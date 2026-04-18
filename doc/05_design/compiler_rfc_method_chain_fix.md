@@ -207,3 +207,17 @@ Once this RFC is implemented and the acceptance criteria pass:
 2. Update `examples/ui/fluent/method_modifiers_example.spl` to use chain syntax.
 3. Update `doc/05_design/ui_typed_core_rfc.md` §4.1 Option B note to say "resolved".
 4. Phase 3 examples in `doc/` that show the intermediate-`var` workaround can be updated to chain form.
+
+---
+
+## See also
+
+- `doc/05_design/compiler_rfc_ufcs.md` — UFCS resolution; once chain-fix
+  lands, chains automatically pick up UFCS resolution semantics for any
+  free function whose first parameter matches the receiver type.
+- `doc/05_design/compiler_rfc_bare_enum_literals.md` — sister Phase 9 item
+  for context-inferred enum cases.
+- `doc/05_design/ui_typed_core_rfc.md` § 4.1 — the original Phase 9
+  motivation (UI fluent chains broken in current Simple).
+- `doc/05_design/ufcs_dot_operator_design.md` — historical UFCS design
+  doc (status corrected 2026-04-18 to "Partial").

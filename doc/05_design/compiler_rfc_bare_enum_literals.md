@@ -236,3 +236,15 @@ The `InferMode.Check` / `check_expr` machinery is real and wired. Expected-type 
 `Call` arguments already runs. The single missing piece is the `case Ident` arm in `check_expr`
 that recognises an enum context. This is substantively smaller than greenfield but not a one-line
 unstub — the rewrite from `Ident` to `EnumLit` in the HIR must be threaded through correctly.
+
+---
+
+## See also
+
+- `doc/05_design/compiler_rfc_ufcs.md` — UFCS dispatch; bare-enum inference
+  uses similar bidirectional-checking infrastructure.
+- `doc/05_design/compiler_rfc_method_chain_fix.md` — sister Phase 9 item
+  for fluent chain syntax.
+- `doc/05_design/ui_typed_core_rfc.md` § 4.2 — the original Phase 9
+  motivation (UI design tokens, status variants currently require
+  qualified form).

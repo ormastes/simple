@@ -1,0 +1,100 @@
+# @gc — module uses GC runtime
+#
+# nvfs_client — shim contract svllm calls to reach the parallel nvfs
+# filesystem design. Defines the API surface (R1–R9 from
+# doc/05_design/nvfs/svllm_requirements.md) without committing to one
+# implementation. A bring-up adapter against today's FAT32 returns
+# NvfsError.Unsupported for any call that FAT32 cannot honor; a future
+# adapter against the canonical nvfs library honors the full surface.
+
+# Object class (what kind of data this object holds).
+enum ObjClass:
+    TensorPack
+    Manifest
+    Adapter
+    AppendOnly
+    Temp
+    KvSpill
+    Mutable
+
+enum OpenMode:
+    ReadOnly
+    ReadWrite
+    Append
+
+# Errors surfaced to svllm. svllm must degrade gracefully on Unsupported.
+enum NvfsError:
+    NotFound
+    PermissionDenied
+    Unsupported
+    IoError
+    InvalidArgument
+    Sealed
+    AlreadyExists
+
+# Opaque handles. nvfs owns the internals; svllm passes them back in.
+struct ObjHandle:
+    id: i64
+
+    static fn null() -> ObjHandle:
+        ObjHandle(id: -1)
+
+    fn is_null(self) -> bool:
+        self.id < 0
+
+struct BufHandle:
+    id: i64
+    len: i64
+
+    static fn null() -> BufHandle:
+        BufHandle(id: -1, len: 0)
+
+    fn is_null(self) -> bool:
+        self.id < 0
+
+# Capabilities reported by fs_query_caps; svllm inspects these before
+# choosing aligned read sizes, concurrency, and fallback paths.
+struct NvfsCaps:
+    lba_size: i64
+    preferred_read_granule: i64
+    preferred_write_granule: i64
+    max_concurrent_ops_per_handle: i64
+    atomic_write_unit: i64
+    atomic_boundary: i64
+    supports_sealed_pin: bool
+    supports_atomic_publish: bool
+    supports_trim: bool
+    zone_size: i64
+    append_granule: i64
+    write_cache_volatile: bool
+
+# Create flags packed into a small record so callers do not have to pass
+# positional bools.
+struct CreateFlags:
+    create_new: bool
+    truncate_existing: bool
+    initial_size_hint: i64
+
+    static fn defaults() -> CreateFlags:
+        CreateFlags(create_new: true, truncate_existing: false, initial_size_hint: 0)
+
+# Durability scope. See R4 in the svllm_requirements doc.
+enum SyncScope:
+    Submitted
+    MediaDurable
+    RootDurable
+
+# The contract every nvfs adapter must satisfy. Implementations live
+# elsewhere (fat32 bring-up adapter; future canonical nvfs adapter).
+trait NvfsClient:
+    fn open(self, path: text, mode: OpenMode) -> Result<ObjHandle, NvfsError>
+    fn create(self, path: text, class: ObjClass, flags: CreateFlags) -> Result<ObjHandle, NvfsError>
+    fn close(self, obj: ObjHandle) -> Result<(), NvfsError>
+    fn seal(self, obj: ObjHandle, pin_extents: bool) -> Result<(), NvfsError>
+    fn trim(self, obj: ObjHandle) -> Result<(), NvfsError>
+    fn read_range(self, obj: ObjHandle, off: i64, len: i64, buf: BufHandle) -> Result<i64, NvfsError>
+    fn publish_atomic(self, temp_obj: ObjHandle, final_path: text) -> Result<(), NvfsError>
+    fn sync(self, obj: ObjHandle, scope: SyncScope) -> Result<(), NvfsError>
+    fn query_caps(self, obj: ObjHandle) -> Result<NvfsCaps, NvfsError>
+    fn register_buffer(self, ptr: i64, len: i64) -> Result<BufHandle, NvfsError>
+    fn unregister_buffer(self, buf: BufHandle) -> Result<(), NvfsError>

@@ -1,6 +1,8 @@
 # UFCS Dot Operator Enhancement Design
 
-**Status:** Complete (All Phases Implemented)
+**Status:** Partial — entry point unstubbed 2026-04-18, dedup pending.
+         Symbol-table de-duplication still needed before methods bind correctly at runtime.
+         See doc/05_design/compiler_rfc_ufcs.md § "Partial unstub applied 2026-04-18" for full context.
 **Date:** 2026-01-26
 **Updated:** 2026-01-26
 

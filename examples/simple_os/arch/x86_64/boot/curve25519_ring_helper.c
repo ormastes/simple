@@ -66,6 +66,17 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
         point_raw[i] = _rv_byte(point->items[i]);
     }
 
+    /* ring's generic X25519 entrypoint expects a masked scalar. The Simple
+     * caller provides the raw 32-byte private key, so clamp it here to match
+     * RFC 7748 and the Simple implementation. */
+    scalar_raw[0] &= 248u;
+    scalar_raw[31] &= 127u;
+    scalar_raw[31] |= 64u;
+
+    /* RFC 7748 ignores the top bit of the peer u-coordinate. Mask it here so
+     * the fd-mode helper matches the Simple path exactly. */
+    point_raw[31] &= 127u;
+
     x25519_scalar_mult_generic_masked(out_raw, scalar_raw, point_raw);
 
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));

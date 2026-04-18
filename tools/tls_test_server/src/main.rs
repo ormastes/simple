@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rcgen::{BasicConstraints, Certificate, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{HandshakeKind, RootCertStore, ServerConfig, ServerConnection};
+use rustls::{HandshakeKind, KeyLogFile, RootCertStore, ServerConfig, ServerConnection};
 
 fn main() {
     let config_path = match parse_args(std::env::args().skip(1).collect()) {
@@ -330,6 +330,7 @@ fn build_server_config(
     };
 
     server_config.alpn_protocols = vec![b"http/1.1".to_vec(), b"simple-test".to_vec()];
+    server_config.key_log = Arc::new(KeyLogFile::new());
     Ok(server_config)
 }
 

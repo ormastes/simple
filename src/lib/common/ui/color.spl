@@ -1,0 +1,154 @@
+# UI Color Type
+#
+# Typed Color class for the UI theme system.
+# Wire stability:
+#   - to_hex() preserves original hex case (upper or lower) via case_lower flag.
+#     from_hex("#007AFF") → to_hex() → "#007AFF"  (uppercase, case_lower=false)
+#     from_hex("#1e1e2e") → to_hex() → "#1e1e2e"  (lowercase, case_lower=true)
+#   - to_rgba_css() is NOT a lossless round-trip for float-alpha rgba() strings
+#     (e.g. "rgba(255,255,255,0.72)") because the u8 alpha channel cannot
+#     represent fractional values exactly (183.6 → u8(183) ≠ 0.72).
+#     Fields that hold such strings must remain `text`.
+#     See deferred fields in glass/theme.spl and glass/tokens.spl.
+
+# =========================================================================
+# Color class
+# =========================================================================
+
+class Color:
+    r: i64
+    g: i64
+    b: i64
+    a: i64
+    # true  → to_hex() emits lowercase a-f  (original was "#1e1e2e"-style)
+    # false → to_hex() emits uppercase A-F  (original was "#007AFF"-style)
+    case_lower: bool
+
+    static fn from_hex(s: text) -> Color:
+        """Parse "#RRGGBB" or "#RRGGBBAA".
+        Detects hex case from the input string and preserves it in to_hex().
+        Returns Color(0,0,0,255,false) on unrecognised format."""
+        var cleaned = s
+        if cleaned.starts_with("#"):
+            cleaned = cleaned.substring(1, cleaned.length())
+        val len = cleaned.length()
+        val lower = _is_lower_hex(cleaned)
+        if len == 6:
+            val r = _hex2(cleaned, 0)
+            val g = _hex2(cleaned, 2)
+            val b = _hex2(cleaned, 4)
+            return Color(r: r, g: g, b: b, a: 255, case_lower: lower)
+        if len == 8:
+            val r = _hex2(cleaned, 0)
+            val g = _hex2(cleaned, 2)
+            val b = _hex2(cleaned, 4)
+            val a = _hex2(cleaned, 6)
+            return Color(r: r, g: g, b: b, a: a, case_lower: lower)
+        # Unrecognised format — return black/opaque, uppercase
+        Color(r: 0, g: 0, b: 0, a: 255, case_lower: false)
+
+    fn to_hex(self) -> text:
+        """Emit "#RRGGBB" (alpha=255) or "#RRGGBBAA".
+        Hex digits match the case of the original input (uppercase by default)."""
+        val rh = _int_to_hex2(self.r, self.case_lower)
+        val gh = _int_to_hex2(self.g, self.case_lower)
+        val bh = _int_to_hex2(self.b, self.case_lower)
+        if self.a == 255:
+            return "#{rh}{gh}{bh}"
+        val ah = _int_to_hex2(self.a, self.case_lower)
+        "#{rh}{gh}{bh}{ah}"
+
+    fn to_rgba_css(self) -> text:
+        """Emit CSS rgba() string using integer alpha (0-255).
+        NOTE: cannot reproduce float-alpha strings like "rgba(255,255,255,0.72)" —
+        those fields must stay as `text`."""
+        "rgba({self.r},{self.g},{self.b},{self.a})"
+
+# =========================================================================
+# Private helpers
+# =========================================================================
+
+fn _is_lower_hex(s: text) -> bool:
+    """Return true if any a-f letter appears in s (meaning original was lowercase)."""
+    var i = 0
+    while i < s.length():
+        val ch = s.substring(i, i + 1)
+        if ch == "a" or ch == "b" or ch == "c" or ch == "d" or ch == "e" or ch == "f":
+            return true
+        i = i + 1
+    false
+
+fn _hex_char_val(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "A" or c == "a": return 10
+    if c == "B" or c == "b": return 11
+    if c == "C" or c == "c": return 12
+    if c == "D" or c == "d": return 13
+    if c == "E" or c == "e": return 14
+    if c == "F" or c == "f": return 15
+    0
+
+fn _hex2(s: text, pos: i64) -> i64:
+    """Parse two hex characters starting at pos."""
+    val hi = _hex_char_val(s.substring(pos, pos + 1))
+    val lo = _hex_char_val(s.substring(pos + 1, pos + 2))
+    hi * 16 + lo
+
+fn _hex_char_upper(v: i64) -> text:
+    if v == 0: return "0"
+    if v == 1: return "1"
+    if v == 2: return "2"
+    if v == 3: return "3"
+    if v == 4: return "4"
+    if v == 5: return "5"
+    if v == 6: return "6"
+    if v == 7: return "7"
+    if v == 8: return "8"
+    if v == 9: return "9"
+    if v == 10: return "A"
+    if v == 11: return "B"
+    if v == 12: return "C"
+    if v == 13: return "D"
+    if v == 14: return "E"
+    if v == 15: return "F"
+    "0"
+
+fn _hex_char_lower(v: i64) -> text:
+    if v == 0: return "0"
+    if v == 1: return "1"
+    if v == 2: return "2"
+    if v == 3: return "3"
+    if v == 4: return "4"
+    if v == 5: return "5"
+    if v == 6: return "6"
+    if v == 7: return "7"
+    if v == 8: return "8"
+    if v == 9: return "9"
+    if v == 10: return "a"
+    if v == 11: return "b"
+    if v == 12: return "c"
+    if v == 13: return "d"
+    if v == 14: return "e"
+    if v == 15: return "f"
+    "0"
+
+fn _int_to_hex2(v: i64, lower: bool) -> text:
+    """Convert 0-255 to two-digit hex string, uppercase or lowercase."""
+    val hi = v / 16
+    val lo = v % 16
+    if lower:
+        val hc = _hex_char_lower(hi)
+        val lc = _hex_char_lower(lo)
+        return "{hc}{lc}"
+    val hc = _hex_char_upper(hi)
+    val lc = _hex_char_upper(lo)
+    "{hc}{lc}"

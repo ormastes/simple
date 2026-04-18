@@ -7,6 +7,22 @@
 # Reference: FIPS 197 (AES)
 # Reference: NIST SP 800-38D (GCM)
 
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn serial_println(msg: text)
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _gcm_debug(msg: text):
+    serial_println("[aes128_gcm] {msg}")
+
+fn _debug_bytes4(label: text, buf: [u8]):
+    if buf.len() >= 4:
+        _gcm_debug("{label} b0={_u8_at(buf, 0)} b1={_u8_at(buf, 1)} b2={_u8_at(buf, 2)} b3={_u8_at(buf, 3)} len={buf.len()}")
+    else:
+        _gcm_debug("{label} short len={buf.len()}")
+
 # ============================================================================
 # AES S-Box (FIPS 197, Section 5.1.1)
 # ============================================================================
@@ -373,10 +389,14 @@ fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
 
 fn _pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
-    var result: [u8] = []
+    val padded_len = if (data.len() % 16) == 0:
+        data.len()
+    else:
+        ((data.len() / 16) + 1) * 16
+    var result: [u8] = rt_array_new_with_cap(padded_len.to_i64())
     var i: u64 = 0
     while i < data.len():
-        result.push(data[i])
+        result.push(_u8_at(data, i))
         i = i + 1
     while (result.len() % 16) != 0:
         result.push(0x00)
@@ -384,14 +404,14 @@ fn _pad_to_16(data: [u8]) -> [u8]:
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays without relying on array concatenation."""
-    var out: [u8] = []
+    var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
     var i: u64 = 0
     while i < a.len():
-        out.push(a[i])
+        out.push(_u8_at(a, i))
         i = i + 1
     i = 0
     while i < b.len():
-        out.push(b[i])
+        out.push(_u8_at(b, i))
         i = i + 1
     out
 
@@ -421,7 +441,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         var block: [u8] = []
         var j: u64 = 0
         while j < 16:
-            block.push(padded_aad[i + j])
+            block.push(_u8_at(padded_aad, i + j))
             j = j + 1
         y = _ghash_block(h, y, block)
         i = i + 16
@@ -433,7 +453,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         var block: [u8] = []
         var j: u64 = 0
         while j < 16:
-            block.push(padded_ct[i + j])
+            block.push(_u8_at(padded_ct, i + j))
             j = j + 1
         y = _ghash_block(h, y, block)
         i = i + 16
@@ -472,7 +492,7 @@ fn _inc32(counter: [u8]) -> [u8]:
     var result: [u8] = []
     var i: u64 = 0
     while i < 16:
-        result.push(counter[i])
+        result.push(_u8_at(counter, i))
         i = i + 1
 
     # Increment the last 4 bytes as a 32-bit big-endian integer
@@ -502,7 +522,7 @@ fn gctr(round_keys: [u32], icb: [u8], input: [u8]) -> [u8]:
     if input.len() == 0:
         return []
 
-    var output: [u8] = []
+    var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
     var cb = icb
     val num_full_blocks = input.len() / 16
 
@@ -513,7 +533,7 @@ fn gctr(round_keys: [u32], icb: [u8], input: [u8]) -> [u8]:
         val offset = i * 16
         var j: u64 = 0
         while j < 16:
-            output.push(input[offset + j] ^ enc_cb[j])
+            output.push(_u8_at(input, offset + j) ^ _u8_at(enc_cb, j))
             j = j + 1
         cb = _inc32(cb)
         i = i + 1
@@ -525,7 +545,7 @@ fn gctr(round_keys: [u32], icb: [u8], input: [u8]) -> [u8]:
         val offset = num_full_blocks * 16
         var j: u64 = 0
         while j < remaining:
-            output.push(input[offset + j] ^ enc_cb[j])
+            output.push(_u8_at(input, offset + j) ^ _u8_at(enc_cb, j))
             j = j + 1
 
     output
@@ -542,7 +562,7 @@ fn _make_j0(nonce: [u8]) -> [u8]:
     var j0: [u8] = []
     var i: u64 = 0
     while i < 12:
-        j0.push(nonce[i])
+        j0.push(_u8_at(nonce, i))
         i = i + 1
     # Append 32-bit counter = 1
     j0.push(0x00)
@@ -607,6 +627,11 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
              Aes128GcmResult.Err on tag mismatch.
     """
     val round_keys = aes128_key_expansion(key)
+    _debug_bytes4("dec key", key)
+    _debug_bytes4("dec nonce", nonce)
+    _debug_bytes4("dec aad", aad)
+    _debug_bytes4("dec ct", ciphertext)
+    _debug_bytes4("dec tag", tag)
 
     # Compute hash subkey H = AES_K(0^128)
     var zero_block: [u8] = []
@@ -624,6 +649,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
 
     # Compute expected tag: T' = MSBt(GCTR_K(J0, S))
     val expected_tag = gctr(round_keys, j0, s)
+    _debug_bytes4("dec expected_tag", expected_tag)
 
     # Constant-time tag comparison
     var diff: u8 = 0x00

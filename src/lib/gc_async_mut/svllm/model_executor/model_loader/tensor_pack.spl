@@ -1,0 +1,77 @@
+# @gc — module uses GC runtime
+#
+# Tensor pack — svllm's on-disk, sealed serving format. Mirrors the
+# ServerlessLLM + Run:ai model-streamer rationale: tiny manifest +
+# large aligned binary chunks organized by execution order.
+#
+# On-disk layout (logical):
+#   <pack_root>/manifest.sdn   # parsed by manifest.spl
+#   <pack_root>/data-000.bin   # chunk 0 (immutable, sealed, pinned)
+#   <pack_root>/data-001.bin   # chunk 1 ...
+#
+# Each chunk is aligned to preferred_read_granule (queried via NvfsClient
+# caps). Tensor bytes may span multiple chunks but always at aligned
+# offsets within a chunk. Immutability guaranteed by fs_seal(pin_extents).
+
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+
+# Describes one tensor: name, shape, dtype, which chunk it lives in,
+# offset within that chunk, byte length.
+struct TensorInfo:
+    name: text
+    shape: [i64]
+    dtype: Dtype
+    chunk_id: i32
+    offset_in_chunk: i64
+    byte_len: i64
+
+# Describes one chunk: its sequence number in the pack, the file path
+# (relative to pack root), total bytes, BLAKE3/sha256 digest hex.
+struct ChunkInfo:
+    id: i32
+    relative_path: text
+    byte_len: i64
+    digest_hex: text
+
+# Top-level pack descriptor: the parsed manifest plus derived indexes.
+# Owned by the loader; not itself persisted.
+struct TensorPack:
+    pack_root: text
+    model_id: text
+    revision: text
+    tensors: [TensorInfo]
+    chunks: [ChunkInfo]
+    preferred_chunk_bytes: i64
+
+    static fn empty(pack_root: text) -> TensorPack:
+        TensorPack(
+            pack_root: pack_root,
+            model_id: "",
+            revision: "",
+            tensors: [],
+            chunks: [],
+            preferred_chunk_bytes: 0
+        )
+
+    fn tensor_count(self) -> i64:
+        self.tensors.len()
+
+    fn chunk_count(self) -> i64:
+        self.chunks.len()
+
+    # Find a tensor by name. Returns null-named TensorInfo when missing;
+    # callers should check .name before using the result.
+    fn find_tensor(self, name: text) -> TensorInfo:
+        var i = 0
+        while i < self.tensors.len():
+            if self.tensors[i].name == name:
+                return self.tensors[i]
+            i = i + 1
+        TensorInfo(
+            name: "",
+            shape: [],
+            dtype: Dtype.F32,
+            chunk_id: -1,
+            offset_in_chunk: 0,
+            byte_len: 0
+        )

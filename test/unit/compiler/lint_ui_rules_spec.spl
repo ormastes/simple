@@ -1,0 +1,185 @@
+"""
+# UI Lint Rules Specification
+
+**Feature IDs:** #UI001 #UI002 #UI003
+**Category:** Tooling / Lint
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests the Phase 8 UI lint rules exercised directly via `Linter` check methods,
+independent of `bin/simple lint` (which is currently broken due to UFCS dedup).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| UI001 | Raw string literal as second arg of WidgetNode.new() |
+| UI002 | Raw string literal in action pos of with_on_typed_action() or toast() |
+| UI003 | Raw theme-name string literal not in an allowlisted file |
+| Allowlist | Paths matching certain patterns are exempt from each rule |
+"""
+
+use compiler.tools.lint.main.{Linter}
+
+# ============================================================================
+# UI001 — ui_no_raw_widget_kind
+# ============================================================================
+
+describe "UI001 — ui_no_raw_widget_kind":
+    it "fires when second arg of WidgetNode.new is a string literal":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind("/tmp/fake.spl",
+            "val x = WidgetNode.new(\"root\", \"panel\")\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code UI001":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind("/tmp/fake.spl",
+            "val x = WidgetNode.new(\"root\", \"panel\")\n")
+        val code = linter.results[0].lint.code
+        expect(code).to_equal("UI001")
+
+    it "does not fire when kind is a variable (not a string literal)":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind("/tmp/fake.spl",
+            "val x = WidgetNode.new(\"root\", my_kind)\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on allowlisted parse path":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind(
+            "src/lib/common/ui/parse/sdn_tree.spl",
+            "val x = WidgetNode.new(\"root\", \"panel\")\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on allowlisted builder path":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind(
+            "src/lib/common/ui/builder.spl",
+            "val x = WidgetNode.new(\"root\", \"panel\")\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "fires once per offending line (two offending lines → two results)":
+        var linter = Linter.new()
+        linter.check_ui_raw_widget_kind("/tmp/fake.spl",
+            "val a = WidgetNode.new(\"id1\", \"panel\")\nval b = WidgetNode.new(\"id2\", \"button\")\n")
+        expect(linter.results.len()).to_equal(2)
+
+# ============================================================================
+# UI002 — ui_no_raw_variant
+# ============================================================================
+
+describe "UI002 — ui_no_raw_variant (with_on_typed_action)":
+    it "fires when second arg of with_on_typed_action is a string literal":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "val w = with_on_typed_action(node, \"save\")\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code UI002":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "val w = with_on_typed_action(node, \"save\")\n")
+        val code = linter.results[0].lint.code
+        expect(code).to_equal("UI002")
+
+    it "does not fire when second arg is a typed action (no literal)":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "val w = with_on_typed_action(node, CommonAction.Save.into_action())\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on allowlisted builder path":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant(
+            "src/lib/common/ui/builder.spl",
+            "val w = with_on_typed_action(node, \"save\")\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on allowlisted glass/builder path":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant(
+            "src/lib/common/ui/glass/builder.spl",
+            "val w = with_on_typed_action(node, \"save\")\n")
+        expect(linter.results.len()).to_equal(0)
+
+describe "UI002 — ui_no_raw_variant (toast)":
+    it "fires when third arg of toast is a string literal":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "toast(node, msg, \"success\")\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code UI002 for toast":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "toast(node, msg, \"success\")\n")
+        val code = linter.results[0].lint.code
+        expect(code).to_equal("UI002")
+
+    it "does not fire when toast variant is a variable":
+        var linter = Linter.new()
+        linter.check_ui_raw_variant("/tmp/fake.spl",
+            "toast(node, msg, variant)\n")
+        expect(linter.results.len()).to_equal(0)
+
+# ============================================================================
+# UI003 — ui_no_raw_theme_name
+# ============================================================================
+
+describe "UI003 — ui_no_raw_theme_name":
+    it "fires on raw ios_light theme string":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = theme_by_name(\"ios_light\")\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code UI003":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = theme_by_name(\"ios_light\")\n")
+        val code = linter.results[0].lint.code
+        expect(code).to_equal("UI003")
+
+    it "fires on glass_obsidian_dark theme string":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = \"glass_obsidian_dark\"\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "fires on simple_dark theme string":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = \"simple_dark\"\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "does not fire on non-theme string":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = \"some_other_value\"\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on allowlisted style.spl path":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name(
+            "src/lib/common/ui/style.spl",
+            "val t = \"ios_light\"\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on comment lines":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "# use ios_light for testing\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire when theme name appears unquoted":
+        var linter = Linter.new()
+        linter.check_ui_raw_theme_name("/tmp/fake.spl",
+            "val t = ios_light\n")
+        expect(linter.results.len()).to_equal(0)

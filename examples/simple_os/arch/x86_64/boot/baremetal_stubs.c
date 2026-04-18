@@ -8492,6 +8492,39 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
     return ENCODE_PTR(out);
 }
 
+RuntimeValue rt_tls13_sha256(RuntimeValue data_rv)
+{
+    uint32_t data_len = 0;
+    uint8_t *data = _tls_copy_runtime_bytes(data_rv, &data_len);
+    uint8_t out[32];
+    if (!data && data_len != 0) return NIL_VALUE;
+    _tls_sha256_digest(data, data_len, out);
+    if (data) free(data);
+    return _tls_runtime_array_from_bytes(out, 32);
+}
+
+RuntimeValue rt_tls13_transcript_hash_2(RuntimeValue a_rv, RuntimeValue b_rv)
+{
+    uint32_t a_len = 0, b_len = 0;
+    uint8_t *a = _tls_copy_runtime_bytes(a_rv, &a_len);
+    uint8_t *b = _tls_copy_runtime_bytes(b_rv, &b_len);
+    uint8_t out[32];
+    uint8_t *merged = (uint8_t *)malloc((size_t)a_len + (size_t)b_len);
+    if ((!a && a_len != 0) || (!b && b_len != 0) || (!merged && (a_len + b_len) != 0)) {
+        if (a) free(a);
+        if (b) free(b);
+        if (merged) free(merged);
+        return NIL_VALUE;
+    }
+    if (a_len > 0) memcpy(merged, a, a_len);
+    if (b_len > 0) memcpy(merged + a_len, b, b_len);
+    _tls_sha256_digest(merged, a_len + b_len, out);
+    if (a) free(a);
+    if (b) free(b);
+    if (merged) free(merged);
+    return _tls_runtime_array_from_bytes(out, 32);
+}
+
 RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
 {
     uint32_t salt_len = 0, ikm_len = 0;
@@ -8503,12 +8536,36 @@ RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
         if (salt) free(salt);
         return NIL_VALUE;
     }
+    serial_puts("[tls-hkdf-extract] salt_len=");
+    serial_put_dec((int64_t)salt_len);
+    serial_puts(" ikm_len=");
+    serial_put_dec((int64_t)ikm_len);
+    serial_puts("\r\n");
+    if (salt_len >= 4) {
+        serial_puts("[tls-hkdf-extract] salt=");
+        serial_put_hex(salt[0]); serial_puts(" ");
+        serial_put_hex(salt[1]); serial_puts(" ");
+        serial_put_hex(salt[2]); serial_puts(" ");
+        serial_put_hex(salt[3]); serial_puts("\r\n");
+    }
+    if (ikm_len >= 4) {
+        serial_puts("[tls-hkdf-extract] ikm=");
+        serial_put_hex(ikm[0]); serial_puts(" ");
+        serial_put_hex(ikm[1]); serial_puts(" ");
+        serial_put_hex(ikm[2]); serial_puts(" ");
+        serial_put_hex(ikm[3]); serial_puts("\r\n");
+    }
     if (salt_len == 0) {
         memset(zero_salt, 0, sizeof(zero_salt));
         _tls_hmac_sha256(zero_salt, 32, ikm, ikm_len, out);
     } else {
         _tls_hmac_sha256(salt, salt_len, ikm, ikm_len, out);
     }
+    serial_puts("[tls-hkdf-extract] out=");
+    serial_put_hex(out[0]); serial_puts(" ");
+    serial_put_hex(out[1]); serial_puts(" ");
+    serial_put_hex(out[2]); serial_puts(" ");
+    serial_put_hex(out[3]); serial_puts("\r\n");
     if (salt) free(salt);
     if (ikm) free(ikm);
     return _tls_runtime_array_from_bytes(out, 32);
@@ -8582,6 +8639,234 @@ RuntimeValue rt_tls13_hkdf_expand_label(RuntimeValue secret_rv, RuntimeValue lab
     free(full_label);
     free(encoded);
     return _tls_runtime_array_from_bytes(okm, out_len);
+}
+
+static RuntimeValue _tls13_hkdf_expand_label_const(RuntimeValue secret_rv, const uint8_t *label, uint32_t label_len, uint32_t out_len)
+{
+    uint32_t secret_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    if (!secret) return NIL_VALUE;
+
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint32_t full_label_len = (uint32_t)sizeof(prefix) + label_len;
+    uint8_t full_label[16];
+    uint8_t encoded[32];
+    uint8_t okm[32];
+    uint8_t t_prev[32];
+    if (full_label_len > sizeof(full_label)) {
+        free(secret);
+        return NIL_VALUE;
+    }
+
+    memcpy(full_label, prefix, sizeof(prefix));
+    memcpy(full_label + sizeof(prefix), label, label_len);
+
+    uint32_t pos = 0;
+    encoded[pos++] = (uint8_t)((out_len >> 8) & 0xffU);
+    encoded[pos++] = (uint8_t)(out_len & 0xffU);
+    encoded[pos++] = (uint8_t)full_label_len;
+    memcpy(encoded + pos, full_label, full_label_len);
+    pos += full_label_len;
+    encoded[pos++] = 0; /* empty context */
+
+    uint32_t okm_len = 0;
+    uint32_t t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < out_len) {
+        uint8_t input[96];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, pos);
+        input_len += pos;
+        input[input_len++] = counter;
+
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (out_len - okm_len) < 32U ? (out_len - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+
+    free(secret);
+    return _tls_runtime_array_from_bytes(okm, out_len);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_key(RuntimeValue secret_rv)
+{
+    static const uint8_t key_label[] = { 'k', 'e', 'y' };
+    return _tls13_hkdf_expand_label_const(secret_rv, key_label, 3U, 16U);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_derived(RuntimeValue secret_rv, RuntimeValue context_rv)
+{
+    uint32_t context_len = 0;
+    uint8_t *context = _tls_copy_runtime_bytes(context_rv, &context_len);
+    uint32_t secret_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    static const uint8_t label[] = { 'd', 'e', 'r', 'i', 'v', 'e', 'd' };
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint8_t full_label[32];
+    uint8_t encoded[128];
+    uint8_t okm[32];
+    uint8_t t_prev[32];
+    if (!secret || !context) {
+        if (secret) free(secret);
+        if (context) free(context);
+        return NIL_VALUE;
+    }
+    uint32_t pos = 0;
+    encoded[pos++] = 0;
+    encoded[pos++] = 32;
+    encoded[pos++] = (uint8_t)(sizeof(prefix) + sizeof(label));
+    memcpy(full_label, prefix, sizeof(prefix));
+    memcpy(full_label + sizeof(prefix), label, sizeof(label));
+    memcpy(encoded + pos, full_label, sizeof(prefix) + sizeof(label));
+    pos += (uint32_t)(sizeof(prefix) + sizeof(label));
+    encoded[pos++] = (uint8_t)context_len;
+    if (context_len > 0) {
+        memcpy(encoded + pos, context, context_len);
+        pos += context_len;
+    }
+    uint32_t okm_len = 0, t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < 32U) {
+        uint8_t input[160];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, pos);
+        input_len += pos;
+        input[input_len++] = counter;
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (32U - okm_len) < 32U ? (32U - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+    free(secret);
+    free(context);
+    return _tls_runtime_array_from_bytes(okm, 32);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_iv(RuntimeValue secret_rv)
+{
+    static const uint8_t iv_label[] = { 'i', 'v' };
+    return _tls13_hkdf_expand_label_const(secret_rv, iv_label, 2U, 12U);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_client_hs(RuntimeValue secret_rv, RuntimeValue context_rv)
+{
+    uint32_t context_len = 0;
+    uint8_t *context = _tls_copy_runtime_bytes(context_rv, &context_len);
+    uint32_t secret_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    static const uint8_t label[] = { 'c', ' ', 'h', 's', ' ', 't', 'r', 'a', 'f', 'f', 'i', 'c' };
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint8_t full_label[32];
+    uint8_t encoded[128];
+    uint8_t okm[32];
+    uint8_t t_prev[32];
+    if (!secret || !context) {
+        if (secret) free(secret);
+        if (context) free(context);
+        return NIL_VALUE;
+    }
+    uint32_t pos = 0;
+    encoded[pos++] = 0;
+    encoded[pos++] = 32;
+    encoded[pos++] = (uint8_t)(sizeof(prefix) + sizeof(label));
+    memcpy(full_label, prefix, sizeof(prefix));
+    memcpy(full_label + sizeof(prefix), label, sizeof(label));
+    memcpy(encoded + pos, full_label, sizeof(prefix) + sizeof(label));
+    pos += (uint32_t)(sizeof(prefix) + sizeof(label));
+    encoded[pos++] = (uint8_t)context_len;
+    if (context_len > 0) {
+        memcpy(encoded + pos, context, context_len);
+        pos += context_len;
+    }
+    uint32_t okm_len = 0, t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < 32U) {
+        uint8_t input[160];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, pos);
+        input_len += pos;
+        input[input_len++] = counter;
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (32U - okm_len) < 32U ? (32U - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+    free(secret);
+    free(context);
+    return _tls_runtime_array_from_bytes(okm, 32);
+}
+
+RuntimeValue rt_tls13_hkdf_expand_label_server_hs(RuntimeValue secret_rv, RuntimeValue context_rv)
+{
+    uint32_t context_len = 0;
+    uint8_t *context = _tls_copy_runtime_bytes(context_rv, &context_len);
+    uint32_t secret_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    static const uint8_t label[] = { 's', ' ', 'h', 's', ' ', 't', 'r', 'a', 'f', 'f', 'i', 'c' };
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint8_t full_label[32];
+    uint8_t encoded[128];
+    uint8_t okm[32];
+    uint8_t t_prev[32];
+    if (!secret || !context) {
+        if (secret) free(secret);
+        if (context) free(context);
+        return NIL_VALUE;
+    }
+    uint32_t pos = 0;
+    encoded[pos++] = 0;
+    encoded[pos++] = 32;
+    encoded[pos++] = (uint8_t)(sizeof(prefix) + sizeof(label));
+    memcpy(full_label, prefix, sizeof(prefix));
+    memcpy(full_label + sizeof(prefix), label, sizeof(label));
+    memcpy(encoded + pos, full_label, sizeof(prefix) + sizeof(label));
+    pos += (uint32_t)(sizeof(prefix) + sizeof(label));
+    encoded[pos++] = (uint8_t)context_len;
+    if (context_len > 0) {
+        memcpy(encoded + pos, context, context_len);
+        pos += context_len;
+    }
+    uint32_t okm_len = 0, t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < 32U) {
+        uint8_t input[160];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, pos);
+        input_len += pos;
+        input[input_len++] = counter;
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (32U - okm_len) < 32U ? (32U - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+    free(secret);
+    free(context);
+    return _tls_runtime_array_from_bytes(okm, 32);
 }
 
 /* rt_array_pop: remove and return last element */
