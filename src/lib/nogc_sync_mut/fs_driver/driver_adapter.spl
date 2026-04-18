@@ -1,0 +1,69 @@
+# Driver-framework adapter for the FAT32 stub driver.
+#
+# This file is the reference pattern for wrapping an FsDriver-trait
+# implementation as a `std.driver.Driver` so it can live in the shared
+# driver registry alongside drivers from other device classes. The
+# adapter delegates lifecycle hooks to the underlying FsDriver where
+# that makes sense and stubs the rest.
+#
+# Real FAT32 drivers will replace these adapter functions with logic
+# that actually touches a block device. Until then the entry registers
+# but rejects every probe — matching the behavior of the stub itself.
+#
+# See: doc/04_architecture/driver_architecture.md §6 (Device-class
+# traits extend the core trait).
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
+use std.driver.registry.{DriverOps}
+use std.driver.static_table.{register_static_driver}
+use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
+                      IoctlCmd, PowerState, ProbeResult}
+
+# --- Driver trait entry points (C ABI so the loader can call them) ---
+
+fn fat32_abi_rev() -> i32:
+    return DRVS_ABI_REV
+
+fn fat32_init(ctx: DriverContext) -> Result<(), DriverError>:
+    # Nothing to pre-allocate for the stub. Real FAT32 would set up its
+    # block-layer handle, bounce-buffer pool, etc. here.
+    return Result.Ok(())
+
+fn fat32_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
+    # The stub drives no device — future FAT32 will inspect `dev.value`
+    # (block-device descriptor) and look for a FAT boot sector.
+    return Result.Ok(ProbeResult.Reject)
+
+fn fat32_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
+    return Result.Err(DriverError.NotSupported)
+
+fn fat32_detach(h: DriverHandle) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn fat32_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn fat32_resume(h: DriverHandle) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn fat32_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    return Result.Err(DriverError.NotSupported)
+
+# --- Registration helper — kernel boot calls this once at startup ---
+
+fn register_fat32_driver() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_driver(
+        "fat32_stub", "0.1", DriverClass.Fs, 0, [])
+    val ops: DriverOps = DriverOps(
+        self_ptr: 0,
+        manifest_abi: fat32_abi_rev,
+        init_fn:   fat32_init,
+        probe_fn:  fat32_probe,
+        attach_fn: fat32_attach,
+        detach_fn: fat32_detach,
+        suspend_fn: fat32_suspend,
+        resume_fn:  fat32_resume,
+        ioctl_fn:   fat32_ioctl,
+    )
+    return register_static_driver(m, ops)

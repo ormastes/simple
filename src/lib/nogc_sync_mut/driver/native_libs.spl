@@ -1,0 +1,94 @@
+# Native-library adapters — uses the shared driver registry so native
+# libs (CUDA runtime, LLD linker, future vulkan / dx12 runtimes) are
+# discoverable and lifecycle-managed the same way hardware drivers are.
+#
+# A NativeLib differs from a Driver only in the manifest kind and in
+# that probe/attach are always no-op: the lib is its own resource, not
+# bound to a device. The shared DriverOps record makes the distinction
+# uniform: a native lib simply returns ProbeResult.Reject from every
+# probe and does useful work only in init.
+#
+# This file carries the *adapters* — the outermost registration shell.
+# The functions each adapter calls (e.g. cuda_module_load, lld_elf_link)
+# live in their respective compiler modules and are unchanged. A future
+# /dev run can move the adapters closer to their backing libs if that
+# ends up cleaner.
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
+use std.driver.registry.{DriverOps}
+use std.driver.static_table.{register_static_driver}
+use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
+                      IoctlCmd, PowerState, ProbeResult}
+
+# --- Generic native-lib stubs (used by every NativeLib adapter) ---
+
+fn nativelib_abi_rev() -> i32:
+    return DRVS_ABI_REV
+
+fn nativelib_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
+    return Result.Ok(ProbeResult.Reject)
+
+fn nativelib_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
+    return Result.Err(DriverError.NotSupported)
+
+fn nativelib_detach(h: DriverHandle) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn nativelib_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn nativelib_resume(h: DriverHandle) -> Result<(), DriverError>:
+    return Result.Ok(())
+
+fn nativelib_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    return Result.Err(DriverError.NotSupported)
+
+# --- Per-lib init glue ---
+#
+# Each native lib gets a dedicated init function that forwards to the
+# lib's own startup. Keeping the adapters thin means changing a lib
+# later (e.g. CUDA runtime version bump) never touches the registry.
+
+fn cuda_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
+    # Real integration: call cuda_init() and translate GpuError.
+    # Current adapter succeeds without touching the CUDA runtime so the
+    # registry works on hosts without a GPU.
+    return Result.Ok(())
+
+fn lld_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
+    # Real integration: call lld_init() / probe for simple_lld_elf_link.
+    # Current adapter succeeds trivially.
+    return Result.Ok(())
+
+# --- Registration helpers — kernel boot calls each once at startup ---
+
+fn register_cuda_ffi_native_lib() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_native_lib("cuda_ffi", "1.0")
+    val ops: DriverOps = DriverOps(
+        self_ptr: 0,
+        manifest_abi: nativelib_abi_rev,
+        init_fn:   cuda_ffi_init,
+        probe_fn:  nativelib_probe,
+        attach_fn: nativelib_attach,
+        detach_fn: nativelib_detach,
+        suspend_fn: nativelib_suspend,
+        resume_fn:  nativelib_resume,
+        ioctl_fn:   nativelib_ioctl,
+    )
+    return register_static_driver(m, ops)
+
+fn register_lld_ffi_native_lib() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_native_lib("lld_ffi", "1.0")
+    val ops: DriverOps = DriverOps(
+        self_ptr: 0,
+        manifest_abi: nativelib_abi_rev,
+        init_fn:   lld_ffi_init,
+        probe_fn:  nativelib_probe,
+        attach_fn: nativelib_attach,
+        detach_fn: nativelib_detach,
+        suspend_fn: nativelib_suspend,
+        resume_fn:  nativelib_resume,
+        ioctl_fn:   nativelib_ioctl,
+    )
+    return register_static_driver(m, ops)
