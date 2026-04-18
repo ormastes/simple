@@ -103,7 +103,18 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase C.3)
 - **Target:** lexer + parser + HIR + struct layout
 - **Priority:** P2
-- **Status:** Open
+- **Status:** **Blocked on FR-DRIVER-0008** (2026-04-18). Rescope discovery
+  by Track-4 agent: the original plan referenced `src/compiler/*.spl`
+  (self-hosted) machinery, but `bin/simple` runs the Rust seed at
+  `src/compiler_rust/`. The Rust seed has parser-only support for the
+  standalone `bitfield` keyword and **no HIR lowering, MIR lowering, or
+  semantic checking** for bitfield field access. Evidence:
+  - `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs:429` — `Node::Bitfield(_)` in skip-pattern
+  - `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:709` — same skip-pattern
+  - `src/compiler_rust/compiler/src/interpreter_eval.rs:1234` — aspirational "processed at compile time" comment, no code
+  - `src/compiler_rust/type/src/checker_check.rs:214` — only registers the bitfield name, no field-access type-checking
+  - Empirical: `bitfield Flags(u32): a:4; b:28` parses; `Flags(a:3, b:5)` → `semantic: function Flags not found`; `f.a` → `variable f not found`.
+  FR-DRIVER-0003 stays Open; real work lives in FR-DRIVER-0008 below.
 - **Requested-semantics:**
   Drivers and FFI shims frequently need packed bit-level layouts —
   PCI config space, descriptor rings, network headers. Today authors
@@ -297,3 +308,44 @@ or `Rejected` (one-line reason).
 - **Notes:** Effort is several days. Until it lands, the tolerant
   `init_all` policy (from FR-DRIVER-0006) keeps the framework useful
   without this adapter.
+
+---
+
+### FR-DRIVER-0008 — Rust-seed bitfield HIR/MIR/sema codegen (blocker for FR-0003)
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** Track-4 agent rescope report (FR-DRIVER-0003)
+- **Target:** `src/compiler_rust/compiler/src/hir/lower/*`,
+  `src/compiler_rust/type/src/checker_check.rs`,
+  `src/compiler_rust/compiler/src/interpreter_eval.rs`,
+  `src/compiler_rust/parser/src/types_def/mod.rs`
+- **Priority:** P2 (blocks FR-DRIVER-0003)
+- **Status:** Open
+- **Requested-semantics:**
+  The Rust seed parses `bitfield Name(T): a:4; b:28` today but has no
+  lowering or codegen — every HIR/interpreter pass skips
+  `Node::Bitfield`. To support bitfield field access (read/write), the
+  seed needs:
+  1. **Parser extension** (`src/compiler_rust/parser/src/types_def/mod.rs:300` `parse_field`) — accept a second `:<num>` after a field's type, store as `Option<u8>` on the `Field` AST (`src/compiler_rust/parser/src/ast/nodes/core.rs:970`).
+  2. **HIR lowering** (`src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs:429` and `stmt_lowering.rs:709`) — replace `Node::Bitfield(_)` skip with a real lowering that records each field's (offset, width, signed?) tuple.
+  3. **Type checker** (`src/compiler_rust/type/src/checker_check.rs:214`) — field-access type-checking: `x.a` on a `Bitfield`-typed value yields the field's declared type (`u16`, `i32`, etc.).
+  4. **Expression rewriting** — `x.a` on a bitfield-typed VReg lowers to `(raw >> offset) & mask` in MIR (sign-extend on signed field types).
+  5. **Assignment rewriting** — `x.a = rhs` lowers to RMW: `raw = (raw & ~(mask << offset)) | ((rhs & mask) << offset)`.
+  6. **Constructor semantics** — `Flags(a: 3, b: 5)` either auto-synthesizes a backing-value init or is rejected with a clear message.
+
+  Once (1)–(6) land, FR-DRIVER-0003's `@packed struct { f: T:N }` sugar
+  is a thin ~50-line routing pass that maps `@packed struct` onto the
+  same `Bitfield` HIR node.
+- **Acceptance-criteria:**
+  - [ ] `bitfield Flags(u32): a:4; b:28` + `var f: Flags = Flags.new(0); f.a = 3; expect(f.a).to_equal(3)` round-trips under `bin/simple test`.
+  - [ ] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
+  - [ ] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
+  - [ ] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
+- **Related-upfront:** `doc/04_architecture/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
+- **Related-design-doc:** tbd
+- **Related-issue:** none
+- **Notes:** Effort: 2–3 days (estimate from Track-4 scope-mismatch
+  report, 2026-04-18). FR-DRIVER-0003 is blocked on this landing —
+  the `@packed` sugar is cheap once the underlying pipeline works.
+  Meanwhile drivers continue to use hand-written shift+mask (the
+  existing pattern works fine).
