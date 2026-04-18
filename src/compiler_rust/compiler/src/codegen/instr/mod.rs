@@ -69,7 +69,7 @@ use collections::{
 };
 use constants::{compile_const_bool, compile_const_float, compile_const_int, compile_const_symbol};
 use contracts::compile_contract_check;
-use core::{compile_binop, compile_builtin_io_call, compile_interp_call};
+use core::{compile_binop, compile_builtin_io_call, compile_interp_call, vreg_is_signed};
 use coverage::{compile_condition_probe, compile_decision_probe, compile_path_probe};
 use enum_union::{
     compile_enum_discriminant, compile_enum_payload, compile_union_discriminant, compile_union_payload,
@@ -122,6 +122,16 @@ pub struct InstrContext<'a, M: Module> {
     /// Vtable data IDs by TypeId (HIR TypeId → DataId).
     /// Used by MirInst::StructInit which has type_id, not struct_name.
     pub vtable_type_ids: &'a std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
+    /// Per-VReg TypeId map derived from MIR.
+    ///
+    /// Mirrors the SPIR-V backend's `vreg_types` field (spirv_builder.rs:66). Populated
+    /// once up front from `MirFunction` by `body::build_vreg_types` and passed through
+    /// by `&mut` so future widening / binop helpers can dispatch on signedness.
+    ///
+    /// FR-DRIVER-0002a infrastructure — currently read-only for consumers; written only
+    /// during the pre-emit walk. Missing entries mean "unknown type" (treat as signed by
+    /// default when FR-0002b lands).
+    pub vreg_types: &'a mut HashMap<VReg, TypeId>,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -168,7 +178,9 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            let val = compile_binop(ctx, builder, *op, lhs, rhs)?;
+            // FR-DRIVER-0002b: pass VRegs through so compile_binop can read
+            // operand signedness from `ctx.vreg_types` for sshr/ushr dispatch.
+            let val = compile_binop(ctx, builder, *op, lhs, rhs, *left, *right)?;
             ctx.vreg_values.insert(*dest, val);
         }
 
@@ -1058,10 +1070,16 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns)
+            // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns).
+            // FR-DRIVER-0002b: pick `sextend` for signed VRegs so negative i8/i16/i32
+            // values survive the widen. Unsigned and unknown keep the old `uextend`.
             let val_type = builder.func.dfg.value_type(val);
             if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
-                val = builder.ins().uextend(types::I64, val);
+                if vreg_is_signed(ctx, *value) == Some(true) {
+                    val = builder.ins().sextend(types::I64, val);
+                } else {
+                    val = builder.ins().uextend(types::I64, val);
+                }
             }
             let three = builder.ins().iconst(types::I64, 3);
             let boxed = builder.ins().ishl(val, three);

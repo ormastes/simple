@@ -242,10 +242,29 @@ fn expand_text_args<M: Module>(
 
 /// Adapt argument values to match a function's expected signature.
 /// Handles count mismatches (padding/truncating) and type mismatches (casting).
+///
+/// Backward-compatible wrapper: widens narrow integers via `uextend` (the old
+/// behavior). For signedness-aware widening, call
+/// [`adapt_args_to_signature_with_signedness`] and pass per-arg signedness
+/// hints from `vreg_types`.
 pub(crate) fn adapt_args_to_signature(
     builder: &mut FunctionBuilder,
     func_ref: cranelift_codegen::ir::FuncRef,
     arg_vals: Vec<cranelift_codegen::ir::Value>,
+) -> Vec<cranelift_codegen::ir::Value> {
+    adapt_args_to_signature_with_signedness(builder, func_ref, arg_vals, None)
+}
+
+/// FR-DRIVER-0002b: VReg-aware variant of [`adapt_args_to_signature`].
+///
+/// `arg_signed[i] == Some(true)` → widen arg `i` via `sextend`. `Some(false)`
+/// or missing → widen via `uextend` (the legacy default). Pass the slice from
+/// a per-call `vreg_is_signed` lookup when the call site has VRegs in scope.
+pub(crate) fn adapt_args_to_signature_with_signedness(
+    builder: &mut FunctionBuilder,
+    func_ref: cranelift_codegen::ir::FuncRef,
+    arg_vals: Vec<cranelift_codegen::ir::Value>,
+    arg_signed: Option<&[Option<bool>]>,
 ) -> Vec<cranelift_codegen::ir::Value> {
     let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
     let sig = &builder.func.dfg.signatures[sig_ref];
@@ -262,9 +281,20 @@ pub(crate) fn adapt_args_to_signature(
             if actual_ty == expected_ty {
                 adapted.push(val);
             } else if actual_ty.is_int() && expected_ty.is_int() {
-                // Integer width conversion (uextend preserves unsigned semantics)
+                // Integer width conversion. FR-DRIVER-0002b: pick sextend for
+                // signed VRegs, uextend otherwise (or when no hint is given —
+                // preserves legacy unsigned-widen default for runtime/FFI
+                // boundaries).
                 if actual_ty.bits() < expected_ty.bits() {
-                    adapted.push(builder.ins().uextend(expected_ty, val));
+                    let signed = arg_signed
+                        .and_then(|s| s.get(i).copied())
+                        .flatten()
+                        .unwrap_or(false);
+                    if signed {
+                        adapted.push(builder.ins().sextend(expected_ty, val));
+                    } else {
+                        adapted.push(builder.ins().uextend(expected_ty, val));
+                    }
                 } else {
                     adapted.push(builder.ins().ireduce(expected_ty, val));
                 }
@@ -453,15 +483,28 @@ pub fn compile_call<M: Module>(
 
                 // Extend smaller return types to i64 (the standard vreg type)
                 // This is needed because some FFI functions return i32 (e.g., rt_exec)
-                // but all vregs are expected to be i64
+                // but all vregs are expected to be i64.
+                //
+                // FR-DRIVER-0002b: if the destination VReg is declared signed,
+                // use `sextend` so negative runtime-returned narrow values keep
+                // their sign. Unsigned and unknown destinations keep the old
+                // `uextend` (zero-extend) behavior — this preserves Rust-FFI
+                // contracts where values like `u32 = 0xFFFFFFFF` must not
+                // sign-extend to `-1` when consumed as `i64`.
+                let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
                 if let Some(ret_type) = get_runtime_return_type(ffi_name) {
                     if ret_type == types::I32 {
-                        // Zero-extend i32 to i64 (preserves unsigned semantics —
-                        // sextend would turn u16 0xFFFF into -1 via i32→i64)
-                        result = builder.ins().uextend(types::I64, result);
+                        result = if dest_signed {
+                            builder.ins().sextend(types::I64, result)
+                        } else {
+                            builder.ins().uextend(types::I64, result)
+                        };
                     } else if ret_type == types::I8 {
-                        // Zero-extend i8 to i64
-                        result = builder.ins().uextend(types::I64, result);
+                        result = if dest_signed {
+                            builder.ins().sextend(types::I64, result)
+                        } else {
+                            builder.ins().uextend(types::I64, result)
+                        };
                     }
                 }
 

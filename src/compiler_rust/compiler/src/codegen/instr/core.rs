@@ -7,19 +7,66 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use crate::hir::BinOp;
+use crate::hir::{BinOp, TypeId};
 use crate::mir::VReg;
 
 use super::helpers::{adapted_call, create_string_constant, declare_named_bytes};
 use super::{InstrContext, InstrResult};
 
+/// Look up whether a VReg holds a signed integer.
+///
+/// Returns:
+/// - `Some(true)` for signed integer types (`i8`, `i16`, `i32`, `i64`).
+/// - `Some(false)` for unsigned integer types (`u8`, `u16`, `u32`, `u64`).
+/// - `None` if the VReg has no entry in `vreg_types` (unknown), or the
+///   stored type is not an integer (bool, floats, structs, strings, etc.).
+///
+/// Part of FR-DRIVER-0002a infrastructure. Consumers (FR-DRIVER-0002b) will
+/// dispatch on this to pick `sshr`/`ushr` and `sextend`/`uextend`. In this
+/// track the helper exists but is intentionally not wired into any call site.
+pub fn vreg_is_signed<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> Option<bool> {
+    let ty = ctx.vreg_types.get(&v).copied()?;
+    match ty {
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => Some(true),
+        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => Some(false),
+        _ => None,
+    }
+}
+
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
 /// This is necessary because some values (e.g., from FFI functions returning i32 or
 /// float constants) may not be i64 even though runtime functions expect i64.
+///
+/// Uses `uextend` (zero-extend) for backward compatibility with the pre-FR-0002b
+/// behavior — most non-shift call sites are widening runtime / FFI return values
+/// where zero-extending is either correct or indistinguishable.
 fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    ensure_i64_typed(builder, val, None)
+}
+
+/// Ensure a value is i64, picking `sextend`/`uextend` based on signedness hint.
+///
+/// FR-DRIVER-0002b: when `signed` is:
+/// - `Some(true)`  → emit `sextend` (preserves sign bit of narrow signed ints).
+/// - `Some(false)` → emit `uextend` (preserves magnitude of narrow unsigned ints).
+/// - `None`        → emit `uextend` (backward-compat default).
+///
+/// Consumers that have a VReg in scope should call this via `ensure_i64_vreg` so
+/// the signedness flows directly from `vreg_types`.
+fn ensure_i64_typed(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    signed: Option<bool>,
+) -> cranelift_codegen::ir::Value {
     let val_type = builder.func.dfg.value_type(val);
     match val_type {
-        types::I8 | types::I16 | types::I32 => builder.ins().uextend(types::I64, val),
+        types::I8 | types::I16 | types::I32 => {
+            if signed == Some(true) {
+                builder.ins().sextend(types::I64, val)
+            } else {
+                builder.ins().uextend(types::I64, val)
+            }
+        }
         types::F64 => builder
             .ins()
             .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val),
@@ -31,6 +78,21 @@ fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) 
         }
         _ => val,
     }
+}
+
+/// VReg-aware `ensure_i64`: looks up signedness from `vreg_types` and dispatches
+/// between `sextend` and `uextend`. Shift-right LHS path uses `default_signed=true`
+/// (Simple's integer types default signed); other callers pass `false` to preserve
+/// the existing uextend-when-unknown behavior.
+fn ensure_i64_vreg<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    vreg: VReg,
+    default_signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let signed = vreg_is_signed(ctx, vreg).or(Some(default_signed));
+    ensure_i64_typed(builder, val, signed)
 }
 
 /// Coerce both operands to matching types for binary operations.
@@ -80,7 +142,27 @@ pub(crate) fn compile_binop<M: Module>(
     op: BinOp,
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
+    left_vreg: VReg,
+    _right_vreg: VReg,
 ) -> InstrResult<cranelift_codegen::ir::Value> {
+    // FR-DRIVER-0002b: capture signedness from the LHS VReg *before* coercion
+    // may widen/promote the value. Only the LHS signedness matters for picking
+    // sshr vs ushr and sextend vs uextend on shift operations — the RHS is a
+    // non-negative shift count and always widens uextend.
+    let lhs_signed = vreg_is_signed(ctx, left_vreg);
+
+    // FR-DRIVER-0002b: preserve the pre-coerce Values so the ShiftRight arm
+    // can re-widen with the right extension. `coerce_binop_operands` calls
+    // `ensure_i64` which unconditionally `uextend`s narrow ints; for a signed
+    // i32 `-16`, that clears the sign bit before `sshr` ever runs, giving
+    // `2147483640` instead of `-8`. Routing ShiftRight around the coerce
+    // preserves the narrow original so `ensure_i64_typed(..., Some(true))`
+    // can emit `sextend`.
+    let pre_lhs = lhs;
+    let pre_rhs = rhs;
+    let pre_lhs_is_int = !matches!(builder.func.dfg.value_type(pre_lhs), types::F32 | types::F64);
+    let pre_rhs_is_int = !matches!(builder.func.dfg.value_type(pre_rhs), types::F32 | types::F64);
+
     // Coerce operands to matching types (handles mixed int/float)
     let (lhs, rhs, is_float) = coerce_binop_operands(builder, lhs, rhs);
     let lhs_type = builder.func.dfg.value_type(lhs);
@@ -147,9 +229,38 @@ pub(crate) fn compile_binop<M: Module>(
             builder.ins().ishl(li, ri)
         }
         BinOp::ShiftRight => {
-            let li = ensure_i64(builder, lhs);
-            let ri = ensure_i64(builder, rhs);
-            builder.ins().sshr(li, ri)
+            // FR-DRIVER-0002b: dispatch sshr / ushr by LHS signedness.
+            //
+            // - Signed LHS (i8/i16/i32/i64, or unknown — Simple integers default
+            //   signed): widen via `sextend` to preserve the sign bit into i64,
+            //   then emit `sshr` (arithmetic shift right).
+            // - Unsigned LHS (u8/u16/u32/u64): widen via `uextend` (zero-fill
+            //   top bits) and emit `ushr` (logical shift right) so high-bit-set
+            //   values (e.g. `0x80000000u32 >> 1`) do not leak the sign bit
+            //   from an implicit `sshr`.
+            //
+            // The shift count (RHS) is always widened via `uextend` — shift
+            // counts are non-negative.
+            //
+            // We widen from the *pre-coerce* values to preserve the narrow
+            // original so `sextend` still sees the sign bit. After
+            // `coerce_binop_operands`, `lhs` has already been `uextend`ed.
+            let use_signed = lhs_signed.unwrap_or(true);
+            let li = if pre_lhs_is_int {
+                ensure_i64_typed(builder, pre_lhs, Some(use_signed))
+            } else {
+                lhs
+            };
+            let ri = if pre_rhs_is_int {
+                ensure_i64_typed(builder, pre_rhs, Some(false))
+            } else {
+                rhs
+            };
+            if use_signed {
+                builder.ins().sshr(li, ri)
+            } else {
+                builder.ins().ushr(li, ri)
+            }
         }
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
             if is_float {

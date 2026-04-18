@@ -5,7 +5,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 use std::collections::{HashMap, HashSet};
 
-use crate::hir::TypeId;
+use crate::hir::{BinOp, TypeId, UnaryOp};
 use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
 
 use super::super::types_util::type_to_cranelift;
@@ -25,6 +25,144 @@ fn collect_cross_block_vregs(func: &MirFunction) -> HashSet<VReg> {
         }
     }
     cross_block
+}
+
+/// Derive the bit-width unit-type from (bits, signed). Used by `build_vreg_types`
+/// to map `UnitWiden` / `UnitNarrow` destination widths back onto the integer
+/// TypeId constants.
+fn unit_bits_to_type_id(bits: u8, signed: bool) -> Option<TypeId> {
+    match (bits, signed) {
+        (8, true) => Some(TypeId::I8),
+        (16, true) => Some(TypeId::I16),
+        (32, true) => Some(TypeId::I32),
+        (64, true) => Some(TypeId::I64),
+        (8, false) => Some(TypeId::U8),
+        (16, false) => Some(TypeId::U16),
+        (32, false) => Some(TypeId::U32),
+        (64, false) => Some(TypeId::U64),
+        _ => None,
+    }
+}
+
+/// Result type of a `BinOp` given the operand types. Comparisons + membership
+/// + identity produce BOOL; logical ops produce BOOL; arithmetic / bitwise /
+/// shift ops keep the left-operand type (unknown operand → unknown result).
+fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
+    match op {
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => Some(TypeId::BOOL),
+        BinOp::Is | BinOp::In | BinOp::NotIn => Some(TypeId::BOOL),
+        BinOp::And | BinOp::Or | BinOp::AndSuspend | BinOp::OrSuspend => Some(TypeId::BOOL),
+        _ => lhs_ty,
+    }
+}
+
+/// Build the `vreg_types: HashMap<VReg, TypeId>` map for a MIR function.
+///
+/// Mirrors the SPIR-V backend's per-op `vreg_types` population (see
+/// `src/codegen/vulkan/spirv_instructions.rs:31-108`) but runs as a single
+/// pre-emission walk instead of inline during codegen — Cranelift does not
+/// need the TypeId to emit each instruction, only to pick signed-vs-unsigned
+/// variants later (FR-DRIVER-0002b). Walking in block + instruction order is
+/// enough for SSA-style MIR: defs precede uses within a block, and block order
+/// is topological for most functions. Cross-block phi-like propagation may
+/// miss some `Copy` destinations — consumers treat missing entries as
+/// "unknown" (default signed in FR-0002b).
+pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
+    let mut types_map: HashMap<VReg, TypeId> = HashMap::new();
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::ConstInt { dest, .. } => {
+                    // MIR integer constants widen to i64 in Cranelift
+                    // (see constants::compile_const_int).
+                    types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::ConstFloat { dest, .. } => {
+                    types_map.insert(*dest, TypeId::F64);
+                }
+                MirInst::ConstBool { dest, .. } => {
+                    types_map.insert(*dest, TypeId::BOOL);
+                }
+                MirInst::Copy { dest, src } => {
+                    if let Some(&ty) = types_map.get(src) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::BinOp { dest, op, left, .. } => {
+                    let lhs_ty = types_map.get(left).copied();
+                    if let Some(ty) = binop_result_type(*op, lhs_ty) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::UnaryOp { dest, op, operand } => {
+                    let ty = match op {
+                        UnaryOp::Not => Some(TypeId::BOOL),
+                        _ => types_map.get(operand).copied(),
+                    };
+                    if let Some(ty) = ty {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::Cast { dest, to_ty, .. } => {
+                    types_map.insert(*dest, *to_ty);
+                }
+                MirInst::Load { dest, ty, .. } => {
+                    types_map.insert(*dest, *ty);
+                }
+                MirInst::GlobalLoad { dest, ty, .. } => {
+                    types_map.insert(*dest, *ty);
+                }
+                MirInst::GcAlloc { dest, ty } => {
+                    types_map.insert(*dest, *ty);
+                }
+                MirInst::StructInit { dest, type_id, .. } => {
+                    types_map.insert(*dest, *type_id);
+                }
+                MirInst::FieldGet { dest, field_type, .. } => {
+                    types_map.insert(*dest, *field_type);
+                }
+                MirInst::IndirectCall {
+                    dest, return_type, ..
+                } => {
+                    if let Some(d) = dest {
+                        types_map.insert(*d, *return_type);
+                    }
+                }
+                MirInst::MethodCallVirtual {
+                    dest, return_type, ..
+                } => {
+                    if let Some(d) = dest {
+                        types_map.insert(*d, *return_type);
+                    }
+                }
+                MirInst::UnitWiden {
+                    dest, to_bits, signed, ..
+                }
+                | MirInst::UnitNarrow {
+                    dest, to_bits, signed, ..
+                } => {
+                    if let Some(ty) = unit_bits_to_type_id(*to_bits, *signed) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
+                    types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::BoxFloat { dest, .. } | MirInst::UnboxFloat { dest, .. } => {
+                    types_map.insert(*dest, TypeId::F64);
+                }
+                // Remaining variants either produce no typed value, or their
+                // typed output (arrays, closures, enums, SIMD lanes, GPU ops,
+                // futures, actors, generators, etc.) is not yet needed by
+                // FR-0002b's signedness dispatch. Leave `vreg_types` entry
+                // absent — consumers treat missing as "unknown".
+                _ => {}
+            }
+        }
+    }
+
+    types_map
 }
 
 /// Coerce a value to i64 for storage in a Variable declared as i64.
@@ -127,6 +265,9 @@ pub fn compile_function_body<M: Module>(
     let mut extra_variables: HashMap<usize, cranelift_frontend::Variable> = HashMap::new();
     // Reverse map: VReg → local_index (populated by Load, used by push to store back)
     let mut vreg_from_local: HashMap<VReg, usize> = HashMap::new();
+    // FR-DRIVER-0002a: per-VReg TypeId, populated once up front from MIR.
+    // Consumers (FR-0002b widening + shift emission) read via InstrContext.vreg_types.
+    let mut vreg_types: HashMap<VReg, TypeId> = build_vreg_types(func);
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
@@ -452,6 +593,7 @@ pub fn compile_function_body<M: Module>(
                     use_map,
                     vtable_data_ids,
                     vtable_type_ids,
+                    vreg_types: &mut vreg_types,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -479,15 +621,29 @@ pub fn compile_function_body<M: Module>(
                     use_map,
                     vtable_data_ids,
                     vtable_type_ids,
+                    vreg_types: &mut vreg_types,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)
-                // and sync to Variables for cross-block SSA
+                // and sync to Variables for cross-block SSA.
+                //
+                // FR-DRIVER-0002b: pick `sextend` for signed narrow ints so a
+                // later `>>` on the widened value still sees the sign bit.
+                // Unsigned and unknown keep the legacy `uextend` default —
+                // that matches Rust-FFI contracts for `u32 = 0xFFFFFFFF`.
                 if let Some(dest) = inst.dest() {
                     if let Some(&val) = vreg_values.get(&dest) {
                         let ty = builder.func.dfg.value_type(val);
                         if ty.is_int() && ty.bits() < 64 {
-                            let extended = builder.ins().uextend(types::I64, val);
+                            let signed = matches!(
+                                vreg_types.get(&dest).copied(),
+                                Some(TypeId::I8) | Some(TypeId::I16) | Some(TypeId::I32) | Some(TypeId::I64)
+                            );
+                            let extended = if signed {
+                                builder.ins().sextend(types::I64, val)
+                            } else {
+                                builder.ins().uextend(types::I64, val)
+                            };
                             vreg_values.insert(dest, extended);
                             if let Some(&var) = vreg_vars.get(&dest) {
                                 builder.def_var(var, extended);
@@ -663,4 +819,124 @@ pub fn compile_function_body<M: Module>(
 
     builder.finalize();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hir::{BinOp, TypeId};
+    use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
+    use simple_parser::ast::Visibility;
+
+    /// FR-DRIVER-0002a: verify `build_vreg_types` populates a TypeId for every
+    /// dest VReg produced by the covered MIR op kinds. This is the acceptance
+    /// test for the Cranelift-side map — it does NOT exercise the emitter
+    /// itself (that's FR-0002b).
+    #[test]
+    fn build_vreg_types_covers_common_ops() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::I32, Visibility::Private);
+
+        let r0 = func.new_vreg(); // ConstInt -> I64
+        let r1 = func.new_vreg(); // Cast -> I32
+        let r2 = func.new_vreg(); // Cast -> U32
+        let r3 = func.new_vreg(); // BinOp Add -> propagates r1 type (I32)
+        let r4 = func.new_vreg(); // BinOp Eq -> BOOL
+        let r5 = func.new_vreg(); // Copy from r2 -> U32
+        let r6 = func.new_vreg(); // Load from addr (arbitrary) -> F64
+        let r7 = func.new_vreg(); // ConstBool -> BOOL
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: r0, value: 5 });
+        entry.instructions.push(MirInst::Cast {
+            dest: r1,
+            source: r0,
+            from_ty: TypeId::I64,
+            to_ty: TypeId::I32,
+        });
+        entry.instructions.push(MirInst::Cast {
+            dest: r2,
+            source: r0,
+            from_ty: TypeId::I64,
+            to_ty: TypeId::U32,
+        });
+        entry.instructions.push(MirInst::BinOp {
+            dest: r3,
+            op: BinOp::Add,
+            left: r1,
+            right: r1,
+        });
+        entry.instructions.push(MirInst::BinOp {
+            dest: r4,
+            op: BinOp::Eq,
+            left: r1,
+            right: r1,
+        });
+        entry.instructions.push(MirInst::Copy { dest: r5, src: r2 });
+        entry.instructions.push(MirInst::Load {
+            dest: r6,
+            addr: r0,
+            ty: TypeId::F64,
+        });
+        entry
+            .instructions
+            .push(MirInst::ConstBool { dest: r7, value: true });
+        entry.terminator = Terminator::Return(Some(r3));
+
+        let map = build_vreg_types(&func);
+
+        assert_eq!(map.get(&r0).copied(), Some(TypeId::I64), "ConstInt -> I64");
+        assert_eq!(map.get(&r1).copied(), Some(TypeId::I32), "Cast to I32");
+        assert_eq!(map.get(&r2).copied(), Some(TypeId::U32), "Cast to U32");
+        assert_eq!(map.get(&r3).copied(), Some(TypeId::I32), "Add propagates lhs type");
+        assert_eq!(map.get(&r4).copied(), Some(TypeId::BOOL), "Eq -> BOOL");
+        assert_eq!(map.get(&r5).copied(), Some(TypeId::U32), "Copy propagates src type");
+        assert_eq!(map.get(&r6).copied(), Some(TypeId::F64), "Load carries ty");
+        assert_eq!(map.get(&r7).copied(), Some(TypeId::BOOL), "ConstBool -> BOOL");
+    }
+
+    /// Signedness classification derived from `build_vreg_types` output —
+    /// this is what `core::vreg_is_signed` will read once FR-0002b wires it in.
+    #[test]
+    fn build_vreg_types_classifies_signedness() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::VOID, Visibility::Private);
+        let signed = func.new_vreg();
+        let unsigned = func.new_vreg();
+        let boolean = func.new_vreg();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::Cast {
+            dest: signed,
+            source: VReg(999),
+            from_ty: TypeId::I64,
+            to_ty: TypeId::I32,
+        });
+        entry.instructions.push(MirInst::Cast {
+            dest: unsigned,
+            source: VReg(999),
+            from_ty: TypeId::I64,
+            to_ty: TypeId::U32,
+        });
+        entry.instructions.push(MirInst::ConstBool {
+            dest: boolean,
+            value: false,
+        });
+        entry.terminator = Terminator::Return(None);
+
+        let map = build_vreg_types(&func);
+
+        // Signed integer types
+        for ty in [TypeId::I8, TypeId::I16, TypeId::I32, TypeId::I64] {
+            let is_signed = matches!(ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+            assert!(is_signed, "{:?} should classify as signed", ty);
+        }
+        // Unsigned integer types
+        for ty in [TypeId::U8, TypeId::U16, TypeId::U32, TypeId::U64] {
+            let is_unsigned = matches!(ty, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64);
+            assert!(is_unsigned, "{:?} should classify as unsigned", ty);
+        }
+
+        assert_eq!(map.get(&signed).copied(), Some(TypeId::I32));
+        assert_eq!(map.get(&unsigned).copied(), Some(TypeId::U32));
+        assert_eq!(map.get(&boolean).copied(), Some(TypeId::BOOL));
+    }
 }

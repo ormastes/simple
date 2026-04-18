@@ -108,7 +108,10 @@ pub fn compile_store<M: Module>(
             _ => builder.ins().iconst(types::I64, 0),
         };
 
-        // Get the value, handling missing VRegs and type mismatches
+        // Get the value, handling missing VRegs and type mismatches.
+        // FR-DRIVER-0002b: widen narrow ints via `sextend` when the source
+        // VReg is signed (Simple ints default signed); otherwise `uextend`.
+        let val_signed = super::core::vreg_is_signed(ctx, value) == Some(true);
         let val = if let Some(&v) = ctx.vreg_values.get(&value) {
             let actual_ty = builder.func.dfg.value_type(v);
             if actual_ty != expected_cl_ty {
@@ -116,7 +119,11 @@ pub fn compile_store<M: Module>(
                     if actual_ty.bits() > expected_cl_ty.bits() {
                         builder.ins().ireduce(expected_cl_ty, v)
                     } else if actual_ty.bits() < expected_cl_ty.bits() {
-                        builder.ins().uextend(expected_cl_ty, v)
+                        if val_signed {
+                            builder.ins().sextend(expected_cl_ty, v)
+                        } else {
+                            builder.ins().uextend(expected_cl_ty, v)
+                        }
                     } else {
                         v
                     }

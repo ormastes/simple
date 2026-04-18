@@ -63,7 +63,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase C.2)
 - **Target:** `src/compiler_rust/compiler/src/codegen/instr/core.rs` + HIR
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (FR-0002a VReg-TypeId infra + FR-0002b consumer landed together 2026-04-18)
 - **Requested-semantics:**
   The `>>` operator is broken in the Rust bootstrap Cranelift backend
   (memory note `feedback_cranelift_shr_bug.md`). Root cause is two-part:
