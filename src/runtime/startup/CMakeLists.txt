@@ -74,12 +74,17 @@ endif()
 if(SPL_BAREMETAL)
     set(CRT_TARGET spl_crt_baremetal_${SPL_ARCH})
 
+    # FR-DRIVER-0005: per-arch DMA cache-maintenance runtime. The
+    # shared dma.c owns the pool + slot table + sync dispatch; the
+    # matching dma_<arch>.c supplies the clean/invalidate primitives.
     add_library(${CRT_TARGET} STATIC
         ${CRT_COMMON_SRC}
         baremetal/crt_baremetal.c
         baremetal/${SPL_ARCH}/start.S
+        baremetal/dma.c
+        baremetal/dma_${SPL_ARCH}.c
     )
-    target_include_directories(${CRT_TARGET} PRIVATE common)
+    target_include_directories(${CRT_TARGET} PRIVATE common baremetal)
 
     # Baremetal: no standard library, freestanding
     target_compile_options(${CRT_TARGET} PRIVATE -ffreestanding -nostdlib)

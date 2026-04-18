@@ -99,6 +99,94 @@ int64_t rt_memcmp(const void* a, const void* b, int64_t n) {
 }
 
 /* ================================================================
+ * DMA Operations (hosted fallback — FR-DRIVER-0005)
+ * ================================================================
+ *
+ * Baremetal supplies rt_dma_* via src/runtime/startup/baremetal/dma.c
+ * + dma_<arch>.c. The hosted path is functional-not-coherent: we
+ * page-align via posix_memalign so drivers that expect page-aligned
+ * DMA buffers run in unit tests, and sync ops collapse to a compiler
+ * barrier because userspace talks to simulated devices via memcpy.
+ */
+
+#define RT_DMA_HOST_MAX_SLOTS 32
+#define RT_DMA_HOST_PAGE_SIZE 4096
+
+struct rt_dma_host_slot {
+    void    *virt;
+    int64_t  size;
+    int      in_use;
+};
+
+static struct rt_dma_host_slot g_rt_dma_host_slots[RT_DMA_HOST_MAX_SLOTS];
+
+/* posix_memalign is in POSIX-2001; declare explicitly so this file
+ * compiles under strict `-std=c11` without a feature-test macro. */
+extern int posix_memalign(void **memptr, size_t alignment, size_t size);
+
+int64_t rt_dma_alloc(int64_t size, int32_t dir_raw) {
+    (void)dir_raw;
+    if (size <= 0) return -1;
+
+    int slot = -1;
+    for (int i = 0; i < RT_DMA_HOST_MAX_SLOTS; i++) {
+        if (!g_rt_dma_host_slots[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) return -1;
+
+    void *p = NULL;
+    if (posix_memalign(&p, RT_DMA_HOST_PAGE_SIZE, (size_t)size) != 0 || !p) {
+        return -1;
+    }
+    g_rt_dma_host_slots[slot].virt   = p;
+    g_rt_dma_host_slots[slot].size   = size;
+    g_rt_dma_host_slots[slot].in_use = 1;
+    return (int64_t)slot;
+}
+
+void rt_dma_free(int64_t handle) {
+    if (handle < 0 || handle >= RT_DMA_HOST_MAX_SLOTS) return;
+    if (g_rt_dma_host_slots[handle].in_use) {
+        free(g_rt_dma_host_slots[handle].virt);
+    }
+    g_rt_dma_host_slots[handle].virt   = NULL;
+    g_rt_dma_host_slots[handle].size   = 0;
+    g_rt_dma_host_slots[handle].in_use = 0;
+}
+
+int64_t rt_dma_virt_of(int64_t handle) {
+    if (handle < 0 || handle >= RT_DMA_HOST_MAX_SLOTS) return 0;
+    if (!g_rt_dma_host_slots[handle].in_use) return 0;
+    return (int64_t)(uintptr_t)g_rt_dma_host_slots[handle].virt;
+}
+
+int64_t rt_dma_phys_of(int64_t handle) {
+    /* Userspace has no physical addresses; return virt so drivers
+     * that program a DMA-physical register at least see a stable,
+     * unique address. Not safe for real hardware — by design. */
+    return rt_dma_virt_of(handle);
+}
+
+void rt_dma_sync_for_device(int64_t handle, int32_t dir_raw) {
+    (void)handle;
+    (void)dir_raw;
+    __asm__ volatile ("" ::: "memory");  /* compiler barrier only */
+}
+
+void rt_dma_sync_for_cpu(int64_t handle, int32_t dir_raw) {
+    (void)handle;
+    (void)dir_raw;
+    __asm__ volatile ("" ::: "memory");
+}
+
+int64_t rt_dma_cache_line_size(void) {
+    /* 64 B is the x86_64 / arm64 default and covers every current
+     * hosted development target. Real baremetal overrides this via
+     * the per-arch dma_<arch>.c. */
+    return 64;
+}
+
+/* ================================================================
  * String Operations
  * ================================================================ */
 
