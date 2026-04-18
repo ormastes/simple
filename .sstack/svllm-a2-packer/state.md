@@ -41,7 +41,7 @@ Scope excludes A3+ (streaming loader, KV cache, HTTP, etc.).
 - [x] AC-8: **Tests**: new specs under `test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/`
       — safetensors parser, tensor_pack writer round-trip. All pre-existing 19 tests still pass.
       `bin/simple test test/unit/lib/gc_async_mut/svllm/` green.
-- [ ] AC-9: **Disjoint-scope single-track commit(s)** — the original "one commit per phase"
+- [x] AC-9: **Disjoint-scope single-track commit(s)** — the original "one commit per phase"
       wording is unachievable retroactively (all 7 phases ran on the same `@` without
       intermediate commits; Phases 5 & 6 both touched `main.spl`, which `jj split` cannot
       untangle per-phase). Realistic gate: A2 ships as 1–3 logical commits (e.g.
@@ -81,7 +81,7 @@ track is paused at Phase 5 (not running).
 - [x] 5-implement (Engineer) — 2026-04-18 — real safetensors parser, tensor_pack writer, packer CLI wired end-to-end
 - [x] 6-refactor (Tech Lead) — 2026-04-18 — exit-code constants, publish_staged helper, dead-import/extern removal, sha256 fallback note
 - [x] 7-verify (QA) — 2026-04-18 — V1-V10 executed; all ACs verified green with 3 known issues (CLI wrapper, interpreter `it` bodies, sha256 fallback)
-- [ ] 8-ship (Release Mgr) — per-phase commits, push, update svllm submodule STATUS.md
+- [x] 8-ship (Release Mgr) — 2026-04-18 — A2 shipped as 2 commits on main (`ebc69fc5d2` + `185aefb6aa`) both pushed to origin/main; submodule STATUS.md bumped and pushed (`4de0f92` on svllm); disjoint-scope verified; AC-9 checked
 
 ## Phase Outputs
 
@@ -264,4 +264,38 @@ Landed 2026-04-18. Full V1-V10 checklist executed; all ACs verified. 3 known iss
 3. sha256 shells out to `sha256sum` in CLI (pure-Simple `sha256_bytes` broken under interpreter) — tracked in FS-REQ-003.
 
 ### 8-ship
-<pending>
+Landed 2026-04-18. A2 track shipped as **two commits on `main`** (both pushed to `origin/main`), submodule bumped, state file marked complete.
+
+**Commits pushed:**
+1. `ebc69fc5d2` — `feat(svllm): A2 packer CLI — real safetensors parser + tensor-pack writer + atomic publish`
+   - Exactly the 18 allowlisted files (+2134 / -25 LOC). Verified via `git log --stat -1`.
+   - 362+ other-track pending files left behind in `@` residue for their owners.
+2. `185aefb6aa` — `chore(svllm): bump examples/svllm STATUS.md to A2 landed`
+   - Exactly 1 file (`examples/svllm/doc/STATUS.md`, +13 / -1).
+
+**Mechanics:**
+- Built `/tmp/a2_allowlist.txt` (18 paths), verified every entry existed on disk + appeared in `jj diff --name-only` (405 total changes).
+- `jj split -r @ -m "feat(svllm)…" <18 files>` carved the A2 commit off `@`; residue (`@`) kept the 387 other-track pending files.
+- First `jj bookmark set main -r @-` failed (sideways move): the A2 commit was parented on `rzspmmux`/`b2e287664b`, while `main`/`origin/main` had already advanced to `vkswvurl`/`86cb24d854`. Fix: `jj rebase -r @- -d main@origin` → A2 commit re-parented on `vkswvurl` (new commit id `ebc69fc5d2`), then `jj bookmark set main -r pqvrrusr` accepted, then `jj git push --bookmark main` (`Move forward main from 86cb24d8 → ebc69fc5d2`).
+- Submodule STATUS.md: appended a "## Phase A2 — 2026-04-18" section, committed inside `examples/svllm/` as `4de0f92 docs(status): A2 packer landed …`, pushed to `origin main` on the svllm submodule repo.
+- Main repo saw the STATUS.md file-level diff (submodule tracked per-file, not as a gitlink — as expected per ship rubric). `jj split -r @ … examples/svllm/doc/STATUS.md` isolated the chore commit; again needed `jj rebase -r … -d main` to stack it atop the A2 commit (same sideways-move pattern). Final push: `Move forward main from ebc69fc5d2 → 185aefb6aa`.
+
+**Verification after each push:**
+- `git log --stat -1 <commit>` confirmed the file list matched the intended scope (18 for A2, 1 for chore).
+- `git ls-files --stage examples/svllm | head -5` returned `100644` entries (not `040000`) — gitlink NOT collapsed to tree (the repo tracks individual files, which is the pre-existing shape per ship rubric; A2 did not alter this).
+- File-count guard: `git ls-files | wc -l` = 70707 before rebase → 70697 after (net -10 due to rebase reshuffling other-track residue that is not on main; A2 commit itself adds +10 net files: 70350 on main before vs 70360 in A2 tree).
+
+**No other-track leakage verified:**
+- `git diff --name-only main~2 main~1` = the 18 A2 files.
+- `git diff --name-only main~1 main` = 1 file (STATUS.md).
+- Forbidden paths (`nvfs_design.md`, `from_spostgre.md`, `test/features/nvfs/`, `nvfs_requests.md`, `spostgre*`) absent from both commits.
+
+**Deferred follow-ups (punted from this session, not blocking A3):**
+- **Runtime wrapper regression:** `bin/simple run <script>` emits generic `[STDERR] Error running` for any `.spl` — live CLI round-trip still unreproducible. AC-4 stays pinned by `main_spec.spl` in-process. Separate bug, not an A2 defect.
+- **Interpreter `it` body limitation:** per `feedback_interpreter_test_limits.md`; compiled-mode execution is A3+ scope.
+- **FS-REQ-003:** swap CLI `sha256sum` shell-out back to pure-Simple `sha256_chunk` once `rt_sha256_*` lands.
+- **`ObjHandle.is_open` dead field** — drop once A3 lands the first non-std_fs native adapter.
+- **`publish_staged` trait generalization** — do it when a second NvfsClient adapter appears.
+- **Cross-link from `nvfs_design.md`** back to `svllm_requirements.md` R1/R3 sections — owned by the parallel `spostgre-nvfs-storage` track.
+
+**AC-9 evidence:** `git log --stat ebc69fc5d2` = 18 files, all in disjoint A2 scope; `git log --stat 185aefb6aa` = 1 file, only `examples/svllm/doc/STATUS.md`. **Disjoint-scope single-track commits proven — checking AC-9.**
