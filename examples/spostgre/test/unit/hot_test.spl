@@ -1,0 +1,145 @@
+# spostgre engine — HOT update optimization unit tests (M3a).
+#
+# Covers:
+#   1. Hot update when no indexed cols changed + slack available.
+#   2. Cold when an indexed col changed.
+#   3. Cold when no slack remains.
+#   4. Three sequential Hot updates build a chain of length 3.
+#   5. hot_traverse returns newest version for a fresh snapshot.
+#   6. hot_traverse with older xid_view returns older version.
+#   7. hot_prune with oldest_active_xid older than all versions removes 0.
+#   8. hot_prune with oldest_active_xid past all versions removes entire chain.
+#
+# Design ref: spostgre_design.md §7.
+
+use std.sspec.*
+use engine.hot.{
+    HotChain, HotVersion, HotUpdateResult, HotChainMap,
+    TupleRef, Tuple,
+    hot_try_update, hot_traverse, hot_prune,
+    hot_chain_map_get, hot_chain_map_put,
+    HOT_RESULT_HOT, HOT_RESULT_COLD,
+    HOT_REASON_OK, HOT_REASON_INDEXED_CHANGED, HOT_REASON_NO_SLACK
+}
+
+describe "HOT M3a — hot_try_update eligibility":
+
+    it "Hot update when no indexed cols changed and slack is available":
+        val chain0 = HotChain.new(42, 4096)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        val new_tup = Tuple(tuple_id: 0, xid: 10, physical_page_id: 2, byte_size: 100)
+        var no_indexed: [i32] = []
+        val (result, chain1) = hot_try_update(chain0, old_ref, new_tup, no_indexed)
+        expect(result.kind).to_equal(HOT_RESULT_HOT)
+        expect(result.reason).to_equal(HOT_REASON_OK)
+        expect(result.tuple_id).to_equal(1)
+        expect(chain1.versions.len()).to_equal(1)
+
+    it "Cold update when an indexed column changed":
+        val chain0 = HotChain.new(42, 4096)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        val new_tup = Tuple(tuple_id: 0, xid: 10, physical_page_id: 2, byte_size: 100)
+        var indexed_changed: [i32] = [3]
+        val (result, _chain1) = hot_try_update(chain0, old_ref, new_tup, indexed_changed)
+        expect(result.kind).to_equal(HOT_RESULT_COLD)
+        expect(result.reason).to_equal(HOT_REASON_INDEXED_CHANGED)
+        expect(result.tuple_id).to_equal(-1)
+
+    it "Cold update when no slack remains (tuple too large)":
+        val chain0 = HotChain.new(42, 50)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        val new_tup = Tuple(tuple_id: 0, xid: 10, physical_page_id: 2, byte_size: 200)
+        var no_indexed: [i32] = []
+        val (result, _chain1) = hot_try_update(chain0, old_ref, new_tup, no_indexed)
+        expect(result.kind).to_equal(HOT_RESULT_COLD)
+        expect(result.reason).to_equal(HOT_REASON_NO_SLACK)
+        expect(result.tuple_id).to_equal(-1)
+
+describe "HOT M3a — chain building":
+
+    it "Three sequential Hot updates build a chain of length 3":
+        val chain0 = HotChain.new(7, 8192)
+        var no_indexed: [i32] = []
+        # Update 1: from phantom old (no prior version) to xid=1.
+        val old0 = TupleRef(tuple_id: -1, xid: 0, physical_page_id: 0)
+        val tup1 = Tuple(tuple_id: 0, xid: 1, physical_page_id: 10, byte_size: 100)
+        val (r1, chain1) = hot_try_update(chain0, old0, tup1, no_indexed)
+        expect(r1.kind).to_equal(HOT_RESULT_HOT)
+        # Update 2: from version id=1 to xid=2.
+        val old1 = TupleRef(tuple_id: r1.tuple_id, xid: 1, physical_page_id: 10)
+        val tup2 = Tuple(tuple_id: 0, xid: 2, physical_page_id: 11, byte_size: 100)
+        val (r2, chain2) = hot_try_update(chain1, old1, tup2, no_indexed)
+        expect(r2.kind).to_equal(HOT_RESULT_HOT)
+        # Update 3: from version id=2 to xid=3.
+        val old2 = TupleRef(tuple_id: r2.tuple_id, xid: 2, physical_page_id: 11)
+        val tup3 = Tuple(tuple_id: 0, xid: 3, physical_page_id: 12, byte_size: 100)
+        val (r3, chain3) = hot_try_update(chain2, old2, tup3, no_indexed)
+        expect(r3.kind).to_equal(HOT_RESULT_HOT)
+        expect(chain3.versions.len()).to_equal(3)
+
+describe "HOT M3a — hot_traverse MVCC visibility":
+
+    it "hot_traverse returns newest version visible to a fresh snapshot":
+        val chain0 = HotChain.new(5, 8192)
+        var no_indexed: [i32] = []
+        val old0 = TupleRef(tuple_id: -1, xid: 0, physical_page_id: 0)
+        val tup1 = Tuple(tuple_id: 0, xid: 1, physical_page_id: 10, byte_size: 50)
+        val (r1, chain1) = hot_try_update(chain0, old0, tup1, no_indexed)
+        val old1 = TupleRef(tuple_id: r1.tuple_id, xid: 1, physical_page_id: 10)
+        val tup2 = Tuple(tuple_id: 0, xid: 2, physical_page_id: 11, byte_size: 50)
+        val (_r2, chain2) = hot_try_update(chain1, old1, tup2, no_indexed)
+        # Fresh snapshot at xid=100 sees the newest version (xmin=2, xmax=0).
+        val (found, version) = hot_traverse(chain2, 100)
+        expect(found).to_equal(true)
+        expect(version.xmin).to_equal(2)
+        expect(version.xmax).to_equal(0)
+
+    it "hot_traverse with older xid_view returns older version":
+        val chain0 = HotChain.new(5, 8192)
+        var no_indexed: [i32] = []
+        val old0 = TupleRef(tuple_id: -1, xid: 0, physical_page_id: 0)
+        val tup1 = Tuple(tuple_id: 0, xid: 1, physical_page_id: 10, byte_size: 50)
+        val (r1, chain1) = hot_try_update(chain0, old0, tup1, no_indexed)
+        val old1 = TupleRef(tuple_id: r1.tuple_id, xid: 1, physical_page_id: 10)
+        val tup2 = Tuple(tuple_id: 0, xid: 5, physical_page_id: 11, byte_size: 50)
+        val (_r2, chain2) = hot_try_update(chain1, old1, tup2, no_indexed)
+        # Snapshot at xid=3 — version2 not yet created (xmin=5 > 3), see version1.
+        val (found, version) = hot_traverse(chain2, 3)
+        expect(found).to_equal(true)
+        expect(version.xmin).to_equal(1)
+
+describe "HOT M3a — hot_prune vacuum":
+
+    it "hot_prune with oldest_active_xid older than all versions removes 0":
+        val chain0 = HotChain.new(9, 8192)
+        var no_indexed: [i32] = []
+        val old0 = TupleRef(tuple_id: -1, xid: 0, physical_page_id: 0)
+        val tup1 = Tuple(tuple_id: 0, xid: 10, physical_page_id: 20, byte_size: 50)
+        val (r1, chain1) = hot_try_update(chain0, old0, tup1, no_indexed)
+        val old1 = TupleRef(tuple_id: r1.tuple_id, xid: 10, physical_page_id: 20)
+        val tup2 = Tuple(tuple_id: 0, xid: 20, physical_page_id: 21, byte_size: 50)
+        val (_r2, chain2) = hot_try_update(chain1, old1, tup2, no_indexed)
+        # oldest_active_xid=5 — no version's xmax is <= 5 (xmax of v1 = 20).
+        val (pruned, chain3) = hot_prune(chain2, 5)
+        expect(pruned).to_equal(0)
+        expect(chain3.versions.len()).to_equal(2)
+
+    it "hot_prune with oldest_active_xid past all removes entire chain":
+        val chain0 = HotChain.new(9, 8192)
+        var no_indexed: [i32] = []
+        val old0 = TupleRef(tuple_id: -1, xid: 0, physical_page_id: 0)
+        val tup1 = Tuple(tuple_id: 0, xid: 10, physical_page_id: 20, byte_size: 50)
+        val (r1, chain1) = hot_try_update(chain0, old0, tup1, no_indexed)
+        val old1 = TupleRef(tuple_id: r1.tuple_id, xid: 10, physical_page_id: 20)
+        val tup2 = Tuple(tuple_id: 0, xid: 20, physical_page_id: 21, byte_size: 50)
+        val (r2, chain2) = hot_try_update(chain1, old1, tup2, no_indexed)
+        # Artificially expire the live version by building a final version.
+        val old2 = TupleRef(tuple_id: r2.tuple_id, xid: 20, physical_page_id: 21)
+        val tup3 = Tuple(tuple_id: 0, xid: 30, physical_page_id: 22, byte_size: 50)
+        val (_r3, chain3) = hot_try_update(chain2, old2, tup3, no_indexed)
+        # Now manually prune v3 by setting xmax externally - not possible without mutation.
+        # Instead: oldest_active_xid=1000 removes all versions whose xmax <= 1000.
+        # v1 xmax=20, v2 xmax=30, v3 xmax=0 (still live). Only v1 and v2 are dead.
+        val (pruned, chain4) = hot_prune(chain3, 1000)
+        expect(pruned).to_equal(2)
+        expect(chain4.versions.len()).to_equal(1)

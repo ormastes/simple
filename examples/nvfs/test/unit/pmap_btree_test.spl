@@ -1,0 +1,229 @@
+# @cover examples/nvfs/src/core/pmap_btree.spl 80%
+"""
+# NVFS pmap B-tree Unit Tests (N5a)
+
+**Feature IDs:** #NVFS-N5a-BTREE
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+**Design:** doc/05_design/nvfs_design_v2.md §17; N5a milestone
+
+## Overview
+
+Tests for the B-tree pmap index that replaces the flat-list sidecar (FR-N3-001).
+Keys are (arena_id, offset); values are PmapBTreeEntry (includes length and PmapEntry).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| PmapKey | Composite key: arena_id (i64) + offset (i64) |
+| PmapBTree | Node-pool B-tree (avoids recursive struct) |
+| fanout | Minimum degree t; max keys = 2t-1 |
+| pmap_btree_new | Creates empty tree with given fanout |
+| pmap_btree_insert | O(log n) insert with leaf-split on overflow |
+| pmap_btree_lookup | O(log n) point lookup |
+| pmap_btree_remove | Leaf removal (rebalancing deferred to N5b) |
+| pmap_btree_range_collect | Inclusive range scan |
+| pmap_btree_snapshot | All entries in order |
+"""
+
+use std.sspec.*
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_pmap_entry(logical: u64, phys: i64, offset: u64) -> PmapEntry:
+    """Build a minimal valid PmapEntry with a CRC32C-style checksum."""
+    val dummy: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+    val csum = pmap_entry_checksum_for(dummy)
+    PmapEntry(
+        logical:       logical,
+        phys:          phys,
+        offset:        offset,
+        len:           4,
+        birth_gen:     0,
+        checksum_algo: 0,
+        checksum:      csum
+    )
+
+fn _insert(tree: PmapBTree, arena_id: i64, offset: i64):
+    """Insert a synthetic entry keyed by (arena_id, offset)."""
+    val pentry = _make_pmap_entry(offset as u64, arena_id, offset as u64)
+    val _ = pmap_btree_insert(tree, arena_id, offset, 4, pentry)
+
+fn _lookup_ok(tree: PmapBTree, arena_id: i64, offset: i64) -> bool:
+    """Return true iff lookup finds an entry for (arena_id, offset)."""
+    val key = PmapKey(arena_id: arena_id, offset: offset)
+    val r = pmap_btree_lookup(tree, key)
+    match r:
+        case None: false
+        case Some(_): true
+
+# ============================================================================
+# Test 1: Empty tree lookup returns None
+# ============================================================================
+
+describe "pmap B-tree — empty tree":
+    """Lookups on an empty tree must return None."""
+
+    it "empty tree lookup returns None":
+        var tree = pmap_btree_new(4)
+        val key = PmapKey(arena_id: 1, offset: 0)
+        val result = pmap_btree_lookup(tree, key)
+        match result:
+            case None:
+                expect(true).to_equal(true)
+            case Some(_):
+                expect(false).to_equal(true)
+
+# ============================================================================
+# Test 2: Insert single + lookup returns entry
+# ============================================================================
+
+describe "pmap B-tree — single insert":
+    """Insert one entry; lookup must find it with correct fields."""
+
+    it "insert single entry then lookup returns the entry":
+        var tree = pmap_btree_new(4)
+        val pentry = _make_pmap_entry(100, 7, 4096)
+        val _ = pmap_btree_insert(tree, 7, 4096, 64, pentry)
+        val key = PmapKey(arena_id: 7, offset: 4096)
+        val result = pmap_btree_lookup(tree, key)
+        match result:
+            case None:
+                expect(false).to_equal(true)
+            case Some(found):
+                expect(found.arena_id).to_equal(7)
+                expect(found.offset).to_equal(4096)
+                expect(found.length).to_equal(64)
+
+# ============================================================================
+# Test 3: Insert 20 (causes splits with fanout=4) + lookup each
+# ============================================================================
+
+describe "pmap B-tree — 20 inserts with fanout=4":
+    """With fanout=4 (max 7 keys/node), inserting 20 entries forces multiple splits."""
+
+    it "all 20 inserted entries are found after splits":
+        var tree = pmap_btree_new(4)
+        var i = 0
+        while i < 20:
+            _insert(tree, 1, i * 100)
+            i = i + 1
+        var j = 0
+        var all_found = true
+        while j < 20:
+            if not _lookup_ok(tree, 1, j * 100):
+                all_found = false
+            j = j + 1
+        expect(all_found).to_equal(true)
+
+# ============================================================================
+# Test 4: Range collect covers correct range
+# ============================================================================
+
+describe "pmap B-tree — range collect":
+    """Range collect [start, end] returns exactly the entries in that range."""
+
+    it "range collect returns only entries within [start, end]":
+        var tree = pmap_btree_new(4)
+        var i = 0
+        while i < 10:
+            _insert(tree, 1, i * 1000)
+            i = i + 1
+        # Query range: offset 2000..5000 inclusive → offsets 2000, 3000, 4000, 5000
+        val start = PmapKey(arena_id: 1, offset: 2000)
+        val end   = PmapKey(arena_id: 1, offset: 5000)
+        val results = pmap_btree_range_collect(tree, start, end)
+        expect(results.len() as i64).to_equal(4)
+
+# ============================================================================
+# Test 5: Range collect with empty range returns empty
+# ============================================================================
+
+describe "pmap B-tree — empty range":
+    """Range collect where start > all keys returns empty list."""
+
+    it "range collect with no matching keys returns empty list":
+        var tree = pmap_btree_new(4)
+        _insert(tree, 1, 0)
+        _insert(tree, 1, 100)
+        val start = PmapKey(arena_id: 1, offset: 9000)
+        val end   = PmapKey(arena_id: 1, offset: 9999)
+        val results = pmap_btree_range_collect(tree, start, end)
+        expect(results.len() as i64).to_equal(0)
+
+# ============================================================================
+# Test 6: Remove single + lookup returns None
+# ============================================================================
+
+describe "pmap B-tree — remove":
+    """After removing an entry, lookup must return None for that key."""
+
+    it "remove single entry then lookup returns None":
+        var tree = pmap_btree_new(4)
+        _insert(tree, 2, 512)
+        val key = PmapKey(arena_id: 2, offset: 512)
+        val removed = pmap_btree_remove(tree, key)
+        match removed:
+            case None:
+                expect(false).to_equal(true)
+            case Some(_):
+                pass_do_nothing
+        val after = pmap_btree_lookup(tree, key)
+        match after:
+            case None:
+                expect(true).to_equal(true)
+            case Some(_):
+                expect(false).to_equal(true)
+
+# ============================================================================
+# Test 7: Remove then reinsert same key returns the newer entry
+# ============================================================================
+
+describe "pmap B-tree — remove then reinsert":
+    """After remove + reinsert, the newer entry is returned."""
+
+    it "reinserted entry has updated length field":
+        var tree = pmap_btree_new(4)
+        val pentry1 = _make_pmap_entry(0, 3, 0)
+        val _ = pmap_btree_insert(tree, 3, 0, 64, pentry1)
+        val key = PmapKey(arena_id: 3, offset: 0)
+        val _ = pmap_btree_remove(tree, key)
+        val pentry2 = _make_pmap_entry(0, 3, 0)
+        val _ = pmap_btree_insert(tree, 3, 0, 128, pentry2)
+        val result = pmap_btree_lookup(tree, key)
+        match result:
+            case None:
+                expect(false).to_equal(true)
+            case Some(found):
+                expect(found.length).to_equal(128)
+
+# ============================================================================
+# Test 8: Large insert (100 entries) + spot-check lookups
+# ============================================================================
+
+describe "pmap B-tree — 100 inserts":
+    """Insert 100 entries (multiple arena_ids) and spot-check a subset."""
+
+    it "spot-check lookups succeed after 100 inserts across 5 arenas":
+        var tree = pmap_btree_new(8)
+        var ai = 0
+        while ai < 5:
+            var oi = 0
+            while oi < 20:
+                _insert(tree, ai as i64, oi * 512)
+                oi = oi + 1
+            ai = ai + 1
+        # Spot-check first and last entry for each arena.
+        var ok = true
+        var ci = 0
+        while ci < 5:
+            if not _lookup_ok(tree, ci as i64, 0):
+                ok = false
+            if not _lookup_ok(tree, ci as i64, 19 * 512):
+                ok = false
+            ci = ci + 1
+        expect(ok).to_equal(true)

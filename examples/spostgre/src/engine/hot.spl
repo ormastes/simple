@@ -1,0 +1,375 @@
+# spostgre engine — HOT (Heap-Only Tuple) update optimization (M3a).
+#
+# HOT avoids new index entries when indexed columns are unchanged AND enough
+# free space exists in the logical page group.  Since spostgre uses
+# out-of-place writes, "same physical page" is relaxed to "same logical page
+# group" — i.e. the update chain is anchored at a logical_page_id and the
+# indexed columns are unchanged.
+#
+# Design ref: spostgre_design.md §7.
+# Research:   spostgre_research.md §2 (PG HOT mechanics).
+#
+# Language note: Simple uses i64 for all unsigned 64-bit fields.
+#   Vec<T> → [T], Option<T> → (bool, T) tuples, no inheritance.
+#
+# FR-HOT-001: Integrate real free-space accounting from PageHeader (pd_upper
+#   - pd_lower) once buffer_mgr exposes a page-slack query.  Currently callers
+#   pass explicit free_bytes / tuple_size parameters.
+
+# ---------------------------------------------------------------------------
+# HotUpdateResult — tagged result from hot_try_update.
+# kind: 0 = Hot, 1 = Cold.
+# reason (when Cold): 1 = indexed_col_changed, 2 = no_slack.
+# ---------------------------------------------------------------------------
+
+struct HotUpdateResult:
+    """Result of a HOT-eligibility check.
+
+    kind    0 = Hot  — update was appended to chain; no new index entry needed.
+            1 = Cold — caller must create a new index entry.
+    tuple_id  new tuple id if Hot; -1 if Cold.
+    reason    0 = ok (Hot); 1 = indexed_col_changed; 2 = no_slack.
+    """
+    kind: i32
+    tuple_id: i64
+    reason: i32
+
+val HOT_RESULT_HOT: i32 = 0
+val HOT_RESULT_COLD: i32 = 1
+val HOT_REASON_OK: i32 = 0
+val HOT_REASON_INDEXED_CHANGED: i32 = 1
+val HOT_REASON_NO_SLACK: i32 = 2
+
+# ---------------------------------------------------------------------------
+# HotVersion — one entry in a HOT chain.
+# ---------------------------------------------------------------------------
+
+struct HotVersion:
+    """One tuple version within a HOT chain.
+
+    tuple_id           — stable tuple identifier.
+    xmin               — xid that created this version.
+    xmax               — xid that expired this version; 0 = still live.
+    physical_page_id   — physical page where this version's bytes reside.
+    changed_indexed_cols — true only on the first Cold root; always false for
+                            in-chain Hot versions.
+    """
+    tuple_id: i64
+    xmin: i64
+    xmax: i64
+    physical_page_id: i64
+    changed_indexed_cols: bool
+
+# ---------------------------------------------------------------------------
+# HotChain — the chain of versions for one logical page group.
+# ---------------------------------------------------------------------------
+
+struct HotChain:
+    """Chain of tuple versions within the same logical page group.
+
+    head_logical_page — logical page id anchoring the chain.
+    versions          — oldest first; last element is the live version.
+    next_tuple_id     — monotonically increasing local id generator.
+    free_bytes        — estimated free bytes remaining in the logical page
+                        (caller-managed; decremented on each Hot update).
+    """
+    head_logical_page: i64
+    versions: [HotVersion]
+    next_tuple_id: i64
+    free_bytes: i64
+
+    static fn new(logical_page: i64, initial_free_bytes: i64) -> HotChain:
+        """Create an empty chain anchored at logical_page."""
+        HotChain(
+            head_logical_page: logical_page,
+            versions: [],
+            next_tuple_id: 1,
+            free_bytes: initial_free_bytes)
+
+# ---------------------------------------------------------------------------
+# TupleRef — lightweight reference to an existing tuple.
+# ---------------------------------------------------------------------------
+
+struct TupleRef:
+    """Reference to an existing tuple version."""
+    tuple_id: i64
+    xid: i64
+    physical_page_id: i64
+
+# ---------------------------------------------------------------------------
+# Tuple — simple in-memory tuple descriptor.
+# ---------------------------------------------------------------------------
+
+struct Tuple:
+    """Minimal tuple descriptor for HOT purposes."""
+    tuple_id: i64        # 0 = unassigned (caller leaves 0, hot assigns)
+    xid: i64
+    physical_page_id: i64
+    byte_size: i64       # serialized size, used for slack accounting
+
+# ---------------------------------------------------------------------------
+# hot_try_update — main entry point.
+#
+# Returns (HotUpdateResult, HotChain) where the chain is the updated copy.
+# Caller must replace their chain with the returned one.
+#
+# HOT eligibility criteria:
+#   1. No indexed columns changed (indexed_cols are column indices that are
+#      part of any index; caller passes which ones changed).
+#   2. Enough free space in the logical page (chain.free_bytes >= new_tuple.byte_size).
+# ---------------------------------------------------------------------------
+
+fn hot_try_update(chain: HotChain, old: TupleRef, new_tuple: Tuple,
+                  changed_indexed_cols: [i32]) -> (HotUpdateResult, HotChain):
+    """Attempt a HOT update on the chain.
+
+    Parameters:
+      chain                — current HOT chain.
+      old                  — reference to the tuple being replaced.
+      new_tuple            — the new tuple version (tuple_id field ignored; assigned here).
+      changed_indexed_cols — column indices that changed.  Empty → no indexed col changed.
+
+    Returns (result, updated_chain).
+    @coverage: spostgre_design.md §7
+    """
+    # Check 1: no indexed columns changed.
+    if changed_indexed_cols.len() > 0:
+        val cold_result = HotUpdateResult(
+            kind: HOT_RESULT_COLD,
+            tuple_id: -1,
+            reason: HOT_REASON_INDEXED_CHANGED)
+        return (cold_result, chain)
+
+    # Check 2: enough free space in the logical page.
+    if chain.free_bytes < new_tuple.byte_size:
+        val cold_result = HotUpdateResult(
+            kind: HOT_RESULT_COLD,
+            tuple_id: -1,
+            reason: HOT_REASON_NO_SLACK)
+        return (cold_result, chain)
+
+    # HOT-eligible: expire the old version and append the new one.
+    val new_tid = chain.next_tuple_id
+    val new_free = chain.free_bytes - new_tuple.byte_size
+
+    # Copy existing versions, stamping xmax on the matching old version.
+    val old_len = chain.versions.len()
+    var new_versions: [HotVersion] = [HotVersion(
+        tuple_id: 0, xmin: 0, xmax: 0,
+        physical_page_id: 0, changed_indexed_cols: false); old_len + 1]
+    var i = 0
+    while i < old_len:
+        val v = chain.versions[i]
+        if v.tuple_id == old.tuple_id:
+            new_versions[i] = HotVersion(
+                tuple_id: v.tuple_id,
+                xmin: v.xmin,
+                xmax: new_tuple.xid,
+                physical_page_id: v.physical_page_id,
+                changed_indexed_cols: v.changed_indexed_cols)
+        else:
+            new_versions[i] = v
+        i = i + 1
+    new_versions[old_len] = HotVersion(
+        tuple_id: new_tid,
+        xmin: new_tuple.xid,
+        xmax: 0,
+        physical_page_id: new_tuple.physical_page_id,
+        changed_indexed_cols: false)
+
+    val updated_chain = HotChain(
+        head_logical_page: chain.head_logical_page,
+        versions: new_versions,
+        next_tuple_id: new_tid + 1,
+        free_bytes: new_free)
+
+    val hot_result = HotUpdateResult(
+        kind: HOT_RESULT_HOT,
+        tuple_id: new_tid,
+        reason: HOT_REASON_OK)
+    (hot_result, updated_chain)
+
+# ---------------------------------------------------------------------------
+# hot_traverse — find the visible version for a given xid_view snapshot.
+#
+# Walks the chain newest-first. A version is visible if:
+#   xmin <= xid_view  AND  (xmax == 0 OR xmax > xid_view)
+#
+# Returns (found: bool, version: HotVersion). found=false when no visible version.
+# ---------------------------------------------------------------------------
+
+fn hot_traverse(chain: HotChain, xid_view: i64) -> (bool, HotVersion):
+    """Find the version visible to xid_view per MVCC snapshot semantics.
+
+    Scans newest-first (end of versions slice) and returns the first
+    version where xmin <= xid_view AND (xmax == 0 OR xmax > xid_view).
+
+    Returns (true, version) on success; (false, sentinel) if nothing visible.
+    @coverage: spostgre_design.md §7 (MVCC traversal)
+    """
+    val sentinel = HotVersion(
+        tuple_id: -1,
+        xmin: 0,
+        xmax: 0,
+        physical_page_id: -1,
+        changed_indexed_cols: false)
+    val n = chain.versions.len()
+    if n == 0:
+        return (false, sentinel)
+    # Scan newest-first.
+    var i = n - 1
+    var keep_scanning = true
+    var found_version = sentinel
+    var found = false
+    while keep_scanning:
+        val v = chain.versions[i]
+        val visible_start = v.xmin <= xid_view
+        val live = v.xmax == 0
+        val expired_after = v.xmax > xid_view
+        if visible_start and (live or expired_after):
+            found_version = v
+            found = true
+            keep_scanning = false
+        else:
+            if i == 0:
+                keep_scanning = false
+            else:
+                i = i - 1
+    (found, found_version)
+
+# ---------------------------------------------------------------------------
+# hot_prune — remove versions no longer visible to any active transaction.
+#
+# A version is dead (pruneable) when:
+#   xmax != 0 AND xmax <= oldest_active_xid
+# i.e. every active transaction has xid >= oldest_active_xid, so they can
+# never see a version whose xmax is already committed and <= their xid_view.
+#
+# Returns (pruned_count, updated_chain).
+# ---------------------------------------------------------------------------
+
+fn hot_prune(chain: HotChain, oldest_active_xid: i64) -> (i32, HotChain):
+    """Remove dead versions from the chain.
+
+    A version is dead when xmax != 0 AND xmax <= oldest_active_xid.
+    Returns (count_pruned, updated_chain).
+    @coverage: spostgre_design.md §7 (HOT pruning)
+    """
+    val n = chain.versions.len()
+    # Count live versions first.
+    var live_count = 0
+    var i = 0
+    while i < n:
+        val v = chain.versions[i]
+        val is_dead = (v.xmax != 0) and (v.xmax <= oldest_active_xid)
+        if not is_dead:
+            live_count = live_count + 1
+        i = i + 1
+
+    val pruned = (n - live_count) as i32
+
+    if pruned == 0:
+        return (0, chain)
+
+    # Build compacted version list.
+    var new_versions: [HotVersion] = [HotVersion(
+        tuple_id: 0, xmin: 0, xmax: 0,
+        physical_page_id: 0, changed_indexed_cols: false); live_count]
+    var dst = 0
+    i = 0
+    while i < n:
+        val v = chain.versions[i]
+        val is_dead = (v.xmax != 0) and (v.xmax <= oldest_active_xid)
+        if not is_dead:
+            new_versions[dst] = v
+            dst = dst + 1
+        i = i + 1
+
+    val updated = HotChain(
+        head_logical_page: chain.head_logical_page,
+        versions: new_versions,
+        next_tuple_id: chain.next_tuple_id,
+        free_bytes: chain.free_bytes)
+    (pruned, updated)
+
+# ---------------------------------------------------------------------------
+# HotChainMap — in-memory parallel map (logical_page_id → HotChain).
+# Used by pmap HOT-aware helper; NOT serialized to disk.
+# ---------------------------------------------------------------------------
+
+struct HotChainMapEntry:
+    """One slot in the HOT chain map."""
+    logical_page_id: i64
+    chain: HotChain
+    valid: bool
+
+struct HotChainMap:
+    """In-memory map from logical_page_id to HotChain.
+
+    Linear scan — suitable for unit test scale.
+    @coverage: spostgre_design.md §7
+    """
+    entries: [HotChainMapEntry]
+
+    static fn new() -> HotChainMap:
+        HotChainMap(entries: [])
+
+fn hot_chain_map_get(map: HotChainMap, logical_page_id: i64) -> (bool, HotChain):
+    """Look up a HotChain by logical_page_id.
+    Returns (found, chain).
+    """
+    val sentinel_chain = HotChain.new(logical_page_id, 0)
+    val n = map.entries.len()
+    var i = 0
+    while i < n:
+        val e = map.entries[i]
+        if e.valid and e.logical_page_id == logical_page_id:
+            return (true, e.chain)
+        i = i + 1
+    (false, sentinel_chain)
+
+fn hot_chain_map_put(map: HotChainMap, logical_page_id: i64, chain: HotChain) -> HotChainMap:
+    """Insert or replace the HotChain for logical_page_id.
+    Returns updated map.
+    """
+    val n = map.entries.len()
+    # Check for existing entry to update.
+    var found_idx = -1
+    var i = 0
+    while i < n:
+        val e = map.entries[i]
+        if e.valid and e.logical_page_id == logical_page_id:
+            found_idx = i
+        i = i + 1
+
+    if found_idx >= 0:
+        var new_entries: [HotChainMapEntry] = [HotChainMapEntry(
+            logical_page_id: 0,
+            chain: HotChain.new(0, 0),
+            valid: false); n]
+        i = 0
+        while i < n:
+            if i == found_idx:
+                new_entries[i] = HotChainMapEntry(
+                    logical_page_id: logical_page_id,
+                    chain: chain,
+                    valid: true)
+            else:
+                new_entries[i] = map.entries[i]
+            i = i + 1
+        return HotChainMap(entries: new_entries)
+
+    # Append new entry.
+    var new_entries: [HotChainMapEntry] = [HotChainMapEntry(
+        logical_page_id: 0,
+        chain: HotChain.new(0, 0),
+        valid: false); n + 1]
+    i = 0
+    while i < n:
+        new_entries[i] = map.entries[i]
+        i = i + 1
+    new_entries[n] = HotChainMapEntry(
+        logical_page_id: logical_page_id,
+        chain: chain,
+        valid: true)
+    HotChainMap(entries: new_entries)

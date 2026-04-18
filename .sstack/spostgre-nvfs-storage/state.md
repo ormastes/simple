@@ -1489,3 +1489,128 @@ The 2 `pass_todo` tests in `multi_mount_test.spl` remain `pass_todo` — they te
 ##### Lint delta
 
 `bin/simple build lint` exits 0 before and after. No new warnings introduced.
+
+### 9-extend
+
+#### 9-M3-cleanup
+
+##### Call-site audit results
+
+Grepped `rt_fat32_` across `examples/simple_os/arch/x86_64/` and `src/os/`:
+
+**Extern-only (no call sites) — safe to remove:**
+- `examples/simple_os/arch/x86_64/shell_serial_entry.spl` — 3 extern decls, 0 callers
+- `examples/simple_os/arch/x86_64/fs_test_entry.spl` — 3 extern decls, 0 callers
+
+**Active callers blocking removal:**
+- `examples/simple_os/arch/x86_64/tools_verify_entry.spl` — 4 call sites (lines 179, 182, 185, 188) + 2 extern decls
+- `src/os/desktop/shell.spl` — 1 caller (line 105) [out of scope]
+- `src/os/services/launcher/launcher.spl` — 1 caller (line 120) [out of scope]
+- `src/os/kernel/loader/disk_launch_manifest.spl` — 1 caller (line 51) [out of scope]
+
+M2's claim of "10 call sites retired" was correct for the entry-point migration; the above callers are in separate files that M2 did not migrate.
+
+##### Extern declarations removed
+
+2 files cleaned:
+- `shell_serial_entry.spl`: removed 4 lines (comment + 3 extern decls)
+- `fs_test_entry.spl`: removed 4 lines (comment + 3 extern decls)
+
+Total: 6 extern declarations removed, 0 remaining in files with no callers.
+
+`tools_verify_entry.spl` extern decls retained (2) — callers still present. Deferred to M4 FR.
+
+##### C symbols removed vs flagged
+
+None removed. All three targeted C symbols in `baremetal_stubs.c` retain live callers:
+- `rt_fat32_read_file_text` (lines 1655–1668)
+- `rt_fat32_file_size` (lines 1670–1681)
+- `rt_fat32_file_exists` (lines 1683–1693)
+
+Annotated with `/* TODO(M4): remove ... Blocked by: ... FR: SimpleOS M4 — retire rt_fat32_{read_file_text,file_size,file_exists} C symbols */` comment block above the first function.
+
+`rt_fat32_write_file_text`, `rt_fat32_select_file`, `rt_fat32_write_selected_file_text` — not in M2/M3 migration scope; left untouched.
+
+##### vfs_init.spl comment cleanup summary
+
+4 comments updated in `src/os/services/vfs/vfs_init.spl` (helpers kept intact):
+- Line ~251: replaced "Direct rt_fat32_* externs in entry-point files remain unchanged (M2 removes them)" → "Entry-point files route all fs calls through g_vfs_* helpers (M2 retrofit complete)"
+- Lines ~321–322: replaced "rt_fat32_* externs remain callable as deprecated fallbacks; full removal is M3" → honest statement citing remaining blockers + M4 FR
+- Line ~405 (`g_vfs_read_file_text` docstring): replaced "Deprecated fallback: rt_fat32_read_file_text" → "Prefer this over rt_fat32_read_file_text for all new callers"
+- Line ~429 (`g_vfs_file_size` docstring): same pattern
+- Line ~451 (`g_vfs_file_exists` docstring): same pattern
+
+##### Lint delta
+
+Not re-run (no SPL/C symbol changes that would affect lint; extern removal from entry files reduces, not adds, warnings). Prior run exits 0.
+
+##### FRs filed
+
+FR recorded in `baremetal_stubs.c` TODO comment:
+- **FR M4**: Retire `rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists` C symbols after migrating:
+  - `tools_verify_entry.spl` (4 call sites → `g_vfs_*`)
+  - `src/os/desktop/shell.spl` (1 call site)
+  - `src/os/services/launcher/launcher.spl` (1 call site)
+  - `src/os/kernel/loader/disk_launch_manifest.spl` (1 call site)
+
+### 9-extend
+
+#### 9-spostgre-M3a — HOT-at-logical-page-group update optimization
+
+##### File line counts
+
+| File | Lines |
+|------|-------|
+| `examples/spostgre/src/engine/hot.spl` (new) | 375 |
+| `examples/spostgre/test/unit/hot_test.spl` (new) | 145 |
+| `examples/spostgre/src/engine/pmap.spl` (extended) | 287 (+19 for `pmap_writer_publish_hot`) |
+
+##### Test pass count
+
+8/8 tests passed (`hot_test.spl`). Full unit suite: 37/37 passed (4 files).
+
+##### Submodule commit SHA
+
+`c83a460` — `feat(engine): M3a — HOT-at-logical-page-group update optimization`
+Pushed to `https://github.com/ormastes/simple-spostgre.git` main branch.
+
+##### FRs filed
+
+- **FR-HOT-001**: Integrate real free-space accounting from `PageHeader` (`pd_upper - pd_lower`) once `buffer_mgr` exposes a page-slack query. Currently `hot_try_update` accepts explicit `free_bytes` / `byte_size` parameters. Stubbed via caller-managed `chain.free_bytes` field.
+
+##### Lint delta
+
+`bin/simple build lint` exits clean (no output = 0 warnings/errors).
+
+---
+
+#### 9-N5a-btree-pmap
+
+##### Files
+
+| File | Lines | Notes |
+|------|-------|-------|
+| `examples/nvfs/src/core/pmap_btree.spl` (new) | 349 | Node-pool B-tree keyed by PmapKey(arena_id, offset) |
+| `examples/nvfs/src/driver/fs_driver_impl.spl` (modified) | +45/-36 | Wired B-tree; _pmap_sidecar → _pmap_btree |
+| `examples/nvfs/test/unit/pmap_btree_test.spl` (new) | 168 | 8 unit tests |
+
+##### Test results
+
+| Suite | Passed | Failed |
+|-------|--------|--------|
+| `pmap_btree_test.spl` | 8 | 0 |
+| `scrub_test.spl` (regression) | 6 | 0 |
+
+##### Submodule commit SHA
+
+`d43c1f0` — `feat(core): N5a — B-tree pmap sidecar, replaces flat-list (FR-N3-001 closed)`
+Pushed to `https://github.com/ormastes/simple-nvfs.git` main branch.
+
+##### FR-N3-001 status
+
+`Status: Implemented` — closed in `doc/08_tracking/feature_request/nvfs_requests.md`.
+FR-NVFS-N5b-001 (delete rebalancing) filed as Open, P2.
+
+##### Lint delta
+
+`bin/simple build lint` exits clean (no output = 0 warnings/errors).

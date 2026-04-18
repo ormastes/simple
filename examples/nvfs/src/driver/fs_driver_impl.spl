@@ -14,6 +14,7 @@ use std.fs_driver.ops.{FsDriver}
 use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl}
 use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
 use examples.nvfs.src.core.pmap.{PmapEntry, pmap_entry_verify, pmap_entry_checksum_for}
+use examples.nvfs.src.core.pmap_btree.{PmapBTree, PmapBTreeEntry, PmapKey, pmap_btree_new, pmap_btree_insert, pmap_btree_lookup, pmap_btree_snapshot}
 use examples.nvfs.src.core.reflink.{reflink_bump, reflink_drop, reflink_get}
 use examples.nvfs.src.driver.capabilities.{nvfs_native_capabilities}
 
@@ -32,61 +33,57 @@ fn nvfs_get_verify_on_read() -> bool:
     _verify_on_read
 
 # ---------------------------------------------------------------------------
-# Module-level: pmap sidecar (arena_id + offset -> PmapEntry)
-# N3: flat list; B-tree-backed lookup is N4+.
-# FR-N3-001: Replace flat pmap sidecar with B-tree keyed lookup (N4+).
+# Module-level: pmap index (arena_id + offset -> PmapBTreeEntry)
+# N5a: B-tree backed; replaces the flat list from N3.
+# FR-N3-001: Closed — B-tree keyed pmap sidecar implemented.
 # ---------------------------------------------------------------------------
 
+# Re-export PmapSidecarEntry as a type alias for scrub.spl compatibility.
+# scrub.spl imports PmapSidecarEntry from this module and accesses
+# .arena_id, .offset, .length, .entry — same fields as PmapBTreeEntry.
 struct PmapSidecarEntry:
-    """Associates a written byte range with its pmap entry."""
+    """Pmap sidecar entry (wraps PmapBTreeEntry for scrub.spl compatibility).
+
+    arena_id, offset, length, entry mirror PmapBTreeEntry fields.
+    """
     arena_id: i64
     offset:   i64
     length:   i64
     entry:    PmapEntry
 
-var _pmap_sidecar: [PmapSidecarEntry] = []
+var _pmap_btree: PmapBTree = pmap_btree_new(16)
 
 fn _pmap_sidecar_put(arena_id: i64, offset: i64, length: i64, entry: PmapEntry):
-    """Store a PmapEntry for a range; replaces existing entry if found."""
-    var i = 0
-    while i < _pmap_sidecar.len() as i64:
-        val e = _pmap_sidecar[i]
-        if e.arena_id == arena_id and e.offset == offset:
-            _pmap_sidecar[i] = PmapSidecarEntry(
-                arena_id: arena_id,
-                offset:   offset,
-                length:   length,
-                entry:    entry
-            )
-            return
-        i = i + 1
-    _pmap_sidecar.push(PmapSidecarEntry(
-        arena_id: arena_id,
-        offset:   offset,
-        length:   length,
-        entry:    entry
-    ))
+    """Store a PmapEntry in the B-tree; overwrites existing entry for same key."""
+    val _ = pmap_btree_insert(_pmap_btree, arena_id, offset, length, entry)
 
 fn _pmap_sidecar_get(arena_id: i64, offset: i64) -> Option<PmapEntry>:
-    """Look up the PmapEntry for a given arena_id + offset, or None."""
-    var i = 0
-    while i < _pmap_sidecar.len() as i64:
-        val e = _pmap_sidecar[i]
-        if e.arena_id == arena_id and e.offset == offset:
-            return Some(e.entry)
-        i = i + 1
-    None
+    """Look up the PmapEntry for a given arena_id + offset. O(log n)."""
+    val key = PmapKey(arena_id: arena_id, offset: offset)
+    val result = pmap_btree_lookup(_pmap_btree, key)
+    match result:
+        case None:
+            None
+        case Some(bt_entry):
+            Some(bt_entry.entry)
 
 fn nvfs_pmap_sidecar_snapshot() -> [PmapSidecarEntry]:
-    """Return a snapshot of all current pmap sidecar entries.
+    """Return a snapshot of all current pmap entries in key order.
 
     Used by the scrub pass (scrub.spl) to iterate over tracked ranges.
-    Returns a copy; mutations to the returned list do not affect the sidecar.
+    Returns a copy; mutations to the returned list do not affect the index.
     """
+    val all_entries = pmap_btree_snapshot(_pmap_btree)
     var out: [PmapSidecarEntry] = []
     var i = 0
-    while i < _pmap_sidecar.len() as i64:
-        out.push(_pmap_sidecar[i])
+    while i < all_entries.len() as i64:
+        val bt = all_entries[i]
+        out.push(PmapSidecarEntry(
+            arena_id: bt.arena_id,
+            offset:   bt.offset,
+            length:   bt.length,
+            entry:    bt.entry
+        ))
         i = i + 1
     out
 

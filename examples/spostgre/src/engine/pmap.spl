@@ -230,6 +230,26 @@ fn pmap_writer_publish(writer: PmapWriter, logical: i64, phys: i64, offset: i64,
     val written = shim_arena_append(writer.arena_id, encoded)
     written > 0
 
+# Import HOT chain map for HOT-aware publish helper.
+use engine.hot.{HotChain, HotChainMap, hot_chain_map_put}
+
+fn pmap_writer_publish_hot(writer: PmapWriter, hot_map: HotChainMap,
+                           logical: i64, phys: i64, offset: i64,
+                           page_lsn: i64, chain: HotChain) -> (bool, HotChainMap):
+    """HOT-aware publish: write v2 pmap entry AND record HotChain in the in-memory map.
+
+    Calls the existing pmap_writer_publish for the on-disk entry, then stores
+    the chain in hot_map keyed by logical.  hot_map is NOT serialized to disk.
+
+    Returns (ok, updated_hot_map).
+    @coverage: spostgre_design.md §7 (HOT-aware pmap)
+    """
+    val ok = pmap_writer_publish(writer, logical, phys, offset, page_lsn)
+    if not ok:
+        return (false, hot_map)
+    val new_map = hot_chain_map_put(hot_map, logical, chain)
+    (true, new_map)
+
 fn pmap_writer_lookup(writer: PmapWriter, logical: i64) -> PmapEntryV2:
     """Scan from the end of the arena; return the last entry matching logical.
 

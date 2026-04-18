@@ -176,6 +176,35 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Notes:** This is the single blocker for Phase 9-M2 (SimpleOS fs call-site retrofit). Until it's resolved, the two direct-FAT32 call sites (`shell_serial_entry.spl`, `fs_test_entry.spl`) cannot be routed through the mount table without reintroducing a known codegen bug. Option A: fix Cranelift `slice()` in baremetal backend (big yak-shave). Option B: add a C extern. Option C: rewrite `MountTable.resolve()` in pure Simple without slice (recommended — self-contained).
   - **Implemented-by:** 2026-04-18, rewrote MountTable.resolve to use str_char_at indexed-char-copy (mount_table.spl +6 lines); 5/5 resolve tests pass.
 
+### FR-HOT-001 — HOT: integrate pd_upper/pd_lower free-space check before chaining
+
+- **Filed-on:** 2026-04-17
+- **Filed-by:** spostgre M3a agent (session spostgre-m3a)
+- **Target:** spostgre  (examples/spostgre/src/engine/hot.spl)
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  `HotChain.try_update` currently chains a HOT update unconditionally at the
+  logical-page-group level. A real PostgreSQL HOT update is only valid when the
+  page has sufficient free space (pd_upper − pd_lower > tuple_size). The
+  `buffer_mgr` API does not yet expose free-space metadata, so the check is
+  deferred. Once `buffer_mgr` provides `page_free_space(page_id) -> u16`, add
+  a pre-check in `try_update`: if `free_space < new_tuple_size`, fall through
+  to a regular heap insert instead of chaining.
+- **Acceptance-criteria:**
+  - [ ] `buffer_mgr` exposes `page_free_space(page_id) -> Result<u16, BufError>`
+  - [ ] `HotChain.try_update` calls `page_free_space` and returns `Err(HotChainFull)`
+        when free space is insufficient, triggering a regular insert at the call site
+  - [ ] Existing 37 HOT unit tests continue to pass
+  - [ ] New test: `try_update` returns `HotChainFull` when mocked free_space = 0
+- **Related-upfront:** none
+- **Related-design-doc:** `examples/spostgre/doc/design/hot_update.md` (M3a design)
+- **Related-issue:** none
+- **Notes:** Blocked on `buffer_mgr` free-space API (not yet in M3a scope).
+  M3a ships without this check; real pd_upper/pd_lower integration is M4 work.
+
+---
+
 Entries here are filed during Phase 5+ implementation (per SStack state file
 `.sstack/spostgre-nvfs-storage/state.md`) when an NVFS need is discovered that
 is not already covered by the `[UPFRONT]` items above. Use `TEMPLATE.md` and
@@ -183,7 +212,54 @@ append under this heading.
 
 ## Closed (Implemented or Rejected)
 
-_No entries yet._
+### FR-N3-001 — Replace flat pmap sidecar with B-tree keyed by (arena_id, offset)
+
+- **Filed-on:** 2026-04-17
+- **Filed-by:** N3 implementation agent
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:**
+  The flat `_pmap_sidecar: [PmapSidecarEntry]` in `fs_driver_impl.spl` performs
+  O(n) linear scan on every read and write path.  Replace it with a B-tree keyed
+  by `(arena_id, offset)` so that insert and lookup are O(log n).  The B-tree must
+  support range iteration (used by scrub) and key removal.  Delete rebalancing
+  may be deferred to a follow-up milestone.
+- **Acceptance-criteria:**
+  - [x] `pmap_btree_insert` is O(log n) with leaf-split propagation
+  - [x] `pmap_btree_lookup` is O(log n)
+  - [x] `pmap_btree_range_collect` returns entries in key order for inclusive range
+  - [x] `pmap_btree_remove` removes leaf key (rebalancing deferred to N5b)
+  - [x] `nvfs_pmap_sidecar_snapshot` iterates via B-tree; scrub_test.spl unchanged
+  - [x] ≥ 8 unit tests pass in `pmap_btree_test.spl`
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
+- **Related-issue:** none
+- **Implemented-by:** N5a agent, 2026-04-17.
+  Files: `examples/nvfs/src/core/pmap_btree.spl` (new, node-pool B-tree),
+  `examples/nvfs/src/driver/fs_driver_impl.spl` (wired), 
+  `examples/nvfs/test/unit/pmap_btree_test.spl` (8 tests).
+  Delete rebalancing tracked as FR-NVFS-N5b-001.
+
+---
+
+### FR-NVFS-N5b-001 — B-tree rebalancing on delete (merge / rotate)
+
+- **Filed-on:** 2026-04-17
+- **Filed-by:** N5a implementation agent
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  `pmap_btree_remove` in N5a performs leaf-only deletion without rebalancing.
+  After many deletes the tree can become unbalanced (under-filled nodes).
+  Implement standard B-tree merge and rotation on delete so the tree remains
+  balanced (minimum t-1 keys per non-root node) after arbitrary remove sequences.
+- **Acceptance-criteria:**
+  - [ ] After inserting 100 entries and removing 50, all remaining lookups succeed
+  - [ ] Tree height does not grow beyond ⌈log_t(n)⌉ after interleaved insert/remove
+  - [ ] Existing pmap_btree_test.spl still passes
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
+- **Related-issue:** none
 
 Closed entries are moved here from `## Open Requests` (never deleted) with
 `Status: Implemented` or `Status: Rejected` and the required link/reason.

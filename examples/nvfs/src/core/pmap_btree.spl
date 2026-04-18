@@ -1,0 +1,547 @@
+# NVFS core — B-tree pmap index (N5a).
+#
+# Replaces the flat _pmap_sidecar list with an O(log n) B-tree keyed by
+# (arena_id, offset).  Node-pool representation avoids recursive struct
+# definitions: children are indices (i64) into PmapBTree.nodes.
+#
+# FR-N3-001: Closed by this module.
+# FR-NVFS-N5b-001: B-tree rebalancing on delete (pass_todo, tracked below).
+#
+# Design: doc/05_design/nvfs_design_v2.md §17; N5a milestone.
+
+use std.fs_driver.error.{FsError}
+use examples.nvfs.src.core.pmap.{PmapEntry}
+
+# ---------------------------------------------------------------------------
+# PmapKey — composite key for B-tree: (arena_id, offset)
+# ---------------------------------------------------------------------------
+
+struct PmapKey:
+    """Composite B-tree key: arena_id (i64) + byte offset (i64)."""
+    arena_id: i64
+    offset:   i64
+
+# ---------------------------------------------------------------------------
+# PmapSidecarEntry — value stored at each leaf
+# ---------------------------------------------------------------------------
+
+struct PmapBTreeEntry:
+    """Leaf payload stored per key in the B-tree.
+
+    Mirrors PmapSidecarEntry: key fields plus length and the full PmapEntry.
+    length is required by scrub (arena_readv_impl call).
+    """
+    arena_id: i64
+    offset:   i64
+    length:   i64
+    entry:    PmapEntry
+
+# ---------------------------------------------------------------------------
+# PmapBTreeNode — one node in the pool
+# ---------------------------------------------------------------------------
+
+struct PmapBTreeNode:
+    """Single B-tree node stored in the node pool.
+
+    keys     — sorted PmapKey array (len <= 2*fanout - 1).
+    entries  — PmapBTreeEntry payload, parallel to keys (leaves only;
+               empty for internal nodes).
+    children — child node indices (i64) into PmapBTree.nodes (internal
+               nodes only; empty for leaves).
+    is_leaf  — true if this node holds entries directly.
+    """
+    keys:     [PmapKey]
+    entries:  [PmapBTreeEntry]
+    children: [i64]
+    is_leaf:  bool
+
+# ---------------------------------------------------------------------------
+# PmapBTree — root struct
+# ---------------------------------------------------------------------------
+
+struct PmapBTree:
+    """Node-pool B-tree keyed by PmapKey.
+
+    nodes   — flat pool of all nodes; indices are stable references.
+    root    — index of the root node in nodes.
+    fanout  — minimum degree t (max keys per node = 2*t - 1).
+              Default fanout = 16 → max 31 keys per node.
+    """
+    nodes:  [PmapBTreeNode]
+    root:   i64
+    fanout: u32
+
+# ---------------------------------------------------------------------------
+# Key comparison helpers
+# ---------------------------------------------------------------------------
+
+fn _key_cmp(a: PmapKey, b: PmapKey) -> i64:
+    """Compare two PmapKeys. Returns -1, 0, or 1."""
+    if a.arena_id < b.arena_id:
+        return -1
+    if a.arena_id > b.arena_id:
+        return 1
+    # arena_id equal, compare offset
+    if a.offset < b.offset:
+        return -1
+    if a.offset > b.offset:
+        return 1
+    0
+
+fn _key_eq(a: PmapKey, b: PmapKey) -> bool:
+    """Return true iff a == b."""
+    _key_cmp(a, b) == 0
+
+fn _key_lt(a: PmapKey, b: PmapKey) -> bool:
+    """Return true iff a < b."""
+    _key_cmp(a, b) < 0
+
+# ---------------------------------------------------------------------------
+# Node pool helpers
+# ---------------------------------------------------------------------------
+
+fn _node_alloc(tree: PmapBTree, node: PmapBTreeNode) -> i64:
+    """Push node into the pool; return its index."""
+    val idx = tree.nodes.len() as i64
+    tree.nodes.push(node)
+    idx
+
+fn _empty_node(is_leaf: bool) -> PmapBTreeNode:
+    """Construct a fresh empty node."""
+    val empty_keys:     [PmapKey]         = []
+    val empty_entries:  [PmapBTreeEntry]  = []
+    val empty_children: [i64]             = []
+    PmapBTreeNode(
+        keys:     empty_keys,
+        entries:  empty_entries,
+        children: empty_children,
+        is_leaf:  is_leaf
+    )
+
+# ---------------------------------------------------------------------------
+# Public API: new
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_new(fanout: u32) -> PmapBTree:
+    """Create an empty PmapBTree with the given minimum degree (fanout).
+
+    Default fanout = 16 (pass 16 for production use).
+    The root starts as an empty leaf node at index 0.
+    """
+    var nodes: [PmapBTreeNode] = []
+    val root_node = _empty_node(true)
+    nodes.push(root_node)
+    PmapBTree(nodes: nodes, root: 0, fanout: fanout)
+
+# ---------------------------------------------------------------------------
+# Lookup — O(log n)
+# ---------------------------------------------------------------------------
+
+fn _lookup_node(tree: PmapBTree, node_idx: i64, key: PmapKey) -> Option<PmapBTreeEntry>:
+    """Recursive lookup in the subtree rooted at node_idx."""
+    val node = tree.nodes[node_idx]
+    val nkeys = node.keys.len() as i64
+
+    # Binary search for the key.
+    var lo: i64 = 0
+    var hi: i64 = nkeys - 1
+    var found_pos: i64 = -1
+
+    while lo <= hi:
+        val mid = lo + (hi - lo) / 2
+        val cmp = _key_cmp(key, node.keys[mid])
+        if cmp == 0:
+            found_pos = mid
+            lo = hi + 1   # break
+        else:
+            if cmp < 0:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+
+    if found_pos >= 0:
+        if node.is_leaf:
+            return Some(node.entries[found_pos])
+        else:
+            # Key found in internal node — descend to right child for canonical copy.
+            # (Internal nodes don't hold entries in this design; all data is at leaves.)
+            return _lookup_node(tree, node.children[found_pos + 1], key)
+
+    if node.is_leaf:
+        return None
+
+    # Determine child to descend into.
+    var child_pos: i64 = 0
+    var ci = 0
+    while ci < nkeys:
+        if _key_lt(node.keys[ci], key):
+            child_pos = ci + 1
+        ci = ci + 1
+
+    _lookup_node(tree, node.children[child_pos], key)
+
+fn pmap_btree_lookup(tree: PmapBTree, key: PmapKey) -> Option<PmapBTreeEntry>:
+    """Look up key in the B-tree. Returns Some(entry) or None. O(log n)."""
+    if tree.nodes.len() == 0:
+        return None
+    _lookup_node(tree, tree.root, key)
+
+# ---------------------------------------------------------------------------
+# Insert helpers
+# ---------------------------------------------------------------------------
+
+fn _max_keys(fanout: u32) -> i64:
+    """Maximum keys per node = 2*fanout - 1."""
+    (2 * fanout as i64) - 1
+
+fn _split_child(tree: PmapBTree, parent_idx: i64, child_slot: i64):
+    """Split the full child of parent at child_slot.
+
+    Standard B-tree split: median key promoted to parent, child halved.
+    The right half becomes a new node appended to the pool.
+    """
+    val fanout = tree.fanout as i64
+    val mid = fanout - 1   # index of median key in child
+
+    val child_idx = tree.nodes[parent_idx].children[child_slot]
+    val child = tree.nodes[child_idx]
+
+    # Build right sibling.
+    var right_keys:     [PmapKey]        = []
+    var right_entries:  [PmapBTreeEntry] = []
+    var right_children: [i64]            = []
+
+    var ki = mid + 1
+    while ki < child.keys.len() as i64:
+        right_keys.push(child.keys[ki])
+        ki = ki + 1
+
+    if child.is_leaf:
+        var ei = mid + 1
+        while ei < child.entries.len() as i64:
+            right_entries.push(child.entries[ei])
+            ei = ei + 1
+    else:
+        var ci2 = mid + 1
+        while ci2 < child.children.len() as i64:
+            right_children.push(child.children[ci2])
+            ci2 = ci2 + 1
+
+    val right_node = PmapBTreeNode(
+        keys:     right_keys,
+        entries:  right_entries,
+        children: right_children,
+        is_leaf:  child.is_leaf
+    )
+    val right_idx = _node_alloc(tree, right_node)
+
+    # Trim child to left half (keys < mid; for leaf include entry at mid).
+    var left_keys:    [PmapKey]        = []
+    var left_entries: [PmapBTreeEntry] = []
+    var left_children:[i64]            = []
+
+    var lki = 0
+    while lki < mid:
+        left_keys.push(child.keys[lki])
+        lki = lki + 1
+
+    if child.is_leaf:
+        # Leaf keeps mid entry; promote mid key to parent as separator.
+        var lei = 0
+        while lei < mid:
+            left_entries.push(child.entries[lei])
+            lei = lei + 1
+    else:
+        var lci = 0
+        while lci <= mid:
+            left_children.push(child.children[lci])
+            lci = lci + 1
+
+    tree.nodes[child_idx] = PmapBTreeNode(
+        keys:     left_keys,
+        entries:  left_entries,
+        children: left_children,
+        is_leaf:  child.is_leaf
+    )
+
+    # Promote median key into parent.
+    val median_key = child.keys[mid]
+    val parent = tree.nodes[parent_idx]
+
+    # Insert median_key at child_slot in parent.keys.
+    var new_parent_keys: [PmapKey] = []
+    var pki = 0
+    while pki < child_slot:
+        new_parent_keys.push(parent.keys[pki])
+        pki = pki + 1
+    new_parent_keys.push(median_key)
+    while pki < parent.keys.len() as i64:
+        new_parent_keys.push(parent.keys[pki])
+        pki = pki + 1
+
+    # Insert right_idx at child_slot+1 in parent.children.
+    var new_parent_children: [i64] = []
+    var pci = 0
+    while pci <= child_slot:
+        new_parent_children.push(parent.children[pci])
+        pci = pci + 1
+    new_parent_children.push(right_idx)
+    while pci < parent.children.len() as i64:
+        new_parent_children.push(parent.children[pci])
+        pci = pci + 1
+
+    tree.nodes[parent_idx] = PmapBTreeNode(
+        keys:     new_parent_keys,
+        entries:  parent.entries,
+        children: new_parent_children,
+        is_leaf:  parent.is_leaf
+    )
+
+fn _insert_nonfull(tree: PmapBTree, node_idx: i64, new_entry: PmapBTreeEntry):
+    """Insert new_entry into the subtree rooted at node_idx (node must not be full)."""
+    val key = PmapKey(arena_id: new_entry.arena_id, offset: new_entry.offset)
+    val node = tree.nodes[node_idx]
+    val nkeys = node.keys.len() as i64
+
+    if node.is_leaf:
+        # Find insertion position (sorted).
+        var pos: i64 = nkeys
+        var si = 0
+        while si < nkeys:
+            if _key_lt(key, node.keys[si]):
+                pos = si
+                si = nkeys   # break
+            else:
+                if _key_eq(key, node.keys[si]):
+                    # Overwrite existing entry.
+                    var updated_entries: [PmapBTreeEntry] = []
+                    var oi = 0
+                    while oi < node.entries.len() as i64:
+                        if oi == si:
+                            updated_entries.push(new_entry)
+                        else:
+                            updated_entries.push(node.entries[oi])
+                        oi = oi + 1
+                    tree.nodes[node_idx] = PmapBTreeNode(
+                        keys:     node.keys,
+                        entries:  updated_entries,
+                        children: node.children,
+                        is_leaf:  node.is_leaf
+                    )
+                    return
+                si = si + 1
+
+        # Build new keys and entries arrays with inserted element at pos.
+        var new_keys:    [PmapKey]        = []
+        var new_entries: [PmapBTreeEntry] = []
+        var ii = 0
+        while ii < pos:
+            new_keys.push(node.keys[ii])
+            new_entries.push(node.entries[ii])
+            ii = ii + 1
+        new_keys.push(key)
+        new_entries.push(new_entry)
+        while ii < nkeys:
+            new_keys.push(node.keys[ii])
+            new_entries.push(node.entries[ii])
+            ii = ii + 1
+
+        tree.nodes[node_idx] = PmapBTreeNode(
+            keys:     new_keys,
+            entries:  new_entries,
+            children: node.children,
+            is_leaf:  node.is_leaf
+        )
+    else:
+        # Find child to descend into.
+        var child_pos: i64 = nkeys
+        var ci = 0
+        while ci < nkeys:
+            if _key_lt(key, node.keys[ci]):
+                child_pos = ci
+                ci = nkeys   # break
+            else:
+                ci = ci + 1
+
+        val child_idx = tree.nodes[node_idx].children[child_pos]
+        val max_k = _max_keys(tree.fanout)
+        if tree.nodes[child_idx].keys.len() as i64 >= max_k:
+            _split_child(tree, node_idx, child_pos)
+            # After split, determine which of the two halves to descend into.
+            if _key_lt(tree.nodes[node_idx].keys[child_pos], key):
+                val next_child = tree.nodes[node_idx].children[child_pos + 1]
+                _insert_nonfull(tree, next_child, new_entry)
+            else:
+                val same_child = tree.nodes[node_idx].children[child_pos]
+                _insert_nonfull(tree, same_child, new_entry)
+        else:
+            _insert_nonfull(tree, child_idx, new_entry)
+
+# ---------------------------------------------------------------------------
+# Public API: insert
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_insert(tree: PmapBTree, arena_id: i64, offset: i64, length: i64, entry: PmapEntry) -> Result<(), FsError>:
+    """Insert (or overwrite) a pmap entry keyed by (arena_id, offset).
+
+    Performs a standard B-tree insert with leaf-split-on-overflow propagated
+    up.  If the root is full, a new root is created (tree grows in height).
+    O(log n).
+    """
+    val new_entry = PmapBTreeEntry(
+        arena_id: arena_id,
+        offset:   offset,
+        length:   length,
+        entry:    entry
+    )
+
+    val root_idx = tree.root
+    val max_k = _max_keys(tree.fanout)
+
+    if tree.nodes[root_idx].keys.len() as i64 >= max_k:
+        # Root is full — create a new root, old root becomes its child.
+        val new_root = PmapBTreeNode(
+            keys:     [],
+            entries:  [],
+            children: [root_idx],
+            is_leaf:  false
+        )
+        val new_root_idx = _node_alloc(tree, new_root)
+        tree.root = new_root_idx
+        _split_child(tree, new_root_idx, 0)
+        _insert_nonfull(tree, new_root_idx, new_entry)
+    else:
+        _insert_nonfull(tree, root_idx, new_entry)
+
+    Ok(())
+
+# ---------------------------------------------------------------------------
+# Public API: remove
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_remove(tree: PmapBTree, key: PmapKey) -> Option<PmapBTreeEntry>:
+    """Remove and return the entry for key, or None if not present.
+
+    Leaf deletion only.  Rebalancing (merge/rotate) is deferred to N5b.
+    FR-NVFS-N5b-001: implement B-tree rebalancing on delete.
+    """
+    val result = _lookup_node(tree, tree.root, key)
+    match result:
+        case None:
+            None
+        case Some(found_entry):
+            _remove_leaf_key(tree, tree.root, key)
+            Some(found_entry)
+
+fn _remove_leaf_key(tree: PmapBTree, node_idx: i64, key: PmapKey):
+    """Walk to the leaf containing key and remove it (no rebalancing)."""
+    val node = tree.nodes[node_idx]
+    val nkeys = node.keys.len() as i64
+
+    if node.is_leaf:
+        var new_keys:    [PmapKey]        = []
+        var new_entries: [PmapBTreeEntry] = []
+        var ri = 0
+        while ri < nkeys:
+            if not _key_eq(node.keys[ri], key):
+                new_keys.push(node.keys[ri])
+                new_entries.push(node.entries[ri])
+            ri = ri + 1
+        tree.nodes[node_idx] = PmapBTreeNode(
+            keys:     new_keys,
+            entries:  new_entries,
+            children: node.children,
+            is_leaf:  node.is_leaf
+        )
+        return
+
+    # Internal node: descend into the appropriate child.
+    # pass_todo: rebalancing on delete (FR-NVFS-N5b-001)
+    var child_pos: i64 = nkeys
+    var ci = 0
+    while ci < nkeys:
+        if _key_eq(node.keys[ci], key):
+            # Key is in separator — descend right child.
+            child_pos = ci + 1
+            ci = nkeys   # break
+        else:
+            if _key_lt(key, node.keys[ci]):
+                child_pos = ci
+                ci = nkeys   # break
+            else:
+                ci = ci + 1
+
+    _remove_leaf_key(tree, node.children[child_pos], key)
+
+# ---------------------------------------------------------------------------
+# Public API: range_iter (collect into list, inclusive)
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_range_collect(tree: PmapBTree, start: PmapKey, end: PmapKey) -> [PmapBTreeEntry]:
+    """Collect all entries with start <= key <= end (inclusive).
+
+    Returns entries in ascending key order.  Implemented as an in-order
+    traversal with early termination.  O(k + log n) where k = result size.
+    """
+    var out: [PmapBTreeEntry] = []
+    _range_collect_node(tree, tree.root, start, end, out)
+    out
+
+fn _range_collect_node(tree: PmapBTree, node_idx: i64, start: PmapKey, end: PmapKey, out: [PmapBTreeEntry]):
+    """In-order traversal collecting entries in [start, end]."""
+    val node = tree.nodes[node_idx]
+    val nkeys = node.keys.len() as i64
+
+    if node.is_leaf:
+        var i = 0
+        while i < nkeys:
+            val k = node.keys[i]
+            if (not _key_lt(k, start)) and (not _key_lt(end, k)):
+                out.push(node.entries[i])
+            i = i + 1
+        return
+
+    # Internal node: interleave child descent with key checks.
+    var i = 0
+    while i < nkeys:
+        val k = node.keys[i]
+        # Descend into child[i] if it might contain keys >= start.
+        if not _key_lt(k, start):
+            _range_collect_node(tree, node.children[i], start, end, out)
+        # Include separator key if in range.
+        # (Internal nodes don't hold entries — skip.)
+        i = i + 1
+
+    # Descend into last child.
+    _range_collect_node(tree, node.children[nkeys], start, end, out)
+
+# ---------------------------------------------------------------------------
+# Public API: snapshot (all entries, in-order)
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_snapshot(tree: PmapBTree) -> [PmapBTreeEntry]:
+    """Return all entries in ascending key order.
+
+    Used by scrub and checksum passes.  O(n).
+    """
+    var out: [PmapBTreeEntry] = []
+    _inorder_collect(tree, tree.root, out)
+    out
+
+fn _inorder_collect(tree: PmapBTree, node_idx: i64, out: [PmapBTreeEntry]):
+    """In-order traversal collecting all leaf entries."""
+    val node = tree.nodes[node_idx]
+    val nkeys = node.keys.len() as i64
+
+    if node.is_leaf:
+        var i = 0
+        while i < nkeys:
+            out.push(node.entries[i])
+            i = i + 1
+        return
+
+    var i = 0
+    while i < nkeys:
+        _inorder_collect(tree, node.children[i], out)
+        i = i + 1
+    _inorder_collect(tree, node.children[nkeys], out)
