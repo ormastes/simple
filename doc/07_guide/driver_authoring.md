@@ -36,7 +36,8 @@ module null_block:
 
         fn probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
             # Match anything. Real drivers check dev.value against the
-            # vendor/device list in the manifest.
+            # vendor/device list in the manifest. Device class is exposed
+            # on DeviceId as `dev.dclass` (not `class` — keyword clash).
             return Result.Ok(ProbeResult.Accept)
 
         fn attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
@@ -139,7 +140,7 @@ describe "null_block":
         var d: NullBlock = NullBlock(attached: 0)
         var ctx: DriverContext = DriverContext(opaque: 0)
         d.init(ctx)
-        var r = d.probe(DeviceId(value: 0, class: DriverClass.Block))
+        var r = d.probe(DeviceId(value: 0, dclass: DriverClass.Block))
         assert(r == Result.Ok(ProbeResult.Accept))
 ```
 
