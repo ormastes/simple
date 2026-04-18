@@ -438,3 +438,14 @@ frame N:
 - Porting the kernel or drivers to ECS — explicitly disallowed.
 - Dynamic component registration at runtime — Simple's type system wants static queries.
 - Scripting-language reflection of ECS state — revisit when a scripting need arises.
+
+## Simple Process Manager (SPM) — Userland Service Layer
+
+Landed in `spm-winfs-llm-suite` (2026-04-18). SPM is a userland service under `src/app/simple_process_manager/` that mediates kernel ↔ WM ↔ LLM ↔ MCP interactions. It sits above the kernel and below apps, in MDSOC+ userland.
+
+- **Does not live in the kernel.** Kernel code in `src/os/kernel/` must never `use app.simple_process_manager.*` or `use lib.common.privilege.*`. The boundary is `src/os/kernel/privilege/privilege_bridge.spl`, which exposes a plain-bytes `PrivilegeTokenMirror`.
+- **Owns** the hierarchical privilege store (`~/.simple/privileges.sdn`), the window registry (authoritative `[WindowRecord]`), the approval broker (HMAC signing), and the LLM release gate (composes `output_gate` + `content_authority` + `notify`).
+- **Shared modules** live under `src/lib/common/{privilege,win_fs,llm,spm}` and `src/lib/nogc_sync_mut/{privilege,llm}`. Pure logic is `common/`; FS I/O and network are `nogc_sync_mut/`.
+- **Transport** is swapped by env (`SIMPLE_SPM_TRANSPORT`) — SimpleOS syscall vs UNIX socket/named pipe. The SPM binary is identical across platforms.
+
+See `doc/04_architecture/simple_process_manager.md`.
