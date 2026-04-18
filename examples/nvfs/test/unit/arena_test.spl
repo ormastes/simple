@@ -1,0 +1,266 @@
+# @cover examples/nvfs/src/core/arena.spl 80%
+"""
+# NVFS Arena Unit Tests
+
+**Feature IDs:** #NVFS-N1-ARENA
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design.md §4.1, §4.3, §4.4
+
+## Overview
+
+Tests for the N1 in-memory arena primitives:
+  - create → append → readv round-trip
+  - seal rejects further appends
+  - clone_range copies correct bytes; out-of-bounds returns error
+  - arena_preferred_granule returns 4096
+  - arena_class passthrough
+  - discard invalidates the arena
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| StorageClass tag | integer ordinal stored at create, returned by arena_class_impl |
+| Sealed arena | arena_append_impl returns -2 on a sealed arena |
+| Discarded arena | arena_readv_impl returns [] on a discarded arena |
+| clone_range | copies byte slice from src to dst; -4 on OOB src range |
+| preferred granule | always 4096 for N1 |
+"""
+
+use std.sspec.*
+
+
+# ============================================================================
+# create → append → readv round-trip
+# ============================================================================
+
+describe "NVFS Arena — create / append / readv":
+    """
+    ## Basic I/O
+
+    Verifies that bytes written via arena_append_impl can be read back
+    through arena_readv_impl and that total_bytes is tracked correctly.
+    """
+
+    it "arena_create_impl returns a positive arena_id":
+        val arena_id = arena_create_impl(0, 0)
+        expect(arena_id > 0).to_equal(true)
+
+    it "append returns the number of bytes written":
+        val arena_id = arena_create_impl(0, 0)
+        val data: [u8] = [65, 66, 67]  # "ABC"
+        val written = arena_append_impl(arena_id, data, 0)
+        expect(written).to_equal(3)
+
+    it "readv returns the exact bytes appended":
+        val arena_id = arena_create_impl(0, 0)
+        val data: [u8] = [10, 20, 30, 40]
+        arena_append_impl(arena_id, data, 0)
+        val result = arena_readv_impl(arena_id, 0, 4)
+        expect(result.len()).to_equal(4)
+        expect(result[0]).to_equal(10)
+        expect(result[3]).to_equal(40)
+
+    it "total_bytes tracks cumulative appends":
+        val arena_id = arena_create_impl(0, 0)
+        arena_append_impl(arena_id, [1, 2], 0)
+        arena_append_impl(arena_id, [3, 4, 5], 0)
+        val total = arena_total_bytes_impl(arena_id)
+        expect(total).to_equal(5)
+
+    it "readv with offset reads from the correct position":
+        val arena_id = arena_create_impl(0, 0)
+        val data: [u8] = [100, 101, 102, 103, 104]
+        arena_append_impl(arena_id, data, 0)
+        val result = arena_readv_impl(arena_id, 2, 2)
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal(102)
+        expect(result[1]).to_equal(103)
+
+
+# ============================================================================
+# Seal rejects further appends
+# ============================================================================
+
+describe "NVFS Arena — seal prevents further appends":
+    """
+    ## Seal contract (§4.3)
+
+    After arena_seal_impl, arena_append_impl must return -2 (Sealed).
+    arena_readv_impl must still succeed on a sealed arena.
+    Sealing is idempotent.
+    """
+
+    it "seal_impl returns true on first call":
+        val arena_id = arena_create_impl(0, 0)
+        arena_append_impl(arena_id, [1, 2, 3], 0)
+        val ok = arena_seal_impl(arena_id, 1)
+        expect(ok).to_equal(true)
+
+    it "append after seal returns -2":
+        val arena_id = arena_create_impl(0, 0)
+        arena_append_impl(arena_id, [5, 6], 0)
+        arena_seal_impl(arena_id, 1)
+        val result = arena_append_impl(arena_id, [7], 0)
+        expect(result).to_equal(-2)
+
+    it "readv still works after seal":
+        val arena_id = arena_create_impl(0, 0)
+        arena_append_impl(arena_id, [9, 8, 7], 0)
+        arena_seal_impl(arena_id, 1)
+        val result = arena_readv_impl(arena_id, 0, 3)
+        expect(result.len()).to_equal(3)
+        expect(result[0]).to_equal(9)
+
+    it "seal is idempotent — second call returns true":
+        val arena_id = arena_create_impl(0, 0)
+        arena_seal_impl(arena_id, 1)
+        val ok2 = arena_seal_impl(arena_id, 2)
+        expect(ok2).to_equal(true)
+
+    it "arena_is_sealed_impl returns true after seal":
+        val arena_id = arena_create_impl(0, 0)
+        arena_seal_impl(arena_id, 1)
+        val sealed = arena_is_sealed_impl(arena_id)
+        expect(sealed).to_equal(true)
+
+
+# ============================================================================
+# clone_range — correct bytes / out-of-bounds error
+# ============================================================================
+
+describe "NVFS Arena — clone_range":
+    """
+    ## Clone range contract (§4.1 / §4.4)
+
+    arena_clone_range_impl copies bytes from src to dst; returns bytes copied.
+    Out-of-bounds src range must return -4 (OutOfBounds).
+    Cloning to a sealed dst returns -2.
+    Cloning from a discarded src returns -3.
+    """
+
+    it "clone_range copies the correct bytes into dst":
+        val src = arena_create_impl(0, 0)
+        val dst = arena_create_impl(0, 0)
+        arena_append_impl(src, [10, 20, 30, 40, 50], 0)
+        val copied = arena_clone_range_impl(src, 1, dst, 0, 3)
+        expect(copied).to_equal(3)
+        val result = arena_readv_impl(dst, 0, 3)
+        expect(result[0]).to_equal(20)
+        expect(result[1]).to_equal(30)
+        expect(result[2]).to_equal(40)
+
+    it "clone_range with out-of-bounds src returns -4":
+        val src = arena_create_impl(0, 0)
+        val dst = arena_create_impl(0, 0)
+        arena_append_impl(src, [1, 2, 3], 0)
+        val result = arena_clone_range_impl(src, 1, dst, 0, 10)  # 1+10 > 3
+        expect(result).to_equal(-4)
+
+    it "clone_range into sealed dst returns -2":
+        val src = arena_create_impl(0, 0)
+        val dst = arena_create_impl(0, 0)
+        arena_append_impl(src, [5, 6, 7], 0)
+        arena_seal_impl(dst, 1)
+        val result = arena_clone_range_impl(src, 0, dst, 0, 2)
+        expect(result).to_equal(-2)
+
+    it "clone_range from discarded src returns -3":
+        val src = arena_create_impl(0, 0)
+        val dst = arena_create_impl(0, 0)
+        arena_append_impl(src, [1, 2, 3], 0)
+        arena_discard_impl(src)
+        val result = arena_clone_range_impl(src, 0, dst, 0, 2)
+        expect(result).to_equal(-3)
+
+    it "clone_range with unknown src returns -1":
+        val dst = arena_create_impl(0, 0)
+        val result = arena_clone_range_impl(-999, 0, dst, 0, 1)
+        expect(result).to_equal(-1)
+
+
+# ============================================================================
+# arena_preferred_granule returns 4096
+# ============================================================================
+
+describe "NVFS Arena — preferred granule":
+    """
+    ## Granule constant (§4.1)
+
+    arena_preferred_granule_impl must return 4096 for all N1 arenas.
+    """
+
+    it "returns 4096 for any arena":
+        val arena_id = arena_create_impl(0, 0)
+        val granule = arena_preferred_granule_impl(arena_id)
+        expect(granule).to_equal(4096)
+
+    it "returns 4096 regardless of storage class":
+        val arena_id = arena_create_impl(3, 0)
+        val granule = arena_preferred_granule_impl(arena_id)
+        expect(granule).to_equal(4096)
+
+
+# ============================================================================
+# StorageClass tag passthrough
+# ============================================================================
+
+describe "NVFS Arena — storage class tag passthrough":
+    """
+    ## Class probe (storage_classes.feature)
+
+    The class_tag passed to arena_create_impl is retrievable via
+    arena_class_impl for any valid, non-discarded arena.
+    """
+
+    it "class tag 0 is returned unchanged":
+        val arena_id = arena_create_impl(0, 0)
+        val cls = arena_class_impl(arena_id)
+        expect(cls).to_equal(0)
+
+    it "class tag 3 (MODEL_IMMUTABLE) is returned unchanged":
+        val arena_id = arena_create_impl(3, 0)
+        val cls = arena_class_impl(arena_id)
+        expect(cls).to_equal(3)
+
+    it "class tag 5 (CHECKPOINT_SNAPSHOT) is returned unchanged":
+        val arena_id = arena_create_impl(5, 0)
+        val cls = arena_class_impl(arena_id)
+        expect(cls).to_equal(5)
+
+
+# ============================================================================
+# Discard invalidates the arena
+# ============================================================================
+
+describe "NVFS Arena — discard":
+    """
+    ## Discard contract (§4.3 / §4.4)
+
+    arena_discard_impl drops the arena state. Subsequent readv returns [].
+    arena_class_impl returns -1 after discard.
+    """
+
+    it "discard_impl returns true for a valid arena":
+        val arena_id = arena_create_impl(0, 0)
+        val ok = arena_discard_impl(arena_id)
+        expect(ok).to_equal(true)
+
+    it "readv after discard returns empty":
+        val arena_id = arena_create_impl(0, 0)
+        arena_append_impl(arena_id, [1, 2, 3], 0)
+        arena_discard_impl(arena_id)
+        val result = arena_readv_impl(arena_id, 0, 3)
+        expect(result.len()).to_equal(0)
+
+    it "class_impl returns -1 after discard":
+        val arena_id = arena_create_impl(2, 0)
+        arena_discard_impl(arena_id)
+        val cls = arena_class_impl(arena_id)
+        expect(cls).to_equal(-1)
+
+    it "discard_impl returns false for unknown arena_id":
+        val ok = arena_discard_impl(-42)
+        expect(ok).to_equal(false)

@@ -1,0 +1,135 @@
+# FsDriver trait — core filesystem driver interface.
+#
+# Trait signatures only; no bodies. All operations are synchronous (blocking).
+# All operations return Result<T, FsError>; drivers never throw.
+#
+# Dispatch pattern: callers match on DriverInstance (see instance.spl) and
+# invoke the appropriate concrete driver — no dyn, no vtable.
+#
+# Source: doc/05_design/fs_driver_interface.md §2.
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension}
+
+trait FsDriver:
+    """Core synchronous filesystem driver interface.
+
+    Every concrete driver (Fat32Driver, NvfsDriver, NvfsPosixDriver, RamFsDriver)
+    implements this trait. VFS dispatch is via exhaustive match on DriverInstance.
+
+    Lifecycle:
+        mount / unmount / remount / statfs
+
+    File I/O:
+        open / close / read / write / pread / pwrite / fstat / fsync / fdatasync / truncate / ftruncate
+
+    Namespace:
+        root / stat / readdir / mkdir / rmdir / unlink / rename
+        symlink / readlink / link
+
+    Extension probe:
+        capabilities — cheap bitmask pre-check.
+        probe        — obtain concrete Extension handle for a capability.
+    """
+
+    # --- Lifecycle ---
+
+    fn mount(opts: MountOptions) -> Result<(), FsError>
+    """Mount this driver with the given options. Must be called before any I/O."""
+
+    fn unmount() -> Result<(), FsError>
+    """Unmount and flush all pending writes. Fails with Busy if open handles remain."""
+
+    fn remount(opts: MountOptions) -> Result<(), FsError>
+    """Remount with new options (e.g., read-only → read-write)."""
+
+    fn statfs() -> Result<FsStatfs, FsError>
+    """Return filesystem-level capacity and inode statistics."""
+
+    # --- Root ---
+
+    fn root() -> Result<Inode, FsError>
+    """Return the inode of the filesystem root directory."""
+
+    # --- File I/O ---
+
+    fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>
+    """Open a file at path with flags; return an opaque FileHandle."""
+
+    fn close(handle: FileHandle) -> Result<(), FsError>
+    """Close an open FileHandle and release driver-side resources."""
+
+    fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>
+    """Read up to buf.len() bytes at offset into buf; return bytes read."""
+
+    fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>
+    """Write buf at offset; return bytes written."""
+
+    fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>
+    """Positional read — equivalent to read but does not advance the file position."""
+
+    fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>
+    """Positional write — equivalent to write but does not advance the file position."""
+
+    fn fstat(handle: FileHandle) -> Result<FileStat, FsError>
+    """Return metadata for the file identified by handle."""
+
+    fn stat(path: Path) -> Result<FileStat, FsError>
+    """Return metadata for the file identified by path."""
+
+    fn truncate(path: Path, length: i64) -> Result<(), FsError>
+    """Truncate or extend the file at path to exactly length bytes."""
+
+    fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>
+    """Truncate or extend the open file to exactly length bytes."""
+
+    fn fsync(handle: FileHandle) -> Result<(), FsError>
+    """Flush all dirty data and metadata for handle to durable storage."""
+
+    fn fdatasync(handle: FileHandle) -> Result<(), FsError>
+    """Flush dirty data (but not necessarily metadata) for handle."""
+
+    # --- Namespace ---
+
+    fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>
+    """Return all entries in the open directory identified by handle."""
+
+    fn mkdir(path: Path, mode: u32) -> Result<(), FsError>
+    """Create a directory at path with the given mode bits."""
+
+    fn rmdir(path: Path) -> Result<(), FsError>
+    """Remove an empty directory at path."""
+
+    fn unlink(path: Path) -> Result<(), FsError>
+    """Remove the file or empty directory at path."""
+
+    fn rename(old: Path, new: Path) -> Result<(), FsError>
+    """Atomically rename old to new; overwrites new if it exists."""
+
+    fn symlink(target: Path, link: Path) -> Result<(), FsError>
+    """Create a symbolic link at link pointing to target."""
+
+    fn readlink(path: Path) -> Result<Path, FsError>
+    """Read the target of the symbolic link at path."""
+
+    fn link(target: Path, link: Path) -> Result<(), FsError>
+    """Create a hard link at link pointing to target (requires Hardlinks cap)."""
+
+    # --- Extension probe ---
+
+    fn capabilities() -> CapabilitySet
+    """Return the bitmask of capabilities this driver supports.
+
+    Callers check has(cap) cheaply before calling probe(cap).
+    This method is infallible and must not block.
+    """
+
+    fn probe(cap: Capability) -> Option<Extension>
+    """Return a concrete Extension handle for cap, or None if not supported.
+
+    Callers MUST check capabilities().has(cap) before calling probe to avoid
+    unnecessary overhead. Returns None for unsupported capabilities even if
+    the bitmask says the cap is present (e.g., cap disabled at mount time).
+    """

@@ -1,0 +1,102 @@
+# CoW engine — random-write emulation over append-only arenas.
+#
+# Every POSIX write at an interior offset is emulated by:
+#   1. allocate a new arena,
+#   2. append base[0..prefix_len] + staging + base[suffix_start..end],
+#   3. publish-flip: caller swaps the fd's arena_id to the new id,
+#   4. caller discards the old arena (ref-counted if shared by other fds).
+#
+# This file owns steps (1) and (2). Steps (3)/(4) are driver-level.
+#
+# Phase 9 B2 — doc/05_design/nvfs_posix_wrapper.md §4.
+
+use std.fs_driver.error.{FsError}
+use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl}
+
+struct CowShadow:
+    """Staging record for an in-flight COW overwrite.
+
+    base_arena   — source arena being overwritten.
+    staging      — the user payload being spliced in.
+    prefix_len   — base[0..prefix_len] is preserved before staging.
+    suffix_start — base[suffix_start..] resumes after staging.
+
+    Invariant: prefix_len <= suffix_start <= base.total_bytes.
+    The staging's length may differ from (suffix_start - prefix_len); a
+    different length produces an implicit file-size change.
+    """
+    base_arena:   i64
+    staging:      [u8]
+    prefix_len:   u64
+    suffix_start: u64
+
+impl CowShadow:
+
+    static fn new(base: i64, off: u64, len: u64) -> CowShadow:
+        """Initialize a CoW shadow targeting base[off..off+len].
+
+        The staging buffer starts empty — call splice() to set it.
+        """
+        CowShadow(
+            base_arena:   base,
+            staging:      [],
+            prefix_len:   off,
+            suffix_start: off + len
+        )
+
+    fn splice(buf: [u8]) -> CowShadow:
+        """Return a new shadow whose staging bytes are `buf`."""
+        CowShadow(
+            base_arena:   self.base_arena,
+            staging:      buf,
+            prefix_len:   self.prefix_len,
+            suffix_start: self.suffix_start
+        )
+
+    fn commit() -> Result<i64, FsError>:
+        """Materialize prefix + staging + suffix into a new arena.
+
+        Returns the new arena_id. Caller is responsible for:
+          - updating the fd_table entry (publish-flip),
+          - discarding the old arena when safe.
+        """
+        val base_total = arena_total_bytes_impl(self.base_arena)
+        if base_total < 0:
+            return Err(FsError.InvalidArg)
+        val base_total_u = base_total as u64
+        if self.prefix_len > base_total_u:
+            return Err(FsError.InvalidArg)
+        var suffix_start = self.suffix_start
+        if suffix_start > base_total_u:
+            suffix_start = base_total_u
+        if self.prefix_len > suffix_start:
+            return Err(FsError.InvalidArg)
+
+        val new_arena = arena_create_impl(0, 4096)
+
+        # Append prefix.
+        if self.prefix_len > 0:
+            val prefix_bytes = arena_readv_impl(self.base_arena, 0, self.prefix_len as i64)
+            val n = arena_append_impl(new_arena, prefix_bytes, 0)
+            if n < 0:
+                return Err(FsError.IoError(0))
+
+        # Append staging.
+        if self.staging.len() as i64 > 0:
+            val n = arena_append_impl(new_arena, self.staging, 0)
+            if n < 0:
+                return Err(FsError.IoError(0))
+
+        # Append suffix.
+        val suffix_len = base_total_u - suffix_start
+        if suffix_len > 0:
+            val suffix_bytes = arena_readv_impl(
+                self.base_arena,
+                suffix_start as i64,
+                suffix_len as i64
+            )
+            val n = arena_append_impl(new_arena, suffix_bytes, 0)
+            if n < 0:
+                return Err(FsError.IoError(0))
+
+        Ok(new_arena)

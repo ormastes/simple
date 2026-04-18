@@ -1,25 +1,239 @@
-# spostgre engine — WAL writer.
+# spostgre engine — WAL writer (M1 in-memory implementation).
 #
-# Writes to a DB_WAL-class arena. The WalWriter trait contract lives in
-# std.spostgre_if.storage_api; this file provides the concrete impl stubs.
+# Writes to an in-memory append-only byte buffer. The WalWriter trait contract
+# lives in std.spostgre_if.storage_api; this file provides the concrete impl.
+#
+# Design refs: spostgre_design.md §4.4 (WAL record layout), §6.3 (group-commit),
+#              §6.4 (durable-commit handshake), §6.5 (NVMe Flush/FUA).
+#
+# M1 scope: in-memory arena only; real NVFS integration deferred to Phase 6+.
+# CRC32C: inlined (std.common.crypto has no crc32c at M1).
+# LE encoding: inlined (std.common.encoding is text-only at M1).
 
 use std.spostgre_if.types.{Lsn, TxnId}
 
+# ---------------------------------------------------------------------------
+# CRC32C — Castagnoli polynomial, table-free software implementation.
+# @coverage: spostgre_design.md §4.4 (xl_crc32c field)
+# ---------------------------------------------------------------------------
+
+fn _crc32c_byte(crc: i32, b: u8) -> i32:
+    """Process one byte through the CRC32C (Castagnoli) polynomial."""
+    var c = crc xor (b as i32)
+    var i = 0
+    while i < 8:
+        val lsb = c and 1
+        c = c / 2
+        if lsb != 0:
+            # 0x82F63B78 in signed i32 is -2127456392
+            c = c xor -2127456392
+        i = i + 1
+    c
+
+fn _crc32c_bytes(data: [u8]) -> i32:
+    """Compute CRC32C over a byte slice."""
+    var crc = -1  # 0xFFFFFFFF
+    var i = 0
+    while i < data.len():
+        crc = _crc32c_byte(crc, data[i])
+        i = i + 1
+    crc xor -1  # final XOR 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Little-endian encode helpers (no stdlib binary codec at M1).
+# ---------------------------------------------------------------------------
+
+fn _le_put_u32(buf: [u8], off: i64, v: i32):
+    """Write v as 4 LE bytes into buf starting at off."""
+    buf[off + 0] = (v and 255) as u8
+    buf[off + 1] = ((v / 256) and 255) as u8
+    buf[off + 2] = ((v / 65536) and 255) as u8
+    buf[off + 3] = ((v / 16777216) and 255) as u8
+
+fn _le_get_u32(buf: [u8], off: i64) -> i32:
+    """Read 4 LE bytes from buf at off as i32."""
+    val b0 = buf[off + 0] as i32
+    val b1 = buf[off + 1] as i32
+    val b2 = buf[off + 2] as i32
+    val b3 = buf[off + 3] as i32
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn _le_put_u64(buf: [u8], off: i64, lo: i32, hi: i32):
+    """Write two i32 halves (lo, hi) as an 8-byte LE value into buf at off."""
+    _le_put_u32(buf, off, lo)
+    _le_put_u32(buf, off + 4, hi)
+
+fn _le_get_u64_lo(buf: [u8], off: i64) -> i32:
+    """Read low 32 bits of LE u64 at off."""
+    _le_get_u32(buf, off)
+
+fn _le_get_u64_hi(buf: [u8], off: i64) -> i32:
+    """Read high 32 bits of LE u64 at off."""
+    _le_get_u32(buf, off + 4)
+
+# ---------------------------------------------------------------------------
+# WalRecord — serialised on-disk/in-buffer form.
+# Layout: §4.4  (xl_tot_len u32, xl_xid u32 lo, xl_prev u64, xl_rmgr u8,
+#                xl_info u8, xl_flags u16, xl_crc32c u32, body...)
+# Fixed header = 28 bytes (0x1C).
+# ---------------------------------------------------------------------------
+
+val WAL_HDR_LEN: i64 = 28
+
+struct WalRecord:
+    """One serialised WAL record (in-memory view)."""
+    lsn: i64        # assigned after append
+    txn_id: i64     # xl_xid (low 32 stored; high deferred)
+    kind: i32       # xl_rmgr (u8) + xl_info (u8) packed into low 16 bits
+    payload: [u8]
+    crc32: i32      # xl_crc32c over serialised header + payload
+
+fn wal_record_encode(rec: WalRecord) -> [u8]:
+    """Serialise a WalRecord to bytes (header + payload)."""
+    val payload_len = rec.payload.len()
+    val tot_len = (WAL_HDR_LEN + payload_len) as i32
+    var buf: [u8] = [0u8; (WAL_HDR_LEN + payload_len) as i64]
+
+    # xl_tot_len @ 0
+    _le_put_u32(buf, 0, tot_len)
+    # xl_xid (low) @ 4
+    _le_put_u32(buf, 4, rec.txn_id as i32)
+    # xl_prev @ 8 — zero for M1 (no prev-chain tracking)
+    _le_put_u64(buf, 8, 0, 0)
+    # xl_rmgr @ 16
+    buf[16] = (rec.kind and 255) as u8
+    # xl_info @ 17
+    buf[17] = ((rec.kind / 256) and 255) as u8
+    # xl_flags @ 18 — zero for M1
+    buf[18] = 0u8
+    buf[19] = 0u8
+    # xl_crc32c @ 20 — placeholder; computed after body
+    _le_put_u32(buf, 20, 0)
+    # body @ 24
+    var i = 0
+    while i < payload_len:
+        buf[24 + i] = rec.payload[i]
+        i = i + 1
+    # compute CRC32C over bytes 0..24+payload_len (with crc field zeroed)
+    val crc = _crc32c_bytes(buf)
+    _le_put_u32(buf, 20, crc)
+    buf
+
+fn wal_record_decode(buf: [u8]) -> WalRecord:
+    """Deserialise a WalRecord from a byte slice."""
+    val tot_len = _le_get_u32(buf, 0) as i64
+    val txn_lo = _le_get_u32(buf, 4) as i64
+    val rmgr = buf[16] as i32
+    val info = buf[17] as i32
+    val kind = rmgr + info * 256
+    val stored_crc = _le_get_u32(buf, 20)
+    val payload_len = tot_len - WAL_HDR_LEN
+    var payload: [u8] = [0u8; payload_len]
+    var i = 0
+    while i < payload_len:
+        payload[i] = buf[24 + i]
+        i = i + 1
+    WalRecord(lsn: 0, txn_id: txn_lo, kind: kind, payload: payload, crc32: stored_crc)
+
+fn wal_record_verify_crc(buf: [u8]) -> bool:
+    """Return true iff the stored CRC32C in buf matches a recomputed value."""
+    val stored_crc = _le_get_u32(buf, 20)
+    # Zero the crc field, recompute, restore
+    var tmp: [u8] = [0u8; buf.len()]
+    var i = 0
+    while i < buf.len():
+        tmp[i] = buf[i]
+        i = i + 1
+    _le_put_u32(tmp, 20, 0)
+    val computed = _crc32c_bytes(tmp)
+    stored_crc == computed
+
+# ---------------------------------------------------------------------------
+# WalState — append-only in-memory WAL arena.
+# ---------------------------------------------------------------------------
+
 struct WalState:
-    """In-memory WAL writer state."""
+    """In-memory WAL writer state.
+
+    M1: arena backed by an in-process [u8] growable buffer.
+    next_lsn:    monotonically increasing; starts at 1.
+    durable_lsn: set by wal_commit_group; always <= next_lsn - 1.
+    """
     arena_id: i64
     next_lsn: i64
     durable_lsn: i64
+    arena: [u8]
 
     static fn new(arena_id: i64) -> WalState:
-        WalState(arena_id: arena_id, next_lsn: 1, durable_lsn: 0)
+        WalState(arena_id: arena_id, next_lsn: 1, durable_lsn: 0, arena: [])
 
-fn wal_append(state: WalState, txn: TxnId, payload: [u8]) -> Lsn:
-    """Append a WAL record; return its assigned LSN."""
-    # @coverage: spostgre_design.md §6.3
-    pass_todo
+fn wal_append(state: WalState, txn: TxnId, payload: [u8]) -> (Lsn, WalState):
+    """Append a WAL record; return (assigned LSN, updated state).
 
-fn wal_flush_to(state: WalState, target: Lsn) -> bool:
-    """Force-flush WAL such that durable_lsn >= target."""
-    # @coverage: spostgre_design.md §6.4, §6.5
-    pass_todo
+    M1 returns a tuple because Simple functions pass by value and the caller
+    must capture the updated state to observe bumped next_lsn.
+
+    @coverage: spostgre_design.md §6.3
+    """
+    val lsn_val = state.next_lsn
+    val rec = WalRecord(
+        lsn: lsn_val,
+        txn_id: txn.id,
+        kind: 0,
+        payload: payload,
+        crc32: 0)
+    val encoded = wal_record_encode(rec)
+    # Grow arena
+    val old_len = state.arena.len()
+    val new_len = old_len + encoded.len()
+    var new_arena: [u8] = [0u8; new_len]
+    var i = 0
+    while i < old_len:
+        new_arena[i] = state.arena[i]
+        i = i + 1
+    var j = 0
+    while j < encoded.len():
+        new_arena[old_len + j] = encoded[j]
+        j = j + 1
+    val new_state = WalState(
+        arena_id: state.arena_id,
+        next_lsn: lsn_val + 1,
+        durable_lsn: state.durable_lsn,
+        arena: new_arena)
+    (Lsn(value: lsn_val), new_state)
+
+fn wal_commit_group(state: WalState, lsn_high: Lsn) -> WalState:
+    """Drain buffered WAL records; set durable_lsn = lsn_high.value.
+
+    M1: no real I/O — synthetic "durable" position update only.
+    @coverage: spostgre_design.md §6.3 (group-commit), §6.4 (handshake)
+    """
+    WalState(
+        arena_id: state.arena_id,
+        next_lsn: state.next_lsn,
+        durable_lsn: lsn_high.value,
+        arena: state.arena)
+
+fn wal_sync(state: WalState) -> WalState:
+    """No-op at M1; present for trait boundary completeness.
+
+    @coverage: spostgre_design.md §6.5
+    """
+    state
+
+fn wal_flush_to(state: WalState, target: Lsn) -> (bool, WalState):
+    """Force-flush WAL such that durable_lsn >= target.
+
+    M1: immediate synthetic flush — sets durable_lsn = target if target <=
+    next_lsn - 1 (i.e. the record has been appended).
+    @coverage: spostgre_design.md §6.4, §6.5
+    """
+    if target.value < state.next_lsn:
+        val new_state = WalState(
+            arena_id: state.arena_id,
+            next_lsn: state.next_lsn,
+            durable_lsn: target.value,
+            arena: state.arena)
+        (true, new_state)
+    else:
+        (false, state)

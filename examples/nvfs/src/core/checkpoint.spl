@@ -1,16 +1,175 @@
 # NVFS core — checkpoint ring.
 #
-# The CHECKPOINT_SNAPSHOT class maintains a ring of recent snapshots; this
-# module advances / rotates the ring.
+# N1 milestone (doc/05_design/nvfs_design.md §5.2 + §12):
+#   Fixed-size circular ring of CheckpointEntry values backed in memory.
+#   Default ring length: 4096 slots. Each entry is 64 bytes on-disk;
+#   in-memory we use a struct with the same fields.
+#
+# The ring advances monotonically; checkpoint_generation is the epoch counter.
+
+# ---------------------------------------------------------------------------
+# Ring entry shape (§5.2)
+# ---------------------------------------------------------------------------
+
+struct CheckpointEntry:
+    """One slot in the checkpoint ring (§5.2)."""
+    checkpoint_generation: u64  # monotonic epoch
+    timestamp_ns: u64
+    superblock_lba_published: u64
+    intent_log_head: u64
+    root_pmap_record_lba: u64
+    root_manifest_record_lba: u64
+    clean: u8
+    checksum: u32
+
+# ---------------------------------------------------------------------------
+# Ring state
+# ---------------------------------------------------------------------------
+
+val RING_CAPACITY: i64 = 4096
+
+var _ring: [CheckpointEntry] = []
+var _ring_init: bool = false
+var _ring_head: i64 = 0   # index of the next write slot
+var _epoch: u64 = 0
+
+fn _ensure_ring_init():
+    """Lazily populate ring with sentinel zeroed entries."""
+    if _ring_init:
+        return
+    var i = 0
+    while i < RING_CAPACITY:
+        _ring.push(CheckpointEntry(
+            checkpoint_generation: 0,
+            timestamp_ns: 0,
+            superblock_lba_published: 0,
+            intent_log_head: 0,
+            root_pmap_record_lba: 0,
+            root_manifest_record_lba: 0,
+            clean: 0,
+            checksum: 0
+        ))
+        i = i + 1
+    _ring_init = true
+
+fn _crc_entry(e: CheckpointEntry) -> u32:
+    """N1 in-memory checksum substitute for CRC32C."""
+    val h0 = (e.checkpoint_generation + e.timestamp_ns) % 0xFFFFFFFF
+    val h1 = (e.superblock_lba_published + e.intent_log_head) % 0xFFFFFFFF
+    val h2 = (e.root_pmap_record_lba + e.root_manifest_record_lba) % 0xFFFFFFFF
+    ((h0 + h1 + h2 + e.clean as u64) % 0xFFFFFFFF) as u32
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn checkpoint_append(entry: CheckpointEntry) -> u64:
+    """Append `entry` to the ring; bumps epoch and stores checksum.
+
+    Returns the assigned checkpoint_generation.
+    """
+    _ensure_ring_init()
+    _epoch = _epoch + 1
+    val stamped = CheckpointEntry(
+        checkpoint_generation: _epoch,
+        timestamp_ns: entry.timestamp_ns,
+        superblock_lba_published: entry.superblock_lba_published,
+        intent_log_head: entry.intent_log_head,
+        root_pmap_record_lba: entry.root_pmap_record_lba,
+        root_manifest_record_lba: entry.root_manifest_record_lba,
+        clean: entry.clean,
+        checksum: 0
+    )
+    val csum = _crc_entry(stamped)
+    val final_entry = CheckpointEntry(
+        checkpoint_generation: _epoch,
+        timestamp_ns: entry.timestamp_ns,
+        superblock_lba_published: entry.superblock_lba_published,
+        intent_log_head: entry.intent_log_head,
+        root_pmap_record_lba: entry.root_pmap_record_lba,
+        root_manifest_record_lba: entry.root_manifest_record_lba,
+        clean: entry.clean,
+        checksum: csum
+    )
+    _ring[_ring_head] = final_entry
+    _ring_head = (_ring_head + 1) % RING_CAPACITY
+    _epoch
+
+fn checkpoint_latest_valid() -> CheckpointEntry:
+    """Return the newest entry with a valid checksum.
+
+    If no valid entry exists, returns a zeroed entry with checksum=0.
+    """
+    _ensure_ring_init()
+    var best_gen: u64 = 0
+    var best_idx: i64 = -1
+    var i = 0
+    while i < RING_CAPACITY:
+        val e = _ring[i]
+        if e.checkpoint_generation > 0:
+            val expected = _crc_entry(CheckpointEntry(
+                checkpoint_generation: e.checkpoint_generation,
+                timestamp_ns: e.timestamp_ns,
+                superblock_lba_published: e.superblock_lba_published,
+                intent_log_head: e.intent_log_head,
+                root_pmap_record_lba: e.root_pmap_record_lba,
+                root_manifest_record_lba: e.root_manifest_record_lba,
+                clean: e.clean,
+                checksum: 0
+            ))
+            if expected == e.checksum and e.checkpoint_generation > best_gen:
+                best_gen = e.checkpoint_generation
+                best_idx = i
+        i = i + 1
+    if best_idx >= 0:
+        return _ring[best_idx]
+    CheckpointEntry(
+        checkpoint_generation: 0,
+        timestamp_ns: 0,
+        superblock_lba_published: 0,
+        intent_log_head: 0,
+        root_pmap_record_lba: 0,
+        root_manifest_record_lba: 0,
+        clean: 0,
+        checksum: 0
+    )
+
+fn checkpoint_count() -> i64:
+    """Count of ring slots that hold a valid (non-zero-gen) entry."""
+    _ensure_ring_init()
+    var count = 0
+    var i = 0
+    while i < RING_CAPACITY:
+        if _ring[i].checkpoint_generation > 0:
+            count = count + 1
+        i = i + 1
+    count
+
+# ---------------------------------------------------------------------------
+# Legacy stubs (preserve existing function names)
+# ---------------------------------------------------------------------------
 
 fn checkpoint_begin_impl() -> i64:
     """Open a new checkpoint; return its generation."""
-    pass_todo
+    _ensure_ring_init()
+    _epoch = _epoch + 1
+    _epoch as i64
 
 fn checkpoint_commit_impl(generation: i64) -> bool:
-    """Finalize the named checkpoint; rotate the ring."""
-    pass_todo
+    """Finalise the checkpoint at `generation`; write a ring entry."""
+    val entry = CheckpointEntry(
+        checkpoint_generation: generation as u64,
+        timestamp_ns: 0,
+        superblock_lba_published: 0,
+        intent_log_head: 0,
+        root_pmap_record_lba: 0,
+        root_manifest_record_lba: 0,
+        clean: 1,
+        checksum: 0
+    )
+    checkpoint_append(entry)
+    true
 
 fn checkpoint_list_impl() -> i64:
     """Count of durable checkpoints in the ring."""
-    pass_todo
+    checkpoint_count()

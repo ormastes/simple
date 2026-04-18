@@ -1,0 +1,48 @@
+# CoW engine contract for the POSIX-over-NVFS shim.
+#
+# This file defines the `CowShadow` struct and `CowShadowOps` trait used by
+# the POSIX shim to perform copy-on-write random writes over arena storage.
+#
+# Concrete implementation lives in examples/nvfs/src/posix/cow_engine.spl.
+# Main-repo callers import this module via std.fs.nvfs_posix.cow_engine.
+#
+# Phase 9 B2 — doc/05_design/nvfs_posix_wrapper.md §4.
+
+use std.fs_driver.error.{FsError}
+
+# CowShadow — staging record for an in-flight COW overwrite.
+#
+#   base_arena   — source arena id the overwrite is applied to.
+#   staging      — bytes being written (the user payload).
+#   prefix_len   — length of the prefix (base[0..prefix_len]) preserved.
+#   suffix_start — offset in base where the suffix (base[suffix_start..]) resumes.
+#
+# commit() on a CowShadow allocates a new arena, appends
+#   base[0..prefix_len] + staging + base[suffix_start..end]
+# and returns the new arena id, leaving callers to perform the publish-flip.
+struct CowShadow:
+    """Staging record for a copy-on-write random write.
+
+    Created by new(); mutated via splice(); materialized via commit().
+    """
+    base_arena:   i64
+    staging:      [u8]
+    prefix_len:   u64
+    suffix_start: u64
+
+# CowShadowOps — contract the submodule impl must satisfy.
+#
+# new(base, off, len)  — create a shadow targeting base[off..off+len].
+# splice(buf)          — set the staging payload; returns a new CowShadow.
+# commit()             — materialize; returns the new arena id or FsError.
+trait CowShadowOps:
+    """Operations on a CowShadow. Impl in examples/nvfs/src/posix/cow_engine.spl."""
+
+    static fn new(base: i64, off: u64, len: u64) -> CowShadow
+    """Initialize a CoW shadow targeting base[off..off+len]."""
+
+    fn splice(buf: [u8]) -> CowShadow
+    """Return a new CowShadow whose staging bytes are `buf`."""
+
+    fn commit() -> Result<i64, FsError>
+    """Materialize prefix+staging+suffix into a fresh arena; return its id."""

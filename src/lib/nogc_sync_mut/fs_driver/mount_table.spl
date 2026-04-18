@@ -1,0 +1,131 @@
+# MountTable — tracks active filesystem mounts.
+#
+# MountEntry associates a mount point path with a DriverInstance.
+# MountTable provides mount/unmount/lookup/resolve operations.
+# Longest-prefix match is used for path resolution.
+#
+# Source: doc/05_design/fs_driver_interface.md §3, §8.
+
+use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.capability.{CapabilitySet}
+
+struct MountId:
+    """Opaque mount table index. Assigned sequentially; not reused after unmount."""
+    id: u32
+
+    static fn null() -> MountId:
+        MountId(id: 0)
+
+    fn is_null() -> bool:
+        self.id == 0
+
+struct MountEntry:
+    """Single active mount.
+
+    id           — unique mount table slot index.
+    mount_point  — absolute path at which this filesystem is mounted.
+    driver       — concrete driver wrapped in DriverInstance.
+    opts         — options negotiated at mount time.
+    active_caps  — capabilities active after mount-time negotiation.
+    """
+    id:          MountId
+    mount_point: Path
+    driver:      DriverInstance
+    opts:        MountOptions
+    active_caps: u32   # CapabilitySet.bits after negotiation
+
+struct MountTable:
+    """Registry of active mounts.
+
+    mounts       — ordered list of MountEntry; lookup uses longest-prefix match.
+    next_id      — next MountId to assign (monotonically increasing).
+
+    Thread safety: callers are responsible for holding an appropriate lock
+    before calling mutating methods (mount, unmount). Reads (lookup, resolve)
+    may race only if the caller guarantees no concurrent mounts/unmounts.
+    """
+    mounts:  [MountEntry]
+    next_id: u32
+
+impl MountTable:
+    static fn new() -> MountTable:
+        MountTable(mounts: [], next_id: 1)
+
+    me fn mount(path: Path, driver: DriverInstance, opts: MountOptions) -> Result<MountId, FsError>:
+        """Add a new mount at path.
+
+        Fails with AlreadyExists if path is already a mount point.
+        Assigns a fresh MountId and appends the entry.
+        """
+        for entry in self.mounts:
+            if entry.mount_point.raw == path.raw:
+                return Err(FsError.AlreadyExists)
+
+        val id = MountId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        val want = opts.want_caps
+        val active = want   # full negotiation done in vfs_mount; stub passes through
+        val entry = MountEntry(
+            id: id,
+            mount_point: path,
+            driver: driver,
+            opts: opts,
+            active_caps: active
+        )
+        self.mounts.push(entry)
+        Ok(id)
+
+    me fn unmount(path: Path) -> Result<(), FsError>:
+        """Remove the mount at path.
+
+        Fails with NotFound if no mount exists at exactly that path.
+        Callers must ensure no open handles before calling unmount.
+        """
+        var idx: i64 = -1
+        var i: i64 = 0
+        while i < self.mounts.len() as i64:
+            if self.mounts[i as i32].mount_point.raw == path.raw:
+                idx = i
+            i = i + 1
+        if idx < 0:
+            return Err(FsError.NotFound)
+        self.mounts.remove(idx as i32)
+        Ok(())
+
+    fn lookup(path: Path) -> MountEntry?:
+        """Return the MountEntry whose mount_point is the longest prefix of path.
+
+        Returns nil if no mount covers path.
+        """
+        var best_len: i64 = -1
+        var best_idx: i32 = -1
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val mp = self.mounts[i].mount_point
+            if path.starts_with(mp):
+                if mp.len() > best_len:
+                    best_len = mp.len()
+                    best_idx = i
+            i = i + 1
+        if best_idx < 0:
+            nil
+        else:
+            Some(self.mounts[best_idx])
+
+    fn resolve(path: Path) -> Result<(MountId, Path), FsError>:
+        """Resolve path to (mount_id, relpath_within_mount).
+
+        relpath is the suffix of path after stripping the mount point prefix.
+        Fails with NotFound if no mount covers path.
+        """
+        val entry_opt = self.lookup(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                val mp_len = entry.mount_point.len() as i32
+                val rel_raw = path.raw.slice(mp_len, path.raw.len() as i32)
+                val relpath = Path(raw: rel_raw)
+                Ok((entry.id, relpath))

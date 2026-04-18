@@ -1,0 +1,325 @@
+# NVFS native driver — NvfsDriver implements FsDriver.
+#
+# Provides the DriverInstance::Nvfs variant implementation.
+# append-only write: if offset != current arena length, returns Err(Unsupported)
+# (callers route random-write to POSIX shim via NvfsPosixDriver, agent B2).
+#
+# Source: doc/05_design/fs_driver_interface.md §3; nvfs_design_v2.md §17.
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension, SnapshotExt, DedupExt, ChecksumExt, SendRecvExt, ScrubExt, CompressExt, EncryptExt, ReflinkExt}
+use std.fs_driver.ops.{FsDriver}
+use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl}
+use examples.nvfs.src.driver.capabilities.{nvfs_native_capabilities}
+
+# ---------------------------------------------------------------------------
+# NvfsOpenHandle — internal record for an open file
+# ---------------------------------------------------------------------------
+
+struct NvfsOpenHandle:
+    """Internal tracking record for a file opened via NvfsDriver.
+
+    handle_id  — opaque id returned to callers (matches FileHandle.id).
+    arena_id   — the underlying arena backing this file.
+    read_only  — true if file was opened without write permission.
+    """
+    handle_id: u64
+    arena_id:  i64
+    read_only: bool
+
+# ---------------------------------------------------------------------------
+# Module-level handle table (maps FileHandle.id to NvfsOpenHandle)
+# ---------------------------------------------------------------------------
+
+var _open_handles: [NvfsOpenHandle] = []
+var _next_handle_id: u64 = 1
+
+fn _find_handle(id: u64) -> i64:
+    """Return index of handle with id in _open_handles, or -1."""
+    var i = 0
+    while i < _open_handles.len() as i64:
+        if _open_handles[i].handle_id == id:
+            return i
+        i = i + 1
+    -1
+
+fn _alloc_handle(arena_id: i64, read_only: bool) -> FileHandle:
+    """Allocate a new handle entry and return the opaque FileHandle."""
+    val id = _next_handle_id
+    _next_handle_id = _next_handle_id + 1
+    val h = NvfsOpenHandle(handle_id: id, arena_id: arena_id, read_only: read_only)
+    _open_handles.push(h)
+    FileHandle(id: id)
+
+fn _remove_handle(idx: i64):
+    """Remove the handle at idx from the table (swap-remove for O(1))."""
+    val last = _open_handles.len() as i64 - 1
+    if idx != last:
+        _open_handles[idx] = _open_handles[last]
+    # pop last element
+    var new_list: [NvfsOpenHandle] = []
+    var i = 0
+    while i < last:
+        new_list.push(_open_handles[i])
+        i = i + 1
+    _open_handles = new_list
+
+# ---------------------------------------------------------------------------
+# NvfsDriver struct
+# ---------------------------------------------------------------------------
+
+struct NvfsDriver:
+    """NVFS native driver — append-only COW storage over arena_* API.
+
+    Capabilities: COW, Snapshot, Checksum, SelfHeal, Reflink, Compress,
+    CaseSensitive, Hardlinks, SparseFiles, LargeFiles, UnicodeNames,
+    SendReceive, Dedup, Scrub, Encrypt, AsyncIo.
+
+    Does NOT provide PosixCompat — route random-write callers to NvfsPosixDriver.
+    """
+    name:      text
+    mounted:   bool
+    read_only: bool
+
+impl FsDriver for NvfsDriver:
+
+    # --- Lifecycle ---
+
+    fn mount(opts: MountOptions) -> Result<(), FsError>:
+        """Record mount options; mark driver as mounted."""
+        self.mounted   = true
+        self.read_only = opts.read_only
+        Ok(())
+
+    fn unmount() -> Result<(), FsError>:
+        """Flush and unmount. Fails with Busy if any handles remain open."""
+        if _open_handles.len() as i64 > 0:
+            return Err(FsError.Busy)
+        self.mounted = false
+        Ok(())
+
+    fn remount(opts: MountOptions) -> Result<(), FsError>:
+        """Update mount options in-place."""
+        self.read_only = opts.read_only
+        Ok(())
+
+    fn statfs() -> Result<FsStatfs, FsError>:
+        """Return zero-filled statistics (real accounting deferred to N2)."""
+        Ok(FsStatfs(
+            total_bytes: 0,
+            free_bytes:  0,
+            avail_bytes: 0,
+            files_total: 0,
+            files_free:  0,
+            block_size:  4096
+        ))
+
+    # --- Root ---
+
+    fn root() -> Result<Inode, FsError>:
+        """Return the root inode (id=1 for NVFS)."""
+        Ok(Inode(id: 1))
+
+    # --- File I/O ---
+
+    fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        """Open a file by allocating a new arena for it.
+
+        N1: each open() creates a fresh append-only arena. File identity /
+        persistence across unmount is deferred to N2 (B-tree forest).
+        """
+        if (not self.mounted):
+            return Err(FsError.InvalidArg)
+        val writable = flags.is_writable()
+        if (writable and self.read_only):
+            return Err(FsError.ReadOnly)
+        val arena_id = arena_create_impl(0, 4096)
+        val handle = _alloc_handle(arena_id, not writable)
+        Ok(handle)
+
+    fn close(handle: FileHandle) -> Result<(), FsError>:
+        """Release an open FileHandle."""
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        _remove_handle(idx)
+        Ok(())
+
+    fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """Read from the arena backing handle at offset."""
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        val h = _open_handles[idx]
+        val data = arena_readv_impl(h.arena_id, offset, buf.len() as i64)
+        Ok(data.len() as i64)
+
+    fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """Append-only write. If offset != current length, return Err(Unsupported).
+
+        Callers requiring random-write must use NvfsPosixDriver (agent B2).
+        """
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        val h = _open_handles[idx]
+        if h.read_only:
+            return Err(FsError.ReadOnly)
+        val current_len = arena_total_bytes_impl(h.arena_id)
+        if offset != current_len:
+            return Err(FsError.Unsupported)
+        val written = arena_append_impl(h.arena_id, buf, 0)
+        if written < 0:
+            return Err(FsError.IoError(0))
+        Ok(written)
+
+    fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """Positional read — delegates to read (N1: no position tracking)."""
+        self.read(handle, offset, buf)
+
+    fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """Positional write — enforces append-only constraint via write."""
+        self.write(handle, offset, buf)
+
+    fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
+        """Return zero-filled stat for the file backing handle."""
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        val h = _open_handles[idx]
+        val size = arena_total_bytes_impl(h.arena_id)
+        val sz = if size < 0: 0 else: size as u64
+        Ok(FileStat(
+            inode:         h.arena_id as u64,
+            size:          sz,
+            blocks:        (sz + 4095) / 4096,
+            block_size:    4096,
+            mode:          0o644,
+            uid:           0,
+            gid:           0,
+            nlinks:        1,
+            atime_ns:      0,
+            mtime_ns:      0,
+            ctime_ns:      0,
+            birth_time_ns: 0
+        ))
+
+    fn stat(path: Path) -> Result<FileStat, FsError>:
+        """Path-based stat — not yet implemented (requires B-tree in N2)."""
+        Err(FsError.Unsupported)
+
+    fn truncate(path: Path, length: i64) -> Result<(), FsError>:
+        """Truncate not supported on append-only native driver."""
+        Err(FsError.Unsupported)
+
+    fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
+        """ftruncate not supported on append-only native driver."""
+        Err(FsError.Unsupported)
+
+    fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        """fsync — N1 in-memory: no-op (all writes already durable in-process)."""
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        Ok(())
+
+    fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        """fdatasync — N1 in-memory: no-op."""
+        val idx = _find_handle(handle.id)
+        if idx < 0:
+            return Err(FsError.InvalidArg)
+        Ok(())
+
+    # --- Namespace ---
+
+    fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        """readdir — namespace not yet implemented (N2)."""
+        Err(FsError.Unsupported)
+
+    fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
+        """mkdir — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn rmdir(path: Path) -> Result<(), FsError>:
+        """rmdir — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn unlink(path: Path) -> Result<(), FsError>:
+        """unlink — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn rename(old: Path, new: Path) -> Result<(), FsError>:
+        """rename — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn symlink(target: Path, link: Path) -> Result<(), FsError>:
+        """symlink — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn readlink(path: Path) -> Result<Path, FsError>:
+        """readlink — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    fn link(target: Path, link: Path) -> Result<(), FsError>:
+        """Hard link — namespace not yet implemented."""
+        Err(FsError.Unsupported)
+
+    # --- Extension probe ---
+
+    fn capabilities() -> CapabilitySet:
+        """Return the full NVFS native capability set (16 capabilities)."""
+        nvfs_native_capabilities()
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        """Return a concrete Extension handle for the requested capability.
+
+        Returns None for capabilities not in the NVFS native set, and for
+        capabilities whose extension structs are not yet fully implemented.
+        In those cases the caller falls back to Err(Unsupported) per the
+        contract in fs_driver_interface.md §4.
+        """
+        match cap:
+            case Capability.Snapshot:
+                Some(Extension.Snapshot(ext: SnapshotExt(
+                    volume_name: self.name,
+                    snap_count:  0
+                )))
+            case Capability.Dedup:
+                Some(Extension.Dedup(ext: DedupExt(
+                    bytes_saved: 0,
+                    scan_active: false
+                )))
+            case Capability.Checksum:
+                Some(Extension.Checksum(ext: ChecksumExt(
+                    algo_tag:  3,
+                    block_size: 4096
+                )))
+            case Capability.SendReceive:
+                Some(Extension.SendReceive(ext: SendRecvExt(
+                    last_sent_gen: 0,
+                    stream_format: 1
+                )))
+            case Capability.Scrub:
+                Some(Extension.Scrub(ext: ScrubExt(
+                    blocks_verified: 0,
+                    errors_found:    0
+                )))
+            case Capability.Compress:
+                Some(Extension.Compress(ext: CompressExt(
+                    default_algo: 0,
+                    enabled:      false
+                )))
+            case Capability.Encrypt:
+                Some(Extension.Encrypt(ext: EncryptExt(
+                    key_id:   0,
+                    key_bits: 256
+                )))
+            case Capability.Reflink:
+                Some(Extension.Reflink(ext: ReflinkExt(
+                    shared_extents: 0,
+                    cow_pending:    false
+                )))
+            case _:
+                None

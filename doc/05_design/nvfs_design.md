@@ -1,8 +1,14 @@
-# NVFS (SimpleFS-NV) Design
+# NVFS (SimpleFS-NV) Design — Version 1 (superseded)
+
+> **SUPERSEDED.** This document is v1, preserved for historical reference.
+> All new work should use **`doc/05_design/nvfs_design_v2.md`** (Phase 9-extend,
+> 2026-04-18), which incorporates Btrfs+ZFS research, birth-generation tracking,
+> Merkle checksums, snapshots, send/receive, encryption, per-chunk RAID, ARC cache,
+> block-group tree split, milestones N6–N8, and the POSIX wrapper design.
 
 - **Feature:** `spostgre-nvfs-storage` (SStack `.sstack/spostgre-nvfs-storage/`)
 - **Phase:** 3-arch
-- **Status:** v0 — Phase 3 design deliverable
+- **Status:** v1 — superseded by `nvfs_design_v2.md`
 - **Last-updated:** 2026-04-18
 - **Author:** NVFS track (Claude solo; Codex unavailable per state file)
 - **Related:**

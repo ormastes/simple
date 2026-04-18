@@ -1,0 +1,419 @@
+# NvfsPosixDriver — POSIX-semantics shim over NVFS arenas.
+#
+# Implements FsDriver for callers that need random write, truncate, and
+# rename-visible semantics without learning about append-only arenas.
+#
+# Capabilities returned: PosixCompat | CaseSensitive | Hardlinks |
+#   SparseFiles | LargeFiles | UnicodeNames | AsyncIo.
+# COW/Snapshot/Checksum/Reflink are deliberately hidden — callers who want
+# arena-level features should use NvfsDriver directly.
+#
+# Phase 9 B2 — doc/05_design/nvfs_posix_wrapper.md.
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension, PosixCompatExt}
+use std.fs_driver.ops.{FsDriver}
+use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl, arena_clone_range_impl}
+use examples.nvfs.src.posix.fd_table.{FdEntry, FdTable}
+use examples.nvfs.src.posix.cow_engine.{CowShadow}
+use examples.nvfs.src.posix.capabilities.{nvfs_posix_capabilities}
+
+# --- Path <-> arena name table --------------------------------------------
+#
+# B2 in-memory name table. N2 replaces this with a B-tree-backed namespace.
+# Each path maps to one arena; unlink removes the mapping but the arena stays
+# alive until all open fds close (ref-counted via FdTable).
+
+struct NameEntry:
+    """In-memory path -> arena mapping."""
+    path:     text
+    arena_id: i64
+
+struct NvfsPosixDriver:
+    """FsDriver impl providing POSIX semantics over NVFS arena storage."""
+    name:      text
+    mounted:   bool
+    read_only: bool
+    fd_table:  FdTable
+    names:     [NameEntry]
+
+impl NvfsPosixDriver:
+
+    static fn new(name: text) -> NvfsPosixDriver:
+        NvfsPosixDriver(
+            name:      name,
+            mounted:   false,
+            read_only: false,
+            fd_table:  FdTable.new(),
+            names:     []
+        )
+
+    fn _find_name(path: Path) -> i64:
+        """Return index in self.names for path.raw, or -1."""
+        var i = 0
+        while i < self.names.len() as i64:
+            if self.names[i].path == path.raw:
+                return i
+            i = i + 1
+        -1
+
+    fn _remove_name(idx: i64):
+        """Swap-remove entry at idx from self.names."""
+        val last = self.names.len() as i64 - 1
+        if idx != last:
+            self.names[idx] = self.names[last]
+        var new_list: [NameEntry] = []
+        var i = 0
+        while i < last:
+            new_list.push(self.names[i])
+            i = i + 1
+        self.names = new_list
+
+    fn _fd_from_handle(handle: FileHandle) -> u32:
+        """Narrow a FileHandle.id to a u32 fd id."""
+        handle.id as u32
+
+impl FsDriver for NvfsPosixDriver:
+
+    # --- Lifecycle ---
+
+    fn mount(opts: MountOptions) -> Result<(), FsError>:
+        self.mounted   = true
+        self.read_only = opts.read_only
+        Ok(())
+
+    fn unmount() -> Result<(), FsError>:
+        self.mounted = false
+        Ok(())
+
+    fn remount(opts: MountOptions) -> Result<(), FsError>:
+        self.read_only = opts.read_only
+        Ok(())
+
+    fn statfs() -> Result<FsStatfs, FsError>:
+        Ok(FsStatfs(
+            total_bytes: 0,
+            free_bytes:  0,
+            avail_bytes: 0,
+            files_total: 0,
+            files_free:  0,
+            block_size:  4096
+        ))
+
+    fn root() -> Result<Inode, FsError>:
+        Ok(Inode(id: 1))
+
+    # --- File I/O ---
+
+    fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        """Open/create a path; allocate fd slot; return FileHandle."""
+        if (not self.mounted):
+            return Err(FsError.InvalidArg)
+        if flags.is_writable() and self.read_only:
+            return Err(FsError.ReadOnly)
+        val existing = self._find_name(path)
+        var arena_id: i64 = -1
+        if existing < 0:
+            arena_id = arena_create_impl(0, 4096)
+            self.names.push(NameEntry(path: path.raw, arena_id: arena_id))
+        else:
+            arena_id = self.names[existing].arena_id
+        val fd = self.fd_table.open(arena_id, flags.bits)
+        Ok(FileHandle(id: fd as u64))
+
+    fn close(handle: FileHandle) -> Result<(), FsError>:
+        """Decrement fd refcount; discard arena if dead and count hit zero."""
+        val fd = self._fd_from_handle(handle)
+        val before_rc = self.fd_table.refcount(fd)
+        val was_dead = match self.fd_table.lookup(fd):
+            case Some(e): e.dead
+            case None:    false
+        val arena_id = match self.fd_table.lookup(fd):
+            case Some(e): e.arena_id
+            case None:    -1
+        val r = self.fd_table.close(fd)
+        match r:
+            case Err(e): return Err(e)
+            case Ok(_): pass_do_nothing
+        if was_dead and before_rc == 1 and arena_id >= 0:
+            val _ = arena_discard_impl(arena_id)
+        Ok(())
+
+    fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(e):
+                val data = arena_readv_impl(e.arena_id, offset, buf.len() as i64)
+                Ok(data.len() as i64)
+            case None: Err(FsError.InvalidArg)
+
+    fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """POSIX write: O_APPEND appends, otherwise CoW-splice at offset."""
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(e):
+                if self.read_only:
+                    return Err(FsError.ReadOnly)
+                val is_append = (e.mode & 1024) != 0
+                if is_append:
+                    val n = arena_append_impl(e.arena_id, buf, 0)
+                    if n < 0:
+                        return Err(FsError.IoError(0))
+                    return Ok(n)
+                # CoW random write: splice at offset, publish-flip, discard old.
+                val total = arena_total_bytes_impl(e.arena_id)
+                if total < 0:
+                    return Err(FsError.InvalidArg)
+                val shadow = CowShadow.new(e.arena_id, offset as u64, buf.len() as u64)
+                val staged = shadow.splice(buf)
+                match staged.commit():
+                    case Ok(new_arena):
+                        self._publish_flip(fd, e.arena_id, new_arena)
+                        Ok(buf.len() as i64)
+                    case Err(x): Err(x)
+            case None: Err(FsError.InvalidArg)
+
+    fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        self.read(handle, offset, buf)
+
+    fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        """Positional write — always CoW-splice at offset (ignore O_APPEND)."""
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(e):
+                if self.read_only:
+                    return Err(FsError.ReadOnly)
+                val shadow = CowShadow.new(e.arena_id, offset as u64, buf.len() as u64)
+                val staged = shadow.splice(buf)
+                match staged.commit():
+                    case Ok(new_arena):
+                        self._publish_flip(fd, e.arena_id, new_arena)
+                        Ok(buf.len() as i64)
+                    case Err(x): Err(x)
+            case None: Err(FsError.InvalidArg)
+
+    fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(e):
+                val size = arena_total_bytes_impl(e.arena_id)
+                val sz = if size < 0: 0 else: size as u64
+                Ok(FileStat(
+                    inode:         e.arena_id as u64,
+                    size:          sz,
+                    blocks:        (sz + 4095) / 4096,
+                    block_size:    4096,
+                    mode:          0o644,
+                    uid:           0,
+                    gid:           0,
+                    nlinks:        1,
+                    atime_ns:      0,
+                    mtime_ns:      0,
+                    ctime_ns:      0,
+                    birth_time_ns: 0
+                ))
+            case None: Err(FsError.InvalidArg)
+
+    fn stat(path: Path) -> Result<FileStat, FsError>:
+        val idx = self._find_name(path)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val arena_id = self.names[idx].arena_id
+        val size = arena_total_bytes_impl(arena_id)
+        val sz = if size < 0: 0 else: size as u64
+        Ok(FileStat(
+            inode:         arena_id as u64,
+            size:          sz,
+            blocks:        (sz + 4095) / 4096,
+            block_size:    4096,
+            mode:          0o644,
+            uid:           0,
+            gid:           0,
+            nlinks:        1,
+            atime_ns:      0,
+            mtime_ns:      0,
+            ctime_ns:      0,
+            birth_time_ns: 0
+        ))
+
+    fn truncate(path: Path, length: i64) -> Result<(), FsError>:
+        """Path-based truncate: CoW-reshape the arena to exactly `length`."""
+        val idx = self._find_name(path)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val arena_id = self.names[idx].arena_id
+        val new_arena = self._truncate_arena(arena_id, length)?
+        self.names[idx] = NameEntry(path: path.raw, arena_id: new_arena)
+        val _ = arena_discard_impl(arena_id)
+        Ok(())
+
+    fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
+        """fd-based truncate: CoW-reshape; publish-flip on the fd slot."""
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(e):
+                val new_arena = self._truncate_arena(e.arena_id, length)?
+                self._publish_flip(fd, e.arena_id, new_arena)
+                Ok(())
+            case None: Err(FsError.InvalidArg)
+
+    fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        val fd = self._fd_from_handle(handle)
+        match self.fd_table.lookup(fd):
+            case Some(_): Ok(())
+            case None:    Err(FsError.InvalidArg)
+
+    fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        self.fsync(handle)
+
+    # --- Namespace ---
+
+    fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        """readdir — in-memory name table stub; full impl deferred to N2."""
+        pass_todo  # doc/05_design/nvfs_posix_wrapper.md §7 (namespace)
+        Err(FsError.Unsupported)
+
+    fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
+        pass_todo  # doc/05_design/nvfs_posix_wrapper.md §7
+        Err(FsError.Unsupported)
+
+    fn rmdir(path: Path) -> Result<(), FsError>:
+        pass_todo  # doc/05_design/nvfs_posix_wrapper.md §7
+        Err(FsError.Unsupported)
+
+    fn unlink(path: Path) -> Result<(), FsError>:
+        """Unlink: drop path mapping; mark every open fd for that arena dead."""
+        val idx = self._find_name(path)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val arena_id = self.names[idx].arena_id
+        self._remove_name(idx)
+        var any_open = false
+        var i = 0
+        while i < self.fd_table.entries.len() as i64:
+            val e = self.fd_table.entries[i]
+            if e.arena_id == arena_id and e.refcount > 0:
+                self.fd_table.mark_dead(i as u32)
+                any_open = true
+            i = i + 1
+        if not any_open:
+            val _ = arena_discard_impl(arena_id)
+        Ok(())
+
+    fn rename(old: Path, new: Path) -> Result<(), FsError>:
+        """Rename: atomic in-memory swap of the name table entry."""
+        val old_idx = self._find_name(old)
+        if old_idx < 0:
+            return Err(FsError.NotFound)
+        val new_idx = self._find_name(new)
+        if new_idx >= 0:
+            val dst_arena = self.names[new_idx].arena_id
+            self._remove_name(new_idx)
+            val _ = arena_discard_impl(dst_arena)
+        val re = self._find_name(old)
+        if re < 0:
+            return Err(FsError.NotFound)
+        val arena_id = self.names[re].arena_id
+        self._remove_name(re)
+        self.names.push(NameEntry(path: new.raw, arena_id: arena_id))
+        Ok(())
+
+    fn symlink(target: Path, link: Path) -> Result<(), FsError>:
+        pass_todo  # doc/05_design/nvfs_posix_wrapper.md §8 (symlinks)
+        Err(FsError.Unsupported)
+
+    fn readlink(path: Path) -> Result<Path, FsError>:
+        pass_todo  # doc/05_design/nvfs_posix_wrapper.md §8 (symlinks)
+        Err(FsError.Unsupported)
+
+    fn link(target: Path, link: Path) -> Result<(), FsError>:
+        """Hard link: alias the name table entry to the same arena_id."""
+        val idx = self._find_name(target)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        if self._find_name(link) >= 0:
+            return Err(FsError.InvalidArg)
+        val arena_id = self.names[idx].arena_id
+        self.names.push(NameEntry(path: link.raw, arena_id: arena_id))
+        Ok(())
+
+    # --- Extension probe ---
+
+    fn capabilities() -> CapabilitySet:
+        nvfs_posix_capabilities()
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        match cap:
+            case Capability.PosixCompat:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(
+                    flags: 0,
+                    mode:  0o644
+                )))
+            case _:
+                None
+
+# --- Internal helpers (kept in a second impl block) -------------------------
+
+impl NvfsPosixDriver:
+
+    fn _publish_flip(fd: u32, old_arena: i64, new_arena: i64):
+        """Atomically swap fd's arena to new_arena; discard old_arena."""
+        val idx = fd as i64
+        if idx >= self.fd_table.entries.len() as i64:
+            return
+        val e = self.fd_table.entries[idx]
+        val updated = FdEntry(
+            arena_id: new_arena,
+            refcount: e.refcount,
+            dead:     e.dead,
+            offset:   e.offset,
+            mode:     e.mode
+        )
+        self.fd_table.entries[idx] = updated
+        # Update name-table entries that pointed to old_arena.
+        var i = 0
+        while i < self.names.len() as i64:
+            if self.names[i].arena_id == old_arena:
+                self.names[i] = NameEntry(
+                    path:     self.names[i].path,
+                    arena_id: new_arena
+                )
+            i = i + 1
+        val _ = arena_discard_impl(old_arena)
+
+    fn _truncate_arena(arena_id: i64, length: i64) -> Result<i64, FsError>:
+        """Return a new arena of exactly `length` bytes based on arena_id.
+
+        Shrink: copy first `length` bytes. Grow: copy all then zero-pad.
+        """
+        if length < 0:
+            return Err(FsError.InvalidArg)
+        val total = arena_total_bytes_impl(arena_id)
+        if total < 0:
+            return Err(FsError.InvalidArg)
+        val new_arena = arena_create_impl(0, 4096)
+        if length <= total:
+            if length > 0:
+                val src = arena_readv_impl(arena_id, 0, length)
+                val n = arena_append_impl(new_arena, src, 0)
+                if n < 0:
+                    return Err(FsError.IoError(0))
+        else:
+            if total > 0:
+                val src = arena_readv_impl(arena_id, 0, total)
+                val n = arena_append_impl(new_arena, src, 0)
+                if n < 0:
+                    return Err(FsError.IoError(0))
+            # Zero-pad the tail.
+            val pad_len = length - total
+            var pad: [u8] = []
+            var i: i64 = 0
+            while i < pad_len:
+                pad.push(0)
+                i = i + 1
+            val n = arena_append_impl(new_arena, pad, 0)
+            if n < 0:
+                return Err(FsError.IoError(0))
+        Ok(new_arena)

@@ -1,0 +1,141 @@
+# @cover examples/nvfs/src/core/pmap.spl 80%
+"""
+# NVFS pmap v2 Unit Tests
+
+**Feature IDs:** #NVFS-N1-PMAP
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design_v2.md §3.1, §17.2
+
+## Overview
+
+Tests for the 80-byte pmap v2 entry: encode/decode round-trip, checksum
+verify passes on good data, fails on corrupted data.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| pmap entry | 80-byte on-disk structure (little-endian) |
+| logical | logical page number |
+| phys | arena_id backing the physical storage |
+| birth_gen | transaction generation when pointer was first written |
+| checksum_algo | CRC32C=0, XXHash64=1, SHA256=2, Blake3=3 |
+| checksum | 32-byte Merkle field; shorter algos left-pad with zeros |
+"""
+
+use std.sspec.*
+
+# ============================================================================
+# Helper: build a minimal pmap entry with a valid CRC32C checksum.
+# ============================================================================
+
+fn _make_entry(logical: u64, phys: i64, offset: u64, len: u64, birth_gen: u64) -> PmapEntry:
+    """Construct a PmapEntry with a CRC32C checksum computed from a dummy block."""
+    val dummy_data: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+    val csum = pmap_entry_checksum_for(dummy_data)
+    PmapEntry(
+        logical:       logical,
+        phys:          phys,
+        offset:        offset,
+        len:           len,
+        birth_gen:     birth_gen,
+        checksum_algo: 0,
+        checksum:      csum
+    )
+
+# ============================================================================
+# Round-trip: encode then decode gives back the same values
+# ============================================================================
+
+describe "pmap v2 — encode/decode round-trip":
+    """
+    ## Round-trip property
+
+    pmap_entry_decode(pmap_entry_encode(e)) must reproduce every field of e.
+    """
+
+    it "round-trip preserves logical and phys fields":
+        val entry = _make_entry(42, 7, 4096, 1, 10)
+        val encoded = pmap_entry_encode(entry)
+        val decoded = pmap_entry_decode(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        val d = decoded.unwrap()
+        expect(d.logical).to_equal(42)
+        expect(d.phys).to_equal(7)
+
+    it "round-trip preserves offset, len, birth_gen":
+        val entry = _make_entry(100, 3, 8192, 5, 77)
+        val encoded = pmap_entry_encode(entry)
+        val decoded = pmap_entry_decode(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        val d = decoded.unwrap()
+        expect(d.offset).to_equal(8192)
+        expect(d.len).to_equal(5)
+        expect(d.birth_gen).to_equal(77)
+
+    it "round-trip preserves checksum_algo tag":
+        val dummy_data: [u8] = [0x01, 0x02]
+        val csum = pmap_entry_checksum_for(dummy_data)
+        val entry = PmapEntry(
+            logical: 1, phys: 1, offset: 0, len: 0, birth_gen: 0,
+            checksum_algo: 0,
+            checksum: csum
+        )
+        val encoded = pmap_entry_encode(entry)
+        val decoded = pmap_entry_decode(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().checksum_algo).to_equal(0)
+
+    it "encoded buffer is exactly 80 bytes":
+        val entry = _make_entry(1, 1, 0, 0, 0)
+        val encoded = pmap_entry_encode(entry)
+        expect(encoded.len() as i64).to_equal(80)
+
+    it "decode fails with InvalidArg when buffer is too short":
+        val short_buf: [u8] = [0x01, 0x02, 0x03]
+        val result = pmap_entry_decode(short_buf)
+        expect(result.is_err()).to_equal(true)
+
+# ============================================================================
+# Checksum verification
+# ============================================================================
+
+describe "pmap v2 — checksum verification":
+    """
+    ## pmap_entry_verify
+
+    verify passes when data matches stored checksum; fails on any byte change.
+    """
+
+    it "verify returns true for data that matches the stored checksum":
+        val data: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+        val csum = pmap_entry_checksum_for(data)
+        val entry = PmapEntry(
+            logical: 5, phys: 2, offset: 0, len: 1, birth_gen: 3,
+            checksum_algo: 0,
+            checksum: csum
+        )
+        expect(pmap_entry_verify(entry, data)).to_equal(true)
+
+    it "verify returns false when data is corrupted (one byte changed)":
+        val data: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+        val csum = pmap_entry_checksum_for(data)
+        val entry = PmapEntry(
+            logical: 5, phys: 2, offset: 0, len: 1, birth_gen: 3,
+            checksum_algo: 0,
+            checksum: csum
+        )
+        val bad_data: [u8] = [0xAB, 0xCD, 0xEF, 0xFF]
+        expect(pmap_entry_verify(entry, bad_data)).to_equal(false)
+
+    it "verify returns false when checksum field has wrong bytes":
+        val data: [u8] = [0x01, 0x02, 0x03]
+        val bad_csum: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF]
+        val entry = PmapEntry(
+            logical: 0, phys: 0, offset: 0, len: 0, birth_gen: 0,
+            checksum_algo: 0,
+            checksum: bad_csum
+        )
+        expect(pmap_entry_verify(entry, data)).to_equal(false)

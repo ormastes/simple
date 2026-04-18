@@ -1,17 +1,111 @@
 # NVFS core — metadata intent log.
 #
-# Small append-only log that captures directory-tree / extent-map
-# mutations so crash recovery can replay them against the last durable
-# checkpoint.
+# N1 milestone (doc/05_design/nvfs_design.md §5.3 + §12):
+#   Append-only in-memory log of intent records. Each record has an
+#   op_code matching §5.3 (1=arena_create, 2=arena_seal, 3=arena_discard, …).
+#   The `arena_seal` path (op_code=2) is the primary scope addition for N1.
+#
+# No real disk I/O. Sequence numbers are monotonic per process lifetime.
+
+# ---------------------------------------------------------------------------
+# Intent record
+# ---------------------------------------------------------------------------
+
+struct IntentRecord:
+    """One log entry (§5.3)."""
+    sequence: u64      # monotonic
+    op_code: u16       # 1=create 2=seal 3=discard 4=publish 5=alloc 6=free
+    flags: u16
+    payload_tag: i64   # arena_id or other op-specific value
+
+# ---------------------------------------------------------------------------
+# Log state
+# ---------------------------------------------------------------------------
+
+var _log: [IntentRecord] = []
+var _seq: u64 = 0
+var _flushed_up_to: u64 = 0
+
+fn _next_seq() -> u64:
+    """Bump and return the next sequence number."""
+    _seq = _seq + 1
+    _seq
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 fn intent_append(payload: [u8]) -> i64:
-    """Append one intent record; return its sequence number."""
-    pass_todo
+    """Append one intent record (raw byte payload); return its sequence number.
+
+    N1: payload is ignored beyond length; op_code defaults to 0 (raw).
+    """
+    val seq = _next_seq()
+    _log.push(IntentRecord(
+        sequence: seq,
+        op_code: 0,
+        flags: 0,
+        payload_tag: 0
+    ))
+    seq as i64
+
+fn intent_append_seal(arena_id: i64) -> u64:
+    """Append an arena_seal record (op_code=2); returns sequence number.
+
+    Called by the arena_seal path so that crash-recovery can replay the seal.
+    """
+    val seq = _next_seq()
+    _log.push(IntentRecord(
+        sequence: seq,
+        op_code: 2,
+        flags: 0,
+        payload_tag: arena_id
+    ))
+    seq
+
+fn intent_append_create(arena_id: i64) -> u64:
+    """Append an arena_create record (op_code=1)."""
+    val seq = _next_seq()
+    _log.push(IntentRecord(
+        sequence: seq,
+        op_code: 1,
+        flags: 0,
+        payload_tag: arena_id
+    ))
+    seq
+
+fn intent_append_discard(arena_id: i64) -> u64:
+    """Append an arena_discard record (op_code=3)."""
+    val seq = _next_seq()
+    _log.push(IntentRecord(
+        sequence: seq,
+        op_code: 3,
+        flags: 0,
+        payload_tag: arena_id
+    ))
+    seq
 
 fn intent_flush(up_to: i64) -> bool:
-    """Force-flush the intent log to and including sequence `up_to`."""
-    pass_todo
+    """Mark all records up to sequence `up_to` as durable (N1: no-op flush)."""
+    _flushed_up_to = up_to as u64
+    true
 
 fn intent_replay_from(checkpoint_gen: i64) -> i64:
-    """Replay intent records past `checkpoint_gen`; return count replayed."""
-    pass_todo
+    """Replay intent records past `checkpoint_gen`; return count replayed.
+
+    N1: returns count of records with sequence > checkpoint_gen in-log.
+    """
+    val threshold = checkpoint_gen as u64
+    var count = 0
+    for rec in _log:
+        if rec.sequence > threshold:
+            count = count + 1
+    count
+
+fn intent_log_len() -> i64:
+    """Return total number of records in the log."""
+    _log.len() as i64
+
+fn intent_latest_seq() -> u64:
+    """Return the latest assigned sequence number (0 if empty)."""
+    _seq

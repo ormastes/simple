@@ -1,0 +1,113 @@
+# spostgre engine — page header + ordering invariant unit tests (M1).
+#
+# Covers: encode/decode PageHeader, CRC32C mismatch detection,
+#         publish_page fails when page_lsn > durable_lsn.
+# Design refs: spostgre_design.md §4.2, §6.5, §9.
+
+use std.sspec.*
+use engine.page.{PageHeader, page_init, page_decode_header, page_encode_header,
+                 page_compute_checksum, page_verify_checksum, page_write,
+                 PAGE_SIZE, PAGE_HDR_LEN}
+use engine.pmap.{PmapState, publish_page}
+use engine.wal.{WalState, wal_append, wal_commit_group}
+use std.spostgre_if.types.{Rel, BlkNo, PhysPtr, TxnId}
+
+describe "Page M1 — encode/decode header":
+    it "page_init writes a valid header with correct lower/upper":
+        var buf: [u8] = [0u8; 8192]
+        val hdr = page_init(buf)
+        expect(hdr.lower).to_equal(PAGE_HDR_LEN as i32)
+        expect(hdr.upper).to_equal(PAGE_SIZE as i32)
+        expect(hdr.special).to_equal(PAGE_SIZE as i32)
+
+    it "page_encode_header and page_decode_header round-trips lsn and generation":
+        var buf: [u8] = [0u8; 8192]
+        val hdr_in = PageHeader(
+            lsn: 42,
+            checksum: 0,
+            flags: 3,
+            lower: 32,
+            upper: 8192,
+            special: 8192,
+            generation: 7)
+        page_encode_header(buf, hdr_in)
+        val hdr_out = page_decode_header(buf)
+        expect(hdr_out.lsn).to_equal(42)
+        expect(hdr_out.generation).to_equal(7)
+        expect(hdr_out.flags).to_equal(3)
+
+    it "page_write stores a valid checksum":
+        var buf: [u8] = [0u8; 8192]
+        val hdr = PageHeader(
+            lsn: 10,
+            checksum: 0,
+            flags: 0,
+            lower: 32,
+            upper: 8192,
+            special: 8192,
+            generation: 1)
+        page_write(buf, hdr)
+        val ok = page_verify_checksum(buf)
+        expect(ok).to_equal(true)
+
+describe "Page M1 — CRC32C mismatch detection":
+    it "verify_checksum returns false when a body byte is corrupted":
+        var buf: [u8] = [0u8; 8192]
+        val hdr = PageHeader(
+            lsn: 1,
+            checksum: 0,
+            flags: 0,
+            lower: 32,
+            upper: 8192,
+            special: 8192,
+            generation: 0)
+        page_write(buf, hdr)
+        # Corrupt a byte in the body area (well past the header)
+        buf[100] = 0xABu8
+        val ok = page_verify_checksum(buf)
+        expect(ok).to_equal(false)
+
+    it "verify_checksum returns true for a freshly initialised page":
+        var buf: [u8] = [0u8; 8192]
+        page_init(buf)
+        val ok = page_verify_checksum(buf)
+        expect(ok).to_equal(true)
+
+describe "Page M1 — WAL-before-pmap-publish ordering invariant":
+    it "publish_page succeeds when page_lsn <= durable_lsn":
+        val state0 = WalState.new(1)
+        val p: [u8] = [1u8]
+        val (lsn1, state1) = wal_append(state0, TxnId(id: 1), p)
+        val wal = wal_commit_group(state1, lsn1)
+        val pmap0 = PmapState.new()
+        val rel = Rel(id: 10)
+        val blk = BlkNo(n: 0)
+        val phys = PhysPtr(arena_id: 1, offset: 0)
+        # page_lsn == durable_lsn == 1 => ok
+        val (ok, _pmap1) = publish_page(wal, pmap0, rel, blk, 1, phys)
+        expect(ok).to_equal(true)
+
+    it "publish_page fails when page_lsn > durable_lsn (ordering violation)":
+        # durable_lsn = 0, page_lsn = 1 => violation
+        val wal = WalState.new(1)
+        val pmap0 = PmapState.new()
+        val rel = Rel(id: 10)
+        val blk = BlkNo(n: 0)
+        val phys = PhysPtr(arena_id: 1, offset: 0)
+        val (ok, _pmap1) = publish_page(wal, pmap0, rel, blk, 1, phys)
+        expect(ok).to_equal(false)
+
+    it "publish_page fails for any lsn > durable_lsn including after commit":
+        val state0 = WalState.new(1)
+        val p: [u8] = [0u8]
+        val (lsn1, state1) = wal_append(state0, TxnId(id: 1), p)
+        val (_lsn2, state2) = wal_append(state1, TxnId(id: 1), p)
+        # Commit only up to lsn1; lsn2 is still pending
+        val wal = wal_commit_group(state2, lsn1)
+        val pmap0 = PmapState.new()
+        val rel = Rel(id: 10)
+        val blk = BlkNo(n: 0)
+        val phys = PhysPtr(arena_id: 1, offset: 0)
+        # page_lsn = 2 > durable_lsn = 1 => violation
+        val (ok, _pmap1) = publish_page(wal, pmap0, rel, blk, 2, phys)
+        expect(ok).to_equal(false)

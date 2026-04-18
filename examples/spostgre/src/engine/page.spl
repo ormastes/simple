@@ -1,19 +1,107 @@
-# spostgre engine — page header + slot directory.
+# spostgre engine — page header + slot directory (M1 implementation).
 #
-# On-disk page format follows spostgre_design.md §4 (logical-page scope).
-# Real encoder / decoder arrives in Phase 6+.
+# On-disk page format follows spostgre_design.md §4.2 (logical-page scope).
+# All multi-byte integers little-endian. Page size 8 KiB (8192 bytes).
+#
+# §4.2 header layout (offset, size, field):
+#   0x00 4  pd_lsn_lo   (u32)  — LSN low word
+#   0x04 4  pd_lsn_hi   (u32)  — LSN high word
+#   0x08 2  pd_checksum (u16)  — CRC32C truncated to 16 bits
+#   0x0a 2  pd_flags    (u16)  — bit0=has_hot, bit1=all_visible
+#   0x0c 2  pd_lower    (u16)  — end of slot array
+#   0x0e 2  pd_upper    (u16)  — start of tuple heap
+#   0x10 2  pd_special  (u16)  — special region offset
+#   0x12 2  pd_pagesize_version (u16) — 0x8004
+#   0x14 4  pd_prune_xid (u32)
+#   0x18 8  pd_generation (u64)
+# Total header = 32 bytes (0x20).
+#
+# CRC32C: inlined — std.common.crypto has no crc32c at M1.
+# LE codec: inlined — std.common.encoding is text-only at M1.
+
+# ---------------------------------------------------------------------------
+# CRC32C (Castagnoli) — same polynomial helper as wal.spl.
+# Duplicated to keep files independently importable at M1.
+# ---------------------------------------------------------------------------
+
+fn _page_crc32c_byte(crc: i32, b: u8) -> i32:
+    """Process one byte through the CRC32C polynomial."""
+    var c = crc xor (b as i32)
+    var i = 0
+    while i < 8:
+        val lsb = c and 1
+        c = c / 2
+        if lsb != 0:
+            c = c xor -2127456392
+        i = i + 1
+    c
+
+fn _page_crc32c(data: [u8]) -> i32:
+    """Compute CRC32C over a byte slice."""
+    var crc = -1
+    var i = 0
+    while i < data.len():
+        crc = _page_crc32c_byte(crc, data[i])
+        i = i + 1
+    crc xor -1
+
+# ---------------------------------------------------------------------------
+# LE codec helpers (page scope).
+# ---------------------------------------------------------------------------
+
+fn _pg_put_u16(buf: [u8], off: i64, v: i32):
+    buf[off + 0] = (v and 255) as u8
+    buf[off + 1] = ((v / 256) and 255) as u8
+
+fn _pg_get_u16(buf: [u8], off: i64) -> i32:
+    (buf[off] as i32) + (buf[off + 1] as i32) * 256
+
+fn _pg_put_u32(buf: [u8], off: i64, v: i32):
+    buf[off + 0] = (v and 255) as u8
+    buf[off + 1] = ((v / 256) and 255) as u8
+    buf[off + 2] = ((v / 65536) and 255) as u8
+    buf[off + 3] = ((v / 16777216) and 255) as u8
+
+fn _pg_get_u32(buf: [u8], off: i64) -> i32:
+    val b0 = buf[off + 0] as i32
+    val b1 = buf[off + 1] as i32
+    val b2 = buf[off + 2] as i32
+    val b3 = buf[off + 3] as i32
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn _pg_put_u64(buf: [u8], off: i64, lo: i32, hi: i32):
+    _pg_put_u32(buf, off, lo)
+    _pg_put_u32(buf, off + 4, hi)
+
+fn _pg_get_u64_lo(buf: [u8], off: i64) -> i32:
+    _pg_get_u32(buf, off)
+
+fn _pg_get_u64_hi(buf: [u8], off: i64) -> i32:
+    _pg_get_u32(buf, off + 4)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+val PAGE_SIZE: i64 = 8192
+val PAGE_HDR_LEN: i64 = 32   # 0x20 — matches §4.2 layout
+val PAGE_VERSION: i32 = 32772  # 0x8004
+
+# ---------------------------------------------------------------------------
+# PageHeader — in-memory view of §4.2 header.
+# ---------------------------------------------------------------------------
 
 struct PageHeader:
-    """Fixed-size page header.
+    """Fixed-size page header (§4.2).
 
     Fields:
-      lsn                 — LSN of the WAL record that last modified this page.
-      checksum            — CRC32C over page body.
-      flags               — bit field (see flag constants below).
-      lower               — free-space low-water (end of slot directory).
-      upper               — free-space high-water (start of tuple area).
-      special             — page-type-specific tail offset.
-      generation          — CoW generation, bumped per page_rewrite.
+      lsn        — LSN (i64) of WAL record that last modified this page.
+      checksum   — CRC32C over page body, truncated to 16 bits (stored as i32).
+      flags      — bit0=has_hot, bit1=all_visible (stored as i32).
+      lower      — end of line-pointer array (byte offset from page start).
+      upper      — start of tuple heap (byte offset from page start).
+      special    — page-type-specific tail offset.
+      generation — CoW generation, bumped per page_rewrite.
     """
     lsn: i64
     checksum: i32
@@ -28,15 +116,124 @@ struct SlotPointer:
     offset: i32
     length: i32
 
-fn page_init(buf: [u8]) -> PageHeader:
-    """Initialize a fresh page buffer; returns the header view."""
-    # @coverage: spostgre_design.md §4
-    pass_todo
-
-fn page_decode_header(buf: [u8]) -> PageHeader:
-    """Decode the header from a page buffer."""
-    pass_todo
+# ---------------------------------------------------------------------------
+# Encode / decode
+# ---------------------------------------------------------------------------
 
 fn page_encode_header(buf: [u8], hdr: PageHeader) -> bool:
-    """Encode a header back into the page buffer."""
-    pass_todo
+    """Encode a PageHeader into buf[0..32] little-endian.
+    @coverage: spostgre_design.md §4.2
+    """
+    val lsn_lo = (hdr.lsn and 2147483647) as i32  # low 31 bits safe; full 64-bit split
+    val lsn_hi = (hdr.lsn / 4294967296) as i32
+    _pg_put_u32(buf, 0, lsn_lo)
+    _pg_put_u32(buf, 4, lsn_hi)
+    _pg_put_u16(buf, 8, hdr.checksum and 65535)
+    _pg_put_u16(buf, 10, hdr.flags and 65535)
+    _pg_put_u16(buf, 12, hdr.lower and 65535)
+    _pg_put_u16(buf, 14, hdr.upper and 65535)
+    _pg_put_u16(buf, 16, hdr.special and 65535)
+    _pg_put_u16(buf, 18, PAGE_VERSION)
+    _pg_put_u32(buf, 20, 0)  # pd_prune_xid — zero at M1
+    val gen_lo = (hdr.generation and 2147483647) as i32
+    val gen_hi = (hdr.generation / 4294967296) as i32
+    _pg_put_u64(buf, 24, gen_lo, gen_hi)
+    true
+
+fn page_decode_header(buf: [u8]) -> PageHeader:
+    """Decode PageHeader from buf[0..32].
+    @coverage: spostgre_design.md §4.2
+    """
+    val lsn_lo = _pg_get_u32(buf, 0) as i64
+    val lsn_hi = _pg_get_u32(buf, 4) as i64
+    val lsn = lsn_lo + lsn_hi * 4294967296
+    val checksum = _pg_get_u16(buf, 8)
+    val flags = _pg_get_u16(buf, 10)
+    val lower = _pg_get_u16(buf, 12)
+    val upper = _pg_get_u16(buf, 14)
+    val special = _pg_get_u16(buf, 16)
+    val gen_lo = _pg_get_u32(buf, 24) as i64
+    val gen_hi = _pg_get_u32(buf, 28) as i64
+    val generation = gen_lo + gen_hi * 4294967296
+    PageHeader(
+        lsn: lsn,
+        checksum: checksum,
+        flags: flags,
+        lower: lower,
+        upper: upper,
+        special: special,
+        generation: generation)
+
+fn page_compute_checksum(buf: [u8]) -> i32:
+    """Compute CRC32C over the page body (bytes 10..) with checksum field zeroed.
+    Returns the low 16 bits as i32 to match the stored u16 field.
+    @coverage: spostgre_design.md §4.2 (pd_checksum)
+    """
+    # Work on a copy with checksum field (offset 8..10) zeroed
+    val n = buf.len()
+    var tmp: [u8] = [0u8; n]
+    var i = 0
+    while i < n:
+        tmp[i] = buf[i]
+        i = i + 1
+    tmp[8] = 0u8
+    tmp[9] = 0u8
+    val crc = _page_crc32c(tmp)
+    crc and 65535
+
+fn page_verify_checksum(buf: [u8]) -> bool:
+    """Return true iff stored pd_checksum matches recomputed CRC32C.
+    @coverage: spostgre_design.md §4.2
+    """
+    val stored = _pg_get_u16(buf, 8)
+    val computed = page_compute_checksum(buf)
+    stored == computed
+
+fn page_init(buf: [u8]) -> PageHeader:
+    """Initialize a fresh page buffer to an empty heap page; return the header.
+    lower = PAGE_HDR_LEN (just past header), upper = PAGE_SIZE, special = PAGE_SIZE.
+    @coverage: spostgre_design.md §4.2
+    """
+    val lower = PAGE_HDR_LEN as i32
+    val upper = PAGE_SIZE as i32
+    val special = PAGE_SIZE as i32
+    val hdr = PageHeader(
+        lsn: 0,
+        checksum: 0,
+        flags: 0,
+        lower: lower,
+        upper: upper,
+        special: special,
+        generation: 0)
+    page_encode_header(buf, hdr)
+    val cs = page_compute_checksum(buf)
+    val hdr2 = PageHeader(
+        lsn: 0,
+        checksum: cs,
+        flags: 0,
+        lower: lower,
+        upper: upper,
+        special: special,
+        generation: 0)
+    page_encode_header(buf, hdr2)
+    hdr2
+
+fn page_read(buf: [u8]) -> PageHeader:
+    """Alias for page_decode_header (trait-surface friendly name)."""
+    page_decode_header(buf)
+
+fn page_write(buf: [u8], hdr: PageHeader):
+    """Write header into buf and recompute checksum.
+    @coverage: spostgre_design.md §4.2
+    """
+    page_encode_header(buf, hdr)
+    val cs = page_compute_checksum(buf)
+    val hdr2 = PageHeader(
+        lsn: hdr.lsn,
+        checksum: cs,
+        flags: hdr.flags,
+        lower: hdr.lower,
+        upper: hdr.upper,
+        special: hdr.special,
+        generation: hdr.generation)
+    page_encode_header(buf, hdr2)

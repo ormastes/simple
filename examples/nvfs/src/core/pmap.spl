@@ -1,0 +1,279 @@
+# NVFS pmap v2 — 80-byte page-map entry (§17.2 of nvfs_design_v2.md).
+#
+# Layout (all fields little-endian):
+#
+#   offset  size  field
+#   0x00    8     logical     (u64)  — logical page number
+#   0x08    8     phys        (i64)  — physical arena id (ArenaId)
+#   0x10    8     offset      (u64)  — physical byte offset within arena
+#   0x18    8     len         (u64)  — page_generation / CoW generation (v1 field retained)
+#   0x20    8     birth_gen   (u64)  — NEW: txg when this pointer was first written
+#   0x28    1     checksum_algo (u8) — NEW: ChecksumAlgo tag (see enum below)
+#   0x29    3     reserved          — zero-filled padding
+#   0x2C    4     flags       (u32) — bit0=blob_pointer, bit1=evicted (v1 bits retained)
+#   0x30    32    checksum    (u8[32]) — Merkle checksum of target block (left-padded)
+#   Total: 80 bytes
+
+use std.fs_driver.error.{FsError}
+
+# ---------------------------------------------------------------------------
+# ChecksumAlgo tag
+# ---------------------------------------------------------------------------
+
+enum ChecksumAlgo:
+    """Checksum algorithm tag stored in pmap entry checksum_algo byte.
+
+    CRC32C   — 4 bytes used; fast, adequate for accidental corruption.
+    XXHash64 — 8 bytes used; fast, good non-crypto hash.
+    SHA256   — 32 bytes used; cryptographic; required for raw-send auth.
+    Blake3   — 32 bytes used; default for new volumes; SIMD-friendly.
+    """
+    CRC32C
+    XXHash64
+    SHA256
+    Blake3
+
+impl ChecksumAlgo:
+    fn tag() -> u8:
+        """Return the on-disk tag byte for this algorithm."""
+        match self:
+            case CRC32C:   0
+            case XXHash64: 1
+            case SHA256:   2
+            case Blake3:   3
+
+    static fn from_tag(tag: u8) -> Result<ChecksumAlgo, FsError>:
+        """Decode an on-disk tag byte back to a ChecksumAlgo."""
+        if tag == 0:
+            return Ok(ChecksumAlgo.CRC32C)
+        if tag == 1:
+            return Ok(ChecksumAlgo.XXHash64)
+        if tag == 2:
+            return Ok(ChecksumAlgo.SHA256)
+        if tag == 3:
+            return Ok(ChecksumAlgo.Blake3)
+        Err(FsError.InvalidArg)
+
+# ---------------------------------------------------------------------------
+# PmapEntry — one 80-byte pmap record
+# ---------------------------------------------------------------------------
+
+struct PmapEntry:
+    """v2 pmap entry. Exactly 80 bytes on disk (little-endian).
+
+    logical       — logical page number addressed by this entry.
+    phys          — arena id (opaque i64) owning the physical backing.
+    offset        — byte offset within the arena.
+    len           — CoW generation (page_generation from v1; retained).
+    birth_gen     — transaction generation when this pointer was first written.
+    checksum_algo — algorithm used to compute checksum (see ChecksumAlgo).
+    checksum      — 32-byte Merkle checksum of the target block (left-padded zeros).
+    """
+    logical:       u64
+    phys:          i64
+    offset:        u64
+    len:           u64
+    birth_gen:     u64
+    checksum_algo: u8
+    checksum:      [u8]   # exactly 32 bytes; [u8;32] not yet supported
+
+# ---------------------------------------------------------------------------
+# Encode helpers
+# ---------------------------------------------------------------------------
+
+fn _put_u64_le(buf: [u8], off: i64, v: u64):
+    """Write v as 8 LE bytes into buf starting at off (in-place push to buf slots)."""
+    var i = 0
+    var x = v
+    while i < 8:
+        buf[off + i] = (x & 0xFF) as u8
+        x = x / 256
+        i = i + 1
+
+fn _put_u32_le(buf: [u8], off: i64, v: u32):
+    """Write v as 4 LE bytes into buf starting at off."""
+    var i = 0
+    var x = v
+    while i < 4:
+        buf[off + i] = (x & 0xFF) as u8
+        x = x / 256
+        i = i + 1
+
+fn _get_u64_le(buf: [u8], off: i64) -> u64:
+    """Read 8 LE bytes from buf starting at off; return u64."""
+    var result: u64 = 0
+    var shift: u64 = 1
+    var i = 0
+    while i < 8:
+        result = result + (buf[off + i] as u64) * shift
+        shift = shift * 256
+        i = i + 1
+    result
+
+fn _get_u32_le(buf: [u8], off: i64) -> u32:
+    """Read 4 LE bytes from buf starting at off; return u32."""
+    var result: u32 = 0
+    var shift: u32 = 1
+    var i = 0
+    while i < 4:
+        result = result + (buf[off + i] as u32) * shift
+        shift = shift * 256
+        i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn pmap_entry_encode(entry: PmapEntry) -> [u8]:
+    """Serialize entry to an 80-byte little-endian byte buffer.
+
+    checksum must contain at least 32 bytes; excess bytes are ignored.
+    If shorter, remaining checksum bytes are zero-padded.
+    """
+    # Build 80-byte buffer pre-filled with zeros.
+    var buf: [u8] = []
+    var i = 0
+    while i < 80:
+        buf.push(0)
+        i = i + 1
+
+    # 0x00: logical (u64)
+    _put_u64_le(buf, 0, entry.logical)
+    # 0x08: phys (i64 stored as u64 bit-cast)
+    _put_u64_le(buf, 8, entry.phys as u64)
+    # 0x10: offset (u64)
+    _put_u64_le(buf, 16, entry.offset)
+    # 0x18: len / page_generation (u64)
+    _put_u64_le(buf, 24, entry.len)
+    # 0x20: birth_gen (u64)
+    _put_u64_le(buf, 32, entry.birth_gen)
+    # 0x28: checksum_algo (u8); 0x29-0x2B already zero (reserved)
+    buf[40] = entry.checksum_algo
+    # 0x2C: flags (u32) — always 0 for now (v2 default)
+    _put_u32_le(buf, 44, 0)
+    # 0x30: checksum (32 bytes)
+    var ci = 0
+    while ci < 32:
+        if ci < entry.checksum.len() as i64:
+            buf[48 + ci] = entry.checksum[ci]
+        ci = ci + 1
+
+    buf
+
+fn pmap_entry_decode(bytes: [u8]) -> Result<PmapEntry, FsError>:
+    """Deserialize a PmapEntry from an 80-byte little-endian buffer.
+
+    Returns Err(InvalidArg) if bytes.len() < 80.
+    Returns Err(Corrupt) if checksum_algo tag is unrecognised.
+    """
+    if bytes.len() as i64 < 80:
+        return Err(FsError.InvalidArg)
+
+    val logical   = _get_u64_le(bytes, 0)
+    val phys_raw  = _get_u64_le(bytes, 8)
+    val offset    = _get_u64_le(bytes, 16)
+    val len       = _get_u64_le(bytes, 24)
+    val birth_gen = _get_u64_le(bytes, 32)
+    val algo_tag  = bytes[40]
+    # bytes[41..43] reserved — ignored on read
+    # bytes[44..47] flags — read but not exposed in v2 struct yet
+    var checksum: [u8] = []
+    var ci = 0
+    while ci < 32:
+        checksum.push(bytes[48 + ci])
+        ci = ci + 1
+
+    # Validate algo tag
+    val _algo_check = ChecksumAlgo.from_tag(algo_tag)?
+
+    Ok(PmapEntry(
+        logical:       logical,
+        phys:          phys_raw as i64,
+        offset:        offset,
+        len:           len,
+        birth_gen:     birth_gen,
+        checksum_algo: algo_tag,
+        checksum:      checksum
+    ))
+
+fn pmap_entry_verify(entry: PmapEntry, data: [u8]) -> bool:
+    """Recompute checksum of data and compare with entry.checksum.
+
+    Returns true if the stored checksum matches the recomputed one.
+    For CRC32C and XXHash64, only the first N bytes of the 32-byte field
+    are significant; the rest are expected to be zero-padded.
+
+    N1 implementation: uses the same lightweight polynomial used by
+    superblock._crc_of — not the real CRC32C. A real CRC32C/Blake3
+    implementation will replace this in N2.
+    """
+    val stored = entry.checksum
+    if stored.len() as i64 < 32:
+        return false
+
+    # Recompute: sum all data bytes modulo 2^32, store as 4-byte LE in slot [28..31].
+    var acc: u64 = 0
+    var di = 0
+    while di < data.len() as i64:
+        acc = (acc + data[di] as u64) % 0xFFFFFFFF
+        di = di + 1
+
+    # CRC32C / generic: compare only last 4 bytes of checksum field.
+    val algo_tag = entry.checksum_algo
+    # All algo styles: write result into bytes [28..31] and compare.
+    val b0 = (acc & 0xFF) as u8
+    val b1 = ((acc / 256) & 0xFF) as u8
+    val b2 = ((acc / 65536) & 0xFF) as u8
+    val b3 = ((acc / 16777216) & 0xFF) as u8
+
+    # For CRC32C (tag=0): only last 4 bytes matter; first 28 must be zero.
+    if algo_tag == 0:
+        var ok = true
+        var pi = 0
+        while pi < 28:
+            if stored[pi] != 0:
+                ok = false
+            pi = pi + 1
+        if (not ok):
+            return false
+        return (stored[28] == b0 and stored[29] == b1 and stored[30] == b2 and stored[31] == b3)
+
+    # For other algos (XXHash64, SHA256, Blake3): full 32-byte compare.
+    # N1: we only populate bytes 28-31; bytes 0-27 must be zero.
+    var ok2 = true
+    var pi2 = 0
+    while pi2 < 28:
+        if stored[pi2] != 0:
+            ok2 = false
+        pi2 = pi2 + 1
+    if (not ok2):
+        return false
+    (stored[28] == b0 and stored[29] == b1 and stored[30] == b2 and stored[31] == b3)
+
+fn pmap_entry_checksum_for(data: [u8]) -> [u8]:
+    """Compute the N1 CRC32C-style checksum of data; returns 32-byte left-padded buffer.
+
+    Helper used by tests and the driver to build a PmapEntry with a valid checksum.
+    """
+    var acc: u64 = 0
+    var di = 0
+    while di < data.len() as i64:
+        acc = (acc + data[di] as u64) % 0xFFFFFFFF
+        di = di + 1
+
+    val b0 = (acc & 0xFF) as u8
+    val b1 = ((acc / 256) & 0xFF) as u8
+    val b2 = ((acc / 65536) & 0xFF) as u8
+    val b3 = ((acc / 16777216) & 0xFF) as u8
+
+    var out: [u8] = []
+    var i = 0
+    while i < 28:
+        out.push(0)
+        i = i + 1
+    out.push(b0)
+    out.push(b1)
+    out.push(b2)
+    out.push(b3)
+    out

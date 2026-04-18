@@ -48,6 +48,13 @@
 - [x] 7-verify (QA) — 2026-04-18
 - [x] 7.5-remediate (post-Phase-7 fixes: research doc regen + submodule gitlink registration) — 2026-04-18
 - [x] 8-ship (Release Mgr) — 2026-04-18
+- [ ] 9-extend (NVFS ← Btrfs/ZFS feature parity + SimpleOS shared FS driver interface + POSIX-over-NVFS wrapper) — started 2026-04-18
+
+### Phase 9 additional requirement (added 2026-04-18 mid-dispatch)
+- **POSIX-over-NVFS wrapper**: NVFS's native arena_* API is append-oriented (seal + discard + clone_range). POSIX expects random-write + truncate + pwrite-at-offset semantics. Even if the emulation is slow, a POSIX compat wrapper must exist so any POSIX-shaped caller (libc, SimpleOS userspace, external tools) can talk to NVFS without knowing about arenas.
+  - Translation patterns to support: `pwrite` at arbitrary offset → arena copy-on-write (copy-to-new-arena, splice, discard old), `truncate` → arena_seal + new shorter arena, `rename` → manifest atomic swap, `unlink` with open handle → defer arena_discard until last ref drops, `mmap(MAP_SHARED,PROT_WRITE)` → emulate via page-fault into a COW shadow arena flushed on msync.
+  - Must be a separate module (`src/lib/nogc_sync_mut/fs/nvfs_posix/` main-repo side; impl in submodule) so callers explicitly opt in to the slow compat layer rather than accidentally using it.
+  - Phase 9 design agent must include this in both the NVFS design update AND the shared FS driver interface design (as the "POSIX-compat shim" capability).
 
 ## Phase Outputs
 
@@ -632,3 +639,253 @@ All ACs verified PASS. Feature delivered at parent commit `46660a19ac56ab89a0c70
 - [x] AC-9: Both private GH repos exist (`ormastes/simple-spostgre`, `ormastes/simple-nvfs`); `.gitmodules` carries both entries; Phase-5 skeleton commits pushed (spostgre `1c219b2`, nvfs `959af03`); remote SHAs reachable. Gitlink-vs-tree deviation per ship summary above — does not affect AC-9's "scaffold commit pushed to main" requirement.
 
 Phase 8 complete. Feature closed.
+
+---
+
+## Phase Outputs
+
+### 9-extend
+
+**Completed:** 2026-04-18. Design consolidation integrating Btrfs + ZFS research with the
+shared FS driver interface and POSIX-over-NVFS wrapper.
+
+#### Design doc manifest
+
+| Path | Lines | MD5 |
+|---|---|---|
+| `doc/05_design/nvfs_design_v2.md` | 798 | `83e521222b3207544c7ce36cf6d3b1f3` |
+| `doc/05_design/fs_driver_interface.md` | 586 | `d1c4da523ddd191e0d920794a6de957e` |
+| `doc/05_design/nvfs_posix_wrapper.md` | 476 | `2d729ca73e2e9126fd43536a6cca5798` |
+
+`doc/05_design/nvfs_design.md` — updated header: marked superseded, points to v2.
+
+#### Top 5 decisions committed
+
+1. **pmap entry widens to 80 bytes** — +8 birth_gen, +1 checksum_algo tag, +32 checksum
+   (blake3-wide). v1's 40-byte entry is incompatible; superblock magic bumped to
+   `NVFS0002`. Offline migration tool required for v1 → v2 upgrade.
+
+2. **Option E' + G-inspired DriverInstance** — `FsDriver` trait + `DriverInstance` enum
+   (`Fat32`, `Nvfs`, `NvfsPosix`, `RamFs`); exhaustive `match` dispatch; no `dyn`;
+   `Extension` enum closed-world; `CapabilitySet` bitmask for cheap pre-probe.
+
+3. **POSIX shim is opt-in only** — `NvfsPosixDriver` is a separate `DriverInstance`
+   variant. `NvfsDriver.probe(Capability::PosixCompat)` returns `None`. The VFS layer
+   never silently inserts the shim. Callers must explicitly mount `DriverType::NvfsPosix`.
+
+4. **Block-group tree from day one (N1)** — isolates `BLOCK_GROUP_ITEM` records from the
+   extent tree, enabling O(block_groups) mount instead of O(extents). No retrofit cost.
+
+5. **RAID5/6 explicitly skipped** — per-chunk RAID supports Single / Dup / Mirror2 /
+   Mirror3 / Mirror4 only. Parity RAID deferred until a stripe-journal or
+   zoned-device-alignment solution is designed (post-N8).
+
+#### Capability catalogue summary (22 capabilities)
+
+`COW`, `Snapshot`, `Clone`, `Dedup`, `Checksum`, `SelfHeal`, `SendReceive`, `Compress`,
+`Encrypt`, `Quota`, `Reflink`, `Atime`, `Xattr`, `Acl`, `PosixCompat`, `HardLink`,
+`SymLink`, `Sparse`, `CaseSensitive`, `Verity`, `L2Arc`, `Scrub`.
+
+FAT32 supports none. NVFS-native supports 16 at N4+ (Compress, Quota, Verity, L2Arc
+future). NVFS-POSIX supports all that NVFS-native supports plus `PosixCompat`.
+
+#### Cross-reference status
+
+All three new docs cross-reference each other by absolute path. Each doc also
+cross-references `nvfs/svllm_requirements.md`, `nvfs/from_spostgre.md`, and
+`spostgre_design.md`. Cross-reference matrix is complete.
+
+#### POSIX-wrapper opt-in discipline
+
+The shim is never picked accidentally. Two enforcement points:
+1. `DriverType::NvfsPosix` must be specified at mount time.
+2. `NvfsDriver.probe(Capability::PosixCompat)` returns `None` — a caller querying a
+   native mount cannot accidentally receive POSIX-shim semantics.
+Write amplification costs are documented per-operation (§4 of `nvfs_posix_wrapper.md`).
+Acceptable workloads: read-mostly, append-heavy, small-files-infrequent-overwrite.
+Random-write hot loops must use the native NVFS API.
+
+
+### 9.5-formal-verification
+**Done 2026-04-17.**
+
+**Abstract.** Phase 9.5 delivered a Lean 4 state model of NVFS plus
+preservation theorems for ten state-integrity invariants (I1–I10) and a
+placeholder crash-refinement theorem for `checkpoint_commit`. The Lean
+project builds cleanly (`lake build` success, Lean 4.29.1, no mathlib
+dependency) with `sorry`-stubbed proofs for the harder cases. A research
+doc surveys prior art (FSCQ, Yggdrasil, Ivy/TLA+, Perennial) and pins
+scope. A BDD `invariants.feature` file encodes each invariant as a
+property-test scenario for the future QuickCheck-style runner.
+
+**Files produced:**
+
+| Path | Lines | Purpose |
+|---|---|---|
+| `doc/01_research/nvfs_formal_verification.md` | 315 | Prior-art survey + scope recommendation + crash-refinement template |
+| `formal/nvfs/lakefile.toml` | 5 | Lake project config (no mathlib) |
+| `formal/nvfs/lean-toolchain` | 1 | `leanprover/lean4:v4.29.1` |
+| `formal/nvfs/Nvfs.lean` | ~22 | Top-level re-export facade |
+| `formal/nvfs/Nvfs/Basic.lean` | ~75 | `ArenaId`, `StorageClass` (6), `Durability`, `WalOp`, `FsError` |
+| `formal/nvfs/Nvfs/State.lean` | ~105 | `Arena`, `PmapEntry`, `CheckpointRoot`, `Superblock`, `WalRecord`, `Snapshot`, `FsState`, `FsState.empty` |
+| `formal/nvfs/Nvfs/Invariants.lean` | ~170 | I1..I10 in `Prop` + `Bool` form, `AllInvariants` aggregate |
+| `formal/nvfs/Nvfs/Ops.lean` | ~220 | 11 transitions: `arena_create`/`_append`/`_readv`/`_seal`/`_discard`/`_clone_range`, `pmap_publish`, `wal_append`, `checkpoint_commit`, `mount`/`unmount` |
+| `formal/nvfs/Nvfs/Theorems.lean` | ~275 | Preservation theorems + `crash` + `checkpoint_commit_crash_refines` |
+| `test/features/nvfs/invariants.feature` | 53 | 10 property-test scenarios + aggregate |
+
+**Invariants — proof status** (as reflected by actual `sorry` count in
+`Theorems.lean`; per-invariant granularity is coarser than per-op
+because most theorems bundle all 10 sub-obligations):
+
+| Invariant | Per-invariant lemma proved? | Bundled in `*_preserves_all`? | Status |
+|---|---|---|---|
+| I1 pmap-entries-live | `arena_create_preserves_I1` + `I1_frame` | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I2 seal-monotonic | `arena_create_preserves_I2` + `I2_frame` | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I3 refcount-consistent | `I3_frame`; arena_create has targeted sub-`sorry` for fresh-arena branch | closed in wal_append, checkpoint_commit | partial |
+| I4 wal-lsn-monotonic | `I4_frame`, `arena_create_preserves_I4`, `wal_append_preserves_I4` (full inductive proof via `walStrictlyIncreasing_append`) | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I5 wal-before-publish | `I5_frame`, `arena_create_preserves_I5` | closed in arena_create, wal_append (via `List.mem_append_left`), checkpoint_commit | partial |
+| I6 superblock-one-valid | `I6_frame`, `arena_create_preserves_I6`; closed for `checkpoint_commit` via case on `sb.active` (new replica has `validChecksum := true` unconditionally) | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I7 checkpoint-roots-consistent | `I7_frame`, `arena_create_preserves_I7`; closed for `checkpoint_commit` from the triple `arenaLive` guard | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I8 extent-mapping-injective | `I8_frame`, `arena_create_preserves_I8` | closed in arena_create, wal_append, checkpoint_commit | partial |
+| I9 reflink-refcount-matches | `I9_frame`; arena_create has targeted sub-`sorry` for fresh-arena branch | closed in wal_append, checkpoint_commit | partial |
+| I10 snapshot-arena-pinned | `I10_frame`, `arena_create_preserves_I10` | closed in arena_create, wal_append, checkpoint_commit | partial |
+
+**Op preservation theorems** (`*_preserves_all`):
+
+| Op | Status |
+|---|---|
+| `arena_create_preserves_all` | **partial-proved** (I1/I2/I4/I5/I6/I7/I8/I10 closed; I3/I9 closed on existing-arena branch, sub-`sorry` only on fresh-arena branch awaiting a "freshness-vs-refs" lemma) |
+| `arena_append_preserves_all` | `sorry` (pure `bytes` frame; needs `List.map`-preservation helper) |
+| `arena_seal_preserves_all` | `sorry` (`List.map`-preservation helper needed) |
+| `arena_discard_preserves_all` | `sorry` (I1 needs the "pmapRefs ≤ refcount = 0 ⇒ no pmap entry" step) |
+| `arena_clone_range_preserves_all` | `sorry` (I8 genuinely needs op strengthening) |
+| `pmap_publish_preserves_all` | `sorry` (I8 needs op strengthening) |
+| `wal_append_preserves_all` + `wal_append_preserves_I4` | **proved** (I4 via `walStrictlyIncreasing_append` inductive lemma; I5 via `List.mem_append_left`) |
+| `checkpoint_commit_preserves_all` | **proved** (I6 via case on `sb.active`; I7 from `arenaLive` guard; rest frame) |
+| `mount_preserves_all` | proved |
+| `unmount_preserves_all` | proved |
+| `checkpoint_commit_crash_refines` | **closed trivially** (`⟨rfl, rfl⟩`); the intended refinement statement still needs linearisation-point machinery (research §5.2) |
+
+Aggregate: **6 `sorry` warnings in `Theorems.lean`** (was 10), **0 build errors**.
+
+**`lake build` result:**
+
+```
+⚠ Built Nvfs.Theorems  (6 sorry warnings)
+✔ Built Nvfs
+Build completed successfully (8 jobs).
+```
+
+Lean toolchain: `leanprover/lean4:v4.29.1` via elan. No mathlib.
+
+**Pointers for follow-up work:**
+
+1. Close I1/I2/I4/I6 `sorry`s across all ops — per research §4.2 these
+   are 1–5-line proofs per op once the frame lemmas are in place.
+2. Extract an `arenaLive_cons_preserves` monotonicity lemma and close
+   the remaining I1/I3/I7/I9/I10 sub-cases of `arena_create_preserves_all`.
+3. Strengthen `pmap_publish` to enforce I8 on insert (or relax I8 to
+   a "post-compaction" invariant), then close
+   `pmap_publish_preserves_all`.
+4. Replace placeholder `crash` function with a linearisation-point-
+   parameterised crash relation; restate `checkpoint_commit_crash_refines`
+   per research §5.2.
+5. Hook the BDD `invariants.feature` up to a generator via the
+   language runner — each scenario then becomes a property test.
+
+No commits made (per task rules).
+
+### 9.5b proof closure pass
+
+**Done 2026-04-17.**
+
+**Final `sorry` count:** 6 (down from 10; four declaration-level `sorry`s
+closed, plus two inner sub-`sorry`s remain inside
+`arena_create_preserves_all`).
+
+**Per-invariant closure delta** (op-level `_preserves_all` bundle
+closures):
+
+| Theorem | Before | After |
+|---|---|---|
+| `arena_create_preserves_all` | partial (3 of 10 framed) | partial (8 of 10 closed; 2 inner sub-`sorry`s on fresh-arena I3/I9) |
+| `arena_seal_preserves_all` | `sorry` | `sorry` (unchanged) |
+| `arena_append_preserves_all` | `sorry` | `sorry` (unchanged) |
+| `arena_discard_preserves_all` | `sorry` | `sorry` (unchanged) |
+| `arena_clone_range_preserves_all` | `sorry` | `sorry` (unchanged) |
+| `pmap_publish_preserves_all` | `sorry` | `sorry` (unchanged) |
+| `wal_append_preserves_I4` | `sorry` | **proved** |
+| `wal_append_preserves_all` | `sorry` | **proved** |
+| `checkpoint_commit_preserves_all` | `sorry` | **proved** |
+| `checkpoint_commit_crash_refines` | `sorry` | **trivially closed** (`⟨rfl, rfl⟩`; intended statement still pending) |
+
+**Helper lemmas added to `Theorems.lean`:**
+
+- `arenaLive_cons_preserves` — monotonicity under prepend
+- `I1_frame` through `I10_frame` — generic frame lemmas (one per invariant)
+- `arena_create_preserves_I1` / `_I5` / `_I7` / `_I8` / `_I10` — per-invariant arena_create proofs
+- `walStrictlyIncreasing_append` — inductive lemma for appending a record whose LSN exceeds the last
+
+**State-model changes:** None.  The task noted a possible need to add
+`entry.birth_lsn`, but the existing `birthGen` field on `PmapEntry`
+plus the op guard (`r.birthGen = args.birthGen ∧ r.lsn ≤ durableLsn`)
+already exactly match I5 — no schema change required.
+
+**Biggest remaining obstacles:**
+
+1. **`List.map`-preservation helper lemma.**  `arena_seal`,
+   `arena_append`, `arena_discard` all update one arena via
+   `s.arenas.map (fun x => if x.id == ar.id then ar' else x)`.  Every
+   `*_preserves_all` bundle for these ops requires a reusable lemma
+   "for `x ∈ s'.arenas`, there exists `y ∈ s.arenas` with matching
+   `id`, `discarded`, `refcount`; and if `y.id ≠ ar.id` then `y = x`".
+   Once this helper is in place, each op's `_preserves_all` should
+   close in ~30-60 lines.  Attempted inline in this pass but ran into
+   an `all_goals first | ... | ...` mismatch; backed out in favor of a
+   clean scope-reduced commit.
+
+2. **"Fresh id ⇒ no refs" lemma for `arena_create`.**  The `_preserves_all`
+   bundle has two inner sub-`sorry`s — one each for the fresh-arena
+   branch of I3 and I9.  Proving these requires chaining the op's
+   freshness guard (`s.arenas.any (· id == args.id) = false`) with I1
+   at `s` to show `arenaPmapRefs s args.id = 0`.  A sketched proof via
+   `List.filter_cons_of_neg` was verified in isolation but not
+   plumbed in due to the additional subtlety for `arenaSnapRefs`
+   (snapshots may pin arena-ids that don't currently exist — this
+   would need either an extra "snapshot-ids-exist" invariant added to
+   the model, or relaxing I3 to exclude pinned ids).
+
+3. **I8 enforcement in `pmap_publish` / `arena_clone_range`.**  Neither
+   op currently refuses colliding `(phys, offset)` pairs, so I8 is
+   not preserved without op strengthening.  Design decision
+   pending: either tighten the op bodies to reject such collisions,
+   or reformulate I8 as a post-compaction invariant.  This is a model
+   question, not a Lean question.
+
+**Biggest open questions (appended):**
+
+4. Whether to introduce an auxiliary invariant "`∀ sn ∈ snapshots, ∀ a ∈ sn.pinned, ∃ ar ∈ arenas, ar.id = a`".  This would close the I3/I9 fresh-arena sub-sorries but adds maintenance burden on every snapshot-producing op.
+
+5. Whether the current `walStrictlyIncreasing` definition (pairwise
+   strict on a 2-element recursion) is the right shape — the
+   inductive helper proved here works, but a `List.Pairwise (· < ·)`
+   formulation might be simpler going forward.
+
+**Verbatim `lake build` tail:**
+
+```
+⚠ [6/8] Replayed Nvfs.Theorems
+warning: Nvfs/Theorems.lean:227:8: declaration uses `sorry`
+warning: Nvfs/Theorems.lean:272:8: declaration uses `sorry`
+warning: Nvfs/Theorems.lean:281:8: declaration uses `sorry`
+warning: Nvfs/Theorems.lean:288:8: declaration uses `sorry`
+warning: Nvfs/Theorems.lean:295:8: declaration uses `sorry`
+warning: Nvfs/Theorems.lean:302:8: declaration uses `sorry`
+Build completed successfully (8 jobs).
+```
+
+Line 227 is `arena_create_preserves_all` (two inner sub-`sorry`s);
+272, 281, 288, 295, 302 are `arena_seal`, `arena_append`,
+`arena_discard`, `arena_clone_range`, `pmap_publish` bundles.
+
+No commits made (per task rules).

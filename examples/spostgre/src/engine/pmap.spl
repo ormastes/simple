@@ -1,10 +1,18 @@
-# spostgre engine — page-indirection map (blk -> PhysPtr).
+# spostgre engine — page-indirection map (blk -> PhysPtr) (M1 implementation).
 #
-# Publishes new page versions atomically. Uses capability-gated
-# CompareAndWrite path when available (see storage.capability), plain
-# write-once-new-entry otherwise.
+# Publishes new page versions. At M1 the pmap is an in-memory list of
+# PmapEntry values; no real NVFS atomic_pointer_record_publish is issued.
+#
+# Key invariant (spostgre_design.md §6.5, §9 step 4):
+#   pmap_publish MUST be called only after the WAL record for the change is
+#   durable (wal.durable_lsn >= the page's page_lsn). publish_page enforces
+#   this by returning false (ordering-violation signal) rather than panicking,
+#   so unit tests can assert the invariant with expect(...).to_equal(false).
 
 use std.spostgre_if.types.{Rel, BlkNo, PhysPtr, Lsn}
+
+# Import WAL state for the ordering guard.
+use engine.wal.{WalState}
 
 struct PmapEntry:
     """One pmap row: (rel, blk) -> physptr at generation."""
@@ -14,11 +22,62 @@ struct PmapEntry:
     offset: i64
     generation: i64
 
-fn pmap_lookup(rel: Rel, blk: BlkNo) -> PhysPtr:
-    """Look up the current physical pointer for (rel, blk)."""
-    pass_todo
+struct PmapState:
+    """In-memory page-indirection map (M1: growable list)."""
+    entries: [PmapEntry]
 
-fn pmap_publish(rel: Rel, blk: BlkNo, phys: PhysPtr, wal_lsn: Lsn) -> bool:
-    """Atomically bind (rel, blk) -> phys. Must be ordered after WAL flush."""
-    # @coverage: spostgre_design.md §6.5 (WAL-before-publish invariant)
-    pass_todo
+    static fn new() -> PmapState:
+        PmapState(entries: [])
+
+fn pmap_lookup(pmap: PmapState, rel: Rel, blk: BlkNo) -> PhysPtr:
+    """Look up the current physical pointer for (rel, blk).
+    Returns PhysPtr.null() if not found.
+    @coverage: spostgre_design.md §4.5
+    """
+    var i = 0
+    var result = PhysPtr(arena_id: -1, offset: 0)
+    while i < pmap.entries.len():
+        val e = pmap.entries[i]
+        if e.rel_id == rel.id and e.blk == blk.n:
+            result = PhysPtr(arena_id: e.arena_id, offset: e.offset)
+        i = i + 1
+    result
+
+fn pmap_publish(pmap: PmapState, rel: Rel, blk: BlkNo, phys: PhysPtr, wal_lsn: Lsn) -> (bool, PmapState):
+    """Bind (rel, blk) -> phys. Returns (true, updated_pmap) on success.
+
+    NOTE: At M1 this does NOT check the WAL ordering invariant itself —
+    that check lives in publish_page which takes the WalState.
+    @coverage: spostgre_design.md §6.5
+    """
+    val new_entry = PmapEntry(
+        rel_id: rel.id,
+        blk: blk.n,
+        arena_id: phys.arena_id,
+        offset: phys.offset,
+        generation: 0)
+    val old_len = pmap.entries.len()
+    var new_entries: [PmapEntry] = [PmapEntry(rel_id: 0, blk: 0, arena_id: 0, offset: 0, generation: 0); old_len + 1]
+    var i = 0
+    while i < old_len:
+        new_entries[i] = pmap.entries[i]
+        i = i + 1
+    new_entries[old_len] = new_entry
+    (true, PmapState(entries: new_entries))
+
+fn publish_page(wal: WalState, pmap: PmapState, rel: Rel, blk: BlkNo, page_lsn: i64, phys: PhysPtr) -> (bool, PmapState):
+    """WAL-before-pmap-publish ordering guard (spostgre_design.md §6.5, §9).
+
+    Checks: page_lsn <= wal.durable_lsn before calling pmap_publish.
+    Returns (false, pmap) if the ordering invariant is violated (page not yet
+    durable). Returns (true, updated_pmap) on success.
+
+    Unit tests assert the false case via:
+        expect(result).to_equal(false)
+    @coverage: spostgre_design.md §6.5 (WAL-before-publish invariant)
+    """
+    if page_lsn > wal.durable_lsn:
+        # Ordering violation: WAL has not flushed past this page's LSN.
+        (false, pmap)
+    else:
+        pmap_publish(pmap, rel, blk, phys, Lsn(value: page_lsn))

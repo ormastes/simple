@@ -1,19 +1,167 @@
 # NVFS core — superblock reader/writer.
 #
-# Implements std.fs.nvfs.superblock_if.SuperblockReader. Lives in the
-# META_DURABLE class with the checkpoint ring.
+# Implements §5.1 of doc/05_design/nvfs_design.md:
+#   Two in-memory replica slots (A=0, B=1). Mount reads both; picks
+#   the one with the higher mount_generation and valid CRC.
 #
-# Source: doc/05_design/nvfs_design.md §3.
+# N1 milestone: in-memory only; no real NVMe I/O.
 
-struct SuperblockDevice:
-    """Backing device reference for the superblock."""
-    arena_id: i64
-    block_size: i32
+struct Superblock:
+    """Superblock record — both A and B replicas use this shape.
+
+    Fields correspond to §5.1 of the NVFS design doc (updated for v2).
+
+    v2 changes (nvfs_design_v2.md §17.1):
+      version    — bumped to 2 for NVFS0002 (was 1 for NVFS0001).
+      compat_v1  — set true when migrating from a v1 volume; migration tool
+                   reads the v1 layout and writes a v2 superblock with this
+                   flag set so the driver can apply compat logic on mount.
+
+    The magic field remains u32 = 0x4E564653 ("NVFS" ASCII). The distinction
+    between v1 and v2 on-disk formats is made by the version field (1 vs 2),
+    consistent with the existing test corpus which uses magic=0x4E564653.
+    """
+    magic: u32
+    version: u32
+    uuid_hi: u64
+    uuid_lo: u64
+    feature_bits: u64
+    mount_generation: u64
+    checkpoint_root: u64
+    replica_id: u8
+    valid: bool
+    checksum: u32
+    compat_v1: bool
+
+# In-memory replica store — index 0 = replica A, index 1 = replica B.
+var _replicas: [Superblock] = []
+var _replicas_init: bool = false
+
+fn _ensure_init():
+    """Lazily initialise the two replica slots."""
+    if _replicas_init:
+        return
+    _replicas.push(Superblock(
+        magic: 0,
+        version: 0,
+        uuid_hi: 0,
+        uuid_lo: 0,
+        feature_bits: 0,
+        mount_generation: 0,
+        checkpoint_root: 0,
+        replica_id: 0,
+        valid: false,
+        checksum: 0,
+        compat_v1: false
+    ))
+    _replicas.push(Superblock(
+        magic: 0,
+        version: 0,
+        uuid_hi: 0,
+        uuid_lo: 0,
+        feature_bits: 0,
+        mount_generation: 0,
+        checkpoint_root: 0,
+        replica_id: 1,
+        valid: false,
+        checksum: 0,
+        compat_v1: false
+    ))
+    _replicas_init = true
+
+fn _crc_of(sb: Superblock) -> u32:
+    """Simple checksum over the non-checksum fields (N1 in-memory substitute for CRC32C)."""
+    val h0 = sb.magic + sb.version
+    val h1 = (sb.uuid_hi + sb.uuid_lo) % 0xFFFFFFFF
+    val h2 = (sb.feature_bits + sb.mount_generation + sb.checkpoint_root) % 0xFFFFFFFF
+    ((h0 + h1 + h2) % 0xFFFFFFFF) as u32
+
+fn superblock_write(sb: Superblock, replica: u8):
+    """Write `sb` into replica slot 0 (A) or 1 (B).
+
+    Sets the checksum field before storing.
+    """
+    _ensure_init()
+    val csum = _crc_of(sb)
+    val stored = Superblock(
+        magic: sb.magic,
+        version: sb.version,
+        uuid_hi: sb.uuid_hi,
+        uuid_lo: sb.uuid_lo,
+        feature_bits: sb.feature_bits,
+        mount_generation: sb.mount_generation,
+        checkpoint_root: sb.checkpoint_root,
+        replica_id: replica,
+        valid: true,
+        checksum: csum,
+        compat_v1: sb.compat_v1
+    )
+    val idx = replica as i64
+    if idx == 0:
+        _replicas[0] = stored
+    else:
+        _replicas[1] = stored
+
+fn superblock_read() -> Superblock:
+    """Return the newer valid replica; prefer A on a tie.
+
+    If neither replica is valid, returns a zeroed Superblock with valid=false.
+    """
+    _ensure_init()
+    val a = _replicas[0]
+    val b = _replicas[1]
+    val a_ok = a.valid and _crc_of(a) == a.checksum
+    val b_ok = b.valid and _crc_of(b) == b.checksum
+    if a_ok and b_ok:
+        if b.mount_generation > a.mount_generation:
+            return b
+        return a
+    if a_ok:
+        return a
+    if b_ok:
+        return b
+    # Neither valid
+    Superblock(
+        magic: 0,
+        version: 0,
+        uuid_hi: 0,
+        uuid_lo: 0,
+        feature_bits: 0,
+        mount_generation: 0,
+        checkpoint_root: 0,
+        replica_id: 0,
+        valid: false,
+        checksum: 0,
+        compat_v1: false
+    )
+
+fn superblock_replica_raw(replica: u8) -> Superblock:
+    """Return the raw replica slot without validity arbitration (for testing)."""
+    _ensure_init()
+    if replica == 0:
+        return _replicas[0]
+    _replicas[1]
 
 fn sb_read() -> i64:
-    """Read and verify the canonical superblock."""
-    pass_todo
+    """Legacy stub: return mount_generation of canonical replica."""
+    val sb = superblock_read()
+    sb.mount_generation as i64
 
 fn sb_write(generation: i64) -> bool:
-    """Emit a new superblock image at the given checkpoint generation."""
-    pass_todo
+    """Legacy stub: bump mount_generation on replica A."""
+    val current = superblock_read()
+    val updated = Superblock(
+        magic: current.magic,
+        version: current.version,
+        uuid_hi: current.uuid_hi,
+        uuid_lo: current.uuid_lo,
+        feature_bits: current.feature_bits,
+        mount_generation: generation as u64,
+        checkpoint_root: current.checkpoint_root,
+        replica_id: 0,
+        valid: true,
+        checksum: 0,
+        compat_v1: current.compat_v1
+    )
+    superblock_write(updated, 0)
+    true

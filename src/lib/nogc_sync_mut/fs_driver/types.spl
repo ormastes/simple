@@ -1,0 +1,172 @@
+# Shared primitive types for the fs_driver layer.
+#
+# All types are newtype structs or plain structs. No inheritance.
+# Opaque handles (Inode, FileHandle, DirHandle) use a single id field;
+# callers must not inspect or construct them outside driver code.
+#
+# Source: doc/05_design/fs_driver_interface.md §2.2, §2.3.
+
+# --- Opaque handles ---
+
+struct Inode:
+    """Opaque inode number. Treat as an opaque u64; do not compare across mounts."""
+    id: u64
+
+    static fn null() -> Inode:
+        Inode(id: 0)
+
+    fn is_null() -> bool:
+        self.id == 0
+
+struct FileHandle:
+    """Opaque open-file handle returned by open(); released by close()."""
+    id: u64
+
+    static fn null() -> FileHandle:
+        FileHandle(id: 0)
+
+    fn is_null() -> bool:
+        self.id == 0
+
+struct DirHandle:
+    """Opaque open-directory handle returned by open() on a directory."""
+    id: u64
+
+    static fn null() -> DirHandle:
+        DirHandle(id: 0)
+
+    fn is_null() -> bool:
+        self.id == 0
+
+# --- Scalar newtypes ---
+
+struct FileMode:
+    """POSIX-style permission/mode bits (rwxrwxrwx + suid/sgid/sticky)."""
+    bits: u32
+
+    static fn default_file() -> FileMode:
+        FileMode(bits: 0o644)
+
+    static fn default_dir() -> FileMode:
+        FileMode(bits: 0o755)
+
+struct Offset:
+    """Signed byte offset within a file. Negative values are invalid."""
+    value: i64
+
+    static fn zero() -> Offset:
+        Offset(value: 0)
+
+    fn is_valid() -> bool:
+        self.value >= 0
+
+# --- Compound stat types ---
+
+struct FsStatfs:
+    """Filesystem-level statistics returned by statfs().
+
+    total_bytes    — total capacity in bytes.
+    free_bytes     — unallocated bytes.
+    avail_bytes    — bytes available to unprivileged callers.
+    files_total    — total inode slots.
+    files_free     — free inode slots.
+    block_size     — preferred I/O block size in bytes.
+    """
+    total_bytes: u64
+    free_bytes:  u64
+    avail_bytes: u64
+    files_total: u64
+    files_free:  u64
+    block_size:  u32
+
+struct FileStat:
+    """Per-file metadata returned by stat() / fstat().
+
+    All timestamps are nanoseconds since Unix epoch (1970-01-01T00:00:00Z).
+    """
+    inode:         u64
+    size:          u64
+    blocks:        u64
+    block_size:    u32
+    mode:          u32
+    uid:           u32
+    gid:           u32
+    nlinks:        u32
+    atime_ns:      u64
+    mtime_ns:      u64
+    ctime_ns:      u64
+    birth_time_ns: u64
+
+struct DirEntry:
+    """Single entry yielded by readdir()."""
+    name:  text
+    inode: Inode
+    is_dir: bool
+
+# --- Mount-time options ---
+
+struct MountOptions:
+    """Options negotiated at mount time.
+
+    read_only     — mount as read-only.
+    want_caps     — capabilities the caller would like enabled.
+    require_caps  — capabilities that must be present (else mount fails).
+    """
+    read_only:    bool
+    want_caps:    u32   # CapabilitySet.bits — avoid circular import
+    require_caps: u32   # CapabilitySet.bits
+
+    static fn default() -> MountOptions:
+        MountOptions(read_only: false, want_caps: 0, require_caps: 0)
+
+# --- OpenFlags bitmask ---
+
+struct OpenFlags:
+    """Flags for open(). Combine with bitwise OR via with_*() helpers."""
+    bits: u32
+
+impl OpenFlags:
+    static fn read_only() -> OpenFlags:
+        OpenFlags(bits: 0)
+
+    static fn write_only() -> OpenFlags:
+        OpenFlags(bits: 1)
+
+    static fn read_write() -> OpenFlags:
+        OpenFlags(bits: 2)
+
+    fn with_create() -> OpenFlags:
+        OpenFlags(bits: self.bits | 64)
+
+    fn with_excl() -> OpenFlags:
+        OpenFlags(bits: self.bits | 128)
+
+    fn with_trunc() -> OpenFlags:
+        OpenFlags(bits: self.bits | 512)
+
+    fn with_append() -> OpenFlags:
+        OpenFlags(bits: self.bits | 1024)
+
+    fn is_writable() -> bool:
+        (self.bits & 3) != 0
+
+# --- Path newtype ---
+
+struct Path:
+    """UTF-8 filesystem path. Absolute paths start with '/'.
+
+    Drivers receive Path; they do not interpret host OS path conventions.
+    """
+    raw: text
+
+    static fn root() -> Path:
+        Path(raw: "/")
+
+    fn is_absolute() -> bool:
+        self.raw.starts_with("/")
+
+    fn len() -> i64:
+        self.raw.len()
+
+    fn starts_with(prefix: Path) -> bool:
+        self.raw.starts_with(prefix.raw)

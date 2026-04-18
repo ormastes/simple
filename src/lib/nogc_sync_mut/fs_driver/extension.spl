@@ -1,0 +1,122 @@
+# Extension — capability-specific operation handles.
+#
+# probe(cap) returns an Option<Extension>. Callers match the variant to get
+# the concrete handle struct, then call its methods. No dyn; all dispatch
+# is via exhaustive match.
+#
+# Stub structs: agents B/C/D fill in the method bodies. For now each struct
+# holds only a marker byte to ensure it compiles as a non-zero-sized type.
+#
+# Source: doc/05_design/fs_driver_interface.md §4.
+
+# --- Extension handle structs (stubs; agents B/C/D fill in) ---
+
+struct SnapshotExt:
+    """Handle for point-in-time snapshot operations.
+
+    volume_name — name of the volume this snapshot handle is attached to.
+    snap_count  — number of snapshots currently present on this volume.
+    """
+    volume_name: text
+    snap_count:  u64
+
+struct DedupExt:
+    """Handle for offline content-hash deduplication.
+
+    bytes_saved — cumulative bytes saved by dedup since mount.
+    scan_active — true if a dedup scan is currently running.
+    """
+    bytes_saved: u64
+    scan_active: bool
+
+struct ChecksumExt:
+    """Handle for per-block checksum verification.
+
+    algo_tag   — ChecksumAlgo tag (0=CRC32C, 1=XXHash64, 2=SHA256, 3=Blake3).
+    block_size — block size in bytes for which checksums are computed.
+    """
+    algo_tag:   u8
+    block_size: u32
+
+struct SendRecvExt:
+    """Handle for incremental stream send/receive.
+
+    last_sent_gen — generation of the last successfully sent snapshot.
+    stream_format — on-wire format version (1 for NVFS v2 TLV format).
+    """
+    last_sent_gen: u64
+    stream_format: u8
+
+struct ScrubExt:
+    """Handle for background online data integrity scrub.
+
+    blocks_verified — number of blocks verified in the current or last scrub pass.
+    errors_found    — number of checksum mismatches detected.
+    """
+    blocks_verified: u64
+    errors_found:    u64
+
+struct CompressExt:
+    """Handle for transparent per-file compression.
+
+    default_algo — compression algorithm tag (0=lz4, 1=zstd, 2=zlib).
+    enabled      — true if transparent compression is active for this volume.
+    """
+    default_algo: u8
+    enabled:      bool
+
+struct EncryptExt:
+    """Handle for transparent at-rest encryption.
+
+    key_id   — master key slot identifier in the key hierarchy.
+    key_bits — key size in bits (128, 256).
+    """
+    key_id:   u64
+    key_bits: u32
+
+struct QuotaExt:
+    """Handle for per-volume space quota and reservation. Filled by agent B (NVFS)."""
+    marker: u8
+
+struct ReflinkExt:
+    """Handle for COW file-range clone (reflink).
+
+    shared_extents — number of extents currently shared via reflink or dedup.
+    cow_pending    — true if a pending COW copy has not been flushed.
+    """
+    shared_extents: u64
+    cow_pending:    bool
+
+struct PosixCompatExt:
+    """Handle for POSIX random-write/truncate emulation (NvfsPosix shim).
+
+    flags — bit 0: O_APPEND-default; bit 1: O_NONBLOCK-default;
+            remaining bits reserved.
+    mode  — default file mode for newly created files (POSIX permission bits).
+    """
+    flags: u32
+    mode:  u32
+
+# --- Extension enum ---
+
+enum Extension:
+    """Capability-specific operation handle returned by FsDriver.probe().
+
+    Each variant wraps a concrete handle struct. Callers exhaustively match
+    to extract the handle, then call methods on it.
+
+    Example:
+        match driver.probe(Capability.Snapshot):
+            case Some(Extension.Snapshot(ext)): ext.create(...)
+            case _: return Err(FsError.Unsupported)
+    """
+    Snapshot(ext: SnapshotExt)
+    Dedup(ext: DedupExt)
+    Checksum(ext: ChecksumExt)
+    SendReceive(ext: SendRecvExt)
+    Scrub(ext: ScrubExt)
+    Compress(ext: CompressExt)
+    Encrypt(ext: EncryptExt)
+    Quota(ext: QuotaExt)
+    Reflink(ext: ReflinkExt)
+    PosixCompat(ext: PosixCompatExt)

@@ -1,0 +1,86 @@
+# spostgre engine — WAL unit tests (M1).
+#
+# Covers: round-trip encode/decode of 3 records, monotonic LSN,
+#         group-commit updates durable_lsn.
+# Design refs: spostgre_design.md §4.4, §6.3, §6.4.
+
+use std.sspec.*
+use engine.wal.{WalState, WalRecord, wal_append, wal_commit_group, wal_sync,
+                wal_record_encode, wal_record_decode, wal_record_verify_crc,
+                WAL_HDR_LEN}
+use std.spostgre_if.types.{Lsn, TxnId}
+
+describe "WAL M1 — encode/decode round-trip":
+    it "encodes a record and verifies CRC32C":
+        val payload: [u8] = [1u8, 2u8, 3u8]
+        val rec = WalRecord(lsn: 0, txn_id: 42, kind: 7, payload: payload, crc32: 0)
+        val encoded = wal_record_encode(rec)
+        val ok = wal_record_verify_crc(encoded)
+        expect(ok).to_equal(true)
+
+    it "decodes txn_id and kind correctly after encode":
+        val payload: [u8] = [10u8, 20u8]
+        val rec = WalRecord(lsn: 0, txn_id: 99, kind: 5, payload: payload, crc32: 0)
+        val encoded = wal_record_encode(rec)
+        val decoded = wal_record_decode(encoded)
+        expect(decoded.txn_id).to_equal(99)
+        expect(decoded.kind).to_equal(5)
+
+    it "round-trips payload bytes":
+        val payload: [u8] = [0u8, 127u8, 255u8]
+        val rec = WalRecord(lsn: 0, txn_id: 1, kind: 0, payload: payload, crc32: 0)
+        val encoded = wal_record_encode(rec)
+        val decoded = wal_record_decode(encoded)
+        expect(decoded.payload.len()).to_equal(3)
+        expect(decoded.payload[0]).to_equal(0u8)
+        expect(decoded.payload[1]).to_equal(127u8)
+        expect(decoded.payload[2]).to_equal(255u8)
+
+    it "detects CRC32C mismatch on corrupt buffer":
+        val payload: [u8] = [1u8, 2u8]
+        val rec = WalRecord(lsn: 0, txn_id: 1, kind: 0, payload: payload, crc32: 0)
+        var encoded = wal_record_encode(rec)
+        # Corrupt a byte in the body region
+        encoded[24] = 0xFFu8
+        val ok = wal_record_verify_crc(encoded)
+        expect(ok).to_equal(false)
+
+describe "WAL M1 — monotonic LSN":
+    it "first append returns LSN 1":
+        val state0 = WalState.new(1)
+        val payload: [u8] = [1u8]
+        val (lsn1, _state1) = wal_append(state0, TxnId(id: 1), payload)
+        expect(lsn1.value).to_equal(1)
+
+    it "successive appends return strictly increasing LSNs":
+        val state0 = WalState.new(1)
+        val p: [u8] = [0u8]
+        val (lsn1, state1) = wal_append(state0, TxnId(id: 1), p)
+        val (lsn2, state2) = wal_append(state1, TxnId(id: 1), p)
+        val (lsn3, _state3) = wal_append(state2, TxnId(id: 1), p)
+        expect(lsn1.value).to_equal(1)
+        expect(lsn2.value).to_equal(2)
+        expect(lsn3.value).to_equal(3)
+        expect(lsn1.precedes(lsn2)).to_equal(true)
+        expect(lsn2.precedes(lsn3)).to_equal(true)
+
+describe "WAL M1 — group commit updates durable_lsn":
+    it "durable_lsn starts at 0":
+        val state = WalState.new(1)
+        expect(state.durable_lsn).to_equal(0)
+
+    it "wal_commit_group sets durable_lsn to lsn_high.value":
+        val state0 = WalState.new(1)
+        val p: [u8] = [0u8]
+        val (lsn1, state1) = wal_append(state0, TxnId(id: 1), p)
+        val (lsn2, state2) = wal_append(state1, TxnId(id: 2), p)
+        val state3 = wal_commit_group(state2, lsn2)
+        expect(state3.durable_lsn).to_equal(lsn2.value)
+
+    it "wal_sync is a no-op returning the same durable_lsn":
+        val state0 = WalState.new(1)
+        val p: [u8] = [5u8]
+        val (lsn1, state1) = wal_append(state0, TxnId(id: 1), p)
+        val state2 = wal_commit_group(state1, lsn1)
+        val state3 = wal_sync(state2)
+        expect(state3.durable_lsn).to_equal(lsn1.value)
