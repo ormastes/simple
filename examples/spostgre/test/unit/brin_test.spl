@@ -1,0 +1,148 @@
+# spostgre engine — BRIN unit tests (M3b).
+#
+# Covers:
+#   1. Empty index + summarize_range → one summary present (not placeholder).
+#   2. Summarize [1,5,3,9,2] → min=1, max=9.
+#   3. Summarize with nulls → has_nulls=true.
+#   4. range_matches: pred [3,7] overlaps summary [1,9] → true.
+#   5. range_matches: pred [10,20] above summary [1,9] → false.
+#   6. range_matches: pred [-5,0] below summary [1,9] → false.
+#   7. scan_range over 5 summaries returns only matching block_range_ids.
+#   8. update_tuple extends min/max when value is outside current bounds.
+#
+# Design ref: spostgre_design.md §8.
+
+use std.sspec.*
+use engine.brin.{
+    BrinValue, BrinSummary, BrinIndex,
+    BRIN_KIND_NULL, BRIN_KIND_INT, BRIN_KIND_FLOAT_BITS, BRIN_KIND_TEXT_HASH,
+    brin_new, brin_summarize_range, brin_update_tuple,
+    brin_range_matches, brin_scan_range
+}
+
+describe "BRIN M3b — brin_summarize_range basics":
+
+    it "Empty index + summarize_range produces one non-placeholder summary":
+        val idx0 = brin_new(1u32, 128u32)
+        var vals: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 42)]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        expect(idx1.summaries.len()).to_equal(1)
+        val s = idx1.summaries[0]
+        expect(s.is_placeholder).to_equal(false)
+
+    it "Summarize [1,5,3,9,2] yields min=1 max=9":
+        val idx0 = brin_new(1u32, 128u32)
+        var vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 1),
+            BrinValue(kind: BRIN_KIND_INT, raw: 5),
+            BrinValue(kind: BRIN_KIND_INT, raw: 3),
+            BrinValue(kind: BRIN_KIND_INT, raw: 9),
+            BrinValue(kind: BRIN_KIND_INT, raw: 2)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        val s = idx1.summaries[0]
+        expect(s.min.raw).to_equal(1)
+        expect(s.max.raw).to_equal(9)
+        expect(s.has_nulls).to_equal(false)
+
+    it "Summarize values containing nulls sets has_nulls=true":
+        val idx0 = brin_new(2u32, 128u32)
+        var vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 10),
+            BrinValue(kind: BRIN_KIND_NULL, raw: 0),
+            BrinValue(kind: BRIN_KIND_INT, raw: 20)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        val s = idx1.summaries[0]
+        expect(s.has_nulls).to_equal(true)
+        expect(s.min.raw).to_equal(10)
+        expect(s.max.raw).to_equal(20)
+
+describe "BRIN M3b — brin_range_matches":
+
+    it "Pred [3,7] overlaps summary [1,9] returns true":
+        val idx0 = brin_new(1u32, 128u32)
+        var vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 1),
+            BrinValue(kind: BRIN_KIND_INT, raw: 9)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        val pred_min = BrinValue(kind: BRIN_KIND_INT, raw: 3)
+        val pred_max = BrinValue(kind: BRIN_KIND_INT, raw: 7)
+        val matches = brin_range_matches(idx1, 0u32, pred_min, pred_max)
+        expect(matches).to_equal(true)
+
+    it "Pred [10,20] entirely above summary [1,9] returns false":
+        val idx0 = brin_new(1u32, 128u32)
+        var vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 1),
+            BrinValue(kind: BRIN_KIND_INT, raw: 9)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        val pred_min = BrinValue(kind: BRIN_KIND_INT, raw: 10)
+        val pred_max = BrinValue(kind: BRIN_KIND_INT, raw: 20)
+        val matches = brin_range_matches(idx1, 0u32, pred_min, pred_max)
+        expect(matches).to_equal(false)
+
+    it "Pred [-5,0] entirely below summary [1,9] returns false":
+        val idx0 = brin_new(1u32, 128u32)
+        var vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 1),
+            BrinValue(kind: BRIN_KIND_INT, raw: 9)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, vals)
+        val pred_min = BrinValue(kind: BRIN_KIND_INT, raw: -5)
+        val pred_max = BrinValue(kind: BRIN_KIND_INT, raw: 0)
+        val matches = brin_range_matches(idx1, 0u32, pred_min, pred_max)
+        expect(matches).to_equal(false)
+
+describe "BRIN M3b — brin_scan_range":
+
+    it "scan_range over 5 summaries returns only matching block_range_ids":
+        # Build 5 ranges with non-overlapping windows:
+        #   range 0: [10,19]
+        #   range 1: [20,29]
+        #   range 2: [30,39]
+        #   range 3: [40,49]
+        #   range 4: [50,59]
+        # Predicate [25,35] should match ranges 1 and 2.
+        val idx0 = brin_new(1u32, 128u32)
+        var v0: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 10), BrinValue(kind: BRIN_KIND_INT, raw: 19)]
+        var v1: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 20), BrinValue(kind: BRIN_KIND_INT, raw: 29)]
+        var v2: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 30), BrinValue(kind: BRIN_KIND_INT, raw: 39)]
+        var v3: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 40), BrinValue(kind: BRIN_KIND_INT, raw: 49)]
+        var v4: [BrinValue] = [BrinValue(kind: BRIN_KIND_INT, raw: 50), BrinValue(kind: BRIN_KIND_INT, raw: 59)]
+        val idx1 = brin_summarize_range(idx0, 0u32, v0)
+        val idx2 = brin_summarize_range(idx1, 1u32, v1)
+        val idx3 = brin_summarize_range(idx2, 2u32, v2)
+        val idx4 = brin_summarize_range(idx3, 3u32, v3)
+        val idx5 = brin_summarize_range(idx4, 4u32, v4)
+        val pred_min = BrinValue(kind: BRIN_KIND_INT, raw: 25)
+        val pred_max = BrinValue(kind: BRIN_KIND_INT, raw: 35)
+        val result = brin_scan_range(idx5, pred_min, pred_max)
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal(1u32)
+        expect(result[1]).to_equal(2u32)
+
+describe "BRIN M3b — brin_update_tuple":
+
+    it "update_tuple extends min/max when value is outside current bounds":
+        # Seed index with summary [5,10] for range 0.
+        val idx0 = brin_new(1u32, 128u32)
+        var seed_vals: [BrinValue] = [
+            BrinValue(kind: BRIN_KIND_INT, raw: 5),
+            BrinValue(kind: BRIN_KIND_INT, raw: 10)
+        ]
+        val idx1 = brin_summarize_range(idx0, 0u32, seed_vals)
+        # Tuple on block 0 (range 0) with value 1 — extends min below 5.
+        val low_val = BrinValue(kind: BRIN_KIND_INT, raw: 1)
+        val idx2 = brin_update_tuple(idx1, 0u64, low_val)
+        val s2 = idx2.summaries[0]
+        expect(s2.min.raw).to_equal(1)
+        expect(s2.max.raw).to_equal(10)
+        # Tuple on block 0 (range 0) with value 99 — extends max above 10.
+        val high_val = BrinValue(kind: BRIN_KIND_INT, raw: 99)
+        val idx3 = brin_update_tuple(idx2, 0u64, high_val)
+        val s3 = idx3.summaries[0]
+        expect(s3.min.raw).to_equal(1)
+        expect(s3.max.raw).to_equal(99)

@@ -1,0 +1,285 @@
+# @cover examples/nvfs/src/core/pmap_btree.spl 80%
+"""
+# NVFS pmap B-tree Rebalance Unit Tests (N5b)
+
+**Feature IDs:** #NVFS-N5b-BTREE-REBALANCE
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Implemented
+**Design:** doc/05_design/nvfs_design_v2.md §17; N5b milestone
+
+## Overview
+
+Tests for B-tree delete rebalancing: borrow-from-left, borrow-from-right,
+merge with sibling, root shrink, and large-scale delete correctness.
+Closes FR-NVFS-N5b-001.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| min_keys | fanout / 2 — minimum keys per non-root node |
+| borrow_left | Rotate key from left sibling through parent |
+| borrow_right | Rotate key from right sibling through parent |
+| merge | Combine two siblings + separator into one node |
+| root_shrink | Root with 0 keys and 1 child collapses to that child |
+| is_empty | Returns true iff root leaf has 0 keys |
+"""
+
+use std.sspec.*
+
+# ============================================================================
+# Helpers (shared with pmap_btree_test.spl conventions)
+# ============================================================================
+
+fn _rb_make_pmap_entry(logical: u64, phys: i64, offset: u64) -> PmapEntry:
+    """Build a minimal valid PmapEntry."""
+    val dummy: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+    val csum = pmap_entry_checksum_for(dummy)
+    PmapEntry(
+        logical:       logical,
+        phys:          phys,
+        offset:        offset,
+        len:           4,
+        birth_gen:     0,
+        checksum_algo: 0,
+        checksum:      csum
+    )
+
+fn _rb_insert(tree: PmapBTree, arena_id: i64, offset: i64):
+    """Insert a synthetic entry keyed by (arena_id, offset)."""
+    val pentry = _rb_make_pmap_entry(offset as u64, arena_id, offset as u64)
+    val _ = pmap_btree_insert(tree, arena_id, offset, 4, pentry)
+
+fn _rb_lookup_ok(tree: PmapBTree, arena_id: i64, offset: i64) -> bool:
+    """Return true iff lookup finds an entry for (arena_id, offset)."""
+    val key = PmapKey(arena_id: arena_id, offset: offset)
+    val r = pmap_btree_lookup(tree, key)
+    match r:
+        case None: false
+        case Some(_): true
+
+fn _rb_remove(tree: PmapBTree, arena_id: i64, offset: i64) -> bool:
+    """Remove entry; return true if it was present."""
+    val key = PmapKey(arena_id: arena_id, offset: offset)
+    val r = pmap_btree_remove(tree, key)
+    match r:
+        case None: false
+        case Some(_): true
+
+# ============================================================================
+# Test 1: Insert 10, delete 5, remaining 5 are still found
+# ============================================================================
+
+describe "pmap B-tree rebalance — insert 10 delete 5":
+    """After inserting 10 and deleting 5, remaining 5 must all be found."""
+
+    it "remaining 5 entries still found after partial delete":
+        var tree = pmap_btree_new(2)
+        var i = 0
+        while i < 10:
+            _rb_insert(tree, 1, i * 100)
+            i = i + 1
+        # Delete offsets 0, 200, 400, 600, 800 (even indices).
+        var d = 0
+        while d < 10:
+            if d * 2 < 10:
+                val _ = _rb_remove(tree, 1, d * 200)
+            d = d + 1
+        # Remaining: 100, 300, 500, 700, 900
+        var all_found = true
+        var r = 0
+        while r < 5:
+            if not _rb_lookup_ok(tree, 1, r * 200 + 100):
+                all_found = false
+            r = r + 1
+        expect(all_found).to_equal(true)
+
+# ============================================================================
+# Test 2: Insert 20 (forces splits), delete every other, all remaining found
+# ============================================================================
+
+describe "pmap B-tree rebalance — insert 20 delete alternates":
+    """With fanout=2 (max 3 keys/node), 20 inserts force splits.
+    Deleting every other entry must leave remaining 10 all findable."""
+
+    it "all remaining entries found after alternating deletes":
+        var tree = pmap_btree_new(2)
+        var i = 0
+        while i < 20:
+            _rb_insert(tree, 1, i * 10)
+            i = i + 1
+        # Delete even offsets: 0, 20, 40, ...
+        var d = 0
+        while d < 20:
+            if d * 2 == d * 2:   # always true, but we pick even indices
+                pass_do_nothing
+            d = d + 1
+        var di = 0
+        while di < 10:
+            val _ = _rb_remove(tree, 1, di * 20)
+            di = di + 1
+        # Remaining: 10, 30, 50, ..., 190
+        var all_found = true
+        var ri = 0
+        while ri < 10:
+            if not _rb_lookup_ok(tree, 1, ri * 20 + 10):
+                all_found = false
+            ri = ri + 1
+        expect(all_found).to_equal(true)
+
+# ============================================================================
+# Test 3: Delete all entries → tree is_empty
+# ============================================================================
+
+describe "pmap B-tree rebalance — delete all entries":
+    """After deleting every inserted entry, pmap_btree_is_empty returns true."""
+
+    it "is_empty true after deleting all entries":
+        var tree = pmap_btree_new(2)
+        var i = 0
+        while i < 8:
+            _rb_insert(tree, 1, i * 50)
+            i = i + 1
+        var d = 0
+        while d < 8:
+            val _ = _rb_remove(tree, 1, d * 50)
+            d = d + 1
+        val empty = pmap_btree_is_empty(tree)
+        expect(empty).to_equal(true)
+
+# ============================================================================
+# Test 4: Delete + reinsert same key returns newer value
+# ============================================================================
+
+describe "pmap B-tree rebalance — delete then reinsert":
+    """After remove + reinsert with different length, newer entry is returned."""
+
+    it "reinserted entry has updated length field after rebalancing delete":
+        var tree = pmap_btree_new(2)
+        # Insert enough to cause at least one split.
+        var i = 0
+        while i < 6:
+            _rb_insert(tree, 5, i * 100)
+            i = i + 1
+        # Remove key (5, 200), then reinsert with length=999.
+        val key = PmapKey(arena_id: 5, offset: 200)
+        val _ = pmap_btree_remove(tree, key)
+        val pentry = _rb_make_pmap_entry(200, 5, 200)
+        val _ = pmap_btree_insert(tree, 5, 200, 999, pentry)
+        val result = pmap_btree_lookup(tree, key)
+        match result:
+            case None:
+                expect(false).to_equal(true)
+            case Some(found):
+                expect(found.length).to_equal(999)
+
+# ============================================================================
+# Test 5: Borrow from right — leaf underflow resolved by right sibling
+# ============================================================================
+
+describe "pmap B-tree rebalance — leaf borrow from right":
+    """Delete until a leaf underflows; right sibling has spare keys.
+    Tree must remain valid (all remaining entries lookupable)."""
+
+    it "borrow from right leaves tree valid":
+        # fanout=2: min_keys=1, max_keys=3.
+        # Insert 4 entries → forces one split → two leaves with ~2 keys each.
+        # Delete from left leaf to trigger underflow → borrow from right.
+        var tree = pmap_btree_new(2)
+        _rb_insert(tree, 1, 10)
+        _rb_insert(tree, 1, 20)
+        _rb_insert(tree, 1, 30)
+        _rb_insert(tree, 1, 40)
+        # Delete 10 (first in left leaf) — right leaf has spares.
+        val _ = _rb_remove(tree, 1, 10)
+        # All remaining must be findable.
+        var ok = true
+        if not _rb_lookup_ok(tree, 1, 20): ok = false
+        if not _rb_lookup_ok(tree, 1, 30): ok = false
+        if not _rb_lookup_ok(tree, 1, 40): ok = false
+        expect(ok).to_equal(true)
+
+# ============================================================================
+# Test 6: Borrow from left — leaf underflow resolved by left sibling
+# ============================================================================
+
+describe "pmap B-tree rebalance — leaf borrow from left":
+    """Delete from right leaf when left has spare; borrow from left."""
+
+    it "borrow from left leaves tree valid":
+        # fanout=2: Insert 5 → splits into tree where right leaf can underflow.
+        var tree = pmap_btree_new(2)
+        _rb_insert(tree, 1, 10)
+        _rb_insert(tree, 1, 20)
+        _rb_insert(tree, 1, 30)
+        _rb_insert(tree, 1, 40)
+        _rb_insert(tree, 1, 50)
+        # Delete last key (50) — right leaf underflows, borrows from left.
+        val _ = _rb_remove(tree, 1, 50)
+        var ok = true
+        if not _rb_lookup_ok(tree, 1, 10): ok = false
+        if not _rb_lookup_ok(tree, 1, 20): ok = false
+        if not _rb_lookup_ok(tree, 1, 30): ok = false
+        if not _rb_lookup_ok(tree, 1, 40): ok = false
+        expect(ok).to_equal(true)
+
+# ============================================================================
+# Test 7: Leaf merge — both siblings at minimum, tree height may decrease
+# ============================================================================
+
+describe "pmap B-tree rebalance — leaf merge":
+    """When both child and sibling are at min_keys, merge occurs.
+    Root may shrink if it becomes empty."""
+
+    it "after merge all remaining entries still lookupable":
+        # fanout=2: Insert exactly 3 → root with 1 key, two leaves with 1 key each.
+        # Delete one leaf entry → underflow → no spare sibling → merge.
+        var tree = pmap_btree_new(2)
+        _rb_insert(tree, 1, 10)
+        _rb_insert(tree, 1, 20)
+        _rb_insert(tree, 1, 30)
+        # Delete 10 — left leaf (1 key) underflows; right also has 1 key; merge.
+        val _ = _rb_remove(tree, 1, 10)
+        # Tree height should have dropped to 0 (single root leaf).
+        var ok = true
+        if not _rb_lookup_ok(tree, 1, 20): ok = false
+        if not _rb_lookup_ok(tree, 1, 30): ok = false
+        expect(ok).to_equal(true)
+
+# ============================================================================
+# Test 8: Insert 100, delete 50 at pattern, remaining 50 all lookupable
+# ============================================================================
+
+describe "pmap B-tree rebalance — large insert/delete":
+    """Insert 100 entries then delete 50 in a spread pattern; remaining 50
+    must all be found by lookup."""
+
+    it "50 remaining entries found after deleting half of 100":
+        var tree = pmap_btree_new(4)
+        var i = 0
+        while i < 100:
+            _rb_insert(tree, 2, i * 8)
+            i = i + 1
+        # Delete every third entry: 0, 24, 48, ... (approx 34 entries).
+        # Also delete 50 entries starting from offset 400 upward.
+        var d = 0
+        while d < 50:
+            val _ = _rb_remove(tree, 2, d * 16)
+            d = d + 1
+        # Remaining: offsets that were NOT deleted.
+        # We kept: odd multiples of 8 that weren't deleted — simplify:
+        # Remaining = {i*8 : i in 0..99} - {d*16 : d in 0..49}
+        # i.e. offsets not divisible by 16 are untouched.
+        var all_found = true
+        var r = 0
+        while r < 100:
+            val offset = r * 8
+            # Check if this was deleted: offset divisible by 16 with offset/16 < 50.
+            val div16 = offset / 16
+            val is_deleted = (div16 * 16 == offset) and (div16 < 50)
+            if not is_deleted:
+                if not _rb_lookup_ok(tree, 2, offset):
+                    all_found = false
+            r = r + 1
+        expect(all_found).to_equal(true)

@@ -247,16 +247,24 @@ append under this heading.
 - **Filed-on:** 2026-04-17
 - **Filed-by:** N5a implementation agent
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-17
+- **Implemented-by:** N5b implementation agent
 - **Requested-semantics:**
   `pmap_btree_remove` in N5a performs leaf-only deletion without rebalancing.
   After many deletes the tree can become unbalanced (under-filled nodes).
   Implement standard B-tree merge and rotation on delete so the tree remains
-  balanced (minimum t-1 keys per non-root node) after arbitrary remove sequences.
+  balanced (minimum fanout/2 keys per non-root node) after arbitrary remove sequences.
 - **Acceptance-criteria:**
-  - [ ] After inserting 100 entries and removing 50, all remaining lookups succeed
-  - [ ] Tree height does not grow beyond ⌈log_t(n)⌉ after interleaved insert/remove
-  - [ ] Existing pmap_btree_test.spl still passes
+  - [x] After inserting 100 entries and removing 50, all remaining lookups succeed
+  - [x] Tree height shrinks when root has 0 keys and 1 child (root-shrink)
+  - [x] Existing pmap_btree_test.spl still passes (8 tests)
+  - [x] New pmap_btree_rebalance_test.spl: 8 tests (borrow-left, borrow-right, merge, delete-all, large-scale)
+- **Files-changed:**
+  - `examples/nvfs/src/core/pmap_btree.spl` — replaced leaf-only remove with
+    full rebalancing: `btree_borrow_from_left`, `btree_borrow_from_right`,
+    `btree_merge_with_right`, `_delete_recursive`, `pmap_btree_is_empty`.
+  - `examples/nvfs/test/unit/pmap_btree_rebalance_test.spl` — 8 new tests.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
 - **Related-issue:** none

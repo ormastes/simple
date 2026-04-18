@@ -1,0 +1,232 @@
+# bench/nvfs_arena_throughput.spl — NVFS arena primitive benchmarks.
+#
+# Measures algorithmic cost of NVFS arena operations on the current in-memory
+# implementation (arena backed by byte-vector shim, not real NVMe).
+#
+# DISCLAIMER: These numbers DO NOT reflect real SSD hardware. Phase 9 NVFS
+# uses an in-process byte-vector arena (nvfs_shim). They measure CPU cost of
+# append/readv/seal/clone_range code paths. Real SSD benchmarks require the
+# NVMe driver layer (Phase 10+) and SSD-iq preconditioning.
+#
+# Scenarios:
+#   A1: create + 1000×append_small (64B) + readv         — arena_append throughput
+#   A2: create + 100×append_large (64KB) + readv         — large-append path
+#   A3: create + 100×clone_range                         — range-copy cost
+#   A4: create + seal + readv (sealed-arena reads)       — sealed-read path
+#
+# NOTE: use examples.nvfs.src.core.arena.* is NOT resolvable from main-repo
+# bin/simple run (spostgre/nvfs are separate git submodules). Scenarios body
+# against a local shim that mirrors the NVFS arena API exactly so the future
+# swap is a 1-line import change (FR-BENCH-NVFS-001).
+#
+# Run: bin/simple run bench/nvfs_arena_throughput.spl
+
+use bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+
+# ── Local NVFS arena shim ─────────────────────────────────────────────────────
+# Mirrors examples/spostgre/src/engine/nvfs_shim.spl API surface.
+# FR-BENCH-NVFS-001: replace with real use examples.nvfs.src.core.arena.*
+#   once submodule import resolution is supported from main-repo bench/ runner.
+
+class BenchArena:
+    # pass_todo: FR-BENCH-NVFS-001 — replace shim with real NVFS arena import.
+    data: [i64]   # word-granule storage proxy (each i64 = 8 bytes)
+    sealed: bool
+    byte_len: i64
+
+fn shim_arena_create() -> BenchArena:
+    BenchArena(data: [], sealed: false, byte_len: 0)
+
+fn shim_arena_append(arena: BenchArena, byte_count: i64) -> BenchArena:
+    # pass_todo: FR-BENCH-NVFS-001 — real append writes aligned bytes to NVFS arena.
+    # Proxy: push one word per 8 bytes (rounded up).
+    if arena.sealed:
+        return arena
+    val words: i64 = (byte_count + 7) / 8
+    var d: [i64] = arena.data
+    var k: i64 = 0
+    while k < words:
+        d.push(0)
+        k = k + 1
+    BenchArena(data: d, sealed: false, byte_len: arena.byte_len + byte_count)
+
+fn shim_arena_readv(arena: BenchArena, offset: i64, byte_count: i64) -> i64:
+    # pass_todo: FR-BENCH-NVFS-001 — real readv issues scatter-gather from NVFS.
+    # Proxy: return byte_count as "bytes read" if within bounds.
+    if offset + byte_count <= arena.byte_len:
+        byte_count
+    else:
+        0
+
+fn shim_arena_clone_range(src: BenchArena, src_off: i64, len: i64) -> BenchArena:
+    # pass_todo: FR-BENCH-NVFS-001 — real clone_range calls arena_clone_range S4.
+    # Proxy: copy word slice.
+    val word_off: i64 = src_off / 8
+    val words: i64 = (len + 7) / 8
+    var d: [i64] = []
+    var k: i64 = word_off
+    val n: i64 = src.data.len() as i64
+    while k < word_off + words and k < n:
+        d.push(src.data[k as i32])
+        k = k + 1
+    BenchArena(data: d, sealed: false, byte_len: len)
+
+fn shim_arena_seal(arena: BenchArena) -> BenchArena:
+    # pass_todo: FR-BENCH-NVFS-001 — real seal calls arena_seal S3 + generation bump.
+    BenchArena(data: arena.data, sealed: true, byte_len: arena.byte_len)
+
+# ── Inline sort + percentile (duplicated from timing.spl for standalone run) ─
+
+fn _sort(samples: [i64]) -> [i64]:
+    var r: [i64] = samples
+    val n: i64 = r.len() as i64
+    var i: i64 = 1
+    while i < n:
+        val key: i64 = r[i as i32]
+        var j: i64 = i - 1
+        while j >= 0 and r[j as i32] > key:
+            r[(j + 1) as i32] = r[j as i32]
+            j = j - 1
+        r[(j + 1) as i32] = key
+        i = i + 1
+    r
+
+fn _pct(sorted: [i64], num: i64, den: i64) -> i64:
+    val n: i64 = sorted.len() as i64
+    if n == 0:
+        return 0
+    var idx: i64 = (n * num) / den
+    if idx >= n:
+        idx = n - 1
+    sorted[idx as i32]
+
+fn _result(label: text, iters: i64, samples: [i64]) -> BenchResult:
+    val s: [i64] = _sort(samples)
+    val n: i64 = s.len() as i64
+    val mn: i64 = if n > 0: s[0] else: 0
+    val mx: i64 = if n > 0: s[(n - 1) as i32] else: 0
+    var total: i64 = 0
+    var k: i64 = 0
+    while k < n:
+        total = total + s[k as i32]
+        k = k + 1
+    val tput: i64 = if total > 0: (iters * 1000) / total else: 0
+    BenchResult(
+        label: label,
+        iters: iters,
+        p50_ns: _pct(s, 50, 100),
+        p99_ns: _pct(s, 99, 100),
+        p99_9_ns: _pct(s, 999, 1000),
+        min_ns: mn,
+        max_ns: mx,
+        total_ns: total,
+        throughput_ops_per_s: tput,
+    )
+
+# ── A1: 1000×append_small (64B) ──────────────────────────────────────────────
+
+fn bench_append_small() -> BenchResult:
+    val iters: i64 = 1000
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        var arena: BenchArena = shim_arena_create()
+        val t0: i64 = bench_now_ns()
+        var j: i64 = 0
+        while j < 1000:
+            arena = shim_arena_append(arena, 64)
+            j = j + 1
+        val _r = shim_arena_readv(arena, 0, arena.byte_len)
+        val t1: i64 = bench_now_ns()
+        samples.push(t1 - t0)
+        i = i + 1
+    _result("arena_append_small_64B_x1000", iters, samples)
+
+# ── A2: 100×append_large (64KB) ──────────────────────────────────────────────
+
+fn bench_append_large() -> BenchResult:
+    val iters: i64 = 100
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        var arena: BenchArena = shim_arena_create()
+        val t0: i64 = bench_now_ns()
+        var j: i64 = 0
+        while j < 100:
+            arena = shim_arena_append(arena, 65536)
+            j = j + 1
+        val _r = shim_arena_readv(arena, 0, arena.byte_len)
+        val t1: i64 = bench_now_ns()
+        samples.push(t1 - t0)
+        i = i + 1
+    _result("arena_append_large_64KB_x100", iters, samples)
+
+# ── A3: 100×clone_range ───────────────────────────────────────────────────────
+
+fn bench_clone_range() -> BenchResult:
+    val iters: i64 = 100
+    # pre-populate source arena
+    var src: BenchArena = shim_arena_create()
+    var fill: i64 = 0
+    while fill < 100:
+        src = shim_arena_append(src, 4096)
+        fill = fill + 1
+    val clone_len: i64 = 4096 * 50
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        val t0: i64 = bench_now_ns()
+        val _dst = shim_arena_clone_range(src, 0, clone_len)
+        val t1: i64 = bench_now_ns()
+        samples.push(t1 - t0)
+        i = i + 1
+    _result("arena_clone_range_200KB", iters, samples)
+
+# ── A4: seal + readv ──────────────────────────────────────────────────────────
+
+fn bench_seal_readv() -> BenchResult:
+    val iters: i64 = 100
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        var arena: BenchArena = shim_arena_create()
+        var j: i64 = 0
+        while j < 10:
+            arena = shim_arena_append(arena, 4096)
+            j = j + 1
+        val t0: i64 = bench_now_ns()
+        val sealed: BenchArena = shim_arena_seal(arena)
+        val _r = shim_arena_readv(sealed, 0, sealed.byte_len)
+        val t1: i64 = bench_now_ns()
+        samples.push(t1 - t0)
+        i = i + 1
+    _result("arena_seal_readv_40KB", iters, samples)
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+fn main():
+    print "=== NVFS arena throughput benchmark ==="
+    print "DISCLAIMER: in-memory shim, NOT real NVFS/NVMe. Ticks = loop-counter proxy."
+    print "FR-BENCH-NVFS-001: swap shim for real examples.nvfs.src.core.arena.* import."
+    print ""
+
+    val r1: BenchResult = bench_append_small()
+    val r2: BenchResult = bench_append_large()
+    val r3: BenchResult = bench_clone_range()
+    val r4: BenchResult = bench_seal_readv()
+
+    bench_print(r1)
+    print ""
+    bench_print(r2)
+    print ""
+    bench_print(r3)
+    print ""
+    bench_print(r4)
+
+    print ""
+    print "=== CSV ==="
+    print bench_csv_header()
+    print bench_csv(r1)
+    print bench_csv(r2)
+    print bench_csv(r3)
+    print bench_csv(r4)

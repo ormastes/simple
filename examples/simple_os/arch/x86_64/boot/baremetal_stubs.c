@@ -1652,54 +1652,10 @@ RuntimeValue spl_fat32_read_file(RuntimeValue name_rv, RuntimeValue buf_rv, Runt
 
 /* Simple wrappers that return values directly (no output-parameter encoding issues) */
 
-/* TODO(M4): remove rt_fat32_read_file_text / rt_fat32_file_size / rt_fat32_file_exists once
- * all callers are migrated to g_vfs_* helpers.  Blocked by:
- *   - examples/simple_os/arch/x86_64/tools_verify_entry.spl (4 call sites)
- *   - src/os/desktop/shell.spl
- *   - src/os/services/launcher/launcher.spl
- *   - src/os/kernel/loader/disk_launch_manifest.spl
- * FR: SimpleOS M4 — retire rt_fat32_{read_file_text,file_size,file_exists} C symbols
+/* TODO(M5): migrate write-path callers from rt_fat32_write_file_text /
+ * rt_fat32_select_file / rt_fat32_write_selected_file_text to g_vfs_* helpers
+ * once the VFS write path is wired in M5.
  */
-RuntimeValue rt_fat32_read_file_text(RuntimeValue name_rv)
-{
-    const char *name = "";
-    if (IS_HEAP(name_rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
-        if (s) name = s->data;
-    }
-    static uint8_t _read_buf[8192];
-    uint32_t bytes_read = 0;
-    int result = fat32_read_file(name, _read_buf, sizeof(_read_buf) - 1, &bytes_read);
-    if (result != 0 || bytes_read == 0) return rt_string_from_cstr("");
-    _read_buf[bytes_read] = '\0';
-    return rt_string_from_cstr((const char *)_read_buf);
-}
-
-RuntimeValue rt_fat32_file_size(RuntimeValue name_rv)
-{
-    const char *name = "";
-    if (IS_HEAP(name_rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
-        if (s) name = s->data;
-    }
-    uint32_t cluster = 0, size = 0;
-    int result = fat32_find_file(name, &cluster, &size);
-    if (result != 0) return (RuntimeValue)(-1);
-    return ENCODE_INT((int64_t)size);
-}
-
-RuntimeValue rt_fat32_file_exists(RuntimeValue name_rv)
-{
-    const char *name = "";
-    if (IS_HEAP(name_rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
-        if (s) name = s->data;
-    }
-    uint32_t cluster = 0, size = 0;
-    int result = fat32_find_file(name, &cluster, &size);
-    return result == 0 ? TRUE_VALUE : FALSE_VALUE;
-}
-
 RuntimeValue rt_fat32_write_file_text(RuntimeValue name_rv, RuntimeValue content_rv)
 {
     const char *name = "";
@@ -9222,6 +9178,42 @@ static int _tls_aes128_gcm_decrypt_raw(const uint8_t key[16], const uint8_t nonc
     return 0;
 }
 
+static int _tls_aes128_gcm_encrypt_raw(const uint8_t key[16], const uint8_t nonce[12],
+                                       const uint8_t *plaintext, uint32_t pt_len,
+                                       const uint8_t *aad, uint32_t aad_len,
+                                       uint8_t *ciphertext_out, uint8_t tag_out[16])
+{
+    uint8_t zero_block[16];
+    uint8_t h[16];
+    uint8_t j0[16];
+    uint8_t s[16];
+    uint8_t ej0[16];
+    memset(zero_block, 0, sizeof(zero_block));
+    _tls_aes128_encrypt_block_raw(key, zero_block, h);
+
+    memcpy(j0, nonce, 12U);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+
+    uint8_t counter[16];
+    memcpy(counter, j0, 16U);
+    _tls_gcm_inc32(counter);
+
+    uint32_t off = 0;
+    while (off < pt_len) {
+        uint8_t stream[16];
+        _tls_aes128_encrypt_block_raw(key, counter, stream);
+        uint32_t take = (pt_len - off) < 16U ? (pt_len - off) : 16U;
+        for (uint32_t i = 0; i < take; i++) ciphertext_out[off + i] = (uint8_t)(plaintext[off + i] ^ stream[i]);
+        _tls_gcm_inc32(counter);
+        off += take;
+    }
+
+    _tls_gcm_ghash(h, aad, aad_len, ciphertext_out, pt_len, s);
+    _tls_aes128_encrypt_block_raw(key, j0, ej0);
+    for (uint32_t i = 0; i < 16U; i++) tag_out[i] = (uint8_t)(s[i] ^ ej0[i]);
+    return 0;
+}
+
 RuntimeValue rt_tls13_aes128_encrypt_block(RuntimeValue key_rv, RuntimeValue block_rv)
 {
     uint32_t key_len = 0, block_len = 0;
@@ -9288,6 +9280,58 @@ cleanup:
     if (aad) free(aad);
     if (tag) free(tag);
     if (plaintext) free(plaintext);
+    return out;
+}
+
+RuntimeValue rt_tls13_record_encrypt(RuntimeValue key_rv, RuntimeValue iv_rv,
+                                     int64_t seq_num_i64, int64_t content_type_i64,
+                                     RuntimeValue plaintext_rv)
+{
+    uint32_t key_len = 0, iv_len = 0, pt_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *iv = _tls_copy_runtime_bytes(iv_rv, &iv_len);
+    uint8_t *plaintext = _tls_copy_runtime_bytes(plaintext_rv, &pt_len);
+    RuntimeValue empty = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t *inner = NULL;
+    uint8_t *record = NULL;
+    RuntimeValue out = empty;
+
+    if (!key || !iv || (!plaintext && pt_len != 0) || key_len != 16U || iv_len != 12U) {
+        goto cleanup;
+    }
+
+    uint32_t inner_len = pt_len + 1U;
+    uint32_t payload_len = inner_len + 16U;
+    inner = (uint8_t *)malloc(inner_len ? inner_len : 1U);
+    record = (uint8_t *)malloc(5U + payload_len);
+    if (!inner || !record) goto cleanup;
+
+    if (pt_len > 0) memcpy(inner, plaintext, pt_len);
+    inner[pt_len] = (uint8_t)(content_type_i64 & 0xff);
+
+    record[0] = 0x17U;
+    record[1] = 0x03U;
+    record[2] = 0x03U;
+    record[3] = (uint8_t)((payload_len >> 8) & 0xffU);
+    record[4] = (uint8_t)(payload_len & 0xffU);
+
+    uint8_t nonce[12];
+    memcpy(nonce, iv, 12U);
+    uint64_t seq = (uint64_t)seq_num_i64;
+    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
+
+    if (_tls_aes128_gcm_encrypt_raw(key, nonce, inner, inner_len, record, 5U, record + 5U, record + 5U + inner_len) != 0) {
+        goto cleanup;
+    }
+
+    out = _tls_runtime_array_from_bytes(record, 5U + payload_len);
+
+cleanup:
+    if (key) free(key);
+    if (iv) free(iv);
+    if (plaintext) free(plaintext);
+    if (inner) free(inner);
+    if (record) free(record);
     return out;
 }
 
@@ -9736,11 +9780,13 @@ RuntimeValue rt_tls13_hkdf_expand_label_server_hs(RuntimeValue secret_rv, Runtim
 RuntimeValue rt_tls13_master_secret_from_hs(RuntimeValue handshake_secret_rv)
 {
     RuntimeValue empty_rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t zeros[32] = {0};
+    RuntimeValue zeros_rv = _tls_runtime_array_from_bytes(zeros, 32U);
     RuntimeValue empty_hash_rv = rt_tls13_sha256(empty_rv);
     if (empty_hash_rv == NIL_VALUE) return NIL_VALUE;
     RuntimeValue derived_rv = rt_tls13_hkdf_expand_label_derived(handshake_secret_rv, empty_hash_rv);
     if (derived_rv == NIL_VALUE) return NIL_VALUE;
-    return rt_tls13_hkdf_extract(derived_rv, NIL_VALUE);
+    return rt_tls13_hkdf_extract(derived_rv, zeros_rv);
 }
 
 RuntimeValue rt_tls13_hkdf_expand_label_client_app(RuntimeValue secret_rv, RuntimeValue context_rv)
@@ -9857,6 +9903,8 @@ RuntimeValue rt_tls13_client_app_secret_7(
     RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g)
 {
     RuntimeValue empty_rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t zeros[32] = {0};
+    RuntimeValue zeros_rv = _tls_runtime_array_from_bytes(zeros, 32U);
     RuntimeValue empty_hash_rv = rt_tls13_sha256(empty_rv);
     serial_puts("[tls-app7] client empty_hash nil=");
     serial_put_hex((uint32_t)(empty_hash_rv == NIL_VALUE));
@@ -9867,7 +9915,7 @@ RuntimeValue rt_tls13_client_app_secret_7(
     serial_put_hex((uint32_t)(derived_rv == NIL_VALUE));
     serial_puts("\r\n");
     if (derived_rv == NIL_VALUE) return NIL_VALUE;
-    RuntimeValue master_rv = rt_tls13_hkdf_extract(derived_rv, empty_rv);
+    RuntimeValue master_rv = rt_tls13_hkdf_extract(derived_rv, zeros_rv);
     serial_puts("[tls-app7] client master nil=");
     serial_put_hex((uint32_t)(master_rv == NIL_VALUE));
     serial_puts("\r\n");
@@ -9890,6 +9938,8 @@ RuntimeValue rt_tls13_server_app_secret_7(
     RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g)
 {
     RuntimeValue empty_rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t zeros[32] = {0};
+    RuntimeValue zeros_rv = _tls_runtime_array_from_bytes(zeros, 32U);
     RuntimeValue empty_hash_rv = rt_tls13_sha256(empty_rv);
     serial_puts("[tls-app7] server empty_hash nil=");
     serial_put_hex((uint32_t)(empty_hash_rv == NIL_VALUE));
@@ -9900,7 +9950,7 @@ RuntimeValue rt_tls13_server_app_secret_7(
     serial_put_hex((uint32_t)(derived_rv == NIL_VALUE));
     serial_puts("\r\n");
     if (derived_rv == NIL_VALUE) return NIL_VALUE;
-    RuntimeValue master_rv = rt_tls13_hkdf_extract(derived_rv, empty_rv);
+    RuntimeValue master_rv = rt_tls13_hkdf_extract(derived_rv, zeros_rv);
     serial_puts("[tls-app7] server master nil=");
     serial_put_hex((uint32_t)(master_rv == NIL_VALUE));
     serial_puts("\r\n");
@@ -9915,6 +9965,113 @@ RuntimeValue rt_tls13_server_app_secret_7(
     serial_put_hex((uint32_t)(out == NIL_VALUE));
     serial_puts("\r\n");
     return out;
+}
+
+static RuntimeValue _tls_cached_client_app_secret = NIL_VALUE;
+static RuntimeValue _tls_cached_server_app_secret = NIL_VALUE;
+
+static int64_t _tls_runtime_array_len_i64(RuntimeValue rv)
+{
+    if (!IS_HEAP(rv)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(rv);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (int64_t)a->len;
+}
+
+int64_t rt_tls13_prepare_app_secrets_7(
+    RuntimeValue handshake_secret_rv,
+    RuntimeValue a, RuntimeValue b, RuntimeValue c,
+    RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g)
+{
+    _tls_cached_client_app_secret = rt_tls13_client_app_secret_7(
+        handshake_secret_rv, a, b, c, d, e, f, g);
+    _tls_cached_server_app_secret = rt_tls13_server_app_secret_7(
+        handshake_secret_rv, a, b, c, d, e, f, g);
+    int64_t client_len = _tls_runtime_array_len_i64(_tls_cached_client_app_secret);
+    int64_t server_len = _tls_runtime_array_len_i64(_tls_cached_server_app_secret);
+    return (client_len & 0xffff) | ((server_len & 0xffff) << 16);
+}
+
+int64_t rt_tls13_fill_app_secrets_7(
+    RuntimeValue handshake_secret_rv,
+    RuntimeValue a, RuntimeValue b, RuntimeValue c,
+    RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g,
+    RuntimeValue client_out_rv,
+    RuntimeValue server_out_rv)
+{
+    RuntimeValue client_rv = rt_tls13_client_app_secret_7(
+        handshake_secret_rv, a, b, c, d, e, f, g);
+    RuntimeValue server_rv = rt_tls13_server_app_secret_7(
+        handshake_secret_rv, a, b, c, d, e, f, g);
+    if (client_rv == NIL_VALUE || server_rv == NIL_VALUE) return -1;
+
+    uint32_t client_len = 0;
+    uint8_t *client = _tls_copy_runtime_bytes(client_rv, &client_len);
+    uint32_t server_len = 0;
+    uint8_t *server = _tls_copy_runtime_bytes(server_rv, &server_len);
+    if ((!client && client_len != 0U) || (!server && server_len != 0U)) {
+        free(client);
+        free(server);
+        return -2;
+    }
+    if (client_len != 32U || server_len != 32U) {
+        free(client);
+        free(server);
+        return -3;
+    }
+    if (_ed_bytes_to_rv(client, 32U, client_out_rv) != 0 ||
+        _ed_bytes_to_rv(server, 32U, server_out_rv) != 0) {
+        free(client);
+        free(server);
+        return -4;
+    }
+    free(client);
+    free(server);
+    return 0;
+}
+
+RuntimeValue rt_tls13_take_cached_client_app_secret(void)
+{
+    RuntimeValue out = _tls_cached_client_app_secret;
+    _tls_cached_client_app_secret = NIL_VALUE;
+    return out;
+}
+
+RuntimeValue rt_tls13_take_cached_server_app_secret(void)
+{
+    RuntimeValue out = _tls_cached_server_app_secret;
+    _tls_cached_server_app_secret = NIL_VALUE;
+    return out;
+}
+
+int64_t rt_tls13_client_app_secret_diag_7(
+    RuntimeValue handshake_secret_rv,
+    RuntimeValue a, RuntimeValue b, RuntimeValue c,
+    RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g)
+{
+    int64_t mask = 0;
+    RuntimeValue empty_rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t zeros[32] = {0};
+    RuntimeValue zeros_rv = _tls_runtime_array_from_bytes(zeros, 32U);
+    RuntimeValue empty_hash_rv = rt_tls13_sha256(empty_rv);
+    if (empty_hash_rv != NIL_VALUE) mask |= 1;
+    if (empty_hash_rv == NIL_VALUE) return mask;
+
+    RuntimeValue derived_rv = rt_tls13_hkdf_expand_label_derived(handshake_secret_rv, empty_hash_rv);
+    if (derived_rv != NIL_VALUE) mask |= 2;
+    if (derived_rv == NIL_VALUE) return mask;
+
+    RuntimeValue master_rv = rt_tls13_hkdf_extract(derived_rv, zeros_rv);
+    if (master_rv != NIL_VALUE) mask |= 4;
+    if (master_rv == NIL_VALUE) return mask;
+
+    RuntimeValue thash_rv = rt_tls13_transcript_hash_7(a, b, c, d, e, f, g);
+    if (thash_rv != NIL_VALUE) mask |= 8;
+    if (thash_rv == NIL_VALUE) return mask;
+
+    RuntimeValue out = rt_tls13_hkdf_expand_label_client_app(master_rv, thash_rv);
+    if (out != NIL_VALUE) mask |= 16;
+    return mask;
 }
 
 /* rt_array_pop: remove and return last element */

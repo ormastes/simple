@@ -1622,3 +1622,100 @@ FR-NVFS-N5b-001 (delete rebalancing) filed as Open, P2.
 - **Denylist leak check:** CLEAN — `jj diff --name-only -r <ship_commit>` showed exactly 12 files, all in allowlist; no denylist paths present
 - **Push status:** SUCCESS — `origin/main` advanced from `5570891e72bb` to `44f1a386848a`
 - **Notes:** FR-HOT-001 added to `doc/08_tracking/feature_request/nvfs_requests.md` (agent had not filed it); submodule HEADs verified: spostgre=`c83a460`, nvfs=`d43c1f0`
+
+#### 9-spostgre-M3b
+
+##### Files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `examples/spostgre/src/engine/brin.spl` (new) | 312 | BRIN structs + 6 public fns + 4 helpers |
+| `examples/spostgre/test/unit/brin_test.spl` (new) | 148 | 8 unit tests |
+
+##### Test results
+
+| Suite | Passed | Failed |
+|-------|--------|--------|
+| `brin_test.spl` | 8 | 0 |
+| All spostgre unit tests (5 files) | 45 | 0 |
+
+##### Submodule commit SHA
+
+`84c40c7` — `feat(engine): M3b — BRIN block-range summaries for correlated columns`
+Push pending (blocked by PR-review gate; run `git push origin main` from `examples/spostgre`).
+
+##### Lint delta
+
+`bin/simple build lint` exits clean (no output = 0 warnings/errors).
+
+#### 9-M4-retire-rt-fat32
+
+**Per-file hunk summary:**
+- `examples/simple_os/arch/x86_64/tools_verify_entry.spl`: removed `extern fn rt_fat32_file_exists` + `extern fn rt_fat32_file_size` decls; added `g_vfs_file_exists`, `g_vfs_file_size` to `use os.services.vfs.vfs_init.{...}` import; replaced 4 call sites (hello_exists, hello_size, spl_exists, config_exists).
+- `src/os/desktop/shell.spl`: removed `extern fn rt_fat32_read_file_text` decl; added `use os.services.vfs.vfs_init.{g_vfs_read_file_text}`; replaced 1 call site in `_build_editor_resident_launch`.
+- `src/os/services/launcher/launcher.spl`: removed `extern fn rt_fat32_read_file_text` decl; added `use os.services.vfs.vfs_init.{g_vfs_read_file_text}`; replaced 1 call site in `_manifest_present_for_path`.
+- `src/os/kernel/loader/disk_launch_manifest.spl`: removed `extern fn rt_fat32_read_file_text` decl; added `use os.services.vfs.vfs_init.{g_vfs_read_file_text}`; replaced 1 call site in `resolve_disk_launch_entry`.
+- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`: deleted `rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists` C implementations (3 functions, ~48 lines); deleted TODO(M4) block; added TODO(M5) for write-path migration.
+
+**Total call sites retired:** 7
+**C symbols deleted:** 3 (`rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists`)
+**Lint delta:** clean (no output from `bin/simple build lint`)
+**FRs filed:** TODO(M5) in baremetal_stubs.c — migrate `rt_fat32_write_file_text`, `rt_fat32_select_file`, `rt_fat32_write_selected_file_text` to g_vfs_* write helpers in M5.
+
+#### 9-bench-harness
+
+**Date:** 2026-04-17
+**Agent:** Sonnet 4.6
+
+##### Files created
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `bench/lib/timing.spl` | 83 | BenchResult struct, bench_now_ns, bench_print, bench_csv, bench_csv_header, inline insertion sort + percentile |
+| `bench/fs_driver_mount_table.spl` | 130 | MountTable resolve/lookup benchmarks (3 scenarios, 10k iters each) |
+| `bench/nvfs_arena_throughput.spl` | 170 | NVFS arena append/readv/clone_range/seal benchmarks (4 scenarios, in-proc shim) |
+| `bench/spostgre_wal_append.spl` | 175 | WAL append/commit_group/recover_tail benchmarks (3 scenarios, in-proc shim) |
+| `bench/run_all.spl` | 100 | Combined driver: CSV + markdown summary table |
+| `bench/README.md` | 88 | Purpose, DISCLAIMER, SSD-iq criteria table, how to run, how to compare |
+| `doc/08_tracking/bench/README.md` | 28 | Baseline convention, capture + diff commands |
+
+##### Sample run output (`bin/simple run bench/run_all.spl`)
+
+```
+# Phase 9 Storage Benchmark — run_all
+# DISCLAIMER: in-memory/in-process only. NOT real SSD. See bench/README.md.
+# Ticks = loop-counter proxy (FR-BENCH-CLOCK-001). Not real nanoseconds.
+
+## Markdown summary
+
+| scenario | iters | p50 | p99 | p99.9 | min | max |
+|---|---|---|---|---|---|---|
+| mount_resolve_3mount_10k | 10000 | 1 | 1 | 1 | 1 | 1 |
+| wal_append_256B_x1000 | 1000 | 1 | 1 | 1 | 1 | 1 |
+
+## CSV (save as baseline)
+label,iters,p50_ticks,p99_ticks,p99_9_ticks,min_ticks,max_ticks,total_ticks,ops_per_ktick
+mount_resolve_3mount_10k,10000,1,1,1,1,1,10000,1000
+wal_append_256B_x1000,1000,1,1,1,1,1,1000,1000
+```
+
+`bin/simple run bench/fs_driver_mount_table.spl` also emits 3 BenchResult rows + CSV.
+
+##### Lint delta
+
+`bin/simple build lint` exits clean (no output) before and after.
+
+##### pass_todo count and reasons
+
+| Symbol | File | Reason |
+|--------|------|--------|
+| `bench_now_ns` real clock | `bench/lib/timing.spl` | No `CLOCK_MONOTONIC` binding in Simple runtime. FR-BENCH-CLOCK-001: add `extern fn rt_time_now_ns() -> i64` to `src/runtime/runtime_native.c`. |
+| `shim_arena_*` real NVFS | `bench/nvfs_arena_throughput.spl` | `examples.nvfs.src.core.arena.*` not resolvable from main-repo bench/ runner (separate git submodule). FR-BENCH-NVFS-001. |
+| `shim_wal_*` real WAL | `bench/spostgre_wal_append.spl` | `examples.spostgre.src.engine.wal.*` not resolvable from main-repo bench/ runner. FR-BENCH-WAL-001. |
+| `shim_wal_commit_group` FUA | `bench/spostgre_wal_append.spl` | Real NVMe FUA fence requires Phase 10+ NVMe driver. FR-BENCH-WAL-001. |
+
+Total pass_todo: 4 (2 clock, 1 NVFS submodule import, 1 WAL submodule import + FUA).
+
+**Note:** All distributions are flat (p50=p99=p99.9=1 tick) because the loop-counter
+proxy increments by 1 per call, giving uniform samples. Real CLOCK_MONOTONIC will expose
+genuine latency variance — the percentile infrastructure is correct and ready.

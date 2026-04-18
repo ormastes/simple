@@ -1,13 +1,30 @@
-# NVFS core — B-tree pmap index (N5a).
+# NVFS core — B-tree pmap index (N5a + N5b).
 #
 # Replaces the flat _pmap_sidecar list with an O(log n) B-tree keyed by
 # (arena_id, offset).  Node-pool representation avoids recursive struct
 # definitions: children are indices (i64) into PmapBTree.nodes.
 #
 # FR-N3-001: Closed by this module.
-# FR-NVFS-N5b-001: B-tree rebalancing on delete (pass_todo, tracked below).
+# FR-NVFS-N5b-001: B-tree delete rebalancing — CLOSED by this file.
 #
-# Design: doc/05_design/nvfs_design_v2.md §17; N5a milestone.
+# Design: doc/05_design/nvfs_design_v2.md §17; N5a + N5b milestones.
+#
+# ---------------------------------------------------------------------------
+# B-tree invariants (N5b)
+# ---------------------------------------------------------------------------
+# fanout = minimum degree t (parameter to pmap_btree_new).
+# Convention used here: min_keys = fanout/2  (task spec, NOT CLRS t-1).
+#   max_keys = 2*fanout - 1
+#   min_keys = fanout / 2          (integer division; root exempt)
+#   merge:   left.keys + separator + right.keys → 2*min_keys + 1 keys max
+#   borrow:  move one key+child through parent separator (rotate)
+# Node pool: merged-away nodes become unreferenced (no compaction needed;
+#   pool indices are stable, so references from remaining nodes stay valid).
+# Root shrink: if root has 0 keys after delete and is an internal node with
+#   exactly 1 child, replace root with that child.
+# Deletion strategy: top-down proactive fix-up (CLRS-style) — before
+#   descending into a child, ensure it has > min_keys so leaf deletion never
+#   causes underflow that requires post-hoc bubbling.
 
 use std.fs_driver.error.{FsError}
 use examples.nvfs.src.core.pmap.{PmapEntry}
@@ -416,29 +433,357 @@ fn pmap_btree_insert(tree: PmapBTree, arena_id: i64, offset: i64, length: i64, e
     Ok(())
 
 # ---------------------------------------------------------------------------
-# Public API: remove
+# Delete rebalancing helpers (N5b)
+# ---------------------------------------------------------------------------
+
+fn _min_keys(fanout: u32) -> i64:
+    """Minimum keys per non-root node = fanout / 2 (integer division)."""
+    fanout as i64 / 2
+
+fn _child_key_count(tree: PmapBTree, parent_idx: i64, child_slot: i64) -> i64:
+    """Return the number of keys in parent.children[child_slot]."""
+    val child_idx = tree.nodes[parent_idx].children[child_slot]
+    tree.nodes[child_idx].keys.len() as i64
+
+fn btree_borrow_from_left(tree: PmapBTree, parent_idx: i64, child_idx_slot: i64) -> bool:
+    """Rotate one key+child from left sibling into child through parent.
+
+    Returns true if borrow succeeded (left sibling had > min_keys).
+    child_idx_slot is the position of the child in parent.children.
+    Left sibling is at child_idx_slot - 1.
+    """
+    if child_idx_slot == 0:
+        return false
+    val left_slot = child_idx_slot - 1
+    val left_nkeys = _child_key_count(tree, parent_idx, left_slot)
+    val min_k = _min_keys(tree.fanout)
+    if left_nkeys <= min_k:
+        return false
+
+    val parent = tree.nodes[parent_idx]
+    val sep_pos = child_idx_slot - 1   # separator key index in parent
+    val sep_key = parent.keys[sep_pos]
+
+    val left_idx  = parent.children[left_slot]
+    val child_idx = parent.children[child_idx_slot]
+    val left  = tree.nodes[left_idx]
+    val child = tree.nodes[child_idx]
+
+    # The last key+entry of left sibling comes into child's front.
+    val left_last_ki = left.keys.len() as i64 - 1
+
+    # Build new child: prepend sep_key (and for leaves: left's last entry).
+    var new_child_keys: [PmapKey] = []
+    var new_child_entries: [PmapBTreeEntry] = []
+    var new_child_children: [i64] = []
+
+    if child.is_leaf:
+        # For leaves: rotate left's last key+entry into child front.
+        new_child_keys.push(left.keys[left_last_ki])
+        new_child_entries.push(left.entries[left_last_ki])
+        var ci2 = 0
+        while ci2 < child.keys.len() as i64:
+            new_child_keys.push(child.keys[ci2])
+            new_child_entries.push(child.entries[ci2])
+            ci2 = ci2 + 1
+        new_child_children = child.children
+    else:
+        # For internal: rotate sep_key into child front, left's last child too.
+        new_child_keys.push(sep_key)
+        var ci2 = 0
+        while ci2 < child.keys.len() as i64:
+            new_child_keys.push(child.keys[ci2])
+            ci2 = ci2 + 1
+        new_child_entries = child.entries
+        # Prepend left's last child pointer.
+        val left_last_child = left.children[left.children.len() as i64 - 1]
+        new_child_children.push(left_last_child)
+        var cc = 0
+        while cc < child.children.len() as i64:
+            new_child_children.push(child.children[cc])
+            cc = cc + 1
+
+    tree.nodes[child_idx] = PmapBTreeNode(
+        keys:     new_child_keys,
+        entries:  new_child_entries,
+        children: new_child_children,
+        is_leaf:  child.is_leaf
+    )
+
+    # Trim left sibling.
+    var new_left_keys: [PmapKey] = []
+    var new_left_entries: [PmapBTreeEntry] = []
+    var new_left_children: [i64] = []
+    var lki = 0
+    while lki < left_last_ki:
+        new_left_keys.push(left.keys[lki])
+        lki = lki + 1
+    if left.is_leaf:
+        var lei = 0
+        while lei < left_last_ki:
+            new_left_entries.push(left.entries[lei])
+            lei = lei + 1
+        new_left_children = left.children
+    else:
+        new_left_entries = left.entries
+        var lci = 0
+        while lci < left.children.len() as i64 - 1:
+            new_left_children.push(left.children[lci])
+            lci = lci + 1
+    tree.nodes[left_idx] = PmapBTreeNode(
+        keys:     new_left_keys,
+        entries:  new_left_entries,
+        children: new_left_children,
+        is_leaf:  left.is_leaf
+    )
+
+    # Update separator in parent: for leaf rotation, new sep = new child's first key.
+    var new_parent_keys: [PmapKey] = []
+    var pki2 = 0
+    while pki2 < parent.keys.len() as i64:
+        if pki2 == sep_pos:
+            if child.is_leaf:
+                new_parent_keys.push(new_child_keys[0])
+            else:
+                new_parent_keys.push(left.keys[left_last_ki])
+        else:
+            new_parent_keys.push(parent.keys[pki2])
+        pki2 = pki2 + 1
+    tree.nodes[parent_idx] = PmapBTreeNode(
+        keys:     new_parent_keys,
+        entries:  parent.entries,
+        children: parent.children,
+        is_leaf:  parent.is_leaf
+    )
+
+    true
+
+fn btree_borrow_from_right(tree: PmapBTree, parent_idx: i64, child_idx_slot: i64) -> bool:
+    """Rotate one key+child from right sibling into child through parent.
+
+    Returns true if borrow succeeded (right sibling had > min_keys).
+    Right sibling is at child_idx_slot + 1.
+    """
+    val parent = tree.nodes[parent_idx]
+    val right_slot = child_idx_slot + 1
+    if right_slot >= parent.children.len() as i64:
+        return false
+    val right_nkeys = _child_key_count(tree, parent_idx, right_slot)
+    val min_k = _min_keys(tree.fanout)
+    if right_nkeys <= min_k:
+        return false
+
+    val sep_pos = child_idx_slot   # separator key index in parent
+    val sep_key = parent.keys[sep_pos]
+
+    val child_idx = parent.children[child_idx_slot]
+    val right_idx = parent.children[right_slot]
+    val child = tree.nodes[child_idx]
+    val right = tree.nodes[right_idx]
+
+    # Build new child: append sep_key (and for leaves: right's first entry).
+    var new_child_keys: [PmapKey] = []
+    var new_child_entries: [PmapBTreeEntry] = []
+    var new_child_children: [i64] = []
+
+    if child.is_leaf:
+        var ci2 = 0
+        while ci2 < child.keys.len() as i64:
+            new_child_keys.push(child.keys[ci2])
+            new_child_entries.push(child.entries[ci2])
+            ci2 = ci2 + 1
+        new_child_keys.push(right.keys[0])
+        new_child_entries.push(right.entries[0])
+        new_child_children = child.children
+    else:
+        var ci2 = 0
+        while ci2 < child.keys.len() as i64:
+            new_child_keys.push(child.keys[ci2])
+            ci2 = ci2 + 1
+        new_child_keys.push(sep_key)
+        new_child_entries = child.entries
+        var cc = 0
+        while cc < child.children.len() as i64:
+            new_child_children.push(child.children[cc])
+            cc = cc + 1
+        new_child_children.push(right.children[0])
+
+    tree.nodes[child_idx] = PmapBTreeNode(
+        keys:     new_child_keys,
+        entries:  new_child_entries,
+        children: new_child_children,
+        is_leaf:  child.is_leaf
+    )
+
+    # Trim right sibling: drop first key+entry+child.
+    var new_right_keys: [PmapKey] = []
+    var new_right_entries: [PmapBTreeEntry] = []
+    var new_right_children: [i64] = []
+    var rki = 1
+    while rki < right.keys.len() as i64:
+        new_right_keys.push(right.keys[rki])
+        rki = rki + 1
+    if right.is_leaf:
+        var rei = 1
+        while rei < right.entries.len() as i64:
+            new_right_entries.push(right.entries[rei])
+            rei = rei + 1
+        new_right_children = right.children
+    else:
+        new_right_entries = right.entries
+        var rci = 1
+        while rci < right.children.len() as i64:
+            new_right_children.push(right.children[rci])
+            rci = rci + 1
+    tree.nodes[right_idx] = PmapBTreeNode(
+        keys:     new_right_keys,
+        entries:  new_right_entries,
+        children: new_right_children,
+        is_leaf:  right.is_leaf
+    )
+
+    # Update separator in parent.
+    var new_parent_keys: [PmapKey] = []
+    var pki2 = 0
+    while pki2 < parent.keys.len() as i64:
+        if pki2 == sep_pos:
+            if child.is_leaf:
+                new_parent_keys.push(right.keys[0])
+            else:
+                new_parent_keys.push(right.keys[0])
+        else:
+            new_parent_keys.push(parent.keys[pki2])
+        pki2 = pki2 + 1
+    tree.nodes[parent_idx] = PmapBTreeNode(
+        keys:     new_parent_keys,
+        entries:  parent.entries,
+        children: parent.children,
+        is_leaf:  parent.is_leaf
+    )
+
+    true
+
+fn btree_merge_with_right(tree: PmapBTree, parent_idx: i64, child_idx_slot: i64):
+    """Merge child at child_idx_slot with its right sibling.
+
+    Pulls separator key from parent into the merged node (for internal nodes).
+    For leaves: just concatenate keys+entries (separator goes away entirely).
+    The right sibling node becomes unreferenced in the pool after merge.
+    One key is removed from parent.
+    """
+    val parent = tree.nodes[parent_idx]
+    val right_slot = child_idx_slot + 1
+    val sep_pos = child_idx_slot   # index of separator key in parent
+
+    val child_idx = parent.children[child_idx_slot]
+    val right_idx = parent.children[right_slot]
+    val child = tree.nodes[child_idx]
+    val right = tree.nodes[right_idx]
+
+    # Build merged node.
+    var merged_keys: [PmapKey] = []
+    var merged_entries: [PmapBTreeEntry] = []
+    var merged_children: [i64] = []
+
+    var mki = 0
+    while mki < child.keys.len() as i64:
+        merged_keys.push(child.keys[mki])
+        mki = mki + 1
+
+    if child.is_leaf:
+        # Leaf merge: no separator key in merged node.
+        var mei = 0
+        while mei < child.entries.len() as i64:
+            merged_entries.push(child.entries[mei])
+            mei = mei + 1
+        merged_children = child.children
+    else:
+        # Internal merge: pull separator key into merged node.
+        merged_keys.push(parent.keys[sep_pos])
+        merged_entries = child.entries
+        var mci = 0
+        while mci < child.children.len() as i64:
+            merged_children.push(child.children[mci])
+            mci = mci + 1
+    # Append right node's keys, entries, children.
+    var rki = 0
+    while rki < right.keys.len() as i64:
+        merged_keys.push(right.keys[rki])
+        rki = rki + 1
+    if child.is_leaf:
+        var rei = 0
+        while rei < right.entries.len() as i64:
+            merged_entries.push(right.entries[rei])
+            rei = rei + 1
+    else:
+        var rci = 0
+        while rci < right.children.len() as i64:
+            merged_children.push(right.children[rci])
+            rci = rci + 1
+
+    tree.nodes[child_idx] = PmapBTreeNode(
+        keys:     merged_keys,
+        entries:  merged_entries,
+        children: merged_children,
+        is_leaf:  child.is_leaf
+    )
+
+    # Remove separator key and right child pointer from parent.
+    var new_parent_keys: [PmapKey] = []
+    var new_parent_children: [i64] = []
+    var pki = 0
+    while pki < parent.keys.len() as i64:
+        if pki != sep_pos:
+            new_parent_keys.push(parent.keys[pki])
+        pki = pki + 1
+    var pci = 0
+    while pci < parent.children.len() as i64:
+        if pci != right_slot:
+            new_parent_children.push(parent.children[pci])
+        pci = pci + 1
+    tree.nodes[parent_idx] = PmapBTreeNode(
+        keys:     new_parent_keys,
+        entries:  parent.entries,
+        children: new_parent_children,
+        is_leaf:  parent.is_leaf
+    )
+
+# ---------------------------------------------------------------------------
+# Public API: remove (N5b — with rebalancing)
 # ---------------------------------------------------------------------------
 
 fn pmap_btree_remove(tree: PmapBTree, key: PmapKey) -> Option<PmapBTreeEntry>:
     """Remove and return the entry for key, or None if not present.
 
-    Leaf deletion only.  Rebalancing (merge/rotate) is deferred to N5b.
-    FR-NVFS-N5b-001: implement B-tree rebalancing on delete.
+    Uses top-down proactive fix-up: before descending into a child we ensure
+    it has more than min_keys, so deletion never leaves a node below minimum.
+    After deletion, if root has 0 keys and 1 child, root shrinks (tree height
+    decreases).  FR-NVFS-N5b-001: CLOSED.
     """
     val result = _lookup_node(tree, tree.root, key)
     match result:
         case None:
-            None
+            return None
         case Some(found_entry):
-            _remove_leaf_key(tree, tree.root, key)
+            _delete_recursive(tree, tree.root, key)
+            # Root shrink: if root is empty internal node with one child, replace.
+            val root = tree.nodes[tree.root]
+            if (not root.is_leaf) and (root.keys.len() == 0):
+                tree.root = root.children[0]
             Some(found_entry)
 
-fn _remove_leaf_key(tree: PmapBTree, node_idx: i64, key: PmapKey):
-    """Walk to the leaf containing key and remove it (no rebalancing)."""
+fn _delete_recursive(tree: PmapBTree, node_idx: i64, key: PmapKey):
+    """Recursively delete key from subtree rooted at node_idx.
+
+    Assumes node_idx has > min_keys (guaranteed by caller for non-root nodes).
+    For root, called directly.
+    """
     val node = tree.nodes[node_idx]
     val nkeys = node.keys.len() as i64
+    val min_k = _min_keys(tree.fanout)
 
     if node.is_leaf:
+        # Simple leaf removal.
         var new_keys:    [PmapKey]        = []
         var new_entries: [PmapBTreeEntry] = []
         var ri = 0
@@ -455,23 +800,51 @@ fn _remove_leaf_key(tree: PmapBTree, node_idx: i64, key: PmapKey):
         )
         return
 
-    # Internal node: descend into the appropriate child.
-    # pass_todo: rebalancing on delete (FR-NVFS-N5b-001)
+    # Internal node: find child to descend into.
     var child_pos: i64 = nkeys
     var ci = 0
     while ci < nkeys:
-        if _key_eq(node.keys[ci], key):
-            # Key is in separator — descend right child.
-            child_pos = ci + 1
+        if _key_lt(key, node.keys[ci]):
+            child_pos = ci
             ci = nkeys   # break
         else:
-            if _key_lt(key, node.keys[ci]):
-                child_pos = ci
-                ci = nkeys   # break
-            else:
-                ci = ci + 1
+            ci = ci + 1
 
-    _remove_leaf_key(tree, node.children[child_pos], key)
+    # Proactive fix-up: ensure child has > min_keys before descending.
+    val child_nkeys = _child_key_count(tree, node_idx, child_pos)
+    if child_nkeys <= min_k:
+        # Try borrow from left sibling.
+        val borrowed_left = btree_borrow_from_left(tree, node_idx, child_pos)
+        if not borrowed_left:
+            # Try borrow from right sibling.
+            val borrowed_right = btree_borrow_from_right(tree, node_idx, child_pos)
+            if not borrowed_right:
+                # Merge: prefer merge with right; if no right, merge left into child.
+                val parent_after = tree.nodes[node_idx]
+                if child_pos < parent_after.children.len() as i64 - 1:
+                    # Merge child with its right sibling.
+                    btree_merge_with_right(tree, node_idx, child_pos)
+                    # After merge, child_pos still valid (left child absorbed right).
+                else:
+                    # No right sibling — merge left sibling with child.
+                    # child becomes right side; merge left (child_pos-1) with child.
+                    btree_merge_with_right(tree, node_idx, child_pos - 1)
+                    # After merge, left sibling now has merged content at child_pos-1.
+                    # Recurse into merged node (now at child_pos - 1).
+                    _delete_recursive(tree, tree.nodes[node_idx].children[child_pos - 1], key)
+                    return
+
+    # Re-read node_idx after possible structural changes.
+    val child_idx = tree.nodes[node_idx].children[child_pos]
+    _delete_recursive(tree, child_idx, key)
+
+# ---------------------------------------------------------------------------
+# Public API: is_empty helper
+# ---------------------------------------------------------------------------
+
+fn pmap_btree_is_empty(tree: PmapBTree) -> bool:
+    """Return true iff the B-tree contains zero entries."""
+    tree.nodes[tree.root].keys.len() == 0
 
 # ---------------------------------------------------------------------------
 # Public API: range_iter (collect into list, inclusive)
