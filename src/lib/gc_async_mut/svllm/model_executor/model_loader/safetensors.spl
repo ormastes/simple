@@ -1,3 +1,5 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # @gc — module uses GC runtime
 #
 # Minimal safetensors reader. Used only by the packer CLI (svllm_pack)
@@ -19,12 +21,19 @@ enum SafetensorsError:
     UnknownDtype
     OffsetOutOfRange
 
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+
+# One tensor's header entry. `dtype` is kept as text for round-trip, while
+# `dtype_tag` is the typed enum form used by the pack planner.
+# `offset`/`length` are byte offsets/lengths relative to the payload start
+# (i.e. the byte immediately after the JSON header).
 struct SafetensorsTensorEntry:
     name: text
     dtype: text
+    dtype_tag: Dtype
     shape: [i64]
-    data_start: i64
-    data_end: i64
+    offset: i64
+    length: i64
 
 struct SafetensorsHeader:
     header_byte_len: i64
@@ -33,8 +42,267 @@ struct SafetensorsHeader:
     static fn empty() -> SafetensorsHeader:
         SafetensorsHeader(header_byte_len: 0, tensors: [])
 
-# Stub: parses only the 8-byte length prefix; rest is TODO for A2.
+# Parse u64 little-endian from a byte buffer at the given offset.
+fn _read_u64_le(bytes: [u8], off: i64) -> i64:
+    var v: i64 = 0
+    var i = 0
+    while i < 8:
+        val b: i64 = bytes[off + i] as i64
+        v = v | (b << (i * 8))
+        i = i + 1
+    v
+
+# Map a safetensors dtype string to the typed Dtype enum.
+fn _parse_dtype(s: text) -> Result<Dtype, SafetensorsError>:
+    if s == "F32":
+        return Ok(Dtype.F32)
+    if s == "F16":
+        return Ok(Dtype.F16)
+    if s == "BF16":
+        return Ok(Dtype.Bf16)
+    if s == "F64":
+        return Ok(Dtype.F64)
+    if s == "I8":
+        return Ok(Dtype.I8)
+    if s == "I16":
+        return Ok(Dtype.I16)
+    if s == "I32":
+        return Ok(Dtype.I32)
+    if s == "I64":
+        return Ok(Dtype.I64)
+    if s == "U8":
+        return Ok(Dtype.U8)
+    if s == "BOOL":
+        return Ok(Dtype.Bool)
+    Err(SafetensorsError.UnknownDtype)
+
+# All parsing operates on the raw [u8] header slice, indexed by absolute
+# byte offset (0 .. header_byte_len). No text-byte_at dependency — the
+# Rust seed compiler's `text` methods differ from the self-hosted impl.
+
+# Read a byte as i64 from the header slice [base, base+hdr_len) in `raw`.
+fn _hb(raw: [u8], base: i64, p: i64) -> i64:
+    raw[base + p] as i64
+
+# Skip ASCII whitespace within [p, hdr_len).
+fn _skip_ws(raw: [u8], base: i64, hdr_len: i64, pos: i64) -> i64:
+    var p = pos
+    while p < hdr_len:
+        val c = _hb(raw, base, p)
+        if c == 32 or c == 9 or c == 10 or c == 13:
+            p = p + 1
+        else:
+            return p
+    p
+
+# Parse a JSON string starting at `pos` (pointing at `"`).
+# Returns (value_text, pos_after).
+fn _parse_string(raw: [u8], base: i64, hdr_len: i64, pos: i64) -> Result<(text, i64), SafetensorsError>:
+    if pos >= hdr_len:
+        return Err(SafetensorsError.MalformedJson)
+    if _hb(raw, base, pos) != 34:
+        return Err(SafetensorsError.MalformedJson)
+    var p = pos + 1
+    var out = ""
+    while p < hdr_len:
+        val c = _hb(raw, base, p)
+        if c == 34:
+            return Ok((out, p + 1))
+        if c == 92:
+            if p + 1 >= hdr_len:
+                return Err(SafetensorsError.MalformedJson)
+            val nxt = _hb(raw, base, p + 1)
+            out = out + nxt.chr()
+            p = p + 2
+        else:
+            out = out + c.chr()
+            p = p + 1
+    Err(SafetensorsError.MalformedJson)
+
+# Parse a non-negative integer starting at `pos`. Returns (value, pos_after).
+fn _parse_int(raw: [u8], base: i64, hdr_len: i64, pos: i64) -> Result<(i64, i64), SafetensorsError>:
+    var p = pos
+    var v: i64 = 0
+    var seen = false
+    while p < hdr_len:
+        val c = _hb(raw, base, p)
+        if c >= 48 and c <= 57:
+            v = v * 10 + (c - 48)
+            seen = true
+            p = p + 1
+        else:
+            break
+    if not seen:
+        return Err(SafetensorsError.MalformedJson)
+    Ok((v, p))
+
+# Parse an integer array like `[1, 2, 3]` at `pos`. Returns (values, pos_after).
+fn _parse_int_array(raw: [u8], base: i64, hdr_len: i64, pos: i64) -> Result<([i64], i64), SafetensorsError>:
+    var p = _skip_ws(raw, base, hdr_len, pos)
+    if p >= hdr_len or _hb(raw, base, p) != 91:
+        return Err(SafetensorsError.MalformedJson)
+    p = _skip_ws(raw, base, hdr_len, p + 1)
+    var out: [i64] = []
+    if p < hdr_len and _hb(raw, base, p) == 93:
+        return Ok((out, p + 1))
+    while p < hdr_len:
+        p = _skip_ws(raw, base, hdr_len, p)
+        val r = _parse_int(raw, base, hdr_len, p)?
+        out.push(r.0)
+        p = _skip_ws(raw, base, hdr_len, r.1)
+        if p >= hdr_len:
+            return Err(SafetensorsError.MalformedJson)
+        val c = _hb(raw, base, p)
+        if c == 44:
+            p = p + 1
+        else:
+            if c == 93:
+                return Ok((out, p + 1))
+            else:
+                return Err(SafetensorsError.MalformedJson)
+    Err(SafetensorsError.MalformedJson)
+
+# Skip one JSON value (object, array, string, number, null, true, false).
+fn _skip_value(raw: [u8], base: i64, hdr_len: i64, pos: i64) -> Result<i64, SafetensorsError>:
+    var p = _skip_ws(raw, base, hdr_len, pos)
+    if p >= hdr_len:
+        return Err(SafetensorsError.MalformedJson)
+    val c = _hb(raw, base, p)
+    if c == 34:
+        val r = _parse_string(raw, base, hdr_len, p)?
+        return Ok(r.1)
+    if c == 123 or c == 91:
+        val open = c
+        val close: i64 = if open == 123: 125 else: 93
+        var depth = 1
+        p = p + 1
+        while p < hdr_len and depth > 0:
+            val cc = _hb(raw, base, p)
+            if cc == 34:
+                val rr = _parse_string(raw, base, hdr_len, p)?
+                p = rr.1
+            else:
+                if cc == open:
+                    depth = depth + 1
+                    p = p + 1
+                else:
+                    if cc == close:
+                        depth = depth - 1
+                        p = p + 1
+                    else:
+                        p = p + 1
+        return Ok(p)
+    while p < hdr_len:
+        val cc = _hb(raw, base, p)
+        if cc == 44 or cc == 125 or cc == 93:
+            return Ok(p)
+        p = p + 1
+    Ok(p)
+
+# Parse one tensor entry body (the inner object after `"name":`).
+fn _parse_tensor_entry_body(raw: [u8], base: i64, hdr_len: i64, pos: i64, name: text) -> Result<(SafetensorsTensorEntry, i64), SafetensorsError>:
+    var p = _skip_ws(raw, base, hdr_len, pos)
+    if p >= hdr_len or _hb(raw, base, p) != 123:
+        return Err(SafetensorsError.MalformedJson)
+    p = _skip_ws(raw, base, hdr_len, p + 1)
+    var dtype_s = ""
+    var shape_v: [i64] = []
+    var offsets: [i64] = []
+    var saw_dtype = false
+    var saw_shape = false
+    var saw_offsets = false
+    while p < hdr_len:
+        p = _skip_ws(raw, base, hdr_len, p)
+        if p < hdr_len and _hb(raw, base, p) == 125:
+            p = p + 1
+            break
+        val key_r = _parse_string(raw, base, hdr_len, p)?
+        val key = key_r.0
+        p = _skip_ws(raw, base, hdr_len, key_r.1)
+        if p >= hdr_len or _hb(raw, base, p) != 58:
+            return Err(SafetensorsError.MalformedJson)
+        p = _skip_ws(raw, base, hdr_len, p + 1)
+        if key == "dtype":
+            val vr = _parse_string(raw, base, hdr_len, p)?
+            dtype_s = vr.0
+            saw_dtype = true
+            p = vr.1
+        else:
+            if key == "shape":
+                val ar = _parse_int_array(raw, base, hdr_len, p)?
+                shape_v = ar.0
+                saw_shape = true
+                p = ar.1
+            else:
+                if key == "data_offsets":
+                    val ar2 = _parse_int_array(raw, base, hdr_len, p)?
+                    offsets = ar2.0
+                    saw_offsets = true
+                    p = ar2.1
+                else:
+                    p = _skip_value(raw, base, hdr_len, p)?
+        p = _skip_ws(raw, base, hdr_len, p)
+        if p < hdr_len and _hb(raw, base, p) == 44:
+            p = p + 1
+    if not saw_dtype or not saw_shape or not saw_offsets:
+        return Err(SafetensorsError.MalformedJson)
+    if offsets.len() != 2:
+        return Err(SafetensorsError.MalformedJson)
+    if offsets[0] < 0 or offsets[1] < offsets[0]:
+        return Err(SafetensorsError.OffsetOutOfRange)
+    val tag = _parse_dtype(dtype_s)?
+    val entry = SafetensorsTensorEntry(
+        name: name,
+        dtype: dtype_s,
+        dtype_tag: tag,
+        shape: shape_v,
+        offset: offsets[0],
+        length: offsets[1] - offsets[0]
+    )
+    Ok((entry, p))
+
+# Parse the top-level header JSON into a SafetensorsHeader.
+fn _parse_header_json(raw: [u8], base: i64, hdr_len: i64, payload_len: i64) -> Result<SafetensorsHeader, SafetensorsError>:
+    var p = _skip_ws(raw, base, hdr_len, 0)
+    if p >= hdr_len or _hb(raw, base, p) != 123:
+        return Err(SafetensorsError.MalformedJson)
+    p = _skip_ws(raw, base, hdr_len, p + 1)
+    var tensors: [SafetensorsTensorEntry] = []
+    while p < hdr_len:
+        p = _skip_ws(raw, base, hdr_len, p)
+        if p < hdr_len and _hb(raw, base, p) == 125:
+            p = p + 1
+            break
+        val kr = _parse_string(raw, base, hdr_len, p)?
+        val name = kr.0
+        p = _skip_ws(raw, base, hdr_len, kr.1)
+        if p >= hdr_len or _hb(raw, base, p) != 58:
+            return Err(SafetensorsError.MalformedJson)
+        p = _skip_ws(raw, base, hdr_len, p + 1)
+        if name == "__metadata__":
+            p = _skip_value(raw, base, hdr_len, p)?
+        else:
+            val er = _parse_tensor_entry_body(raw, base, hdr_len, p, name)?
+            val entry = er.0
+            if entry.offset + entry.length > payload_len:
+                return Err(SafetensorsError.OffsetOutOfRange)
+            tensors.push(entry)
+            p = er.1
+        p = _skip_ws(raw, base, hdr_len, p)
+        if p < hdr_len and _hb(raw, base, p) == 44:
+            p = p + 1
+    Ok(SafetensorsHeader(header_byte_len: hdr_len, tensors: tensors))
+
+# Parse a full safetensors byte buffer: 8-byte LE length prefix, then JSON
+# header, then payload. Pure — no I/O.
 fn parse_safetensors_header(bytes: [u8]) -> Result<SafetensorsHeader, SafetensorsError>:
     if bytes.len() < 8:
         return Err(SafetensorsError.TruncatedHeader)
-    Err(SafetensorsError.MalformedJson)
+    val hdr_len = _read_u64_le(bytes, 0)
+    if hdr_len < 0:
+        return Err(SafetensorsError.MalformedJson)
+    val total: i64 = bytes.len() as i64
+    if 8 + hdr_len > total:
+        return Err(SafetensorsError.TruncatedHeader)
+    val payload_len = total - 8 - hdr_len
+    _parse_header_json(bytes, 8, hdr_len, payload_len)

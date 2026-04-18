@@ -1,6 +1,9 @@
-# svllm manifest — parser surface (failing tests pin the target API)
+# svllm manifest — parser + A2 serializer surface
+# A2 adds serialize_manifest(). Parser round-trip deferred to A3.
 
-use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{TensorPackManifest, ManifestError, parse_manifest, build_tensor_pack}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{TensorPackManifest, ManifestError, parse_manifest, build_tensor_pack, serialize_manifest}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
 
 describe "TensorPackManifest.empty":
     it "is_empty on fresh value":
@@ -30,3 +33,41 @@ describe "build_tensor_pack (A1 stub)":
         val r = build_tensor_pack("/tmp/pack", m)
         # Intentionally failing until build is implemented.
         expect(r.is_ok()).to_equal(true)
+
+# ----- A2 serializer specs (failing until Phase 5) -----
+
+fn _demo_pack() -> TensorPack:
+    var p = TensorPack.empty("/tmp/pack")
+    p.model_id = "demo"
+    p.revision = "v0"
+    p.chunks.push(ChunkInfo(
+        id: 0,
+        relative_path: "data-000.bin",
+        byte_len: 4096,
+        digest_hex: "0011aabb00000000000000000000000000000000000000000000000000000000"
+    ))
+    p.tensors.push(TensorInfo(
+        name: "w", shape: [2, 2], dtype: Dtype.F32,
+        chunk_id: 0, offset_in_chunk: 0, byte_len: 16
+    ))
+    p
+
+describe "serialize_manifest (A2)":
+    it "produces non-empty bytes":
+        val pack = _demo_pack()
+        val out = serialize_manifest(pack)
+        expect(out.len()).to_be_greater_than(10)
+
+    it "includes the schema_version field":
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("schema_version")
+
+    it "includes the tensor name 'w' and dtype F32":
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("w")
+        expect(out).to_contain("F32")
+
+    it "includes digest_hex and relative_path":
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("0011aabb")
+        expect(out).to_contain("data-000.bin")

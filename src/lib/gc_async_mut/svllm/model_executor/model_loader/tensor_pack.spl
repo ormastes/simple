@@ -1,3 +1,5 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # @gc — module uses GC runtime
 #
 # Tensor pack — svllm's on-disk, sealed serving format. Mirrors the
@@ -14,6 +16,16 @@
 # offsets within a chunk. Immutability guaranteed by fs_seal(pin_extents).
 
 use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.common.crypto.types.{rotr32}
+use std.common.crypto.sha256.{sha256_bytes}
+
+# Default chunk alignment (4 KiB). Matches common NVMe LBA + typical
+# `preferred_read_granule` floor per arch.md §3.
+val DEFAULT_CHUNK_ALIGN: i64 = 4096
+
+# Default preferred chunk size (2 MiB). Greedy planner starts a new chunk
+# when the next tensor would push the current chunk past this threshold.
+val DEFAULT_PREFERRED_CHUNK_BYTES: i64 = 2097152
 
 # Describes one tensor: name, shape, dtype, which chunk it lives in,
 # offset within that chunk, byte length.
@@ -75,3 +87,125 @@ struct TensorPack:
             offset_in_chunk: 0,
             byte_len: 0
         )
+
+# Align `v` up to the next multiple of `align` (align > 0).
+fn _align_up(v: i64, align: i64) -> i64:
+    if align <= 1:
+        return v
+    val rem = v % align
+    if rem == 0:
+        return v
+    v + (align - rem)
+
+# Greedy chunk planner. Walks tensors in declaration order; starts a new
+# chunk when the next aligned tensor would push the current chunk past
+# `preferred_chunk_bytes`. Each tensor's `offset_in_chunk` is aligned up
+# to `align`. Pure — no I/O, no digests (digests are computed at emit time).
+#
+# Returns a TensorPack whose `tensors` carry assigned chunk_id/offset and
+# whose `chunks` carry placeholder byte_len + empty digest_hex (filled by
+# the emitter).
+fn plan_chunks(tensors: [TensorInfo], align: i64, preferred_chunk_bytes: i64) -> TensorPack:
+    var pack = TensorPack.empty("")
+    pack.preferred_chunk_bytes = preferred_chunk_bytes
+    var cur_chunk: i32 = 0
+    var cur_off: i64 = 0
+    var i = 0
+    while i < tensors.len():
+        val t = tensors[i]
+        var placed_off = _align_up(cur_off, align)
+        if placed_off > 0 and (placed_off + t.byte_len) > preferred_chunk_bytes:
+            # Close the current chunk and start a new one.
+            pack.chunks.push(ChunkInfo(
+                id: cur_chunk,
+                relative_path: "data-" + _pad3(cur_chunk as i64) + ".bin",
+                byte_len: cur_off,
+                digest_hex: ""
+            ))
+            cur_chunk = cur_chunk + (1 as i32)
+            cur_off = 0
+            placed_off = 0
+        pack.tensors.push(TensorInfo(
+            name: t.name,
+            shape: t.shape,
+            dtype: t.dtype,
+            chunk_id: cur_chunk,
+            offset_in_chunk: placed_off,
+            byte_len: t.byte_len
+        ))
+        cur_off = placed_off + t.byte_len
+        i = i + 1
+    # Flush the final chunk (even if empty, if we had any tensors).
+    if tensors.len() > 0:
+        pack.chunks.push(ChunkInfo(
+            id: cur_chunk,
+            relative_path: "data-" + _pad3(cur_chunk as i64) + ".bin",
+            byte_len: _align_up(cur_off, align),
+            digest_hex: ""
+        ))
+    pack
+
+# Zero-pad a non-negative integer to 3 digits (e.g. 0 -> "000", 12 -> "012").
+fn _pad3(v: i64) -> text:
+    if v < 10:
+        return "00" + v.to_text()
+    if v < 100:
+        return "0" + v.to_text()
+    v.to_text()
+
+# Emit the raw bytes of one tensor slot: the tensor bytes followed by zero
+# padding so the slot's total length is a multiple of `align`. Pure.
+fn write_chunk(t: TensorInfo, tensor_bytes: [u8], align: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < tensor_bytes.len():
+        out.push(tensor_bytes[i])
+        i = i + 1
+    val padded = _align_up(tensor_bytes.len() as i64, align)
+    var p: i64 = tensor_bytes.len() as i64
+    while p < padded:
+        out.push(0 as u8)
+        p = p + 1
+    out
+
+# Convert one nibble (0..15) to its lowercase hex character code point.
+fn _nibble_to_hex(n: i64) -> text:
+    if n < 10:
+        (n + 48).chr()
+    else:
+        (n + 87).chr()
+
+# Local bytes-to-hex that sidesteps the Rust-seed compiler's missing
+# `str.get(i)` method (the shared `std.common.crypto.types.bytes_to_hex`
+# uses "abcdef".get(i) which breaks interpreter mode).
+fn _bytes_to_hex(bytes: list) -> text:
+    var out = ""
+    var i = 0
+    while i < bytes.len():
+        val b: i64 = bytes.get(i) as i64
+        val hi = (b / 16) and 0xF
+        val lo = b and 0xF
+        out = out + _nibble_to_hex(hi) + _nibble_to_hex(lo)
+        i = i + 1
+    out
+
+# Convert [u8] to a list of i64 byte values (sha256_bytes expects each element
+# as an integer; [u8] elements may be sign-extended or Option-wrapped by the
+# interpreter).
+fn _u8_to_i64_list(bytes: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        out.push((bytes[i] as i64) and 0xFF)
+        i = i + 1
+    out
+
+# SHA-256 of a byte buffer, returned as 64-char lowercase hex. Thin wrapper
+# over `std.common.crypto.sha256.sha256_bytes` with a local hex formatter.
+# NOTE: broken under the Rust-seed interpreter (sha256_bytes returns bogus
+# [0x11,...]); correct under compiled/self-hosted. Packer CLI shells out to
+# `sha256sum` as a workaround until FS-REQ-003 lands a runtime primitive.
+fn sha256_chunk(bytes: [u8]) -> text:
+    val ints = _u8_to_i64_list(bytes)
+    val hash = sha256_bytes(ints)
+    _bytes_to_hex(hash)

@@ -1,0 +1,75 @@
+# svllm nvfs_client::std_fs — A2 adapter specs (fail until Phase 5)
+#
+# On FAT32 `.seal()` is a no-op (documented here); ext4/xfs variants
+# may additionally fsync the inode. Tests that require fsync are marked
+# skip("FS-REQ-001") until `rt_file_fsync` lands (see audit §4).
+
+use std.gc_async_mut.svllm.nvfs_client.std_fs.{StdFsNvfsClient}
+use std.gc_async_mut.svllm.nvfs_client.{ObjClass, CreateFlags, NvfsError, SyncScope}
+
+fn _tmp_path(name: text) -> text:
+    "/tmp/svllm_a2_" + name
+
+describe "StdFsNvfsClient.create (A2)":
+    it "opens a fresh AppendOnly object and returns Ok":
+        val client = StdFsNvfsClient.new()
+        val flags = CreateFlags.defaults()
+        val r = client.create(_tmp_path("create.bin"), ObjClass.AppendOnly, flags)
+        expect(r.is_ok()).to_equal(true)
+        # Cleanup: close + remove.
+        val obj = r.unwrap()
+        client.close(obj)
+
+describe "StdFsNvfsClient.write (A2)":
+    it "appends bytes and reports Ok":
+        val client = StdFsNvfsClient.new()
+        val path = _tmp_path("write.bin")
+        val obj = client.create(path, ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        var buf: [u8] = []
+        var i = 0
+        while i < 8:
+            buf.push(0x5A as u8)
+            i = i + 1
+        val n = client.write(obj, buf)
+        expect(n.is_ok()).to_equal(true)
+        client.close(obj)
+
+describe "StdFsNvfsClient.seal (A2)":
+    it "returns Ok (on FAT32 this is a no-op; documented contract)":
+        val client = StdFsNvfsClient.new()
+        val obj = client.create(_tmp_path("seal.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        val r = client.seal(obj, false)
+        expect(r.is_ok()).to_equal(true)
+
+describe "StdFsNvfsClient.publish_atomic (A2)":
+    it "renames staging path to final path via rt_file_move":
+        val client = StdFsNvfsClient.new()
+        val staging = _tmp_path("publish.bin.tmp")
+        val final_path = _tmp_path("publish.bin")
+        val obj = client.create(staging, ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        var buf: [u8] = []
+        buf.push(0x01 as u8)
+        client.write(obj, buf)
+        client.seal(obj, false)
+        val r = client.publish_atomic(obj, final_path)
+        expect(r.is_ok()).to_equal(true)
+
+    it "returns Err when the source staging path does not exist":
+        val client = StdFsNvfsClient.new()
+        # Fabricate a handle for a path that was never created; adapter must refuse.
+        val ghost = client.create(_tmp_path("ghost.tmp"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        client.close(ghost)
+        # After close+rename, a second publish must not succeed.
+        val r = client.publish_atomic(ghost, _tmp_path("ghost.final"))
+        expect(r.is_err()).to_equal(true)
+
+describe "StdFsNvfsClient.sync (A2) — fsync primitive gap":
+    it "skip('FS-REQ-001'): fsync semantics deferred until rt_file_fsync extern lands":
+        # Blocked on FS-REQ-001 (see .sstack/svllm-a2-packer/audit.md §4).
+        # Adapter returns NvfsError.Unsupported today; test will be re-enabled
+        # once `rt_file_fsync` is wired through the runtime.
+        val client = StdFsNvfsClient.new()
+        val obj = client.create(_tmp_path("sync.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        val r = client.sync(obj, SyncScope.File)
+        # Expect Unsupported until FS-REQ-001 closes.
+        expect(r.is_err()).to_equal(true)

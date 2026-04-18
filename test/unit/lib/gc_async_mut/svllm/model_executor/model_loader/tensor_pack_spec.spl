@@ -1,6 +1,8 @@
-# svllm tensor_pack — data type surface
+# svllm tensor_pack — data type surface + A2 writer specs
+#
+# A2 adds plan_chunks/write_chunk/sha256_chunk. These tests fail until Phase 5.
 
-use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo, plan_chunks, write_chunk, sha256_chunk, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES}
 use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
 
 describe "TensorPack.empty":
@@ -49,3 +51,69 @@ describe "ChunkInfo":
         )
         expect(c.relative_path).to_equal("data-000.bin")
         expect(c.digest_hex).to_equal("0011aabb")
+
+# ----- A2 writer specs (failing until Phase 5) -----
+
+describe "DEFAULT constants (A2)":
+    it "chunk align is 4 KiB":
+        expect(DEFAULT_CHUNK_ALIGN).to_equal(4096)
+
+    it "preferred chunk bytes is 2 MiB":
+        expect(DEFAULT_PREFERRED_CHUNK_BYTES).to_equal(2097152)
+
+describe "plan_chunks (A2)":
+    it "emits a single chunk for two small tensors (16B + 24B, fits in one 2 MiB chunk)":
+        val tensors = [
+            TensorInfo(name: "w", shape: [2, 2], dtype: Dtype.F32,
+                       chunk_id: 0, offset_in_chunk: 0, byte_len: 16),
+            TensorInfo(name: "b", shape: [3], dtype: Dtype.I64,
+                       chunk_id: 0, offset_in_chunk: 0, byte_len: 24)
+        ]
+        val pack = plan_chunks(tensors, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES)
+        expect(pack.chunk_count()).to_equal(1)
+        expect(pack.tensor_count()).to_equal(2)
+
+    it "aligns the second tensor to DEFAULT_CHUNK_ALIGN (4096)":
+        val tensors = [
+            TensorInfo(name: "w", shape: [2, 2], dtype: Dtype.F32,
+                       chunk_id: 0, offset_in_chunk: 0, byte_len: 16),
+            TensorInfo(name: "b", shape: [3], dtype: Dtype.I64,
+                       chunk_id: 0, offset_in_chunk: 0, byte_len: 24)
+        ]
+        val pack = plan_chunks(tensors, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES)
+        val second = pack.tensors[1]
+        # 16 bytes then align-up to 4096.
+        expect(second.offset_in_chunk).to_equal(4096)
+
+describe "write_chunk (A2)":
+    it "emits chunk bytes of expected length (tensor bytes + align padding)":
+        val t = TensorInfo(name: "w", shape: [2, 2], dtype: Dtype.F32,
+                           chunk_id: 0, offset_in_chunk: 0, byte_len: 16)
+        var src: [u8] = []
+        var i = 0
+        while i < 16:
+            src.push(0xAB as u8)
+            i = i + 1
+        val out = write_chunk(t, src, DEFAULT_CHUNK_ALIGN)
+        # First 16 bytes are the tensor; remainder (if any) is zero padding.
+        expect(out.len()).to_be_greater_than(15)
+
+describe "sha256_chunk (A2)":
+    it "returns a 64-char lowercase hex digest":
+        var bytes: [u8] = []
+        var i = 0
+        while i < 16:
+            bytes.push(0 as u8)
+            i = i + 1
+        val hex = sha256_chunk(bytes)
+        expect(hex.len()).to_equal(64)
+
+    it "is deterministic (same input => same hex)":
+        var a: [u8] = []
+        var b: [u8] = []
+        var i = 0
+        while i < 8:
+            a.push(0x42 as u8)
+            b.push(0x42 as u8)
+            i = i + 1
+        expect(sha256_chunk(a)).to_equal(sha256_chunk(b))

@@ -13,7 +13,8 @@
 #
 # SDN is the project's canonical data format (see .claude/rules/language.md).
 
-use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
 
 enum ManifestError:
     NotFound
@@ -55,3 +56,84 @@ fn parse_manifest(sdn_text: text) -> Result<TensorPackManifest, ManifestError>:
 # descriptor (resolves tensor → chunk mappings, checks invariants).
 fn build_tensor_pack(pack_root: text, m: TensorPackManifest) -> Result<TensorPack, ManifestError>:
     Err(ManifestError.Malformed)
+
+# Map a Dtype enum back to its safetensors-style text label.
+fn _dtype_label(dt: Dtype) -> text:
+    match dt:
+        Dtype.F32 => "F32"
+        Dtype.F16 => "F16"
+        Dtype.Bf16 => "BF16"
+        Dtype.F64 => "F64"
+        Dtype.I8 => "I8"
+        Dtype.I16 => "I16"
+        Dtype.I32 => "I32"
+        Dtype.I64 => "I64"
+        Dtype.U8 => "U8"
+        Dtype.Bool => "BOOL"
+
+# Minimal JSON-string escape: `"` and `\` only. Manifest values do not
+# contain control chars for v0. Uses char_at (Rust-seed compatible) rather
+# than byte_at; input is restricted to ASCII-clean identifiers + hex digests.
+fn _esc(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "\"":
+            out = out + "\\\""
+        else:
+            if ch == "\\":
+                out = out + "\\\\"
+            else:
+                out = out + ch
+        i = i + 1
+    out
+
+# Serialize an [i64] shape array as `[a,b,c]`.
+fn _shape_json(shape: [i64]) -> text:
+    var out = "["
+    var i = 0
+    while i < shape.len():
+        if i > 0:
+            out = out + ","
+        out = out + shape[i].to_text()
+        i = i + 1
+    out + "]"
+
+# Serialize a TensorPack into the canonical v0 manifest format. Output is a
+# deterministic JSON-ish single-line text (schema per arch.md §4). Keys are
+# emitted in a fixed order; integers decimal; no whitespace padding.
+fn serialize_manifest(pack: TensorPack) -> text:
+    var out = "{"
+    out = out + "\"schema_version\":0"
+    out = out + ",\"model_id\":\"" + _esc(pack.model_id) + "\""
+    out = out + ",\"revision\":\"" + _esc(pack.revision) + "\""
+    out = out + ",\"preferred_chunk_bytes\":" + pack.preferred_chunk_bytes.to_text()
+    out = out + ",\"digest_algo\":\"sha256\""
+    out = out + ",\"chunks\":["
+    var i = 0
+    while i < pack.chunks.len():
+        val c = pack.chunks[i]
+        if i > 0:
+            out = out + ","
+        out = out + "{\"id\":" + (c.id as i64).to_text()
+        out = out + ",\"relative_path\":\"" + _esc(c.relative_path) + "\""
+        out = out + ",\"byte_len\":" + c.byte_len.to_text()
+        out = out + ",\"digest_hex\":\"" + _esc(c.digest_hex) + "\"}"
+        i = i + 1
+    out = out + "]"
+    out = out + ",\"tensors\":["
+    var j = 0
+    while j < pack.tensors.len():
+        val t = pack.tensors[j]
+        if j > 0:
+            out = out + ","
+        out = out + "{\"name\":\"" + _esc(t.name) + "\""
+        out = out + ",\"dtype\":\"" + _dtype_label(t.dtype) + "\""
+        out = out + ",\"shape\":" + _shape_json(t.shape)
+        out = out + ",\"chunk_id\":" + (t.chunk_id as i64).to_text()
+        out = out + ",\"offset_in_chunk\":" + t.offset_in_chunk.to_text()
+        out = out + ",\"byte_len\":" + t.byte_len.to_text() + "}"
+        j = j + 1
+    out = out + "]"
+    out + "}"

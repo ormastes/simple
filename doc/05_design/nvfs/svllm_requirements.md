@@ -165,3 +165,133 @@ These are targets, not acceptance gates — they are here so nvfs can evaluate d
 5. Will nvfs ship a user-space library binding svllm links against, or a syscall ABI through a capability handle?
 
 Please reply in this file (inline) or by creating `./nvfs_design.md` and linking responses there; svllm will update R1–R9 based on the answers.
+
+---
+
+## R1 Append-Only Object Class — Concrete Spec
+
+- **Status:** appended 2026-04-18 by svllm A2-packer Phase 3 architect. Scope: make R1's `append_only` class precise enough that the svllm packer and the future nvfs adapter can implement/verify it without further clarification.
+- **Companion spec:** R3 below (publish ordering) assumes these semantics.
+
+### Object state machine
+
+```
+[OPEN] ── append(bytes) ──▶ [OPEN]        (size grows monotonically)
+   │
+   │ seal()
+   ▼
+[SEALED] ── any mutation ──▶ ERROR.Sealed (reject, no-op)
+   │
+   │ delete()   (requires cap + !pin_extents)
+   ▼
+[GONE]
+```
+
+- Only two externally visible states (`OPEN`, `SEALED`). `GONE` is the tombstone after delete.
+- An object is created in `OPEN` state via `fs_create(path, class=append_only, flags)`. Creation is idempotent only when `flags.create_new = false`; by default, creating over an existing path errors.
+
+### Allowed operations per state
+
+| Op | OPEN | SEALED | Notes |
+|---|---|---|---|
+| `append(handle, bytes)` | ✅ | ❌ `Sealed` | Bytes append at current size; partial writes allowed but each call is atomic w.r.t. size. |
+| `truncate(handle, n)` | ❌ `InvalidOp` | ❌ `Sealed` | Append-only: truncate never legal, even while open. |
+| `write_at(handle, off, bytes)` | ❌ `InvalidOp` | ❌ `Sealed` | Random writes never legal. |
+| `read_at(handle, off, len)` | ✅ | ✅ | Readable in both states (live readers see partial OPEN content). |
+| `seal(handle)` | ✅ → SEALED | no-op (idempotent) | See size/hash rules below. |
+| `stat(handle)` | ✅ | ✅ | `size` + `state` always queryable. |
+| `delete(path)` | ✅ (best effort) | ✅ (if no `pin_extents`) | SEALED + pinned → `Pinned` error. |
+| `rename(src, dst)` | ✅ | ✅ | State preserved across rename. |
+
+### Size-at-seal
+
+- At `seal()`, the object's byte length is **frozen**. The returned `SealReceipt` contains the final `size: i64`; subsequent `stat()` must return this exact value forever.
+- The adapter MUST reject any buffered-but-not-yet-flushed append that would race the seal. Semantics: `seal()` is a fence — all prior successful `append` calls are included, no later `append` is accepted.
+- A zero-length seal is legal (empty sealed object). Consumers SHOULD still validate digest coverage.
+
+### Hash-at-seal
+
+- If the object was created with `flags.hash_on_seal = true` (default for tensor-pack chunks and manifests), `seal()` returns `digest_hex: text` computed over the entire final content.
+- Algorithm: **sha256** for manifest v0 (see arch.md §6 open-question resolution 2). Adapter MAY also compute BLAKE3; in that case the receipt returns both — client picks the one matching its manifest's `digest_algo`.
+- If `hash_on_seal = false`, `digest_hex` is `""` and the client is responsible for out-of-band verification.
+- Digest is computed **once** during seal from the adapter's internal write path (ideally as bytes flow to storage); re-reading post-seal to re-digest is wasteful and MUST NOT be required to prove integrity.
+
+### Rejection rules post-seal
+
+- Any call that would mutate the content (`append`, `write_at`, `truncate`, changing class flags) returns `NvfsError.Sealed` deterministically — never `InvalidOp`, never silent no-op.
+- `fs_sync(durable)` on a SEALED object is a no-op success: the object is already final.
+- Attempting to re-seal returns success (idempotent) — but the returned receipt MUST match the original (same size, same digest_hex). Adapters MUST cache the seal receipt.
+
+### GC / delete semantics
+
+- `delete(path)` on an OPEN object is legal and implicitly seals-then-deletes; any live readers keep their handle valid until close (POSIX-style unlink-while-open).
+- `delete(path)` on a SEALED object with `pin_extents = true` returns `NvfsError.Pinned`. Client must first call `unpin(handle)` with a cap. This prevents accidental GC of hot tensor-pack chunks.
+- `delete(path)` on a SEALED object without pinning frees storage immediately on conventional NVMe; on ZNS, reclaim is deferred to zone reset.
+- Tombstones (`GONE`) are not observable by clients; `fs_create` on a GONE path is equivalent to creating from scratch.
+
+### Failure surface
+
+- `Sealed` — mutation after seal.
+- `InvalidOp` — op illegal regardless of state (truncate, write_at).
+- `Pinned` — delete of a pinned sealed object.
+- `SizeMismatch` — seal with explicit `expected_size` fails if actual ≠ expected (optional check, used by the packer).
+- `Io`, `NoSpace`, `Unsupported` — inherited from the general adapter surface.
+
+### Adapter conformance test (svllm-maintained)
+
+The svllm track will ship a spec under `test/unit/lib/gc_async_mut/svllm/nvfs_client/` that exercises the full state machine against whatever `NvfsClient` implementation is provided. Nvfs implementations pass by making this spec green. FAT32 bring-up adapter is expected to fail `pin_extents` + `hash_on_seal` paths and MUST return `Unsupported` (not silently mis-behave).
+
+---
+
+## R3 Atomic Manifest Publish — Ordering Rules
+
+- **Status:** appended 2026-04-18 by svllm A2-packer Phase 3 architect.
+- **Relates to:** R3 above, which stated the requirement at the black-box level. This section fixes the **exact sequence** that svllm's packer will execute and that nvfs MUST preserve the visibility semantics of.
+
+### Required ordering (data before manifest)
+
+For a pack with N data chunks and 1 manifest, the publisher MUST execute the following steps in this exact order. An implementation that reorders steps 1–3 vs. 4–6 is non-conformant:
+
+1. `fs_create(data-K.bin.tmp, append_only, hash_on_seal=true)` + stream appends + `seal()` — for every K in [0, N).
+2. `fs_sync(data-K.bin.tmp, scope=data_durable)` — for every K.
+3. `fs_rename(data-K.bin.tmp → data-K.bin)` — for every K. Order among K is free; none of these names are yet referenced by any live reader path.
+4. `fs_create(manifest.sdn.tmp, append_only, hash_on_seal=true)` + stream append + `seal()`.
+5. `fs_sync(manifest.sdn.tmp, scope=data_durable)`.
+6. `fs_rename(manifest.sdn.tmp → manifest.sdn)` — **publish fencepost.** Before this step, no reader can observe any part of the new pack; after, the entire pack is visible.
+7. `fs_sync(pack_root/, scope=metadata_durable)` — directory barrier. Ensures the rename is durable across a crash.
+
+### Visibility atomicity guarantee
+
+- **Reader protocol:** open `manifest.sdn` first. Absence = pack absent. Presence = every chunk listed in the manifest's `chunks[].relative_path` MUST be openable and have matching `byte_len` + `digest_hex`. Any discrepancy is a corruption bug, not a race.
+- **Writer protocol:** the packer MUST NOT write `manifest.sdn` (final name) at any point before step 6. It MUST NOT partially update an existing `manifest.sdn` — the only legal write path is `.tmp` → seal → rename.
+- Crash between any two steps leaves the old pack visible (or nothing, if initial publish) — never a mixed state. This is the load-bearing invariant for R3.
+
+### fsync + directory-fsync requirements
+
+- Steps 2 and 5 require **file fsync** (`fs_sync(handle, scope=data_durable)`). Without it, a post-rename crash can lose the file body while preserving the directory entry — reader sees a truncated chunk or manifest.
+- Step 7 requires **directory fsync** (`fs_sync(dir_handle, scope=metadata_durable)`). Without it, a crash can revert the rename even though the file body is durable — reader sees the pre-rename state (old pack or no pack), which is itself safe but wastes a publish.
+- **nvfs MUST provide both primitives.** The current runtime lacks them — tracked as `FS-REQ-001-fsync-primitive` under `doc/05_design/svllm/fs_requests/`.
+
+### Rename fencepost rules
+
+- The rename in step 6 MUST be atomic w.r.t. readers: at no observable instant is the destination name half-written, half-old, or absent (if a prior manifest existed).
+- POSIX `rename(2)` within a single directory on ext4/xfs/btrfs satisfies this. FAT32 does **not** — it is a delete-then-create sequence with a visible gap. svllm's FAT32 bring-up accepts this gap and documents it as a known degraded-mode risk (`FS-REQ-002-fat32-rename-atomicity`).
+- `rename` from one directory to another is **disallowed** for the publish fencepost; publisher MUST stage `.tmp` in the same directory as the final name.
+
+### Recoverability after crash mid-publish
+
+The packer (and any future `svllm_pack verify` / cleanup) MUST tolerate the following crash points and recover to a consistent state:
+
+| Crash between steps | State seen at restart | Required cleanup |
+|---|---|---|
+| 1 ↔ 2 | `data-K.bin.tmp` may exist, possibly empty/partial | Delete all `*.tmp` in pack_root. |
+| 2 ↔ 3 | Same as above; some files durable | Same cleanup. |
+| 3 ↔ 4 | Some/all `data-K.bin` present; no manifest | Delete all `*.bin` without manifest entry (there is none). Retry from step 1 or abort. |
+| 4 ↔ 5 | `manifest.sdn.tmp` exists; not yet durable | Delete it; keep data files; caller may retry step 4. |
+| 5 ↔ 6 | `manifest.sdn.tmp` durable; final name absent | Delete `*.tmp`; treat pack as absent. (Safe: the rename never landed.) |
+| 6 ↔ 7 | Final `manifest.sdn` present but dir not fsynced | On crash-recovery: the rename may or may not have survived the cache. If it did, pack is live. If not, pack is absent. Either is consistent. |
+| after 7 | Published and durable | None. |
+
+**Key invariant:** at no crash boundary can a reader observe `manifest.sdn` pointing to a chunk that does not exist or whose bytes don't match the recorded digest. The ordering rules above are necessary AND sufficient to guarantee this, given correct fsync + atomic rename from the underlying FS.
+
+**End of R1/R3 append, 2026-04-18.**

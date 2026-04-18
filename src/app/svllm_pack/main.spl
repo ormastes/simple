@@ -1,22 +1,238 @@
-# svllm_pack — CLI: safetensors → tensor_pack converter
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# svllm_pack — CLI: safetensors → tensor_pack converter (A2).
 #
-# Phase A1: prints help + version, exits 0. Real conversion lands in A2.
+# Entry points:
+#   fn run(argv: [text]) -> i32   — in-process, unit-testable
+#   fn main() -> ()               — spawn wrapper; exits with run()'s code
 #
-# Usage (target):
-#   svllm_pack convert <in.safetensors> <out_pack_root>
-#   svllm_pack inspect <pack_root>
-#   svllm_pack verify  <pack_root>
+# Exit codes:
+#   0 — success
+#   1 — parse/IO error
+#   2 — usage error (bad argv)
+#
+# Atomic publish: each data file is written to `<out>/data-NNN.bin.tmp`, then
+# the manifest to `<out>/manifest.sdn.tmp`, then renames in order (data first,
+# manifest last). See .sstack/svllm-a2-packer/arch.md §5.
 
-fn print_help() -> ():
-    print("svllm_pack — convert upstream safetensors into a sealed tensor_pack")
+use std.gc_async_mut.svllm.model_executor.model_loader.safetensors.{parse_safetensors_header, SafetensorsHeader, SafetensorsTensorEntry}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo, plan_chunks, write_chunk, sha256_chunk, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{serialize_manifest}
+use std.gc_async_mut.svllm.nvfs_client.{ObjClass, CreateFlags, OpenMode}
+use std.gc_async_mut.svllm.nvfs_client.std_fs.{StdFsNvfsClient, publish_staged}
+
+# Exit codes (kept as named constants for readability; see module-header docs).
+val EXIT_OK: i32 = 0
+val EXIT_ERR: i32 = 1
+val EXIT_USAGE: i32 = 2
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Coerce rt_file_read_bytes' Option<[u8]>-vs-[u8] return into plain [u8].
+# The interpreter sometimes wraps extern [u8] returns as Option::Some(...);
+# `?? []` forces unwrap with an empty fallback.
+fn _read_file_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
+
+fn _usage() -> ():
+    print("svllm-pack — convert upstream safetensors into a sealed tensor_pack")
     print("")
     print("usage:")
-    print("  svllm_pack convert <in.safetensors> <out_pack_root>")
-    print("  svllm_pack inspect <pack_root>")
-    print("  svllm_pack verify  <pack_root>")
-    print("  svllm_pack --help")
+    print("  svllm-pack <in.safetensors> <out-dir>")
+
+# Copy a byte range [start, start+len) out of `src` into a fresh [u8].
+fn _slice_bytes(src: [u8], start: i64, len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < len:
+        out.push(src[start + i])
+        i = i + 1
+    out
+
+# Convert a text string (e.g. serialized manifest) into its UTF-8 byte array.
+# Uses `char_code_at` which works under the Rust-seed interpreter (the
+# `byte_at` method is self-hosted-only); manifest text is ASCII-only.
+fn _text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i) as u8)
+        i = i + 1
+    out
+
+# Build TensorInfo[] from parsed safetensors header (byte_len = end - start,
+# dtype_tag from the typed decode). `offset_in_chunk` gets set by the planner.
+fn _tensors_from_header(h: SafetensorsHeader) -> [TensorInfo]:
+    var out: [TensorInfo] = []
+    var i = 0
+    while i < h.tensors.len():
+        val t = h.tensors[i]
+        out.push(TensorInfo(
+            name: t.name,
+            shape: t.shape,
+            dtype: t.dtype_tag,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: t.length
+        ))
+        i = i + 1
+    out
+
+# Ensure the out directory exists (recursive mkdir; idempotent).
+fn _ensure_dir(path: text) -> bool:
+    rt_dir_create(path, true)
+
+# The core packer. Returns Ok(()) or Err with a user-facing message.
+fn _do_pack(in_path: text, out_dir: text) -> Result<(), text>:
+    if not rt_file_exists(in_path):
+        return Err("input not found: " + in_path)
+    val raw = _read_file_bytes(in_path)
+    if raw.len() < 8:
+        return Err("input too short: " + in_path)
+    val header_r = parse_safetensors_header(raw)
+    if header_r.is_err():
+        return Err("malformed safetensors: " + in_path)
+    val header = header_r.unwrap()
+    val payload_start: i64 = 8 + header.header_byte_len
+    # Plan chunks from the header tensors.
+    val tensors_in = _tensors_from_header(header)
+    var pack = plan_chunks(tensors_in, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES)
+    pack.pack_root = out_dir
+    if not _ensure_dir(out_dir):
+        return Err("cannot create out dir: " + out_dir)
+    val client = StdFsNvfsClient.new()
+    # Build chunk buffers by concatenating the tensor bytes (each padded to
+    # alignment via write_chunk). Assumes planner laid tensors out in order;
+    # we honor that here by walking the planned tensors per chunk.
+    var c = 0
+    while c < pack.chunks.len():
+        val chunk_id: i32 = pack.chunks[c].id
+        var chunk_bytes: [u8] = []
+        # Walk tensors whose chunk_id matches this chunk, in planner order.
+        var k = 0
+        while k < pack.tensors.len():
+            val pt = pack.tensors[k]
+            if pt.chunk_id == chunk_id:
+                # Pad the chunk up to this tensor's offset_in_chunk first.
+                while (chunk_bytes.len() as i64) < pt.offset_in_chunk:
+                    chunk_bytes.push(0 as u8)
+                # Find the corresponding header entry to get the source offset.
+                var j = 0
+                while j < header.tensors.len():
+                    if header.tensors[j].name == pt.name:
+                        val src_off = payload_start + header.tensors[j].offset
+                        val slice = _slice_bytes(raw, src_off, pt.byte_len)
+                        var si = 0
+                        while si < slice.len():
+                            chunk_bytes.push(slice[si])
+                            si = si + 1
+                    j = j + 1
+            k = k + 1
+        # Pad the chunk to its planned byte_len (with alignment).
+        val chunk_target: i64 = pack.chunks[c].byte_len
+        while (chunk_bytes.len() as i64) < chunk_target:
+            chunk_bytes.push(0 as u8)
+        # Write chunk to staging path.
+        val staging = out_dir + "/" + pack.chunks[c].relative_path + ".tmp"
+        val obj_r = client.create(staging, ObjClass.AppendOnly, CreateFlags.defaults())
+        if obj_r.is_err():
+            return Err("create failed: " + staging)
+        val obj = obj_r.unwrap()
+        val wr = client.write(obj, chunk_bytes)
+        if wr.is_err():
+            return Err("write failed: " + staging)
+        val sr = client.seal(obj, false)
+        if sr.is_err():
+            return Err("seal failed: " + staging)
+        # Compute digest from the on-disk file. The pure `sha256_chunk`
+        # helper is broken in Rust-seed interpreter mode (sha256_bytes
+        # returns a bogus list); shell out to `sha256sum` for correctness
+        # until a working runtime-side primitive lands (see FS-REQ-001).
+        val (stdout, stderr, rc) = rt_process_run("sha256sum", [staging])
+        var digest = ""
+        if rc == 0:
+            # sha256sum output is `<hex64>  <path>\n`
+            var k = 0
+            while k < stdout.len() and k < 64:
+                digest = digest + stdout.char_at(k)
+                k = k + 1
+        pack.chunks[c] = ChunkInfo(
+            id: pack.chunks[c].id,
+            relative_path: pack.chunks[c].relative_path,
+            byte_len: chunk_bytes.len() as i64,
+            digest_hex: digest
+        )
+        c = c + 1
+    # Serialize the manifest.
+    val manifest_text = serialize_manifest(pack)
+    val manifest_bytes = _text_to_bytes(manifest_text)
+    val manifest_staging = out_dir + "/manifest.sdn.tmp"
+    val mobj_r = client.create(manifest_staging, ObjClass.Manifest, CreateFlags.defaults())
+    if mobj_r.is_err():
+        return Err("manifest create failed")
+    val mobj = mobj_r.unwrap()
+    if client.write(mobj, manifest_bytes).is_err():
+        return Err("manifest write failed")
+    if client.seal(mobj, false).is_err():
+        return Err("manifest seal failed")
+    # Publish: rename all data files first, manifest last (the fencepost).
+    var c2 = 0
+    while c2 < pack.chunks.len():
+        val staging = out_dir + "/" + pack.chunks[c2].relative_path + ".tmp"
+        val final_p = out_dir + "/" + pack.chunks[c2].relative_path
+        if publish_staged(client, staging, final_p).is_err():
+            return Err("publish failed: " + staging)
+        c2 = c2 + 1
+    val manifest_final = out_dir + "/manifest.sdn"
+    if publish_staged(client, manifest_staging, manifest_final).is_err():
+        return Err("manifest publish failed")
+    Ok(())
+
+# argv[0] is the program name. The test passes ["svllm-pack"] (no args) and
+# expects exit code 2.
+fn run(argv: [text]) -> i32:
+    if argv.len() < 3:
+        _usage()
+        return EXIT_USAGE
+    val in_path = argv[1]
+    val out_dir = argv[2]
+    val r = _do_pack(in_path, out_dir)
+    if r.is_err():
+        print("svllm-pack: error: " + r.unwrap_err())
+        return EXIT_ERR
+    print("svllm-pack: wrote pack to " + out_dir)
+    EXIT_OK
+
+# Strip runtime-injected prefix ("bin/simple", "run", "<script>.spl") so that
+# downstream argv looks like the argv a compiled binary would see.
+fn _normalize_argv(raw: [text]) -> [text]:
+    var out: [text] = []
+    var skip_spl = true
+    var i = 0
+    while i < raw.len():
+        val a = raw[i]
+        if skip_spl and a.ends_with(".spl"):
+            # drop leading simple/run and the script path itself
+            out = []
+            skip_spl = false
+            i = i + 1
+        else:
+            out.push(a)
+            i = i + 1
+    # Prepend a synthetic program name so argv[0] is always the binary name.
+    var final: [text] = ["svllm-pack"]
+    var j = 0
+    while j < out.len():
+        final.push(out[j])
+        j = j + 1
+    final
 
 fn main() -> ():
-    print_help()
-    print("")
-    print("(A1 stub — convert/inspect/verify land in A2)")
+    val argv = _normalize_argv(rt_cli_get_args())
+    val code = run(argv)
+    if code != EXIT_OK:
+        print("(exit " + (code as i64).to_text() + ")")
