@@ -11,8 +11,22 @@ use os.services.vfs.vfs_init.{vfs_boot_init, vfs_service_start, vfs_is_ready}
 use os.services.netstack.netstack_init.{net_boot_init, net_service_start, net_is_ready}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_dump_devices}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.kernel.ipc.spm_port.{spm_port_register, spm_port_is_registered}
 
 extern fn serial_println(msg: text)
+
+# ============================================================================
+# Well-Known Task IDs
+# ============================================================================
+
+# Reserved kernel-boot placeholder for the SPM port receiver. The real
+# userland SPM task will later claim ownership via a rebind syscall (follow-up
+# work in the spm-winfs-llm-suite track). Using a fixed placeholder keeps boot
+# from deadlocking on a not-yet-spawned SPM task (see
+# src/os/kernel/privilege/privilege_bridge.spl:140 TODO for the matching
+# early-boot fallback). 0 is reserved as the "unregistered" sentinel, so we
+# pick a high non-zero constant that cannot collide with a real TaskId.
+val SPM_WELL_KNOWN_TASK_ID: u64 = 0xfffffff0 as u64
 
 # ============================================================================
 # Service Status Tracking
@@ -21,6 +35,7 @@ extern fn serial_println(msg: text)
 var svc_storage_ok: bool = false
 var svc_network_ok: bool = false
 var svc_display_ok: bool = false
+var svc_spm_port_ok: bool = false
 
 # ============================================================================
 # Boot-Time Service Initialization
@@ -40,6 +55,15 @@ fn init_all_services():
 
     # Step 0: PCI device enumeration (populates pcimgr device table)
     pcimgr_init()
+
+    # Step 0.5: SPM kernel port — register a well-known placeholder receiver
+    # so syscalls 110-114 have a claimed kernel slot from the first tick.
+    # The real userland SPM task claims ownership later via rebind.
+    svc_spm_port_ok = init_spm_port()
+    if svc_spm_port_ok:
+        serial_println("[init] SPM port: registered placeholder receiver")
+    else:
+        serial_println("[init] SPM port: registration FAILED")
 
     # Step 1: Storage stack (PCI -> NVMe -> FAT32 -> VFS)
     svc_storage_ok = vfs_boot_init()
@@ -77,7 +101,27 @@ fn init_all_services():
     serial_println("[init]   storage: {if svc_storage_ok: "OK" else: "UNAVAILABLE"}")
     serial_println("[init]   network: {if svc_network_ok: "OK" else: "UNAVAILABLE"}")
     serial_println("[init]   display: {if svc_display_ok: "OK" else: "UNAVAILABLE"}")
+    serial_println("[init]   spm_port: {if svc_spm_port_ok: "OK" else: "UNAVAILABLE"}")
     serial_println("========================================")
+
+# ============================================================================
+# SPM Port Init Helper
+# ============================================================================
+
+fn init_spm_port() -> bool:
+    """Claim the SPM kernel-port slot with a well-known placeholder task id.
+
+    Approach: placeholder-slot. Registering a non-zero TaskId at boot means
+    `spm_port_is_registered()` returns true from the first scheduler tick,
+    so the kernel's privilege bridge and SPM syscalls (110-114) have a
+    stable landing site even before the userland SPM service spawns.
+
+    The real SPM task rebinds this slot later (follow-up syscall work).
+    Since `spm_port_register` rejects a second distinct task id while one
+    is registered, the rebind path must call `spm_port_reset` first -- that
+    is out of scope for this commit but is the expected sequence.
+    """
+    spm_port_register(SPM_WELL_KNOWN_TASK_ID)
 
 # ============================================================================
 # Display Init Helper
@@ -111,6 +155,15 @@ fn services_network_ready() -> bool:
 fn services_display_ready() -> bool:
     """Check if display service initialized successfully."""
     svc_display_ok
+
+fn services_spm_port_ready() -> bool:
+    """Check if the SPM kernel port has a registered receiver."""
+    svc_spm_port_ok
+
+fn spm_well_known_task_id() -> u64:
+    """Return the placeholder TaskId used by the kernel boot path to claim
+    the SPM port slot before the real SPM service has spawned."""
+    SPM_WELL_KNOWN_TASK_ID
 
 fn services_all_ready() -> bool:
     """Check if all essential services are available."""
