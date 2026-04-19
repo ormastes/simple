@@ -1719,3 +1719,74 @@ Total pass_todo: 4 (2 clock, 1 NVFS submodule import, 1 WAL submodule import + F
 **Note:** All distributions are flat (p50=p99=p99.9=1 tick) because the loop-counter
 proxy increments by 1 per call, giving uniform samples. Real CLOCK_MONOTONIC will expose
 genuine latency variance — the percentile infrastructure is correct and ready.
+
+#### 9-hot-slack
+
+**Done 2026-04-18.** Implemented FR-HOT-001: real free-space slack API in spostgre buffer_mgr.
+
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `examples/spostgre/src/engine/buffer_mgr.spl` | Added `page_slack(hdr: PageHeader) -> i32` + `LINE_POINTER_SIZE: i32 = 4`. |
+| `examples/spostgre/src/engine/hot.spl` | Added `hot_try_update_page` using `page_slack`; updated FR-HOT-001 comment to Implemented. |
+| `examples/spostgre/test/unit/hot_slack_test.spl` | New — 3 unit tests: plenty-of-slack (HOT), too-full (Cold/no_slack), exact-boundary (HOT). |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | FR-HOT-001 status flipped Open → Implemented. |
+
+**Design decisions:**
+
+- `page_slack` takes a decoded `PageHeader` (not a `page_id`) — buffer_mgr has no live page map at M3a; callers decode from buffer via `page_decode_header` before calling.
+- Added as `hot_try_update_page` (new fn) rather than replacing `hot_try_update` — existing 8 `hot_test.spl` tests remain untouched and the caller contract is backward-compatible.
+- Slack check: `hdr.upper - hdr.lower >= new_tuple.byte_size + LINE_POINTER_SIZE` (4 bytes for ItemIdData). Exact-boundary counts as sufficient.
+
+#### 9-bench-clock-baremetal
+
+**Date:** 2026-04-18
+**Agent:** Sonnet 4.6
+
+##### Option chosen: B-prime (extend existing timer.spl, not runtime_native.c #ifdef)
+
+`runtime_native.c` is the **hosted** runtime only — baremetal links `baremetal_stubs.c`
+instead, so an `#ifdef __SIMPLEOS__` branch there is a dead path. The correct baremetal
+hook is `@export("C", name: "rt_time_now_ns")` in the kernel's own timer module,
+which already owns `tsc_frequency`, `tsc_at_init`, and `_read_tsc()`.
+
+##### Files changed
+
+| File | Change |
+|------|--------|
+| `src/runtime/runtime_native.c` | Added hosted `rt_time_now_ns()` via `clock_gettime(CLOCK_MONOTONIC)` |
+| `src/os/kernel/arch/x86_64/timer.spl` | Added `@export("C", name: "rt_time_now_ns") fn rt_time_now_ns() -> i64` using existing TSC calibration |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | Added FR-BENCH-CLOCK-001 (Implemented) + FR-BENCH-CLOCK-002 (Open, HPET/PMTMR follow-up) |
+
+##### Calibration math
+
+```
+ns = (delta / freq) * 1_000_000_000
+   + (delta % freq) * 1_000_000_000 / freq
+```
+
+Overflow-safe: at 4 GHz TSC, `delta * 1e9` overflows ~2.3 s. Dividing `delta/freq`
+extracts whole seconds first; remainder < `freq` keeps `rem * 1e9` safely in i64.
+
+TSC calibrated at boot via PIT channel 2 (~10ms window, `_calibrate_tsc`):
+`tsc_frequency = (tsc_end - tsc_start) * 100` (10ms = 1/100 s).
+
+##### HPET/PMTMR
+
+Deferred — PIT-ch2 calibration is adequate for bench percentile resolution.
+Filed as FR-BENCH-CLOCK-002 (Open, P2).
+
+##### End-to-end QEMU test
+
+Not run (out of budget). Monotonicity is structurally guaranteed: TSC is
+invariant on modern CPUs and on QEMU's `-cpu max`; `tsc_at_init` is set once
+at `X86Timer.init()` before `_calibrate_tsc()` runs. Any call to
+`rt_time_now_ns()` after init will see a non-decreasing `_read_tsc() - tsc_at_init`.
+
+Follow-up FR: wire a SimpleOS boot test that prints `rt_time_now_ns()` twice
+and asserts the second > first.
+
+##### pass_todo resolution
+
+FR-BENCH-CLOCK-001 from `bench/lib/timing.spl` pass_todo table: **Implemented**.

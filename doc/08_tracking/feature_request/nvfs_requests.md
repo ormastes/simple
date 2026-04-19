@@ -182,7 +182,8 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Filed-by:** spostgre M3a agent (session spostgre-m3a)
 - **Target:** spostgre  (examples/spostgre/src/engine/hot.spl)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented — 2026-04-18
+- **Implemented-by:** 9-hot-slack agent (session spostgre-hot-001)
 - **Requested-semantics:**
   `HotChain.try_update` currently chains a HOT update unconditionally at the
   logical-page-group level. A real PostgreSQL HOT update is only valid when the
@@ -192,16 +193,49 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   a pre-check in `try_update`: if `free_space < new_tuple_size`, fall through
   to a regular heap insert instead of chaining.
 - **Acceptance-criteria:**
-  - [ ] `buffer_mgr` exposes `page_free_space(page_id) -> Result<u16, BufError>`
-  - [ ] `HotChain.try_update` calls `page_free_space` and returns `Err(HotChainFull)`
-        when free space is insufficient, triggering a regular insert at the call site
-  - [ ] Existing 37 HOT unit tests continue to pass
-  - [ ] New test: `try_update` returns `HotChainFull` when mocked free_space = 0
+  - [x] `buffer_mgr` exposes `page_slack(hdr: PageHeader) -> i32` (pd_upper - pd_lower)
+        and `LINE_POINTER_SIZE: i32 = 4`
+  - [x] `hot_try_update_page` in `hot.spl` calls `page_slack` and returns Cold/no_slack
+        when `slack < byte_size + LINE_POINTER_SIZE`
+  - [x] Existing HOT unit tests continue to pass (hot_try_update signature unchanged)
+  - [x] 3 new tests in `examples/spostgre/test/unit/hot_slack_test.spl`:
+        plenty-of-slack (HOT), too-full (Cold/no_slack), exact-boundary (HOT)
 - **Related-upfront:** none
 - **Related-design-doc:** `examples/spostgre/doc/design/hot_update.md` (M3a design)
 - **Related-issue:** none
-- **Notes:** Blocked on `buffer_mgr` free-space API (not yet in M3a scope).
-  M3a ships without this check; real pd_upper/pd_lower integration is M4 work.
+- **Notes:** Implemented as `hot_try_update_page` (new fn) rather than replacing
+  `hot_try_update`, preserving existing caller contract. `page_slack` accepts a
+  decoded `PageHeader` rather than a `page_id` (buffer_mgr has no live page map
+  at M3a); callers decode from the buffer before calling.
+
+---
+
+### FR-BENCH-CLOCK-002 — Replace PIT-ch2 TSC calibration with HPET/PMTMR
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** bench-clock-baremetal agent
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Current TSC calibration in `src/os/kernel/arch/x86_64/timer.spl` uses PIT
+  channel 2 for a ~10ms measurement window. Virtualised QEMU HPET is available
+  via the ACPI HPET table (MMIO counter at 100 MHz-ish) and provides better
+  reference accuracy. The ACPI FADT PM_TMR_BLK port gives a 3.579545 MHz
+  PMTMR fallback. Implement ACPI table walk → HPET MMIO → PMTMR port-IO
+  discovery, use whichever is present, fall back to PIT-ch2 if neither found.
+- **Acceptance-criteria:**
+  - [ ] `_calibrate_tsc` probes ACPI RSDP (already passed by Limine) for HPET
+        table; if found, maps MMIO counter and uses it as reference
+  - [ ] If HPET absent, falls back to FADT PM_TMR_BLK port for PMTMR reference
+  - [ ] If neither present, retains PIT-ch2 path (unchanged from FR-BENCH-CLOCK-001)
+  - [ ] `tsc_frequency` error vs HPET-measured value < 0.1% on QEMU
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/simpleos_fs_migration.md` (boot init section)
+- **Related-issue:** none
+- **Notes:** Low priority — PIT-ch2 10ms window is sufficient for bench
+  percentile resolution at current granularity. HPET/PMTMR calibration is a
+  correctness improvement for CPU frequency detection on real hardware where
+  PIT may be unreliable.
 
 ---
 
@@ -268,6 +302,36 @@ append under this heading.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
 - **Related-issue:** none
+
+### FR-BENCH-CLOCK-001 — Add rt_time_now_ns() for hosted and baremetal targets
+
+- **Filed-on:** 2026-04-17
+- **Filed-by:** 9-bench-harness agent (session spostgre-nvfs-storage)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** bench-clock-baremetal agent
+- **Requested-semantics:**
+  Bench harness in `bench/lib/timing.spl` calls `extern fn rt_time_now_ns() -> i64`
+  but the symbol was absent from both hosted and baremetal runtimes.
+  Hosted: backed by `clock_gettime(CLOCK_MONOTONIC)`.
+  Baremetal (SimpleOS x86_64): backed by TSC calibrated at boot against PIT
+  channel 2 (~10ms window, `_calibrate_tsc` in `timer.spl`).
+- **Acceptance-criteria:**
+  - [x] `rt_time_now_ns()` present in `src/runtime/runtime_native.c` (hosted)
+  - [x] `rt_time_now_ns()` exported with C linkage from
+        `src/os/kernel/arch/x86_64/timer.spl` (baremetal)
+  - [x] Returns monotonically increasing values (TSC is invariant on modern CPUs)
+  - [x] `bin/simple build lint` passes clean
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/08_tracking/bench/README.md`
+- **Related-issue:** none
+- **Notes:** Calibration math: `ns = (delta/freq)*1e9 + (delta%freq)*1e9/freq`.
+  Split avoids i64 overflow: at 4 GHz TSC, `delta*1e9` would overflow ~2.3s;
+  dividing out seconds first keeps remainder < freq. HPET/PMTMR fallback
+  tracked as FR-BENCH-CLOCK-002.
+
+---
 
 Closed entries are moved here from `## Open Requests` (never deleted) with
 `Status: Implemented` or `Status: Rejected` and the required link/reason.

@@ -83,6 +83,40 @@ fn extract_code_snippet(tokens: [SimpleToken], start: i64, end_pos: i64) -> text
         i = i + 1
     parts.join("")
 
+fn block_line_count(block: DuplicateBlock) -> i64:
+    block.line_end - block.line_start + 1
+
+fn total_lines_for_blocks(blocks: [DuplicateBlock]) -> i64:
+    var total_lines = 0
+    for block in blocks:
+        total_lines = total_lines + block_line_count(block)
+    total_lines
+
+fn build_duplicate_group(blocks: [DuplicateBlock]) -> DuplicateGroup:
+    val total_lines = total_lines_for_blocks(blocks)
+    DuplicateGroup(
+        blocks: blocks,
+        occurrences: blocks.len(),
+        total_lines: total_lines,
+        impact_score: blocks.len() * total_lines
+    )
+
+fn has_signal_word(code: text, word: text) -> bool:
+    code.contains("{word} ") or code.contains("{word}(") or code.contains("{word}:")
+
+fn is_low_signal_block(block: DuplicateBlock) -> bool:
+    val code = block.code
+    val has_executable_signal = (
+        has_signal_word(code, "fn") or
+        has_signal_word(code, "val") or
+        has_signal_word(code, "var") or
+        has_signal_word(code, "return") or
+        has_signal_word(code, "if") or
+        has_signal_word(code, "while") or
+        has_signal_word(code, "for")
+    )
+    not has_executable_signal
+
 fn compute_token_code(token: SimpleToken) -> i64:
     """Compute hash code for a single token."""
     val token_str = token_to_string(token)
@@ -197,7 +231,9 @@ fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [Du
         val hash_key = "{block.hash_value}"
 
         if hash_map.contains_key(hash_key):
-            hash_map[hash_key].push(block)
+            var existing = hash_map[hash_key]
+            existing.push(block)
+            hash_map[hash_key] = existing
         else:
             hash_map[hash_key] = [block]
 
@@ -207,19 +243,18 @@ fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [Du
         val blocks = hash_map[hash_key]
 
         if blocks.len() >= 2:
-            var total_lines = 0
+            var low_signal_only = true
             for block in blocks:
-                total_lines = total_lines + (block.line_end - block.line_start + 1)
+                if not is_low_signal_block(block):
+                    low_signal_only = false
+                    break
 
-            val impact = blocks.len() * total_lines
+            if low_signal_only:
+                continue
 
-            if impact >= config.min_impact:
-                groups.push(DuplicateGroup(
-                    blocks: blocks,
-                    occurrences: blocks.len(),
-                    total_lines: total_lines,
-                    impact_score: impact
-                ))
+            val group = build_duplicate_group(blocks)
+            if group.impact_score >= config.min_impact:
+                groups.push(group)
 
     groups
 
@@ -284,7 +319,9 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         var file_blocks = {}
         for block in all_blocks:
             if file_blocks.contains_key(block.file):
-                file_blocks[block.file].push(block)
+                var grouped = file_blocks[block.file]
+                grouped.push(block)
+                file_blocks[block.file] = grouped
             else:
                 file_blocks[block.file] = [block]
 
@@ -388,6 +425,7 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     var match_count = 0
     val max_comparisons_per_block = 50
     val max_total_comparisons = 10000
+    var adjacency = {}
 
     var i = 0
     while i < blocks_to_analyze.len() and comparison_count < max_total_comparisons:
@@ -411,6 +449,10 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 j = j + 1
                 continue
 
+            if is_low_signal_block(block1) and is_low_signal_block(block2):
+                j = j + 1
+                continue
+
             comparison_count = comparison_count + 1
             comparisons_this_block = comparisons_this_block + 1
 
@@ -421,22 +463,76 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
             val above_threshold = similarity >= config.similarity_threshold
             if above_threshold:
                 match_count = match_count + 1
-                val new_group = DuplicateGroup(
-                    blocks: [block1, block2],
-                    occurrences: 2,
-                    total_lines: (block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1),
-                    impact_score: 2 * ((block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1))
-                )
+                val key1 = "{i}"
+                val key2 = "{j}"
+                if adjacency.contains_key(key1):
+                    var neighbors1 = adjacency[key1]
+                    neighbors1.push(j)
+                    adjacency[key1] = neighbors1
+                else:
+                    adjacency[key1] = [j]
 
-                val meets_impact = new_group.impact_score >= config.min_impact
-                if meets_impact:
-                    refined_groups.push(new_group)
+                if adjacency.contains_key(key2):
+                    var neighbors2 = adjacency[key2]
+                    neighbors2.push(i)
+                    adjacency[key2] = neighbors2
+                else:
+                    adjacency[key2] = [i]
 
             j = j + 1
         i = i + 1
 
     log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
+
+    var visited = {}
+    for node_key in adjacency.keys():
+        if visited.contains_key(node_key):
+            continue
+
+        var component = []
+        var stack = [node_key]
+        visited[node_key] = true
+
+        while stack.len() > 0:
+            val current = stack[stack.len() - 1]
+            stack = stack[0:stack.len() - 1]
+            component.push(current)
+
+            val neighbors = adjacency[current] ?? []
+            for neighbor in neighbors:
+                val neighbor_key = "{neighbor}"
+                if not visited.contains_key(neighbor_key):
+                    visited[neighbor_key] = true
+                    stack.push(neighbor_key)
+
+        if component.len() < 2:
+            continue
+
+        var component_blocks = []
+        for block_key in component:
+            val block_idx = parse_idx(block_key)
+            if block_idx >= 0 and block_idx < blocks_to_analyze.len():
+                component_blocks.push(blocks_to_analyze[block_idx])
+
+        if component_blocks.len() < 2:
+            continue
+
+        val new_group = build_duplicate_group(component_blocks)
+        if new_group.impact_score >= config.min_impact:
+            refined_groups.push(new_group)
+
     refined_groups
+
+fn parse_idx(value: text) -> i64:
+    var result = 0
+    var i = 0
+    while i < value.len():
+        val byte = value.bytes()[i]
+        if byte < 48 or byte > 57:
+            return -1
+        result = result * 10 + (byte - 48)
+        i = i + 1
+    result
 
 fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     var all_blocks = []
@@ -482,4 +578,3 @@ fn find_duplicates_with_options(
     if use_incremental:
         eprint("[WARNING] Incremental duplicate detection not available; falling back to full scan")
     find_duplicates(files, config, cache_manager)
-

@@ -1,0 +1,127 @@
+use app.duplicate_check.detector.{find_duplicates, DuplicateGroup}
+use app.duplicate_check.cache.{new_token_cache_manager}
+use app.duplicate_check.config.{default_config}
+use app.io.mod.{file_write, shell}
+
+fn ensure_clean_dir(path: text):
+    shell("rm -rf '{path}'")
+    shell("mkdir -p '{path}'")
+
+fn write_test_file(path: text, content: text):
+    file_write(path, content)
+
+fn detector_test_config():
+    var config = default_config()
+    config.min_tokens = 8
+    config.min_lines = 3
+    config.min_impact = 1
+    config.exclude_patterns = []
+    config.quiet = true
+    config
+
+fn unique_file_count(group: DuplicateGroup) -> i64:
+    var seen = {}
+    for block in group.blocks:
+        seen[block.file] = true
+    seen.keys().len()
+
+fn make_similar_module(prefix: text, base_offset: i64, count: i64) -> text:
+    var lines = ["struct {prefix}Worker:"]
+    var i = 0
+    while i < count:
+        lines.push("    value_{i}: i64")
+        i = i + 1
+
+    lines.push("")
+    lines.push("fn compute_{prefix}(seed: i64) -> i64:")
+
+    var j = 0
+    while j < count:
+        val offset = base_offset + j
+        lines.push("    val item_{j} = seed + {offset}")
+        j = j + 1
+
+    lines.push("    return seed")
+    lines.join("\n")
+
+describe "duplicate_check detector grouping regressions":
+    it "keeps all exact-match occurrences across three files":
+        val root = "/tmp/simple_duplicate_detector_exact"
+        ensure_clean_dir(root)
+
+        val body = "fn shared_logic(seed: i64) -> i64:\n    val base = seed + 1\n    val total = base * 2\n    return total\n"
+        val file_a = "{root}/a.spl"
+        val file_b = "{root}/b.spl"
+        val file_c = "{root}/c.spl"
+        write_test_file(file_a, body)
+        write_test_file(file_b, body)
+        write_test_file(file_c, body)
+
+        val config = detector_test_config()
+        val cache = new_token_cache_manager()
+        val groups = find_duplicates([file_a, file_b, file_c], config, cache)
+
+        expect(groups.len()).to_be_greater_than(0)
+        expect(groups[0].occurrences).to_be_greater_than(2)
+        expect(unique_file_count(groups[0])).to_equal(3)
+
+    it "keeps cosine groups when sampling spans many files":
+        val root = "/tmp/simple_duplicate_detector_cosine"
+        ensure_clean_dir(root)
+
+        var files = []
+        var i = 0
+        while i < 6:
+            val path = "{root}/sample_{i}.spl"
+            val content = make_similar_module("sample_{i}", i * 10, 24)
+            write_test_file(path, content)
+            files.push(path)
+            i = i + 1
+
+        var config = detector_test_config()
+        config.use_cosine_similarity = true
+        config.similarity_threshold = 0.60
+        config.ignore_identifiers = false
+        config.ignore_literals = false
+
+        val cache = new_token_cache_manager()
+        val groups = find_duplicates(files, config, cache)
+
+        expect(groups.len()).to_be_greater_than(0)
+        expect(groups[0].occurrences).to_be_greater_than(5)
+        expect(unique_file_count(groups[0])).to_equal(6)
+
+    it "skips declaration-only exact groups":
+        val root = "/tmp/simple_duplicate_detector_struct_only"
+        ensure_clean_dir(root)
+
+        val fields = "struct SharedConfig:\n    alpha: i64\n    beta: text\n    gamma: bool\n    delta: f64\n"
+        val file_a = "{root}/one.spl"
+        val file_b = "{root}/two.spl"
+        write_test_file(file_a, fields)
+        write_test_file(file_b, fields)
+
+        val config = detector_test_config()
+        val cache = new_token_cache_manager()
+        val groups = find_duplicates([file_a, file_b], config, cache)
+
+        expect(groups.len()).to_equal(0)
+
+    it "skips grouped export boilerplate cosine groups":
+        val root = "/tmp/simple_duplicate_detector_exports"
+        ensure_clean_dir(root)
+
+        val exports = "export use app.alpha.{One, Two, Three}\nexport use app.beta.{Four, Five, Six}\nexport use app.gamma.{Seven, Eight, Nine}\n"
+        val file_a = "{root}/exports_a.spl"
+        val file_b = "{root}/exports_b.spl"
+        write_test_file(file_a, exports)
+        write_test_file(file_b, exports)
+
+        var config = detector_test_config()
+        config.use_cosine_similarity = true
+        config.similarity_threshold = 0.60
+
+        val cache = new_token_cache_manager()
+        val groups = find_duplicates([file_a, file_b], config, cache)
+
+        expect(groups.len()).to_equal(0)

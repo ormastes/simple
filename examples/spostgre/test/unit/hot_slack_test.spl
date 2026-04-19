@@ -1,0 +1,79 @@
+# spostgre engine — HOT free-space slack unit tests (FR-HOT-001).
+#
+# Verifies that hot_try_update_page (the real-PageHeader variant) uses
+# pd_upper - pd_lower free-space accounting when deciding whether to chain a
+# HOT update.  Three cases:
+#   1. Plenty of slack  → HOT chain taken.
+#   2. Page too full    → fallback to cold update (no_slack reason).
+#   3. Exact boundary   → HOT chain taken (upper - lower == tuple + lp).
+#
+# Design ref: spostgre_design.md §7; FR-HOT-001 in nvfs_requests.md.
+
+use std.sspec.*
+use engine.hot.{
+    HotChain, HotVersion, HotUpdateResult,
+    TupleRef, Tuple,
+    hot_try_update_page,
+    HOT_RESULT_HOT, HOT_RESULT_COLD,
+    HOT_REASON_OK, HOT_REASON_NO_SLACK
+}
+use engine.page.{PageHeader, PAGE_SIZE, PAGE_HDR_LEN}
+use engine.buffer_mgr.{LINE_POINTER_SIZE}
+
+# ---------------------------------------------------------------------------
+# Helper: build a PageHeader with given lower and upper.
+# ---------------------------------------------------------------------------
+
+fn make_hdr(lower: i32, upper: i32) -> PageHeader:
+    PageHeader(
+        lsn: 0,
+        checksum: 0,
+        flags: 0,
+        lower: lower,
+        upper: upper,
+        special: PAGE_SIZE as i32,
+        generation: 0)
+
+describe "HOT FR-HOT-001 — page_slack-based eligibility":
+
+    it "HOT chain taken when page has plenty of slack":
+        # Page with 4096 bytes free (lower=32, upper=4128).
+        val hdr = make_hdr(PAGE_HDR_LEN as i32, (PAGE_HDR_LEN as i32) + 4096)
+        val chain0 = HotChain.new(42, 0)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        # Tuple is 100 bytes; needs 100 + 4 (line pointer) = 104 ≤ 4096 slack.
+        val new_tup = Tuple(tuple_id: 0, xid: 10, physical_page_id: 2, byte_size: 100)
+        var no_indexed: [i32] = []
+        val (result, chain1) = hot_try_update_page(chain0, old_ref, new_tup, no_indexed, hdr)
+        expect(result.kind).to_equal(HOT_RESULT_HOT)
+        expect(result.reason).to_equal(HOT_REASON_OK)
+        expect(result.tuple_id).to_equal(1)
+        expect(chain1.versions.len()).to_equal(1)
+
+    it "Cold update when page is too full":
+        # Page with only 50 bytes free (lower=8142, upper=8192).
+        val hdr = make_hdr(8142, PAGE_SIZE as i32)
+        val chain0 = HotChain.new(42, 0)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        # Tuple is 100 bytes; needs 104 > 50 slack → Cold.
+        val new_tup = Tuple(tuple_id: 0, xid: 10, physical_page_id: 2, byte_size: 100)
+        var no_indexed: [i32] = []
+        val (result, _chain1) = hot_try_update_page(chain0, old_ref, new_tup, no_indexed, hdr)
+        expect(result.kind).to_equal(HOT_RESULT_COLD)
+        expect(result.reason).to_equal(HOT_REASON_NO_SLACK)
+        expect(result.tuple_id).to_equal(-1)
+
+    it "HOT chain taken at exact-enough boundary":
+        # tuple_size=100, lp=4 → need exactly 104 bytes.
+        # Set upper - lower = 104 exactly.
+        val lower = PAGE_HDR_LEN as i32
+        val upper = lower + 104
+        val hdr = make_hdr(lower, upper)
+        val chain0 = HotChain.new(7, 0)
+        val old_ref = TupleRef(tuple_id: 0, xid: 0, physical_page_id: 1)
+        val new_tup = Tuple(tuple_id: 0, xid: 5, physical_page_id: 2, byte_size: 100)
+        var no_indexed: [i32] = []
+        val (result, chain1) = hot_try_update_page(chain0, old_ref, new_tup, no_indexed, hdr)
+        expect(result.kind).to_equal(HOT_RESULT_HOT)
+        expect(result.reason).to_equal(HOT_REASON_OK)
+        expect(chain1.versions.len()).to_equal(1)

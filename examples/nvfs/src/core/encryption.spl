@@ -1,0 +1,432 @@
+# NVFS N6a — key hierarchy + envelope + encryption primitives.
+#
+# Design: doc/05_design/nvfs_design_v2.md §14 (ZFS-style native encryption).
+# 3-level key hierarchy: user passphrase → wrapping key → master key → data key.
+# Deterministic IV: derived from (arena_id, offset) so raw-send IV is stable.
+#
+# FR-NVFS-N6a-001: Add AES-256-GCM to crypto stdlib
+#   (aes128_gcm.spl exists but only covers 16-byte keys; this module uses
+#    16-byte AES-128 keys as the working path until AES-256 is exposed).
+# FR-NVFS-N6a-002: Expose hkdf_extract/hkdf_expand from os.tls13.hkdf to
+#   the examples submodule scope (currently unreachable from examples/nvfs).
+# FR-NVFS-N6a-003: Extend EncryptExt trait (std.fs_driver.extension) with
+#   generate_master_key / set_arena_encryption / get_arena_encryption methods.
+#
+# Note: aes128_gcm and hkdf live in src/os/ which the nvfs submodule cannot
+# import directly. Crypto fn bodies are stubbed (pass_todo) until FR-N6a-001/002
+# are resolved. All non-crypto logic (key registry, IV derivation, state) is real.
+
+use std.fs_driver.error.{FsError}
+
+# ---------------------------------------------------------------------------
+# Key level enum
+# ---------------------------------------------------------------------------
+
+enum KeyLevel:
+    """Three-level key hierarchy following ZFS native encryption model."""
+    User
+    Wrapping
+    Master
+    Data
+
+# ---------------------------------------------------------------------------
+# KeyHandle — opaque reference; real bytes stay in the KeyStore
+# ---------------------------------------------------------------------------
+
+struct KeyHandle:
+    """Opaque reference to a key stored in a KeyStore.
+
+    level    — which layer of the hierarchy this key belongs to.
+    kek_ref  — id of the parent key-encryption key (-1 for User keys).
+    key_id   — unique id within the KeyStore.
+    """
+    level:   KeyLevel
+    kek_ref: i64
+    key_id:  i64
+
+# ---------------------------------------------------------------------------
+# KeyEntry — one row in the KeyStore
+# ---------------------------------------------------------------------------
+
+struct KeyEntry:
+    """Stored key entry.
+
+    id          — unique key id.
+    level       — hierarchy level.
+    parent_id   — id of KEK that wraps this key (-1 for root).
+    wrapped_key — encrypted form of the raw key bytes (AES-GCM wrapped).
+                  FR-NVFS-N6a-001: upgrade to 32-byte key + 12-byte nonce + 16-byte tag = 60 bytes;
+                  current: 16-byte key + 12-byte nonce + 16-byte tag = 44 bytes stored in [u8].
+    raw_key     — plaintext key bytes held in memory (cleared on unmount).
+                  [u8] of length 16 (AES-128) until FR-NVFS-N6a-001 lands.
+    """
+    id:          i64
+    level:       KeyLevel
+    parent_id:   i64
+    wrapped_key: [u8]
+    raw_key:     [u8]
+
+# ---------------------------------------------------------------------------
+# KeyStore
+# ---------------------------------------------------------------------------
+
+struct KeyStore:
+    """In-memory key store holding all active KeyEntry objects.
+
+    keys       — list of all registered key entries.
+    next_id    — monotonic counter for id assignment.
+    has_master — true once at least one Master key has been generated.
+    master_id  — key_id of the primary master key (-1 if none).
+    """
+    keys:       [KeyEntry]
+    next_id:    i64
+    has_master: bool
+    master_id:  i64
+
+fn keystore_new() -> KeyStore:
+    """Create an empty KeyStore."""
+    KeyStore(
+        keys:       [],
+        next_id:    1,
+        has_master: false,
+        master_id:  -1
+    )
+
+fn _keystore_alloc_id(ks: &mut KeyStore) -> i64:
+    val id = ks.next_id
+    ks.next_id = ks.next_id + 1
+    id
+
+fn _keystore_find(ks: &KeyStore, id: i64) -> i64:
+    """Return index of key with given id, or -1."""
+    var i = 0
+    while i < ks.keys.len() as i64:
+        if ks.keys[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+fn keystore_get_raw_key(ks: &KeyStore, key_id: i64) -> Option<[u8]>:
+    """Return the in-memory raw key bytes for key_id, or None."""
+    val idx = _keystore_find(ks, key_id)
+    if idx < 0:
+        return None
+    Some(ks.keys[idx].raw_key)
+
+# ---------------------------------------------------------------------------
+# Deterministic IV helpers
+# ---------------------------------------------------------------------------
+
+fn _iv_byte(arena_id: i64, offset: i64, slot: i64) -> u8:
+    """Produce one IV byte at position `slot` from (arena_id, offset).
+
+    Manual XOR mixing: spread arena_id and offset bits across 12 bytes.
+    FR-NVFS-N6a-002: replace with hkdf_expand or SHA-256 truncation once
+    cross-submodule crypto access is available.
+    """
+    val a = arena_id ^ (arena_id >> 8) ^ (arena_id >> 16) ^ (arena_id >> 24)
+    val o = offset   ^ (offset   >> 8) ^ (offset   >> 16) ^ (offset   >> 24)
+    val mixed = a ^ (o << (slot & 7)) ^ (slot * 0x6B)
+    (mixed & 0xFF).to_u8()
+
+fn _make_iv(arena_id: i64, offset: i64) -> [u8]:
+    """Build a deterministic 12-byte IV from (arena_id, offset).
+
+    Same inputs always produce same IV — required for raw-send compatibility
+    (ZFS design, N6b). Offset provides per-block uniqueness within an arena.
+    """
+    var iv: [u8] = []
+    var slot: i64 = 0
+    while slot < 12:
+        iv.push(_iv_byte(arena_id, offset, slot))
+        slot = slot + 1
+    iv
+
+# ---------------------------------------------------------------------------
+# Pseudo-random key generation (deterministic seed from id)
+# FR-NVFS-N6a-001: replace with crypto-grade RNG once available.
+# ---------------------------------------------------------------------------
+
+fn _gen_key_bytes(seed: i64) -> [u8]:
+    """Generate 16 pseudo-random key bytes from seed.
+
+    WARNING: Not cryptographically secure. FR-NVFS-N6a-001 tracks upgrade to
+    AES-256 + CSPRNG for production use.
+    """
+    var key: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        val b = (seed ^ (seed >> (i & 15)) ^ (i * 0x9E3779B9)) & 0xFF
+        key.push(b.to_u8())
+        i = i + 1
+    key
+
+fn _derive_data_key_bytes(master_key: [u8], arena_id: i64) -> [u8]:
+    """Derive per-arena data key from master key + arena_id.
+
+    Deterministic: same (master_key, arena_id) always yields same output.
+    FR-NVFS-N6a-002: replace body with hkdf_expand(master_key, arena_id_bytes, 16).
+    """
+    var key: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        val mk_byte = if (master_key.len() as i64 > i): master_key[i].to_i64() else: 0
+        val b = (mk_byte ^ arena_id ^ (arena_id >> (i & 7)) ^ (i * 0x6D)) & 0xFF
+        key.push(b.to_u8())
+        i = i + 1
+    key
+
+# ---------------------------------------------------------------------------
+# Passphrase → wrapping key derivation
+# FR-NVFS-N6a-002: stub until hkdf_sha256 is accessible from this submodule.
+# ---------------------------------------------------------------------------
+
+fn keystore_derive_wrapping(ks: &mut KeyStore, user_passphrase: [u8]) -> KeyHandle:
+    """Derive a wrapping KEK from a user passphrase via HKDF-SHA-256.
+
+    FR-NVFS-N6a-002: body stubs HKDF with deterministic XOR mixing.
+    Real implementation: hkdf_extract(salt=[], ikm=user_passphrase) →
+    hkdf_expand(prk, info="nvfs-wrapping-key", length=16).
+    """
+    # Stub: derive from passphrase bytes by XOR reduction.
+    var seed: i64 = 0x4E564653  # "NVFS"
+    var i: i64 = 0
+    while i < user_passphrase.len() as i64:
+        seed = seed ^ (user_passphrase[i].to_i64() << (i & 7))
+        i = i + 1
+    val raw_key = _gen_key_bytes(seed)
+    val id = _keystore_alloc_id(ks)
+    val entry = KeyEntry(
+        id:          id,
+        level:       KeyLevel.Wrapping,
+        parent_id:   -1,
+        wrapped_key: [],
+        raw_key:     raw_key
+    )
+    ks.keys.push(entry)
+    KeyHandle(level: KeyLevel.Wrapping, kek_ref: -1, key_id: id)
+
+# ---------------------------------------------------------------------------
+# Generate master key, wrapped under wrapping KEK
+# ---------------------------------------------------------------------------
+
+fn keystore_generate_master(ks: &mut KeyStore, wrapping_id: i64) -> Result<KeyHandle, FsError>:
+    """Generate a fresh 256-bit master key and wrap it under wrapping_id.
+
+    FR-NVFS-N6a-001: upgrade to 32-byte key; currently 16 bytes (AES-128).
+    The wrapped_key field stores the AES-128-GCM ciphertext of raw_key under
+    the wrapping KEK. Body uses stub crypto until FR-N6a-001/002 are resolved.
+    """
+    val wk_idx = _keystore_find(ks, wrapping_id)
+    if wk_idx < 0:
+        return Err(FsError.InvalidArg)
+    val wk_raw = ks.keys[wk_idx].raw_key
+    val master_id = _keystore_alloc_id(ks)
+    val master_raw = _gen_key_bytes(master_id)
+    # Stub wrap: XOR master_raw with wk_raw (placeholder for AES-GCM wrap).
+    # FR-NVFS-N6a-001: replace with aes128_gcm_encrypt(wk_raw, nonce, master_raw, []).
+    var wrapped: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        val m = master_raw[i].to_i64()
+        val w = if (wk_raw.len() as i64 > i): wk_raw[i].to_i64() else: 0
+        wrapped.push((m ^ w).to_u8())
+        i = i + 1
+    val entry = KeyEntry(
+        id:          master_id,
+        level:       KeyLevel.Master,
+        parent_id:   wrapping_id,
+        wrapped_key: wrapped,
+        raw_key:     master_raw
+    )
+    ks.keys.push(entry)
+    ks.has_master = true
+    ks.master_id = master_id
+    Ok(KeyHandle(level: KeyLevel.Master, kek_ref: wrapping_id, key_id: master_id))
+
+# ---------------------------------------------------------------------------
+# Derive per-arena data key from master key + arena_id (deterministic)
+# ---------------------------------------------------------------------------
+
+fn keystore_derive_data_key(ks: &mut KeyStore, master_id: i64, arena_id: i64) -> Result<KeyHandle, FsError>:
+    """Derive a per-arena data key from master + arena_id.
+
+    Deterministic: same (master_id, arena_id) always yields same data key.
+    The derived key is stored in the KeyStore for later lookup.
+    """
+    val mk_idx = _keystore_find(ks, master_id)
+    if mk_idx < 0:
+        return Err(FsError.InvalidArg)
+    val mk_raw = ks.keys[mk_idx].raw_key
+    val data_raw = _derive_data_key_bytes(mk_raw, arena_id)
+    # Check if this (master_id, arena_id) data key already exists.
+    val data_id_seed = master_id * 1000003 + arena_id
+    var j: i64 = 0
+    while j < ks.keys.len() as i64:
+        val e = ks.keys[j]
+        match e.level:
+            case KeyLevel.Data:
+                if e.parent_id == master_id:
+                    val existing_derived = _derive_data_key_bytes(mk_raw, arena_id)
+                    if existing_derived.len() as i64 == e.raw_key.len() as i64:
+                        var match_found = true
+                        var k: i64 = 0
+                        while k < existing_derived.len() as i64:
+                            if existing_derived[k] != e.raw_key[k]:
+                                match_found = false
+                            k = k + 1
+                        if match_found:
+                            return Ok(KeyHandle(level: KeyLevel.Data, kek_ref: master_id, key_id: e.id))
+            case _:
+                pass_do_nothing
+        j = j + 1
+    val data_id = _keystore_alloc_id(ks)
+    val entry = KeyEntry(
+        id:          data_id,
+        level:       KeyLevel.Data,
+        parent_id:   master_id,
+        wrapped_key: [],
+        raw_key:     data_raw
+    )
+    ks.keys.push(entry)
+    Ok(KeyHandle(level: KeyLevel.Data, kek_ref: master_id, key_id: data_id))
+
+# ---------------------------------------------------------------------------
+# EncryptedEnvelope — wire format for one encrypted block
+# ---------------------------------------------------------------------------
+
+struct EncryptedEnvelope:
+    """AES-GCM ciphertext envelope stored in lieu of plaintext.
+
+    key_id     — identifies which data key was used.
+    iv         — 12-byte deterministic nonce derived from (arena_id, offset).
+    ciphertext — encrypted payload bytes.
+    tag        — 16-byte GCM authentication tag.
+    """
+    key_id:     i64
+    iv:         [u8]
+    ciphertext: [u8]
+    tag:        [u8]
+
+# ---------------------------------------------------------------------------
+# AES-128-GCM helpers
+# FR-NVFS-N6a-001: upgrade to AES-256-GCM when available.
+# ---------------------------------------------------------------------------
+
+fn _aes128_encrypt_stub(key: [u8], iv: [u8], plaintext: [u8]) -> [u8]:
+    """Stub AES-128-GCM encrypt returning ciphertext || 16-byte tag.
+
+    FR-NVFS-N6a-001: replace with:
+      use os.crypto.aes128_gcm.{aes128_gcm_encrypt}
+      aes128_gcm_encrypt(key, iv, plaintext, [])
+    The submodule currently cannot import os.crypto; stubbing with XOR cipher.
+    """
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < plaintext.len() as i64:
+        val p = plaintext[i].to_i64()
+        val k = if (key.len() as i64 > 0): key[i % key.len() as i64].to_i64() else: 0
+        val v = if (iv.len() as i64 > 0): iv[i % iv.len() as i64].to_i64() else: 0
+        out.push((p ^ k ^ v).to_u8())
+        i = i + 1
+    # Append 16-byte tag (stub: XOR-based checksum of plaintext).
+    var tag_acc: i64 = 0
+    i = 0
+    while i < plaintext.len() as i64:
+        tag_acc = (tag_acc ^ plaintext[i].to_i64() ^ (i * 0x5A)) & 0xFFFFFFFF
+        i = i + 1
+    var t: i64 = 0
+    while t < 16:
+        val tag_byte = (tag_acc ^ (t * 0x6B) ^ key[t % key.len() as i64].to_i64()) & 0xFF
+        out.push(tag_byte.to_u8())
+        t = t + 1
+    out
+
+fn _aes128_decrypt_stub(key: [u8], iv: [u8], ciphertext: [u8], tag: [u8]) -> Result<[u8], FsError>:
+    """Stub AES-128-GCM decrypt; verifies tag before returning plaintext.
+
+    FR-NVFS-N6a-001: replace with:
+      use os.crypto.aes128_gcm.{aes128_gcm_decrypt}
+      match aes128_gcm_decrypt(key, iv, ciphertext, [], tag): ...
+    """
+    # Decrypt with same XOR.
+    var plaintext: [u8] = []
+    var i: i64 = 0
+    while i < ciphertext.len() as i64:
+        val c = ciphertext[i].to_i64()
+        val k = if (key.len() as i64 > 0): key[i % key.len() as i64].to_i64() else: 0
+        val v = if (iv.len() as i64 > 0): iv[i % iv.len() as i64].to_i64() else: 0
+        plaintext.push((c ^ k ^ v).to_u8())
+        i = i + 1
+    # Recompute expected tag.
+    var tag_acc: i64 = 0
+    i = 0
+    while i < plaintext.len() as i64:
+        tag_acc = (tag_acc ^ plaintext[i].to_i64() ^ (i * 0x5A)) & 0xFFFFFFFF
+        i = i + 1
+    var expected_tag: [u8] = []
+    var t: i64 = 0
+    while t < 16:
+        val tag_byte = (tag_acc ^ (t * 0x6B) ^ key[t % key.len() as i64].to_i64()) & 0xFF
+        expected_tag.push(tag_byte.to_u8())
+        t = t + 1
+    # Constant-time tag comparison.
+    if tag.len() != expected_tag.len():
+        return Err(FsError.Corrupt)
+    var mismatch: bool = false
+    var j: i64 = 0
+    while j < tag.len() as i64:
+        if tag[j] != expected_tag[j]:
+            mismatch = true
+        j = j + 1
+    if mismatch:
+        return Err(FsError.Corrupt)
+    Ok(plaintext)
+
+# ---------------------------------------------------------------------------
+# Public encrypt / decrypt
+# ---------------------------------------------------------------------------
+
+fn encrypt_arena_data(ks: &KeyStore, key: KeyHandle, arena_id: i64, offset: i64, plaintext: [u8]) -> Result<EncryptedEnvelope, FsError>:
+    """Encrypt plaintext using the data key identified by key.key_id.
+
+    IV is deterministic: derived from (arena_id, offset) — stable across
+    raw-send (N6b). Tag mismatch on decrypt returns Err(Corrupt).
+    """
+    val raw_opt = keystore_get_raw_key(ks, key.key_id)
+    val raw_key = match raw_opt:
+        case None:
+            return Err(FsError.InvalidArg)
+        case Some(k):
+            k
+    val iv = _make_iv(arena_id, offset)
+    val combined = _aes128_encrypt_stub(raw_key, iv, plaintext)
+    # combined = ciphertext || 16-byte tag
+    val ct_len = combined.len() as i64 - 16
+    if ct_len < 0:
+        return Err(FsError.IoError(0))
+    var ciphertext: [u8] = []
+    var tag: [u8] = []
+    var i: i64 = 0
+    while i < ct_len:
+        ciphertext.push(combined[i])
+        i = i + 1
+    while i < combined.len() as i64:
+        tag.push(combined[i])
+        i = i + 1
+    Ok(EncryptedEnvelope(
+        key_id:     key.key_id,
+        iv:         iv,
+        ciphertext: ciphertext,
+        tag:        tag
+    ))
+
+fn decrypt_arena_data(ks: &KeyStore, envelope: EncryptedEnvelope) -> Result<[u8], FsError>:
+    """Decrypt an EncryptedEnvelope; return Err(Corrupt) on GCM tag mismatch."""
+    val raw_opt = keystore_get_raw_key(ks, envelope.key_id)
+    val raw_key = match raw_opt:
+        case None:
+            return Err(FsError.InvalidArg)
+        case Some(k):
+            k
+    _aes128_decrypt_stub(raw_key, envelope.iv, envelope.ciphertext, envelope.tag)

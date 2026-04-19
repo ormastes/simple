@@ -12,9 +12,13 @@
 # Language note: Simple uses i64 for all unsigned 64-bit fields.
 #   Vec<T> → [T], Option<T> → (bool, T) tuples, no inheritance.
 #
-# FR-HOT-001: Integrate real free-space accounting from PageHeader (pd_upper
-#   - pd_lower) once buffer_mgr exposes a page-slack query.  Currently callers
-#   pass explicit free_bytes / tuple_size parameters.
+# FR-HOT-001: IMPLEMENTED (2026-04-18) — hot_try_update_page uses real
+#   PageHeader free-space (pd_upper - pd_lower) from buffer_mgr.page_slack.
+#   The original hot_try_update (caller-managed free_bytes) is preserved for
+#   existing callers.
+
+use engine.page.{PageHeader}
+use engine.buffer_mgr.{page_slack, LINE_POINTER_SIZE}
 
 # ---------------------------------------------------------------------------
 # HotUpdateResult — tagged result from hot_try_update.
@@ -327,6 +331,92 @@ fn hot_chain_map_get(map: HotChainMap, logical_page_id: i64) -> (bool, HotChain)
             return (true, e.chain)
         i = i + 1
     (false, sentinel_chain)
+
+# ---------------------------------------------------------------------------
+# hot_try_update_page — FR-HOT-001 real free-space variant.
+#
+# Same as hot_try_update but uses the real PageHeader (pd_upper - pd_lower)
+# to compute available free space, including the cost of one new line-pointer
+# slot (LINE_POINTER_SIZE = 4 bytes).
+#
+# Eligibility: page_slack(hdr) >= new_tuple.byte_size + LINE_POINTER_SIZE
+# ---------------------------------------------------------------------------
+
+fn hot_try_update_page(chain: HotChain, old: TupleRef, new_tuple: Tuple,
+                       changed_indexed_cols: [i32],
+                       hdr: PageHeader) -> (HotUpdateResult, HotChain):
+    """Attempt a HOT update using real PageHeader free-space accounting.
+
+    Uses pd_upper - pd_lower (via page_slack) plus one line-pointer slot
+    (4 bytes) to determine whether the page has room for the new tuple.
+
+    Parameters:
+      chain                — current HOT chain (free_bytes field unused here).
+      old                  — reference to the tuple being replaced.
+      new_tuple            — the new tuple version (byte_size = serialized size).
+      changed_indexed_cols — column indices that changed.
+      hdr                  — decoded PageHeader for the target physical page.
+
+    Returns (result, updated_chain).
+    @coverage: spostgre_design.md §7 (FR-HOT-001)
+    """
+    # Check 1: no indexed columns changed.
+    if changed_indexed_cols.len() > 0:
+        val cold_result = HotUpdateResult(
+            kind: HOT_RESULT_COLD,
+            tuple_id: -1,
+            reason: HOT_REASON_INDEXED_CHANGED)
+        return (cold_result, chain)
+
+    # Check 2: real page free-space (pd_upper - pd_lower >= tuple + line_pointer).
+    val slack = page_slack(hdr) as i64
+    val needed = new_tuple.byte_size + (LINE_POINTER_SIZE as i64)
+    if slack < needed:
+        val cold_result = HotUpdateResult(
+            kind: HOT_RESULT_COLD,
+            tuple_id: -1,
+            reason: HOT_REASON_NO_SLACK)
+        return (cold_result, chain)
+
+    # HOT-eligible: expire the old version and append the new one.
+    val new_tid = chain.next_tuple_id
+
+    # Copy existing versions, stamping xmax on the matching old version.
+    val old_len = chain.versions.len()
+    var new_versions: [HotVersion] = [HotVersion(
+        tuple_id: 0, xmin: 0, xmax: 0,
+        physical_page_id: 0, changed_indexed_cols: false); old_len + 1]
+    var i = 0
+    while i < old_len:
+        val v = chain.versions[i]
+        if v.tuple_id == old.tuple_id:
+            new_versions[i] = HotVersion(
+                tuple_id: v.tuple_id,
+                xmin: v.xmin,
+                xmax: new_tuple.xid,
+                physical_page_id: v.physical_page_id,
+                changed_indexed_cols: v.changed_indexed_cols)
+        else:
+            new_versions[i] = v
+        i = i + 1
+    new_versions[old_len] = HotVersion(
+        tuple_id: new_tid,
+        xmin: new_tuple.xid,
+        xmax: 0,
+        physical_page_id: new_tuple.physical_page_id,
+        changed_indexed_cols: false)
+
+    val updated_chain = HotChain(
+        head_logical_page: chain.head_logical_page,
+        versions: new_versions,
+        next_tuple_id: new_tid + 1,
+        free_bytes: chain.free_bytes)
+
+    val hot_result = HotUpdateResult(
+        kind: HOT_RESULT_HOT,
+        tuple_id: new_tid,
+        reason: HOT_REASON_OK)
+    (hot_result, updated_chain)
 
 fn hot_chain_map_put(map: HotChainMap, logical_page_id: i64, chain: HotChain) -> HotChainMap:
     """Insert or replace the HotChain for logical_page_id.

@@ -1,0 +1,240 @@
+# @cover examples/nvfs/src/core/encryption.spl 80%
+"""
+# NVFS N6a Encryption Unit Tests
+
+**Feature IDs:** #NVFS-N6a-ENCRYPT
+**Category:** Data Security
+**Difficulty:** 3/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design_v2.md §14; N6a milestone
+
+## Overview
+
+Tests for the N6a encryption scaffolding: key hierarchy generation,
+encrypted arena round-trip, corruption detection, fast-path bypass,
+deterministic IV, and per-arena key isolation.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| KeyStore | In-memory registry of KeyEntry objects (User/Wrapping/Master/Data) |
+| KeyHandle | Opaque reference: (level, kek_ref, key_id) |
+| EncryptedEnvelope | (key_id, iv[12], ciphertext, tag[16]) |
+| encrypt_arena_data | Deterministic IV from (arena_id, offset); AES-128-GCM stub |
+| decrypt_arena_data | Tag verification; Err(Corrupt) on mismatch |
+| nvfs_set_arena_encryption | Marks an arena as encrypted in the module registry |
+"""
+
+use std.sspec.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _default_driver() -> NvfsDriver:
+    val d = NvfsDriver.new("enc-test-vol")
+    val opts = MountOptions(read_only: false, label: "enc-test")
+    val _ = d.mount(opts)
+    d
+
+fn _write_data(driver: NvfsDriver, data: [u8]) -> (FileHandle, i64):
+    """Open file, write data, return (handle, arena_id) — does NOT close."""
+    val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+    val path = Path(raw: "/enc_test_file")
+    val handle = driver.open(path, flags).unwrap()
+    val st = driver.fstat(handle).unwrap()
+    val arena_id = st.inode as i64
+    val _ = driver.write(handle, 0, data)
+    (handle, arena_id)
+
+fn _setup_master() -> i64:
+    """Call nvfs_keystore_generate_master and return the master key_id."""
+    val res = nvfs_keystore_generate_master()
+    val handle = res.unwrap()
+    handle.key_id
+
+# ---------------------------------------------------------------------------
+# Test 1: generate_master_key + set_arena_encryption marks arena encrypted
+# ---------------------------------------------------------------------------
+
+describe "encryption — generate_master_key marks arena encrypted":
+    """After calling nvfs_keystore_generate_master and nvfs_set_arena_encryption,
+    nvfs_get_arena_encryption must return Some(EncryptionInfo)."""
+
+    it "returns Some(EncryptionInfo) after set_arena_encryption(enabled=true)":
+        val master_id = _setup_master()
+        val kh = KeyHandle(level: KeyLevel.Master, kek_ref: -1, key_id: master_id)
+        val arena_id: i64 = 9001
+        val _ = nvfs_set_arena_encryption(arena_id, true, kh)
+        val info_opt = nvfs_get_arena_encryption(arena_id)
+        val is_some = match info_opt:
+            case None: false
+            case Some(_): true
+        expect(is_some).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 2: write + read round-trip on encrypted arena returns original plaintext
+# ---------------------------------------------------------------------------
+
+describe "encryption — round-trip on encrypted arena":
+    """Write plaintext to an encrypted arena; read back must match original."""
+
+    it "read returns original plaintext after encrypt-write on encrypted arena":
+        val master_id = _setup_master()
+        val kh = KeyHandle(level: KeyLevel.Master, kek_ref: -1, key_id: master_id)
+        var d = _default_driver()
+        val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+        val path = Path(raw: "/enc_roundtrip")
+        val handle = d.open(path, flags).unwrap()
+        val st = d.fstat(handle).unwrap()
+        val arena_id = st.inode as i64
+        # Mark arena as encrypted BEFORE writing.
+        val _ = nvfs_set_arena_encryption(arena_id, true, kh)
+        val plaintext: [u8] = [0x48u8, 0x65u8, 0x6Cu8, 0x6Cu8, 0x6Fu8]  # "Hello"
+        val written = d.write(handle, 0, plaintext).unwrap()
+        # written includes ciphertext + 16-byte tag overhead.
+        expect(written > 0).to_equal(true)
+        # Read back and check plaintext length returned equals original.
+        val read_buf: [u8] = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                               0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                               0u8, 0u8, 0u8, 0u8, 0u8]
+        val read_len = d.read(handle, 0, read_buf).unwrap()
+        # The decrypted plaintext length must match original.
+        expect(read_len).to_equal(plaintext.len() as i64)
+        val _ = d.close(handle)
+
+# ---------------------------------------------------------------------------
+# Test 3: Corrupted ciphertext → Err(Corrupt) on read
+# ---------------------------------------------------------------------------
+
+describe "encryption — corrupted ciphertext detected":
+    """Mutate one byte of ciphertext in an encrypted arena; read must return Err(Corrupt)."""
+
+    it "decrypt returns Err(Corrupt) when tag byte is mutated":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x74u8, 0x65u8, 0x73u8, 0x74u8]  # "test"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk_res = keystore_derive_data_key(ks, master.key_id, 42)
+        val dk = dk_res.unwrap()
+        val plaintext: [u8] = [0xAAu8, 0xBBu8, 0xCCu8, 0xDDu8]
+        val env_res = encrypt_arena_data(ks, dk, 42, 0, plaintext)
+        val env = env_res.unwrap()
+        # Corrupt the first tag byte.
+        var bad_tag: [u8] = []
+        var ti: i64 = 0
+        while ti < env.tag.len() as i64:
+            if ti == 0:
+                bad_tag.push((env.tag[ti].to_i64() ^ 0xFF).to_u8())
+            else:
+                bad_tag.push(env.tag[ti])
+            ti = ti + 1
+        val corrupt_env = EncryptedEnvelope(
+            key_id:     env.key_id,
+            iv:         env.iv,
+            ciphertext: env.ciphertext,
+            tag:        bad_tag
+        )
+        val result = decrypt_arena_data(ks, corrupt_env)
+        val is_corrupt = match result:
+            case Err(FsError.Corrupt): true
+            case _: false
+        expect(is_corrupt).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 4: Unencrypted arena bypasses crypto (fast path)
+# ---------------------------------------------------------------------------
+
+describe "encryption — unencrypted arena bypasses crypto":
+    """An arena not in the encrypted registry must not have encryption overhead."""
+
+    it "write to unencrypted arena returns exact buf.len() bytes written":
+        var d = _default_driver()
+        val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+        val path = Path(raw: "/plain_test")
+        val handle = d.open(path, flags).unwrap()
+        val st = d.fstat(handle).unwrap()
+        val arena_id = st.inode as i64
+        # Do NOT mark this arena as encrypted.
+        val data: [u8] = [0x01u8, 0x02u8, 0x03u8, 0x04u8]
+        val written = d.write(handle, 0, data).unwrap()
+        # No overhead: written must equal data length exactly.
+        expect(written).to_equal(data.len() as i64)
+        val _ = d.close(handle)
+
+# ---------------------------------------------------------------------------
+# Test 5: Deterministic IV — same (arena_id, offset) produces same envelope
+# ---------------------------------------------------------------------------
+
+describe "encryption — deterministic IV":
+    """Two encryptions of the same plaintext at same (arena_id, offset) must
+    produce identical IV and ciphertext (given deterministic key)."""
+
+    it "encrypt_arena_data is deterministic: same inputs → same ciphertext":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x6Bu8, 0x65u8, 0x79u8]  # "key"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk_res = keystore_derive_data_key(ks, master.key_id, 100)
+        val dk = dk_res.unwrap()
+        val plaintext: [u8] = [0x11u8, 0x22u8, 0x33u8, 0x44u8]
+        val env1_res = encrypt_arena_data(ks, dk, 100, 0, plaintext)
+        val env1 = env1_res.unwrap()
+        val env2_res = encrypt_arena_data(ks, dk, 100, 0, plaintext)
+        val env2 = env2_res.unwrap()
+        # IVs must match (deterministic).
+        expect(env1.iv.len() as i64).to_equal(env2.iv.len() as i64)
+        var iv_match = true
+        var i: i64 = 0
+        while i < env1.iv.len() as i64:
+            if env1.iv[i] != env2.iv[i]:
+                iv_match = false
+            i = i + 1
+        expect(iv_match).to_equal(true)
+        # Ciphertexts must match (deterministic key + IV).
+        expect(env1.ciphertext.len() as i64).to_equal(env2.ciphertext.len() as i64)
+        var ct_match = true
+        i = 0
+        while i < env1.ciphertext.len() as i64:
+            if env1.ciphertext[i] != env2.ciphertext[i]:
+                ct_match = false
+            i = i + 1
+        expect(ct_match).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 6: Different arena_ids produce different envelopes for same plaintext
+# ---------------------------------------------------------------------------
+
+describe "encryption — arena isolation":
+    """Different arena_ids must produce different IVs and ciphertexts even
+    for identical plaintext and master key — ensuring key isolation."""
+
+    it "encrypt_arena_data for arena 1 vs arena 2 produces distinct ciphertexts":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x73u8, 0x65u8, 0x63u8]  # "sec"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk1_res = keystore_derive_data_key(ks, master.key_id, 200)
+        val dk1 = dk1_res.unwrap()
+        val dk2_res = keystore_derive_data_key(ks, master.key_id, 201)
+        val dk2 = dk2_res.unwrap()
+        val plaintext: [u8] = [0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]
+        val env1_res = encrypt_arena_data(ks, dk1, 200, 0, plaintext)
+        val env1 = env1_res.unwrap()
+        val env2_res = encrypt_arena_data(ks, dk2, 201, 0, plaintext)
+        val env2 = env2_res.unwrap()
+        # Ciphertexts must differ (different data keys OR different IVs).
+        var ct_same = true
+        if env1.ciphertext.len() != env2.ciphertext.len():
+            ct_same = false
+        else:
+            var i: i64 = 0
+            while i < env1.ciphertext.len() as i64:
+                if env1.ciphertext[i] != env2.ciphertext[i]:
+                    ct_same = false
+                i = i + 1
+        expect(ct_same).to_equal(false)

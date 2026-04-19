@@ -1,0 +1,530 @@
+# @covers src/lib/common/cbor/types.spl 80%
+# @allow(unnamed_duplicate_typed_args)
+# @allow(primitive_api)
+# CBOR Types Coverage Test
+# Branch coverage for types.spl: byte array helpers + text/byte conversion
+#
+# **Feature IDs:** #CBOR-COVERAGE
+# **Category:** Testing
+# **Status:** Implemented
+
+use std.common.cbor.major_types.*
+use std.common.cbor.types.*
+use std.common.cbor.encode.*
+use std.common.cbor.decode.*
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn empty_i64_list() -> [i64]:
+    var r = [0]
+    r = []
+    r
+
+# ============================================================================
+# Test Group 1: types.spl - Byte Array Helpers
+# ============================================================================
+
+describe "CBOR Types - byte_at":
+    context "when index is valid":
+        it "returns the byte at the given index":
+            val bytes = [10, 20, 30]
+            expect(byte_at(bytes, 0)).to_equal(10)
+            expect(byte_at(bytes, 1)).to_equal(20)
+            expect(byte_at(bytes, 2)).to_equal(30)
+
+    context "when index is negative":
+        it "returns 0":
+            val bytes = [10, 20, 30]
+            expect(byte_at(bytes, -1)).to_equal(0)
+            expect(byte_at(bytes, -100)).to_equal(0)
+
+    context "when index is out of bounds":
+        it "returns 0":
+            val bytes = [10, 20, 30]
+            expect(byte_at(bytes, 3)).to_equal(0)
+            expect(byte_at(bytes, 100)).to_equal(0)
+
+    context "when array is empty":
+        it "returns 0 for any index":
+            val bts = empty_i64_list()
+            expect(byte_at(bts, 0)).to_equal(0)
+
+describe "CBOR Types - bytes_append":
+    context "when appending to array":
+        it "returns array with new byte at end":
+            val bytes = [1, 2]
+            val result = bytes_append(bytes, 3)
+            expect(result.len()).to_equal(3)
+            expect(result[2]).to_equal(3)
+
+    context "when appending to empty array":
+        it "returns single-element array":
+            val bts = empty_i64_list()
+            val result = bytes_append(bts, 42)
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal(42)
+
+describe "CBOR Types - bytes_concat":
+    context "when both arrays have elements":
+        it "concatenates them":
+            val a = [1, 2]
+            val b = [3, 4]
+            val result = bytes_concat(a, b)
+            expect(result.len()).to_equal(4)
+            expect(result[0]).to_equal(1)
+            expect(result[3]).to_equal(4)
+
+    context "when first array is empty":
+        it "returns copy of second array":
+            val empty = empty_i64_list()
+            val non_empty = [5, 6]
+            val result = bytes_concat(empty, non_empty)
+            expect(result.len()).to_equal(2)
+            expect(result[0]).to_equal(5)
+
+    context "when second array is empty":
+        it "returns copy of first array":
+            val non_empty = [7, 8]
+            val empty = empty_i64_list()
+            val result = bytes_concat(non_empty, empty)
+            expect(result.len()).to_equal(2)
+            expect(result[1]).to_equal(8)
+
+describe "CBOR Types - bytes_slice":
+    context "when slice is within bounds":
+        it "extracts the correct slice":
+            val bytes = [10, 20, 30, 40, 50]
+            val result = bytes_slice(bytes, 1, 3)
+            expect(result.len()).to_equal(3)
+            expect(result[0]).to_equal(20)
+            expect(result[1]).to_equal(30)
+            expect(result[2]).to_equal(40)
+
+    context "when slice extends past end":
+        it "returns only available bytes":
+            val bytes = [10, 20, 30]
+            val result = bytes_slice(bytes, 2, 5)
+            # Only index 2 is valid, rest are beyond end
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal(30)
+
+    context "when start is at end":
+        it "returns empty for zero-length":
+            val bytes = [10, 20]
+            val result = bytes_slice(bytes, 0, 0)
+            expect(result.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 2: types.spl - Initial Byte Encoding/Decoding
+# ============================================================================
+
+describe "CBOR Types - make_initial_byte":
+    context "when encoding major type 0 with value 0":
+        it "returns 0x00":
+            expect(make_initial_byte(0, 0)).to_equal(0)
+
+    context "when encoding major type 0 with value 23":
+        it "returns 23":
+            expect(make_initial_byte(0, 23)).to_equal(23)
+
+    context "when encoding major type 1 with value 0":
+        it "returns 32":
+            # major_type 1 * 32 + 0 = 32
+            expect(make_initial_byte(1, 0)).to_equal(32)
+
+    context "when encoding major type 7 with value 31":
+        it "returns 0xFF (255)":
+            # major_type 7 * 32 + 31 = 224 + 31 = 255
+            expect(make_initial_byte(7, 31)).to_equal(255)
+
+    context "when encoding all major types":
+        it "correctly shifts major type bits":
+            expect(make_initial_byte(0, 0)).to_equal(0)
+            expect(make_initial_byte(1, 0)).to_equal(32)
+            expect(make_initial_byte(2, 0)).to_equal(64)
+            expect(make_initial_byte(3, 0)).to_equal(96)
+            expect(make_initial_byte(4, 0)).to_equal(128)
+            expect(make_initial_byte(5, 0)).to_equal(160)
+            expect(make_initial_byte(6, 0)).to_equal(192)
+            expect(make_initial_byte(7, 0)).to_equal(224)
+
+describe "CBOR Types - get_major_type":
+    context "when byte represents each major type":
+        it "extracts the correct major type":
+            expect(get_major_type(0)).to_equal(0)
+            expect(get_major_type(32)).to_equal(1)
+            expect(get_major_type(64)).to_equal(2)
+            expect(get_major_type(96)).to_equal(3)
+            expect(get_major_type(128)).to_equal(4)
+            expect(get_major_type(160)).to_equal(5)
+            expect(get_major_type(192)).to_equal(6)
+            expect(get_major_type(224)).to_equal(7)
+
+    context "when additional info is non-zero":
+        it "still extracts correct major type":
+            # 0x58 = 88 = major 2 (byte string) + addl 24 (uint8)
+            expect(get_major_type(88)).to_equal(2)
+
+describe "CBOR Types - get_additional_info":
+    context "when extracting additional info":
+        it "returns the low 5 bits":
+            expect(get_additional_info(0)).to_equal(0)
+            expect(get_additional_info(23)).to_equal(23)
+            expect(get_additional_info(24)).to_equal(24)
+            expect(get_additional_info(31)).to_equal(31)
+
+    context "when major type is non-zero":
+        it "still extracts correct additional info":
+            # 0x38 = 56 = major 1 (neg int) + addl 24 (uint8)
+            expect(get_additional_info(56)).to_equal(24)
+
+# ============================================================================
+# Test Group 3: types.spl - Text/Byte Conversion
+# ============================================================================
+
+describe "CBOR Types - text_to_bytes":
+    context "when converting ASCII text":
+        # NOTE: text_to_bytes only reliably handles single-char input due to
+        # a known runtime limitation with substring() inside while loops.
+        it "returns correct byte values for lowercase":
+            val result_a = text_to_bytes("a")
+            expect(result_a.len()).to_equal(1)
+            expect(result_a[0]).to_equal(97)
+            val result_b = text_to_bytes("b")
+            expect(result_b[0]).to_equal(98)
+            val result_c = text_to_bytes("c")
+            expect(result_c[0]).to_equal(99)
+
+        it "returns correct byte values for uppercase":
+            val result_a = text_to_bytes("A")
+            expect(result_a.len()).to_equal(1)
+            expect(result_a[0]).to_equal(65)
+            val result_b = text_to_bytes("B")
+            expect(result_b[0]).to_equal(66)
+            val result_c = text_to_bytes("C")
+            expect(result_c[0]).to_equal(67)
+
+        it "returns correct byte values for digits":
+            val result_0 = text_to_bytes("0")
+            expect(result_0.len()).to_equal(1)
+            expect(result_0[0]).to_equal(48)
+            val result_1 = text_to_bytes("1")
+            expect(result_1[0]).to_equal(49)
+            val result_2 = text_to_bytes("2")
+            expect(result_2[0]).to_equal(50)
+
+        it "returns correct value for space":
+            val result = text_to_bytes(" ")
+            expect(result[0]).to_equal(32)
+
+        it "handles special characters":
+            val result_bang = text_to_bytes("!")
+            expect(result_bang[0]).to_equal(33)
+            val result_at = text_to_bytes("@")
+            expect(result_at[0]).to_equal(64)
+            val result_hash = text_to_bytes("#")
+            expect(result_hash[0]).to_equal(35)
+
+    context "when converting empty text":
+        it "returns empty array":
+            val result = text_to_bytes("")
+            expect(result.len()).to_equal(0)
+
+    context "when converting punctuation":
+        it "handles braces and brackets":
+            val result_open = text_to_bytes("{")
+            expect(result_open[0]).to_equal(123)
+            val result_close = text_to_bytes("}")
+            expect(result_close[0]).to_equal(125)
+
+        it "handles tilde and backtick":
+            val result_tilde = text_to_bytes("~")
+            expect(result_tilde[0]).to_equal(126)
+            val result_backtick = text_to_bytes("`")
+            expect(result_backtick[0]).to_equal(96)
+
+describe "CBOR Types - bytes_to_text":
+    context "when converting byte values to text":
+        it "returns correct ASCII text for lowercase":
+            val bytes = [104, 105]  # h, i
+            val result = bytes_to_text(bytes)
+            expect(result).to_equal("hi")
+
+        it "returns correct ASCII text for uppercase":
+            val bytes = [72, 73]  # H, I
+            val result = bytes_to_text(bytes)
+            expect(result).to_equal("HI")
+
+        it "returns correct text for digits":
+            val bytes = [48, 49, 50]  # 0, 1, 2
+            val result = bytes_to_text(bytes)
+            expect(result).to_equal("012")
+
+    context "when converting empty byte array":
+        it "returns empty text":
+            val empty = empty_i64_list()
+            val result = bytes_to_text(empty)
+            expect(result).to_equal("")
+
+    context "when roundtripping":
+        it "text_to_bytes then bytes_to_text returns original":
+            # Single-char roundtrip (multi-char limited by runtime substring bug)
+            val original = "H"
+            val bts = text_to_bytes(original)
+            val roundtrip = bytes_to_text(bts)
+            expect(roundtrip).to_equal(original)
+
+# ============================================================================
+# Test Group 23: types.spl - text_to_bytes more character coverage
+# ============================================================================
+
+describe "CBOR Types - text_to_bytes extended chars":
+    context "when converting additional lowercase letters":
+        it "handles d through h":
+            expect(text_to_bytes("d")[0]).to_equal(100)
+            expect(text_to_bytes("e")[0]).to_equal(101)
+            expect(text_to_bytes("f")[0]).to_equal(102)
+            expect(text_to_bytes("g")[0]).to_equal(103)
+            expect(text_to_bytes("h")[0]).to_equal(104)
+
+        it "handles i through m":
+            expect(text_to_bytes("i")[0]).to_equal(105)
+            expect(text_to_bytes("j")[0]).to_equal(106)
+            expect(text_to_bytes("k")[0]).to_equal(107)
+            expect(text_to_bytes("l")[0]).to_equal(108)
+            expect(text_to_bytes("m")[0]).to_equal(109)
+
+        it "handles n through r":
+            expect(text_to_bytes("n")[0]).to_equal(110)
+            expect(text_to_bytes("o")[0]).to_equal(111)
+            expect(text_to_bytes("p")[0]).to_equal(112)
+            expect(text_to_bytes("q")[0]).to_equal(113)
+            expect(text_to_bytes("r")[0]).to_equal(114)
+
+        it "handles s through w":
+            expect(text_to_bytes("s")[0]).to_equal(115)
+            expect(text_to_bytes("t")[0]).to_equal(116)
+            expect(text_to_bytes("u")[0]).to_equal(117)
+            expect(text_to_bytes("v")[0]).to_equal(118)
+            expect(text_to_bytes("w")[0]).to_equal(119)
+
+        it "handles x through z":
+            expect(text_to_bytes("x")[0]).to_equal(120)
+            expect(text_to_bytes("y")[0]).to_equal(121)
+            expect(text_to_bytes("z")[0]).to_equal(122)
+
+    context "when converting additional uppercase letters":
+        it "handles D through H":
+            expect(text_to_bytes("D")[0]).to_equal(68)
+            expect(text_to_bytes("E")[0]).to_equal(69)
+            expect(text_to_bytes("F")[0]).to_equal(70)
+            expect(text_to_bytes("G")[0]).to_equal(71)
+            expect(text_to_bytes("H")[0]).to_equal(72)
+
+        it "handles I through M":
+            expect(text_to_bytes("I")[0]).to_equal(73)
+            expect(text_to_bytes("J")[0]).to_equal(74)
+            expect(text_to_bytes("K")[0]).to_equal(75)
+            expect(text_to_bytes("L")[0]).to_equal(76)
+            expect(text_to_bytes("M")[0]).to_equal(77)
+
+        it "handles N through R":
+            expect(text_to_bytes("N")[0]).to_equal(78)
+            expect(text_to_bytes("O")[0]).to_equal(79)
+            expect(text_to_bytes("P")[0]).to_equal(80)
+            expect(text_to_bytes("Q")[0]).to_equal(81)
+            expect(text_to_bytes("R")[0]).to_equal(82)
+
+        it "handles S through W":
+            expect(text_to_bytes("S")[0]).to_equal(83)
+            expect(text_to_bytes("T")[0]).to_equal(84)
+            expect(text_to_bytes("U")[0]).to_equal(85)
+            expect(text_to_bytes("V")[0]).to_equal(86)
+            expect(text_to_bytes("W")[0]).to_equal(87)
+
+        it "handles X through Z":
+            expect(text_to_bytes("X")[0]).to_equal(88)
+            expect(text_to_bytes("Y")[0]).to_equal(89)
+            expect(text_to_bytes("Z")[0]).to_equal(90)
+
+    context "when converting digits":
+        it "handles 3 through 9":
+            expect(text_to_bytes("3")[0]).to_equal(51)
+            expect(text_to_bytes("4")[0]).to_equal(52)
+            expect(text_to_bytes("5")[0]).to_equal(53)
+            expect(text_to_bytes("6")[0]).to_equal(54)
+            expect(text_to_bytes("7")[0]).to_equal(55)
+            expect(text_to_bytes("8")[0]).to_equal(56)
+            expect(text_to_bytes("9")[0]).to_equal(57)
+
+    context "when converting special characters":
+        it "handles quote and dollar and percent":
+            expect(text_to_bytes("\"")[0]).to_equal(34)
+            expect(text_to_bytes("$")[0]).to_equal(36)
+            expect(text_to_bytes("%")[0]).to_equal(37)
+
+        it "handles ampersand and apostrophe":
+            expect(text_to_bytes("&")[0]).to_equal(38)
+            expect(text_to_bytes("'")[0]).to_equal(39)
+
+        it "handles parentheses and asterisk":
+            expect(text_to_bytes("(")[0]).to_equal(40)
+            expect(text_to_bytes(")")[0]).to_equal(41)
+            expect(text_to_bytes("*")[0]).to_equal(42)
+
+        it "handles plus comma minus period":
+            expect(text_to_bytes("+")[0]).to_equal(43)
+            expect(text_to_bytes(",")[0]).to_equal(44)
+            expect(text_to_bytes("-")[0]).to_equal(45)
+            expect(text_to_bytes(".")[0]).to_equal(46)
+
+        it "handles slash colon semicolon":
+            expect(text_to_bytes("/")[0]).to_equal(47)
+            expect(text_to_bytes(":")[0]).to_equal(58)
+            expect(text_to_bytes(";")[0]).to_equal(59)
+
+        it "handles angle brackets equals question":
+            expect(text_to_bytes("<")[0]).to_equal(60)
+            expect(text_to_bytes("=")[0]).to_equal(61)
+            expect(text_to_bytes(">")[0]).to_equal(62)
+            expect(text_to_bytes("?")[0]).to_equal(63)
+
+        it "handles brackets backslash caret underscore":
+            expect(text_to_bytes("[")[0]).to_equal(91)
+            expect(text_to_bytes("\\")[0]).to_equal(92)
+            expect(text_to_bytes("]")[0]).to_equal(93)
+            expect(text_to_bytes("^")[0]).to_equal(94)
+            expect(text_to_bytes("_")[0]).to_equal(95)
+
+        it "handles pipe":
+            expect(text_to_bytes("|")[0]).to_equal(124)
+
+# ============================================================================
+# Test Group 24: types.spl - bytes_to_text more character coverage
+# ============================================================================
+
+describe "CBOR Types - bytes_to_text extended chars":
+    context "when converting additional lowercase byte values":
+        it "handles d through h":
+            expect(bytes_to_text([100])).to_equal("d")
+            expect(bytes_to_text([101])).to_equal("e")
+            expect(bytes_to_text([102])).to_equal("f")
+            expect(bytes_to_text([103])).to_equal("g")
+            expect(bytes_to_text([104])).to_equal("h")
+
+        it "handles i through m":
+            expect(bytes_to_text([105])).to_equal("i")
+            expect(bytes_to_text([106])).to_equal("j")
+            expect(bytes_to_text([107])).to_equal("k")
+            expect(bytes_to_text([108])).to_equal("l")
+            expect(bytes_to_text([109])).to_equal("m")
+
+        it "handles n through r":
+            expect(bytes_to_text([110])).to_equal("n")
+            expect(bytes_to_text([111])).to_equal("o")
+            expect(bytes_to_text([112])).to_equal("p")
+            expect(bytes_to_text([113])).to_equal("q")
+            expect(bytes_to_text([114])).to_equal("r")
+
+        it "handles s through w":
+            expect(bytes_to_text([115])).to_equal("s")
+            expect(bytes_to_text([116])).to_equal("t")
+            expect(bytes_to_text([117])).to_equal("u")
+            expect(bytes_to_text([118])).to_equal("v")
+            expect(bytes_to_text([119])).to_equal("w")
+
+        it "handles x through z":
+            expect(bytes_to_text([120])).to_equal("x")
+            expect(bytes_to_text([121])).to_equal("y")
+            expect(bytes_to_text([122])).to_equal("z")
+
+    context "when converting additional uppercase byte values":
+        it "handles D through H":
+            expect(bytes_to_text([68])).to_equal("D")
+            expect(bytes_to_text([69])).to_equal("E")
+            expect(bytes_to_text([70])).to_equal("F")
+            expect(bytes_to_text([71])).to_equal("G")
+            expect(bytes_to_text([72])).to_equal("H")
+
+        it "handles I through M":
+            expect(bytes_to_text([73])).to_equal("I")
+            expect(bytes_to_text([74])).to_equal("J")
+            expect(bytes_to_text([75])).to_equal("K")
+            expect(bytes_to_text([76])).to_equal("L")
+            expect(bytes_to_text([77])).to_equal("M")
+
+        it "handles N through R":
+            expect(bytes_to_text([78])).to_equal("N")
+            expect(bytes_to_text([79])).to_equal("O")
+            expect(bytes_to_text([80])).to_equal("P")
+            expect(bytes_to_text([81])).to_equal("Q")
+            expect(bytes_to_text([82])).to_equal("R")
+
+        it "handles S through W":
+            expect(bytes_to_text([83])).to_equal("S")
+            expect(bytes_to_text([84])).to_equal("T")
+            expect(bytes_to_text([85])).to_equal("U")
+            expect(bytes_to_text([86])).to_equal("V")
+            expect(bytes_to_text([87])).to_equal("W")
+
+        it "handles X through Z":
+            expect(bytes_to_text([88])).to_equal("X")
+            expect(bytes_to_text([89])).to_equal("Y")
+            expect(bytes_to_text([90])).to_equal("Z")
+
+    context "when converting digit byte values":
+        it "handles 3 through 9":
+            expect(bytes_to_text([51])).to_equal("3")
+            expect(bytes_to_text([52])).to_equal("4")
+            expect(bytes_to_text([53])).to_equal("5")
+            expect(bytes_to_text([54])).to_equal("6")
+            expect(bytes_to_text([55])).to_equal("7")
+            expect(bytes_to_text([56])).to_equal("8")
+            expect(bytes_to_text([57])).to_equal("9")
+
+    context "when converting special character byte values":
+        it "handles quote dollar percent":
+            expect(bytes_to_text([34])).to_equal("\"")
+            expect(bytes_to_text([36])).to_equal("$")
+            expect(bytes_to_text([37])).to_equal("%")
+
+        it "handles ampersand apostrophe":
+            expect(bytes_to_text([38])).to_equal("&")
+            expect(bytes_to_text([39])).to_equal("'")
+
+        it "handles parentheses asterisk":
+            expect(bytes_to_text([40])).to_equal("(")
+            expect(bytes_to_text([41])).to_equal(")")
+            expect(bytes_to_text([42])).to_equal("*")
+
+        it "handles plus comma minus period":
+            expect(bytes_to_text([43])).to_equal("+")
+            expect(bytes_to_text([44])).to_equal(",")
+            expect(bytes_to_text([45])).to_equal("-")
+            expect(bytes_to_text([46])).to_equal(".")
+
+        it "handles slash colon semicolon":
+            expect(bytes_to_text([47])).to_equal("/")
+            expect(bytes_to_text([58])).to_equal(":")
+            expect(bytes_to_text([59])).to_equal(";")
+
+        it "handles angle brackets equals question":
+            expect(bytes_to_text([60])).to_equal("<")
+            expect(bytes_to_text([61])).to_equal("=")
+            expect(bytes_to_text([62])).to_equal(">")
+            expect(bytes_to_text([63])).to_equal("?")
+
+        it "handles brackets backslash caret underscore":
+            expect(bytes_to_text([91])).to_equal("[")
+            expect(bytes_to_text([92])).to_equal("\\")
+            expect(bytes_to_text([93])).to_equal("]")
+            expect(bytes_to_text([94])).to_equal("^")
+            expect(bytes_to_text([95])).to_equal("_")
+
+        it "handles pipe":
+            expect(bytes_to_text([124])).to_equal("|")
