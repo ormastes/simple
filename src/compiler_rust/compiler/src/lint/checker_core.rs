@@ -405,7 +405,6 @@ impl LintChecker {
             collect_from_node(&mut self.functions, item);
         }
     }
-}
 
     /// Check for file-level lint allow attribute
     pub(super) fn has_file_level_allow(&self, lint_name: &str) -> bool {

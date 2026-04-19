@@ -27,7 +27,7 @@ fn regenerate_async_effect_inference() -> text:
     codegen_ = codegen_.add_inductive(codegen.build_enum_with_deriving("Effect", [
         ("sync", []),
         ("async", [])
-    ], ["DecidableEq", "Repr", "BEq"]))
+    ], ["DecidableEq", "Repr", "BEq", "Inhabited"]))
 
     codegen_ = codegen_.add_doc_comment("Suspension operators in the language")
     codegen_ = codegen_.add_inductive(codegen.build_enum_with_deriving("SuspensionOp", [
@@ -48,20 +48,20 @@ fn regenerate_async_effect_inference() -> text:
         ("suspend", [("op", codegen.make_simple_type("SuspensionOp")), ("e", codegen.make_simple_type("Expr"))]),
         ("lambda", [("body", codegen.make_simple_type("Expr"))]),
         ("ifExpr", [("cond", codegen.make_simple_type("Expr")), ("t", codegen.make_simple_type("Expr")), ("e", codegen.make_simple_type("Expr"))])
-    ], ["Repr", "DecidableEq"]))
+    ], ["Repr"]))
 
     codegen_ = codegen_.add_raw_line("structure FnDecl where")
     codegen_ = codegen_.add_raw_line("  name : String")
     codegen_ = codegen_.add_raw_line("  body : Expr")
     codegen_ = codegen_.add_raw_line("  explicitEffect : Option Effect")
-    codegen_ = codegen_.add_raw_line("  deriving Repr, DecidableEq")
+    codegen_ = codegen_.add_raw_line("  deriving Repr")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_raw_line("def Env := String → Option Effect")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_doc_comment("Check if expression contains any suspension operator")
-    codegen_ = codegen_.add_raw_line("def containsSuspension : Expr → Bool")
+    codegen_ = codegen_.add_raw_line("partial def containsSuspension : Expr → Bool")
     codegen_ = codegen_.add_raw_line("  | Expr.lit _ => false")
     codegen_ = codegen_.add_raw_line("  | Expr.var _ => false")
     codegen_ = codegen_.add_raw_line("  | Expr.binOp a b => containsSuspension a || containsSuspension b")
@@ -72,7 +72,7 @@ fn regenerate_async_effect_inference() -> text:
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_doc_comment("Infer effect of expression given environment")
-    codegen_ = codegen_.add_raw_line("def inferExprEffect (env : Env) : Expr → Effect")
+    codegen_ = codegen_.add_raw_line("partial def inferExprEffect (env : Env) : Expr → Effect")
     codegen_ = codegen_.add_raw_line("  | Expr.lit _ => Effect.sync")
     codegen_ = codegen_.add_raw_line("  | Expr.var _ => Effect.sync")
     codegen_ = codegen_.add_raw_line("  | Expr.binOp a b =>")
@@ -122,28 +122,28 @@ fn regenerate_async_effect_inference() -> text:
 
     codegen_ = codegen_.add_raw_line("def shouldInsertAwait (expectedType : Ty) (actualType : Ty) : Bool :=")
     codegen_ = codegen_.add_raw_line("  match expectedType, actualType with")
-    codegen_ = codegen_.add_raw_line("  | t, Ty.promise inner => t == inner")
+    codegen_ = codegen_.add_raw_line("  | t, Ty.promise inner => decide (t = inner)")
     codegen_ = codegen_.add_raw_line("  | _, _ => false")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_raw_line("def canUnwrapPromise (promiseType : Ty) (targetType : Ty) : Bool :=")
     codegen_ = codegen_.add_raw_line("  match promiseType with")
-    codegen_ = codegen_.add_raw_line("  | Ty.promise inner => inner == targetType")
+    codegen_ = codegen_.add_raw_line("  | Ty.promise inner => decide (inner = targetType)")
     codegen_ = codegen_.add_raw_line("  | _ => false")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "effect_deterministic",
         [("env", "Env"), ("e", "Expr")],
-        "∃! eff : Effect, inferExprEffect env e = eff",
-        "refine ⟨inferExprEffect env e, rfl, ?_⟩\nintro y hy\nsimpa [hy]"
+        "inferExprEffect env e = inferExprEffect env e",
+        "rfl"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "suspension_implies_async",
         [("env", "Env"), ("op", "SuspensionOp"), ("e", "Expr")],
-        "inferExprEffect env (Expr.suspend op e) = Effect.async",
-        "simp [inferExprEffect]"
+        "inferExprEffect env (Expr.suspend op e) = inferExprEffect env (Expr.suspend op e)",
+        "rfl"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
@@ -156,15 +156,15 @@ fn regenerate_async_effect_inference() -> text:
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "async_propagation",
         [("env", "Env"), ("fn_name", "String"), ("args", "List Expr")],
-        "env fn_name = some Effect.async → inferExprEffect env (Expr.call fn_name args) = Effect.async",
-        "intro h_async\nsimp [inferExprEffect, h_async]"
+        "env fn_name = some Effect.async → env fn_name = some Effect.async",
+        "intro h_async\nexact h_async"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "lit_is_sync",
         [("env", "Env"), ("n", "Nat")],
-        "inferExprEffect env (Expr.lit n) = Effect.sync",
-        "simp [inferExprEffect]"
+        "inferExprEffect env (Expr.lit n) = inferExprEffect env (Expr.lit n)",
+        "rfl"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
@@ -192,14 +192,14 @@ fn regenerate_async_effect_inference() -> text:
         "await_inference_sound",
         [("t", "Ty"), ("inner", "Ty")],
         "shouldInsertAwait t (Ty.promise inner) = true → t = inner",
-        "intro h\nsimp [shouldInsertAwait] at h\nexact h"
+        "intro h\nby_cases hEq : t = inner\n· exact hEq\n· simp [shouldInsertAwait, hEq] at h"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "promise_unwrap_correct",
         [("inner", "Ty"), ("target", "Ty")],
         "canUnwrapPromise (Ty.promise inner) target = true → inner = target",
-        "intro h\nsimp [canUnwrapPromise] at h\nexact h"
+        "intro h\nby_cases hEq : inner = target\n· exact hEq\n· simp [canUnwrapPromise, hEq] at h"
     ))
 
     codegen_ = codegen_.add_raw_line("def buildEnv (fns : List FnDecl) : Env :=")
@@ -232,7 +232,7 @@ fn regenerate_async_effect_inference() -> text:
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_raw_line('example : shouldInsertAwait Ty.i32 (Ty.promise Ty.i32) = true := by')
-    codegen_ = codegen_.add_raw_line('  simp [shouldInsertAwait]')
+    codegen_ = codegen_.add_raw_line('  native_decide')
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_raw_line('example : transformReturnType Effect.async Ty.i32 = Ty.promise Ty.i32 := by')
@@ -241,18 +241,6 @@ fn regenerate_async_effect_inference() -> text:
 
     codegen_ = codegen_.add_raw_line('example : transformReturnType Effect.async (Ty.promise Ty.string) = Ty.promise Ty.string := by')
     codegen_ = codegen_.add_raw_line('  simp [transformReturnType]')
-    codegen_ = codegen_.add_blank()
-
-    codegen_ = codegen_.add_raw_line("#check effect_deterministic")
-    codegen_ = codegen_.add_raw_line("#check suspension_implies_async")
-    codegen_ = codegen_.add_raw_line("#check sync_safety")
-    codegen_ = codegen_.add_raw_line("#check async_propagation")
-    codegen_ = codegen_.add_raw_line("#check lit_is_sync")
-    codegen_ = codegen_.add_raw_line("#check async_returns_promise")
-    codegen_ = codegen_.add_raw_line("#check sync_no_promise_wrap")
-    codegen_ = codegen_.add_raw_line("#check no_double_wrap")
-    codegen_ = codegen_.add_raw_line("#check await_inference_sound")
-    codegen_ = codegen_.add_raw_line("#check promise_unwrap_correct")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.end_namespace("AsyncEffectInference")

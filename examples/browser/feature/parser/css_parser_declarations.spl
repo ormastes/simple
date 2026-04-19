@@ -1,0 +1,122 @@
+# CSS Parser — Declaration block parsing extension.
+#
+# Extension block for CssParser. Split from css_parser.spl for size management.
+# Implements CSS declaration block parsing (CSS Syntax Level 3 §5.4):
+#   parse_declaration_block, _skip_to_declaration_end, parse_declaration.
+
+use examples.browser.entity.dom.css_types.CSSDeclaration
+use examples.browser.entity.dom.css_types.CSSValue
+use examples.browser.feature.parser.css_tokenizer.CssToken
+use examples.browser.shared.logging
+use examples.browser.feature.parser.css_shorthand.{expand_shorthand, is_shorthand}
+
+impl CssParser:
+
+    # ---------- Declaration block parsing ----------
+
+    me parse_declaration_block() -> [CSSDeclaration]:
+        var declarations = [CSSDeclaration]()
+
+        self.skip_whitespace()
+        match self.current:
+            CssToken.OpenBrace:
+                self.advance()
+            _:
+                self.logger.warn("Expected '{' for declaration block")
+                return declarations
+
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    self.logger.warn("Unterminated declaration block")
+                    break
+                _:
+                    val decl = self.parse_declaration()
+                    if val Some(d) = decl:
+                        # Expand shorthands into longhands
+                        if is_shorthand(d.property):
+                            val expanded = expand_shorthand(d.property, d.value)
+                            for ed in expanded:
+                                var final_d = ed
+                                if d.important:
+                                    final_d = CSSDeclaration(property: ed.property, value: ed.value, important: true)
+                                declarations.push(final_d)
+                        else:
+                            declarations.push(d)
+                    else:
+                        # Error recovery: skip to next semicolon or close brace
+                        self._skip_to_declaration_end()
+
+        declarations
+
+    me _skip_to_declaration_end():
+        while true:
+            match self.current:
+                CssToken.Semicolon:
+                    self.advance()
+                    break
+                CssToken.CloseBrace:
+                    break
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+    me parse_declaration() -> CSSDeclaration?:
+        self.skip_whitespace()
+
+        # Property name
+        var property = ""
+        match self.current:
+            CssToken.Ident(value: name):
+                property = name
+                self.advance()
+            _:
+                return nil
+
+        self.skip_whitespace()
+
+        # Colon
+        match self.current:
+            CssToken.Colon:
+                self.advance()
+            _:
+                self.logger.warn("Expected ':' in declaration")
+                return nil
+
+        self.skip_whitespace()
+
+        # Value
+        val value = self.parse_value()
+
+        # Check for !important
+        var important = false
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Delim(value: d):
+                if d == "!":
+                    self.advance()
+                    self.skip_whitespace()
+                    match self.current:
+                        CssToken.Ident(value: kw):
+                            if kw.to_lower() == "important":
+                                important = true
+                                self.advance()
+                        _:
+                            pass_dn
+            _:
+                pass_dn
+
+        # Consume optional semicolon
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Semicolon:
+                self.advance()
+            _:
+                pass_dn
+
+        CSSDeclaration(property: property, value: value, important: important)

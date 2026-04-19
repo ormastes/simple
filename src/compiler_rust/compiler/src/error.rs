@@ -19,9 +19,9 @@ pub use _codes_file::codes;
 mod _typo_file;
 pub use _typo_file::typo;
 
-#[path = "error_factory.rs"]
-mod _factory_file;
-pub use _factory_file::factory;
+#[path = "error_factory/mod.rs"]
+mod error_factory;
+pub use error_factory::factory;
 
 // ---------------------------------------------------------------------------
 

@@ -1,0 +1,394 @@
+# CSS Parser — Value parsing extension.
+#
+# Extension block for CssParser. Split from css_parser.spl for size management.
+# Implements CSS value parsing (CSS Values Level 4 + CSS Color Level 4):
+#   parse_value, _parse_ident_value, parse_color, _parse_rgb_function,
+#   _consume_number_value, _consume_float_value, _skip_comma,
+#   parse_length, parse_function, _collect_var_name.
+#
+# Note: named "media" per the project split plan; contains value/function parsing.
+
+use std.common.color.types.{Color, from_rgba, from_rgb}
+use examples.browser.entity.dom.css_types.CSSValue
+use examples.browser.feature.parser.css_tokenizer.CssToken
+use examples.browser.shared.logging
+
+impl CssParser:
+
+    # ---------- Value parsing ----------
+
+    me parse_value() -> CSSValue:
+        self.skip_whitespace()
+        match self.current:
+            CssToken.Hash(value: hex, is_id: _):
+                return self.parse_color()
+            CssToken.Number(value: v, is_integer: _):
+                return self.parse_length()
+            CssToken.Dimension(value: v, unit: u):
+                self.advance()
+                return CSSValue.Length(v: v, unit: u)
+            CssToken.Percentage(value: v):
+                self.advance()
+                return CSSValue.Percentage(v: v)
+            CssToken.String(value: v):
+                self.advance()
+                return CSSValue.Keyword(v: v)
+            CssToken.Url(value: v):
+                self.advance()
+                return CSSValue.Url(v: v)
+            CssToken.Function(name: fn_name):
+                return self.parse_function()
+            CssToken.Ident(value: name):
+                return self._parse_ident_value()
+            _:
+                self.advance()
+                return CSSValue.Keyword(v: "unknown")
+
+    me _parse_ident_value() -> CSSValue:
+        var name = ""
+        match self.current:
+            CssToken.Ident(value: n):
+                name = n
+                self.advance()
+            _:
+                return CSSValue.Keyword(v: "unknown")
+
+        val lower = name.to_lower()
+
+        # Global keywords
+        if lower == "inherit":
+            return CSSValue.Inherit
+        if lower == "initial":
+            return CSSValue.Initial
+        if lower == "unset":
+            return CSSValue.Unset
+
+        # Named colors
+        val color = named_color_to_rgb(name)
+        if val Some(c) = color:
+            return c
+
+        # Generic keyword
+        CSSValue.Keyword(v: name)
+
+    me parse_color() -> CSSValue:
+        match self.current:
+            CssToken.Hash(value: hex, is_id: _):
+                self.advance()
+                val parsed = parse_hex_color(hex)
+                if val Some(c) = parsed:
+                    return c
+                self.logger.warn("Invalid hex color: #{hex}")
+                return CSSValue.Keyword(v: "#{hex}")
+            CssToken.Function(name: fn_name):
+                val lower = fn_name.to_lower()
+                if lower == "rgb" or lower == "rgba":
+                    return self._parse_rgb_function()
+                return self.parse_function()
+            CssToken.Ident(value: name):
+                return self._parse_ident_value()
+            _:
+                return self.parse_value()
+
+    me _parse_rgb_function() -> CSSValue:
+        self.advance()  # consume Function token
+        self.skip_whitespace()
+
+        var r = self._consume_number_value()
+        self.skip_whitespace()
+        self._skip_comma()
+        self.skip_whitespace()
+
+        var g = self._consume_number_value()
+        self.skip_whitespace()
+        self._skip_comma()
+        self.skip_whitespace()
+
+        var b = self._consume_number_value()
+        self.skip_whitespace()
+
+        var a = 255
+        # Check for alpha component
+        match self.current:
+            CssToken.Comma:
+                self.advance()
+                self.skip_whitespace()
+                val alpha_f = self._consume_float_value()
+                # Alpha is 0.0-1.0, convert to 0-255
+                a = (alpha_f * 255.0).to_i64()
+                if a < 0:
+                    a = 0
+                if a > 255:
+                    a = 255
+            _:
+                pass_dn
+
+        self.skip_whitespace()
+        # Consume closing paren
+        match self.current:
+            CssToken.CloseParen:
+                self.advance()
+            _:
+                self.logger.warn("Expected ')' after rgb/rgba")
+
+        CSSValue.Color(color: from_rgba(r.to_i64(), g.to_i64(), b.to_i64(), a))
+
+    me _consume_number_value() -> f64:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                return v
+            CssToken.Percentage(value: v):
+                self.advance()
+                # Percentage in rgb: 100% = 255
+                return (v / 100.0) * 255.0
+            _:
+                return 0.0
+
+    me _consume_float_value() -> f64:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                return v
+            CssToken.Percentage(value: v):
+                self.advance()
+                return v / 100.0
+            _:
+                return 0.0
+
+    me _skip_comma():
+        match self.current:
+            CssToken.Comma:
+                self.advance()
+            _:
+                pass_dn
+
+    me parse_length() -> CSSValue:
+        match self.current:
+            CssToken.Number(value: v, is_integer: _):
+                self.advance()
+                # Check if followed by a unit or '%'
+                match self.current:
+                    CssToken.Ident(value: unit):
+                        self.advance()
+                        return CSSValue.Length(v: v, unit: unit)
+                    CssToken.Delim(value: d):
+                        if d == "%":
+                            self.advance()
+                            return CSSValue.Percentage(v: v)
+                        return CSSValue.Number(v: v)
+                    _:
+                        return CSSValue.Number(v: v)
+            CssToken.Dimension(value: v, unit: u):
+                self.advance()
+                return CSSValue.Length(v: v, unit: u)
+            CssToken.Percentage(value: v):
+                self.advance()
+                return CSSValue.Percentage(v: v)
+            _:
+                self.advance()
+                return CSSValue.Number(v: 0.0)
+
+    me parse_function() -> CSSValue:
+        var fn_name = ""
+        match self.current:
+            CssToken.Function(name: n):
+                fn_name = n
+                self.advance()
+            _:
+                return CSSValue.Keyword(v: "unknown")
+
+        val lower = fn_name.to_lower()
+
+        # Handle rgb/rgba specially
+        if lower == "rgb" or lower == "rgba":
+            # We already advanced past the function token, so parse args directly
+            self.skip_whitespace()
+            var r = self._consume_number_value()
+            self.skip_whitespace()
+            self._skip_comma()
+            self.skip_whitespace()
+            var g = self._consume_number_value()
+            self.skip_whitespace()
+            self._skip_comma()
+            self.skip_whitespace()
+            var b = self._consume_number_value()
+            self.skip_whitespace()
+            var a = 255
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    val alpha_f = self._consume_float_value()
+                    a = (alpha_f * 255.0).to_i64()
+                _:
+                    pass_dn
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Color(color: from_rgba(r.to_i64(), g.to_i64(), b.to_i64(), a))
+
+        # Handle url() function
+        if lower == "url":
+            var url_val = ""
+            self.skip_whitespace()
+            match self.current:
+                CssToken.String(value: v):
+                    url_val = v
+                    self.advance()
+                CssToken.Ident(value: v):
+                    url_val = v
+                    self.advance()
+                _:
+                    self.logger.warn("CSS url(): unrecognized argument token, skipping")
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    self.logger.warn("CSS url(): expected closing paren, skipping")
+            return CSSValue.Url(v: url_val)
+
+        # Handle calc(), min(), max(), clamp()
+        if lower == "calc" or lower == "min" or lower == "max" or lower == "clamp":
+            var args = [CSSValue]()
+            self.skip_whitespace()
+            while true:
+                match self.current:
+                    CssToken.CloseParen:
+                        self.advance()
+                        break
+                    CssToken.Eof:
+                        break
+                    CssToken.Comma:
+                        self.advance()
+                        self.skip_whitespace()
+                    _:
+                        val arg = self.parse_value()
+                        args.push(arg)
+                        self.skip_whitespace()
+            return CSSValue.Function(name: lower, args: args)
+
+        # Handle var()
+        if lower == "var":
+            self.skip_whitespace()
+            var var_name = ""
+            match self.current:
+                CssToken.Ident(value: v):
+                    var_name = v
+                    self.advance()
+                _:
+                    # Try to collect custom property name like --foo
+                    var_name = self._collect_var_name()
+            self.skip_whitespace()
+            var fallback: CSSValue? = nil
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    fallback = self.parse_value()
+                    self.skip_whitespace()
+                _:
+                    pass_dn
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Var(name: var_name, fallback: fallback)
+
+        # Handle env()
+        if lower == "env":
+            self.skip_whitespace()
+            var env_name = ""
+            match self.current:
+                CssToken.Ident(value: v):
+                    env_name = v
+                    self.advance()
+                _:
+                    pass_dn
+            self.skip_whitespace()
+            var fallback: CSSValue? = nil
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    fallback = self.parse_value()
+                    self.skip_whitespace()
+                _:
+                    pass_dn
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            # env() resolves to the fallback or zero (safe-area-inset-* etc.)
+            if val Some(fb) = fallback:
+                return fb
+            return CSSValue.Length(v: 0.0, unit: "px")
+
+        # Handle attr()
+        if lower == "attr":
+            self.skip_whitespace()
+            var attr_name = ""
+            match self.current:
+                CssToken.Ident(value: v):
+                    attr_name = v
+                    self.advance()
+                _:
+                    pass_dn
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Keyword(v: "attr({attr_name})")
+
+        # Generic function: skip arguments, return keyword
+        var depth = 1
+        while depth > 0:
+            match self.current:
+                CssToken.OpenParen:
+                    depth = depth + 1
+                    self.advance()
+                CssToken.CloseParen:
+                    depth = depth - 1
+                    self.advance()
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+        CSSValue.Keyword(v: "{fn_name}(...)")
+
+    me _collect_var_name() -> text:
+        # Collect a CSS custom property name (e.g. --my-color).
+        # Custom property names start with '--' which may be tokenized as two Delim('-').
+        var name = ""
+        # Consume up to close paren or comma
+        while true:
+            match self.current:
+                CssToken.CloseParen:
+                    break
+                CssToken.Comma:
+                    break
+                CssToken.Eof:
+                    break
+                CssToken.Whitespace:
+                    break
+                CssToken.Ident(value: v):
+                    name = "{name}{v}"
+                    self.advance()
+                CssToken.Delim(value: d):
+                    name = "{name}{d}"
+                    self.advance()
+                CssToken.Number(value: v, is_integer: _):
+                    name = "{name}{v}"
+                    self.advance()
+                _:
+                    break
+        name
