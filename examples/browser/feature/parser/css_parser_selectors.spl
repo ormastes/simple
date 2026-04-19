@@ -1,0 +1,280 @@
+# CSS Parser — Selector parsing extension.
+#
+# Extension block for CssParser. Split from css_parser.spl for size management.
+# Implements CSS Selectors Level 4 parsing:
+#   parse_selector_list, parse_selector, _parse_compound_selector,
+#   parse_simple_selector, _parse_attribute_selector, _skip_until_bracket,
+#   _parse_pseudo, parse_combinator, _is_selector_start.
+
+use examples.browser.entity.dom.css_types.Selector
+use examples.browser.entity.dom.css_types.SelectorPart
+use examples.browser.feature.parser.css_tokenizer.CssToken
+use examples.browser.shared.logging
+
+impl CssParser:
+
+    # ---------- Selector parsing ----------
+
+    me parse_selector_list() -> [Selector]:
+        var selectors = [Selector]()
+        self.skip_whitespace()
+        val first = self.parse_selector()
+        if first.parts.len() > 0:
+            selectors.push(first)
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    val next_sel = self.parse_selector()
+                    if next_sel.parts.len() > 0:
+                        selectors.push(next_sel)
+                _:
+                    break
+        selectors
+
+    me parse_selector() -> Selector:
+        var parts = [SelectorPart]()
+        self.skip_whitespace()
+
+        # Parse first compound selector
+        val initial = self._parse_compound_selector()
+        for p in initial:
+            parts.push(p)
+
+        # Parse combinator + compound sequences
+        while true:
+            val comb = self.parse_combinator()
+            if comb == "":
+                break
+            parts.push(SelectorPart.Combinator(kind: comb))
+            val compound = self._parse_compound_selector()
+            if compound.len() == 0:
+                break
+            for p in compound:
+                parts.push(p)
+
+        Selector.create(parts)
+
+    me _parse_compound_selector() -> [SelectorPart]:
+        var parts = [SelectorPart]()
+        while true:
+            val part = self.parse_simple_selector()
+            if val Some(p) = part:
+                parts.push(p)
+            else:
+                break
+        parts
+
+    me parse_simple_selector() -> SelectorPart?:
+        match self.current:
+            CssToken.Ident(value: name):
+                self.advance()
+                return SelectorPart.Type(name: name)
+            CssToken.Delim(value: v):
+                if v == "*":
+                    self.advance()
+                    return SelectorPart.Universal
+                if v == ".":
+                    self.advance()
+                    # Expect class name
+                    match self.current:
+                        CssToken.Ident(value: class_name):
+                            self.advance()
+                            return SelectorPart.Class(name: class_name)
+                        _:
+                            self.logger.warn("Expected class name after '.'")
+                            return nil
+                return nil
+            CssToken.Hash(value: id_name, is_id: _):
+                self.advance()
+                return SelectorPart.Id(name: id_name)
+            CssToken.OpenBracket:
+                return self._parse_attribute_selector()
+            CssToken.Colon:
+                return self._parse_pseudo()
+            _:
+                return nil
+
+    me _parse_attribute_selector() -> SelectorPart?:
+        self.advance()  # consume '['
+        self.skip_whitespace()
+        var attr_name = ""
+        match self.current:
+            CssToken.Ident(value: name):
+                attr_name = name
+                self.advance()
+            _:
+                self.logger.warn("Expected attribute name in selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+
+        # Check for close bracket (presence selector)
+        match self.current:
+            CssToken.CloseBracket:
+                self.advance()
+                return SelectorPart.Attribute(name: attr_name, op: "", value: "")
+            _:
+                pass_dn
+
+        # Parse operator
+        var op = ""
+        match self.current:
+            CssToken.Delim(value: d):
+                if d == "=":
+                    op = "="
+                    self.advance()
+                else if d == "~" or d == "|" or d == "^" or d == "$" or d == "*":
+                    op = d
+                    self.advance()
+                    # Expect '=' after
+                    match self.current:
+                        CssToken.Delim(value: eq):
+                            if eq == "=":
+                                op = op + "="
+                                self.advance()
+                        _:
+                            pass_dn
+                else:
+                    self.logger.warn("Unexpected delimiter in attribute selector")
+                    self._skip_until_bracket()
+                    return nil
+            _:
+                self.logger.warn("Expected operator in attribute selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+
+        # Parse value
+        var attr_value = ""
+        match self.current:
+            CssToken.Ident(value: v):
+                attr_value = v
+                self.advance()
+            CssToken.String(value: v):
+                attr_value = v
+                self.advance()
+            _:
+                self.logger.warn("Expected value in attribute selector")
+                self._skip_until_bracket()
+                return nil
+
+        self.skip_whitespace()
+        # Consume closing bracket
+        match self.current:
+            CssToken.CloseBracket:
+                self.advance()
+            _:
+                self.logger.warn("Expected ']' in attribute selector")
+
+        SelectorPart.Attribute(name: attr_name, op: op, value: attr_value)
+
+    me _skip_until_bracket():
+        while true:
+            match self.current:
+                CssToken.CloseBracket:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    break
+                _:
+                    self.advance()
+
+    me _parse_pseudo() -> SelectorPart?:
+        self.advance()  # consume first ':'
+
+        # Check for pseudo-element (::)
+        match self.current:
+            CssToken.Colon:
+                self.advance()
+                # Pseudo-element
+                match self.current:
+                    CssToken.Ident(value: name):
+                        self.advance()
+                        return SelectorPart.PseudoElement(name: name)
+                    _:
+                        self.logger.warn("Expected pseudo-element name")
+                        return nil
+            _:
+                pass_dn
+
+        # Pseudo-class
+        match self.current:
+            CssToken.Ident(value: name):
+                self.advance()
+                return SelectorPart.PseudoClass(name: name)
+            CssToken.Function(name: fn_name):
+                self.advance()
+                # Consume function arguments (simplified: skip until closing paren)
+                var depth = 1
+                while depth > 0:
+                    match self.current:
+                        CssToken.OpenParen:
+                            depth = depth + 1
+                            self.advance()
+                        CssToken.CloseParen:
+                            depth = depth - 1
+                            self.advance()
+                        CssToken.Eof:
+                            break
+                        _:
+                            self.advance()
+                return SelectorPart.PseudoClass(name: fn_name)
+            _:
+                self.logger.warn("Expected pseudo-class name")
+                return nil
+
+    me parse_combinator() -> text:
+        # Check for whitespace (descendant combinator)
+        var had_whitespace = false
+        match self.current:
+            CssToken.Whitespace:
+                had_whitespace = true
+                self.skip_whitespace()
+            _:
+                pass_dn
+
+        # Check for explicit combinators
+        match self.current:
+            CssToken.Delim(value: v):
+                if v == ">":
+                    self.advance()
+                    self.skip_whitespace()
+                    return ">"
+                if v == "+":
+                    self.advance()
+                    self.skip_whitespace()
+                    return "+"
+                if v == "~":
+                    self.advance()
+                    self.skip_whitespace()
+                    return "~"
+                pass_dn
+            _:
+                pass_dn
+
+        # Whitespace was a descendant combinator if followed by selector start
+        if had_whitespace:
+            val is_sel_start = self._is_selector_start()
+            if is_sel_start:
+                return " "
+        ""
+
+    fn _is_selector_start() -> bool:
+        match self.current:
+            CssToken.Ident(value: _):
+                return true
+            CssToken.Hash(value: _, is_id: _):
+                return true
+            CssToken.OpenBracket:
+                return true
+            CssToken.Colon:
+                return true
+            CssToken.Delim(value: v):
+                return v == "." or v == "*"
+            _:
+                return false
