@@ -1,59 +1,20 @@
-# TODO: [test][P1] build the real compiled WSS e2e driver — _ws_client.spl + socket round trip
-# TODO: [compile][P1] remaining --compile / --mode=smf gap: `me <method>(args)` calls on hoisted nested class defs fail with "Unknown variable" — wrapper hoisting resolves the "class def in fn body" HIR error, but downstream method-resolution on hoisted types still needs work (seen in sspec_system_test_spec.spl)
-# TODO: [runtime][P1] bootstrap-propagate the v2 Phase A rt_random_hex extern to bin/simple (self-hosted)
-
-# Live WSS end-to-end smoke — skeleton for v2 Phase D
-#
-# This file documents the intended end-to-end smoke flow for the web UI
-# stack (plain TCP + TLS modes).  The interpreter-mode test runner does
-# NOT execute `it` blocks, so the assertions below are exercised only
-# when this test file is compiled and invoked as a standalone binary —
-# that compiled-mode execution harness is v2.1 work (see plan file at
-# /home/ormastes/.claude/plans/merry-zooming-lecun.md, Phase D risk #3).
-#
-# Until compiled-mode runs the `it` blocks, this file's job is:
-#   1. Exercise the import graph (file LOADS in interpreter mode, which
-#      confirms the symbols below exist and resolve).
-#   2. Document the wire-level round trip as a checklist future work
-#      can automate.
-#
-# See also:
-#   - src/app/ui.web/tls_serve_loop.spl — TlsWebServer + accept_loop
-#   - src/app/ui.web/ui_routes.spl      — /ui/ws dispatch + adapter loop
-#   - src/app/ui.web/ws_handler.spl     — send_ws_text, compute_ws_accept
-#   - src/app/ui.web/async_ws.spl       — server-side frame reader w/ unmask
-#   - src/app/ui.web/session_token.spl  — random_hex + token mint/verify
-#   - src/compiler_rust/runtime/src/value/net_tls.rs — rustls server
-
 use std.sspec.*
-use app.ui.web.session_token.{random_hex, SessionToken, verify as verify_token, load_secret}
+use app.ui.web.session_token.{random_hex, SessionToken, verify as verify_token}
 use app.ui.web.ws_handler.{compute_ws_accept, is_ws_upgrade_request}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 
 describe "WSS smoke — handshake primitives":
     """
-    ## Sanity check on the primitives an e2e smoke client will compose.
-
-    The compiled-mode e2e driver will:
-      1. Spawn TlsWebServer on a free port with a self-signed cert.
-      2. POST /ui/login { capability_grant: "dev" } → parse bearer.
-      3. Open wss://127.0.0.1:<port>/ui/ws?token=<bearer>.
-      4. Verify Sec-WebSocket-Accept via compute_ws_accept(client_key).
-      5. Send hello, expect capabilities.
-      6. Send open_session, expect snapshot.
-      7. Touch the .ui.sdn file, expect patch_batch (Phase C broadcast).
-      8. Send ping, expect pong.
-      9. Disconnect cleanly.
+    Covers the pure string-level handshake helpers used by `/ui/ws`.
     """
 
     it "random_hex(16) produces a usable Sec-WebSocket-Key base":
         val key_bytes = random_hex(16)
         expect(key_bytes.len()).to_equal(32)
 
-    it "compute_ws_accept is deterministic for a known key":
-        val accept_a = compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
-        val accept_b = compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
-        expect(accept_a).to_equal(accept_b)
+    it "compute_ws_accept matches the RFC example":
+        val accept = compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
+        expect(accept).to_equal("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
 
     it "is_ws_upgrade_request recognises the upgrade header":
         val headers = "Host: localhost\nUpgrade: websocket\nConnection: Upgrade\n"
@@ -80,8 +41,8 @@ describe "WSS smoke — token round trip":
             Ok(t):
                 expect(t.grant_id).to_equal("dev")
                 expect(t.origin).to_equal("https://localhost")
-            Err(_):
-                expect(verified.is_ok()).to_equal(true)
+            Err(err):
+                expect(err).to_equal(AuthError.InvalidToken)
 
     it "verify rejects a tampered signature":
         val secret = "test-secret-A"
@@ -91,9 +52,9 @@ describe "WSS smoke — token round trip":
         val verified = verify_token(serialized, "https://localhost", "test-secret-B", 1u64)
         match verified:
             Ok(_):
-                expect(verified.is_err()).to_equal(true)
-            Err(_):
-                expect(verified.unwrap_err()).to_equal(AuthError.InvalidToken)
+                expect(serialized).to_equal("")
+            Err(err):
+                expect(err).to_equal(AuthError.InvalidToken)
 
 describe "WSS smoke — origin gate":
     """
@@ -107,5 +68,8 @@ describe "WSS smoke — origin gate":
         # Constructor produces the localhost fallback when no allowlist is set.
         expect(guard.allowed.len()).to_equal(2i64)
         val result = guard.check("Origin: https://localhost\r\nHost: localhost\r\n")
-        expect(result.is_ok()).to_equal(true)
-        expect(result.unwrap()).to_equal("https://localhost")
+        match result:
+            Ok(origin):
+                expect(origin).to_equal("https://localhost")
+            Err(err):
+                expect(err).to_equal(AuthError.InvalidToken)

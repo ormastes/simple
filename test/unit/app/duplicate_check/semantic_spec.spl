@@ -5,6 +5,7 @@ use app.duplicate_check.ollama_client.{EmbeddingResult, parse_embedding_response
 use app.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, set_cached, csv_to_floats, floats_to_csv}
 use app.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, text_similarity}
 use app.duplicate_check.semantic_formatter.{format_match_line, severity_label}
+use app.io.mod.{file_write}
 
 # ============================================================================
 # Doc Extractor Tests
@@ -36,6 +37,40 @@ describe "doc_extractor":
             has_doc: false
         )
         expect(entry.has_doc).to_equal(false)
+
+    it "extracts docs and signatures for supported item kinds from a file":
+        val path = "/tmp/doc_extractor_supported_items.spl"
+        val content = "# Adds one\n" +
+            "fn add_one(value: i64) -> i64:\n" +
+            "    value + 1\n\n" +
+            "# Shared data\n" +
+            "struct SharedState:\n" +
+            "    count: i64\n\n" +
+            "# Handles work\n" +
+            "class Worker:\n" +
+            "    me run():\n" +
+            "        nil\n\n" +
+            "# Outcome values\n" +
+            "enum Outcome:\n" +
+            "    Ok\n" +
+            "    Err\n"
+        file_write(path, content)
+
+        val entries = extract_docs_from_file(path)
+
+        expect(entries.len()).to_equal(4)
+        expect(entries[0].item_name).to_equal("add_one")
+        expect(entries[0].signature).to_equal("fn add_one(value: i64) -> i64")
+        expect(entries[0].doc_comment).to_equal("Adds one")
+        expect(entries[1].item_kind).to_equal("struct")
+        expect(entries[1].item_name).to_equal("SharedState")
+        expect(entries[1].has_doc).to_equal(true)
+        expect(entries[2].item_kind).to_equal("class")
+        expect(entries[2].item_name).to_equal("Worker")
+        expect(entries[2].doc_comment).to_equal("Handles work")
+        expect(entries[3].item_kind).to_equal("enum")
+        expect(entries[3].item_name).to_equal("Outcome")
+        expect(entries[3].doc_comment).to_equal("Outcome values")
 
     it "processes doc text - strips hash prefix":
         val result = process_doc_text("# This is a comment")
