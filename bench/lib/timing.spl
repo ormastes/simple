@@ -1,23 +1,15 @@
 # bench/lib/timing.spl — Benchmark timing primitives for Phase 9 storage components.
 #
-# LIMITATION: Simple does not yet expose a nanosecond-precision monotonic clock.
-# rt_time_now_unix() returns seconds. bench_now_ns() uses a global loop-counter
-# proxy: each call increments g_bench_tick by 1. Units are TICKS, not real ns.
-# All percentile math is correct; only the unit label is inaccurate until
-# FR-BENCH-CLOCK-001 lands a real CLOCK_MONOTONIC binding.
-#
-# FR-BENCH-CLOCK-001: expose extern fn rt_time_now_ns() -> i64 backed by
-#   clock_gettime(CLOCK_MONOTONIC, &ts) → ts.tv_sec*1_000_000_000 + ts.tv_nsec.
+# FR-BENCH-CLOCK-001 implemented: bench_now_ns() now calls rt_time_now_ns()
+# backed by clock_gettime(CLOCK_MONOTONIC) in src/runtime/runtime_native.c.
+# Units are real nanoseconds.
 
-# ── Global tick counter proxy ─────────────────────────────────────────────────
+# ── Real nanosecond clock ────────────────────────────────────────────────────
 
-var g_bench_tick: i64 = 0
+extern fn rt_time_now_ns() -> i64
 
 fn bench_now_ns() -> i64:
-    # pass_todo: FR-BENCH-CLOCK-001 — replace with real CLOCK_MONOTONIC binding.
-    # Until then, returns a monotone counter in units of "ticks" (not real ns).
-    g_bench_tick = g_bench_tick + 1
-    g_bench_tick
+    rt_time_now_ns()
 
 # ── Result type ───────────────────────────────────────────────────────────────
 
@@ -78,8 +70,8 @@ fn bench_measure(label: text, iters: i64, body: fn() -> ()) -> BenchResult:
     val p50: i64 = _percentile(sorted, 50, 100)
     val p99: i64 = _percentile(sorted, 99, 100)
     val p99_9: i64 = _percentile(sorted, 999, 1000)
-    # throughput: iters per total_tick (meaningless without real clock; shown as ratio)
-    val tput: i64 = if total > 0: (iters * 1000) / total else: 0
+    # throughput: kilo-ops per second (iters * 1_000_000 / total_ns)
+    val tput: i64 = if total > 0: (iters * 1000000) / total else: 0
     BenchResult(
         label: label,
         iters: iters,
@@ -96,10 +88,9 @@ fn bench_measure(label: text, iters: i64, body: fn() -> ()) -> BenchResult:
 
 fn bench_print(r: BenchResult):
     print "bench: {r.label}"
-    print "  iters={r.iters}  total_ticks={r.total_ns}"
+    print "  iters={r.iters}  total_ns={r.total_ns}"
     print "  min={r.min_ns}  p50={r.p50_ns}  p99={r.p99_ns}  p99.9={r.p99_9_ns}  max={r.max_ns}"
-    print "  throughput(ops/ktick)={r.throughput_ops_per_s}"
-    print "  [NOTE: ticks are loop-counter proxy, not real ns — FR-BENCH-CLOCK-001]"
+    print "  throughput(kops/s)={r.throughput_ops_per_s}"
 
 # ── CSV row ───────────────────────────────────────────────────────────────────
 
@@ -107,4 +98,4 @@ fn bench_csv(r: BenchResult) -> text:
     "{r.label},{r.iters},{r.p50_ns},{r.p99_ns},{r.p99_9_ns},{r.min_ns},{r.max_ns},{r.total_ns},{r.throughput_ops_per_s}"
 
 fn bench_csv_header() -> text:
-    "label,iters,p50_ticks,p99_ticks,p99_9_ticks,min_ticks,max_ticks,total_ticks,ops_per_ktick"
+    "label,iters,p50_ns,p99_ns,p99_9_ns,min_ns,max_ns,total_ns,kops_per_s"

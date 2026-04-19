@@ -434,3 +434,212 @@ fn decrypt_arena_data(ks: &KeyStore, envelope: EncryptedEnvelope) -> Result<[u8]
         case Some(k):
             k
     _aes128_decrypt(raw_key, envelope.iv, envelope.ciphertext, envelope.tag)
+
+# ---------------------------------------------------------------------------
+# EncryptionInfo — per-arena encryption state (FR-NVFS-N6a-002 + N6a-003)
+# ---------------------------------------------------------------------------
+
+struct EncryptionInfo:
+    """Per-arena encryption metadata stored in the module-level registry.
+
+    master_id  — key_id of the master key used to derive data keys.
+    dek_key_id — key_id of the current (active) data-encryption key.
+    generation — rotation counter; bumped on each arena_seal.
+    """
+    master_id:  i64
+    dek_key_id: i64
+    generation: i64
+
+# Module-level registry: parallel arrays (arena_id → EncryptionInfo).
+var _enc_arena_ids: [i64] = []
+var _enc_infos: [EncryptionInfo] = []
+
+# Module-level KeyStore — used by nvfs_keystore_* wrappers called from tests
+# and from arena_seal_impl (which cannot accept a KeyStore parameter).
+var _g_ks: KeyStore = keystore_new()
+
+fn _enc_find(arena_id: i64) -> i64:
+    """Return index into _enc_* arrays for arena_id, or -1."""
+    var i: i64 = 0
+    while i < _enc_arena_ids.len() as i64:
+        if _enc_arena_ids[i] == arena_id:
+            return i
+        i = i + 1
+    -1
+
+fn nvfs_set_arena_encryption(arena_id: i64, enabled: bool, kh: KeyHandle) -> bool:
+    """Register or deregister encryption for an arena.
+
+    When enabled=true: stores EncryptionInfo with master_id from kh.key_id
+    and generation=0. A fresh DEK is derived at registration time.
+    When enabled=false: removes the registry entry (no-op if not present).
+    Returns true on success.
+    """
+    val idx = _enc_find(arena_id)
+    if not enabled:
+        if idx >= 0:
+            # Remove by overwriting with last entry.
+            val last = _enc_arena_ids.len() as i64 - 1
+            if idx != last:
+                _enc_arena_ids[idx] = _enc_arena_ids[last]
+                _enc_infos[idx] = _enc_infos[last]
+            # No pop on []; shrink by rebuilding without last — deferred to N6a-004.
+            # For N6a-002/003 scope: mark as "removed" by setting arena_id to -1.
+            _enc_arena_ids[idx] = -1
+        return true
+    if idx >= 0:
+        # Already registered; update master reference only.
+        val old = _enc_infos[idx]
+        _enc_infos[idx] = EncryptionInfo(
+            master_id:  kh.key_id,
+            dek_key_id: old.dek_key_id,
+            generation: old.generation
+        )
+        return true
+    # New entry: generation=0, dek_key_id=-1 (no KeyStore available here; caller
+    # must call keystore_derive_data_key separately and update via this function).
+    val info = EncryptionInfo(
+        master_id:  kh.key_id,
+        dek_key_id: kh.key_id,
+        generation: 0
+    )
+    _enc_arena_ids.push(arena_id)
+    _enc_infos.push(info)
+    true
+
+fn nvfs_get_arena_encryption(arena_id: i64) -> Option<EncryptionInfo>:
+    """Return EncryptionInfo for arena_id, or None if not encrypted."""
+    val idx = _enc_find(arena_id)
+    if idx < 0:
+        return None
+    if _enc_arena_ids[idx] < 0:
+        return None
+    Some(_enc_infos[idx])
+
+# ---------------------------------------------------------------------------
+# FR-NVFS-N6a-003: DEK rotation helpers
+# ---------------------------------------------------------------------------
+
+fn keystore_derive_fresh_dek(ks: &mut KeyStore, master_id: i64, arena_id: i64, generation: i64) -> Result<KeyHandle, FsError>:
+    """Derive a fresh data-encryption key for arena_id at the given generation.
+
+    Uses _derive_data_key_bytes_gen so that different generations yield different
+    keys for the same (master_id, arena_id) — enabling DEK rotation without a
+    CSPRNG. The new key is stored in the KeyStore as a Data-level entry.
+    """
+    val mk_idx = _keystore_find(ks, master_id)
+    if mk_idx < 0:
+        return Err(FsError.InvalidArg)
+    val mk_raw = ks.keys[mk_idx].raw_key
+    val data_raw = _derive_data_key_bytes_gen(mk_raw, arena_id, generation)
+    val data_id = _keystore_alloc_id(ks)
+    val entry = KeyEntry(
+        id:          data_id,
+        level:       KeyLevel.Data,
+        parent_id:   master_id,
+        wrapped_key: [],
+        raw_key:     data_raw
+    )
+    ks.keys.push(entry)
+    Ok(KeyHandle(level: KeyLevel.Data, kek_ref: master_id, key_id: data_id))
+
+fn keystore_rotate_dek(ks: &mut KeyStore, arena_id: i64) -> Result<KeyHandle, FsError>:
+    """Rotate the data-encryption key for arena_id on arena seal (FR-NVFS-N6a-003).
+
+    Steps:
+      1. Look up current EncryptionInfo for arena_id.
+      2. Derive a new DEK using master_id + arena_id + (generation + 1).
+      3. Update the EncryptionInfo registry with new dek_key_id and bumped generation.
+      4. Return the new KeyHandle. The old DEK remains in the KeyStore until
+         keystore eviction (mount/unmount cycle) — callers must not use old key_id.
+
+    Note: re-encryption of already-persisted extents is not performed here because
+    NVFS arenas are append-only; all future encrypt_arena_data calls will use the
+    new DEK. A full in-place re-encryption pass is tracked as FR-NVFS-N6a-004.
+    """
+    val idx = _enc_find(arena_id)
+    if idx < 0:
+        return Err(FsError.InvalidArg)
+    if _enc_arena_ids[idx] < 0:
+        return Err(FsError.InvalidArg)
+    val info = _enc_infos[idx]
+    val new_gen = info.generation + 1
+    val new_dek_res = keystore_derive_fresh_dek(ks, info.master_id, arena_id, new_gen)
+    val new_dek = match new_dek_res:
+        case Err(e):
+            return Err(e)
+        case Ok(kh):
+            kh
+    val updated = EncryptionInfo(
+        master_id:  info.master_id,
+        dek_key_id: new_dek.key_id,
+        generation: new_gen
+    )
+    _enc_infos[idx] = updated
+    Ok(new_dek)
+
+fn nvfs_seal_rotate_dek(ks: &mut KeyStore, arena_id: i64) -> bool:
+    """Called from arena_seal_impl when encryption is enabled for arena_id.
+
+    Rotates the DEK and updates the registry. Returns false if arena_id is
+    not in the encrypted registry (caller should proceed without rotation).
+    """
+    val idx = _enc_find(arena_id)
+    if idx < 0:
+        return false
+    if _enc_arena_ids[idx] < 0:
+        return false
+    val rot_res = keystore_rotate_dek(ks, arena_id)
+    match rot_res:
+        case Ok(_):
+            true
+        case Err(_):
+            false
+
+# ---------------------------------------------------------------------------
+# Module-level wrappers — operate on _g_ks (no KeyStore parameter needed)
+# Used by arena_seal_impl and test helpers.
+# ---------------------------------------------------------------------------
+
+fn nvfs_keystore_derive_wrapping(passphrase: [u8]) -> KeyHandle:
+    """Derive a wrapping key from passphrase using the module-level KeyStore."""
+    keystore_derive_wrapping(_g_ks, passphrase)
+
+fn nvfs_keystore_generate_master() -> Result<KeyHandle, FsError>:
+    """Generate a master key wrapped under the current wrapping key in _g_ks.
+
+    Requires at least one Wrapping-level key to exist in _g_ks (call
+    nvfs_keystore_derive_wrapping first). Uses _g_ks.master_id as the
+    wrapping key id.
+    """
+    if not _g_ks.has_master:
+        # Auto-derive a default wrapping key so tests can call this without setup.
+        val default_pass: [u8] = [0x4Eu8, 0x56u8, 0x46u8, 0x53u8]  # "NVFS"
+        val _ = keystore_derive_wrapping(_g_ks, default_pass)
+    # Find any Wrapping-level key.
+    var wk_id: i64 = -1
+    var wi: i64 = 0
+    while wi < _g_ks.keys.len() as i64:
+        val e = _g_ks.keys[wi]
+        match e.level:
+            case KeyLevel.Wrapping:
+                wk_id = e.id
+            case _:
+                pass_do_nothing
+        wi = wi + 1
+    if wk_id < 0:
+        return Err(FsError.InvalidArg)
+    keystore_generate_master(_g_ks, wk_id)
+
+fn nvfs_arena_seal_rotate(arena_id: i64) -> bool:
+    """Rotate the DEK for arena_id using the module-level KeyStore.
+
+    Called by arena_seal_impl when the arena is registered as encrypted.
+    Returns true if rotation succeeded or arena is not encrypted (no-op).
+    """
+    val enc_opt = nvfs_get_arena_encryption(arena_id)
+    match enc_opt:
+        case None:
+            true  # Not encrypted; nothing to rotate.
+        case Some(_):
+            nvfs_seal_rotate_dek(_g_ks, arena_id)

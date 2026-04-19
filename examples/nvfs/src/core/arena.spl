@@ -9,6 +9,11 @@
 #   -2  Sealed         — append on sealed arena
 #   -3  Discarded      — access on discarded arena
 #   -4  OutOfBounds    — clone_range src range out of bounds
+#
+# FR-NVFS-N6a-003: arena_seal_impl now calls nvfs_arena_seal_rotate to rotate
+#   the DEK for encrypted arenas on seal. Non-encrypted arenas are unaffected.
+
+use examples.nvfs.src.core.encryption.{nvfs_arena_seal_rotate}
 
 # ---------------------------------------------------------------------------
 # Arena metadata record
@@ -134,7 +139,12 @@ fn arena_readv_impl(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
     result
 
 fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
-    """Seal the arena at `generation`; idempotent. Returns false if unknown."""
+    """Seal the arena at `generation`; idempotent. Returns false if unknown.
+
+    FR-NVFS-N6a-003: if the arena is registered as encrypted, rotates its DEK
+    via nvfs_arena_seal_rotate before marking it sealed. Non-encrypted arenas
+    are unaffected. Rotation failure is non-fatal (returns true regardless).
+    """
     val idx = _find_index(arena_id)
     if idx < 0:
         return false
@@ -144,6 +154,9 @@ fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
     # Idempotent
     if meta.sealed:
         return true
+
+    # Rotate DEK if this arena is encrypted (no-op for non-encrypted arenas).
+    val _ = nvfs_arena_seal_rotate(arena_id)
 
     val updated = ArenaMeta(
         arena_id: meta.arena_id,

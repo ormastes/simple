@@ -1874,4 +1874,25 @@ Unit tests: `test/unit/os/vfs_cursor_test.spl` (6 tests — cursor set/get/overw
 - **Byte-writeback:** Uses `arena_mutate_for_test` byte-by-byte (the only in-scope byte-writer reachable from `scrub.spl` without touching out-of-scope files). A proper `arena_write_range` API is a follow-up.
 - **META_DURABLE fallback:** Deferred — superblock/checkpoint-ring replicas are not reachable from `scrub.spl` without importing out-of-scope driver modules. Tracked as FR-NVFS-N4b-001.
 - **RepairResult:** Simple struct (repaired: bool, source_arena: i64) rather than enum with payload — Simple enums are C-style (no payload variants in user-defined enums).
+
+#### 9-n4b-scheduler
+
+**Done 2026-04-18.** Implemented FR-NVFS-N4b-001: proactive scrub scheduler with rate limiting + META_DURABLE replica fallback.
+
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `examples/nvfs/src/core/scrub.spl` | Added `ScrubScheduler` struct; `scrub_scheduler_new` constructor; `scrub_scheduler_tick` (rate-limited, early-return on interval guard); `_is_metadata_arena` heuristic; `scrub_repair_meta_durable` (superblock replica fallback for arena_id ≤ 0); `_scrub_repair_with_meta_durable` (chains peer-scan → replica fallback); `scrub_all` updated to call `_scrub_repair_with_meta_durable`; added `superblock_replica_raw` import. |
+| `examples/nvfs/test/unit/scrub_test.spl` | Added imports for `superblock_write`, `Superblock`, scheduler fns; `_default_pmap_entry` helper; Test 10 (tick-too-early → checked=0, last_run_ns unchanged); Test 11 (tick-after-interval → last_run_ns advanced, checked≥1); Test 12 (metadata-block repair from valid replica → repaired=true). |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | FR-NVFS-N4b-001 flipped from Open → Implemented with full acceptance-criteria checkmarks. |
+
+**Design decisions:**
+
+- **No `FsState` parameter:** `FsState` does not exist in the codebase; `scrub_scheduler_tick` uses the same module-level globals as `scrub_all` (via `nvfs_pmap_sidecar_snapshot`). The spec's `fs: &FsState` parameter was dropped.
+- **`batch_size` field on `ScrubScheduler`:** Derived from `rate_bytes_per_sec / 4096` (assumed 4 KiB extent). Zero rate → batch_size = 2^63−1 (unlimited). Stored as a field so callers can override directly.
+- **META_DURABLE sentinel:** `_is_metadata_arena(arena_id)` returns true for `arena_id ≤ 0`. Arena 0 maps to the superblock region (replica A=0, B=1 in `superblock.spl`). All user data arenas have positive ids.
+- **`superblock_replica_raw` reuse:** No `superblock_replica_offset` function exists; the actual API is `superblock_replica_raw(replica: u8)` in `superblock.spl`. Repair writes the replica's checksum bytes byte-by-byte via `arena_mutate_for_test` (in-memory approximation; real device would read raw bytes from disk offset).
+- **`_scrub_repair_with_meta_durable`:** Private bridge function chaining peer-scan → META_DURABLE fallback; called from both `scrub_all` and `scrub_scheduler_tick` so both paths benefit from the fallback.
+- **Existing tests unaffected:** `scrub_all` repair calls changed from `scrub_repair_block` to `_scrub_repair_with_meta_durable`; for non-metadata arenas the fallback returns immediately, preserving N4a behaviour exactly.
 - **No commits made** per task brief.

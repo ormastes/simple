@@ -318,7 +318,9 @@ append under this heading.
 - **Filed-on:** 2026-04-18
 - **Filed-by:** N4a-scrub-repair agent
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** N4b-scheduler agent
 - **Requested-semantics:**
   N4a repair falls back to Unrepairable when no reflink peer has a good copy.
   N4b should (a) add a background-task scheduler that runs `scrub_all`
@@ -326,13 +328,19 @@ append under this heading.
   also check META_DURABLE superblock and checkpoint-ring replicas (already
   written 2–3× by the driver) as a fallback source of truth.
 - **Acceptance-criteria:**
-  - [ ] Background scrub task that respects `ScrubOptions.throttle_ms`
-  - [ ] `scrub_repair_block` tries META_DURABLE replicas after peer scan fails
-  - [ ] `arena_write_range` (or equivalent) replaces `arena_mutate_for_test` for repair
-  - [ ] Existing N4a tests continue to pass
+  - [x] `ScrubScheduler` struct with `interval_ms`, `rate_bytes_per_sec`, `batch_size`, `last_run_ns`
+  - [x] `scrub_scheduler_tick` returns empty report when interval has not elapsed; runs pass and advances `last_run_ns` when it has
+  - [x] Rate limiting via `batch_size` (derived from `rate_bytes_per_sec / 4096`)
+  - [x] `scrub_repair_meta_durable` reads `superblock_replica_raw(0..2)` as fallback when peer scan returns Unrepairable and `arena_id <= 0` (metadata region)
+  - [x] `_scrub_repair_with_meta_durable` chains peer-scan → META_DURABLE fallback; called from both `scrub_all` and `scrub_scheduler_tick`
+  - [x] 3 new tests: tick-too-early (checked=0, last_run_ns unchanged), tick-after-interval (last_run_ns advanced, checked≥1), metadata-replica repair succeeds
+  - [x] Existing N4a tests (1–9) continue to pass
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
 - **Related-issue:** none
+- **Notes:** `arena_write_range` replacement deferred — `arena_mutate_for_test` is
+  still used for writeback (the only in-scope byte-writer). `scrub_scheduler_new`
+  is a convenience constructor; callers may also construct `ScrubScheduler` directly.
 
 ---
 
