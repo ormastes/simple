@@ -37,7 +37,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-001 investigation session
 - **Target:** compiler — import resolver / name-resolution pass
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Partially-Implemented (2026-04-18, Claude Sonnet 4.6)
 - **Requested-semantics:**
   When two structs share the same short name but live in different fully-qualified
   module paths (e.g., `compiler.common.driver_core_types.CompileOptions` vs
@@ -147,6 +147,92 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   precedence over any later load of a conflicting module.
 
   Do NOT attempt this fix here — dedicated compiler-core agent required.
+
+- **Partial-fix applied (2026-04-18, Claude Sonnet 4.6):**
+  Two minimal changes made within `src/compiler/20.hir/`:
+
+  1. `hir_lowering/items.spl` — `lower_module` (and the bootstrap-safe
+     `HirLowering_dot_lower_module`) now sets `self.module_filename = module.name`
+     at entry, before `declare_module_symbols`. Previously the single shared
+     `HirLowering` instance (instantiated once in `driver.spl` and reused for
+     every module) always had `module_filename = ""`, so every symbol across all
+     modules was tagged with an empty `defining_module`. Now each module's symbols
+     carry the correct per-module name in `Symbol.defining_module`.
+
+  2. `hir_types.spl` — `SymbolTable.define` now has a first-write-wins guard for
+     type-kind symbols (Class/Struct/Enum/Trait): if the current scope already
+     contains a binding for `name`, the existing `SymbolId` is returned unchanged.
+     Non-type symbols (Function, Parameter, Field, Variable, etc.) retain
+     last-write-wins behaviour so normal redefinition and shadowing continue
+     to work.
+
+  **What this fixes:** determinism — the first module processed "wins" the short
+  name rather than the last. Module processing order is now deterministic
+  (dict key iteration order in the driver loop).
+
+  **What this does NOT fix:** import-target-aware resolution. If
+  `driver_core_types.spl` loads AFTER `backend_types.spl` in the driver's module
+  map, the first-write-wins guard means `backend_types.CompileOptions` wins and
+  the bug persists. Full fix requires FR-COMPILER-003 (2-pass import resolver
+  with per-import-target AST loading). Bootstrap is required to verify effect.
+
+  **Infrastructure blocker confirmed:** `HirLowering` has no `module_resolver`,
+  `current_file`, or `loaded_modules` fields. The Rust seed's two-pass approach
+  (`preregister_imported_type_names` + `load_imported_types`) cannot be ported
+  without first adding a module-resolver port to `HirLowering` — that is driver-
+  layer work outside `src/compiler/20.hir/`.
+
+---
+
+### FR-COMPILER-003 — Add 2-pass import resolver to self-hosted HIR lowering
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-002 fix session
+- **Target:** compiler — `src/compiler/20.hir/hir_lowering/` + `src/compiler/80.driver/`
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  The self-hosted HIR lowerer (`HirLowering`) must mirror the Rust seed's
+  two-pass import loading pipeline from
+  `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`:
+
+  Pass 0 (`preregister_imported_type_names`): for each `use mod.*` or named
+  import, resolve the module path to a `.spl` file, parse it, and register
+  empty placeholder types for all exported names that match the import target.
+
+  Pass 1 (`load_imported_types`): fill in field lists, method sets, and
+  globals for the placeholders created in Pass 0, filtered by
+  `should_import_symbol(target)`.
+
+  Without this, `lower_import` is a metadata-only no-op that never calls
+  `symbols.define` for imported names, so `use compiler.common.driver_core_types.*`
+  has no effect on the symbol table and `CompileOptions` resolves by module
+  load order rather than explicit import path.
+- **Acceptance-criteria:**
+  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+        a field access on the 17-field driver struct succeeds in the self-hosted
+        binary (FR-COMPILER-002 AC #1).
+  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves
+        to the 7-field backend struct and does NOT expose `mode` / `low_memory`
+        (FR-COMPILER-002 AC #2).
+  - [ ] Both can coexist in the same file via aliased imports (FR-COMPILER-002 AC #3).
+  - [ ] FR-COMPILER-001 acceptance criteria are met.
+- **Prerequisites (infrastructure changes needed first):**
+  1. Add `module_resolver: ModuleResolverPort?` field to `HirLowering` class
+     (currently absent — confirmed 2026-04-18).
+  2. Add `current_file: text?` and `loaded_modules: [text]` fields to `HirLowering`.
+  3. Driver (`src/compiler/80.driver/driver.spl`) must populate these fields when
+     constructing `HirLowering` — i.e., `HirLowering.with_resolver(resolver, file)`.
+  4. `lower_module` must call a new `resolve_import_symbols` pass before
+     `declare_module_symbols` to pre-populate the scope with explicitly imported names.
+- **Related-upfront:** none
+- **Related-design-doc:** `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
+  (reference implementation, 717 lines)
+- **Related-issue:** FR-COMPILER-002 (parent), FR-COMPILER-001 (upstream symptom)
+- **Notes:**
+  FR-COMPILER-002 partial fix (first-write-wins + per-module `module_filename`)
+  landed 2026-04-18. That fix is a prerequisite but does not resolve the
+  import-target-awareness gap. This FR is the blocking item for FR-COMPILER-001.
 
 ---
 

@@ -32,7 +32,7 @@ mod llvm_tests;
 
 #[cfg(test)]
 #[cfg(not(doctest))]
-#[path = "codegen_instr_tests.rs"]
+#[path = "codegen_instr_tests/mod.rs"]
 mod codegen_instr_tests;
 
 #[cfg(test)]

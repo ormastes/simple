@@ -700,6 +700,42 @@ Phase 8 complete. Feature closed.
 
 ## Phase Outputs
 
+> **Wave boundaries below are inferred from dispatch dates and ship bundles — "wave" is not
+> a literal label in the append-only log; see the detail sections for authoritative source.**
+
+### Wave Summary Table (Phase 9)
+
+| Wave | Date(s) | Key deliverables | Commit(s) on origin/main | AC satisfied |
+|------|---------|-----------------|--------------------------|--------------|
+| Ship-1 | 2026-04-17 | NVFS extend design (Btrfs/ZFS/POSIX-shim), formal-verification (Lean 4 I1–I10), proof closure pass (9.5b), M1-retrofit (Fat32Driver wrap), N2-namespace, fs-driver unit tests, FR-0004-fix, integration tests, M2-retrofit-retry, N4a-scrub (detect), spostgre-M2 (WAL/pmap), ramfs real impl, M3-cleanup, spostgre-M3a (HOT), N5a-btree-pmap, spostgre-M3b (BRIN) | parent `409a7e19…` → pushed `6a5bc0299eaf` | AC-1..AC-8 (AC-9 gitlink deviation noted) |
+| Ship-2 | 2026-04-18 | FR-0004 followup ship, integration test ship, N3/FR-0004 FR-flip | parent `a5a9ff0ea3…` → pushed `93f49a6974b3` | AC-1..AC-9 |
+| Ship-5 | 2026-04-18 | M4-retire-rt-fat32, bench-harness, spostgre-M3b ship, N5a ship; FR-HOT-001 filed | parent `5570891e72bb` → pushed `44f1a386848a`; submodules spostgre=`c83a460`, nvfs=`d43c1f0` | AC-1..AC-9 |
+| Post-ship (local) | 2026-04-18 | HOT-slack (FR-HOT-001 impl), bench-clock-baremetal (FR-BENCH-CLOCK-001), N6a-real-aes-retry, N6b-raw-send, spostgre-M4 (tier cache), N4a-scrub-repair, N4b-scheduler, NVFS-v3-design, storage-overview-doc, fs-driver-guide, N6a-002/003 (KDF+DEK-rotation), e2e-integration, FR-COMPILER-001-fix (diag→FR-COMPILER-002 filed), bench-baseline, M5-vacuum-tests, namespace-kw-fix, FR-COMPILER-002-diag, BDD wave 7/8 features | **No ship section — all changes are local/unpushed as of state-file timestamp** | AC-1..AC-9 (per-section pass; no final push verified) |
+
+### Storage Track Status (AC-1..AC-9)
+
+| AC | One-line status |
+|----|-----------------|
+| AC-1 | PASS — `doc/01_research/spostgre_research.md` (868 lines; Phase-7.5 regen after Write-drop). |
+| AC-2 | PASS — `doc/05_design/spostgre_design.md` (747 lines); MDSOC+ outer+ECS, 7-fork layout, M1-M5 milestones. |
+| AC-3 | PASS — `doc/05_design/nvfs_design.md` (625 lines, v1); superseded by `nvfs_design_v2.md` (798 lines) in Ship-1. |
+| AC-4 | PASS — `doc/08_tracking/feature_request/nvfs_requests.md` with README + TEMPLATE; 7 `[UPFRONT]` rows for S1..S7. |
+| AC-5 | PASS (gitlink deviation) — 13 main-repo `.spl` + 20 submodule `.spl`; symlink resolves; lint EXIT 0. Submodule gitlinks stored as 040000 tree by jj (accepted ship shape, matching svllm precedent). |
+| AC-6 | PASS — 0 Python/Bash, 0 `extends`/`inherits`, `pass_todo` not `todo!()`, `<>` generics, MDSOC+ for spostgre / MDSOC-only for NVFS, jj VCS main-only. |
+| AC-7 | PASS — `doc/04_architecture/mdsoc_architecture_tobe.md` additive xref to all three design docs. |
+| AC-8 | PASS — `doc/05_design/nvfs/from_spostgre.md` (279 lines); 7 P0 + 6 P1-stretch upfront fs-API requirements. |
+| AC-9 | PASS (gitlink deviation same as AC-5) — both private GH repos exist; `.gitmodules` carries both entries; scaffold commits on remote `main` (spostgre `1c219b2`, nvfs `959af03`). |
+
+### Inconsistency flags
+
+- **FR-NVFS-N4a-001 appears twice:** `9-N4a-scrub` (L1437, detect-only, 2026-04-17) and `9-n4a-scrub-repair` (L1915, detect+repair, 2026-04-18). **Canonical = `9-n4a-scrub-repair`**; the earlier section was superseded when repair was added.
+- **9-M2-retrofit appears twice:** L1053 (BLOCKED — no edits made) and L1397 `9-M2-retrofit-retry` (DONE, 2026-04-17). **Canonical = retry section at L1397.**
+- **Eight `### 9-extend` headers** (L703, L1051, L1246, L1435, L1467, L1512, L1549, L1612) — all the same logical phase, repeated because each parallel dispatch appended its own header. Treat as one continuous phase.
+
+---
+
+### Wave-by-wave detail (append-only log, see Wave Summary Table above)
+
 ### 9-extend
 
 **Completed:** 2026-04-18. Design consolidation integrating Btrfs + ZFS research with the
@@ -2175,3 +2211,17 @@ implemented) and record ns-level baseline numbers.
 
 **Verification:** Bench exits via SIGTERM (interpreter-budget) rather than parse error — namespace keyword errors are gone.
 - Checksum NOT asserted (pmap always zero-fills checksum on publish); `birth_gen` increment is the correct post-vacuum invariant.
+
+#### 9-bench-clock-hpet-pmtmr
+
+**Status:** DONE (2026-04-18)
+**FR:** FR-BENCH-CLOCK-002
+**Files changed:**
+- `src/os/kernel/acpi/clock_sources.spl` — new: ACPI HPET/PMTMR discovery stubs, HPET MMIO helpers, PMTMR port helpers
+- `src/os/kernel/arch/x86_64/timer.spl` — added `_choose_clock_source()` dispatcher + HPET/PMTMR/PIT branch stubs; `_calibrate_tsc` now probes ACPI sources before falling back to PIT ch2
+- `test/unit/os/timer_test.spl` — new: 3 structural tests for HPET/PMTMR/PIT fallback chain using fake fixture values
+
+**Key design notes:**
+- `_choose_clock_source(hpet_base: u64?, pmtmr_port: u32?) -> str` is a pure, side-effect-free dispatcher imported directly by tests.
+- HPET and PMTMR calibration branches (`_calibrate_tsc_hpet`, `_calibrate_tsc_pmtmr`) are structurally wired but fall through to PIT until FR-SIMPLEOS-ACPI-001 delivers real ACPI table walk.
+- FR-BENCH-CLOCK-002 flipped to Implemented (scaffolded); 0.1% accuracy criterion requires FR-SIMPLEOS-ACPI-001.

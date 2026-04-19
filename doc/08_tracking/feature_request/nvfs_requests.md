@@ -215,7 +215,9 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Filed-on:** 2026-04-18
 - **Filed-by:** bench-clock-baremetal agent
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** agent a8cc4856 (completed by spostgre-nvfs-storage)
 - **Requested-semantics:**
   Current TSC calibration in `src/os/kernel/arch/x86_64/timer.spl` uses PIT
   channel 2 for a ~10ms measurement window. Virtualised QEMU HPET is available
@@ -236,6 +238,11 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   percentile resolution at current granularity. HPET/PMTMR calibration is a
   correctness improvement for CPU frequency detection on real hardware where
   PIT may be unreliable.
+  **Implementation note:** `_choose_clock_source()` dispatcher + HPET/PMTMR
+  stubs are wired in `timer.spl`; HPET and PMTMR branches fall through to PIT
+  until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is implemented. The 0.1% QEMU
+  accuracy criterion requires FR-SIMPLEOS-ACPI-001 to deliver real HPET/PMTMR
+  addresses.
 
 ---
 

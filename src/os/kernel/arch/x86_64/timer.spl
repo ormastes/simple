@@ -20,6 +20,9 @@ use os.kernel.interrupts.apic.{apic_init, apic_set_timer, apic_stop_timer,
     TIMER_DIV_16}
 use os.kernel.interrupts.idt.{VEC_TIMER}
 use std.baremetal.x86.io.{outb, inb, io_wait}
+use os.kernel.acpi.clock_sources.{acpi_hpet_present, acpi_pmtmr_port,
+    acpi_set_rsdp, PMTMR_FREQ, pmtmr_read, hpet_read_counter,
+    hpet_read_capabilities, hpet_enable}
 
 # ============================================================================
 # Constants
@@ -204,10 +207,83 @@ fn _read_tsc() -> u64:
     (hi << 32) | (lo & 0xFFFFFFFF)
 
 # ============================================================================
+# Clock source selection — HPET → PMTMR → PIT fallback chain
+# FR-BENCH-CLOCK-002
+# ============================================================================
+
+# Clock source names (returned by _choose_clock_source)
+val CLOCK_SRC_HPET:  str = "HPET"
+val CLOCK_SRC_PMTMR: str = "PMTMR"
+val CLOCK_SRC_PIT:   str = "PIT"
+
+fn _choose_clock_source(hpet_base: u64?, pmtmr_port: u32?) -> str:
+    """Return the best available TSC calibration reference source.
+
+    Priority: HPET (MMIO, ~100 MHz) > PMTMR (port I/O, 3.58 MHz) > PIT ch2.
+    Takes pre-discovered values so callers (including tests) can pass fixtures.
+    """
+    if hpet_base != nil:
+        return CLOCK_SRC_HPET
+    if pmtmr_port != nil:
+        return CLOCK_SRC_PMTMR
+    CLOCK_SRC_PIT
+
+# ============================================================================
 # TSC Calibration
 # ============================================================================
 
 fn _calibrate_tsc():
+    """Calibrate TSC frequency.
+
+    Probe order (FR-BENCH-CLOCK-002): HPET → PMTMR → PIT channel 2.
+
+    HPET and PMTMR branches are structurally wired but functionally no-ops
+    until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is implemented — both
+    acpi_hpet_present() and acpi_pmtmr_port() return nil until then.
+    PIT ch2 path is unchanged from FR-BENCH-CLOCK-001.
+    """
+    val hpet_base  = acpi_hpet_present()
+    val pmtmr_prt  = acpi_pmtmr_port()
+    val src        = _choose_clock_source(hpet_base, pmtmr_prt)
+
+    if src == CLOCK_SRC_HPET:
+        _calibrate_tsc_hpet(hpet_base as u64)
+        return
+    if src == CLOCK_SRC_PMTMR:
+        _calibrate_tsc_pmtmr(pmtmr_prt as u32)
+        return
+    _calibrate_tsc_pit()
+
+fn _calibrate_tsc_hpet(hpet_virt: u64):
+    """Calibrate TSC using HPET MMIO counter as reference.
+
+    STUB: hpet_virt is always 0 until FR-SIMPLEOS-ACPI-001 provides a real
+    HPET MMIO address. When ACPI is available:
+    1. Enable HPET counter via hpet_enable().
+    2. Read capabilities to get COUNTER_CLK_PERIOD (femtoseconds/tick).
+    3. Spin for N HPET ticks (e.g. equivalent of ~10ms).
+    4. Compute TSC frequency from TSC delta and elapsed real time.
+
+    Until implemented, falls through to PIT calibration.
+    """
+    # STUB — ACPI HPET not yet mapped; fall back to PIT
+    _calibrate_tsc_pit()
+
+fn _calibrate_tsc_pmtmr(port: u32):
+    """Calibrate TSC using PMTMR (3.579545 MHz PM timer) as reference.
+
+    STUB: port is always 0 until FR-SIMPLEOS-ACPI-001 provides a real FADT
+    PM_TMR_BLK port. When ACPI is available:
+    1. Read PMTMR start value via pmtmr_read(port).
+    2. Spin for ~10ms worth of PMTMR ticks (35795 ticks at 3.579545 MHz).
+    3. Compute TSC frequency from TSC delta and known PMTMR frequency.
+
+    Until implemented, falls through to PIT calibration.
+    """
+    # STUB — ACPI PMTMR port not yet discovered; fall back to PIT
+    _calibrate_tsc_pit()
+
+fn _calibrate_tsc_pit():
     """Calibrate TSC frequency using PIT channel 2.
 
     Method:

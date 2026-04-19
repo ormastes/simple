@@ -2,38 +2,49 @@
 @allow(unnamed_duplicate_typed_args)
 # Ollama embedding API client
 
-extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
-
 use std.text.{escape_json}
 use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.http_ffi.{HttpMethod, http_request}
 use compiler.tools.duplicate_check.math_utils.{find_substr, parse_float_safe}
 
 struct EmbeddingResult:
     vector: [f64]
     error: text
 
+fn should_use_http_embeddings() -> bool:
+    # Bootstrap interpreter runs do not expose rt_http_request yet.
+    # Keep semantic mode on the text-fallback path by default, and allow
+    # explicit opt-in for runtimes that do provide the HTTP transport.
+    (env_get("SIMPLE_DUPCHECK_USE_OLLAMA_HTTP") ?? "") == "1"
+
 fn check_ollama_available(base_url: text) -> bool:
+    if not should_use_http_embeddings():
+        return false
     val url = base_url + "/api/tags"
-    val result = rt_http_request("GET", url, "", "")
-    val (status, body, err) = result
-    status == 200
+    val response = http_request(HttpMethod.GET, url, [], "")
+    response.status_code == 200
 
 fn get_embedding(base_url: text, model: text, input_text: text) -> EmbeddingResult:
+    if not should_use_http_embeddings():
+        return EmbeddingResult(
+            vector: [],
+            error: "HTTP embedding transport disabled in this runtime"
+        )
     val url = base_url + "/api/embed"
     val escaped = escape_json(input_text)
     val body = LB() + Q() + "model" + Q() + ":" + Q() + model + Q() + "," + Q() + "input" + Q() + ":" + Q() + escaped + Q() + RB()
-    val headers = "Content-Type: application/json"
+    val headers = ["Content-Type: application/json"]
 
-    val result = rt_http_request("POST", url, headers, body)
-    val (status, response_body, err) = result
+    val response = http_request(HttpMethod.POST, url, headers, body)
 
-    if status != 200:
-        var error_msg = "Ollama request failed with status {status}"
-        if err.len() > 0:
-            error_msg = error_msg + ": " + err
+    if response.status_code != 200:
+        var error_msg = "Ollama request failed with status {response.status_code}"
+        if response.error.len() > 0:
+            error_msg = error_msg + ": " + response.error
         return EmbeddingResult(vector: [], error: error_msg)
 
-    val vec = parse_embedding_response(response_body)
+    val vec = parse_embedding_response(response.body)
     if vec.len() == 0:
         return EmbeddingResult(vector: [], error: "Failed to parse embedding from response")
 
@@ -120,5 +131,3 @@ fn parse_float_array_from(json: text, start: i64) -> [f64]:
         i = i + 1
 
     result
-
-
