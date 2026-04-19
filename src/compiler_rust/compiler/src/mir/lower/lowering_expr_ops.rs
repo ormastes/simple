@@ -2,8 +2,6 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{BinOp, HirExpr, TypeId, UnaryOp};
-#[allow(unused_imports)]
-use crate::mir::instructions::MirInst;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {

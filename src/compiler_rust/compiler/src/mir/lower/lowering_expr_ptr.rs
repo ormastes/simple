@@ -66,7 +66,7 @@ impl<'a> MirLowerer<'a> {
 
         // Search through old_expr_map to find matching expression
         for (idx, captured_expr) in &ctx.old_expr_map {
-            if captured_expr == inner.as_ref() {
+            if captured_expr == inner {
                 // Found matching expression, return the captured VReg
                 if let Some(&vreg) = ctx.old_captures.get(idx) {
                     return Ok(vreg);

@@ -2,12 +2,12 @@ namespace ManualPointerBorrow
 -- A tiny borrow checker for manual pointers: `exclusive` tracks a unique borrow,
 --     `shared` counts active shared borrows.
 -- Type-safe borrow state where invalid states are unrepresentable.
---     The invariant "exclusive → shared = 0" is encoded in the inductive structure.
+--     Shared borrows are encoded as `n + 1`, so the shared case is always positive.
 -- Convert ValidBorrowState to BorrowState. Always produces a valid state.
 inductive ValidBorrowState
   | unborrowed
   | exclusive
-  | shared : Nat → count > 0 → ValidBorrowState
+  | shared : Nat → ValidBorrowState
 deriving Repr
 
 structure BorrowState where
@@ -17,14 +17,14 @@ structure BorrowState where
 def ValidBorrowState.toState : ValidBorrowState → BorrowState
   | .unborrowed => { exclusive := false, shared := 0 }
   | .exclusive => { exclusive := true, shared := 0 }
-  | .shared count _ => { exclusive := false, shared := count }
+  | .shared count => { exclusive := false, shared := count + 1 }
 
 -- Convert BorrowState to ValidBorrowState if valid.
 def BorrowState.toValid (s : BorrowState) : Option ValidBorrowState :=
   match s.exclusive, s.shared with
   | false, 0 => some .unborrowed
   | true, 0 => some .exclusive
-  | false, n + 1 => some (.shared (n + 1) (Nat.succ_pos n))
+  | false, n + 1 => some (.shared n)
   | true, _ + 1 => none
 
 def valid (s : BorrowState) : Prop :=
@@ -47,19 +47,14 @@ theorem validState_always_valid (vs : ValidBorrowState) :
   cases vs with
   | unborrowed => simp [ValidBorrowState.toState, valid]
   | exclusive => simp [ValidBorrowState.toState, valid]
-  | shared count h => simp [ValidBorrowState.toState, valid]
+  | shared count => simp [ValidBorrowState.toState, valid]
 
 theorem toValid_toState (vs : ValidBorrowState) :
   vs.toState.toValid = some vs := by
   cases vs with
   | unborrowed => simp [ValidBorrowState.toState, BorrowState.toValid]
   | exclusive => simp [ValidBorrowState.toState, BorrowState.toValid]
-  | shared count h =>
-    cases hcount : count with
-    | zero =>
-      simp [ValidBorrowState.toState, BorrowState.toValid, hcount] at h
-    | succ n =>
-      simp [ValidBorrowState.toState, BorrowState.toValid, hcount]
+  | shared count => simp [ValidBorrowState.toState, BorrowState.toValid]
 
 theorem exclusive_ok (s : BorrowState) (hv : valid s) :
   valid (takeExclusive s) := by

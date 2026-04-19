@@ -18,11 +18,11 @@ fn regenerate_manual_pointer_borrow() -> text:
     codegen_ = codegen_.add_structure(borrow_state)
 
     # ValidBorrowState inductive
-    codegen_ = codegen_.add_doc_comment("Type-safe borrow state where invalid states are unrepresentable.\n    The invariant \"exclusive → shared = 0\" is encoded in the inductive structure.")
+    codegen_ = codegen_.add_doc_comment("Type-safe borrow state where invalid states are unrepresentable.\n    Shared borrows are encoded as `n + 1`, so the shared case is always positive.")
     valid_state = codegen.build_enum_with_deriving("ValidBorrowState", [
         ("unborrowed", []),
         ("exclusive", []),
-        ("shared", [("count", codegen.make_simple_type("Nat")), ("h", codegen.make_simple_type("count > 0"))])
+        ("shared", [("count", codegen.make_simple_type("Nat"))])
     ], ["Repr"])
     codegen_ = codegen_.add_inductive(valid_state)
 
@@ -37,16 +37,10 @@ fn regenerate_manual_pointer_borrow() -> text:
 
     # Conversion functions
     codegen_ = codegen_.add_doc_comment("Convert ValidBorrowState to BorrowState. Always produces a valid state.")
-    to_state_def = codegen.build_function(
-        "ValidBorrowState.toState",
-        [("_", codegen.make_simple_type("ValidBorrowState"))],
-        codegen.make_simple_type("BorrowState"),
-        "match _ with\n| .unborrowed => {{ exclusive := false, shared := 0 }}\n| .exclusive => {{ exclusive := true, shared := 0 }}\n| .shared count _ => {{ exclusive := false, shared := count }}"
-    )
     codegen_ = codegen_.add_raw_line("def ValidBorrowState.toState : ValidBorrowState → BorrowState")
     codegen_ = codegen_.add_raw_line("  | .unborrowed => {{ exclusive := false, shared := 0 }}")
     codegen_ = codegen_.add_raw_line("  | .exclusive => {{ exclusive := true, shared := 0 }}")
-    codegen_ = codegen_.add_raw_line("  | .shared count _ => {{ exclusive := false, shared := count }}")
+    codegen_ = codegen_.add_raw_line("  | .shared count => {{ exclusive := false, shared := count + 1 }}")
     codegen_ = codegen_.add_blank()
 
     codegen_ = codegen_.add_doc_comment("Convert BorrowState to ValidBorrowState if valid.")
@@ -54,7 +48,7 @@ fn regenerate_manual_pointer_borrow() -> text:
     codegen_ = codegen_.add_raw_line("  match s.exclusive, s.shared with")
     codegen_ = codegen_.add_raw_line("  | false, 0 => some .unborrowed")
     codegen_ = codegen_.add_raw_line("  | true, 0 => some .exclusive")
-    codegen_ = codegen_.add_raw_line("  | false, n + 1 => some (.shared (n + 1) (Nat.succ_pos n))")
+    codegen_ = codegen_.add_raw_line("  | false, n + 1 => some (.shared n)")
     codegen_ = codegen_.add_raw_line("  | true, _ + 1 => none")
     codegen_ = codegen_.add_blank()
 
@@ -63,14 +57,14 @@ fn regenerate_manual_pointer_borrow() -> text:
         "validState_always_valid",
         [("vs", "ValidBorrowState")],
         "valid vs.toState",
-        "cases vs with\n| unborrowed => simp [ValidBorrowState.toState, valid]\n| exclusive => simp [ValidBorrowState.toState, valid]\n| shared count h => simp [ValidBorrowState.toState, valid]"
+        "cases vs with\n| unborrowed => simp [ValidBorrowState.toState, valid]\n| exclusive => simp [ValidBorrowState.toState, valid]\n| shared count => simp [ValidBorrowState.toState, valid]"
     ))
 
     codegen_ = codegen_.add_theorem(codegen.build_theorem(
         "toValid_toState",
         [("vs", "ValidBorrowState")],
         "vs.toState.toValid = some vs",
-        "cases vs with\n| unborrowed => simp [ValidBorrowState.toState, BorrowState.toValid]\n| exclusive => simp [ValidBorrowState.toState, BorrowState.toValid]\n| shared count h =>\n  cases hcount : count with\n  | zero =>\n    simp [ValidBorrowState.toState, BorrowState.toValid, hcount] at h\n  | succ n =>\n    simp [ValidBorrowState.toState, BorrowState.toValid, hcount]"
+        "cases vs with\n| unborrowed => simp [ValidBorrowState.toState, BorrowState.toValid]\n| exclusive => simp [ValidBorrowState.toState, BorrowState.toValid]\n| shared count => simp [ValidBorrowState.toState, BorrowState.toValid]"
     ))
 
     # Operation functions
