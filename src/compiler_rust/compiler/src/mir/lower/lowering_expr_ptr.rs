@@ -85,7 +85,7 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn lower_neighbor_access_expr(
         &mut self,
         array: &HirExpr,
-        direction: &crate::hir::NeighborDirection,
+        direction: &NeighborDirection,
     ) -> MirLowerResult<VReg> {
         let array_reg = self.lower_expr(array)?;
         self.with_func(|func, current_block| {
