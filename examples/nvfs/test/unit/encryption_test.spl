@@ -27,6 +27,12 @@ deterministic IV, and per-arena key isolation.
 """
 
 use std.sspec.*
+use examples.nvfs.src.core.encryption.{
+    keystore_new, keystore_derive_wrapping, keystore_generate_master,
+    keystore_derive_data_key, encrypt_arena_data, decrypt_arena_data,
+    KeyHandle, KeyLevel, EncryptedEnvelope
+}
+use std.fs_driver.error.{FsError}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -237,4 +243,112 @@ describe "encryption — arena isolation":
                 if env1.ciphertext[i] != env2.ciphertext[i]:
                     ct_same = false
                 i = i + 1
+        expect(ct_same).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Test 7: Real AES-128-GCM roundtrip (FR-NVFS-N6a-001 implemented)
+# ---------------------------------------------------------------------------
+
+describe "encryption — real AES-128-GCM roundtrip":
+    """encrypt_arena_data + decrypt_arena_data must recover exact plaintext
+    using the vendored aes128_gcm implementation (no stub XOR cipher)."""
+
+    it "decrypt(encrypt(plaintext)) == plaintext":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x72u8, 0x65u8, 0x61u8, 0x6Cu8]  # "real"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk_res = keystore_derive_data_key(ks, master.key_id, 77)
+        val dk = dk_res.unwrap()
+        val plaintext: [u8] = [0x41u8, 0x45u8, 0x53u8, 0x2Du8, 0x47u8, 0x43u8, 0x4Du8]  # "AES-GCM"
+        val env_res = encrypt_arena_data(ks, dk, 77, 0, plaintext)
+        val env = env_res.unwrap()
+        val dec_res = decrypt_arena_data(ks, env)
+        val recovered = dec_res.unwrap()
+        expect(recovered.len() as i64).to_equal(plaintext.len() as i64)
+        var bytes_match = true
+        var i: i64 = 0
+        while i < plaintext.len() as i64:
+            if recovered[i] != plaintext[i]:
+                bytes_match = false
+            i = i + 1
+        expect(bytes_match).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 8: Real AES-128-GCM tag mismatch → Err(Corrupt)
+# ---------------------------------------------------------------------------
+
+describe "encryption — real AES-128-GCM tag mismatch":
+    """Mutating the authentication tag must cause decrypt to return Err(Corrupt)
+    via real GCM verification, not a stub XOR checksum."""
+
+    it "flipped tag byte → Err(Corrupt) from real GCM":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x74u8, 0x61u8, 0x67u8]  # "tag"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk_res = keystore_derive_data_key(ks, master.key_id, 55)
+        val dk = dk_res.unwrap()
+        val plaintext: [u8] = [0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8]
+        val env_res = encrypt_arena_data(ks, dk, 55, 0, plaintext)
+        val env = env_res.unwrap()
+        # Flip last byte of the tag.
+        var bad_tag: [u8] = []
+        var ti: i64 = 0
+        while ti < env.tag.len() as i64:
+            if ti == env.tag.len() as i64 - 1:
+                bad_tag.push((env.tag[ti].to_i64() ^ 0x01).to_u8())
+            else:
+                bad_tag.push(env.tag[ti])
+            ti = ti + 1
+        val bad_env = EncryptedEnvelope(
+            key_id:     env.key_id,
+            iv:         env.iv,
+            ciphertext: env.ciphertext,
+            tag:        bad_tag
+        )
+        val result = decrypt_arena_data(ks, bad_env)
+        val is_corrupt = match result:
+            case Err(FsError.Corrupt): true
+            case _: false
+        expect(is_corrupt).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 9: Different nonce → different ciphertext (GCM CTR mode)
+# ---------------------------------------------------------------------------
+
+describe "encryption — different nonce produces different ciphertext":
+    """encrypt_arena_data at offset=0 vs offset=1 must produce different
+    ciphertext for the same plaintext and key, because the IV differs."""
+
+    it "encrypt at offset 0 vs offset 1 yields distinct ciphertexts":
+        val ks = keystore_new()
+        val passphrase: [u8] = [0x6Eu8, 0x6Fu8, 0x6Eu8, 0x63u8, 0x65u8]  # "nonce"
+        val wk = keystore_derive_wrapping(ks, passphrase)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dk_res = keystore_derive_data_key(ks, master.key_id, 300)
+        val dk = dk_res.unwrap()
+        val plaintext: [u8] = [0xCAu8, 0xFEu8, 0xBAu8, 0xBEu8]
+        val env_a_res = encrypt_arena_data(ks, dk, 300, 0, plaintext)
+        val env_a = env_a_res.unwrap()
+        val env_b_res = encrypt_arena_data(ks, dk, 300, 1, plaintext)
+        val env_b = env_b_res.unwrap()
+        # IVs must differ (different offset).
+        var iv_same = true
+        var i: i64 = 0
+        while i < env_a.iv.len() as i64:
+            if env_a.iv[i] != env_b.iv[i]:
+                iv_same = false
+            i = i + 1
+        expect(iv_same).to_equal(false)
+        # Ciphertexts must also differ.
+        var ct_same = true
+        i = 0
+        while i < env_a.ciphertext.len() as i64:
+            if env_a.ciphertext[i] != env_b.ciphertext[i]:
+                ct_same = false
+            i = i + 1
         expect(ct_same).to_equal(false)

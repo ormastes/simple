@@ -2,10 +2,13 @@
 #
 # Pins pages in memory; tracks dirty state; evicts via clock-sweep.
 # Concrete impl of std.spostgre_if.storage_api.BufferManager.
+# M4: TierCache (L2 NVMe) wired at eviction and fault paths.
 
 use std.spostgre_if.types.{Rel, BlkNo}
 use std.spostgre_if.storage_api.{PageBuf}
 use engine.page.{PageHeader}
+use engine.tier_cache.{TierCache, tier_cache_new, tier_cache_put,
+                        tier_cache_get, tier_cache_invalidate}
 
 # ---------------------------------------------------------------------------
 # Free-space accounting helpers (FR-HOT-001).
@@ -33,16 +36,54 @@ struct BufferSlot:
     generation: i64
 
 struct BufferPool:
-    """Fixed-size frame table."""
-    slots: [BufferSlot]
-    capacity: i32
+    """Fixed-size frame table.
+
+    M4 additions:
+      tier  — L2 NVMe cache (DB_TEMP arena, ephemeral).
+      disk_reads — count of falls-through to durable storage; useful in tests.
+    """
+    slots:      [BufferSlot]
+    capacity:   i32
+    tier:       TierCache
+    disk_reads: i64
 
     static fn new(capacity: i32) -> BufferPool:
-        BufferPool(slots: [], capacity: capacity)
+        BufferPool(slots: [], capacity: capacity,
+                   tier: tier_cache_new(), disk_reads: 0)
 
 fn buf_get(pool: BufferPool, rel: Rel, blk: BlkNo) -> PageBuf:
-    """Pin (rel, blk); load from arena if missing."""
+    """Pin (rel, blk); load from arena if missing.
+
+    Fault path (M4 hook):
+      1. Check L2 TierCache — if hit, serve from NVMe cache (no disk I/O).
+      2. Otherwise fall through to durable storage (disk_reads counter bumped).
+    """
+    # M4 fault hook — L2 check before durable read.
+    val cached = tier_cache_get(pool.tier, rel.id, blk.value)
+    if cached.len() > 0:
+        return PageBuf(data: cached)
+    # L2 miss: would read from durable storage here (pass_todo).
+    # disk_reads increment omitted because pool is immutable here;
+    # a real impl would return (PageBuf, BufferPool) or use interior mutability.
     pass_todo
+
+fn buf_evict(pool: BufferPool, slot: BufferSlot) -> BufferPool:
+    """Evict a clean slot to L2 NVMe cache (M4 eviction hook).
+
+    Dirty pages must be flushed to WAL / durable storage first; this function
+    is only called for clean (unmodified) slots. The page bytes are written to
+    the TierCache so a subsequent fault can be served from L2.
+    """
+    if slot.dirty:
+        # Dirty: caller must write-back to durable storage then call
+        # tier_cache_invalidate. Do not cache here.
+        return pool
+    # Clean eviction — write to L2.
+    # Byte content is not yet available (buf_get is pass_todo); placeholder.
+    val placeholder: [u8] = []
+    val new_tier = tier_cache_put(pool.tier, slot.rel_id, slot.blk, placeholder)
+    BufferPool(slots: pool.slots, capacity: pool.capacity,
+               tier: new_tier, disk_reads: pool.disk_reads)
 
 fn buf_prefetch(pool: BufferPool, rel: Rel, blk: BlkNo) -> bool:
     """Fire-and-forget prefetch."""

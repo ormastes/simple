@@ -12,11 +12,12 @@
 # FR-NVFS-N6a-003: Extend EncryptExt trait (std.fs_driver.extension) with
 #   generate_master_key / set_arena_encryption / get_arena_encryption methods.
 #
-# Note: aes128_gcm and hkdf live in src/os/ which the nvfs submodule cannot
-# import directly. Crypto fn bodies are stubbed (pass_todo) until FR-N6a-001/002
-# are resolved. All non-crypto logic (key registry, IV derivation, state) is real.
+# FR-NVFS-N6a-001 IMPLEMENTED: leaf DEK encrypt/decrypt now uses vendored
+#   aes128_gcm from examples/nvfs/src/core/crypto/aes128_gcm.spl.
+#   Stubs removed. Key hierarchy (wrapping/master/data) unchanged.
 
 use std.fs_driver.error.{FsError}
+use examples.nvfs.src.core.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
 
 # ---------------------------------------------------------------------------
 # Key level enum
@@ -223,15 +224,10 @@ fn keystore_generate_master(ks: &mut KeyStore, wrapping_id: i64) -> Result<KeyHa
     val wk_raw = ks.keys[wk_idx].raw_key
     val master_id = _keystore_alloc_id(ks)
     val master_raw = _gen_key_bytes(master_id)
-    # Stub wrap: XOR master_raw with wk_raw (placeholder for AES-GCM wrap).
-    # FR-NVFS-N6a-001: replace with aes128_gcm_encrypt(wk_raw, nonce, master_raw, []).
-    var wrapped: [u8] = []
-    var i: i64 = 0
-    while i < 16:
-        val m = master_raw[i].to_i64()
-        val w = if (wk_raw.len() as i64 > i): wk_raw[i].to_i64() else: 0
-        wrapped.push((m ^ w).to_u8())
-        i = i + 1
+    # Wrap master key under wrapping KEK using AES-128-GCM.
+    # nonce: deterministic from master_id (12 bytes).
+    val wrap_nonce = _make_iv(master_id, 0)
+    val wrapped = aes128_gcm_encrypt(wk_raw, wrap_nonce, master_raw, [])
     val entry = KeyEntry(
         id:          master_id,
         level:       KeyLevel.Master,
@@ -309,79 +305,28 @@ struct EncryptedEnvelope:
     tag:        [u8]
 
 # ---------------------------------------------------------------------------
-# AES-128-GCM helpers
-# FR-NVFS-N6a-001: upgrade to AES-256-GCM when available.
+# AES-128-GCM helpers — real implementation via vendored aes128_gcm.spl
 # ---------------------------------------------------------------------------
 
-fn _aes128_encrypt_stub(key: [u8], iv: [u8], plaintext: [u8]) -> [u8]:
-    """Stub AES-128-GCM encrypt returning ciphertext || 16-byte tag.
+fn _aes128_encrypt(key: [u8], iv: [u8], plaintext: [u8]) -> [u8]:
+    """AES-128-GCM encrypt returning ciphertext || 16-byte tag (concatenated).
 
-    FR-NVFS-N6a-001: replace with:
-      use os.crypto.aes128_gcm.{aes128_gcm_encrypt}
-      aes128_gcm_encrypt(key, iv, plaintext, [])
-    The submodule currently cannot import os.crypto; stubbing with XOR cipher.
+    Delegates to aes128_gcm_encrypt from the vendored crypto module.
+    No AAD is used at this layer (key_id is stored in the envelope header).
     """
-    var out: [u8] = []
-    var i: i64 = 0
-    while i < plaintext.len() as i64:
-        val p = plaintext[i].to_i64()
-        val k = if (key.len() as i64 > 0): key[i % key.len() as i64].to_i64() else: 0
-        val v = if (iv.len() as i64 > 0): iv[i % iv.len() as i64].to_i64() else: 0
-        out.push((p ^ k ^ v).to_u8())
-        i = i + 1
-    # Append 16-byte tag (stub: XOR-based checksum of plaintext).
-    var tag_acc: i64 = 0
-    i = 0
-    while i < plaintext.len() as i64:
-        tag_acc = (tag_acc ^ plaintext[i].to_i64() ^ (i * 0x5A)) & 0xFFFFFFFF
-        i = i + 1
-    var t: i64 = 0
-    while t < 16:
-        val tag_byte = (tag_acc ^ (t * 0x6B) ^ key[t % key.len() as i64].to_i64()) & 0xFF
-        out.push(tag_byte.to_u8())
-        t = t + 1
-    out
+    aes128_gcm_encrypt(key, iv, plaintext, [])
 
-fn _aes128_decrypt_stub(key: [u8], iv: [u8], ciphertext: [u8], tag: [u8]) -> Result<[u8], FsError>:
-    """Stub AES-128-GCM decrypt; verifies tag before returning plaintext.
+fn _aes128_decrypt(key: [u8], iv: [u8], ciphertext: [u8], tag: [u8]) -> Result<[u8], FsError>:
+    """AES-128-GCM decrypt; maps Aes128GcmResult to Result<[u8], FsError>.
 
-    FR-NVFS-N6a-001: replace with:
-      use os.crypto.aes128_gcm.{aes128_gcm_decrypt}
-      match aes128_gcm_decrypt(key, iv, ciphertext, [], tag): ...
+    Returns Err(Corrupt) on authentication tag mismatch.
     """
-    # Decrypt with same XOR.
-    var plaintext: [u8] = []
-    var i: i64 = 0
-    while i < ciphertext.len() as i64:
-        val c = ciphertext[i].to_i64()
-        val k = if (key.len() as i64 > 0): key[i % key.len() as i64].to_i64() else: 0
-        val v = if (iv.len() as i64 > 0): iv[i % iv.len() as i64].to_i64() else: 0
-        plaintext.push((c ^ k ^ v).to_u8())
-        i = i + 1
-    # Recompute expected tag.
-    var tag_acc: i64 = 0
-    i = 0
-    while i < plaintext.len() as i64:
-        tag_acc = (tag_acc ^ plaintext[i].to_i64() ^ (i * 0x5A)) & 0xFFFFFFFF
-        i = i + 1
-    var expected_tag: [u8] = []
-    var t: i64 = 0
-    while t < 16:
-        val tag_byte = (tag_acc ^ (t * 0x6B) ^ key[t % key.len() as i64].to_i64()) & 0xFF
-        expected_tag.push(tag_byte.to_u8())
-        t = t + 1
-    # Constant-time tag comparison.
-    if tag.len() != expected_tag.len():
-        return Err(FsError.Corrupt)
-    var mismatch: bool = false
-    var j: i64 = 0
-    while j < tag.len() as i64:
-        if tag[j] != expected_tag[j]:
-            mismatch = true
-        j = j + 1
-    if mismatch:
-        return Err(FsError.Corrupt)
-    Ok(plaintext)
+    val result = aes128_gcm_decrypt(key, iv, ciphertext, [], tag)
+    match result:
+        case Aes128GcmResult.Ok(data: plaintext):
+            Ok(plaintext)
+        case Aes128GcmResult.Err(_):
+            Err(FsError.Corrupt)
 
 # ---------------------------------------------------------------------------
 # Public encrypt / decrypt
@@ -400,7 +345,7 @@ fn encrypt_arena_data(ks: &KeyStore, key: KeyHandle, arena_id: i64, offset: i64,
         case Some(k):
             k
     val iv = _make_iv(arena_id, offset)
-    val combined = _aes128_encrypt_stub(raw_key, iv, plaintext)
+    val combined = _aes128_encrypt(raw_key, iv, plaintext)
     # combined = ciphertext || 16-byte tag
     val ct_len = combined.len() as i64 - 16
     if ct_len < 0:
@@ -429,4 +374,4 @@ fn decrypt_arena_data(ks: &KeyStore, envelope: EncryptedEnvelope) -> Result<[u8]
             return Err(FsError.InvalidArg)
         case Some(k):
             k
-    _aes128_decrypt_stub(raw_key, envelope.iv, envelope.ciphertext, envelope.tag)
+    _aes128_decrypt(raw_key, envelope.iv, envelope.ciphertext, envelope.tag)

@@ -1,0 +1,132 @@
+# spostgre engine — L2 NVMe tier cache (M4).
+#
+# Aurora Optimized Reads pattern: on DRAM eviction, clean pages are written to
+# a process-survivable DB_TEMP arena on local NVMe instead of being dropped.
+# On page fault, TierCache is consulted before going to durable storage.
+#
+# The DB_TEMP arena is ephemeral: NVFS discards it on mount, so TierCache
+# starts empty on every process restart. No recovery logic needed.
+
+use engine.nvfs_shim.{shim_arena_create, shim_arena_append, shim_arena_readv,
+                      shim_arena_total_bytes}
+
+# Storage class ordinal for ephemeral local NVMe (not in nvfs_shim — added here
+# to avoid touching the shim module).
+val STORAGE_CLASS_DB_TEMP: i32 = 3
+
+# ---------------------------------------------------------------------------
+# PageKey — identifies a page as (rel_id, blk) matching BufferSlot fields.
+# ---------------------------------------------------------------------------
+
+struct PageKey:
+    """Composite key for a buffered page."""
+    rel_id: i64
+    blk:    i64
+
+# ---------------------------------------------------------------------------
+# TierCache — parallel-array index over a single DB_TEMP arena.
+# ---------------------------------------------------------------------------
+
+pub struct TierCache:
+    """L2 NVMe cache backed by a single DB_TEMP arena.
+
+    index_keys    — ordered list of cached PageKeys.
+    index_offsets — byte offset of the first byte of that page's data in arena.
+    index_lengths — byte length stored (one page worth of bytes each).
+    arena_handle  — opaque id returned by shim_arena_create.
+    """
+    arena_handle:  i64
+    index_keys:    [PageKey]
+    index_offsets: [i64]
+    index_lengths: [i64]
+
+pub fn tier_cache_new() -> TierCache:
+    """Create a fresh TierCache backed by a new DB_TEMP arena."""
+    val handle = shim_arena_create(STORAGE_CLASS_DB_TEMP, 0)
+    TierCache(
+        arena_handle:  handle,
+        index_keys:    [],
+        index_offsets: [],
+        index_lengths: [])
+
+fn _tc_find(cache: TierCache, key: PageKey) -> i64:
+    """Return index of key in cache or -1 if absent."""
+    var i = 0
+    while i < cache.index_keys.len():
+        val k = cache.index_keys[i]
+        if k.rel_id == key.rel_id and k.blk == key.blk:
+            return i as i64
+        i = i + 1
+    -1
+
+pub fn tier_cache_put(cache: TierCache, rel_id: i64, blk: i64, bytes: [u8]) -> TierCache:
+    """Append bytes to the L2 arena; update index. Overwrites (same-key ignored).
+
+    If the page is already cached, the old entry is kept as a tombstone
+    (arena is append-only). The index entry is updated to point at the new copy.
+    """
+    val key = PageKey(rel_id: rel_id, blk: blk)
+    val off = shim_arena_total_bytes(cache.arena_handle)
+    val written = shim_arena_append(cache.arena_handle, bytes)
+    if written <= 0:
+        return cache
+    val n = bytes.len() as i64
+    val existing = _tc_find(cache, key)
+    if existing >= 0:
+        # Update existing entry to point at new copy.
+        var new_offsets = cache.index_offsets
+        var new_lengths = cache.index_lengths
+        new_offsets[existing] = off
+        new_lengths[existing] = n
+        return TierCache(
+            arena_handle:  cache.arena_handle,
+            index_keys:    cache.index_keys,
+            index_offsets: new_offsets,
+            index_lengths: new_lengths)
+    # Append new entry.
+    var new_keys    = cache.index_keys
+    var new_offsets = cache.index_offsets
+    var new_lengths = cache.index_lengths
+    new_keys.push(key)
+    new_offsets.push(off)
+    new_lengths.push(n)
+    TierCache(
+        arena_handle:  cache.arena_handle,
+        index_keys:    new_keys,
+        index_offsets: new_offsets,
+        index_lengths: new_lengths)
+
+pub fn tier_cache_get(cache: TierCache, rel_id: i64, blk: i64) -> [u8]:
+    """Return cached bytes for (rel_id, blk), or empty slice if not present."""
+    val key = PageKey(rel_id: rel_id, blk: blk)
+    val idx = _tc_find(cache, key)
+    if idx < 0:
+        return []
+    val off = cache.index_offsets[idx]
+    val n   = cache.index_lengths[idx]
+    shim_arena_readv(cache.arena_handle, off, n)
+
+pub fn tier_cache_invalidate(cache: TierCache, rel_id: i64, blk: i64) -> TierCache:
+    """Remove the L2 entry for (rel_id, blk) — called on durable write-back.
+
+    Arena bytes are not reclaimed (append-only); only the index entry is dropped.
+    """
+    val key = PageKey(rel_id: rel_id, blk: blk)
+    val idx = _tc_find(cache, key)
+    if idx < 0:
+        return cache
+    var new_keys:    [PageKey] = []
+    var new_offsets: [i64]     = []
+    var new_lengths: [i64]     = []
+    var i = 0
+    while i < cache.index_keys.len():
+        if i as i64 != idx:
+            new_keys.push(cache.index_keys[i])
+            new_offsets.push(cache.index_offsets[i])
+            new_lengths.push(cache.index_lengths[i])
+        i = i + 1
+    TierCache(
+        arena_handle:  cache.arena_handle,
+        index_keys:    new_keys,
+        index_offsets: new_offsets,
+        index_lengths: new_lengths)

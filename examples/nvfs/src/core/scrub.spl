@@ -1,16 +1,18 @@
-# NVFS core — N4a background scrub pass (detect-only).
+# NVFS core — N4a background scrub pass (detect + repair).
 #
 # Walks every pmap sidecar entry, re-reads the arena bytes, recomputes the
-# checksum, and compares against the stored checksum.  Aggregates results into
-# a ScrubReport.  No self-heal — that arrives with N4b (RAID1/DUP).
+# checksum, and compares against the stored checksum.  When a bad block is
+# found, attempts repair from a reflink peer (another sidecar entry whose
+# stored checksum matches and whose live data still verifies).  Aggregates
+# results into a ScrubReport.
 #
 # Design: doc/05_design/nvfs_design_v2.md §14; N4a milestone.
-# FR-NVFS-N4a-001: Expose a public arena mutation API for fault injection beyond test scope.
+# FR-NVFS-N4a-001: Implemented — repair path added; detect + repair.
 
 use std.fs_driver.error.{FsError}
 use examples.nvfs.src.core.pmap.{pmap_entry_verify}
 use examples.nvfs.src.driver.fs_driver_impl.{PmapSidecarEntry, nvfs_pmap_sidecar_snapshot}
-use examples.nvfs.src.core.arena.{arena_readv_impl}
+use examples.nvfs.src.core.arena.{arena_readv_impl, arena_mutate_for_test}
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -22,13 +24,29 @@ struct ScrubReport:
     checked          — total entries examined.
     good             — entries whose checksum matched the arena data.
     corrupted        — entries whose checksum did NOT match.
+    repaired         — corrupted entries successfully restored from a peer.
     corrupted_arenas — arena_ids of all corrupted entries (may contain
                        duplicates if multiple ranges of the same arena fail).
     """
     checked:          u64
     good:             u64
     corrupted:        u64
+    repaired:         u64
     corrupted_arenas: [i64]
+
+# ---------------------------------------------------------------------------
+# RepairResult — outcome of a repair attempt for one bad block
+# ---------------------------------------------------------------------------
+
+struct RepairResult:
+    """Result of a scrub_repair_block call.
+
+    repaired     — true if the block was successfully restored from a peer.
+    source_arena — arena_id of the peer that supplied the good bytes, or -1
+                   if no peer was found (Unrepairable).
+    """
+    repaired:     bool
+    source_arena: i64
 
 struct ScrubOptions:
     """Tunables for a scrub pass.
@@ -54,6 +72,64 @@ impl Scrubber:
         Scrubber(_unused: false)
 
 # ---------------------------------------------------------------------------
+# scrub_repair_block — repair a bad block from a reflink peer
+# ---------------------------------------------------------------------------
+
+fn scrub_repair_block(bad_sc: PmapSidecarEntry) -> RepairResult:
+    """Attempt to repair a corrupted sidecar entry from a reflink peer.
+
+    Algorithm:
+      1. Snapshot all sidecar entries (same snapshot used by scrub_all caller).
+      2. For each peer entry, skip if it is the bad entry itself (same arena_id
+         and offset).
+      3. Read the peer's live bytes; if they verify against the peer's stored
+         checksum AND that checksum matches the bad entry's expected checksum,
+         copy the good bytes back into the bad location byte-by-byte via
+         arena_mutate_for_test.
+      4. Return Repaired(source_arena) on first successful repair.
+      5. If no peer found, return Unrepairable (source_arena = -1).
+
+    Note: META_DURABLE superblock/checkpoint replicas are not reachable from
+    this module without out-of-scope imports; the META_DURABLE fallback is
+    therefore not implemented in N4a — tracked as a follow-up in N4b.
+    """
+    val entries = nvfs_pmap_sidecar_snapshot()
+    val bad_checksum = bad_sc.entry.checksum
+
+    var i = 0
+    while i < entries.len() as i64:
+        val peer = entries[i]
+        # Skip the bad entry itself.
+        val same_arena  = peer.arena_id == bad_sc.arena_id
+        val same_offset = peer.offset   == bad_sc.offset
+        if not (same_arena and same_offset):
+            # Check peer's checksum matches the bad entry's expected checksum.
+            val peer_chk = peer.entry.checksum
+            var chk_match = peer_chk.len() == bad_checksum.len()
+            if chk_match:
+                var ci = 0
+                while ci < peer_chk.len() as i64:
+                    if peer_chk[ci] != bad_checksum[ci]:
+                        chk_match = false
+                    ci = ci + 1
+            if chk_match:
+                # Read peer's live bytes and verify they are good.
+                val peer_data = arena_readv_impl(peer.arena_id, peer.offset, peer.length)
+                if peer_data.len() > 0:
+                    val peer_ok = pmap_entry_verify(peer.entry, peer_data)
+                    if peer_ok:
+                        # Copy good bytes into the bad location.
+                        var bi = 0
+                        while bi < peer_data.len() as i64:
+                            val _ = arena_mutate_for_test(bad_sc.arena_id, bad_sc.offset + bi, peer_data[bi])
+                            bi = bi + 1
+                        return RepairResult(repaired: true, source_arena: peer.arena_id)
+        i = i + 1
+
+    # No valid peer found; META_DURABLE fallback deferred to N4b.
+    RepairResult(repaired: false, source_arena: -1)
+
+# ---------------------------------------------------------------------------
 # scrub_all — main entry point
 # ---------------------------------------------------------------------------
 
@@ -64,16 +140,18 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
       1. Snapshot the current sidecar (avoids iterator invalidation).
       2. For each entry, read its arena byte range via arena_readv_impl.
       3. Re-verify the stored PmapEntry checksum against the live bytes.
-      4. Increment good or corrupted counters accordingly.
-      5. If stop_after_first_error and corrupted > 0, return early.
+      4. If corrupt, attempt repair via scrub_repair_block (reflink peer scan).
+      5. Increment counters; if stop_after_first_error and corrupted > 0,
+         return early.
 
-    N4a: detect-only.  No repair.  Background-task mode is FR-NVFS-N4b-001.
+    N4a: detect + repair from reflink peers.  Background-task mode is N4b.
     """
     val entries = nvfs_pmap_sidecar_snapshot()
 
     var checked:          u64 = 0
     var good:             u64 = 0
     var corrupted:        u64 = 0
+    var repaired:         u64 = 0
     var corrupted_arenas: [i64] = []
 
     var i = 0
@@ -87,11 +165,15 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
         if data.len() == 0:
             corrupted = corrupted + 1
             corrupted_arenas.push(sc.arena_id)
+            val rr = scrub_repair_block(sc)
+            if rr.repaired:
+                repaired = repaired + 1
             if opts.stop_after_first_error:
                 return Ok(ScrubReport(
                     checked:          checked,
                     good:             good,
                     corrupted:        corrupted,
+                    repaired:         repaired,
                     corrupted_arenas: corrupted_arenas
                 ))
         else:
@@ -101,11 +183,15 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
             else:
                 corrupted = corrupted + 1
                 corrupted_arenas.push(sc.arena_id)
+                val rr2 = scrub_repair_block(sc)
+                if rr2.repaired:
+                    repaired = repaired + 1
                 if opts.stop_after_first_error:
                     return Ok(ScrubReport(
                         checked:          checked,
                         good:             good,
                         corrupted:        corrupted,
+                        repaired:         repaired,
                         corrupted_arenas: corrupted_arenas
                     ))
 
@@ -115,5 +201,6 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
         checked:          checked,
         good:             good,
         corrupted:        corrupted,
+        repaired:         repaired,
         corrupted_arenas: corrupted_arenas
     ))

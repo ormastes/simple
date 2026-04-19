@@ -174,3 +174,79 @@ describe "scrub — idempotency":
         expect(r1.checked).to_equal(r2.checked)
         expect(r1.good).to_equal(r2.good)
         expect(r1.corrupted).to_equal(r2.corrupted)
+
+# ---------------------------------------------------------------------------
+# Helpers for repair tests
+# ---------------------------------------------------------------------------
+
+fn _write_named_block(driver: NvfsDriver, name: text, content: [u8]) -> i64:
+    """Write content to a named file; return the arena_id."""
+    val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+    val path = Path(raw: name)
+    val handle_res = driver.open(path, flags)
+    val handle = handle_res.unwrap()
+    val _ = driver.write(handle, 0, content)
+    val st = driver.fstat(handle).unwrap()
+    val arena_id = st.inode as i64
+    val _ = driver.close(handle)
+    arena_id
+
+# ---------------------------------------------------------------------------
+# Test 7: repair — bad block with good reflink peer → repaired
+# ---------------------------------------------------------------------------
+
+describe "scrub — repair from reflink peer":
+    """Bad block with an identical-content peer is repaired."""
+
+    it "repaired count is 1 and corrupted is 1 when a good peer exists":
+        var d = _default_driver()
+        # Write the same content to two different files to create identical-checksum peers.
+        val content: [u8] = [0xCA, 0xFE, 0xBA, 0xBE]
+        val arena1 = _write_named_block(d, "/repair_peer_a", content)
+        val arena2 = _write_named_block(d, "/repair_peer_b", content)
+        # Corrupt only arena1; arena2 remains good.
+        val _ = arena_mutate_for_test(arena1, 0, 0x00)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        # At least one corruption must be detected.
+        expect(report.corrupted >= 1).to_equal(true)
+        # At least one repair must have been performed.
+        expect(report.repaired >= 1).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 8: repair — bad block with no peer → unrepairable
+# ---------------------------------------------------------------------------
+
+describe "scrub — unrepairable single block":
+    """Bad block with no peer returns repaired=0."""
+
+    it "repaired count is 0 when no good peer exists for the corrupted block":
+        var d = _default_driver()
+        # Write unique content so no peer with matching checksum exists.
+        val unique_content: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+        val arena_id = _write_named_block(d, "/repair_no_peer", unique_content)
+        val _ = arena_mutate_for_test(arena_id, 0, 0xFF)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.corrupted >= 1).to_equal(true)
+        # No peer exists, so the block is unrepairable (repaired may be 0).
+        # We verify repaired < corrupted to confirm at least one was unrepairable.
+        expect(report.repaired < report.corrupted).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 9: repair — corruption propagated to all peers → unrepairable
+# ---------------------------------------------------------------------------
+
+describe "scrub — unrepairable when all peers corrupted":
+    """When every copy of a block is corrupted, repair returns 0."""
+
+    it "repaired count is 0 when both arena copies are corrupted":
+        var d = _default_driver()
+        val content: [u8] = [0xDE, 0xAD, 0xC0, 0xDE]
+        val arena_a = _write_named_block(d, "/all_corrupt_a", content)
+        val arena_b = _write_named_block(d, "/all_corrupt_b", content)
+        # Corrupt both.
+        val _ = arena_mutate_for_test(arena_a, 0, 0x00)
+        val _ = arena_mutate_for_test(arena_b, 0, 0x00)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.corrupted >= 2).to_equal(true)
+        # All peers are corrupt so none can be repaired.
+        expect(report.repaired).to_equal(0)

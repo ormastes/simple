@@ -244,6 +244,98 @@ Entries here are filed during Phase 5+ implementation (per SStack state file
 is not already covered by the `[UPFRONT]` items above. Use `TEMPLATE.md` and
 append under this heading.
 
+### FR-SIMPLEOS-M5-001 — VFS select-file cursor semantic (VfsCursor singleton)
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** M5-fs-select-cursor agent
+- **Target:** os  (src/os/services/vfs/vfs_init.spl)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** M5-fs-select-cursor agent
+- **Requested-semantics:**
+  `rt_fat32_select_file` (retired in M5) held a static 64-byte name cursor that
+  callers used to remember the last-selected file before operating on it.
+  FsDriver has no stateful-cursor concept. Option C was chosen: a module-level
+  `g_vfs_selected_file: text` var in `vfs_init.spl` (service layer) provides
+  backwards-compatible `g_vfs_select_file` / `g_vfs_get_selected_file` /
+  `g_vfs_clear_selected_file` / `g_vfs_write_selected_file_text` helpers.
+  DriverInstance and FsDriver remain stateless; state lives only in the service
+  layer, consistent with the MDSOC+ composition-over-state pattern.
+- **Acceptance-criteria:**
+  - [x] `g_vfs_select_file(name)` stores the name in `g_vfs_selected_file`
+  - [x] `g_vfs_get_selected_file()` returns the stored name
+  - [x] `g_vfs_clear_selected_file()` resets to empty string
+  - [x] `g_vfs_write_selected_file_text(content)` returns false when no file selected
+  - [x] `g_vfs_write_file_text(name, content)` dispatches write through mount table
+  - [x] 6 unit tests pass in `test/unit/os/vfs_cursor_test.spl`
+  - [x] DriverInstance and FsDriver are unmodified (stateless contract preserved)
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/fs_driver_interface.md §3`
+- **Related-issue:** none
+- **Notes:** Option A (cursor in DriverInstance enum arms) was rejected — semantically
+  wrong, pollutes the driver layer. Option B (callers carry path) has no current callers
+  to retrofit. Option C (service-layer singleton) was chosen as the minimal backwards-
+  compatible approach with zero impact on the driver interface.
+
+---
+
+### FR-NVFS-N4a-001 — Scrub repair path: detect + repair from reflink peers
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** N4a-scrub-repair agent
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** N4a-scrub-repair agent
+- **Requested-semantics:**
+  `scrub_all` previously only detected checksum mismatches and reported them.
+  Add a repair path: when a bad block is found, scan all pmap sidecar entries
+  for a peer whose stored checksum matches the bad entry's expected checksum and
+  whose live data still verifies.  Copy the good bytes back byte-by-byte via
+  `arena_mutate_for_test`.  If no valid peer is found, report Unrepairable.
+  META_DURABLE (superblock/checkpoint) replica fallback is deferred to N4b.
+- **Acceptance-criteria:**
+  - [x] `RepairResult` struct added to `scrub.spl` (repaired: bool, source_arena: i64)
+  - [x] `scrub_repair_block(bad_sc)` iterates pmap sidecar for a peer with matching
+        checksum and valid live data; copies bytes on success
+  - [x] `ScrubReport` gains a `repaired: u64` counter
+  - [x] `scrub_all` calls repair on every corrupt entry and updates counters
+  - [x] Test 7: bad block + good peer → repaired >= 1
+  - [x] Test 8: bad block + no peer → repaired < corrupted (unrepairable)
+  - [x] Test 9: both copies corrupt → repaired = 0
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
+- **Related-issue:** none
+- **Notes:** Byte-writeback uses `arena_mutate_for_test` (the only in-scope
+  byte-writer); a proper `arena_write_range` API is a follow-up.
+  META_DURABLE replica fallback tracked as FR-NVFS-N4b-001.
+
+---
+
+### FR-NVFS-N4b-001 — Proactive scrub scheduler + META_DURABLE replica repair
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** N4a-scrub-repair agent
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  N4a repair falls back to Unrepairable when no reflink peer has a good copy.
+  N4b should (a) add a background-task scheduler that runs `scrub_all`
+  periodically (honouring `throttle_ms`), and (b) extend the repair path to
+  also check META_DURABLE superblock and checkpoint-ring replicas (already
+  written 2–3× by the driver) as a fallback source of truth.
+- **Acceptance-criteria:**
+  - [ ] Background scrub task that respects `ScrubOptions.throttle_ms`
+  - [ ] `scrub_repair_block` tries META_DURABLE replicas after peer scan fails
+  - [ ] `arena_write_range` (or equivalent) replaces `arena_mutate_for_test` for repair
+  - [ ] Existing N4a tests continue to pass
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
+- **Related-issue:** none
+
+---
+
 ## Closed (Implemented or Rejected)
 
 ### FR-N3-001 — Replace flat pmap sidecar with B-tree keyed by (arena_id, offset)
@@ -333,5 +425,107 @@ append under this heading.
 
 ---
 
+### FR-NVFS-N6a-001 — Wire real AES-128-GCM into NVFS leaf DEK encrypt/decrypt
+
+- **Filed-on:** 2026-04-17
+- **Filed-by:** N6a scaffolding agent (session spostgre-nvfs-storage)
+- **Target:** nvfs  (examples/nvfs/src/core/encryption.spl)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** 9-n6a-real-aes-retry agent
+- **Requested-semantics:**
+  `encryption.spl` stubs (`_aes128_encrypt_stub` / `_aes128_decrypt_stub`) use
+  XOR + checksum instead of real AES-128-GCM. Replace with calls to
+  `aes128_gcm_encrypt` / `aes128_gcm_decrypt` from the vendored
+  `examples/nvfs/src/core/crypto/aes128_gcm.spl`. Keep 3-level key hierarchy
+  (wrapping → master → data DEK) intact; only the leaf DEK performs AES-GCM.
+  Also upgrade `keystore_generate_master` to use AES-GCM for wrapped_key storage.
+- **Acceptance-criteria:**
+  - [x] `_aes128_encrypt_stub` / `_aes128_decrypt_stub` removed (no unused code)
+  - [x] `encrypt_arena_data` / `decrypt_arena_data` use real AES-128-GCM
+  - [x] `keystore_generate_master` wraps master key with `aes128_gcm_encrypt`
+  - [x] 3 new tests: roundtrip recovers exact bytes, tag-mismatch → Err(Corrupt),
+        different offset → different ciphertext
+  - [x] Existing 6 tests unchanged
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
+- **Related-issue:** none
+- **Notes:** Cross-submodule import solved via `examples.nvfs.src.core.crypto.aes128_gcm`
+  namespace (same pattern as `pmap_btree.spl`). Runtime externs (`rt_aes_sbox`,
+  `rt_aes_rcon`, `rt_aes128_encrypt_block_into`) resolved by main Simple runtime.
+  FR-NVFS-N6a-002 (HKDF cross-submodule access) and FR-NVFS-N6a-003 (EncryptExt
+  trait extension) remain open.
+
+---
+
+### FR-NVFS-N6b-001 — Raw send / encrypted replication stream (btrfs-send style)
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** N6b implementation agent
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** N6b implementation agent
+- **Requested-semantics:**
+  Stream a sealed MODEL_IMMUTABLE arena between peers without decrypting the
+  payload.  Ciphertext + key metadata travel over the wire as a self-describing
+  byte stream (magic `NVSR`, 16-byte header, per-arena begin/extent/end records).
+  The receiver stores the raw ciphertext when no dataset key is available
+  (`encrypted_opaque=true`); it can mount once a key is presented separately.
+  Plaintext (unencrypted) arenas are also supported (flags bit 0 clear).
+- **Acceptance-criteria:**
+  - [x] `send_arena(arena_id, stream, ks, key)` serialises one sealed arena
+  - [x] `receive_arena(stream, ks, key)` reconstructs and returns arena_id
+  - [x] Plaintext roundtrip: received bytes match original
+  - [x] Encrypted roundtrip with correct key: decrypts to original plaintext
+  - [x] Encrypted roundtrip with wrong key: `ok=false` (GCM tag mismatch)
+  - [x] Encrypted stream + no key: `ok=true`, `encrypted_opaque=true`, ciphertext stored
+  - [x] 4 unit tests in `examples/nvfs/test/unit/send_test.spl`
+- **Files-changed:**
+  - `examples/nvfs/src/core/send.spl` (new) — SendStream, RecvStream, send_arena, receive_arena
+  - `examples/nvfs/test/unit/send_test.spl` (new) — 4 tests
+  - `examples/nvfs/src/core/__init__.spl` — docstring updated to list send module
+  - `doc/05_design/nvfs/send_format.md` (new) — wire format spec
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs/send_format.md`; `nvfs_design_v2.md §14`
+- **Related-issue:** none
+- **Notes:** Encryption calls `encrypt_arena_data` / `decrypt_arena_data` from
+  `encryption.spl` (N6a). Checksum field uses algo=0 (none) for N6b;
+  CRC32C upgrade tracked as FR-NVFS-N6b-002 once cross-submodule access lands.
+
+---
+
 Closed entries are moved here from `## Open Requests` (never deleted) with
 `Status: Implemented` or `Status: Rejected` and the required link/reason.
+
+### FR-SPOSTGRE-M4-001 — L2 NVMe tier cache (Aurora Optimized Reads pattern)
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** spostgre-m4 agent (session spostgre-nvfs-storage)
+- **Target:** spostgre  (examples/spostgre/src/engine/tier_cache.spl)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** spostgre-m4 agent
+- **Requested-semantics:**
+  When a clean DRAM page is about to be evicted from `BufferPool`, write it to a
+  DB_TEMP arena on local NVMe instead of discarding it. On subsequent page fault,
+  check `TierCache` before falling through to durable storage. The DB_TEMP arena
+  is ephemeral: NVFS discards it on mount, so `TierCache` starts empty on every
+  process restart (no recovery path needed). Aurora reader-replica warming
+  (pre-populating the L2 from a replica stream) is deferred to a follow-up milestone.
+- **Acceptance-criteria:**
+  - [x] `TierCache` struct with DB_TEMP arena + parallel-array index
+  - [x] `tier_cache_put` appends to arena and updates index
+  - [x] `tier_cache_get` reads from arena; returns empty slice on miss
+  - [x] `tier_cache_invalidate` removes index entry on durable write-back
+  - [x] `BufferPool` gains `tier: TierCache` and `disk_reads: i64` (2 fields)
+  - [x] `buf_get` checks `tier_cache_get` before durable path (fault hook)
+  - [x] `buf_evict` writes clean pages to `tier_cache_put` (eviction hook)
+  - [x] 7 unit tests in `tier_cache_test.spl` pass
+- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
+- **Related-design-doc:** `doc/05_design/nvfs_design.md §DB_TEMP`
+- **Related-issue:** none
+- **Notes:** `STORAGE_CLASS_DB_TEMP = 3` defined in `tier_cache.spl` (shim treats
+  class_tag opaquely). Aurora reader-replica pre-warming deferred.

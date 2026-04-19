@@ -445,6 +445,98 @@ pub fn g_vfs_file_size(name: text) -> i64:
     val relpath = Path(raw: rel_raw)
     g_vfs_dispatch_file_size(entry.driver, relpath)
 
+# ============================================================================
+# VFS Select-File Cursor (FR-SIMPLEOS-M5-001, Option C)
+# ============================================================================
+#
+# Replaces rt_fat32_select_file's static 64-byte name cursor.
+# State lives here (service layer), NOT in DriverInstance — drivers stay
+# stateless per the MDSOC+ composition-over-state contract.
+#
+# Usage:
+#   g_vfs_select_file("HELLO.TXT")            # remember name
+#   g_vfs_write_selected_file_text("content") # write to remembered name
+#   g_vfs_clear_selected_file()               # reset cursor
+
+var g_vfs_selected_file: text = ""
+
+pub fn g_vfs_select_file(name: text):
+    """Set the VFS cursor to name (bare FAT32 name or absolute path).
+
+    Analogous to the retired rt_fat32_select_file semantics.
+    The name is stored as-is; g_vfs_write_selected_file_text uses it
+    as the destination path.
+    """
+    g_vfs_selected_file = name
+
+pub fn g_vfs_get_selected_file() -> text:
+    """Return the currently selected file name, or empty string if none."""
+    g_vfs_selected_file
+
+pub fn g_vfs_clear_selected_file():
+    """Clear the VFS file cursor."""
+    g_vfs_selected_file = ""
+
+pub fn g_vfs_write_selected_file_text(content: text) -> bool:
+    """Write content to the currently selected file via the mount table.
+
+    Returns true on success, false if no file is selected or write fails.
+    Analogous to the retired rt_fat32_write_selected_file_text semantics.
+    """
+    if g_vfs_selected_file == "":
+        return false
+    g_vfs_write_file_text(g_vfs_selected_file, content)
+
+pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
+    """Write content as UTF-8 text to name via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Returns true on success, false on any error.
+    """
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    g_vfs_dispatch_write_file_text(entry.driver, relpath, content)
+
+fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content: text) -> bool:
+    """Dispatch write-whole-file-as-text to the correct concrete driver.
+
+    All four DriverInstance arms are covered to satisfy exhaustive match.
+    Only Fat32 is implemented; others return false (not yet supported).
+    """
+    match driver:
+        case Fat32(d):
+            val flags = OpenFlags.read_write()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return false
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i32 = 0
+            while i < content.len():
+                buf.push(str_char_at(content, i.to_i64()).to_u8())
+                i = i + 1
+            val write_r = d.write(handle, 0, buf)
+            d.close(handle)
+            write_r.is_ok()
+        case Nvfs(_):
+            false
+        case NvfsPosix(_):
+            false
+        case RamFs(_):
+            false
+
 pub fn g_vfs_file_exists(name: text) -> bool:
     """Check file existence via the mount table.
 

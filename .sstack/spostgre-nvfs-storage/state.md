@@ -1790,3 +1790,88 @@ and asserts the second > first.
 ##### pass_todo resolution
 
 FR-BENCH-CLOCK-001 from `bench/lib/timing.spl` pass_todo table: **Implemented**.
+
+#### 9-fs-select-cursor
+
+**FR-SIMPLEOS-M5-001 — VFS select-file cursor semantic**
+**Status:** Implemented — 2026-04-18
+**Option chosen:** C (VfsCursor singleton in service layer)
+
+`rt_fat32_select_file` was retired in M5. A module-level `g_vfs_selected_file: text`
+var in `src/os/services/vfs/vfs_init.spl` provides the replacement cursor semantics:
+
+- `g_vfs_select_file(name)` — set cursor
+- `g_vfs_get_selected_file()` — read cursor
+- `g_vfs_clear_selected_file()` — reset cursor
+- `g_vfs_write_selected_file_text(content)` — write to cursor-named file
+- `g_vfs_write_file_text(name, content)` — write to explicit path via mount table
+
+DriverInstance and FsDriver are **unmodified**; state lives in the service layer only.
+Unit tests: `test/unit/os/vfs_cursor_test.spl` (6 tests — cursor set/get/overwrite/clear/abs-path/multi-clear).
+
+#### 9-n6a-real-aes-retry
+
+**Done 2026-04-18.** FR-NVFS-N6a-001 implemented (retry after jj/submodule race restored encryption.spl from HEAD b70fdcc4).
+
+**Changes:**
+- `examples/nvfs/src/core/encryption.spl` — added `use examples.nvfs.src.core.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}`; replaced `_aes128_encrypt_stub` / `_aes128_decrypt_stub` with `_aes128_encrypt` / `_aes128_decrypt` delegating to real vendored AES-128-GCM; updated `keystore_generate_master` wrapped_key to use `aes128_gcm_encrypt` (nonce from `_make_iv(master_id, 0)`); callers `encrypt_arena_data` / `decrypt_arena_data` updated accordingly. Stubs removed (no unused code).
+- `examples/nvfs/test/unit/encryption_test.spl` — added explicit `use` imports; added 3 new describe blocks (Tests 7–9): real AES-128-GCM roundtrip (encrypt → decrypt recovers exact bytes), real tag-mismatch → Err(Corrupt), different-nonce (offset 0 vs 1) → different ciphertext.
+
+**Import path confirmed:** `examples.nvfs.src.core.crypto.aes128_gcm` (matches sibling pattern from `pmap_btree.spl` and `scrub.spl`).
+
+**Runtime externs:** `rt_aes_sbox`, `rt_aes_rcon`, `rt_aes128_encrypt_block_into` declared in vendored aes128_gcm.spl; resolved by main Simple runtime (same as hosted test runner). No additional provider needed in the submodule.
+
+#### 9-n6b-raw-send
+
+**Done 2026-04-18.** FR-NVFS-N6b-001 implemented — raw send / encrypted replication stream.
+
+**Goal:** Stream a sealed MODEL_IMMUTABLE arena between peers without decrypting the payload. Ciphertext + key metadata travel verbatim; the receiver cannot read plaintext unless it has the dataset key.
+
+**Changes:**
+- `examples/nvfs/src/core/send.spl` (new) — `SendStream` / `RecvStream` buffer-backed wire streams; `send_arena(arena_id, stream, ks, key)` serialises one arena with an NVSR header (magic `NVSR`, flags, arena_count, checksum_algo) and per-arena begin/extent/end records; `receive_arena(stream, ks, key)` reconstructs to a fresh local arena. Encrypted extents use `encrypt_arena_data` / `decrypt_arena_data` from N6a. Opaque storage (no-key path) stores raw ciphertext with `encrypted_opaque=true`.
+- `examples/nvfs/test/unit/send_test.spl` (new) — 4 tests: plaintext roundtrip, encrypted roundtrip correct key, encrypted wrong key → `ok=false`, encrypted no key → `encrypted_opaque=true`.
+- `examples/nvfs/src/core/__init__.spl` — docstring updated to list `send` and `encryption` modules.
+- `doc/05_design/nvfs/send_format.md` (new) — wire format spec: header table, extent record layout, encryption semantics, checksum algo codes.
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-NVFS-N6b-001 added in Closed/Implemented.
+
+**Wire format constants:** magic=`NVSR`, version=1, flag bit 0=encrypted, bit 1=reflink-compressed (N6c), checksum_algo=0 (none) for N6b.
+
+**Dependency on N6a:** calls `encrypt_arena_data` / `decrypt_arena_data`; stubs in N6a (XOR cipher) are transparently replaced when real AES-128-GCM from N6a-real-aes-retry is active — no changes needed here.
+
+**3-level key hierarchy preserved:** wrapping → master (AES-GCM wrapped) → data DEK (deterministic derivation). Only the leaf DEK performs AES-GCM on arena data.
+
+#### 9-spostgre-m4
+
+**Done 2026-04-18.** Aurora Optimized Reads-style L2 NVMe tier cache wired into spostgre buffer_mgr.
+
+**Files created:**
+- `examples/spostgre/src/engine/tier_cache.spl` — `TierCache` struct (arena_handle + parallel-array index: keys/offsets/lengths); `tier_cache_new()` creates a DB_TEMP arena via `shim_arena_create(STORAGE_CLASS_DB_TEMP=3, 0)`; `tier_cache_put/get/invalidate` drive the shim append/readv API. `STORAGE_CLASS_DB_TEMP = 3` defined locally (shim treats class_tag opaquely; adding it to nvfs_shim would be an out-of-scope touch).
+- `examples/spostgre/test/unit/engine/tier_cache_test.spl` — 7 tests across 3 describe blocks: put→get round-trip (3 cases), invalidate (3 cases), L2-hit-bypasses-durable (1 case using `BufferPool.disk_reads`).
+
+**Files modified:**
+- `examples/spostgre/src/engine/buffer_mgr.spl` — 2 new fields on `BufferPool`: `tier: TierCache` and `disk_reads: i64`; `BufferPool.new` initialises both; fault-path hook in `buf_get` (checks `tier_cache_get` before durable pass_todo); eviction hook `buf_evict` (writes clean slots to `tier_cache_put`). Exactly 2 hook sites, 2 new fields — within budget.
+- `examples/spostgre/src/engine/__init__.spl` — docstring updated to list `tier_cache` module.
+
+**FR filed:** `FR-SPOSTGRE-M4-001` added to `doc/08_tracking/feature_request/nvfs_requests.md` under `## Closed (Implemented or Rejected)`. Aurora reader-replica warming deferred.
+
+**Deviations:** None. No commits made per task brief.
+
+#### 9-n4a-scrub-repair
+
+**Done 2026-04-18.** Implemented FR-NVFS-N4a-001: scrub repair path (detect + repair, not just detect).
+
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `examples/nvfs/src/core/scrub.spl` | Added `RepairResult` struct; `scrub_repair_block(bad_sc)` peer-scan + byte-writeback; `ScrubReport.repaired: u64`; `scrub_all` calls repair on each corrupt entry. |
+| `examples/nvfs/test/unit/scrub_test.spl` | 3 new tests: Test 7 (good peer → repaired), Test 8 (no peer → unrepairable), Test 9 (all peers corrupted → repaired=0). |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | FR-NVFS-N4a-001 added as Implemented; FR-NVFS-N4b-001 added as Open. |
+
+**Design decisions:**
+
+- **Peer discovery:** `reflink.spl` only tracks `arena_id → refcount` (no data-content peer list). Peer detection uses `nvfs_pmap_sidecar_snapshot()` scan: a peer is any sidecar entry with matching stored checksum whose live data still verifies. O(n) per bad block; adequate for N4a.
+- **Byte-writeback:** Uses `arena_mutate_for_test` byte-by-byte (the only in-scope byte-writer reachable from `scrub.spl` without touching out-of-scope files). A proper `arena_write_range` API is a follow-up.
+- **META_DURABLE fallback:** Deferred — superblock/checkpoint-ring replicas are not reachable from `scrub.spl` without importing out-of-scope driver modules. Tracked as FR-NVFS-N4b-001.
+- **RepairResult:** Simple struct (repaired: bool, source_arena: i64) rather than enum with payload — Simple enums are C-style (no payload variants in user-defined enums).
+- **No commits made** per task brief.

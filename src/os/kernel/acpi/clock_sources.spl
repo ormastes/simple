@@ -1,0 +1,175 @@
+# ACPI Clock Source Discovery — FR-BENCH-CLOCK-002
+#
+# Helpers to locate HPET MMIO base and PMTMR port from ACPI tables.
+#
+# Status: STUB — ACPI table parsing infrastructure does not yet exist in
+#   SimpleOS. The boot layer (limine_boot.spl) captures the RSDP physical
+#   address in BootOutputPort.rsdp_addr but no code walks RSDP → RSDT/XSDT.
+#   See FR-SIMPLEOS-ACPI-001 for the blocking prerequisite.
+#
+# When FR-SIMPLEOS-ACPI-001 is implemented:
+#   1. Call acpi_set_rsdp(phys_addr) early in kernel init with the address
+#      from BootOutputPort.rsdp_addr.
+#   2. acpi_hpet_present() walks RSDP → RSDT/XSDT → HPET signature table
+#      and returns the EventTimerBlockID.BaseAddress (MMIO u64).
+#   3. acpi_pmtmr_port() walks RSDP → FADT (signature "FACP") → PM_TMR_BLK
+#      field (u32 port I/O address).
+#
+# Usage by timer.spl:
+#   use os.kernel.acpi.clock_sources.{acpi_hpet_present, acpi_pmtmr_port,
+#       acpi_set_rsdp}
+#
+# MMIO access uses os.kernel.boot.mmio.{mmio_read32, mmio_read64} (volatile).
+# Port I/O uses std.baremetal.x86.io.{inb}.
+
+use std.baremetal.x86.io.{inb}
+use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
+
+# ============================================================================
+# RSDP global — set once at kernel init from BootOutputPort.rsdp_addr
+# ============================================================================
+
+# Physical address of RSDP (0 = not set / unavailable)
+var g_rsdp_phys: u64 = 0
+
+fn acpi_set_rsdp(phys: u64):
+    """Record the RSDP physical address provided by the bootloader.
+
+    Must be called before acpi_hpet_present() or acpi_pmtmr_port().
+    Typically called in the arch kernel-init path after parsing BootOutputPort.
+    """
+    g_rsdp_phys = phys
+
+fn acpi_rsdp_available() -> bool:
+    """Return true if a valid RSDP address has been registered."""
+    g_rsdp_phys != 0
+
+# ============================================================================
+# ACPI table signatures (4-byte ASCII as u32, little-endian)
+# ============================================================================
+
+# "HPET" = 0x54455048
+val ACPI_SIG_HPET: u32 = 0x54455048
+# "FACP" (FADT) = 0x50434146
+val ACPI_SIG_FACP: u32 = 0x50434146
+# "RSDT" = 0x54445352
+val ACPI_SIG_RSDT: u32 = 0x54445352
+# "XSDT" = 0x54445358
+val ACPI_SIG_XSDT: u32 = 0x54445358
+
+# ============================================================================
+# ACPI HPET discovery
+# ============================================================================
+
+fn acpi_hpet_present() -> u64?:
+    """Return HPET MMIO base address if the HPET ACPI table is present.
+
+    STUB: Returns nil until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is
+    implemented. The logic below describes the intended implementation:
+
+    Walk: RSDP → check revision
+      - revision 0 (ACPI 1.0): use RSDT (32-bit entry pointers)
+        RSDT at RSDP+16 (u32), entry count = (header.length - 36) / 4
+      - revision >= 2: prefer XSDT (64-bit entry pointers)
+        XSDT at RSDP+24 (u64), entry count = (header.length - 36) / 8
+
+    For each table entry pointer, read the 4-byte signature (first u32).
+    If signature == ACPI_SIG_HPET:
+      HPET table layout (per ACPI spec §5.2.12 and HPET spec §3.2.4):
+        Offset 0  : signature  (4 bytes)
+        Offset 4  : length     (4 bytes)
+        Offset 8  : revision   (1 byte)
+        Offset 36 : EventTimerBlockID (8 bytes, u64)
+        Offset 44 : BaseAddress (GAS structure, 12 bytes total)
+          - address_space_id (1 byte, 0=system memory)
+          - bit_width        (1 byte)
+          - bit_offset       (1 byte)
+          - access_size      (1 byte)
+          - address          (8 bytes, u64) ← HPET MMIO base
+
+    Return address at (hpet_table_virt + 44 + 4).
+
+    Prerequisite: phys_to_virt() mapping (HHDM) must be established before
+    this is called. Use the HHDM offset from BootOutputPort to convert.
+    """
+    # STUB — ACPI table walk not yet implemented
+    # Blocked on FR-SIMPLEOS-ACPI-001
+    nil
+
+# ============================================================================
+# ACPI PMTMR (PM Timer) port discovery
+# ============================================================================
+
+fn acpi_pmtmr_port() -> u32?:
+    """Return PMTMR I/O port if discoverable via ACPI FADT.
+
+    STUB: Returns nil until FR-SIMPLEOS-ACPI-001 is implemented.
+
+    Intended implementation:
+    Walk RSDP → RSDT/XSDT → find table with signature ACPI_SIG_FACP (FADT).
+    FADT layout (ACPI spec §5.2.9):
+      Offset 76 : PM_TMR_BLK (u32) — I/O port base for ACPI PM timer
+      Offset 112: X_PM_TMR_BLK (GAS, 12 bytes) — extended (ACPI 2.0+)
+
+    PMTMR is a 24-bit counter at 3.579545 MHz (3,579,545 Hz).
+    Port returns a 32-bit value; only the low 24 bits are the counter
+    (bit 23 rollover at 0x00FFFFFF ≈ 4.688 seconds).
+
+    For ACPI 2.0+ (FADT revision ≥ 3 and length ≥ 148): prefer
+    X_PM_TMR_BLK.address if address_space_id == 1 (I/O space).
+    Otherwise fall back to PM_TMR_BLK (u32 at offset 76).
+    """
+    # STUB — ACPI table walk not yet implemented
+    # Blocked on FR-SIMPLEOS-ACPI-001
+    nil
+
+# ============================================================================
+# PMTMR read helper (port I/O, 32-bit, 24-bit counter)
+# ============================================================================
+
+val PMTMR_MASK: u32 = 0x00FFFFFF   # 24-bit counter mask
+val PMTMR_FREQ: u64 = 3579545      # Hz (exactly 3.579545 MHz)
+
+fn pmtmr_read(port: u32) -> u32:
+    """Read PMTMR counter from I/O port (24-bit masked)."""
+    # The PMTMR is a 32-bit port read; low 24 bits are the timer value.
+    # Some implementations extend to 32 bits; masking is always safe.
+    val raw = inb(port as i32) as u32
+    raw & PMTMR_MASK
+
+fn pmtmr_read32(port: u32) -> u32:
+    """Read all 32 bits of PMTMR — some platforms extend to 32-bit counter."""
+    inb(port as i32) as u32
+
+# ============================================================================
+# HPET read helper (MMIO, 64-bit counter at offset 0xF0)
+# ============================================================================
+
+# HPET register offsets (from MMIO base)
+val HPET_REG_GCAP:    u64 = 0x000   # General Capabilities and ID
+val HPET_REG_GCONF:   u64 = 0x010   # General Configuration
+val HPET_REG_COUNTER: u64 = 0x0F0   # Main Counter Value
+
+fn hpet_read_counter(hpet_virt: u64) -> u64:
+    """Read HPET main 64-bit counter from MMIO base (virtual address).
+
+    The HPET must be enabled (bit 0 of GCONF set) before reading.
+    """
+    mmio_read64(hpet_virt + HPET_REG_COUNTER)
+
+fn hpet_read_capabilities(hpet_virt: u64) -> u64:
+    """Read HPET General Capabilities register.
+
+    Bits 63:32 = COUNTER_CLK_PERIOD (femtoseconds per tick, u32).
+    Bits 12:8  = NUM_TIM_CAP (number of timers minus one).
+    Bit  13    = COUNT_SIZE_CAP (1 = 64-bit counter, 0 = 32-bit).
+    """
+    mmio_read64(hpet_virt + HPET_REG_GCAP)
+
+fn hpet_enable(hpet_virt: u64):
+    """Enable HPET main counter (set bit 0 of General Configuration)."""
+    # Read current config (64-bit register, use mmio_read64)
+    val conf = mmio_read64(hpet_virt + HPET_REG_GCONF)
+    # Set ENABLE_CNF (bit 0) — only modify bit 0 to avoid disturbing legacy replacement
+    use os.kernel.boot.mmio.{mmio_write64}
+    mmio_write64(hpet_virt + HPET_REG_GCONF, conf | 1)
