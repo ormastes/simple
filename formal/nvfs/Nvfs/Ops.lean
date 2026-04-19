@@ -23,6 +23,8 @@ structure ArenaCreateArgs where
 def arena_create (s : FsState) (args : ArenaCreateArgs) : Except FsError FsState :=
   if s.arenas.any (fun ar => ar.id == args.id) then
     Except.error FsError.arenaNotFound  -- id reuse: treat as lookup failure
+  else if s.snapshots.any (fun sn => sn.pinned.contains args.id) then
+    Except.error FsError.arenaNotFound  -- snapshot already pins this id: freshness violation
   else
     let ar : Arena := {
       id := args.id, class_ := args.class_, durability := args.durability,
@@ -77,7 +79,8 @@ def arena_seal (s : FsState) (id : ArenaId) : Except FsError FsState :=
 
 /-! ### arena_discard -/
 
-/-- Discard only if refcount = 0 AND no snapshot pins the arena. -/
+/-- Discard only if refcount = 0 AND no snapshot pins the arena AND it is
+not one of the active checkpoint roots (I7 preservation). -/
 def arena_discard (s : FsState) (id : ArenaId) : Except FsError FsState :=
   match s.findArena id with
   | none => Except.error FsError.arenaNotFound
@@ -86,6 +89,10 @@ def arena_discard (s : FsState) (id : ArenaId) : Except FsError FsState :=
       Except.error FsError.arenaStillReferenced
     else if s.snapshots.any (fun sn => sn.pinned.contains id) then
       Except.error FsError.snapshotPinsArena
+    else if decide (id = s.activeRoot.inodeRoot)
+         || decide (id = s.activeRoot.extentRoot)
+         || decide (id = s.activeRoot.allocRoot) then
+      Except.error FsError.arenaStillReferenced
     else
       let ar' := { ar with discarded := true }
       Except.ok { s with
@@ -102,13 +109,17 @@ structure CloneRangeArgs where
   checksum : Checksum
 
 /-- Create a reflink: install a new `shared` pmap entry and bump the
-source arena's refcount. -/
+source arena's refcount.  Rejects if any existing entry at the same
+`(phys, offset)` is non-shared (I8 preservation). -/
 def arena_clone_range (s : FsState) (args : CloneRangeArgs)
     : Except FsError FsState :=
   match s.findArena args.src with
   | none => Except.error FsError.arenaNotFound
   | some ar =>
     if ar.discarded then Except.error FsError.alreadyDiscarded
+    else if s.pmap.any (fun e =>
+              e.phys == args.src && decide (e.offset = args.offset) && !e.shared) then
+      Except.error FsError.arenaNotFound  -- non-shared entry at (phys,offset): I8 violation
     else
       let e : PmapEntry := {
         logical := args.dstLogical, phys := args.src,
@@ -131,12 +142,16 @@ structure PmapPublishArgs where
   checksum : Checksum
 
 /-- Publish a new pmap entry — only legal if the matching WAL record is
-already durable (I5). -/
+already durable (I5) and no existing entry occupies `(phys, offset)`
+(I8 preservation for non-shared entries). -/
 def pmap_publish (s : FsState) (args : PmapPublishArgs) : Except FsError FsState :=
   if !(s.wal.any (fun r =>
         decide (r.op = WalOp.pmapPublish) && decide (r.birthGen = args.birthGen)
           && decide (r.lsn ≤ s.durableLsn))) then
     Except.error FsError.publishBeforeDurable
+  else if s.pmap.any (fun e =>
+            e.phys == args.phys && decide (e.offset = args.offset)) then
+    Except.error FsError.arenaNotFound  -- conflicting (phys,offset): I8 violation
   else
   match s.findArena args.phys with
   | none => Except.error FsError.arenaNotFound

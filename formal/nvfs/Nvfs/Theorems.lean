@@ -119,40 +119,55 @@ theorem I10_frame {s s' : FsState}
 
 /-! ## `arena_create` -/
 
+/-! ### Helper: unfold `arena_create` guard structure.
+
+`arena_create` now has two error guards before the `Except.ok`:
+1. id already in `arenas` → error
+2. id already pinned by a snapshot → error
+All per-invariant theorems share the same three-way split. -/
+
+private theorem arena_create_ok_elim
+    {s : FsState} {args : ArenaCreateArgs} {s' : FsState}
+    (hok : arena_create s args = Except.ok s') :
+    ¬ s.arenas.any (fun ar => ar.id == args.id) = true ∧
+    ¬ s.snapshots.any (fun sn => sn.pinned.contains args.id) = true ∧
+    s' = { s with arenas :=
+      { id := args.id, class_ := args.class_, durability := args.durability,
+        sealed := false, discarded := false, bytes := [],
+        genCreated := s.currentGen, refcount := 0 } :: s.arenas } := by
+  unfold arena_create at hok
+  split at hok
+  · exact absurd hok (by simp)
+  · rename_i hnodup
+    split at hok
+    · exact absurd hok (by simp)
+    · rename_i hnosnap
+      injection hok with hst
+      exact ⟨hnodup, hnosnap, hst.symm⟩
+
 theorem arena_create_preserves_I2
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I2_sealMonotonic s) : I2_sealMonotonic s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · intro ar har
-    injection hok with hst
-    subst hst
-    simp only [List.mem_cons] at har
-    rcases har with rfl | hmem
-    · intro hsealed; simp at hsealed
-    · exact h ar hmem
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok
+  subst hst
+  intro ar har
+  simp only [List.mem_cons] at har
+  rcases har with rfl | hmem
+  · intro hsealed; simp at hsealed
+  · exact h ar hmem
 
 theorem arena_create_preserves_I6
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I6_superblockOneValid s) : I6_superblockOneValid s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    exact h
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst; exact h
 
 theorem arena_create_preserves_I4
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I4_walLsnMonotonic s) : I4_walLsnMonotonic s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    exact h
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst; exact h
 
 /-- I1 for `arena_create`: existing pmap entries still point at live
 arenas — prepending a fresh arena only adds liveness. -/
@@ -160,111 +175,123 @@ theorem arena_create_preserves_I1
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I1_pmapEntriesLive s) : I1_pmapEntriesLive s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    intro e he
-    have := h e he
-    unfold FsState.arenaLive at *
-    rw [List.any_cons, this, Bool.or_true]
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst
+  intro e he
+  have := h e he
+  unfold FsState.arenaLive at *
+  rw [List.any_cons, this, Bool.or_true]
 
 /-- I7 for `arena_create`. -/
 theorem arena_create_preserves_I7
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I7_checkpointRootsConsistent s) : I7_checkpointRootsConsistent s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    unfold I7_checkpointRootsConsistent FsState.activeRoot FsState.arenaLive at *
-    refine ⟨?_, ?_, ?_⟩
-    · rw [List.any_cons, h.1, Bool.or_true]
-    · rw [List.any_cons, h.2.1, Bool.or_true]
-    · rw [List.any_cons, h.2.2, Bool.or_true]
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst
+  unfold I7_checkpointRootsConsistent FsState.activeRoot FsState.arenaLive at *
+  refine ⟨?_, ?_, ?_⟩
+  · rw [List.any_cons, h.1, Bool.or_true]
+  · rw [List.any_cons, h.2.1, Bool.or_true]
+  · rw [List.any_cons, h.2.2, Bool.or_true]
 
 theorem arena_create_preserves_I8
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I8_extentMappingInjective s) : I8_extentMappingInjective s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    exact h
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst; exact h
 
 theorem arena_create_preserves_I5
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I5_walBeforePublish s) : I5_walBeforePublish s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    exact h
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst; exact h
 
 theorem arena_create_preserves_I10
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : I10_snapshotArenaPinned s) : I10_snapshotArenaPinned s' := by
-  unfold arena_create at hok
-  split at hok
-  · exact absurd hok (by simp)
-  · injection hok with hst; subst hst
-    intro sn hsn_mem a ha_mem ar har hid
-    simp only [List.mem_cons] at har
-    rcases har with rfl | hmem
-    · rfl  -- new arena: discarded = false
-    · exact h sn hsn_mem a ha_mem ar hmem hid
+  obtain ⟨_, _, hst⟩ := arena_create_ok_elim hok; subst hst
+  intro sn hsn_mem a ha_mem ar har hid
+  simp only [List.mem_cons] at har
+  rcases har with rfl | hmem
+  · rfl  -- new arena: discarded = false
+  · exact h sn hsn_mem a ha_mem ar hmem hid
 
 /-- Full preservation for `arena_create`.
 
-I3 and I9 are closed on the "existing arena" branch by frame; the
-"new arena" branch needs `args.id` to be absent from all pmap entries
-and snapshots, which follows from the op's id-freshness guard plus
-I1/I10 at `s` but is left as a targeted sub-`sorry` for future work. -/
+I3: the new arena has refcount 0 and pmapRefs 0 (pmap unchanged, and I1 at s ensures
+no existing pmap entry references args.id since args.id was not in arenas).
+arenaSnapRefs 0 follows from the snapshot-pin freshness guard in the op.
+I9: pmapRefs ≤ 0 = refcount; same argument. -/
 theorem arena_create_preserves_all
     (s : FsState) (args : ArenaCreateArgs) (s' : FsState)
     (hok : arena_create s args = Except.ok s')
     (h : AllInvariants s) : AllInvariants s' := by
+  obtain ⟨hnodup, hnosnap, hst⟩ := arena_create_ok_elim hok
+  subst hst
+  -- pmapRefs for the fresh id = 0: no pmap entry in s has phys = args.id,
+  -- because every pmap entry phys is live (I1), hence in s.arenas, hence ≠ args.id.
+  have hpmap0 : arenaPmapRefs s args.id = 0 := by
+    unfold arenaPmapRefs
+    have hf : s.pmap.filter (fun e => e.phys == args.id) = [] := by
+      apply List.filter_eq_nil_iff.mpr
+      intro e he
+      simp only [Bool.not_eq_true, beq_eq_false_iff_ne, ne_eq]
+      intro heq
+      have hlive := h.i1 e he
+      unfold FsState.arenaLive at hlive
+      simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at hlive
+      obtain ⟨ar, har, hid, _⟩ := hlive
+      apply hnodup
+      simp only [List.any_eq_true, beq_iff_eq]
+      exact ⟨ar, har, hid ▸ heq⟩
+    rw [hf]; rfl
+  -- snapRefs for the fresh id = 0: op guard ensures no snapshot pins args.id.
+  have hsnap0 : arenaSnapRefs s args.id = 0 := by
+    unfold arenaSnapRefs
+    have hf : s.snapshots.filter (fun sn => sn.pinned.contains args.id) = [] := by
+      apply List.filter_eq_nil_iff.mpr
+      intro sn hsn
+      simp only [Bool.not_eq_true]
+      cases hc : sn.pinned.contains args.id
+      · rfl
+      · exfalso; apply hnosnap
+        simp only [List.any_eq_true]
+        exact ⟨sn, hsn, hc⟩
+    rw [hf]; rfl
   refine {
-    i1 := arena_create_preserves_I1 s args s' hok h.i1,
-    i2 := arena_create_preserves_I2 s args s' hok h.i2,
+    i1 := arena_create_preserves_I1 s args _ hok h.i1,
+    i2 := arena_create_preserves_I2 s args _ hok h.i2,
     i3 := ?_,
-    i4 := arena_create_preserves_I4 s args s' hok h.i4,
-    i5 := arena_create_preserves_I5 s args s' hok h.i5,
-    i6 := arena_create_preserves_I6 s args s' hok h.i6,
-    i7 := arena_create_preserves_I7 s args s' hok h.i7,
-    i8 := arena_create_preserves_I8 s args s' hok h.i8,
+    i4 := arena_create_preserves_I4 s args _ hok h.i4,
+    i5 := arena_create_preserves_I5 s args _ hok h.i5,
+    i6 := arena_create_preserves_I6 s args _ hok h.i6,
+    i7 := arena_create_preserves_I7 s args _ hok h.i7,
+    i8 := arena_create_preserves_I8 s args _ hok h.i8,
     i9 := ?_,
-    i10 := arena_create_preserves_I10 s args s' hok h.i10 }
-  · -- I3
-    unfold arena_create at hok
-    split at hok
-    · exact absurd hok (by simp)
-    · injection hok with hst; subst hst
-      intro ar har
-      simp only [List.mem_cons] at har
-      rcases har with rfl | hmem
-      · -- new arena has refcount = 0; need pmapRefs + snapRefs ≤ 0.
-        -- Unwinding requires the id-freshness guard.  Targeted sorry.
-        sorry
-      · have := h.i3 ar hmem
-        unfold arenaPmapRefs arenaSnapRefs at *
-        exact this
-  · -- I9
-    unfold arena_create at hok
-    split at hok
-    · exact absurd hok (by simp)
-    · injection hok with hst; subst hst
-      intro ar har
-      simp only [List.mem_cons] at har
-      rcases har with rfl | hmem
-      · sorry
-      · have := h.i9 ar hmem
-        unfold arenaPmapRefs at *
-        exact this
+    i10 := arena_create_preserves_I10 s args _ hok h.i10 }
+  · -- I3: ∀ ar ∈ s'.arenas, pmapRefs + snapRefs ≤ refcount ∧ (discarded → refcount = 0)
+    intro ar har
+    simp only [List.mem_cons] at har
+    rcases har with rfl | hmem
+    · -- new arena: refcount = 0, pmapRefs = 0 (pmap unchanged), snapRefs = 0 (guard)
+      refine ⟨?_, fun hd => by simp at hd⟩
+      -- arenaPmapRefs and arenaSnapRefs only look at pmap/snapshots, unchanged in {s with arenas := ...}
+      show arenaPmapRefs s args.id + arenaSnapRefs s args.id ≤ 0
+      simp [hpmap0, hsnap0]
+    · -- existing arena: I3 still holds; pmap and snapshots unchanged
+      have := h.i3 ar hmem
+      unfold arenaPmapRefs arenaSnapRefs at *
+      exact this
+  · -- I9: ∀ ar ∈ s'.arenas, pmapRefs ≤ refcount
+    intro ar har
+    simp only [List.mem_cons] at har
+    rcases har with rfl | hmem
+    · -- new arena: pmapRefs = 0 ≤ 0 = refcount
+      show arenaPmapRefs s args.id ≤ 0
+      simp [hpmap0]
+    · have := h.i9 ar hmem
+      unfold arenaPmapRefs at *
+      exact this
 
 /-! ## `arena_seal`, `arena_append`, `arena_discard`, `arena_clone_range`,
 `pmap_publish` — left as `sorry` with precise rationale. -/
