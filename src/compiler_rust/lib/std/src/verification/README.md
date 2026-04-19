@@ -43,10 +43,9 @@ verification/
 
 ```simple
 import verification.lean.codegen as codegen
-import verification.models.memory_capabilities as memcap
 
 # Create code generator
-gen = codegen.LeanCodegen.new("MemoryCapabilities")
+codegen_ = codegen.LeanCodegen.create("MemoryCapabilities")
 
 # Add RefCapability enum
 ref_cap = codegen.build_enum("RefCapability", [
@@ -54,17 +53,17 @@ ref_cap = codegen.build_enum("RefCapability", [
     ("Exclusive", []),
     ("Isolated", [])
 ])
-gen = gen.add_inductive(ref_cap)
+codegen_ = codegen_.add_inductive(ref_cap)
 
 # Add CapType structure
 cap_type = codegen.build_class("CapType", [
     ("baseType", codegen.make_string_type()),
     ("capability", codegen.make_simple_type("RefCapability"))
 ])
-gen = gen.add_structure(cap_type)
+codegen_ = codegen_.add_structure(cap_type)
 
 # Generate Lean code
-lean_code = gen.emit()
+lean_code = codegen_.emit()
 print(lean_code)
 ```
 
@@ -94,6 +93,40 @@ for (path, content) in files.items():
     print("Generated: " + path)
     print(content[:100] + "...")
 ```
+
+### CLI Workflow
+
+Current repo workflow is CLI-first:
+
+```bash
+bin/simple gen-lean write --force
+bin/simple verify list
+bin/simple verify check
+```
+
+Expected current state in this checkout:
+
+- `gen-lean write --force` regenerates the full supported verification tree under `verification/`
+- `verify list` reports the authoritative artifact inventory
+- `verify check` passes with all generated Lean files green
+
+As of 2026-04-19, the supported generated tree is fully green:
+
+- `verification/nogc_compile/src/NogcCompile.lean`
+- `verification/async_compile/src/AsyncCompile.lean`
+- `verification/gc_manual_borrow/src/GcManualBorrow.lean`
+- `verification/manual_pointer_borrow/src/ManualPointerBorrow.lean`
+- `verification/module_resolution/src/ModuleResolution.lean`
+- `verification/visibility_export/src/VisibilityExport.lean`
+- `verification/macro_auto_import/src/MacroAutoImport.lean`
+- `verification/type_inference_compile/src/TypeInferenceCompile.lean`
+- `verification/type_inference_compile/src/Contracts.lean`
+- `verification/type_inference_compile/src/AsyncEffectInference.lean`
+- `verification/type_inference_compile/src/Generics.lean`
+- `verification/memory_capabilities/src/MemoryCapabilities.lean`
+- `verification/memory_model_drf/src/MemoryModelDRF.lean`
+- `verification/tensor_dimensions/src/TensorDimensions.lean`
+- `verification/tensor_dimensions/src/TensorMemory.lean`
 
 ### Work with Proof Obligations
 

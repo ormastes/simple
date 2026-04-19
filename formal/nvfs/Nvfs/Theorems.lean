@@ -337,7 +337,7 @@ private theorem arenaLive_map_ne {s : FsState} {ar ar' : Arena} {a : ArenaId}
   refine ⟨b, List.mem_map.mpr ⟨b, hb, ?_⟩, hbid, hbnotd⟩
   -- show: (if b.id == ar.id then ar' else b) = b
   have hbne : b.id ≠ ar.id := fun heq => hne (hbid ▸ heq)
-  simp only [beq_iff_eq, hbne, ite_false]
+  simp [hbne]
 
 theorem arena_discard_preserves_all
     (s : FsState) (id : ArenaId) (s' : FsState)
@@ -508,24 +508,18 @@ theorem arena_clone_range_preserves_all
           injection hok with hst; subst hst
           have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
           have harid : ar.id = args.src := findArena_id hfind
-          -- let-bound names; all proof goals will see these as opaque
-          let newEntry : PmapEntry :=
-            { logical := args.dstLogical, phys := args.src, offset := args.offset,
-              len := args.len, birthGen := args.birthGen, shared := true,
-              checksum := args.checksum }
-          let ar' : Arena := { ar with refcount := ar.refcount + 1 }
-          -- hpmapInc: stated with newEntry.phys so filter_cons unfolds directly
+          have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
+          -- hpmapInc: inline struct literals, no let-bindings
           have hpmapInc : ∀ x : ArenaId, arenaPmapRefs
-                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                          pmap := newEntry :: s.pmap } x =
-              arenaPmapRefs s x + (if newEntry.phys = x then 1 else 0) := by
+                { s with
+                  arenas := s.arenas.map (fun y => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap } x =
+              arenaPmapRefs s x + (if args.src = x then 1 else 0) := by
             intro x; unfold arenaPmapRefs
             simp only [List.filter_cons, beq_iff_eq]
-            by_cases hx : newEntry.phys = x
-            · simp [hx]
-            · simp [hx]
-          -- newEntry.phys = args.src definitionally
-          have hnphys : newEntry.phys = args.src := rfl
+            by_cases hx : args.src = x <;> simp [hx]
           refine {
             i1 := ?_, i2 := ?_, i3 := ?_,
             i4 := I4_frame rfl rfl h.i4,
@@ -537,98 +531,132 @@ theorem arena_clone_range_preserves_all
             simp only [List.mem_cons] at hen
             rcases hen with rfl | hmem
             · -- new entry: phys = args.src = ar.id
-              have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, harid, hnd⟩
+              refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, harid, by simp [hnd]⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
             · -- existing entry: was live in s, still live after map
-              have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
               have hlive := h.i1 en hmem
               unfold FsState.arenaLive at *
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
               obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
               by_cases heq : b.id = ar.id
-              · refine ⟨ar', ?_, heq ▸ hbid, hnd⟩
+              · refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, heq ▸ hbid, by simp [hnd]⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
               · refine ⟨b, ?_, hbid, hbnotd⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
-          · -- I2: sealed monotonicity (discarded unchanged for both ar' and others)
+          · -- I2: sealed monotonicity (sealed and discarded unchanged for all arenas)
             intro a ha hsealed
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            -- beta-reduce the lambda so split can see the if-expression
-            simp only [] at hba
-            split at hba
-            · -- b mapped to ar'; sealed is unchanged (ar'.sealed = b.sealed = ar.sealed)
-              subst hba; exact h.i2 b hb hsealed
-            · subst hba; exact h.i2 b hb hsealed
+            -- The map function is: if b.id = ar.id then { ar with refcount+1 } else b
+            -- In the matched branch, the mapped value uses ar's fields (not b's)
+            by_cases hbid : b.id = ar.id
+            · -- mapped to { ar with refcount+1 }: sealed = ar.sealed
+              have : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by
+                simp [hbid]
+              rw [this] at hba; subst hba
+              -- hsealed : ar.sealed = true; need: ar.discarded = false ∨ ar.refcount + 1 = 0
+              -- ar.refcount + 1 ≠ 0 for Nat, so always take left branch
+              exact Or.inl ((h.i2 ar har_mem hsealed).elim id (fun _ => hnd))
+            · -- mapped to b itself
+              have : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by
+                simp [hbid]
+              rw [this] at hba; subst hba
+              exact h.i2 b hb hsealed
           · -- I3: refcount consistency
             intro a ha
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            split at hba
-            · -- target arena ar': refcount +1, pmapRefs +1
-              subst hba
+            by_cases hbid : b.id = ar.id
+            · -- target arena: mapped to { ar with refcount+1 }
+              have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by
+                simp [hbid]
+              rw [hmap] at hba; subst hba
+              -- a = { ar with refcount+1 }, so a.id = ar.id = args.src
+              have hq := hpmapInc ar.id
+              rw [if_pos harid.symm] at hq
+              have hsneq : arenaSnapRefs
+                { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap } ar.id =
+                arenaSnapRefs s ar.id := rfl
+              rw [hq, hsneq]
+              have h3 := h.i3 ar har_mem
+              -- new refcount = ar.refcount + 1; pmapRefs increased by 1
+              show arenaPmapRefs s ar.id + 1 + arenaSnapRefs s ar.id ≤ ar.refcount + 1 ∧
+                (ar.discarded = true → ar.refcount + 1 = 0)
+              exact ⟨by omega, fun hd => absurd hd (by simp [hnd])⟩
+            · -- non-target arena: mapped to b itself
+              have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by
+                simp [hbid]
+              rw [hmap] at hba; subst hba
               have h3 := h.i3 b hb
-              have heqb : b.id = args.src := by
-                have := @findArena_id s args.src ar hfind; simp_all [beq_iff_eq]
               have hq := hpmapInc b.id
-              rw [hnphys, if_pos heqb.symm] at hq
-              rw [arenaSnapRefs_map_eq]
-              rw [hq]
-              refine ⟨by omega, fun hd => by simp [hd] at h3; exact absurd (h3.2 hd) (by omega)⟩
-            · -- non-target arena
-              subst hba
-              have h3 := h.i3 b hb
-              have hq := hpmapInc b.id
-              rw [hnphys] at hq
-              rw [arenaSnapRefs_map_eq, hq]
-              by_cases heqb : b.id = args.src
-              · rw [if_pos heqb.symm]; exact ⟨by omega, fun hd => h3.2 hd⟩
-              · rw [if_neg (Ne.symm heqb)]; exact ⟨by omega, fun hd => h3.2 hd⟩
+              have hsneq : arenaSnapRefs
+                { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap } b.id =
+                arenaSnapRefs s b.id := rfl
+              rw [hq, hsneq]
+              -- b.id ≠ ar.id = args.src, so the if-branch is 0
+              rw [if_neg (show ¬ args.src = b.id from fun h => hbid (harid ▸ h.symm))]
+              exact ⟨by omega, fun hd => h3.2 hd⟩
           · -- I5: WAL guard in op ensures the new entry's birthGen is in WAL
             intro en hen
             simp only [List.mem_cons] at hen
             rcases hen with rfl | hmem
-            · -- new entry: WAL guard hwalok provides the witness
-              simp only [Bool.not_eq_true] at hwalok
-              rw [Bool.not_eq_false] at hwalok
-              simp only [List.any_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hwalok
+            · -- new entry: simp converts hwalok to existential; extract witness
+              simp at hwalok
               obtain ⟨r, hr, hop, hbg, hlsn⟩ := hwalok
               exact ⟨r, hr, hop, hbg, hlsn⟩
             · exact h.i5 en hmem
           · -- I7: roots live; arenaLive preserved (only refcount changed, not discarded)
-            unfold I7_checkpointRootsConsistent FsState.activeRoot
-            have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
-            -- helper: ar' is live in the new state (arenaLive only uses .arenas)
-            have har'live : FsState.arenaLive
-                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                          pmap := newEntry :: s.pmap } ar.id = true := by
+            -- The new state has identical superblock to s, so activeRoot fields are the same.
+            -- arenaLive only reads .arenas (monotone under refcount bump).
+            unfold I7_checkpointRootsConsistent
+            -- new state's activeRoot = s.activeRoot since superblock unchanged
+            have hactEq : { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap }.activeRoot = s.activeRoot := rfl
+            -- helper: if a root id = ar.id, the updated arena is still live
+            have har'live : ∀ rid : ArenaId, rid = ar.id →
+                FsState.arenaLive { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap } rid = true := by
+              intro rid hrid; subst hrid
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, rfl, hnd⟩
+              refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, rfl, by simp [hnd]⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
-            -- helper: arenaLive for the new state = arenaLive for arenas-only state
-            -- (arenaLive only uses .arenas field)
+            -- arenaLive only reads .arenas, so pmap extension is transparent
             have hliveEq : ∀ a : ArenaId,
-                FsState.arenaLive { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y) } a =
-                FsState.arenaLive { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                                           pmap := newEntry :: s.pmap } a := by
+                FsState.arenaLive { s with arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y) } a =
+                FsState.arenaLive { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.dstLogical, phys := args.src, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := true,
+                             checksum := args.checksum } :: s.pmap } a := by
               intro a; unfold FsState.arenaLive; rfl
+            rw [hactEq]
             refine ⟨?_, ?_, ?_⟩
-            · -- inodeRoot
-              by_cases heq : s.activeRoot.inodeRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.1
-            · -- extentRoot
-              by_cases heq : s.activeRoot.extentRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.2.1
-            · -- allocRoot
-              by_cases heq : s.activeRoot.allocRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.2.2
+            · by_cases heq : s.activeRoot.inodeRoot = ar.id
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.1
+            · by_cases heq : s.activeRoot.extentRoot = ar.id
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.2.1
+            · by_cases heq : s.activeRoot.allocRoot = ar.id
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.2.2
           · -- I8: new entry has shared=true; guard prevents non-shared conflicts
             intro e1 he1 e2 he2 hlog
             simp only [List.mem_cons] at he1 he2
@@ -637,29 +665,30 @@ theorem arena_clone_range_preserves_all
               subst he1eq; subst he2eq; exact absurd rfl hlog
             · -- e1=new, e2=old
               subst he1eq
-              by_cases hp : newEntry.phys = e2.phys
-              · by_cases ho : newEntry.offset = e2.offset
+              -- new entry: phys = args.src, offset = args.offset, shared = true
+              by_cases hp : args.src = e2.phys
+              · by_cases ho : args.offset = e2.offset
                 · -- same (phys,offset), e2 must be shared else guard contradiction
                   have he2sh : e2.shared = true := by
                     cases hc : e2.shared
                     · exfalso; apply hnoconflict
                       simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
                                   Bool.not_eq_true]
-                      exact ⟨e2, hm2, hp.symm, ho.symm, hc⟩
+                      exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩, by simp [hc]⟩
                     · rfl
                   exact Or.inr (Or.inr ⟨rfl, he2sh⟩)
                 · exact Or.inr (Or.inl ho)
               · exact Or.inl hp
             · -- e1=old, e2=new
               subst he2eq
-              by_cases hp : e1.phys = newEntry.phys
-              · by_cases ho : e1.offset = newEntry.offset
+              by_cases hp : e1.phys = args.src
+              · by_cases ho : e1.offset = args.offset
                 · have he1sh : e1.shared = true := by
                     cases hc : e1.shared
                     · exfalso; apply hnoconflict
                       simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
                                   Bool.not_eq_true]
-                      exact ⟨e1, hm1, hp, ho, hc⟩
+                      exact ⟨e1, hm1, ⟨hp, ho⟩, by simp [hc]⟩
                     · rfl
                   exact Or.inr (Or.inr ⟨he1sh, rfl⟩)
                 · exact Or.inr (Or.inl ho)
@@ -670,31 +699,30 @@ theorem arena_clone_range_preserves_all
             intro a ha
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            split at hba
-            · -- target arena ar': refcount +1, pmapRefs +1
-              subst hba
-              have heqb : b.id = args.src := by
-                have := @findArena_id s args.src ar hfind; simp_all [beq_iff_eq]
-              have hq := hpmapInc b.id
-              rw [hnphys, if_pos heqb.symm] at hq
-              rw [hq]; have := h.i9 b hb; omega
+            by_cases hbid : b.id = ar.id
+            · -- target arena: refcount +1, pmapRefs +1
+              have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [hmap] at hba; subst hba
+              have hq := hpmapInc ar.id
+              rw [if_pos harid.symm] at hq
+              simp only [hq]
+              have := h.i9 ar har_mem; omega
             · -- non-target arena
-              subst hba
+              have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [hmap] at hba; subst hba
               have hq := hpmapInc b.id
-              rw [hnphys] at hq
-              rw [hq]
-              by_cases heqb : b.id = args.src
-              · rw [if_pos heqb.symm]; have := h.i9 b hb; omega
-              · rw [if_neg (Ne.symm heqb)]; exact h.i9 b hb
+              -- b.id ≠ ar.id = args.src, so the if-branch is 0
+              rw [if_neg (show ¬ args.src = b.id from fun h => hbid (harid ▸ h.symm))] at hq
+              simp only [hq, Nat.add_zero]; exact h.i9 b hb
           · -- I10: snapshot-pinned arenas not discarded (discarded unchanged for all arenas)
             intro sn hsn a ha_mem a' ha' hid
             simp only [List.mem_map] at ha'
             obtain ⟨b, hb, hba⟩ := ha'
-            simp only [] at hba
-            split at hba
-            · subst hba
-              simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
-            · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
+            by_cases hbid : b.id = ar.id
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [hmap] at hba; subst hba; exact hnd
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [hmap] at hba; subst hba; exact h.i10 sn hsn a ha_mem b hb hid
 
 theorem pmap_publish_preserves_all
     (s : FsState) (args : PmapPublishArgs) (s' : FsState)
@@ -716,18 +744,17 @@ theorem pmap_publish_preserves_all
           injection hok with hst; subst hst
           have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
           have harid : ar.id = args.phys := findArena_id hfind
-          let newEntry : PmapEntry :=
-            { logical := args.logical, phys := args.phys, offset := args.offset,
-              len := args.len, birthGen := args.birthGen, shared := false,
-              checksum := args.checksum }
-          let ar' : Arena := { ar with refcount := ar.refcount + 1 }
+          have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
+          -- hpmapInc: inline struct literals, no let-bindings
           have hpmapInc : ∀ x : ArenaId, arenaPmapRefs
-                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                          pmap := newEntry :: s.pmap } x =
-              arenaPmapRefs s x + (if newEntry.phys = x then 1 else 0) := by
+                { s with
+                  arenas := s.arenas.map (fun y => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap } x =
+              arenaPmapRefs s x + (if args.phys = x then 1 else 0) := by
             intro x; unfold arenaPmapRefs; simp only [List.filter_cons, beq_iff_eq]
-            by_cases hx : newEntry.phys = x <;> simp [hx]
-          have hnphys : newEntry.phys = args.phys := rfl
+            by_cases hx : args.phys = x <;> simp [hx]
           refine {
             i1 := ?_, i2 := ?_, i3 := ?_,
             i4 := I4_frame rfl rfl h.i4,
@@ -737,136 +764,167 @@ theorem pmap_publish_preserves_all
           · -- I1: all pmap entries live
             intro en hen
             simp only [List.mem_cons] at hen
-            have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
             rcases hen with rfl | hmem
-            · unfold FsState.arenaLive
+            · -- new entry: phys = args.phys = ar.id
+              unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, harid, hnd⟩
+              refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, harid, by simp [hnd]⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
             · have hlive := h.i1 en hmem
               unfold FsState.arenaLive at *
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
               obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
               by_cases heq : b.id = ar.id
-              · refine ⟨ar', ?_, heq ▸ hbid, hnd⟩
+              · refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, heq ▸ hbid, by simp [hnd]⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
               · refine ⟨b, ?_, hbid, hbnotd⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
-          · -- I2
+          · -- I2: sealed monotonicity
             intro a ha hsealed
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            simp only [] at hba
-            split at hba
-            · subst hba; exact h.i2 b hb hsealed
-            · subst hba; exact h.i2 b hb hsealed
-          · -- I3
+            by_cases hbid : b.id = ar.id
+            · have : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [this] at hba; subst hba
+              exact Or.inl ((h.i2 ar har_mem hsealed).elim id (fun _ => hnd))
+            · have : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [this] at hba; subst hba
+              exact h.i2 b hb hsealed
+          · -- I3: refcount consistency
             intro a ha
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            split at hba
-            · subst hba
-              have heqb : b.id = args.phys := by
-                have := @findArena_id s args.phys ar hfind; simp_all [beq_iff_eq]
+            by_cases hbid : b.id = ar.id
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [hmap] at hba; subst hba
+              have hq := hpmapInc ar.id
+              rw [if_pos harid.symm] at hq
+              have hsneq : arenaSnapRefs
+                { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap } ar.id =
+                arenaSnapRefs s ar.id := rfl
+              rw [hq, hsneq]
+              have h3 := h.i3 ar har_mem
+              have hrc : ({ ar with refcount := ar.refcount + 1 } : Arena).refcount = ar.refcount + 1 := rfl
+              have hid2 : ({ ar with refcount := ar.refcount + 1 } : Arena).id = ar.id := rfl
+              rw [hid2, hrc]
+              exact ⟨by omega, fun hd => absurd hd (by simp [hnd])⟩
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [hmap] at hba; subst hba
               have h3 := h.i3 b hb
               have hq := hpmapInc b.id
-              rw [hnphys, if_pos heqb.symm] at hq
-              rw [arenaSnapRefs_map_eq, hq]
-              refine ⟨by omega, fun hd => by simp [hd] at h3; exact absurd (h3.2 hd) (by omega)⟩
-            · subst hba
-              have h3 := h.i3 b hb
-              have hq := hpmapInc b.id
-              rw [hnphys] at hq
-              rw [arenaSnapRefs_map_eq, hq]
-              by_cases heqb : b.id = args.phys
-              · rw [if_pos heqb.symm]; exact ⟨by omega, fun hd => h3.2 hd⟩
-              · rw [if_neg (Ne.symm heqb)]; exact ⟨by omega, fun hd => h3.2 hd⟩
+              have hsneq : arenaSnapRefs
+                { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap } b.id =
+                arenaSnapRefs s b.id := rfl
+              rw [hq, hsneq]
+              -- b.id ≠ ar.id = args.phys, so the if-branch is 0
+              rw [if_neg (show ¬ args.phys = b.id from fun h => hbid (harid ▸ h.symm))]
+              exact ⟨by omega, fun hd => h3.2 hd⟩
           · -- I5: WAL guard gives the witness for the new entry
             intro en hen
             simp only [List.mem_cons] at hen
             rcases hen with rfl | hmem
-            · simp only [Bool.not_eq_true] at hwalok
-              rw [Bool.not_eq_false] at hwalok
-              simp only [List.any_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hwalok
+            · -- new entry: simp converts hwalok to existential; extract witness
+              simp at hwalok
               obtain ⟨r, hr, hop, hbg, hlsn⟩ := hwalok
               exact ⟨r, hr, hop, hbg, hlsn⟩
             · exact h.i5 en hmem
           · -- I7: roots live; arenaLive preserved (discarded unchanged)
-            unfold I7_checkpointRootsConsistent FsState.activeRoot
-            have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
-            have har'live : FsState.arenaLive
-                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                          pmap := newEntry :: s.pmap } ar.id = true := by
+            unfold I7_checkpointRootsConsistent
+            have hactEq : { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap }.activeRoot = s.activeRoot := rfl
+            have har'live : ∀ rid : ArenaId, rid = ar.id →
+                FsState.arenaLive { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap } rid = true := by
+              intro rid hrid; subst hrid
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, rfl, hnd⟩
+              refine ⟨{ ar with refcount := ar.refcount + 1 }, ?_, rfl, by simp [hnd]⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
             have hliveEq : ∀ a : ArenaId,
-                FsState.arenaLive { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y) } a =
-                FsState.arenaLive { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
-                                           pmap := newEntry :: s.pmap } a := by
+                FsState.arenaLive { s with arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y) } a =
+                FsState.arenaLive { s with
+                  arenas := s.arenas.map (fun (y : Arena) => if y.id == ar.id then { ar with refcount := ar.refcount + 1 } else y),
+                  pmap := { logical := args.logical, phys := args.phys, offset := args.offset,
+                             len := args.len, birthGen := args.birthGen, shared := false,
+                             checksum := args.checksum } :: s.pmap } a := by
               intro a; unfold FsState.arenaLive; rfl
+            rw [hactEq]
             refine ⟨?_, ?_, ?_⟩
             · by_cases heq : s.activeRoot.inodeRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.1
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.1
             · by_cases heq : s.activeRoot.extentRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.2.1
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.2.1
             · by_cases heq : s.activeRoot.allocRoot = ar.id
-              · rw [← heq]; exact har'live
-              · rw [← hliveEq]; exact arenaLive_map_ne (Ne.symm heq) h.i7.2.2
+              · exact har'live _ heq
+              · rw [← hliveEq]; exact arenaLive_map_ne heq h.i7.2.2
           · -- I8: new entry non-shared; guard blocks any existing entry at same (phys,offset)
             intro e1 he1 e2 he2 hlog
             simp only [List.mem_cons] at he1 he2
             rcases he1 with he1eq | hm1 <;> rcases he2 with he2eq | hm2
-            · exact absurd (he1eq.trans he2eq.symm) hlog
-            · -- e1=new, e2=old: new entry is non-shared, so if same (phys,offset) contradiction
+            · -- both new: same logical (inline struct), contradicts hlog
+              subst he1eq; subst he2eq; exact absurd rfl hlog
+            · -- e1=new, e2=old: new entry is non-shared
               subst he1eq
-              by_cases hp : newEntry.phys = e2.phys
-              · by_cases ho : newEntry.offset = e2.offset
+              -- new entry: phys = args.phys, offset = args.offset
+              by_cases hp : args.phys = e2.phys
+              · by_cases ho : args.offset = e2.offset
                 · exfalso; apply hnoconflict
                   simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
-                  exact ⟨e2, hm2, hp.symm, ho.symm⟩
-                · left; right; exact ho
-              · left; left; exact hp
+                  exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩⟩
+                · exact Or.inr (Or.inl ho)
+              · exact Or.inl hp
             · -- e1=old, e2=new
               subst he2eq
-              by_cases hp : e1.phys = newEntry.phys
-              · by_cases ho : e1.offset = newEntry.offset
+              by_cases hp : e1.phys = args.phys
+              · by_cases ho : e1.offset = args.offset
                 · exfalso; apply hnoconflict
                   simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
-                  exact ⟨e1, hm1, hp, ho⟩
-                · left; right; exact ho
-              · left; left; exact hp
+                  exact ⟨e1, hm1, ⟨hp, ho⟩⟩
+                · exact Or.inr (Or.inl ho)
+              · exact Or.inl hp
             · exact h.i8 e1 hm1 e2 hm2 hlog
-          · -- I9
+          · -- I9: pmapRefs ≤ refcount
             intro a ha
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
-            split at hba
-            · subst hba
-              have heqb : b.id = args.phys := by
-                have := @findArena_id s args.phys ar hfind; simp_all [beq_iff_eq]
+            by_cases hbid : b.id = ar.id
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [hmap] at hba; subst hba
+              have hq := hpmapInc ar.id
+              rw [if_pos harid.symm] at hq
+              simp only [hq]
+              have := h.i9 ar har_mem; omega
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [hmap] at hba; subst hba
               have hq := hpmapInc b.id
-              rw [hnphys, if_pos heqb.symm] at hq
-              rw [hq]; have := h.i9 b hb; omega
-            · subst hba
-              have hq := hpmapInc b.id
-              rw [hnphys] at hq
-              rw [hq]
-              by_cases heqb : b.id = args.phys
-              · rw [if_pos heqb.symm]; have := h.i9 b hb; omega
-              · rw [if_neg (Ne.symm heqb)]; exact h.i9 b hb
+              -- b.id ≠ ar.id = args.phys, so the if-branch is 0
+              rw [if_neg (show ¬ args.phys = b.id from fun h => hbid (harid ▸ h.symm))] at hq
+              simp only [hq, Nat.add_zero]; exact h.i9 b hb
           · -- I10: discarded unchanged
             intro sn hsn a ha_mem a' ha' hid
             simp only [List.mem_map] at ha'
             obtain ⟨b, hb, hba⟩ := ha'
-            simp only [] at hba
-            split at hba
-            · subst hba
-              simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
-            · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
+            by_cases hbid : b.id = ar.id
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = { ar with refcount := ar.refcount + 1 } := by simp [hbid]
+              rw [hmap] at hba; subst hba; exact hnd
+            · have hmap : (if b.id == ar.id then { ar with refcount := ar.refcount + 1 } else b) = b := by simp [hbid]
+              rw [hmap] at hba; subst hba; exact h.i10 sn hsn a ha_mem b hb hid
 
 /-! ## `wal_append` — I4 and I5 closed. -/
 

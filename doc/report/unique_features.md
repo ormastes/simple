@@ -260,7 +260,7 @@ Qualification:
 
 These should be advertised with scope qualifiers in README:
 
-- ~~Lean verification as a finished verification pipeline~~ → Implemented (bounded milestone). Advanced features (cross-crate, automated proofs) deferred.
+- ~~Lean verification as a finished verification pipeline~~ → Implemented for the current generated tree. `gen-lean write --force` and `verify check` are green for all 15 supported generated Lean files; advanced features (cross-crate proofs, automated proof synthesis) remain deferred.
 - ~~remote baremetal end-to-end execution on all lanes~~ → Implemented with qualifiers. Stable and host-aware lanes are real; hardware-dependent execution still depends on host tools/boards and should not be described as universally complete.
 - ~~VHDL backend support as production-ready~~ → Implemented (bounded scope). Analysis/elaboration validated; simulation/synthesis deferred.
 - ~~C/C++ bidirectional interop as complete~~ → Implemented. Both directions proven with round-trip tests.

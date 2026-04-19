@@ -2,7 +2,7 @@
 # Duplication detection CLI
 
 use compiler.tools.duplicate_check.config (load_config, DuplicationConfig)
-use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_in_file, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, DuplicateGroup, DuplicateBlock}
+use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_in_file, find_duplicates_in_file_with_hash_filter, collect_repeated_hashes, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, HashScanSummary, DuplicateGroup, DuplicateBlock}
 use compiler.tools.duplicate_check.formatter (print_text_report, print_json_report, write_sdn_database)
 use compiler.tools.duplicate_check.debug (init_debug)
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
@@ -67,9 +67,18 @@ fn build_groups_from_blocks(all_blocks: [DuplicateBlock], config: DuplicationCon
 fn scan_files_sequential(files: [text], config: DuplicationConfig, cache_manager) -> [DuplicateBlock]:
     var all_blocks: [DuplicateBlock] = []
     val interner = new_token_interner()
+    val hash_scan = if config.use_cosine_similarity:
+        HashScanSummary(repeated_hashes: {}, candidate_files: {})
+    else:
+        collect_repeated_hashes(files, config, cache_manager, interner)
 
     for file in files:
-        val blocks = find_duplicates_in_file(file, config, cache_manager, interner)
+        if not config.use_cosine_similarity and not hash_scan.candidate_files.contains_key(file):
+            continue
+        val blocks = if config.use_cosine_similarity:
+            find_duplicates_in_file(file, config, cache_manager, interner)
+        else:
+            find_duplicates_in_file_with_hash_filter(file, config, cache_manager, interner, hash_scan.repeated_hashes)
         all_blocks.merge(blocks)
 
     normalize_block_hashes(all_blocks)
@@ -158,6 +167,10 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             i = i + 2
         elif arg == "--cosine":
             config.use_cosine_similarity = true
+            # Cosine mode needs lexical detail to avoid collapsing unrelated
+            # helper bodies into the same structural feature vectors.
+            config.ignore_identifiers = false
+            config.ignore_literals = false
             i = i + 1
         elif arg == "--semantic":
             config.use_semantic = true

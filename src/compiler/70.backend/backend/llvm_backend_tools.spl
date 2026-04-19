@@ -9,7 +9,10 @@ use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
-use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
+use compiler.backend.backend.io_compat.{backend_shell_tuple}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 # FFI for reading files (object code + optimized IR)
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -30,7 +33,7 @@ fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
     Parses nm output to identify function, data, and constant symbols.
     Skips undefined (U) and weak (W/w) symbols.
     """
-    val (nm_out, nm_err, nm_code) = shell("nm '{obj_path}' 2>/dev/null")
+    val (nm_out, nm_err, nm_code) = backend_shell_tuple("nm '{obj_path}' 2>/dev/null")
     if nm_code != 0:
         return []
 
@@ -136,7 +139,7 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     elif triple.starts_with("riscv32"):
         target_flags = " -mattr=+m,+a,+c -target-abi=ilp32"
     val cmd = "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
-    val (llc_out, llc_err, llc_code) = shell(cmd)
+    val (llc_out, llc_err, llc_code) = backend_shell_tuple(cmd)
 
     # Clean up IR file
     file_delete(ir_path)
@@ -264,7 +267,7 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
 
     val triple = config.triple.to_text()
     val llc_cmd_str = "{llc} -mtriple={triple} -filetype=obj --function-sections --data-sections {opt_flag} -o {obj_path} {ir_path} 2>&1"
-    val (wasm_llc_out, wasm_llc_err, wasm_llc_code) = shell(llc_cmd_str)
+    val (wasm_llc_out, wasm_llc_err, wasm_llc_code) = backend_shell_tuple(llc_cmd_str)
 
     file_delete(ir_path)
 
@@ -296,7 +299,7 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
 
     ld_args = ld_args + " -o {output_path} {obj_path} 2>&1"
 
-    val (ld_out, ld_err, ld_code) = shell(ld_args)
+    val (ld_out, ld_err, ld_code) = backend_shell_tuple(ld_args)
     file_delete(obj_path)
 
     if ld_code != 0:
@@ -307,11 +310,11 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
     if wasm_opt_cmd != "" and opt_level != OptimizationLevel.Debug:
         val wasm_opt_flag = if opt_level == OptimizationLevel.Size: "-Oz" else: "-O3"
         val opt_output = "{output_path}.opt"
-        val (wopt_out, wopt_err, wopt_code) = shell("{wasm_opt_cmd} {wasm_opt_flag} {output_path} -o {opt_output} 2>&1")
+        val (wopt_out, wopt_err, wopt_code) = backend_shell_tuple("{wasm_opt_cmd} {wasm_opt_flag} {output_path} -o {opt_output} 2>&1")
         if wopt_code == 0:
             # Replace original with optimized version
             file_delete(output_path)
-            shell("mv {opt_output} {output_path}")
+            backend_shell_tuple("mv {opt_output} {output_path}")
         else:
             # Optimization failed, keep unoptimized version
             file_delete(opt_output)
