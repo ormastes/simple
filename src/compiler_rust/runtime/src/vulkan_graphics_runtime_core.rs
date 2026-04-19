@@ -67,7 +67,7 @@ pub(super) struct VulkanState {
     pub images: HashMap<i64, Arc<VulkanImage>>,
     pub samplers: HashMap<i64, Arc<Sampler>>,
     pub render_passes: HashMap<i64, Arc<RenderPass>>,
-    pub graphics_pipelines: HashMap<i64, GraphicsPipeline>,
+    pub graphics_pipelines: HashMap<i64, Arc<GraphicsPipeline>>,
     pub framebuffers: HashMap<i64, Arc<Framebuffer>>,
     pub swapchains: HashMap<i64, Arc<VulkanSwapchain>>,
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,

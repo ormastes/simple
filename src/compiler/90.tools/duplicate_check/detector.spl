@@ -76,13 +76,17 @@ fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
 
     hash
 
-fn extract_code_snippet(tokens: [SimpleToken], start: i64, end_pos: i64) -> text:
-    var parts: [text] = []
-    var i = start
-    while i < end_pos and i < tokens.len():
-        parts.push(tokens[i].value)
-        i = i + 1
-    parts.join("")
+fn extract_code_snippet(source: text, tokens: [SimpleToken], start: i64, end_pos: i64) -> text:
+    if start < 0 or start >= tokens.len():
+        return ""
+    val last_idx = end_pos - 1
+    if last_idx < start or last_idx >= tokens.len():
+        return ""
+    val start_offset = tokens[start].start_offset
+    val end_offset = tokens[last_idx].end_offset
+    if start_offset < 0 or end_offset < start_offset or end_offset > source.len():
+        return ""
+    source[start_offset:end_offset]
 
 fn block_line_count(block: DuplicateBlock) -> i64:
     block.line_end - block.line_start + 1
@@ -147,12 +151,12 @@ fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
     result
 
 fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
+    val content = file_read(file_path)
     val cached = get_cached_tokens(cache_manager, file_path)
     var tokens = []
     if cached != nil:
         tokens = cached
     else:
-        val content = file_read(file_path)
         tokens = tokenize(content, config)
         set_cached_tokens(cache_manager, file_path, tokens)
 
@@ -199,7 +203,7 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_man
         val line_count = end_line - start_line + 1
 
         if line_count >= config.min_lines:
-            val code = extract_code_snippet(tokens, i, end_idx)
+            val code = extract_code_snippet(content, tokens, i, end_idx)
 
             val new_block = DuplicateBlock(
                 file: file_path,
@@ -340,9 +344,11 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     var file_token_cache = {}
     var file_line_index_cache = {}
     var feature_vectors = []
+    var low_signal_flags = []
     var block_idx = 0
     while block_idx < blocks_to_analyze.len():
         val block = blocks_to_analyze[block_idx]
+        low_signal_flags.push(is_low_signal_block(block))
 
         var tokens = []
         if file_token_cache.contains_key(block.file):
@@ -439,7 +445,7 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 j = j + 1
                 continue
 
-            if is_low_signal_block(block1) and is_low_signal_block(block2):
+            if low_signal_flags[i] and low_signal_flags[j]:
                 j = j + 1
                 continue
 

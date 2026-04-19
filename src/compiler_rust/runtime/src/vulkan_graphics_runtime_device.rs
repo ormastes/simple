@@ -36,10 +36,10 @@ pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
     use super::vulkan_graphics_runtime_core::SemaphorePool;
     let mut state = STATE.lock();
     let idx = id as usize;
-    if idx >= state.physical_devices.len() {
+    let dev_count = state.physical_devices.len();
+    if idx >= dev_count {
         state.set_error(format!(
-            "Device index {id} out of range (count={})",
-            state.physical_devices.len()
+            "Device index {id} out of range (count={dev_count})"
         ));
         return 0;
     }

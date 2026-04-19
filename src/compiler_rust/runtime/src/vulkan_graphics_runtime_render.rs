@@ -4,6 +4,8 @@
 
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{vk, STATE};
+#[cfg(feature = "vulkan")]
+use ash::vk::Handle;
 
 // ============================================================================
 // Graphics Draw Commands

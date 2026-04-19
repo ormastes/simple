@@ -6,6 +6,8 @@
 use super::vulkan_graphics_runtime_core::{
     alloc_handle, DescriptorPool, DescriptorSet, DescriptorSetLayout, vk, STATE,
 };
+#[cfg(feature = "vulkan")]
+use ash::vk::Handle;
 
 // ============================================================================
 // Descriptor Sets

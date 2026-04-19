@@ -37,7 +37,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-001 investigation session
 - **Target:** compiler — import resolver / name-resolution pass
 - **Priority:** P0
-- **Status:** Partially-Implemented (2026-04-18, Claude Sonnet 4.6)
+- **Status:** Open (updated 2026-04-18)
 - **Requested-semantics:**
   When two structs share the same short name but live in different fully-qualified
   module paths (e.g., `compiler.common.driver_core_types.CompileOptions` vs
@@ -148,39 +148,40 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 
   Do NOT attempt this fix here — dedicated compiler-core agent required.
 
-- **Partial-fix applied (2026-04-18, Claude Sonnet 4.6):**
-  Two minimal changes made within `src/compiler/20.hir/`:
+- **Investigation update (2026-04-18, Claude Sonnet 4.6):**
+  Attempted two code changes within `src/compiler/20.hir/`; both reverted after
+  safety analysis revealed secondary regressions:
 
-  1. `hir_lowering/items.spl` — `lower_module` (and the bootstrap-safe
-     `HirLowering_dot_lower_module`) now sets `self.module_filename = module.name`
-     at entry, before `declare_module_symbols`. Previously the single shared
-     `HirLowering` instance (instantiated once in `driver.spl` and reused for
-     every module) always had `module_filename = ""`, so every symbol across all
-     modules was tagged with an empty `defining_module`. Now each module's symbols
-     carry the correct per-module name in `Symbol.defining_module`.
+  **Attempted fix 1:** Set `self.module_filename = module.name` in `lower_module`
+  to give each module's symbols a correct `defining_module` tag.
+  **Reverted because:** `Module.name` is a dotted module path
+  (e.g., `compiler.common.driver_core_types`), not a filename
+  (e.g., `driver_core_types.spl`). The `effective_visibility()` function at
+  `hir_lowering/types.spl:132` expects filename format for its filename-based
+  auto-public matching. Using a dotted path would silently break visibility
+  computation for all types in all modules.
 
-  2. `hir_types.spl` — `SymbolTable.define` now has a first-write-wins guard for
-     type-kind symbols (Class/Struct/Enum/Trait): if the current scope already
-     contains a binding for `name`, the existing `SymbolId` is returned unchanged.
-     Non-type symbols (Function, Parameter, Field, Variable, etc.) retain
-     last-write-wins behaviour so normal redefinition and shadowing continue
-     to work.
+  **Attempted fix 2:** First-write-wins guard in `SymbolTable.define` for
+  Class/Struct/Enum/Trait symbols.
+  **Reverted because:** `lower_class`/`lower_struct`/`lower_enum` call
+  `self.symbols.lookup(name).unwrap()` to get the SymbolId, then use it as the
+  `HirClass.symbol` key. If the guard returns A's SymbolId for B's class, module
+  B's `HirModule.classes[A_id]` stores B's HirClass under A's id. Downstream
+  passes (method resolution, monomorphization, codegen) see inconsistent
+  id-to-definition bindings — different bug, same or worse symptom.
 
-  **What this fixes:** determinism — the first module processed "wins" the short
-  name rather than the last. Module processing order is now deterministic
-  (dict key iteration order in the driver loop).
-
-  **What this does NOT fix:** import-target-aware resolution. If
-  `driver_core_types.spl` loads AFTER `backend_types.spl` in the driver's module
-  map, the first-write-wins guard means `backend_types.CompileOptions` wins and
-  the bug persists. Full fix requires FR-COMPILER-003 (2-pass import resolver
-  with per-import-target AST loading). Bootstrap is required to verify effect.
-
-  **Infrastructure blocker confirmed:** `HirLowering` has no `module_resolver`,
-  `current_file`, or `loaded_modules` fields. The Rust seed's two-pass approach
-  (`preregister_imported_type_names` + `load_imported_types`) cannot be ported
-  without first adding a module-resolver port to `HirLowering` — that is driver-
-  layer work outside `src/compiler/20.hir/`.
+  **Infrastructure blockers confirmed (both are required for FR-COMPILER-003):**
+  1. `HirLowering` has no `module_resolver`, `current_file`, or `loaded_modules`
+     fields — the Rust seed's 2-pass approach cannot be ported without these.
+  2. The driver (`80.driver/driver.spl`) creates ONE `HirLowering` instance and
+     reuses it for all modules, with `module_filename = ""` throughout. Fixing
+     per-module `module_filename` requires either: (a) passing the filename as a
+     parameter to `lower_module`, OR (b) driver calling
+     `lowering.module_filename = source.path` before each `lower_module` call.
+     Option (b) is a one-line driver change (out of `20.hir/` scope); option (a)
+     requires changing `lower_module`'s signature (in-scope but breaks the API).
+  3. The `effective_visibility` function must be updated to accept dotted module
+     paths if `module_filename` is changed to carry module paths.
 
 ---
 

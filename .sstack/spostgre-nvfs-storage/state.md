@@ -2263,3 +2263,51 @@ A2 p50 ≈ 10s/iter — interpreter overhead for 8192 word-push inner loop.
 - `doc/08_tracking/feature_request/nvfs_requests.md` — FR-BENCH-BASELINE-001 updated; FR-BENCH-ARENA-ITER-001 filed
 
 **No commits made per task brief.**
+
+#### 9-fr-compiler-002-fix
+
+**Date:** 2026-04-18
+**Agent:** Claude Sonnet 4.6 / FR-COMPILER-002 fix session
+**Status:** Diagnosis complete, code changes reverted, FR-COMPILER-003 filed
+
+**What was investigated:**
+
+Confirmed root cause mechanism in `src/compiler/80.driver/driver.spl:444`:
+single `HirLowering` instance created via `hirlowering_new()` (no filename, no
+resolver) and reused for all modules in a loop. `module_filename` stays `""`
+throughout. Every `declare_module_symbols` call writes into the same shared scope
+with `defining_module = ""` for all symbols — last-write-wins by module iteration
+order.
+
+**Code changes attempted and reverted (no net code change):**
+
+1. `lower_module` setting `self.module_filename = module.name` — reverted.
+   `Module.name` is a dotted path (`compiler.common.driver_core_types`), not a
+   filename (`driver_core_types.spl`). `effective_visibility()` expects filename
+   format — using dotted path would silently break auto-public visibility for all
+   types.
+
+2. First-write-wins guard in `SymbolTable.define` for Class/Struct/Enum/Trait —
+   reverted. `lower_class`/`lower_struct` call `symbols.lookup(name).unwrap()` to
+   get the SymbolId used as the HirClass/HirStruct key in the HIR module dict.
+   Returning A's SymbolId for B's class makes B's HirClass stored under A's id —
+   inconsistent downstream (method resolution, mono, codegen).
+
+**Documentation changes (permanent):**
+
+- `doc/08_tracking/feature_request/compiler_requests.md`:
+  - FR-COMPILER-002 updated with infrastructure blockers and two failed fix
+    attempts with revert rationale.
+  - FR-COMPILER-003 filed: 2-pass import resolver requiring `module_resolver`,
+    `current_file`, `loaded_modules` in `HirLowering`; driver must populate;
+    `lower_module` needs a pre-declare `resolve_import_symbols` pass.
+
+**Infrastructure blockers for correct fix (FR-COMPILER-003):**
+1. `HirLowering` needs `module_resolver: ModuleResolverPort?` + `current_file` +
+   `loaded_modules` fields.
+2. Driver must call `lowering.module_filename = source.path` before each
+   `lower_module` (1-line driver change, outside `20.hir/` scope) — or
+   `lower_module` signature must accept the filename.
+3. `effective_visibility` must accept dotted paths alongside filenames.
+4. `lower_module` must call `resolve_import_symbols` before `declare_module_symbols`
+   to scope-bind explicitly imported names from imported modules' ASTs.
