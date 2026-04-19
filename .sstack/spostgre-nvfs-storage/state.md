@@ -2311,3 +2311,217 @@ order.
 3. `effective_visibility` must accept dotted paths alongside filenames.
 4. `lower_module` must call `resolve_import_symbols` before `declare_module_symbols`
    to scope-bind explicitly imported names from imported modules' ASTs.
+
+#### 12-e1-checkpoint-api
+
+**Goal:** FR-STORAGE-E2E-001 — implement `checkpoint_begin` / `checkpoint_commit`
+in the spostgre engine so the e2e integration test no longer needs the
+`wal_writer_commit_group + wal_writer_sync` workaround in scenario 7.
+
+**Changes made:**
+
+- `examples/spostgre/src/engine/checkpoint.spl` — replaced both `pass_todo` bodies
+  with a full in-process checkpoint ring backed by a META_DURABLE shim arena:
+  - Module-level state: `_cp_arena_id`, `_cp_epoch`, `_cp_durable_lsn`.
+  - `checkpoint_begin() -> Lsn` — lazily creates ring arena, bumps epoch, returns
+    `Lsn(value: current_tail + 1)` as the target the caller must fence.
+  - `checkpoint_commit(at: Lsn) -> bool` — serialises a 16-byte record (epoch LE +
+    lsn LE) and appends via `shim_arena_fua_append`; advances `_cp_durable_lsn`.
+  - `checkpoint_durable_lsn() -> i64` — new accessor used by the e2e test.
+
+- `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`:
+  - Added `use engine.checkpoint.{checkpoint_begin, checkpoint_commit, checkpoint_durable_lsn}`.
+  - Scenario 7 body replaced: calls `checkpoint_begin()` → `checkpoint_commit(ckpt_lsn)` →
+    asserts `checkpoint_durable_lsn() >= lsn1.value`. The `wal_writer_sync` workaround
+    is removed; the describe block label updated to drop "(checkpoint sim)".
+  - Docstring updated: "pass_todo" note replaced with "fully implemented" note.
+
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-STORAGE-E2E-001
+  acceptance criterion 7 updated (checkbox ticked for real checkpoint API);
+  Notes section updated to "fully implemented 2026-04-18 (12-e1-checkpoint-api)".
+
+**Scope respected:** ops.spl trait not touched (no new trait methods needed);
+nvfs core checkpoint ring not touched (ring format preserved); M4/M5/encryption
+paths not touched.
+
+---
+
+#### 12-a1-hirlowering-infra
+
+**Date:** 2026-04-18
+**Agent:** A1 (FR-COMPILER-003 infrastructure scaffold)
+
+**Changes:**
+
+- `src/compiler/20.hir/hir_lowering/types.spl` — Added `module_resolver: ModuleResolverPort?`
+  and `loaded_modules: [text]` fields to `HirLowering` class. Updated `hirlowering_new()`,
+  `with_filename()`, and `with_config()` constructors to initialize both new fields.
+  Added `with_resolver(resolver, filename)` constructor for A2's use.
+  Added `use compiler.mdsoc.feature.module_loading.app.module_resolver_port.{ModuleResolverPort}` import.
+
+- `src/compiler/80.driver/driver.spl` — In `lower_and_check_impl()`: builds a
+  `source_path_map: Dict<text, text>` from `self.ctx.sources` (module_name → source.path),
+  then sets `lowering.module_filename = src_path` before each `lower_module` call.
+  Same fix applied to `lower_to_hir_impl()` compatibility stub.
+
+- `test/unit/compiler/hir/module_filename_populated_spec.spl` — New unit test (two `it`
+  blocks): verifies that symbols produced by `lower_module` have `defining_module` set to
+  the path passed as `module_filename`, for both single-module and two-module cases.
+
+- `doc/08_tracking/feature_request/compiler_requests.md` — FR-COMPILER-003 prerequisites
+  1–3 marked `[x]`; prerequisite 4 (resolve_import_symbols pass) left `[ ]` for A2.
+
+**Scope respected:** No resolve pass added; `declare_module_symbols` behavior unchanged;
+`src/compiler_rust/` untouched; no commit created.
+
+#### 12-b1-acpi-walker
+
+**Status:** DONE (2026-04-18)
+**FR:** FR-SIMPLEOS-ACPI-001
+**Files changed:**
+- `src/os/kernel/acpi/rsdp.spl` — new: `acpi_find_rsdp()` BIOS shadow scanner (0xE0000–0x100000, 16-byte stride, 8-byte sig + checksum); `acpi_rsdp_revision`, `acpi_rsdp_rsdt_phys`, `acpi_rsdp_xsdt_phys` helpers
+- `src/os/kernel/acpi/rsdt.spl` — new: `acpi_iterate_tables(rsdp_phys, cb)` walks XSDT (rev≥2, 64-bit entries) or RSDT (32-bit entries); `acpi_find_table(rsdp_phys, sig) -> u64?` convenience wrapper; `acpi_table_signature(table_phys) -> u32`
+- `src/os/kernel/acpi/fadt.spl` — new: `acpi_fadt_pm_tmr_port(fadt_phys) -> u32?` reads legacy PM_TMR_BLK (offset 76); prefers X_PM_TMR_BLK GAS (offset 208, ACPI 2.0+, SystemIO) when rev≥3 and length≥244
+- `src/os/kernel/acpi/hpet_table.spl` — new: `acpi_hpet_base(hpet_phys) -> u64?` extracts MMIO physical base from GAS at offset 44; address u64 at GAS+4 (offset 48)
+- `src/os/kernel/acpi/clock_sources.spl` — stubs replaced: `_resolve_rsdp()` prefers `g_rsdp_phys`, falls back to `acpi_find_rsdp()`; `acpi_hpet_present()` and `acpi_pmtmr_port()` now call real helpers; 4 new imports added
+- `test/unit/os/acpi/acpi_test.spl` — new: 3 test groups (RSDP global state, signature constants, nil returns with zero RSDP)
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-SIMPLEOS-ACPI-001 added as Implemented; FR-BENCH-CLOCK-002 notes updated with "Unblocked by" reference
+
+**Key design decisions:**
+- All addresses physical throughout; helpers call `phys_to_virt()` (from `limine_boot.spl`) internally
+- FADT X_PM_TMR_BLK at offset 208 (not 112 — the stub comment was wrong; 112 is IAPC_BOOT_ARCH)
+- HPET MMIO base at GAS+4 = offset 48 (GAS header is 4 bytes before the u64 address)
+- RSDP: 8-byte "RSD PTR " signature + 20-byte checksum (rev 0) + full-length extended checksum (rev ≥ 2)
+- `acpi_find_table()` uses a closure capturing a `var found_phys: u64 = 0` local; no heap allocation
+- Test strategy: structural/constant verification + nil-guard tests; real MMIO integration requires QEMU boot
+
+---
+
+#### 12-c1-compression
+
+**FR:** FR-NVFS-N7a-001
+**Status:** Implemented 2026-04-18
+**Files changed:**
+- `examples/nvfs/src/core/compression.spl` (new) — CompressAlgo enum (None=0, LZ4=1, Zstd3=2, Zstd19=3); `compress_extent(data, class_tag)` with class-aware policy table; `decompress_extent`; LZ4/Zstd tagged-copy stubs (real encoders deferred to FR-NVFS-N7a-002/003); incompressible fallback at 90% threshold
+- `examples/nvfs/src/core/pmap.spl` — PmapEntry extended from v2 (80 bytes) to v3 (88 bytes): added `compress_algo: u8` + `compressed_len: u32` fields; `pmap_entry_encode` writes 88-byte v3 layout (checksum at 0x38); `pmap_entry_decode` dispatches on buf len (80→v2 compat with algo=0/len=0 synthesized, 88→v3 native)
+- `examples/nvfs/src/core/arena.spl` — added `arena_append_compressed` (compress then store) and `arena_read_extent` (read then decompress); `compression.spl` imported
+- `examples/nvfs/test/unit/core/compression_test.spl` (new) — 4 test groups: (a) LZ4/Zstd roundtrip, (b) class policy MODEL_IMMUTABLE/DB_WAL/META_DURABLE skip, (c) pmap v2→v3 migration, (d) arena compressed persist+read
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-NVFS-N7a-001 flipped to Implemented
+
+**Key design decisions:**
+- Vendored pure-Simple (no runtime externs), matching the encryption.spl precedent
+- LZ4/Zstd stubs use tagged-copy frame: `[u32 decompressed_len LE | raw bytes]`; ratio SLOs require FR-NVFS-N7a-002/003
+- Pmap v2/v3 compat: length-based dispatch in decode (80 vs 88 bytes) — no superblock version check needed
+- arena_append_compressed returns compressed byte count; callers retain original len for pmap entry
+- Checksum is computed over compressed bytes per §V3-2.4 (callers do compress → checksum → pmap_entry)
+
+#### 12-f1-lean-close
+
+**Closed 2 sorries** in `formal/nvfs/Nvfs/Theorems.lean` (round-5 pass):
+
+| Sorry | Line (before) | Tactic summary |
+|-------|--------------|----------------|
+| `arena_seal_preserves_all` | 299 | `unfold arena_seal at hok; split` — 3 branches: `none`→absurd, idempotent→`injection/subst/exact h`, main→`injection/subst` then `refine {i1..i10}`. I2: matched arena gets `sealed=true`, `discarded=false` (hnd) → `Or.inl hnd`. I1/I3/I7/I9/I10: `List.mem_map` + `by_cases hbid` + existing `arenaLive_map_ne`/frame helpers. I7: `hactEq : (... : FsState).activeRoot = s.activeRoot := rfl` + `har'live` helper pattern (mirrored from `arena_clone_range`). |
+| `arena_append_preserves_all` | 308 | Same `split` skeleton — 3 branches: `none`→absurd, `ar.sealed`→absurd, `ar.discarded`→absurd, main→`injection/subst`. Pure frame: no invariant inspects `bytes`. I2: sealed/discarded unchanged → `h.i2 ar har_mem hsealed` directly. All others: identical `List.mem_map` + `by_cases hbid` pattern. |
+
+**Root cause of prior failure:** `findArena_id`, `pmapRefs_pos`, `arenaLive_map_ne` were declared `private` *after* the two theorems. Fixed by hoisting them before the `/-! ## arena_seal ... -/` section. Also: `.activeRoot` dot-notation on anonymous struct literal requires explicit `(... : FsState)` type ascription.
+
+**Build:** `cd formal/nvfs && lake build` → `Build completed successfully (8 jobs)` — 0 errors, 0 sorry warnings.
+
+#### 12-b2-hpet-pmtmr-real
+
+**Status:** DONE (2026-04-18)
+**FR:** FR-BENCH-CLOCK-002 (closes)
+**Files changed:**
+- `src/os/kernel/arch/x86_64/timer.spl` — replaced `_calibrate_tsc_hpet` and `_calibrate_tsc_pmtmr` stubs with real HPET MMIO counter reads and PMTMR port-IO reads over a ~10ms busy-wait window; extracted pure math helpers `_tsc_hz_from_hpet(tsc_delta, hpet_delta, period_fs) -> u64` and `_tsc_hz_from_pmtmr(tsc_delta, pmtmr_delta) -> u64` for unit-testability; both callers fall back to PIT if hz==0
+- `test/unit/os/timer_test.spl` — added 5 new test cases across 2 new feature blocks: `_tsc_hz_from_hpet` (expected Hz, zero period_fs guard, zero hpet_delta guard) and `_tsc_hz_from_pmtmr` (expected Hz within ±1%, zero delta guard)
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-BENCH-CLOCK-002 acceptance criteria all flipped to [x]; Notes updated to "Fully implemented 2026-04-18 (B2)"
+
+**Key design decisions:**
+- Overflow-safe staged HPET formula: `elapsed_ns = hpet_delta * period_fs / 1_000_000` then `tsc_hz = tsc_delta * 1_000_000_000 / elapsed_ns` (avoids u64 overflow at QEMU HPET period_fs ~10^7)
+- PMTMR wrap handled by `& 0xFFFFFF` on the u64 delta (pmtmr_read already masks to 24-bit)
+- No changes to ACPI parsers (B1) or `_choose_clock_source` dispatcher
+- No `io.spl` changes needed: `pmtmr_read` uses `inb` internally; HPET uses existing `mmio_read64`
+
+#### 12-c2-dedup
+
+**Status:** DONE (2026-04-18)
+**FR:** FR-NVFS-N7b-001 (closes)
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `examples/nvfs/src/core/dedup.spl` | New — `DedupTable` struct; `dedup_class_enabled(class_tag)` policy table (MODEL_IMMUTABLE/GENERAL_MUTABLE=true; DB_TEMP/META_DURABLE/DB_WAL/CHECKPOINT_SNAPSHOT=false); `_dedup_fold_hash` pure-Simple 32-byte stub hash (Blake3 placeholder); `dedup_insert_or_bump`, `dedup_release`, `dedup_lookup`, `dedup_hash_of`; module-level singleton accessors. |
+| `examples/nvfs/src/core/reflink.spl` | Extended — `DedupHashRef` + `DedupRefcountTable` sibling struct (keyed by `[u8]` content hash, not arena_id); `dedup_refcount_bump`, `dedup_refcount_dec`, `dedup_refcount_get` module-level helpers. Existing `ReflinkTable` and all reflink tests untouched. |
+| `examples/nvfs/src/core/arena.spl` | Extended — `_extent_hashes: [[[u8]]]` parallel list (per-arena flat list of recorded content hashes); `arena_create_impl` initializes empty slot; `arena_append_deduped` (dedup → compress path: miss=compress+store+DDT-insert, hit=bump+return 0); `arena_discard_impl` walks `_extent_hashes` and calls `dedup_release` for each hash before clearing buffer. |
+| `examples/nvfs/test/unit/core/dedup_test.spl` | New — 4 describe blocks, 15 `it` cases: (a) same plaintext inserted twice → refcount=2; (b) release drops refcount to 1, returns false; (c) release-to-zero removes entry; (d) DB_TEMP/META_DURABLE/DB_WAL class skips dedup, MODEL_IMMUTABLE/GENERAL_MUTABLE opts in; arena_append_deduped on DB_TEMP writes bytes (no DDT lookup). |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | FR-NVFS-N7b-001 flipped to Implemented; implementation notes appended. |
+
+**Key design decisions:**
+
+- Hash uses `_dedup_fold_hash` (pure-Simple XOR-fold, 32 bytes) as stand-in; no cross-submodule SHA-256/Blake3 reachable from `examples/nvfs` (mirrors encryption.spl precedent). Blake3 + HMAC-DHK migration tracked as FR-NVFS-N7b-002.
+- DHK is per-dataset, derived at mount time (not per-arena). The hook point is `dedup_hash_of(plaintext)` in dedup.spl — swap its body for `HMAC(DHK, plaintext)` when encryption is active.
+- `DedupRefcountTable` is a sibling to `ReflinkTable` (not merged) to keep `ArenaRef` shape intact and avoid breaking existing reflink tests.
+- `arena_append_deduped` follows `arena_append_compressed` precedent: new function, no signature change to existing `arena_append_impl`.
+- `_extent_hashes` parallel list tracks hashes per-arena so `arena_discard_impl` can release DDT refcounts without changing `ArenaMeta` struct shape.
+- CoW B-tree backend (DEDUP_TREE_OBJECTID=12), 256 MB LRU cache, and on-disk layout are follow-up work.
+
+#### 12-a2-resolve-import-pass
+
+**Status:** DONE (2026-04-18)
+**FR:** FR-COMPILER-003 (closes A2 prerequisite #4)
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `src/compiler/20.hir/hir_lowering/items.spl` | Added `resolve_import_symbols(module: Module)` method; called at top of `lower_module` before `declare_module_symbols`; handles both glob and named imports; pre-registers type names with `defining_module` from the imported module's path. |
+| `src/compiler/20.hir/hir_lowering/types.spl` | Added `modules_by_name: Dict<text, any>` field to `HirLowering` class; updated all 4 constructors (`hirlowering_new`, `with_filename`, `with_config`, `with_resolver`) and backend direct-constructor to include `modules_by_name: {}`. |
+| `src/compiler/20.hir/hir_types.spl` | Added first-write-wins guard to `SymbolTable.define` for type-level symbols (Class/Struct/Enum/Trait): if name already in scope, return existing id (no overwrite). |
+| `src/compiler/70.backend/backend/compile_c_entry.spl` | Added `modules_by_name: {}` to direct HirLowering struct constructor. |
+| `src/compiler/80.driver/driver.spl` | Added `lowering.modules_by_name = self.ctx.modules` in `lower_and_check_impl` and `lowering.modules_by_name = ctx.modules` in `lower_to_hir_impl`, before the module loop. |
+| `test/unit/compiler/hir/resolve_import_symbols_spec.spl` | New — 2 `it` blocks: (a) named import from module A wins over same-named symbol from module B; (b) glob import pre-registers all type symbols from imported module. |
+| `doc/08_tracking/feature_request/compiler_requests.md` | FR-COMPILER-003 status → Implemented; prerequisite #4 flipped to [x]; A2 implementation notes + remaining limitation appended; FR-COMPILER-004 filed for module-scoped symbol tables. |
+
+**Key design decisions:**
+- Used `Dict<text, any>` for `modules_by_name` to avoid type-namespace ambiguity between `compiler.core.parser.Module` (driver) and `compiler.frontend.parser_types.Module` (hir_lowering); consistent with `ModuleResolverPort.resolve_fn: any` precedent.
+- first-write-wins only blocks `declare_module_symbols` from overwriting explicit imports; it does NOT solve the shared-HirLowering cross-module case (tracked as FR-COMPILER-004).
+- For the driver's shared-HirLowering path, the correct fix is per-module HirLowering instances (option 1 in FR-COMPILER-004) — not `define_override`, which would have inconsistent id-to-definition bindings downstream.
+
+#### 12-e2-cross-submodule-imports
+
+**Status:** DONE (2026-04-18) — investigation complete; no source changes (blocked — see below)
+**FR:** FR-SPOSTGRE-M2-001 (Open, blocked on FR-SPOSTGRE-M2-002), FR-SPOSTGRE-M2-002 (Open, filed against NVFS)
+
+**Investigation summary:**
+
+The task requested replacing duplicated NVFS constants/types in `nvfs_shim.spl` with
+cross-submodule imports enabled by FR-COMPILER-003 (2-pass import resolver).
+
+**Items audited in `examples/spostgre/src/engine/nvfs_shim.spl`:**
+
+| Item | Type | Result |
+|------|------|--------|
+| `STORAGE_CLASS_DB_WAL: i32 = 1` | val | No canonical def in nvfs — KEPT |
+| `STORAGE_CLASS_META_DURABLE: i32 = 2` | val | No canonical def in nvfs — KEPT |
+| `DURABILITY_DATA_DURABLE: i32 = 1` | val | No canonical def in nvfs — KEPT |
+| `PmapEntry` | struct | Not in shim (lives in pmap.spl); nvfs PmapEntry fields diverge |
+| `SuperblockHeader` | struct | Not in shim — no action needed |
+
+**Root cause of blockage:**
+- NVFS `arena.spl` uses `class_tag: i32` as an opaque passthrough; named StorageClass/
+  DurabilityClass ordinals do not exist anywhere in `examples/nvfs/src/core/`.
+- The 3 `val` declarations in `nvfs_shim.spl` and `STORAGE_CLASS_DB_TEMP` in
+  `tier_cache.spl` are the *only* definitions of these ordinals in the codebase.
+- spostgre's `PmapEntry` and nvfs's `PmapEntry` are structurally unrelated structs
+  (different fields, different semantics); import would require aliasing with a
+  misleading name.
+
+**Per the task's "prefer duplicates over flaky imports" rule:** no source changes were made.
+
+**Follow-up required (NVFS side):**
+FR-SPOSTGRE-M2-002 filed: add `examples/nvfs/src/core/constants.spl` with named ordinals.
+Once that lands, `nvfs_shim.spl` and `tier_cache.spl` can drop their local `val` declarations.
+
+**Files changed:** doc only
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-SPOSTGRE-M2-001 (Open, blocked) + FR-SPOSTGRE-M2-002 (Open) added
+- `.sstack/spostgre-nvfs-storage/state.md` — this entry

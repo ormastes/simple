@@ -26,9 +26,9 @@ Exercises the spostgre WAL + pmap writers through the NVFS shim together:
   3. pmap publish: after commit_group makes the record durable, pmap_writer_publish
      records the (logical, phys, offset, page_lsn) mapping.
 
-  4. Checkpoint simulation: checkpoint_begin / checkpoint_commit are pass_todo
-     at M2. The equivalent is wal_writer_commit_group (FUA fence) + wal_writer_sync.
-     See state.md §9-e2e-integration for the API-gap note.
+  4. Checkpoint: checkpoint_begin returns a target Lsn; checkpoint_commit
+     appends a ring record via FUA fence and sets durable_lsn.
+     FR-STORAGE-E2E-001: fully implemented (no longer pass_todo).
 
   5. Remount simulation: WAL and pmap arena byte-images are extracted, re-injected
      into fresh arenas (simulating a process restart with durable storage), and
@@ -44,7 +44,7 @@ Scenarios (10 it-blocks):
   4. commit_group advances durable_lsn to lsn_high
   5. pmap_writer_publish returns true
   6. pmap_writer_lookup returns the correct page_lsn (birth_gen)
-  7. wal_writer_sync advances durable_lsn to current total_bytes
+  7. checkpoint_begin/commit make WAL LSN durable via checkpoint ring
   8. Remount: wal_recover_tail on re-seeded arena returns all 3 records
   9. Remount: pmap_writer_lookup on re-seeded arena returns matching page_lsn
  10. CRC fence: corrupted record stops recovery — only prefix records returned
@@ -59,6 +59,7 @@ use engine.wal.{WalWriter, wal_writer_append, wal_writer_commit_group,
                 wal_writer_sync, wal_recover_tail, wal_record_encode,
                 WAL_HDR_LEN}
 use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
+use engine.checkpoint.{checkpoint_begin, checkpoint_commit, checkpoint_durable_lsn}
 use engine.nvfs_shim.{shim_arena_create, shim_arena_readv,
                       shim_arena_append, shim_arena_total_bytes,
                       shim_arena_corrupt_byte_for_test,
@@ -126,7 +127,7 @@ describe "E2E spostgre+NVFS — WAL append":
 # Scenarios 5-7 — pmap publish + sync (checkpoint equivalent at M2)
 # ============================================================================
 
-describe "E2E spostgre+NVFS — pmap publish + checkpoint sim":
+describe "E2E spostgre+NVFS — pmap publish + checkpoint":
     it "pmap_writer_publish returns true after WAL commit":
         val w0 = WalWriter.new()
         val p = tuple_insert_payload()
@@ -151,15 +152,18 @@ describe "E2E spostgre+NVFS — pmap publish + checkpoint sim":
         expect(entry.phys != -1).to_equal(true)
         expect(entry.birth_gen).to_equal(page_lsn)
 
-    it "wal_writer_sync advances durable_lsn to current total bytes (checkpoint sim)":
-        # checkpoint_begin/checkpoint_commit are pass_todo at M2.
-        # Equivalent is wal_writer_sync which FUA-fences and sets durable_lsn.
+    it "checkpoint_begin/commit make WAL LSN durable via checkpoint ring":
+        # FR-STORAGE-E2E-001: real checkpoint_begin/commit replace the former
+        # wal_writer_sync workaround.  checkpoint_begin returns the target LSN;
+        # checkpoint_commit appends a ring record and advances durable_lsn.
         val w0 = WalWriter.new()
         val p = tuple_insert_payload()
         val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 5), p)
-        val ws = wal_writer_sync(w1)
-        val total = shim_arena_total_bytes(ws.arena_id)
-        expect(ws.durable_lsn).to_equal(total)
+        val _wc = wal_writer_commit_group(w1, lsn1)
+        val ckpt_lsn = checkpoint_begin()
+        val ok = checkpoint_commit(ckpt_lsn)
+        expect(ok).to_equal(true)
+        expect(checkpoint_durable_lsn() >= lsn1.value).to_equal(true)
 
 # ============================================================================
 # Scenarios 8-9 — remount simulation: extract + re-inject arenas

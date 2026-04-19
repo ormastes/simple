@@ -191,7 +191,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-002 fix session
 - **Target:** compiler — `src/compiler/20.hir/hir_lowering/` + `src/compiler/80.driver/`
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented (2026-04-18, A2 agent)
 - **Requested-semantics:**
   The self-hosted HIR lowerer (`HirLowering`) must mirror the Rust seed's
   two-pass import loading pipeline from
@@ -219,13 +219,16 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [ ] Both can coexist in the same file via aliased imports (FR-COMPILER-002 AC #3).
   - [ ] FR-COMPILER-001 acceptance criteria are met.
 - **Prerequisites (infrastructure changes needed first):**
-  1. Add `module_resolver: ModuleResolverPort?` field to `HirLowering` class
-     (currently absent — confirmed 2026-04-18).
-  2. Add `current_file: text?` and `loaded_modules: [text]` fields to `HirLowering`.
-  3. Driver (`src/compiler/80.driver/driver.spl`) must populate these fields when
-     constructing `HirLowering` — i.e., `HirLowering.with_resolver(resolver, file)`.
-  4. `lower_module` must call a new `resolve_import_symbols` pass before
-     `declare_module_symbols` to pre-populate the scope with explicitly imported names.
+  1. [x] Add `module_resolver: ModuleResolverPort?` field to `HirLowering` class
+     (added 2026-04-18 by A1 agent; `HirLowering.with_resolver()` constructor also added).
+  2. [x] Add `loaded_modules: [text]` field to `HirLowering` (uses existing
+     `module_filename: text` for `current_file` — same field, already present).
+  3. [x] Driver (`src/compiler/80.driver/driver.spl`) now sets
+     `lowering.module_filename = source.path` per module in both
+     `lower_and_check_impl` and `lower_to_hir_impl` (2026-04-18 A1).
+  4. [x] `lower_module` now calls `resolve_import_symbols` pass before
+     `declare_module_symbols` to pre-populate the scope with explicitly imported names
+     (A2 implemented 2026-04-18).
 - **Related-upfront:** none
 - **Related-design-doc:** `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
   (reference implementation, 717 lines)
@@ -234,6 +237,25 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   FR-COMPILER-002 partial fix (first-write-wins + per-module `module_filename`)
   landed 2026-04-18. That fix is a prerequisite but does not resolve the
   import-target-awareness gap. This FR is the blocking item for FR-COMPILER-001.
+
+  **A2 implementation (2026-04-18, Claude Sonnet 4.6):**
+  `resolve_import_symbols` added to `src/compiler/20.hir/hir_lowering/items.spl`.
+  Called at the top of `lower_module` before `declare_module_symbols`.
+  Handles both glob imports (`use mod.*`) and named imports (`use mod.{Name}`).
+  `modules_by_name: Dict<text, any>` field added to `HirLowering` in
+  `src/compiler/20.hir/hir_lowering/types.spl`; driver sets it before the
+  lowering loop in both `lower_and_check_impl` and `lower_to_hir_impl`.
+  `SymbolTable.define` updated with first-write-wins guard for type-level symbols
+  (Class/Struct/Enum/Trait) in `src/compiler/20.hir/hir_types.spl`.
+  Test spec: `test/unit/compiler/hir/resolve_import_symbols_spec.spl` (2 `it` blocks).
+
+  **Remaining limitation (tracked as FR-COMPILER-004):**
+  The driver uses a SINGLE shared `HirLowering` instance for all modules. When
+  module A is lowered first and registers A's `CompileOptions`, then a consumer
+  with `use b.{CompileOptions}` is lowered, `resolve_import_symbols` cannot
+  override A's already-registered id. Correct fix requires module-scoped symbol
+  tables (FR-COMPILER-004). For the single-consumer-with-fresh-HirLowering case
+  (tests, incremental compilation), A2 works correctly.
 
 ---
 
@@ -297,3 +319,51 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   4. Observe "Runtime error: Function 'CompileOptions.input_files' not found"
      followed by "Function 'CompileOptions.low_memory' not found" and
      "Function 'CompileOptions.mode' not found" — wrong-struct collision.
+
+---
+
+### FR-COMPILER-004 — Module-scoped symbol tables for correct cross-module name isolation
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-003 A2 session
+- **Target:** compiler — `src/compiler/20.hir/hir_types.spl` + `src/compiler/20.hir/hir_lowering/`
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  The driver uses a single shared `HirLowering` instance with a flat global
+  `SymbolTable` scope to lower all modules in sequence. When two modules export
+  the same type name (e.g., `CompileOptions` in `driver_core_types.spl` and
+  `backend_types.spl`), the first module lowered registers its type id into
+  scope and the first-write-wins guard prevents any subsequent module's type from
+  being registered. As a result, a consumer with `use b.{CompileOptions}` that is
+  lowered AFTER module A has been processed will resolve to A's id — even though
+  `resolve_import_symbols` (FR-COMPILER-003 A2) correctly tries to pre-register
+  B's type before the consumer's `declare_module_symbols` runs.
+
+  The fix requires each module to be lowered with its own isolated symbol scope
+  (or a per-module namespace prefix in the flat scope) so that type names from
+  different modules do not collide. The Rust seed uses per-compilation-unit
+  `GlobalScope` instances for this purpose.
+- **Acceptance-criteria:**
+  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+        a field access on `low_memory` / `mode` succeeds in the self-hosted binary
+        regardless of module load order (FR-COMPILER-002 AC #1 and #2).
+  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to
+        the 7-field backend struct and does NOT expose `mode` / `low_memory`.
+  - [ ] Both coexist in the same compilation unit via aliased imports without collision.
+  - [ ] FR-COMPILER-001 acceptance criteria are fully met.
+- **Related-upfront:** none
+- **Related-design-doc:** `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
+  (reference: per-unit GlobalScope creation)
+- **Related-issue:** FR-COMPILER-002, FR-COMPILER-003 (prerequisites and parent)
+- **Notes:**
+  FR-COMPILER-003 A2 (`resolve_import_symbols` + first-write-wins guard) partially
+  addresses this: it works correctly when each module is lowered with a FRESH
+  `HirLowering` instance (e.g., in tests or incremental compilation). The remaining
+  failure mode is the shared-instance driver path where module A has already
+  registered its type before the consumer is lowered.
+  Three implementation options:
+  1. Per-module `HirLowering` instances in the driver (simplest; allows first-write-wins to work per-consumer)
+  2. Module-qualified keys in the flat SymbolTable (`"module::TypeName"` instead of `"TypeName"`)
+  3. Push/pop module scope per `lower_module` call with scoped lookup
+  Option 1 is the lowest-risk starting point since A2 already wires `modules_by_name`.

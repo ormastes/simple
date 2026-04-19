@@ -1,0 +1,221 @@
+"""
+ACPI Table Walker Unit Tests — FR-SIMPLEOS-ACPI-001
+
+Structural tests using synthetic fixture bytes for FADT and HPET table
+parsing.  Uses the reader-closure variants (acpi_fadt_pm_tmr_port_raw,
+acpi_hpet_base_raw) so that tests pass a byte-array indexer rather than
+dereferencing real physical addresses.
+
+Three test groups:
+  1. ACPI signature constant encoding (structural, no I/O)
+  2. HPET table parser: fixture bytes verify GAS offset 44/48 arithmetic
+  3. FADT parser: fixture bytes verify legacy port (offset 76) and extended
+     X_PM_TMR_BLK GAS (offset 208) selection logic
+"""
+
+use std.spec
+use os.kernel.acpi.clock_sources.{
+    acpi_set_rsdp,
+    acpi_rsdp_available,
+    ACPI_SIG_HPET,
+    ACPI_SIG_FACP,
+    ACPI_SIG_RSDT,
+    ACPI_SIG_XSDT,
+}
+use os.kernel.acpi.fadt.{
+    acpi_fadt_pm_tmr_port_raw,
+    FADT_OFF_REVISION,
+    FADT_OFF_LENGTH,
+    FADT_OFF_PM_TMR_BLK,
+    FADT_OFF_X_PM_TMR_BLK,
+    GAS_OFF_SPACE_ID,
+    GAS_OFF_ADDRESS,
+    GAS_SPACE_SYSTEM_IO,
+    FADT_MIN_LEN_EXTENDED,
+}
+use os.kernel.acpi.hpet_table.{
+    acpi_hpet_base_raw,
+    HPET_TBL_OFF_GAS,
+    HPET_TBL_GAS_OFF_SPACE,
+    HPET_TBL_GAS_OFF_ADDRESS,
+    GAS_SPACE_SYSTEM_MEMORY,
+}
+
+# ============================================================================
+# Fixture helpers
+#
+# We build a flat [u8] array and supply read8/read32 closures that index it.
+# Byte order is little-endian (x86 native).
+# ============================================================================
+
+fn _make_fadt_legacy(port: u32) -> [u8]:
+    """Minimal FADT fixture: revision=1, length=80 (too small for extended),
+    PM_TMR_BLK = port at offset 76."""
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < 256:
+        buf = buf + [0]
+        i = i + 1
+    # offset 4: length = 80 (u32 LE)
+    buf[4] = (80 & 0xFF) as u8
+    buf[5] = ((80 >> 8) & 0xFF) as u8
+    buf[6] = 0
+    buf[7] = 0
+    # offset 8: revision = 1
+    buf[8] = 1
+    # offset 76: PM_TMR_BLK = port (u32 LE)
+    buf[76] = (port & 0xFF) as u8
+    buf[77] = ((port >> 8) & 0xFF) as u8
+    buf[78] = ((port >> 16) & 0xFF) as u8
+    buf[79] = ((port >> 24) & 0xFF) as u8
+    buf
+
+fn _make_fadt_extended(legacy_port: u32, gas_port: u32) -> [u8]:
+    """FADT fixture: revision=3, length=244, PM_TMR_BLK = legacy_port,
+    X_PM_TMR_BLK GAS = SystemIO at gas_port (offset 208)."""
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < 256:
+        buf = buf + [0]
+        i = i + 1
+    # offset 4: length = 244 (u32 LE)
+    buf[4] = (244 & 0xFF) as u8
+    buf[5] = ((244 >> 8) & 0xFF) as u8
+    buf[6] = 0
+    buf[7] = 0
+    # offset 8: revision = 3
+    buf[8] = 3
+    # offset 76: legacy PM_TMR_BLK
+    buf[76] = (legacy_port & 0xFF) as u8
+    buf[77] = ((legacy_port >> 8) & 0xFF) as u8
+    buf[78] = ((legacy_port >> 16) & 0xFF) as u8
+    buf[79] = ((legacy_port >> 24) & 0xFF) as u8
+    # offset 208: X_PM_TMR_BLK GAS
+    #   +0: address_space_id = 1 (SystemIO)
+    buf[208] = GAS_SPACE_SYSTEM_IO
+    #   +1,+2,+3: bit_width, bit_offset, access_size (don't care)
+    buf[209] = 32
+    buf[210] = 0
+    buf[211] = 4
+    #   +4..+11: address = gas_port (u64 LE)
+    buf[212] = (gas_port & 0xFF) as u8
+    buf[213] = ((gas_port >> 8) & 0xFF) as u8
+    buf[214] = ((gas_port >> 16) & 0xFF) as u8
+    buf[215] = ((gas_port >> 24) & 0xFF) as u8
+    buf[216] = 0
+    buf[217] = 0
+    buf[218] = 0
+    buf[219] = 0
+    buf
+
+fn _make_hpet_table(mmio_lo: u32, mmio_hi: u32) -> [u8]:
+    """HPET fixture: GAS at offset 44, address_space_id=0 (SystemMemory),
+    MMIO base = mmio_hi:mmio_lo (u64 LE) at GAS+4 = offset 48."""
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        buf = buf + [0]
+        i = i + 1
+    # offset 44: GAS address_space_id = 0 (SystemMemory)
+    buf[44] = GAS_SPACE_SYSTEM_MEMORY
+    buf[45] = 64   # bit_width
+    buf[46] = 0    # bit_offset
+    buf[47] = 0    # access_size
+    # offset 48: address u64 LE
+    buf[48] = (mmio_lo & 0xFF) as u8
+    buf[49] = ((mmio_lo >> 8) & 0xFF) as u8
+    buf[50] = ((mmio_lo >> 16) & 0xFF) as u8
+    buf[51] = ((mmio_lo >> 24) & 0xFF) as u8
+    buf[52] = (mmio_hi & 0xFF) as u8
+    buf[53] = ((mmio_hi >> 8) & 0xFF) as u8
+    buf[54] = ((mmio_hi >> 16) & 0xFF) as u8
+    buf[55] = ((mmio_hi >> 24) & 0xFF) as u8
+    buf
+
+fn _buf_read8(buf: [u8], off: u64) -> u8:
+    buf[off as i64]
+
+fn _buf_read32(buf: [u8], off: u64) -> u32:
+    val b0 = buf[(off + 0) as i64] as u32
+    val b1 = buf[(off + 1) as i64] as u32
+    val b2 = buf[(off + 2) as i64] as u32
+    val b3 = buf[(off + 3) as i64] as u32
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+# ============================================================================
+# Test Group 1: ACPI signature constant encoding
+# ============================================================================
+
+describe "ACPI signature constants":
+    it "ACPI_SIG_HPET encodes 'HPET' little-endian":
+        # 'H'=0x48, 'P'=0x50, 'E'=0x45, 'T'=0x54 → LE u32 = 0x54455048
+        expect(ACPI_SIG_HPET).to_equal(0x54455048)
+
+    it "ACPI_SIG_FACP encodes 'FACP' little-endian":
+        # 'F'=0x46, 'A'=0x41, 'C'=0x43, 'P'=0x50 → LE u32 = 0x50434146
+        expect(ACPI_SIG_FACP).to_equal(0x50434146)
+
+    it "ACPI_SIG_RSDT encodes 'RSDT' little-endian":
+        expect(ACPI_SIG_RSDT).to_equal(0x54445352)
+
+    it "ACPI_SIG_XSDT encodes 'XSDT' little-endian":
+        expect(ACPI_SIG_XSDT).to_equal(0x54445358)
+
+# ============================================================================
+# Test Group 2: HPET table parser — fixture bytes, GAS at offset 44/48
+# ============================================================================
+
+describe "acpi_hpet_base_raw":
+    it "extracts MMIO base from GAS address at offset 48":
+        # QEMU HPET MMIO base: 0xFED00000 (lo=0xFED00000, hi=0)
+        val buf = _make_hpet_table(0xFED00000, 0)
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+        val result = acpi_hpet_base_raw(r8, r32, 0)
+        expect(result != nil).to_equal(true)
+        expect(result as u64).to_equal(0xFED00000)
+
+    it "returns nil when address_space_id is not SystemMemory":
+        val buf = _make_hpet_table(0xFED00000, 0)
+        var badbuf = buf
+        badbuf[44] = 1   # SystemIO — not valid for HPET MMIO
+        fn r8(off: u64) -> u8: _buf_read8(badbuf, off)
+        fn r32(off: u64) -> u32: _buf_read32(badbuf, off)
+        val result = acpi_hpet_base_raw(r8, r32, 0)
+        expect(result == nil).to_equal(true)
+
+    it "returns nil when MMIO address is zero":
+        val buf = _make_hpet_table(0, 0)
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+        val result = acpi_hpet_base_raw(r8, r32, 0)
+        expect(result == nil).to_equal(true)
+
+# ============================================================================
+# Test Group 3: FADT parser — fixture bytes, offsets 76 and 208
+# ============================================================================
+
+describe "acpi_fadt_pm_tmr_port_raw":
+    it "reads legacy PM_TMR_BLK at offset 76 for ACPI 1.0 FADT":
+        val buf = _make_fadt_legacy(0xB008)
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+        val result = acpi_fadt_pm_tmr_port_raw(r8, r32, 0)
+        expect(result != nil).to_equal(true)
+        expect(result as u32).to_equal(0xB008)
+
+    it "prefers X_PM_TMR_BLK GAS at offset 208 for ACPI 2.0+ FADT":
+        # legacy port 0xB008, extended GAS port 0xB800 — should return 0xB800
+        val buf = _make_fadt_extended(0xB008, 0xB800)
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+        val result = acpi_fadt_pm_tmr_port_raw(r8, r32, 0)
+        expect(result != nil).to_equal(true)
+        expect(result as u32).to_equal(0xB800)
+
+    it "returns nil when PM_TMR_BLK is zero":
+        val buf = _make_fadt_legacy(0)
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+        val result = acpi_fadt_pm_tmr_port_raw(r8, r32, 0)
+        expect(result == nil).to_equal(true)

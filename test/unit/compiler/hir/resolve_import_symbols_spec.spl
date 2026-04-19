@@ -1,0 +1,92 @@
+# Unit test: resolve_import_symbols 2-pass import resolver
+#
+# **Feature:** FR-COMPILER-003 (A2) — 2-pass import resolver
+# **Status:** Active
+#
+# Verifies that when a consumer module imports `use a.{CompileOptions}`, the
+# pre-pass registers the correct CompileOptions from module A, not the
+# CompileOptions from module B — even when B is also loaded.
+#
+# Setup mirrors the FR-COMPILER-002 minimum repro:
+#   Module a: struct CompileOptions with `only_in_a: i64` (unique to A)
+#   Module b: struct CompileOptions with `only_in_b: i64` (unique to B)
+#   Consumer: `use a.{CompileOptions}` → must resolve to A's version
+#
+# The test asserts that the resolved symbol for `CompileOptions` in the
+# consumer carries `defining_module = "a"`, confirming the explicit import
+# took precedence over module load order.
+
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+describe "resolve_import_symbols 2-pass import resolver":
+    it "named import from module A wins over same-named symbol from module B":
+        val log = make_logger()
+
+        # Module A: CompileOptions has only_in_a (unique sentinel field)
+        val src_a = "struct CompileOptions:\n    input_files: [text]\n    only_in_a: i64"
+        val path_a = "a"
+        val module_a = parse_full_frontend(src_a, path_a, path_a, log)
+
+        # Module B: CompileOptions has only_in_b (unique sentinel field)
+        val src_b = "struct CompileOptions:\n    mode: text\n    only_in_b: i64"
+        val path_b = "b"
+        val module_b = parse_full_frontend(src_b, path_b, path_b, log)
+
+        # Consumer: explicitly imports CompileOptions from module A
+        val src_consumer = "use a.{CompileOptions}"
+        val path_consumer = "consumer"
+        val module_consumer = parse_full_frontend(src_consumer, path_consumer, path_consumer, log)
+
+        # Wire up modules map — both modules available to resolve_import_symbols
+        var modules_map: Dict<text, any> = {}
+        modules_map[path_a] = module_a
+        modules_map[path_b] = module_b
+
+        # Lower the consumer with modules_by_name set
+        # resolve_import_symbols must pre-register A's CompileOptions first
+        var lowering = HirLowering.with_filename(path_consumer)
+        lowering.modules_by_name = modules_map
+        val hir_consumer = lowering.lower_module(module_consumer)
+
+        # CompileOptions must resolve to the entry registered from module A
+        val resolved_id = hir_consumer.symbols.lookup("CompileOptions")
+        expect(resolved_id.?).to_equal(true)
+
+        val sym = hir_consumer.symbols.get(resolved_id.unwrap())
+        expect(sym.?).to_equal(true)
+
+        val defining_mod = sym.unwrap().defining_module
+        expect(defining_mod.?).to_equal(true)
+        # Must resolve to module A (the explicit import target), not B
+        expect(defining_mod.unwrap()).to_equal(path_a)
+
+    it "glob import pre-registers all type symbols from imported module":
+        val log = make_logger()
+
+        # Library module with two types
+        val src_lib = "struct Foo:\n    x: i64\nstruct Bar:\n    y: text"
+        val path_lib = "mylib"
+        val module_lib = parse_full_frontend(src_lib, path_lib, path_lib, log)
+
+        # Consumer uses glob import
+        val src_consumer2 = "use mylib.*"
+        val path_consumer2 = "consumer2"
+        val module_consumer2 = parse_full_frontend(src_consumer2, path_consumer2, path_consumer2, log)
+
+        var modules_map2: Dict<text, any> = {}
+        modules_map2[path_lib] = module_lib
+
+        var lowering2 = HirLowering.with_filename(path_consumer2)
+        lowering2.modules_by_name = modules_map2
+        val hir2 = lowering2.lower_module(module_consumer2)
+
+        # Both Foo and Bar must be resolvable in the consumer's symbol table
+        val foo_id = hir2.symbols.lookup("Foo")
+        val bar_id = hir2.symbols.lookup("Bar")
+        expect(foo_id.?).to_equal(true)
+        expect(bar_id.?).to_equal(true)

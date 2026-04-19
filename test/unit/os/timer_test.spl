@@ -1,11 +1,11 @@
-# Timer clock-source selection tests — FR-BENCH-CLOCK-002
+# Timer clock-source selection and calibration math tests — FR-BENCH-CLOCK-002
 #
-# Structural unit tests for the HPET → PMTMR → PIT fallback chain.
-# Uses the pure dispatcher _choose_clock_source() with synthetic fixture
-# values — no ACPI tables or real hardware required.
+# Unit tests for the HPET → PMTMR → PIT fallback chain and the pure
+# calibration math helpers. No ACPI tables or real hardware required.
 
 use os.kernel.arch.x86_64.timer.{_choose_clock_source,
-    CLOCK_SRC_HPET, CLOCK_SRC_PMTMR, CLOCK_SRC_PIT}
+    CLOCK_SRC_HPET, CLOCK_SRC_PMTMR, CLOCK_SRC_PIT,
+    _tsc_hz_from_hpet, _tsc_hz_from_pmtmr}
 
 feature "X86Timer clock-source selection — FR-BENCH-CLOCK-002":
 
@@ -23,3 +23,43 @@ feature "X86Timer clock-source selection — FR-BENCH-CLOCK-002":
         # Fixture: both stubs returned nil (ACPI not yet walked)
         val src = _choose_clock_source(nil, nil)
         assert src == CLOCK_SRC_PIT
+
+feature "HPET TSC calibration math — FR-BENCH-CLOCK-002":
+
+    it "_tsc_hz_from_hpet returns expected frequency for synthetic deltas":
+        # Synthetic: QEMU HPET period_fs = 10_000_000 fs (100 MHz HPET)
+        # 10ms window: hpet_delta = 1_000_000 ticks (at 100 MHz)
+        #              tsc_delta  = 3_000_000_000 ticks (at 3 GHz)
+        # elapsed_ns = 1_000_000 * 10_000_000 / 1_000_000 = 10_000_000 ns = 10ms
+        # tsc_hz = 3_000_000_000 * 1_000_000_000 / 10_000_000 = 3_000_000_000
+        val period_fs: u64  = 10000000
+        val hpet_delta: u64 = 1000000
+        val tsc_delta: u64  = 3000000000
+        val hz = _tsc_hz_from_hpet(tsc_delta, hpet_delta, period_fs)
+        assert hz == 3000000000
+
+    it "_tsc_hz_from_hpet returns 0 when period_fs is zero":
+        val hz = _tsc_hz_from_hpet(3000000000, 1000000, 0)
+        assert hz == 0
+
+    it "_tsc_hz_from_hpet returns 0 when hpet_delta is zero":
+        val hz = _tsc_hz_from_hpet(3000000000, 0, 10000000)
+        assert hz == 0
+
+feature "PMTMR TSC calibration math — FR-BENCH-CLOCK-002":
+
+    it "_tsc_hz_from_pmtmr returns expected frequency for synthetic deltas":
+        # Synthetic: 10ms window at 3.579545 MHz PMTMR → 35795 ticks
+        #            TSC at 3 GHz → 30_000_000 ticks in 10ms
+        # tsc_hz = 30_000_000 * 3_579_545 / 35_795 = ~3_000_000_000
+        val pmtmr_delta: u64 = 35795
+        val tsc_delta: u64   = 30000000
+        val hz = _tsc_hz_from_pmtmr(tsc_delta, pmtmr_delta)
+        # Allow ±1% tolerance: exact = 3_000_000_000 * 35795/35795 = tsc*freq/delta
+        # exact: 30_000_000 * 3_579_545 / 35_795 = 2_999_957_259 (within 0.002%)
+        assert hz > 2970000000
+        assert hz < 3030000000
+
+    it "_tsc_hz_from_pmtmr returns 0 when pmtmr_delta is zero":
+        val hz = _tsc_hz_from_pmtmr(3000000000, 0)
+        assert hz == 0

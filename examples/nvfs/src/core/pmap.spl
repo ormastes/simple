@@ -1,18 +1,30 @@
-# NVFS pmap v2 — 80-byte page-map entry (§17.2 of nvfs_design_v2.md).
+# NVFS pmap v3 — 88-byte page-map entry (§V3-5.1 of nvfs_design_v3.md).
+#
+# v3 extends v2 (80 bytes) by 8 bytes.  The flags field moved from 0x2C to 0x30
+# to make room for compress_algo (u8) + reserved_algo_pad (u16) + compressed_len (u32).
+# Checksum moved from 0x30 to 0x38.
 #
 # Layout (all fields little-endian):
 #
 #   offset  size  field
-#   0x00    8     logical     (u64)  — logical page number
-#   0x08    8     phys        (i64)  — physical arena id (ArenaId)
-#   0x10    8     offset      (u64)  — physical byte offset within arena
-#   0x18    8     len         (u64)  — page_generation / CoW generation (v1 field retained)
-#   0x20    8     birth_gen   (u64)  — NEW: txg when this pointer was first written
-#   0x28    1     checksum_algo (u8) — NEW: ChecksumAlgo tag (see enum below)
-#   0x29    3     reserved          — zero-filled padding
-#   0x2C    4     flags       (u32) — bit0=blob_pointer, bit1=evicted (v1 bits retained)
-#   0x30    32    checksum    (u8[32]) — Merkle checksum of target block (left-padded)
-#   Total: 80 bytes
+#   0x00    8     logical        (u64)  — logical page number
+#   0x08    8     phys           (i64)  — physical arena id (ArenaId)
+#   0x10    8     offset         (u64)  — physical byte offset within arena
+#   0x18    8     len            (u64)  — page_generation / CoW generation
+#   0x20    8     birth_gen      (u64)  — txg when this pointer was first written
+#   0x28    1     checksum_algo  (u8)   — ChecksumAlgo tag (see enum below)
+#   0x29    1     compress_algo  (u8)   — NEW v3: CompressAlgo tag (0=None,1=LZ4,2=Zstd3)
+#   0x2A    2     reserved_algo_pad     — zero-filled
+#   0x2C    4     compressed_len (u32)  — NEW v3: byte length of compressed on-disk data
+#                                         (0 when compress_algo=None)
+#   0x30    4     flags          (u32)  — bit0=blob_pointer, bit1=evicted (v1/v2 bits)
+#   0x34    4     reserved_flags_pad    — zero-filled
+#   0x38    32    checksum       (u8[32]) — Merkle checksum of target block (left-padded)
+#   Total: 88 bytes
+#
+# Migration: v2 (80-byte) entries are decoded with algo=0 / compressed_len=0.
+#   pmap_entry_decode dispatches on bytes.len(): 80 → v2 path, 88 → v3 path.
+#   See nvfs_design_v3.md §V3-7.
 
 use std.fs_driver.error.{FsError}
 
@@ -59,23 +71,30 @@ impl ChecksumAlgo:
 # ---------------------------------------------------------------------------
 
 struct PmapEntry:
-    """v2 pmap entry. Exactly 80 bytes on disk (little-endian).
+    """v3 pmap entry. Exactly 88 bytes on disk (little-endian).
 
-    logical       — logical page number addressed by this entry.
-    phys          — arena id (opaque i64) owning the physical backing.
-    offset        — byte offset within the arena.
-    len           — CoW generation (page_generation from v1; retained).
-    birth_gen     — transaction generation when this pointer was first written.
-    checksum_algo — algorithm used to compute checksum (see ChecksumAlgo).
-    checksum      — 32-byte Merkle checksum of the target block (left-padded zeros).
+    logical        — logical page number addressed by this entry.
+    phys           — arena id (opaque i64) owning the physical backing.
+    offset         — byte offset within the arena.
+    len            — CoW generation (page_generation from v1; retained).
+    birth_gen      — transaction generation when this pointer was first written.
+    checksum_algo  — algorithm used to compute checksum (see ChecksumAlgo).
+    compress_algo  — NEW v3: compression algorithm (see CompressAlgo in compression.spl).
+    compressed_len — NEW v3: byte length of compressed on-disk data (0 when algo=None).
+    checksum       — 32-byte Merkle checksum of the compressed bytes (left-padded zeros).
+
+    v2 compatibility: when decoded from an 80-byte buffer, compress_algo=0 and
+    compressed_len=0 are synthesized (no compression; §V3-7 migration path).
     """
-    logical:       u64
-    phys:          i64
-    offset:        u64
-    len:           u64
-    birth_gen:     u64
-    checksum_algo: u8
-    checksum:      [u8]   # exactly 32 bytes; [u8;32] not yet supported
+    logical:        u64
+    phys:           i64
+    offset:         u64
+    len:            u64
+    birth_gen:      u64
+    checksum_algo:  u8
+    compress_algo:  u8    # NEW v3: CompressAlgo tag; 0=None for v2-decoded entries
+    compressed_len: u32   # NEW v3: 0 when compress_algo=None
+    checksum:       [u8]  # exactly 32 bytes; [u8;32] not yet supported
 
 # ---------------------------------------------------------------------------
 # Encode helpers
@@ -126,15 +145,29 @@ fn _get_u32_le(buf: [u8], off: i64) -> u32:
 # ---------------------------------------------------------------------------
 
 fn pmap_entry_encode(entry: PmapEntry) -> [u8]:
-    """Serialize entry to an 80-byte little-endian byte buffer.
+    """Serialize entry to an 88-byte little-endian byte buffer (v3 layout).
 
     checksum must contain at least 32 bytes; excess bytes are ignored.
     If shorter, remaining checksum bytes are zero-padded.
+
+    v3 layout (§V3-5.1):
+      0x00  logical (u64)
+      0x08  phys    (i64)
+      0x10  offset  (u64)
+      0x18  len     (u64)
+      0x20  birth_gen (u64)
+      0x28  checksum_algo (u8)
+      0x29  compress_algo (u8)
+      0x2A  reserved_algo_pad (u16) = 0
+      0x2C  compressed_len (u32)
+      0x30  flags (u32) = 0
+      0x34  reserved_flags_pad (u32) = 0
+      0x38  checksum (u8[32])
     """
-    # Build 80-byte buffer pre-filled with zeros.
+    # Build 88-byte buffer pre-filled with zeros.
     var buf: [u8] = []
     var i = 0
-    while i < 80:
+    while i < 88:
         buf.push(0)
         i = i + 1
 
@@ -148,26 +181,39 @@ fn pmap_entry_encode(entry: PmapEntry) -> [u8]:
     _put_u64_le(buf, 24, entry.len)
     # 0x20: birth_gen (u64)
     _put_u64_le(buf, 32, entry.birth_gen)
-    # 0x28: checksum_algo (u8); 0x29-0x2B already zero (reserved)
+    # 0x28: checksum_algo (u8)
     buf[40] = entry.checksum_algo
-    # 0x2C: flags (u32) — always 0 for now (v2 default)
-    _put_u32_le(buf, 44, 0)
-    # 0x30: checksum (32 bytes)
+    # 0x29: compress_algo (u8)
+    buf[41] = entry.compress_algo
+    # 0x2A-0x2B: reserved_algo_pad — already zero
+    # 0x2C: compressed_len (u32)
+    _put_u32_le(buf, 44, entry.compressed_len)
+    # 0x30: flags (u32) — always 0 for now
+    _put_u32_le(buf, 48, 0)
+    # 0x34: reserved_flags_pad — already zero
+    # 0x38: checksum (32 bytes)
     var ci = 0
     while ci < 32:
         if ci < entry.checksum.len():
-            buf[48 + ci] = entry.checksum[ci]
+            buf[56 + ci] = entry.checksum[ci]
         ci = ci + 1
 
     buf
 
 fn pmap_entry_decode(bytes: [u8]) -> Result<PmapEntry, FsError>:
-    """Deserialize a PmapEntry from an 80-byte little-endian buffer.
+    """Deserialize a PmapEntry from an 80-byte (v2) or 88-byte (v3) buffer.
+
+    v2 (80 bytes): checksum at 0x30 (offset 48); compress_algo=0, compressed_len=0 synthesized.
+    v3 (88 bytes): compress_algo at 0x29, compressed_len at 0x2C, checksum at 0x38 (offset 56).
 
     Returns Err(InvalidArg) if bytes.len() < 80.
     Returns Err(Corrupt) if checksum_algo tag is unrecognised.
+
+    Migration path (§V3-7): reading a v2 on-disk entry with a v3 decoder yields
+    compress_algo=0 (None) and compressed_len=0 — identical semantics to uncompressed.
     """
-    if bytes.len() < 80:
+    val buf_len = bytes.len() as i64
+    if buf_len < 80:
         return Err(FsError.InvalidArg)
 
     val logical   = _get_u64_le(bytes, 0)
@@ -176,25 +222,50 @@ fn pmap_entry_decode(bytes: [u8]) -> Result<PmapEntry, FsError>:
     val len       = _get_u64_le(bytes, 24)
     val birth_gen = _get_u64_le(bytes, 32)
     val algo_tag  = bytes[40]
-    # bytes[41..43] reserved — ignored on read
-    # bytes[44..47] flags — read but not exposed in v2 struct yet
-    var checksum: [u8] = []
-    var ci = 0
-    while ci < 32:
-        checksum.push(bytes[48 + ci])
-        ci = ci + 1
 
-    # Validate algo tag
+    # Validate checksum algo tag
     val _algo_check = ChecksumAlgo.from_tag(algo_tag)?
 
+    if buf_len >= 88:
+        # v3 layout: compress_algo at 0x29, compressed_len at 0x2C, checksum at 0x38.
+        val compress_algo  = bytes[41]
+        val compressed_len = _get_u32_le(bytes, 44)
+        # flags at 0x30 (offset 48) — read but not yet exposed
+        var checksum: [u8] = []
+        var ci = 0
+        while ci < 32:
+            checksum.push(bytes[56 + ci])
+            ci = ci + 1
+        return Ok(PmapEntry(
+            logical:        logical,
+            phys:           phys_raw as i64,
+            offset:         offset,
+            len:            len,
+            birth_gen:      birth_gen,
+            checksum_algo:  algo_tag,
+            compress_algo:  compress_algo,
+            compressed_len: compressed_len,
+            checksum:       checksum
+        ))
+
+    # v2 layout (80 bytes): checksum at 0x30 (offset 48); synthesize v3 fields.
+    # bytes[41..43] reserved — ignored on read
+    # bytes[44..47] flags — not yet exposed
+    var checksum2: [u8] = []
+    var ci2 = 0
+    while ci2 < 32:
+        checksum2.push(bytes[48 + ci2])
+        ci2 = ci2 + 1
     Ok(PmapEntry(
-        logical:       logical,
-        phys:          phys_raw as i64,
-        offset:        offset,
-        len:           len,
-        birth_gen:     birth_gen,
-        checksum_algo: algo_tag,
-        checksum:      checksum
+        logical:        logical,
+        phys:           phys_raw as i64,
+        offset:         offset,
+        len:            len,
+        birth_gen:      birth_gen,
+        checksum_algo:  algo_tag,
+        compress_algo:  0,   # v2 → v3 migration: no compression
+        compressed_len: 0,
+        checksum:       checksum2
     ))
 
 fn pmap_entry_verify(entry: PmapEntry, data: [u8]) -> bool:

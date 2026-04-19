@@ -131,3 +131,108 @@ fn reflink_drop(arena_id: i64) -> bool:
 fn reflink_get(arena_id: i64) -> u32:
     """Module-level get; returns current refcount for arena_id."""
     _reflink_table.get(arena_id)
+
+# ---------------------------------------------------------------------------
+# Dedup-refcount helpers (N7b sibling table)
+#
+# The existing ReflinkTable keys by arena_id (i64).  Content-hash-keyed dedup
+# refcounts use a separate DedupRefcountTable so the reflink machinery is not
+# disturbed (preserves all existing reflink tests).
+#
+# DedupHashRef — one dedup-refcount entry
+# ---------------------------------------------------------------------------
+
+struct DedupHashRef:
+    """Refcount record keyed by a 32-byte content hash."""
+    content_hash: [u8]   # 32 bytes
+    refcount:     u32
+
+struct DedupRefcountTable:
+    """Sibling refcount table for content-hash-keyed dedup entries."""
+    refs: [DedupHashRef]
+
+impl DedupRefcountTable:
+
+    static fn new() -> DedupRefcountTable:
+        DedupRefcountTable(refs: [])
+
+    fn _hash_eq(a: [u8], b: [u8]) -> bool:
+        if a.len() != b.len():
+            return false
+        var i = 0
+        while i < a.len():
+            if a[i] != b[i]:
+                return false
+            i = i + 1
+        true
+
+    fn _find(content_hash: [u8]) -> i64:
+        var i = 0
+        while i < self.refs.len() as i64:
+            if self._hash_eq(self.refs[i].content_hash, content_hash):
+                return i
+            i = i + 1
+        -1
+
+    fn get(content_hash: [u8]) -> u32:
+        """Return refcount for content_hash; 0 if not tracked."""
+        val idx = self._find(content_hash)
+        if idx < 0:
+            return 0
+        self.refs[idx].refcount
+
+    fn bump(content_hash: [u8]) -> u32:
+        """Increment refcount; insert with count=2 if first bump (creator=1 implicit).
+
+        Returns new refcount.
+        """
+        val idx = self._find(content_hash)
+        if idx < 0:
+            self.refs.push(DedupHashRef(content_hash: content_hash, refcount: 2))
+            return 2
+        val old_rc = self.refs[idx].refcount
+        val new_rc = old_rc + 1
+        self.refs[idx] = DedupHashRef(content_hash: content_hash, refcount: new_rc)
+        new_rc
+
+    fn dec(content_hash: [u8]) -> bool:
+        """Decrement refcount; returns true when it reaches zero (entry removed).
+
+        If not in table, treats implicit count as 1 and returns true.
+        """
+        val idx = self._find(content_hash)
+        if idx < 0:
+            return true
+        val old_rc = self.refs[idx].refcount
+        if old_rc <= 1:
+            val last = self.refs.len() as i64 - 1
+            if idx != last:
+                self.refs[idx] = self.refs[last]
+            var new_list: [DedupHashRef] = []
+            var i = 0
+            while i < last:
+                new_list.push(self.refs[i])
+                i = i + 1
+            self.refs = new_list
+            return true
+        val new_rc = old_rc - 1
+        self.refs[idx] = DedupHashRef(content_hash: content_hash, refcount: new_rc)
+        false
+
+# ---------------------------------------------------------------------------
+# Module-level singleton dedup-refcount table + accessors
+# ---------------------------------------------------------------------------
+
+var _dedup_rc_table: DedupRefcountTable = DedupRefcountTable(refs: [])
+
+fn dedup_refcount_bump(content_hash: [u8]) -> u32:
+    """Bump the dedup refcount for content_hash; returns new count."""
+    _dedup_rc_table.bump(content_hash)
+
+fn dedup_refcount_dec(content_hash: [u8]) -> bool:
+    """Decrement the dedup refcount; returns true when freed."""
+    _dedup_rc_table.dec(content_hash)
+
+fn dedup_refcount_get(content_hash: [u8]) -> u32:
+    """Return the current dedup refcount; 0 if not tracked."""
+    _dedup_rc_table.get(content_hash)

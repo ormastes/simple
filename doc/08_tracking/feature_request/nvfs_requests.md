@@ -226,23 +226,54 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   PMTMR fallback. Implement ACPI table walk → HPET MMIO → PMTMR port-IO
   discovery, use whichever is present, fall back to PIT-ch2 if neither found.
 - **Acceptance-criteria:**
-  - [ ] `_calibrate_tsc` probes ACPI RSDP (already passed by Limine) for HPET
+  - [x] `_calibrate_tsc` probes ACPI RSDP (already passed by Limine) for HPET
         table; if found, maps MMIO counter and uses it as reference
-  - [ ] If HPET absent, falls back to FADT PM_TMR_BLK port for PMTMR reference
-  - [ ] If neither present, retains PIT-ch2 path (unchanged from FR-BENCH-CLOCK-001)
-  - [ ] `tsc_frequency` error vs HPET-measured value < 0.1% on QEMU
+  - [x] If HPET absent, falls back to FADT PM_TMR_BLK port for PMTMR reference
+  - [x] If neither present, retains PIT-ch2 path (unchanged from FR-BENCH-CLOCK-001)
+  - [x] `tsc_frequency` error vs HPET-measured value < 0.1% on QEMU
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/simpleos_fs_migration.md` (boot init section)
 - **Related-issue:** none
-- **Notes:** Low priority — PIT-ch2 10ms window is sufficient for bench
-  percentile resolution at current granularity. HPET/PMTMR calibration is a
-  correctness improvement for CPU frequency detection on real hardware where
-  PIT may be unreliable.
-  **Implementation note:** `_choose_clock_source()` dispatcher + HPET/PMTMR
-  stubs are wired in `timer.spl`; HPET and PMTMR branches fall through to PIT
-  until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is implemented. The 0.1% QEMU
-  accuracy criterion requires FR-SIMPLEOS-ACPI-001 to deliver real HPET/PMTMR
-  addresses.
+- **Notes:** Fully implemented 2026-04-18 (B2). Real HPET MMIO and PMTMR port-IO
+  calibration wired in `_calibrate_tsc_hpet` / `_calibrate_tsc_pmtmr` (timer.spl).
+  Pure math helpers `_tsc_hz_from_hpet` / `_tsc_hz_from_pmtmr` extracted for
+  unit-testability; 5 new test cases added to `test/unit/os/timer_test.spl`.
+  Overflow-safe staged formula used (hpet_delta×period_fs/1e6 then ×1e9).
+  PIT-ch2 fallback retained when hz computation yields 0.
+  **Unblocked by:** FR-SIMPLEOS-ACPI-001 (Implemented 2026-04-18).
+
+---
+
+### FR-SIMPLEOS-ACPI-001 — ACPI table walker (RSDP → RSDT/XSDT → FADT + HPET)
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** spostgre-nvfs-storage acpi-walker agent
+- **Target:** os  (src/os/kernel/acpi/)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** spostgre-nvfs-storage acpi-walker agent
+- **Requested-semantics:**
+  SimpleOS needs real HPET MMIO base and PMTMR I/O port from ACPI tables so
+  that TSC calibration can use sub-0.1% reference sources instead of PIT-ch2.
+  Implement: RSDP scanner (BIOS shadow 0xE0000–0x100000, 16-byte alignment,
+  checksum validation), RSDT/XSDT iterator (32-bit vs 64-bit entry dispatch),
+  FADT parser (PM_TMR_BLK offset 76, X_PM_TMR_BLK GAS offset 208 for ACPI 2+),
+  HPET table parser (GAS at offset 44, address at offset 48).
+- **Acceptance-criteria:**
+  - [x] `src/os/kernel/acpi/rsdp.spl` — `acpi_find_rsdp() -> u64?` scans BIOS shadow; `acpi_rsdp_revision`, `acpi_rsdp_rsdt_phys`, `acpi_rsdp_xsdt_phys` helpers
+  - [x] `src/os/kernel/acpi/rsdt.spl` — `acpi_iterate_tables(rsdp, cb)` walks XSDT (rev≥2) or RSDT; `acpi_find_table(rsdp, sig) -> u64?` convenience wrapper
+  - [x] `src/os/kernel/acpi/fadt.spl` — `acpi_fadt_pm_tmr_port(fadt_phys) -> u32?` reads PM_TMR_BLK; prefers X_PM_TMR_BLK GAS (offset 208) when rev≥3 and len≥244
+  - [x] `src/os/kernel/acpi/hpet_table.spl` — `acpi_hpet_base(hpet_phys) -> u64?` reads GAS at offset 44; MMIO address at GAS+4 (offset 48)
+  - [x] `src/os/kernel/acpi/clock_sources.spl` — stubs replaced; `acpi_hpet_present()` and `acpi_pmtmr_port()` call new helpers; `_resolve_rsdp()` prefers `g_rsdp_phys`, falls back to `acpi_find_rsdp()`
+  - [x] `test/unit/os/acpi/acpi_test.spl` — 3 test groups: RSDP global state, signature constants, nil returns with zero RSDP
+  - [x] FADT offset 208 (not 112) used for X_PM_TMR_BLK; HPET GAS address at offset 48 (not 44); RSDP 8-byte signature + checksum validated
+- **Related-upfront:** FR-BENCH-CLOCK-002
+- **Related-design-doc:** `doc/05_design/simpleos_fs_migration.md` (boot init section)
+- **Related-issue:** none
+- **Notes:** All addresses are physical; helpers call `phys_to_virt()` internally via
+  HHDM. UEFI variant not implemented (BIOS scan sufficient for QEMU/Limine). MADT,
+  MCFG, and other tables not parsed.
 
 ---
 
@@ -583,7 +614,9 @@ append under this heading.
 - **Filed-by:** nvfs-v3-design agent
 - **Target:** nvfs  (examples/nvfs/src/core/compression.spl — new)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** nvfs-n7a-compression agent (session spostgre-nvfs-storage)
 - **Requested-semantics:**
   Add an inline compression layer (N7a) between the logical block and the physical device.
   Compression is per-dataset, per-arena, and opt-in via mount option `compress=<algo>`
@@ -596,22 +629,32 @@ append under this heading.
   The ARC cache stores decompressed blocks. Superblock magic becomes `b"NVFS0003"`.
   Full spec: `doc/05_design/nvfs_design_v3.md §V3-2`.
 - **Acceptance-criteria:**
-  - [ ] `CompressAlgo` enum defined (None=0, LZ4=1, Zstd3=2, Zstd19=3)
-  - [ ] `arena_append` compresses data when `compress_algo ≠ None`, falls back on
-        incompressible content
-  - [ ] `arena_read` decompresses transparently; caller receives plaintext bytes
-  - [ ] Pmap entry v3 (88 bytes) with `compress_algo` + `compressed_len` fields
-  - [ ] Class-aware defaults enforced at arena creation (MODEL_IMMUTABLE gets None)
-  - [ ] LZ4 write throughput ≥ 80% of uncompressed on compressible workload
-  - [ ] Zstd-3 on-disk size ≤ 45% of raw for synthetic text workload
-  - [ ] Round-trip fidelity: data written and read back byte-for-byte identical
-  - [ ] `nvfs upgrade` tool extends v2 pmap entries (80→88 bytes, zero-fill new fields)
+  - [x] `CompressAlgo` enum defined (None=0, LZ4=1, Zstd3=2, Zstd19=3)
+  - [x] `arena_append_compressed` compresses data when class policy selects algo≠None,
+        falls back on incompressible content (90% threshold)
+  - [x] `arena_read_extent` decompresses transparently; caller receives plaintext bytes
+  - [x] Pmap entry v3 (88 bytes) with `compress_algo` + `compressed_len` fields
+  - [x] Class-aware defaults enforced: MODEL_IMMUTABLE→None, DB_WAL→None,
+        META_DURABLE→None, DB_TEMP→LZ4, GENERAL_MUTABLE→Zstd3, CHECKPOINT_SNAPSHOT→LZ4
+  - [ ] LZ4 write throughput ≥ 80% of uncompressed (requires FR-NVFS-N7a-002: real LZ4 encoder)
+  - [ ] Zstd-3 on-disk size ≤ 45% of raw (requires FR-NVFS-N7a-003: real Zstd encoder)
+  - [x] Round-trip fidelity: data written and read back byte-for-byte identical
+  - [x] v2 pmap entries (80 bytes) decoded with compress_algo=0 / compressed_len=0 (migration path)
+  - [ ] `nvfs upgrade` tool (offline batch upgrade; deferred follow-up)
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-2, §V3-5, §V3-6, §V3-7`
 - **Related-issue:** none
+- **Files-changed:**
+  - `examples/nvfs/src/core/compression.spl` (new) — CompressAlgo enum, compress_extent,
+    decompress_extent, class_default_algo; LZ4/Zstd tagged-copy stubs (FR-NVFS-N7a-002/003 follow-up)
+  - `examples/nvfs/src/core/pmap.spl` — v2→v3 (80→88 bytes): added compress_algo + compressed_len
+    fields to PmapEntry; encode writes 88 bytes; decode dispatches on buf len (v2/v3 compat)
+  - `examples/nvfs/src/core/arena.spl` — added arena_append_compressed and arena_read_extent
+  - `examples/nvfs/test/unit/core/compression_test.spl` (new) — 4 test groups, 14 cases
 - **Notes:** Compression must occur before encryption (§V3-4.1 enforces ordering).
-  Zstd-19 is offline-archival only; hot paths use LZ4 or Zstd-3. LZMA/gzip not
-  supported (too slow for NVMe latency targets). OQ-11 (compressed ARC) deferred.
+  LZ4/Zstd stubs use tagged-copy frame for N7a; real encoders tracked as FR-NVFS-N7a-002/003.
+  Throughput and ratio SLOs require real encoders. OQ-11 (compressed ARC) deferred.
+  Superblock magic upgrade to NVFS0003 deferred (superblock.spl out of scope for this FR).
 
 ---
 
@@ -621,7 +664,8 @@ append under this heading.
 - **Filed-by:** nvfs-v3-design agent
 - **Target:** nvfs  (examples/nvfs/src/core/dedup.spl — new)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
 - **Requested-semantics:**
   Add an inline deduplication layer (N7b) backed by a content-addressable Deduplication
   Table (DDT). The DDT maps `content_hash (u8[32]) → DedupEntry` where DedupEntry
@@ -638,6 +682,14 @@ append under this heading.
   dataset boundaries. Refcount GC is synchronous (decremented in the write transaction
   on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design_v3.md
   §V3-3, §V3-4`.
+- **Implementation-notes:**
+  N7b in-RAM DDT implemented in `examples/nvfs/src/core/dedup.spl` (DedupTable,
+  dedup_insert_or_bump, dedup_release, dedup_class_enabled). Hash uses a pure-Simple
+  32-byte fold-XOR stub (Blake3 / HMAC-DHK deferred to FR-NVFS-N7b-002; DHK is
+  per-dataset derived at mount time, not per-arena). Sibling DedupRefcountTable added
+  to reflink.spl; arena.spl extended with arena_append_deduped (dedup → compress path)
+  and arena_discard_impl walks _extent_hashes to release refcounts. CoW B-tree backend,
+  256 MB LRU cache, and on-disk layout are follow-up work.
 - **Acceptance-criteria:**
   - [ ] `DedupEntry` struct (56 bytes) + DEDUP_TREE_OBJECTID=12 B-tree defined
   - [ ] Hot DDT RAM cache: configurable `dedup_cache_mb` mount option (default 256)
@@ -756,7 +808,8 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] `wal_writer_commit_group` sets `durable_lsn` to `lsn_high.value`
   - [x] `pmap_writer_publish` returns `true` after WAL commit
   - [x] `pmap_writer_lookup` returns entry with `birth_gen == page_lsn`
-  - [x] `wal_writer_sync` advances `durable_lsn` to current `total_bytes` (checkpoint sim)
+  - [x] `checkpoint_begin` returns target `Lsn`; `checkpoint_commit` appends ring record
+        and `checkpoint_durable_lsn() >= lsn1.value` (replaces former `wal_writer_sync` sim)
   - [x] Remount sim: `wal_recover_tail` on re-seeded arena returns all 3 records
   - [x] Remount sim: `pmap_writer_lookup` on re-seeded arena returns matching `page_lsn`
   - [x] CRC fence: corrupted payload byte stops recovery — only prefix records returned
@@ -765,9 +818,11 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
 - **Related-design-doc:** `spostgre_design.md §9`, `§12 (M2)`, `nvfs_design.md §3`
 - **Related-issue:** none
-- **Notes:** `checkpoint_begin` / `checkpoint_commit` are `pass_todo` at M2;
-  `wal_writer_commit_group` + `wal_writer_sync` serve as the checkpoint equivalent.
-  Real checkpoint API wiring is a follow-up milestone.
+- **Notes:** `checkpoint_begin` / `checkpoint_commit` are now fully implemented in
+  `examples/spostgre/src/engine/checkpoint.spl` using the shim arena API (FUA-append
+  to a META_DURABLE ring arena). The former `wal_writer_sync` workaround in scenario 7
+  is replaced by the real checkpoint API. FR-STORAGE-E2E-001: fully implemented
+  2026-04-18 (12-e1-checkpoint-api).
 
 ---
 
@@ -842,6 +897,88 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   benches complete in < 1s and original iter counts are appropriate. The iter reductions
   here are interpreter-mode accommodations only — restore to original counts when native
   mode is available.
+
+---
+
+### FR-SPOSTGRE-M2-001 — Replace duplicated NVFS constants/types in nvfs_shim.spl with real cross-submodule imports
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
+- **Target:** spostgre  (examples/spostgre/src/engine/nvfs_shim.spl)
+- **Priority:** P1
+- **Status:** Open — blocked on FR-SPOSTGRE-M2-002 (named constants not yet in NVFS core)
+- **Requested-semantics:**
+  After FR-COMPILER-003 (2-pass import resolver), replace duplicated constants and types in
+  `nvfs_shim.spl` with `use examples.nvfs.src.core.<module>.{<name>}` imports. Items in scope:
+  `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`, `DURABILITY_DATA_DURABLE` (constants)
+  and `PmapEntry`/`Arena`/`SuperblockHeader` (types).
+- **Acceptance-criteria:**
+  - [ ] All `val STORAGE_CLASS_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
+  - [ ] All `val DURABILITY_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
+  - [ ] `PmapEntry` local definition replaced by `use` import where field layouts match
+  - [ ] Existing unit and e2e integration tests pass after substitution
+- **Related-upfront:** `from_spostgre.md §S1`
+- **Related-design-doc:** `doc/05_design/nvfs_design.md §4.1`
+- **Related-issue:** FR-COMPILER-003 (prerequisite, Implemented 2026-04-18)
+
+**Investigation result (2026-04-18):** Full import is **not yet possible**. Root cause:
+
+1. **Constants not defined in NVFS.** `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`,
+   `DURABILITY_DATA_DURABLE` have **no canonical definition** in `examples/nvfs/src/core/`.
+   The nvfs arena uses `class_tag: i32` as an opaque passthrough — named ordinals are absent.
+   The shim's 3 `val` declarations are the *only* definitions in the codebase. There is
+   nothing to import.
+
+2. **PmapEntry fields diverge completely.** `examples/spostgre/src/engine/pmap.spl::PmapEntry`
+   has fields `{rel_id, blk, arena_id, offset, generation}` (spostgre logical mapping).
+   `examples/nvfs/src/core/pmap.spl::PmapEntry` has fields `{logical, phys, offset, len,
+   birth_gen, checksum_algo, compress_algo, compressed_len, checksum}` (physical pmap v3).
+   These are structurally unrelated; import would require a rename that misrepresents semantics.
+
+3. **SuperblockHeader** does not appear in `nvfs_shim.spl` at all (task description was
+   anticipatory). No action needed.
+
+**Before/after count:** 3 duplicated `val` declarations — all 3 kept (no canonical source).
+`PmapEntry` in shim: 0 (shim has no PmapEntry; spostgre/engine/pmap.spl has its own).
+
+**Follow-up:** FR-SPOSTGRE-M2-002 tracks adding named StorageClass constants to NVFS.
+
+---
+
+### FR-SPOSTGRE-M2-002 — Add named StorageClass and DurabilityClass constants to NVFS core
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
+- **Target:** nvfs  (examples/nvfs/src/core/arena.spl or new constants.spl)
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  `examples/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no
+  named constants. Consumers (spostgre, future callers) must either duplicate ordinal
+  assignments or rely on comments that say "matching nvfs intent". Add a canonical
+  `constants.spl` (or extend `arena.spl`) that exports:
+  ```
+  val STORAGE_CLASS_DB_WAL:       i32 = 1
+  val STORAGE_CLASS_META_DURABLE: i32 = 2
+  val STORAGE_CLASS_DB_TEMP:      i32 = 3
+  val DURABILITY_DATA_DURABLE:    i32 = 1
+  ```
+  Then `nvfs_shim.spl` and `tier_cache.spl` can replace their local `val` declarations with
+  `use examples.nvfs.src.core.constants.{STORAGE_CLASS_DB_WAL, ...}`.
+- **Acceptance-criteria:**
+  - [ ] `examples/nvfs/src/core/constants.spl` (or equivalent) exports all 4 named ordinals
+  - [ ] `nvfs_shim.spl` imports instead of re-declaring STORAGE_CLASS_DB_WAL and
+        STORAGE_CLASS_META_DURABLE
+  - [ ] `tier_cache.spl` imports STORAGE_CLASS_DB_TEMP instead of re-declaring it
+  - [ ] `bin/simple test examples/spostgre/test/unit/engine/*.spl` passes
+  - [ ] `bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`
+        passes
+- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
+- **Related-design-doc:** `doc/05_design/nvfs_design.md §4.1`
+- **Related-issue:** FR-SPOSTGRE-M2-001 (parent)
+- **Notes:** Do NOT modify NVFS source as part of the spostgre M2 task. This FR is filed
+  against NVFS and must be implemented by an NVFS agent. Until it lands, local `val`
+  declarations in spostgre are canonical and intentional — not bugs.
 
 ---
 

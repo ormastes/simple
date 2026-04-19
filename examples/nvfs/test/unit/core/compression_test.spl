@@ -1,0 +1,227 @@
+# @cover examples/nvfs/src/core/compression.spl 80%
+"""
+# NVFS Compression Unit Tests — FR-NVFS-N7a-001
+
+**Feature IDs:** #NVFS-N7a-COMPRESS
+**Category:** Storage
+**Difficulty:** 2/5
+**Status:** Implemented
+**Design:** doc/05_design/nvfs_design_v3.md §V3-2
+
+## Overview
+
+Four test cases:
+  (a) LZ4 roundtrip — compress_extent + decompress_extent returns original bytes.
+  (b) Class policy — MODEL_IMMUTABLE(3) skips compression (algo=0 returned).
+  (c) Pmap v2 → v3 migration — 80-byte decode sets compress_algo=0, compressed_len=0.
+  (d) Compressed extent persists and reads back via arena_append_compressed +
+      arena_read_extent.
+"""
+
+use std.sspec.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_block(size: i64, fill: u8) -> [u8]:
+    """Build a byte block of `size` bytes all set to `fill`."""
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out.push(fill)
+        i = i + 1
+    out
+
+fn _blocks_equal(a: [u8], b: [u8]) -> bool:
+    """Return true iff a and b have identical length and content."""
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# StorageClass ordinals (must match arena.spl / compression.spl definitions):
+#   META_DURABLE(0), DB_WAL(1), DB_TEMP(2), MODEL_IMMUTABLE(3),
+#   GENERAL_MUTABLE(4), CHECKPOINT_SNAPSHOT(5)
+
+# ---------------------------------------------------------------------------
+# (a) LZ4 roundtrip
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7a-001 (a) — LZ4 roundtrip via DB_TEMP class":
+    """
+    DB_TEMP class_tag=2 → default algo=LZ4(1).
+    compress_extent produces algo=1 output; decompress_extent recovers exact plaintext.
+    """
+
+    it "compress_extent on DB_TEMP returns algo=1":
+        val data = _make_block(64, 0xAA)
+        val cr = compress_extent(data, 2)
+        expect(cr.algo as i64).to_equal(1)
+
+    it "LZ4 compress then decompress roundtrip recovers exact bytes":
+        val data = _make_block(32, 0x55)
+        val cr = compress_extent(data, 2)
+        val dr = decompress_extent(cr.data, cr.compressed_len, data.len() as u32, cr.algo)
+        expect(dr.ok).to_equal(true)
+        expect(_blocks_equal(dr.data, data)).to_equal(true)
+
+    it "compressed_len matches data.len() in CompressResult":
+        val data = _make_block(16, 0x77)
+        val cr = compress_extent(data, 2)
+        expect((cr.compressed_len as i64)).to_equal(cr.data.len() as i64)
+
+    it "Zstd3 roundtrip via GENERAL_MUTABLE class":
+        val data = _make_block(48, 0x33)
+        # GENERAL_MUTABLE class_tag=4 → Zstd3(2)
+        val cr = compress_extent(data, 4)
+        expect(cr.algo as i64).to_equal(2)
+        val dr = decompress_extent(cr.data, cr.compressed_len, data.len() as u32, cr.algo)
+        expect(dr.ok).to_equal(true)
+        expect(_blocks_equal(dr.data, data)).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# (b) Class policy — MODEL_IMMUTABLE skips compression
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7a-001 (b) — class policy: MODEL_IMMUTABLE skips compression":
+    """
+    MODEL_IMMUTABLE class_tag=3 → algo=None(0).
+    compress_extent must return algo=0 and data identical to input.
+    This enforces §V3-2.1: ML weight tensors are already dense; skip overhead.
+    """
+
+    it "MODEL_IMMUTABLE class returns algo=0 (no compression)":
+        val data = _make_block(64, 0xFF)
+        val cr = compress_extent(data, 3)
+        expect(cr.algo as i64).to_equal(0)
+
+    it "MODEL_IMMUTABLE data field equals original plaintext":
+        val data = _make_block(20, 0x01)
+        val cr = compress_extent(data, 3)
+        expect(_blocks_equal(cr.data, data)).to_equal(true)
+
+    it "META_DURABLE class_tag=0 also returns algo=0":
+        val data = _make_block(16, 0xCC)
+        val cr = compress_extent(data, 0)
+        expect(cr.algo as i64).to_equal(0)
+
+    it "DB_WAL class_tag=1 also returns algo=0":
+        val data = _make_block(16, 0xBB)
+        val cr = compress_extent(data, 1)
+        expect(cr.algo as i64).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# (c) Pmap v2 → v3 migration: 80-byte decode synthesizes compress_algo=0
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7a-001 (c) — pmap v2 → v3 migration":
+    """
+    pmap_entry_decode on an 80-byte v2 buffer synthesizes compress_algo=0
+    and compressed_len=0 (§V3-7 migration path).
+    pmap_entry_decode on a 88-byte v3 buffer reads compress_algo + compressed_len.
+    """
+
+    it "v2 80-byte decode yields compress_algo=0":
+        # Build a valid v2 entry (using v3 encode then truncate to 80 bytes is wrong;
+        # build manually using the v2 field layout).
+        # We construct using pmap_entry_encode on a PmapEntry with algo=0/len=0,
+        # then truncate the result to 80 bytes using the old v2 checksum-at-0x30 layout.
+        # Simpler: build a 80-byte buffer matching the v2 spec directly.
+        var buf: [u8] = []
+        var i = 0
+        while i < 80:
+            buf.push(0)
+            i = i + 1
+        # logical = 99 at offset 0
+        buf[0] = 99
+        # checksum_algo = 0 (CRC32C) at offset 40
+        buf[40] = 0
+        # checksum at offset 48 (v2 layout: 0x30 = 48): set bytes 28-31 to non-zero
+        buf[76] = 0x01   # byte 28 of checksum field (offset 48+28=76)
+        val result = pmap_entry_decode(buf)
+        # result is a Result<PmapEntry, FsError>
+        # check that decode succeeded and compress_algo=0
+        var ok = false
+        match result:
+            case Ok(entry):
+                ok = (entry.compress_algo as i64 == 0 and entry.compressed_len as i64 == 0 and entry.logical == 99)
+            case Err(_):
+                ok = false
+        expect(ok).to_equal(true)
+
+    it "v3 88-byte encode/decode round-trips compress_algo and compressed_len":
+        val dummy_data: [u8] = [0xAB, 0xCD, 0xEF, 0x01]
+        val csum = pmap_entry_checksum_for(dummy_data)
+        val entry = PmapEntry(
+            logical:        7,
+            phys:           2,
+            offset:         4096,
+            len:            1,
+            birth_gen:      5,
+            checksum_algo:  0,
+            compress_algo:  1,
+            compressed_len: 128,
+            checksum:       csum
+        )
+        val encoded = pmap_entry_encode(entry)
+        expect(encoded.len() as i64).to_equal(88)
+        val decoded_r = pmap_entry_decode(encoded)
+        var ok2 = false
+        match decoded_r:
+            case Ok(d):
+                ok2 = (d.compress_algo as i64 == 1 and d.compressed_len as i64 == 128 and d.logical == 7)
+            case Err(_):
+                ok2 = false
+        expect(ok2).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# (d) Compressed extent persists and reads back
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7a-001 (d) — compressed extent persists via arena and reads back":
+    """
+    arena_append_compressed writes compressed bytes; arena_read_extent decompresses.
+    The caller receives original plaintext bytes (transparent decompression).
+    Tests DB_TEMP (LZ4) and MODEL_IMMUTABLE (no-op) paths end-to-end.
+    """
+
+    it "DB_TEMP arena: append_compressed then read_extent returns original bytes":
+        # Create a DB_TEMP arena (class_tag=2 → LZ4 compression).
+        val arena_id = arena_create_impl(2, 4096)
+        val data = _make_block(32, 0xAA)
+        # Compress and append
+        val cr = compress_extent(data, 2)
+        val written = arena_append_compressed(arena_id, data, 0)
+        expect(written > 0).to_equal(true)
+        # Read back: algo=cr.algo, compressed_len=cr.compressed_len, decompressed_len=data.len()
+        val recovered = arena_read_extent(arena_id, 0, cr.compressed_len as i64, cr.algo, data.len() as i64)
+        expect(_blocks_equal(recovered, data)).to_equal(true)
+
+    it "MODEL_IMMUTABLE arena: append_compressed stores raw bytes unchanged":
+        # Create a MODEL_IMMUTABLE arena (class_tag=3 → algo=None).
+        val arena_id2 = arena_create_impl(3, 4096)
+        val data2 = _make_block(24, 0x77)
+        val written2 = arena_append_compressed(arena_id2, data2, 0)
+        # algo=0 → stored as-is → compressed_len = data2.len()
+        val recovered2 = arena_read_extent(arena_id2, 0, data2.len() as i64, 0, data2.len() as i64)
+        expect(_blocks_equal(recovered2, data2)).to_equal(true)
+
+    it "GENERAL_MUTABLE arena: Zstd3 roundtrip via arena helpers":
+        val arena_id3 = arena_create_impl(4, 4096)
+        val data3 = _make_block(40, 0x55)
+        val cr3 = compress_extent(data3, 4)
+        val written3 = arena_append_compressed(arena_id3, data3, 0)
+        expect(written3 > 0).to_equal(true)
+        val recovered3 = arena_read_extent(arena_id3, 0, cr3.compressed_len as i64, cr3.algo, data3.len() as i64)
+        expect(_blocks_equal(recovered3, data3)).to_equal(true)
+
+    it "decompress_extent with algo=0 returns raw bytes unchanged":
+        val raw: [u8] = [0x01, 0x02, 0x03, 0x04]
+        val dr = decompress_extent(raw, 4, 4, 0)
+        expect(dr.ok).to_equal(true)
+        expect(_blocks_equal(dr.data, raw)).to_equal(true)

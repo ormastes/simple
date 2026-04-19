@@ -15,8 +15,94 @@ use compiler.common.dependency.visibility.{Visibility}
 # ============================================================================
 
 impl HirLowering:
+    me resolve_import_symbols(module: Module):
+        """Pass 0: register imported type names before declare_module_symbols.
+
+        For each `use foo.bar.*` or `use foo.bar.{Baz}` in the current module,
+        look up the imported module in self.modules_by_name, walk its top-level
+        class/struct/enum/trait declarations, filter by the import target (glob or
+        named list), and call symbols.define for each matching name with the
+        imported module's path as defining_module.
+
+        Because SymbolTable.define is first-write-wins for type symbols, any name
+        pre-registered here will NOT be overwritten when declare_module_symbols
+        later processes modules that happen to export the same short name.
+        """
+        val mod_name_map = self.modules_by_name
+        val import_span = Span.empty()
+
+        var imp_idx = 0
+        while imp_idx < module.imports.len():
+            val imp = module.imports[imp_idx]
+            val imported_mod_name = imp.module
+
+            # Locate the imported module's parsed AST
+            val imported_mod = mod_name_map[imported_mod_name]
+            if imported_mod != nil:
+                # Determine import mode: glob vs named list
+                val is_glob = imp.items.is_empty()
+
+                if is_glob:
+                    # Glob import: register all type-level symbols from the imported module
+                    val cls_keys = imported_mod.classes.keys()
+                    var ci = 0
+                    while ci < cls_keys.len():
+                        val n = cls_keys[ci]
+                        self.symbols.define(n, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        ci = ci + 1
+
+                    val str_keys = imported_mod.structs.keys()
+                    var si = 0
+                    while si < str_keys.len():
+                        val n = str_keys[si]
+                        self.symbols.define(n, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        si = si + 1
+
+                    val enum_keys = imported_mod.enums.keys()
+                    var ei = 0
+                    while ei < enum_keys.len():
+                        val n = enum_keys[ei]
+                        self.symbols.define(n, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        ei = ei + 1
+
+                    val trait_keys = imported_mod.traits.keys()
+                    var ti = 0
+                    while ti < trait_keys.len():
+                        val n = trait_keys[ti]
+                        self.symbols.define(n, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        ti = ti + 1
+                else:
+                    # Named import: register only explicitly listed names
+                    var item_idx = 0
+                    while item_idx < imp.items.len():
+                        val item = imp.items[item_idx]
+                        val imported_name = item.name
+
+                        # Try class first, then struct, then enum, then trait
+                        val as_cls = imported_mod.classes[imported_name]
+                        val as_str = imported_mod.structs[imported_name]
+                        val as_enum = imported_mod.enums[imported_name]
+                        val as_trait = imported_mod.traits[imported_name]
+
+                        if as_cls != nil:
+                            self.symbols.define(imported_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        elif as_str != nil:
+                            self.symbols.define(imported_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        elif as_enum != nil:
+                            self.symbols.define(imported_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        elif as_trait != nil:
+                            self.symbols.define(imported_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        # Non-type imports (functions, consts) are not pre-registered here
+                        item_idx = item_idx + 1
+
+            imp_idx = imp_idx + 1
+
     me lower_module(module: Module) -> HirModule:
         """Lower a parsed module to HIR."""
+        # Pass 0: pre-register imported type names so explicit `use` paths win
+        # over module load order when two modules export the same short name.
+        self.resolve_import_symbols(module)
+
         # First pass: declare all top-level symbols
         self.declare_module_symbols(module)
 
@@ -775,6 +861,7 @@ impl HirLowering:
 
 fn HirLowering_dot_lower_module(self: HirLowering, module: Module) -> HirModule:
     """Bootstrap-safe HIR lowering entrypoint."""
+    self.resolve_import_symbols(module)
     self.declare_module_symbols(module)
 
     var functions: Dict<SymbolId, HirFunction> = {}

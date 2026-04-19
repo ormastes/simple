@@ -293,25 +293,6 @@ theorem arena_create_preserves_all
       unfold arenaPmapRefs at *
       exact this
 
-/-! ## `arena_seal`, `arena_append`, `arena_discard`, `arena_clone_range`,
-`pmap_publish` — left as `sorry` with precise rationale. -/
-
-theorem arena_seal_preserves_all
-    (s : FsState) (id : ArenaId) (s' : FsState)
-    (hok : arena_seal s id = Except.ok s')
-    (h : AllInvariants s) : AllInvariants s' := by
-  -- Requires a `List.map`-preservation lemma that `id`, `discarded`,
-  -- `refcount` are unchanged under the update, plus a case on the
-  -- (sealed → discarded = false ∨ refcount = 0) I2 branch.
-  sorry
-
-theorem arena_append_preserves_all
-    (s : FsState) (args : ArenaAppendArgs) (s' : FsState)
-    (hok : arena_append s args = Except.ok s')
-    (h : AllInvariants s) : AllInvariants s' := by
-  -- Same `List.map`-preservation shape as `arena_seal`; pure `bytes` frame.
-  sorry
-
 private theorem findArena_id {s : FsState} {id : ArenaId} {ar : Arena}
     (hfind : s.findArena id = some ar) : ar.id = id := by
   unfold FsState.findArena at hfind
@@ -338,6 +319,243 @@ private theorem arenaLive_map_ne {s : FsState} {ar ar' : Arena} {a : ArenaId}
   -- show: (if b.id == ar.id then ar' else b) = b
   have hbne : b.id ≠ ar.id := fun heq => hne (hbid ▸ heq)
   simp [hbne]
+
+/-! ## `arena_seal`, `arena_append`, `arena_discard`, `arena_clone_range`,
+`pmap_publish` — left as `sorry` with precise rationale. -/
+
+theorem arena_seal_preserves_all
+    (s : FsState) (id : ArenaId) (s' : FsState)
+    (hok : arena_seal s id = Except.ok s')
+    (h : AllInvariants s) : AllInvariants s' := by
+  unfold arena_seal at hok
+  split at hok
+  · exact absurd hok (by simp)
+  · rename_i ar hfind
+    have harid : ar.id = id := findArena_id hfind
+    have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
+    split at hok
+    · -- idempotent: already sealed, s' = s
+      injection hok with hst; subst hst; exact h
+    · rename_i hnotsealed
+      split at hok
+      · exact absurd hok (by simp)
+      · rename_i hnotdisc
+        have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
+        injection hok with hst; subst hst
+        -- s' = { s with arenas := s.arenas.map (fun x => if x.id == ar.id then { ar with sealed := true } else x) }
+        -- pmap, snapshots, wal, durableLsn, superblock all unchanged
+        refine {
+          i1 := ?_, i2 := ?_, i3 := ?_,
+          i4 := I4_frame rfl rfl h.i4,
+          i5 := I5_frame rfl rfl rfl h.i5,
+          i6 := I6_frame rfl h.i6,
+          i7 := ?_, i8 := I8_frame rfl h.i8,
+          i9 := ?_, i10 := ?_ }
+        · -- I1: arenaLive preserved (discarded unchanged for all arenas)
+          intro e he
+          have hlive := h.i1 e he
+          unfold FsState.arenaLive at *
+          simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
+          obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
+          by_cases hbne : b.id = ar.id
+          · refine ⟨{ ar with sealed := true }, ?_, hbne ▸ hbid, by simp [hnd]⟩
+            apply List.mem_map.mpr; exact ⟨b, hb, by simp [hbne]⟩
+          · refine ⟨b, ?_, hbid, hbnotd⟩
+            apply List.mem_map.mpr; exact ⟨b, hb, by simp [hbne]⟩
+        · -- I2: sealed monotonicity
+          intro a ha hsealed
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) =
+                { ar with sealed := true } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            -- sealed = true, discarded = false (hnd)
+            exact Or.inl hnd
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            exact h.i2 b hb hsealed
+        · -- I3: refcount consistency (pmap, snapshots, refcount all unchanged)
+          intro a ha
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) =
+                { ar with sealed := true } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            have h3 := h.i3 ar har_mem
+            unfold arenaPmapRefs arenaSnapRefs at *; exact h3
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            have h3 := h.i3 b hb
+            unfold arenaPmapRefs arenaSnapRefs at *; exact h3
+        · -- I7: checkpoint roots still live (superblock unchanged, only sealed bit changed)
+          unfold I7_checkpointRootsConsistent
+          -- activeRoot only reads superblock which is unchanged
+          have hactEq : (({ s with arenas := s.arenas.map (fun x => if x.id == ar.id then
+                { ar with sealed := true } else x) } : FsState).activeRoot) = s.activeRoot := rfl
+          have har'live : ∀ rid : ArenaId, rid = ar.id →
+              FsState.arenaLive ({ s with arenas := s.arenas.map (fun x => if x.id == ar.id then
+                { ar with sealed := true } else x) } : FsState) rid = true := by
+            intro rid hrid; subst hrid
+            unfold FsState.arenaLive
+            simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+            exact ⟨{ ar with sealed := true }, List.mem_map.mpr ⟨ar, har_mem, by simp⟩, rfl, by simp [hnd]⟩
+          rw [hactEq]
+          refine ⟨?_, ?_, ?_⟩
+          · by_cases heq : s.activeRoot.inodeRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.1
+          · by_cases heq : s.activeRoot.extentRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.2.1
+          · by_cases heq : s.activeRoot.allocRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.2.2
+        · -- I9: pmapRefs ≤ refcount (pmap, refcount unchanged)
+          intro a ha
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) =
+                { ar with sealed := true } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            have := h.i9 ar har_mem
+            unfold arenaPmapRefs at *; exact this
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            have := h.i9 b hb
+            unfold arenaPmapRefs at *; exact this
+        · -- I10: snapshot-pinned arenas not discarded (discarded unchanged)
+          intro sn hsn a ha_mem a' ha' hid
+          simp only [List.mem_map] at ha'
+          obtain ⟨b, hb, hba⟩ := ha'
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) =
+                { ar with sealed := true } := by simp [hbid]
+            rw [hmap] at hba; subst hba; exact hnd
+          · have hmap : (if b.id == ar.id then { ar with sealed := true } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba; exact h.i10 sn hsn a ha_mem b hb hid
+
+theorem arena_append_preserves_all
+    (s : FsState) (args : ArenaAppendArgs) (s' : FsState)
+    (hok : arena_append s args = Except.ok s')
+    (h : AllInvariants s) : AllInvariants s' := by
+  unfold arena_append at hok
+  split at hok
+  · exact absurd hok (by simp)
+  · rename_i ar hfind
+    have harid : ar.id = args.id := findArena_id hfind
+    have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
+    split at hok
+    · exact absurd hok (by simp)
+    · rename_i hnotsealed
+      split at hok
+      · exact absurd hok (by simp)
+      · rename_i hnotdisc
+        have hnd : ar.discarded = false := by simp only [Bool.not_eq_true] at hnotdisc; exact hnotdisc
+        injection hok with hst; subst hst
+        -- s' = { s with arenas := s.arenas.map (fun x => if x.id == ar.id then { ar with bytes := ... } else x) }
+        -- only bytes changes; no invariant inspects bytes; pmap, snapshots, wal, superblock all unchanged
+        refine {
+          i1 := ?_, i2 := ?_, i3 := ?_,
+          i4 := I4_frame rfl rfl h.i4,
+          i5 := I5_frame rfl rfl rfl h.i5,
+          i6 := I6_frame rfl h.i6,
+          i7 := ?_, i8 := I8_frame rfl h.i8,
+          i9 := ?_, i10 := ?_ }
+        · -- I1: arenaLive preserved (id, discarded unchanged for all arenas)
+          intro e he
+          have hlive := h.i1 e he
+          unfold FsState.arenaLive at *
+          simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
+          obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
+          by_cases hbne : b.id = ar.id
+          · refine ⟨{ ar with bytes := ar.bytes ++ args.bytes }, ?_, hbne ▸ hbid, by simp [hnd]⟩
+            apply List.mem_map.mpr; exact ⟨b, hb, by simp [hbne]⟩
+          · refine ⟨b, ?_, hbid, hbnotd⟩
+            apply List.mem_map.mpr; exact ⟨b, hb, by simp [hbne]⟩
+        · -- I2: sealed monotonicity (sealed, discarded, refcount unchanged)
+          intro a ha hsealed
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) =
+                { ar with bytes := ar.bytes ++ args.bytes } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            exact h.i2 ar har_mem hsealed
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            exact h.i2 b hb hsealed
+        · -- I3: refcount consistency (pmap, snapshots, refcount all unchanged)
+          intro a ha
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) =
+                { ar with bytes := ar.bytes ++ args.bytes } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            have h3 := h.i3 ar har_mem
+            unfold arenaPmapRefs arenaSnapRefs at *; exact h3
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            have h3 := h.i3 b hb
+            unfold arenaPmapRefs arenaSnapRefs at *; exact h3
+        · -- I7: checkpoint roots still live (superblock unchanged, only bytes changed)
+          unfold I7_checkpointRootsConsistent
+          -- activeRoot only reads superblock which is unchanged
+          have hactEq : (({ s with arenas := s.arenas.map (fun x => if x.id == ar.id then
+                { ar with bytes := ar.bytes ++ args.bytes } else x) } : FsState).activeRoot) = s.activeRoot := rfl
+          have har'live : ∀ rid : ArenaId, rid = ar.id →
+              FsState.arenaLive ({ s with arenas := s.arenas.map (fun x => if x.id == ar.id then
+                { ar with bytes := ar.bytes ++ args.bytes } else x) } : FsState) rid = true := by
+            intro rid hrid; subst hrid
+            unfold FsState.arenaLive
+            simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+            exact ⟨{ ar with bytes := ar.bytes ++ args.bytes }, List.mem_map.mpr ⟨ar, har_mem, by simp⟩, rfl, by simp [hnd]⟩
+          rw [hactEq]
+          refine ⟨?_, ?_, ?_⟩
+          · by_cases heq : s.activeRoot.inodeRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.1
+          · by_cases heq : s.activeRoot.extentRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.2.1
+          · by_cases heq : s.activeRoot.allocRoot = ar.id
+            · exact har'live _ heq
+            · exact arenaLive_map_ne heq h.i7.2.2
+        · -- I9: pmapRefs ≤ refcount (pmap, refcount unchanged)
+          intro a ha
+          simp only [List.mem_map] at ha
+          obtain ⟨b, hb, hba⟩ := ha
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) =
+                { ar with bytes := ar.bytes ++ args.bytes } := by simp [hbid]
+            rw [hmap] at hba; subst hba
+            have := h.i9 ar har_mem
+            unfold arenaPmapRefs at *; exact this
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba
+            have := h.i9 b hb
+            unfold arenaPmapRefs at *; exact this
+        · -- I10: snapshot-pinned arenas not discarded (discarded unchanged)
+          intro sn hsn a ha_mem a' ha' hid
+          simp only [List.mem_map] at ha'
+          obtain ⟨b, hb, hba⟩ := ha'
+          by_cases hbid : b.id = ar.id
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) =
+                { ar with bytes := ar.bytes ++ args.bytes } := by simp [hbid]
+            rw [hmap] at hba; subst hba; exact hnd
+          · have hmap : (if b.id == ar.id then { ar with bytes := ar.bytes ++ args.bytes } else b) = b := by
+              simp [hbid]
+            rw [hmap] at hba; subst hba; exact h.i10 sn hsn a ha_mem b hb hid
 
 theorem arena_discard_preserves_all
     (s : FsState) (id : ArenaId) (s' : FsState)

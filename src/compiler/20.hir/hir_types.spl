@@ -199,7 +199,30 @@ impl SymbolTable:
         table
 
     me define(name: text, kind: SymbolKind, type_: HirType?, span: Span, visibility: Visibility, is_mutable: bool, defining_module: text?) -> SymbolId:
-        """Define a new symbol in current scope."""
+        """Define a new symbol in current scope.
+
+        For type-level symbols (Class, Struct, Enum, Trait): first-write-wins.
+        If the name is already bound in the current scope and the existing entry's
+        defining_module matches, return the existing id (idempotent re-register).
+        If a different module already registered the name, the first registration
+        wins and this call is a no-op (returns the existing id).
+        For non-type symbols (Variable, Parameter, Field, etc.) always create a
+        new entry so shadowing and overloading work as before.
+        """
+        # First-write-wins for type-level symbols
+        val is_type_symbol = match kind:
+            case SymbolKind.Class: true
+            case SymbolKind.Struct: true
+            case SymbolKind.Enum: true
+            case SymbolKind.Trait: true
+            case _: false
+
+        if is_type_symbol:
+            val scope = self.scopes[self.current_scope.id]
+            if scope.symbols.contains_key(name):
+                # Already registered — return the existing id (first-write-wins)
+                return scope.symbols[name]
+
         val id = SymbolId.new(self.next_symbol_id)
         self.next_symbol_id = self.next_symbol_id + 1
 

@@ -2,8 +2,47 @@
 #
 # Writes a checkpoint record to the WAL, waits for it to become durable,
 # then publishes the new checkpoint superblock entry.
+#
+# M2 implementation: checkpoint ring is backed by a dedicated shim arena.
+# checkpoint_begin  — bumps epoch; returns the current WAL position as the
+#                     target LSN that the caller must make durable.
+# checkpoint_commit — appends a checkpoint record to the ring arena and
+#                     advances _cp_durable_lsn.
+#
+# The ring arena (STORAGE_CLASS_META_DURABLE) holds fixed 16-byte records:
+#   [0..7]  epoch  (i64 LE)
+#   [8..15] lsn    (i64 LE)
+# This is the in-process equivalent of the NVFS checkpoint ring (§5.2).
 
 use std.spostgre_if.types.{Lsn}
+use engine.nvfs_shim.{shim_arena_create, shim_arena_append, shim_arena_fua_append,
+                      shim_arena_total_bytes, STORAGE_CLASS_META_DURABLE}
+
+# ---------------------------------------------------------------------------
+# Module-level checkpoint ring state
+# ---------------------------------------------------------------------------
+
+var _cp_arena_id:     i64 = -1
+var _cp_epoch:        i64 = 0
+var _cp_durable_lsn:  i64 = 0
+
+val CP_RECORD_LEN: i64 = 16  # 8 bytes epoch + 8 bytes lsn
+
+fn _cp_ensure_arena():
+    """Lazily create the checkpoint ring arena on first use."""
+    if _cp_arena_id < 0:
+        _cp_arena_id = shim_arena_create(STORAGE_CLASS_META_DURABLE, CP_RECORD_LEN * 16)
+
+fn _cp_le_put_i64(buf: [u8], off: i64, v: i64):
+    """Write v as 8 LE bytes into buf starting at off."""
+    buf[off + 0] = (v and 255) as u8
+    buf[off + 1] = ((v / 256) and 255) as u8
+    buf[off + 2] = ((v / 65536) and 255) as u8
+    buf[off + 3] = ((v / 16777216) and 255) as u8
+    buf[off + 4] = ((v / 4294967296) and 255) as u8
+    buf[off + 5] = ((v / 1099511627776) and 255) as u8
+    buf[off + 6] = ((v / 281474976710656) and 255) as u8
+    buf[off + 7] = 0u8  # epoch values fit in 7 bytes for foreseeable lifetimes
 
 struct CheckpointState:
     """Current checkpoint in flight."""
@@ -12,10 +51,37 @@ struct CheckpointState:
     committed: bool
 
 fn checkpoint_begin() -> Lsn:
-    """Start a checkpoint; returns the LSN that must be made durable first."""
-    # @coverage: spostgre_design.md §6, nvfs_design.md §3 (CHECKPOINT_SNAPSHOT)
-    pass_todo
+    """Start a checkpoint; returns the LSN that must be made durable first.
+
+    Reserves a new epoch in the in-process checkpoint ring and returns the
+    current arena tail as the target LSN the caller must fence before
+    calling checkpoint_commit.
+
+    @coverage: spostgre_design.md §6, nvfs_design.md §3 (CHECKPOINT_SNAPSHOT)
+    """
+    _cp_ensure_arena()
+    _cp_epoch = _cp_epoch + 1
+    val current_tail = shim_arena_total_bytes(_cp_arena_id)
+    val target: i64 = if current_tail < 0: 0 else: current_tail
+    Lsn(value: target + 1)
 
 fn checkpoint_commit(at: Lsn) -> bool:
-    """Finalize a checkpoint once WAL past `at` is durable."""
-    pass_todo
+    """Finalize a checkpoint once WAL past `at` is durable.
+
+    Appends a 16-byte checkpoint record (epoch, lsn) to the ring arena via
+    a FUA-equivalent append, then advances _cp_durable_lsn to at.value.
+    Returns true on success.
+    """
+    _cp_ensure_arena()
+    var record: [u8] = [0u8; CP_RECORD_LEN]
+    _cp_le_put_i64(record, 0, _cp_epoch)
+    _cp_le_put_i64(record, 8, at.value)
+    val written = shim_arena_fua_append(_cp_arena_id, record)
+    if written < 0:
+        return false
+    _cp_durable_lsn = at.value
+    true
+
+fn checkpoint_durable_lsn() -> i64:
+    """Return the LSN last confirmed durable by a committed checkpoint."""
+    _cp_durable_lsn

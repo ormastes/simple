@@ -10,6 +10,13 @@ use compiler.common.config.{TypeInferenceConfig, TypeDefault}
 use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 
+# Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
+# The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
+# Kept here (layer 20) to avoid a layer violation (20 must not import 85).
+struct ModuleResolverPort:
+    name: text
+    resolve_fn: any
+
 # HIR Lowering Context
 # ============================================================================
 
@@ -20,7 +27,10 @@ class HirLowering:
     current_function: SymbolId?
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
-    module_filename: text    # Filename for visibility matching (e.g., "test_case.spl")
+    module_filename: text          # Filename/path for visibility matching and defining_module population
+    module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
+    loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
+    modules_by_name: Dict<text, any>       # All parsed modules keyed by module name (for resolve_import_symbols)
 
 struct LoweringError:
     """Error during lowering."""
@@ -45,7 +55,10 @@ fn hirlowering_new() -> HirLowering:
         current_function: nil,
         loop_depth: 0,
         type_inference_config: nil,
-        module_filename: ""
+        module_filename: "",
+        module_resolver: nil,
+        loaded_modules: [],
+        modules_by_name: {}
     )
 
 impl HirLowering:
@@ -60,7 +73,10 @@ impl HirLowering:
             current_function: nil,
             loop_depth: 0,
             type_inference_config: nil,
-            module_filename: filename
+            module_filename: filename,
+            module_resolver: nil,
+            loaded_modules: [],
+            modules_by_name: {}
         )
 
     static fn with_config(config: TypeInferenceConfig) -> HirLowering:
@@ -70,7 +86,24 @@ impl HirLowering:
             current_function: nil,
             loop_depth: 0,
             type_inference_config: Some(config),
-            module_filename: ""
+            module_filename: "",
+            module_resolver: nil,
+            loaded_modules: [],
+            modules_by_name: {}
+        )
+
+    static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
+        """Create HIR lowering with module resolver for 2-pass import resolution (FR-COMPILER-003 A2)."""
+        HirLowering(
+            symbols: SymbolTable.new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: nil,
+            module_filename: filename,
+            module_resolver: Some(resolver),
+            loaded_modules: [],
+            modules_by_name: {}
         )
 
     me set_type_inference_config(config: TypeInferenceConfig):

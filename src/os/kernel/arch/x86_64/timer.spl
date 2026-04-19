@@ -237,10 +237,8 @@ fn _calibrate_tsc():
 
     Probe order (FR-BENCH-CLOCK-002): HPET → PMTMR → PIT channel 2.
 
-    HPET and PMTMR branches are structurally wired but functionally no-ops
-    until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is implemented — both
-    acpi_hpet_present() and acpi_pmtmr_port() return nil until then.
-    PIT ch2 path is unchanged from FR-BENCH-CLOCK-001.
+    HPET and PMTMR branches use real ACPI-discovered addresses (B1 complete).
+    PIT ch2 path is the final fallback when neither HPET nor PMTMR is present.
     """
     val hpet_base  = acpi_hpet_present()
     val pmtmr_prt  = acpi_pmtmr_port()
@@ -254,34 +252,96 @@ fn _calibrate_tsc():
         return
     _calibrate_tsc_pit()
 
-fn _calibrate_tsc_hpet(hpet_virt: u64):
-    """Calibrate TSC using HPET MMIO counter as reference.
+fn _tsc_hz_from_hpet(tsc_delta: u64, hpet_delta: u64, period_fs: u64) -> u64:
+    """Compute TSC Hz from measured TSC and HPET deltas.
 
-    STUB: hpet_virt is always 0 until FR-SIMPLEOS-ACPI-001 provides a real
-    HPET MMIO address. When ACPI is available:
-    1. Enable HPET counter via hpet_enable().
-    2. Read capabilities to get COUNTER_CLK_PERIOD (femtoseconds/tick).
-    3. Spin for N HPET ticks (e.g. equivalent of ~10ms).
-    4. Compute TSC frequency from TSC delta and elapsed real time.
+    Overflow-safe staged formula:
+      elapsed_ns = hpet_delta * period_fs / 1_000_000
+      tsc_hz     = tsc_delta  * 1_000_000_000 / elapsed_ns
 
-    Until implemented, falls through to PIT calibration.
+    At QEMU HPET period_fs ≈ 10_000_000 fs and 10ms window:
+      hpet_delta * period_fs ≈ 1e13 (safe in u64, max ~1.8e19)
+      tsc_delta * 1e9        ≈ 4e16 (safe)
+
+    Returns 0 if any intermediate value is zero (caller falls back to PIT).
     """
-    # STUB — ACPI HPET not yet mapped; fall back to PIT
-    _calibrate_tsc_pit()
+    if period_fs == 0 or hpet_delta == 0:
+        return 0
+    val elapsed_ns = hpet_delta * period_fs / 1000000
+    if elapsed_ns == 0:
+        return 0
+    tsc_delta * 1000000000 / elapsed_ns
+
+fn _tsc_hz_from_pmtmr(tsc_delta: u64, pmtmr_delta: u64) -> u64:
+    """Compute TSC Hz from measured TSC and PMTMR deltas.
+
+    PMTMR runs at exactly PMTMR_FREQ (3,579,545 Hz), 24-bit.
+    Formula: tsc_hz = tsc_delta * PMTMR_FREQ / pmtmr_delta
+
+    Returns 0 if pmtmr_delta is zero (caller falls back to PIT).
+    """
+    if pmtmr_delta == 0:
+        return 0
+    tsc_delta * PMTMR_FREQ / pmtmr_delta
+
+fn _calibrate_tsc_hpet(hpet_virt: u64):
+    """Calibrate TSC using HPET MMIO counter as reference (~10ms window).
+
+    Algorithm (FR-BENCH-CLOCK-002):
+    1. Enable HPET counter via hpet_enable().
+    2. Read capabilities → COUNTER_CLK_PERIOD (femtoseconds/tick) from bits 63:32.
+    3. Compute target tick count: 10_000_000 ns × 10^6 / period_fs.
+    4. Sample tsc0 + hpet0, spin until hpet advances by target, sample tsc1 + hpet1.
+    5. tsc_hz = _tsc_hz_from_hpet(tsc1-tsc0, hpet1-hpet0, period_fs).
+
+    Falls back to PIT if period_fs is 0 or computed hz is 0.
+    """
+    hpet_enable(hpet_virt)
+    val caps = hpet_read_capabilities(hpet_virt)
+    val period_fs = caps >> 32
+    if period_fs == 0:
+        _calibrate_tsc_pit()
+        return
+    # Target: spin for 10ms = 10_000_000 ns.
+    # hpet_ticks_for_10ms = 10_000_000_000_000 / period_fs  (ns→fs: ×10^6)
+    val target_ticks = 10000000000000 / period_fs
+    val hpet0 = hpet_read_counter(hpet_virt)
+    val tsc0  = _read_tsc()
+    var hpet1 = hpet_read_counter(hpet_virt)
+    while (hpet1 - hpet0) < target_ticks:
+        hpet1 = hpet_read_counter(hpet_virt)
+    val tsc1 = _read_tsc()
+    val hz = _tsc_hz_from_hpet(tsc1 - tsc0, hpet1 - hpet0, period_fs)
+    if hz == 0:
+        _calibrate_tsc_pit()
+        return
+    tsc_frequency = hz
 
 fn _calibrate_tsc_pmtmr(port: u32):
-    """Calibrate TSC using PMTMR (3.579545 MHz PM timer) as reference.
+    """Calibrate TSC using PMTMR (3.579545 MHz PM timer) as reference (~10ms window).
 
-    STUB: port is always 0 until FR-SIMPLEOS-ACPI-001 provides a real FADT
-    PM_TMR_BLK port. When ACPI is available:
-    1. Read PMTMR start value via pmtmr_read(port).
-    2. Spin for ~10ms worth of PMTMR ticks (35795 ticks at 3.579545 MHz).
-    3. Compute TSC frequency from TSC delta and known PMTMR frequency.
+    Algorithm (FR-BENCH-CLOCK-002):
+    1. Read PMTMR start value via pmtmr_read(port) — returns 24-bit masked value.
+    2. Spin until PMTMR advances by ≥35795 ticks (= ~10ms at 3.579545 MHz);
+       handle 24-bit wrap with & 0xFFFFFF on the delta.
+    3. tsc_hz = _tsc_hz_from_pmtmr(tsc_delta, pmtmr_delta).
 
-    Until implemented, falls through to PIT calibration.
+    Falls back to PIT if computed hz is 0.
     """
-    # STUB — ACPI PMTMR port not yet discovered; fall back to PIT
-    _calibrate_tsc_pit()
+    val pmtmr0 = pmtmr_read(port) as u64
+    val tsc0   = _read_tsc()
+    # 35795 ticks ≈ 10ms at 3.579545 MHz
+    val target: u64 = 35795
+    var pmtmr1 = pmtmr_read(port) as u64
+    while ((pmtmr1 - pmtmr0) & 0xFFFFFF) < target:
+        pmtmr1 = pmtmr_read(port) as u64
+    val tsc1       = _read_tsc()
+    val pmtmr_delta = (pmtmr1 - pmtmr0) & 0xFFFFFF
+    val hz = _tsc_hz_from_pmtmr(tsc1 - tsc0, pmtmr_delta)
+    if hz == 0:
+        _calibrate_tsc_pit()
+        return
+    tsc_frequency = hz
 
 fn _calibrate_tsc_pit():
     """Calibrate TSC frequency using PIT channel 2.

@@ -14,6 +14,8 @@
 #   the DEK for encrypted arenas on seal. Non-encrypted arenas are unaffected.
 
 use examples.nvfs.src.core.encryption.{nvfs_arena_seal_rotate}
+use examples.nvfs.src.core.compression.{compress_extent, decompress_extent, class_default_algo}
+use examples.nvfs.src.core.dedup.{dedup_class_enabled, dedup_hash_of, dedup_insert_or_bump, dedup_release, dedup_lookup}
 
 # ---------------------------------------------------------------------------
 # Arena metadata record
@@ -38,6 +40,10 @@ struct ArenaMeta:
 var _arena_ids: [i64] = []
 var _metas: [ArenaMeta] = []
 var _bufs: [[u8]] = []
+# _extent_hashes: parallel list; each entry is a flat list of 32-byte hashes
+# for extents appended via arena_append_deduped, in append order.
+# Only populated when dedup_class_enabled for the arena's class_tag.
+var _extent_hashes: [[[u8]]] = []
 var _next_id: i64 = 1
 
 fn _find_index(arena_id: i64) -> i64:
@@ -74,6 +80,9 @@ fn arena_create_impl(class_tag: i32, hint_bytes: i64) -> i64:
     _arena_ids.push(arena_id)
     _metas.push(meta)
     _bufs.push(buf)
+    # Initialize empty extent-hash list for this arena (populated by arena_append_deduped).
+    var empty_hashes: [[u8]] = []
+    _extent_hashes.push(empty_hashes)
 
     arena_id
 
@@ -110,6 +119,150 @@ fn arena_append_impl(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
     )
     _metas[idx] = updated
     n
+
+fn arena_append_compressed(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    """Append data to arena, applying class-aware compression before storage.
+
+    FR-NVFS-N7a-001: compress-on-write path (§V3-2.4 write path steps 2-5).
+    Ordering: plaintext → compress → (encrypt handled by caller) → on-disk.
+
+    Returns bytes_written (of compressed data), or negative error code:
+      -1  InvalidArena
+      -2  Sealed
+      -3  Discarded
+
+    The return value is the count of bytes physically appended (compressed).
+    Callers that need the original logical size must retain data.len() separately.
+    Use arena_read_extent for the decompression-aware read path.
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    # Apply class-aware compression.
+    val result = compress_extent(data, meta.class_tag)
+    val payload = result.data
+    val n = payload.len() as i64
+
+    var buf = _bufs[idx]
+    for byte in payload:
+        buf.push(byte)
+    _bufs[idx] = buf
+
+    val updated = ArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        hint_bytes:  meta.hint_bytes,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: meta.total_bytes + n
+    )
+    _metas[idx] = updated
+    n
+
+fn arena_append_deduped(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    """Append data with dedup-then-compress ordering (§V3-2.4 N7b write path).
+
+    FR-NVFS-N7b-001: dedup layer above compression.
+    Ordering: plaintext → dedup-hash → (if hit) return 0; (if miss) compress → store.
+
+    When the arena's class has dedup enabled:
+      - Computes a 32-byte hash of plaintext.
+      - Looks up the module DDT.
+      - On hit: bumps the DDT refcount, records hash in _extent_hashes, returns 0
+        (no new bytes written — caller uses the existing physical pointer).
+      - On miss: inserts into DDT, compresses, appends, records hash.
+    When dedup is not enabled for the class, falls back to arena_append_impl.
+
+    Returns bytes_written (compressed) on miss, 0 on dedup hit, or negative error:
+      -1  InvalidArena
+      -2  Sealed
+      -3  Discarded
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    # Gate: if class does not participate in dedup, fall back to plain append.
+    if not dedup_class_enabled(meta.class_tag):
+        return arena_append_impl(arena_id, data, durability_tag)
+
+    # Compute content hash on plaintext (§V3-3.1: hash before compress/encrypt).
+    val h = dedup_hash_of(data)
+
+    # DDT lookup.
+    val hit = dedup_lookup(data)
+    if hit:
+        # Dedup hit: bump refcount, record hash, return 0 (no new physical write).
+        val _ = dedup_insert_or_bump(h, arena_id, meta.total_bytes)
+        var hashes = _extent_hashes[idx]
+        hashes.push(h)
+        _extent_hashes[idx] = hashes
+        return 0
+
+    # Dedup miss: compress then store.
+    val result = compress_extent(data, meta.class_tag)
+    val payload = result.data
+    val n = payload.len() as i64
+
+    var buf = _bufs[idx]
+    for byte in payload:
+        buf.push(byte)
+    _bufs[idx] = buf
+
+    val updated = ArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        hint_bytes:  meta.hint_bytes,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: meta.total_bytes + n
+    )
+    _metas[idx] = updated
+
+    # Insert into DDT (first occurrence; refcount=1).
+    val _ = dedup_insert_or_bump(h, arena_id, meta.total_bytes)
+
+    # Record hash for later release on discard.
+    var hashes2 = _extent_hashes[idx]
+    hashes2.push(h)
+    _extent_hashes[idx] = hashes2
+
+    n
+
+fn arena_read_extent(arena_id: i64, off: i64, compressed_len: i64, algo: u8, decompressed_len: i64) -> [u8]:
+    """Read a compressed extent from the arena and decompress it.
+
+    FR-NVFS-N7a-001: decompress-on-read path (§V3-2.4 read path steps 2-4).
+
+    off             — physical byte offset in arena where compressed data starts.
+    compressed_len  — number of compressed bytes to read (from pmap compressed_len field).
+    algo            — CompressAlgo tag (from pmap compress_algo field; 0=None).
+    decompressed_len — expected plaintext size (logical block size).
+
+    When algo=0 (None), reads compressed_len bytes and returns them directly.
+    Returns empty slice on error (invalid arena, out of range, decompression failure).
+    """
+    val raw = arena_readv_impl(arena_id, off, compressed_len)
+    if raw.len() == 0:
+        return []
+    if algo == 0:
+        return raw
+    val result = decompress_extent(raw, raw.len() as u32, decompressed_len as u32, algo)
+    if result.ok:
+        result.data
+    else:
+        []
 
 fn arena_readv_impl(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
     """Read `buf_len` bytes from `off`; returns the slice or empty on error.
@@ -170,11 +323,26 @@ fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
     true
 
 fn arena_discard_impl(arena_id: i64) -> bool:
-    """Drop the arena. Returns false if arena_id unknown."""
+    """Drop the arena. Returns false if arena_id unknown.
+
+    FR-NVFS-N7b-001: walks _extent_hashes[idx] and calls dedup_release for
+    each recorded content hash so the DDT refcount is correctly decremented.
+    When a refcount reaches zero the DDT entry is removed (physical block free
+    is the caller's responsibility in a full implementation).
+    """
     val idx = _find_index(arena_id)
     if idx < 0:
         return false
     val meta = _metas[idx]
+
+    # Release dedup refcounts for all extents appended via arena_append_deduped.
+    val hashes = _extent_hashes[idx]
+    var hi = 0
+    while hi < hashes.len():
+        val _ = dedup_release(hashes[hi])
+        hi = hi + 1
+    _extent_hashes[idx] = []
+
     val updated = ArenaMeta(
         arena_id: meta.arena_id,
         class_tag: meta.class_tag,

@@ -1,0 +1,193 @@
+# @cover examples/nvfs/src/core/dedup.spl 80%
+"""
+# NVFS Deduplication Unit Tests — FR-NVFS-N7b-001
+
+**Feature IDs:** #NVFS-N7b-DEDUP
+**Category:** Storage
+**Difficulty:** 2/5
+**Status:** Implemented
+**Design:** doc/05_design/nvfs_design_v3.md §V3-3, §V3-4
+
+## Overview
+
+Four test cases:
+  (a) Same plaintext inserted twice → refcount=2 (dedup hit).
+  (b) Release drops refcount from 2 to 1 (arena still live).
+  (c) Release-to-zero removes the DDT entry entirely.
+  (d) DB_TEMP class (class_tag=2) skips dedup entirely.
+
+Hash note: uses _dedup_fold_hash stub (pure-Simple XOR fold).
+Blake3 / HMAC-DHK migration tracked as FR-NVFS-N7b-002.
+"""
+
+use std.sspec.*
+use examples.nvfs.src.core.dedup.{
+    DedupTable,
+    dedup_hash_of,
+    dedup_class_enabled
+}
+use examples.nvfs.src.core.arena.{
+    arena_create_impl,
+    arena_append_deduped
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_block(size: i64, fill: u8) -> [u8]:
+    """Build a byte block of `size` bytes all set to `fill`."""
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out.push(fill)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# (a) Same plaintext inserted twice → refcount=2
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7b-001 (a) — same plaintext inserted twice yields refcount=2":
+    """
+    DedupTable.dedup_insert_or_bump called twice with the same content_hash
+    must return refcount=2 on the second call (dedup hit path).
+    """
+
+    it "first insert returns refcount=1":
+        var tbl = DedupTable.new()
+        val data = _make_block(32, 0xAA)
+        val h = dedup_hash_of(data)
+        val rc1 = tbl.dedup_insert_or_bump(h, 10, 0)
+        expect(rc1 as i64).to_equal(1)
+
+    it "second insert with same hash returns refcount=2":
+        var tbl2 = DedupTable.new()
+        val data2 = _make_block(32, 0xBB)
+        val h2 = dedup_hash_of(data2)
+        val _ = tbl2.dedup_insert_or_bump(h2, 20, 0)
+        val rc2 = tbl2.dedup_insert_or_bump(h2, 20, 0)
+        expect(rc2 as i64).to_equal(2)
+
+    it "dedup_lookup returns true after first insert":
+        var tbl3 = DedupTable.new()
+        val data3 = _make_block(16, 0xCC)
+        val h3 = dedup_hash_of(data3)
+        val _ = tbl3.dedup_insert_or_bump(h3, 30, 0)
+        expect(tbl3.dedup_lookup(h3)).to_equal(true)
+
+    it "get_refcount returns 2 after two inserts":
+        var tbl4 = DedupTable.new()
+        val data4 = _make_block(16, 0xDD)
+        val h4 = dedup_hash_of(data4)
+        val _ = tbl4.dedup_insert_or_bump(h4, 40, 0)
+        val _ = tbl4.dedup_insert_or_bump(h4, 40, 0)
+        expect(tbl4.get_refcount(h4) as i64).to_equal(2)
+
+# ---------------------------------------------------------------------------
+# (b) Release drops refcount from 2 to 1 (still alive)
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7b-001 (b) — release drops refcount; entry survives at refcount=1":
+    """
+    After two inserts (refcount=2), one dedup_release should drop to 1
+    and return false (entry not freed).
+    """
+
+    it "dedup_release after double insert returns false (still referenced)":
+        var tbl = DedupTable.new()
+        val data = _make_block(24, 0x11)
+        val h = dedup_hash_of(data)
+        val _ = tbl.dedup_insert_or_bump(h, 50, 0)
+        val _ = tbl.dedup_insert_or_bump(h, 50, 0)
+        val freed = tbl.dedup_release(h)
+        expect(freed).to_equal(false)
+
+    it "refcount is 1 after one release from 2":
+        var tbl2 = DedupTable.new()
+        val data2 = _make_block(24, 0x22)
+        val h2 = dedup_hash_of(data2)
+        val _ = tbl2.dedup_insert_or_bump(h2, 60, 0)
+        val _ = tbl2.dedup_insert_or_bump(h2, 60, 0)
+        val _ = tbl2.dedup_release(h2)
+        expect(tbl2.get_refcount(h2) as i64).to_equal(1)
+
+# ---------------------------------------------------------------------------
+# (c) Release-to-zero removes the entry
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7b-001 (c) — release to zero removes DDT entry":
+    """
+    After one insert (refcount=1), dedup_release returns true and the entry
+    is removed from the table (get_refcount returns 0).
+    """
+
+    it "dedup_release on refcount=1 returns true":
+        var tbl = DedupTable.new()
+        val data = _make_block(32, 0x33)
+        val h = dedup_hash_of(data)
+        val _ = tbl.dedup_insert_or_bump(h, 70, 0)
+        val freed = tbl.dedup_release(h)
+        expect(freed).to_equal(true)
+
+    it "get_refcount returns 0 after release-to-zero":
+        var tbl2 = DedupTable.new()
+        val data2 = _make_block(32, 0x44)
+        val h2 = dedup_hash_of(data2)
+        val _ = tbl2.dedup_insert_or_bump(h2, 80, 0)
+        val _ = tbl2.dedup_release(h2)
+        expect(tbl2.get_refcount(h2) as i64).to_equal(0)
+
+    it "dedup_lookup returns false after release-to-zero":
+        var tbl3 = DedupTable.new()
+        val data3 = _make_block(32, 0x55)
+        val h3 = dedup_hash_of(data3)
+        val _ = tbl3.dedup_insert_or_bump(h3, 90, 0)
+        val _ = tbl3.dedup_release(h3)
+        expect(tbl3.dedup_lookup(h3)).to_equal(false)
+
+    it "two inserts then two releases removes entry":
+        var tbl4 = DedupTable.new()
+        val data4 = _make_block(16, 0x66)
+        val h4 = dedup_hash_of(data4)
+        val _ = tbl4.dedup_insert_or_bump(h4, 100, 0)
+        val _ = tbl4.dedup_insert_or_bump(h4, 100, 0)
+        val step1 = tbl4.dedup_release(h4)   # → refcount=1, false
+        val step2 = tbl4.dedup_release(h4)   # → refcount=0, true
+        expect(step1).to_equal(false)
+        expect(step2).to_equal(true)
+        expect(tbl4.get_refcount(h4) as i64).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# (d) DB_TEMP class (class_tag=2) skips dedup
+# ---------------------------------------------------------------------------
+
+describe "FR-NVFS-N7b-001 (d) — DB_TEMP class skips dedup":
+    """
+    dedup_class_enabled(2) must return false (DB_TEMP is excluded per §V3-4.1).
+    arena_append_deduped on a DB_TEMP arena falls back to plain append and
+    does NOT touch the DDT.
+    """
+
+    it "dedup_class_enabled returns false for DB_TEMP (class_tag=2)":
+        expect(dedup_class_enabled(2)).to_equal(false)
+
+    it "dedup_class_enabled returns false for META_DURABLE (class_tag=0)":
+        expect(dedup_class_enabled(0)).to_equal(false)
+
+    it "dedup_class_enabled returns false for DB_WAL (class_tag=1)":
+        expect(dedup_class_enabled(1)).to_equal(false)
+
+    it "dedup_class_enabled returns true for MODEL_IMMUTABLE (class_tag=3)":
+        expect(dedup_class_enabled(3)).to_equal(true)
+
+    it "dedup_class_enabled returns true for GENERAL_MUTABLE (class_tag=4)":
+        expect(dedup_class_enabled(4)).to_equal(true)
+
+    it "arena_append_deduped on DB_TEMP arena writes bytes (no DDT lookup)":
+        # DB_TEMP class_tag=2: dedup disabled, falls back to arena_append_impl.
+        val aid = arena_create_impl(2, 4096)
+        val data = _make_block(16, 0x77)
+        val written = arena_append_deduped(aid, data, 0)
+        # Should return bytes written (> 0), not 0 (dedup hit) and not negative.
+        expect(written > 0).to_equal(true)

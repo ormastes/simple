@@ -1,19 +1,12 @@
-# ACPI Clock Source Discovery — FR-BENCH-CLOCK-002
+# ACPI Clock Source Discovery — FR-BENCH-CLOCK-002 / FR-SIMPLEOS-ACPI-001
 #
 # Helpers to locate HPET MMIO base and PMTMR port from ACPI tables.
 #
-# Status: STUB — ACPI table parsing infrastructure does not yet exist in
-#   SimpleOS. The boot layer (limine_boot.spl) captures the RSDP physical
-#   address in BootOutputPort.rsdp_addr but no code walks RSDP → RSDT/XSDT.
-#   See FR-SIMPLEOS-ACPI-001 for the blocking prerequisite.
-#
-# When FR-SIMPLEOS-ACPI-001 is implemented:
-#   1. Call acpi_set_rsdp(phys_addr) early in kernel init with the address
-#      from BootOutputPort.rsdp_addr.
-#   2. acpi_hpet_present() walks RSDP → RSDT/XSDT → HPET signature table
-#      and returns the EventTimerBlockID.BaseAddress (MMIO u64).
-#   3. acpi_pmtmr_port() walks RSDP → FADT (signature "FACP") → PM_TMR_BLK
-#      field (u32 port I/O address).
+# Status: IMPLEMENTED — FR-SIMPLEOS-ACPI-001 (ACPI table walk) is complete.
+#   acpi_hpet_present() walks RSDP → RSDT/XSDT → HPET signature table and
+#   returns the HPET BaseAddress GAS physical address (MMIO u64).
+#   acpi_pmtmr_port() walks RSDP → FADT (signature "FACP") → PM_TMR_BLK
+#   field (u32 port I/O address).
 #
 # Usage by timer.spl:
 #   use os.kernel.acpi.clock_sources.{acpi_hpet_present, acpi_pmtmr_port,
@@ -24,6 +17,11 @@
 
 use std.baremetal.x86.io.{inb}
 use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+use os.kernel.acpi.rsdp.{acpi_find_rsdp}
+use os.kernel.acpi.rsdt.{acpi_find_table}
+use os.kernel.acpi.fadt.{acpi_fadt_pm_tmr_port}
+use os.kernel.acpi.hpet_table.{acpi_hpet_base}
 
 # ============================================================================
 # RSDP global — set once at kernel init from BootOutputPort.rsdp_addr
@@ -61,40 +59,29 @@ val ACPI_SIG_XSDT: u32 = 0x54445358
 # ACPI HPET discovery
 # ============================================================================
 
+fn _resolve_rsdp() -> u64?:
+    """Return RSDP physical address: use registered value if available,
+    otherwise fall back to BIOS shadow scan."""
+    if g_rsdp_phys != 0:
+        return g_rsdp_phys
+    acpi_find_rsdp()
+
 fn acpi_hpet_present() -> u64?:
-    """Return HPET MMIO base address if the HPET ACPI table is present.
+    """Return HPET MMIO base address (physical) if the HPET ACPI table is present.
 
-    STUB: Returns nil until FR-SIMPLEOS-ACPI-001 (ACPI table walk) is
-    implemented. The logic below describes the intended implementation:
+    Walk: RSDP → RSDT/XSDT → table with signature ACPI_SIG_HPET → GAS.address.
+    Returns the physical MMIO base (typically 0xFED00000 on QEMU).
 
-    Walk: RSDP → check revision
-      - revision 0 (ACPI 1.0): use RSDT (32-bit entry pointers)
-        RSDT at RSDP+16 (u32), entry count = (header.length - 36) / 4
-      - revision >= 2: prefer XSDT (64-bit entry pointers)
-        XSDT at RSDP+24 (u64), entry count = (header.length - 36) / 8
-
-    For each table entry pointer, read the 4-byte signature (first u32).
-    If signature == ACPI_SIG_HPET:
-      HPET table layout (per ACPI spec §5.2.12 and HPET spec §3.2.4):
-        Offset 0  : signature  (4 bytes)
-        Offset 4  : length     (4 bytes)
-        Offset 8  : revision   (1 byte)
-        Offset 36 : EventTimerBlockID (8 bytes, u64)
-        Offset 44 : BaseAddress (GAS structure, 12 bytes total)
-          - address_space_id (1 byte, 0=system memory)
-          - bit_width        (1 byte)
-          - bit_offset       (1 byte)
-          - access_size      (1 byte)
-          - address          (8 bytes, u64) ← HPET MMIO base
-
-    Return address at (hpet_table_virt + 44 + 4).
-
-    Prerequisite: phys_to_virt() mapping (HHDM) must be established before
-    this is called. Use the HHDM offset from BootOutputPort to convert.
+    Callers must convert to virtual with phys_to_virt() before MMIO access.
+    Returns nil if RSDP is unavailable, HPET table is absent, or GAS is invalid.
     """
-    # STUB — ACPI table walk not yet implemented
-    # Blocked on FR-SIMPLEOS-ACPI-001
-    nil
+    val rsdp = _resolve_rsdp()
+    if rsdp == nil:
+        return nil
+    val hpet_phys = acpi_find_table(rsdp as u64, ACPI_SIG_HPET)
+    if hpet_phys == nil:
+        return nil
+    acpi_hpet_base(hpet_phys as u64)
 
 # ============================================================================
 # ACPI PMTMR (PM Timer) port discovery
@@ -103,25 +90,20 @@ fn acpi_hpet_present() -> u64?:
 fn acpi_pmtmr_port() -> u32?:
     """Return PMTMR I/O port if discoverable via ACPI FADT.
 
-    STUB: Returns nil until FR-SIMPLEOS-ACPI-001 is implemented.
+    Walk RSDP → RSDT/XSDT → table with signature ACPI_SIG_FACP (FADT).
+    Extracts PM_TMR_BLK (offset 76) or X_PM_TMR_BLK GAS (offset 208,
+    ACPI 2.0+, SystemIO space only).
 
-    Intended implementation:
-    Walk RSDP → RSDT/XSDT → find table with signature ACPI_SIG_FACP (FADT).
-    FADT layout (ACPI spec §5.2.9):
-      Offset 76 : PM_TMR_BLK (u32) — I/O port base for ACPI PM timer
-      Offset 112: X_PM_TMR_BLK (GAS, 12 bytes) — extended (ACPI 2.0+)
-
-    PMTMR is a 24-bit counter at 3.579545 MHz (3,579,545 Hz).
-    Port returns a 32-bit value; only the low 24 bits are the counter
-    (bit 23 rollover at 0x00FFFFFF ≈ 4.688 seconds).
-
-    For ACPI 2.0+ (FADT revision ≥ 3 and length ≥ 148): prefer
-    X_PM_TMR_BLK.address if address_space_id == 1 (I/O space).
-    Otherwise fall back to PM_TMR_BLK (u32 at offset 76).
+    PMTMR is a 24-bit counter at 3.579545 MHz.
+    Returns nil if RSDP unavailable, FADT absent, or PM_TMR_BLK == 0.
     """
-    # STUB — ACPI table walk not yet implemented
-    # Blocked on FR-SIMPLEOS-ACPI-001
-    nil
+    val rsdp = _resolve_rsdp()
+    if rsdp == nil:
+        return nil
+    val fadt_phys = acpi_find_table(rsdp as u64, ACPI_SIG_FACP)
+    if fadt_phys == nil:
+        return nil
+    acpi_fadt_pm_tmr_port(fadt_phys as u64)
 
 # ============================================================================
 # PMTMR read helper (port I/O, 32-bit, 24-bit counter)
