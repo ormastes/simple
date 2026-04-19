@@ -1,0 +1,774 @@
+# HTML5 Tree Builder — InBody mode + InBody helpers.
+#
+# Extension block for TreeBuilder. Split from html_tree_builder.spl for
+# size management. Covers WHATWG HTML5 spec §13.2.6 InBody mode (the primary
+# document body parsing mode), its start/end tag dispatchers, and the
+# InBody-specific helper methods:
+#   handle_heading, close_p_if_in_button_scope, close_block_element,
+#   close_heading, close_inline_element, run_adoption_agency,
+#   _remove_from_active_formatting.
+#
+# Also contains the module-level _is_special_element helper used by
+# the adoption agency algorithm.
+
+use examples.browser.entity.dom.node_types
+use examples.browser.entity.dom.attribute_types
+use examples.browser.feature.parser.html_tokenizer
+use examples.browser.shared.logging
+
+impl TreeBuilder:
+
+    # ===================================================================
+    # InBody mode — the primary mode for document content
+    # ===================================================================
+
+    me process_in_body(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                self.frameset_ok = false
+                self.insert_text(data)
+
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("InBody: unexpected doctype, ignoring")
+
+            HtmlToken.StartTag(name, attributes, self_closing):
+                self.process_in_body_start_tag(name, attributes, self_closing)
+
+            HtmlToken.EndTag(name):
+                self.process_in_body_end_tag(name)
+
+            HtmlToken.Eof:
+                pass_do_nothing
+
+    # --- InBody start tag dispatcher ---
+
+    me process_in_body_start_tag(name: text, attributes: [Attr], self_closing: bool):
+        match name:
+            "html":
+                # Merge attributes into existing html element
+                self.logger.warn("InBody: unexpected <html>, merging attributes")
+
+            "body":
+                # Merge attributes into existing body element
+                self.logger.warn("InBody: unexpected <body>, merging attributes")
+                self.frameset_ok = false
+
+            "head":
+                self.logger.warn("InBody: unexpected <head>, ignoring")
+
+            # --- Block-level elements ---
+            "div":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "p":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "section":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "article":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "aside":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "nav":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "main":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "header":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "footer":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "address":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "blockquote":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "pre":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "figure":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "figcaption":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+
+            # --- Headings ---
+            "h1":
+                self.handle_heading(name, attributes)
+            "h2":
+                self.handle_heading(name, attributes)
+            "h3":
+                self.handle_heading(name, attributes)
+            "h4":
+                self.handle_heading(name, attributes)
+            "h5":
+                self.handle_heading(name, attributes)
+            "h6":
+                self.handle_heading(name, attributes)
+
+            # --- Lists ---
+            "ul":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "ol":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "li":
+                self.frameset_ok = false
+                # Close any open <li> in scope
+                if self.has_in_list_item_scope("li"):
+                    self.generate_implied_end_tags("li")
+                    self.pop_until("li")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dl":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dt":
+                self.frameset_ok = false
+                if self.has_in_scope("dt"):
+                    self.generate_implied_end_tags("dt")
+                    self.pop_until("dt")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "dd":
+                self.frameset_ok = false
+                if self.has_in_scope("dd"):
+                    self.generate_implied_end_tags("dd")
+                    self.pop_until("dd")
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+
+            # --- Inline elements ---
+            "span":
+                self.insert_element(name, attributes)
+            "a":
+                # Adoption agency: if there is already an <a> in the active
+                # formatting list, run the adoption agency to close it first
+                # (WHATWG 13.2.6.4.7 — handles <a>...<a> misnesting).
+                var existing_a = false
+                var ai = self.active_formatting.len() - 1
+                while ai >= 0:
+                    val af_id = self.active_formatting.get(ai)
+                    val af_tag = self.get_element_tag(af_id)
+                    if af_tag == "a":
+                        existing_a = true
+                        ai = -1  # break
+                    else:
+                        ai = ai - 1
+                if existing_a:
+                    self.run_adoption_agency("a")
+                val a_id = self.insert_element(name, attributes)
+                self.active_formatting.push(a_id)
+            "b":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "strong":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "i":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "em":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "u":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "s":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "small":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "code":
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
+            "abbr":
+                self.insert_element(name, attributes)
+            "cite":
+                self.insert_element(name, attributes)
+            "mark":
+                self.insert_element(name, attributes)
+            "sub":
+                self.insert_element(name, attributes)
+            "sup":
+                self.insert_element(name, attributes)
+
+            # --- Void elements (self-closing, no end tag) ---
+            "br":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "hr":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "img":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "input":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "embed":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "wbr":
+                self.insert_element(name, attributes)
+                self.pop_current()
+                self.frameset_ok = false
+            "area":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "source":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "track":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "col":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "param":
+                self.insert_element(name, attributes)
+                self.pop_current()
+
+            # --- Table elements ---
+            "table":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+                self.insertion_mode = InsertionMode.InTable
+            "tr":
+                self.insert_element(name, attributes)
+            "td":
+                self.insert_element(name, attributes)
+            "th":
+                self.insert_element(name, attributes)
+            "caption":
+                self.insert_element(name, attributes)
+            "thead":
+                self.insert_element(name, attributes)
+            "tbody":
+                self.insert_element(name, attributes)
+            "tfoot":
+                self.insert_element(name, attributes)
+            "colgroup":
+                self.insert_element(name, attributes)
+
+            # --- Form elements ---
+            "form":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "button":
+                if self.has_in_scope("button"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("button")
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "select":
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "textarea":
+                self.insert_element(name, attributes)
+                self.frameset_ok = false
+            "label":
+                self.insert_element(name, attributes)
+            "fieldset":
+                self.close_p_if_in_button_scope()
+                self.insert_element(name, attributes)
+            "legend":
+                self.insert_element(name, attributes)
+            "optgroup":
+                self.insert_element(name, attributes)
+            "option":
+                self.insert_element(name, attributes)
+
+            # --- Meta/Link elements in body ---
+            "link":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "meta":
+                self.insert_element(name, attributes)
+                self.pop_current()
+            "base":
+                self.insert_element(name, attributes)
+                self.pop_current()
+
+            # --- Raw text elements ---
+            "script":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+            "style":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+            "title":
+                self.insert_element(name, attributes)
+                self.original_insertion_mode = self.insertion_mode
+                self.insertion_mode = InsertionMode.Text
+
+            # --- Default: insert as generic element ---
+            _:
+                self.insert_element(name, attributes)
+
+    # --- InBody end tag dispatcher ---
+
+    me process_in_body_end_tag(name: text):
+        match name:
+            "body":
+                if self.has_in_scope("body"):
+                    self.insertion_mode = InsertionMode.AfterBody
+                else:
+                    self.logger.warn("InBody: </body> without <body> in scope")
+            "html":
+                if self.has_in_scope("body"):
+                    self.insertion_mode = InsertionMode.AfterBody
+                    self.process_after_body(HtmlToken.EndTag(name: "html"))
+                else:
+                    self.logger.warn("InBody: </html> without <body> in scope")
+
+            # --- Block end tags with scope checking ---
+            "div":
+                self.close_block_element(name)
+            "p":
+                if self.has_in_button_scope("p"):
+                    self.generate_implied_end_tags("p")
+                    self.pop_until("p")
+                else:
+                    # Insert an empty <p> per spec
+                    self.insert_element("p", [Attr]())
+                    self.pop_current()
+            "section":
+                self.close_block_element(name)
+            "article":
+                self.close_block_element(name)
+            "aside":
+                self.close_block_element(name)
+            "nav":
+                self.close_block_element(name)
+            "main":
+                self.close_block_element(name)
+            "header":
+                self.close_block_element(name)
+            "footer":
+                self.close_block_element(name)
+            "address":
+                self.close_block_element(name)
+            "blockquote":
+                self.close_block_element(name)
+            "pre":
+                self.close_block_element(name)
+            "figure":
+                self.close_block_element(name)
+            "figcaption":
+                self.close_block_element(name)
+
+            # --- Heading end tags ---
+            "h1":
+                self.close_heading()
+            "h2":
+                self.close_heading()
+            "h3":
+                self.close_heading()
+            "h4":
+                self.close_heading()
+            "h5":
+                self.close_heading()
+            "h6":
+                self.close_heading()
+
+            # --- List end tags ---
+            "ul":
+                self.close_block_element(name)
+            "ol":
+                self.close_block_element(name)
+            "li":
+                if self.has_in_list_item_scope("li"):
+                    self.generate_implied_end_tags("li")
+                    self.pop_until("li")
+            "dl":
+                self.close_block_element(name)
+            "dt":
+                if self.has_in_scope("dt"):
+                    self.generate_implied_end_tags("dt")
+                    self.pop_until("dt")
+            "dd":
+                if self.has_in_scope("dd"):
+                    self.generate_implied_end_tags("dd")
+                    self.pop_until("dd")
+
+            # --- Table end tags ---
+            "table":
+                if self.has_in_table_scope("table"):
+                    self.pop_until("table")
+            "tr":
+                if self.has_in_table_scope("tr"):
+                    self.pop_until("tr")
+            "td":
+                if self.has_in_table_scope("td"):
+                    self.pop_until("td")
+            "th":
+                if self.has_in_table_scope("th"):
+                    self.pop_until("th")
+            "caption":
+                if self.has_in_table_scope("caption"):
+                    self.pop_until("caption")
+            "thead":
+                if self.has_in_table_scope("thead"):
+                    self.pop_until("thead")
+            "tbody":
+                if self.has_in_table_scope("tbody"):
+                    self.pop_until("tbody")
+            "tfoot":
+                if self.has_in_table_scope("tfoot"):
+                    self.pop_until("tfoot")
+            "colgroup":
+                if self.has_in_table_scope("colgroup"):
+                    self.pop_until("colgroup")
+
+            # --- Form end tags ---
+            "form":
+                if self.has_in_scope("form"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("form")
+            "button":
+                if self.has_in_scope("button"):
+                    self.generate_implied_end_tags("")
+                    self.pop_until("button")
+            "select":
+                if self.has_in_scope("select"):
+                    self.pop_until("select")
+            "textarea":
+                if self.has_in_scope("textarea"):
+                    self.pop_until("textarea")
+            "fieldset":
+                self.close_block_element(name)
+
+            # --- Inline end tags (simplified — full spec uses adoption agency) ---
+            "a":
+                self.close_inline_element(name)
+            "b":
+                self.close_inline_element(name)
+            "strong":
+                self.close_inline_element(name)
+            "i":
+                self.close_inline_element(name)
+            "em":
+                self.close_inline_element(name)
+            "u":
+                self.close_inline_element(name)
+            "s":
+                self.close_inline_element(name)
+            "small":
+                self.close_inline_element(name)
+            "code":
+                self.close_inline_element(name)
+            "span":
+                self.close_inline_element(name)
+            "abbr":
+                self.close_inline_element(name)
+            "cite":
+                self.close_inline_element(name)
+            "mark":
+                self.close_inline_element(name)
+            "sub":
+                self.close_inline_element(name)
+            "sup":
+                self.close_inline_element(name)
+            "label":
+                self.close_inline_element(name)
+            "legend":
+                self.close_inline_element(name)
+            "optgroup":
+                self.close_inline_element(name)
+            "option":
+                self.close_inline_element(name)
+
+            # --- Void elements should not have end tags ---
+            "br":
+                self.logger.warn("InBody: unexpected </br>, treating as <br>")
+                self.insert_element("br", [Attr]())
+                self.pop_current()
+
+            # --- Default: walk up the stack (any other end tag) ---
+            _:
+                self.close_inline_element(name)
+
+    # ===================================================================
+    # Helper methods for InBody tag processing
+    # ===================================================================
+
+    me handle_heading(name: text, attributes: [Attr]):
+        self.close_p_if_in_button_scope()
+        # If current node is a heading, close it (no nested headings)
+        val cn = self.current_node()
+        if cn >= 0:
+            val cn_tag = self.get_element_tag(cn)
+            if HEADING_ELEMENTS.contains(cn_tag):
+                self.logger.warn("InBody: nested heading <{name}> inside <{cn_tag}>, closing")
+                self.pop_current()
+        self.insert_element(name, attributes)
+
+    me close_p_if_in_button_scope():
+        if self.has_in_button_scope("p"):
+            self.generate_implied_end_tags("p")
+            self.pop_until("p")
+
+    me close_block_element(name: text):
+        if self.has_in_scope(name):
+            self.generate_implied_end_tags("")
+            self.pop_until(name)
+        else:
+            self.logger.warn("InBody: </{name}> without matching open element")
+
+    me close_heading():
+        # Close any heading element in scope
+        var found = false
+        var idx = self.open_elements.len() - 1
+        while idx >= 0 and not found:
+            val node_id = self.open_elements.get(idx)
+            val node_tag = self.get_element_tag(node_id)
+            if HEADING_ELEMENTS.contains(node_tag):
+                found = true
+            if SCOPE_ELEMENTS.contains(node_tag):
+                idx = -1  # break
+            idx = idx - 1
+        if found:
+            self.generate_implied_end_tags("")
+            # Pop until we find a heading element
+            var guard = 0
+            while guard < 100:
+                guard = guard + 1
+                if self.open_elements.len() == 0:
+                    return
+                val top_id = self.current_node()
+                val top_tag = self.get_element_tag(top_id)
+                self.pop_current()
+                if HEADING_ELEMENTS.contains(top_tag):
+                    return
+
+    me close_inline_element(name: text):
+        # Use the adoption agency algorithm for formatting elements (WHATWG 13.2.6.4.7).
+        # This correctly handles misnested tags like <b>1<i>2</b>3</i>.
+        self.run_adoption_agency(name)
+
+    # Adoption agency algorithm (WHATWG spec section 13.2.6.4.7).
+    # Handles misnested formatting elements by reparenting nodes.
+    me run_adoption_agency(tag: text):
+        # Outer loop: run up to 8 times
+        var outer = 0
+        while outer < 8:
+            outer = outer + 1
+
+            # Step 1: Find the formatting element in the active formatting list
+            var formatting_idx = -1
+            var fi = self.active_formatting.len() - 1
+            while fi >= 0:
+                val node_id = self.active_formatting.get(fi)
+                val node_tag = self.get_element_tag(node_id)
+                if node_tag == tag:
+                    formatting_idx = fi
+                    fi = -1  # break
+                else:
+                    fi = fi - 1
+
+            if formatting_idx < 0:
+                # No formatting element found — fall back to simple close
+                if self.has_in_scope(tag):
+                    self.generate_implied_end_tags("")
+                    self.pop_until(tag)
+                else:
+                    self.logger.trace("adoption_agency: </{tag}> not in scope, ignoring")
+                return
+
+            val formatting_id = self.active_formatting.get(formatting_idx)
+
+            # Check if the formatting element is in the stack of open elements
+            var stack_idx = -1
+            var si = self.open_elements.len() - 1
+            while si >= 0:
+                if self.open_elements.get(si) == formatting_id:
+                    stack_idx = si
+                    si = -1  # break
+                else:
+                    si = si - 1
+
+            if stack_idx < 0:
+                # Not in stack — remove from formatting list and return
+                self._remove_from_active_formatting(formatting_idx)
+                return
+
+            if not self.has_in_scope(tag):
+                self.logger.trace("adoption_agency: <{tag}> not in scope")
+                return
+
+            # Step 2: Find the furthest block — first block-level element
+            # in the stack after the formatting element
+            var furthest_block_idx = -1
+            var bi = stack_idx + 1
+            while bi < self.open_elements.len():
+                val bid = self.open_elements.get(bi)
+                val btag = self.get_element_tag(bid)
+                if _is_special_element(btag):
+                    furthest_block_idx = bi
+                    bi = self.open_elements.len()  # break
+                else:
+                    bi = bi + 1
+
+            # Step 3: If no furthest block, pop until formatting element
+            if furthest_block_idx < 0:
+                # Pop elements from the stack up to and including formatting_id
+                var guard = 0
+                while guard < 1000 and self.open_elements.len() > 0:
+                    guard = guard + 1
+                    val top = self.open_elements.get(self.open_elements.len() - 1)
+                    self.open_elements.pop()
+                    if top == formatting_id:
+                        guard = 1000  # break
+                self._remove_from_active_formatting(formatting_idx)
+                return
+
+            # Step 4: Inner loop — reparent nodes
+            val furthest_block_id = self.open_elements.get(furthest_block_idx)
+            # Common ancestor is the element just before the formatting element
+            val common_ancestor_id = self.open_elements.get(stack_idx - 1)
+
+            # Remove the formatting element from the open elements stack
+            var new_open = [i64]()
+            var oi = 0
+            while oi < self.open_elements.len():
+                if oi != stack_idx:
+                    new_open.push(self.open_elements.get(oi))
+                oi = oi + 1
+            self.open_elements = new_open
+
+            # Move the furthest block's children into a new formatting element,
+            # then append the new element as a child of the furthest block.
+            val new_elem_id = self.create_element(tag, [Attr]())
+            # Reparent: move all children of furthest_block into the new element
+            val fb_node = self.get_node(furthest_block_id)
+            var child_idx = 0
+            while child_idx < fb_node.children.len():
+                val child_id = fb_node.children.get(child_idx)
+                self.append_child(new_elem_id, child_id)
+                child_idx = child_idx + 1
+            # Clear the furthest block's children list
+            var ni = 0
+            while ni < self.nodes.len():
+                var node = self.nodes.get(ni)
+                if node.id == furthest_block_id:
+                    node.children = [i64]()
+                ni = ni + 1
+            # Append new element as the sole child of the furthest block
+            self.append_child(furthest_block_id, new_elem_id)
+
+            # Update the active formatting list: replace the old formatting
+            # element with the new one
+            self._remove_from_active_formatting(formatting_idx)
+            self.active_formatting.push(new_elem_id)
+
+            self.logger.trace("adoption_agency: reparented under <{tag}> id={new_elem_id}")
+            return  # One pass is enough for most cases
+
+    me _remove_from_active_formatting(idx: i64):
+        var new_list = [i64]()
+        var i = 0
+        while i < self.active_formatting.len():
+            if i != idx:
+                new_list.push(self.active_formatting.get(i))
+            i = i + 1
+        self.active_formatting = new_list
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+# Check if a tag is a "special" element per the HTML5 spec.
+# Special elements create scope boundaries for the adoption agency algorithm.
+fn _is_special_element(tag: text) -> bool:
+    match tag:
+        "address": true
+        "applet": true
+        "area": true
+        "article": true
+        "aside": true
+        "base": true
+        "blockquote": true
+        "body": true
+        "br": true
+        "button": true
+        "caption": true
+        "center": true
+        "col": true
+        "colgroup": true
+        "dd": true
+        "details": true
+        "dir": true
+        "div": true
+        "dl": true
+        "dt": true
+        "fieldset": true
+        "figcaption": true
+        "figure": true
+        "footer": true
+        "form": true
+        "h1": true
+        "h2": true
+        "h3": true
+        "h4": true
+        "h5": true
+        "h6": true
+        "head": true
+        "header": true
+        "hr": true
+        "html": true
+        "iframe": true
+        "img": true
+        "input": true
+        "li": true
+        "link": true
+        "listing": true
+        "main": true
+        "marquee": true
+        "meta": true
+        "nav": true
+        "object": true
+        "ol": true
+        "p": true
+        "pre": true
+        "script": true
+        "section": true
+        "select": true
+        "source": true
+        "style": true
+        "summary": true
+        "table": true
+        "tbody": true
+        "td": true
+        "template": true
+        "textarea": true
+        "tfoot": true
+        "th": true
+        "thead": true
+        "title": true
+        "tr": true
+        "ul": true
+        _: false

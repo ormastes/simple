@@ -252,4 +252,352 @@ impl LlvmBackend {
         vreg_map.insert(dest, closure_i64.into());
         Ok(())
     }
+
+    // ============================================================================
+    // Enum / Union / Option / Result / Pattern helpers
+    // ============================================================================
+
+    /// Compile EnumUnit: create an enum with no payload using rt_enum_new.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_enum_unit(
+        &self,
+        dest: crate::mir::VReg,
+        variant_name: &str,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let i64_t = self.runtime_int_type();
+        let i32_t = self.context.i32_type();
+        let disc = {
+            let mut hasher = DefaultHasher::new();
+            variant_name.hash(&mut hasher);
+            (hasher.finish() & 0xFFFFFFFF) as u32
+        };
+        let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+            let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+            module.add_function("rt_enum_new", fn_type, None)
+        });
+        let nil_val = i64_t.const_int(3, false);
+        let result = builder
+            .build_call(
+                rt_fn,
+                &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), nil_val.into()],
+                "enum_unit",
+            )
+            .map_err(|e| CompileError::Semantic(format!("enum unit call: {e}")))?
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_t.const_int(0, false).into());
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
+
+    /// Compile EnumWith: create an enum with a payload using rt_enum_new.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_enum_with(
+        &self,
+        dest: crate::mir::VReg,
+        variant_name: &str,
+        payload: crate::mir::VReg,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let i64_t = self.runtime_int_type();
+        let i32_t = self.context.i32_type();
+        let disc = {
+            let mut hasher = DefaultHasher::new();
+            variant_name.hash(&mut hasher);
+            (hasher.finish() & 0xFFFFFFFF) as u32
+        };
+        let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+            let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+            module.add_function("rt_enum_new", fn_type, None)
+        });
+        let payload_val = vreg_map.get(&payload).copied().unwrap_or_else(|| i64_t.const_int(3, false).into());
+        let payload_val = self.coerce_value_to_type(payload_val, Some(i64_t.into()), builder)?;
+        let result = builder
+            .build_call(
+                rt_fn,
+                &[i32_t.const_int(0, false).into(), i32_t.const_int(disc as u64, false).into(), payload_val.into()],
+                "enum_with",
+            )
+            .map_err(|e| CompileError::Semantic(format!("enum with call: {e}")))?
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_t.const_int(0, false).into());
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
+
+    /// Compile UnionWrap: wrap a value in a union using rt_enum_new.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_union_wrap(
+        &self,
+        dest: crate::mir::VReg,
+        value: crate::mir::VReg,
+        type_index: u32,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        let i64_t = self.runtime_int_type();
+        let i32_t = self.context.i32_type();
+        let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+            let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+            module.add_function("rt_enum_new", fn_type, None)
+        });
+        let val = vreg_map.get(&value).copied().unwrap_or_else(|| i64_t.const_int(3, false).into());
+        let result = builder
+            .build_call(
+                rt_fn,
+                &[i32_t.const_int(type_index as u64, false).into(), i32_t.const_int(0, false).into(), val.into()],
+                "union_wrap",
+            )
+            .map_err(|e| CompileError::Semantic(format!("union wrap call: {e}")))?
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_t.const_int(0, false).into());
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
+
+    /// Compile OptionSome / ResultOk / ResultErr using rt_enum_new with named variant.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_tagged_enum_value(
+        &self,
+        dest: crate::mir::VReg,
+        enum_id: u32,
+        variant_name: &str,
+        value: crate::mir::VReg,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+        call_label: &str,
+    ) -> Result<(), CompileError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let i64_t = self.runtime_int_type();
+        let i32_t = self.context.i32_type();
+        let disc = {
+            let mut h = DefaultHasher::new();
+            variant_name.hash(&mut h);
+            (h.finish() & 0xFFFFFFFF) as u32
+        };
+        let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+            let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+            module.add_function("rt_enum_new", fn_type, None)
+        });
+        let val = self.get_vreg(&value, vreg_map)?;
+        let val = self.coerce_value_to_type(val, Some(i64_t.into()), builder)?;
+        let result = builder
+            .build_call(
+                rt_fn,
+                &[i32_t.const_int(enum_id as u64, false).into(), i32_t.const_int(disc as u64, false).into(), val.into()],
+                call_label,
+            )
+            .map_err(|e| CompileError::Semantic(format!("{call_label} call: {e}")))?
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_t.const_int(0, false).into());
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
+
+    /// Compile OptionNone: enum with nil payload.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_option_none(
+        &self,
+        dest: crate::mir::VReg,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let i64_t = self.runtime_int_type();
+        let i32_t = self.context.i32_type();
+        let disc = {
+            let mut h = DefaultHasher::new();
+            "None".hash(&mut h);
+            (h.finish() & 0xFFFFFFFF) as u32
+        };
+        let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+            let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
+            module.add_function("rt_enum_new", fn_type, None)
+        });
+        let nil_val = i64_t.const_int(3, false);
+        let result = builder
+            .build_call(
+                rt_fn,
+                &[i32_t.const_int(1, false).into(), i32_t.const_int(disc as u64, false).into(), nil_val.into()],
+                "opt_none",
+            )
+            .map_err(|e| CompileError::Semantic(format!("option none: {e}")))?
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_t.const_int(0, false).into());
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
+
+    /// Compile PatternTest: test subject against a MirPattern.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_pattern_test(
+        &self,
+        dest: crate::mir::VReg,
+        subject: &crate::mir::VReg,
+        pattern: &crate::mir::MirPattern,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        let i64_type = self.runtime_int_type();
+        let subject_val = self.get_vreg_val(subject, vreg_map, i64_type);
+        let result = match pattern {
+            crate::mir::MirPattern::Wildcard | crate::mir::MirPattern::Binding(_) => {
+                i64_type.const_int(1, false)
+            }
+            crate::mir::MirPattern::Literal(lit) => match lit {
+                crate::mir::MirLiteral::Int(n) => {
+                    let lit_val = i64_type.const_int(*n as u64, false);
+                    let cmp = builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, subject_val.into_int_value(), lit_val, "pat_int_eq")
+                        .map_err(|e| format!("pattern icmp: {e}"))?;
+                    builder.build_int_z_extend(cmp, i64_type, "pat_ext").map_err(|e| format!("pattern zext: {e}"))?
+                }
+                crate::mir::MirLiteral::Bool(b) => {
+                    let lit_val = i64_type.const_int(if *b { 1 } else { 0 }, false);
+                    let cmp = builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, subject_val.into_int_value(), lit_val, "pat_bool_eq")
+                        .map_err(|e| format!("pattern icmp: {e}"))?;
+                    builder.build_int_z_extend(cmp, i64_type, "pat_ext").map_err(|e| format!("pattern zext: {e}"))?
+                }
+                crate::mir::MirLiteral::Nil => {
+                    let nil_val = i64_type.const_int(3, false);
+                    let cmp = builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, subject_val.into_int_value(), nil_val, "pat_nil_eq")
+                        .map_err(|e| format!("pattern icmp: {e}"))?;
+                    builder.build_int_z_extend(cmp, i64_type, "pat_ext").map_err(|e| format!("pattern zext: {e}"))?
+                }
+                crate::mir::MirLiteral::String(s) => {
+                    let bytes = s.as_bytes();
+                    let global_val = self.context.const_string(bytes, false);
+                    let global = module.add_global(global_val.get_type(), None, "pat_str_const");
+                    global.set_initializer(&global_val);
+                    global.set_constant(true);
+                    let str_ptr = builder
+                        .build_pointer_cast(global.as_pointer_value(), self.context.ptr_type(inkwell::AddressSpace::default()), "str_ptr")
+                        .map_err(|e| format!("pattern str ptr: {e}"))?;
+                    let str_ptr_int = builder.build_ptr_to_int(str_ptr, i64_type, "str_ptr_int").map_err(|e| format!("pattern ptrtoint: {e}"))?;
+                    let str_len = i64_type.const_int(bytes.len() as u64, false);
+                    let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        module.add_function("rt_string_new", fn_type, None)
+                    });
+                    let lit_str = builder
+                        .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
+                        .map_err(|e| format!("pattern string_new: {e}"))?
+                        .try_as_basic_value().left().unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    let rt_string_eq = module.get_function("rt_string_eq").unwrap_or_else(|| {
+                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        module.add_function("rt_string_eq", fn_type, None)
+                    });
+                    builder
+                        .build_call(rt_string_eq, &[subject_val.into(), lit_str.into()], "pat_str_eq")
+                        .map_err(|e| format!("pattern string_eq: {e}"))?
+                        .try_as_basic_value().left().unwrap_or_else(|| i64_type.const_int(0, false).into())
+                        .into_int_value()
+                }
+                crate::mir::MirLiteral::Float(f) => {
+                    let lit_bits = f.to_bits() as u64;
+                    let lit_val = i64_type.const_int(lit_bits, false);
+                    let cmp = builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, subject_val.into_int_value(), lit_val, "pat_float_eq")
+                        .map_err(|e| format!("pattern icmp: {e}"))?;
+                    builder.build_int_z_extend(cmp, i64_type, "pat_ext").map_err(|e| format!("pattern zext: {e}"))?
+                }
+            },
+            crate::mir::MirPattern::Variant { variant_name, .. } => {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let rt_enum_disc = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_enum_discriminant", fn_type, None)
+                });
+                let disc = builder
+                    .build_call(rt_enum_disc, &[subject_val.into()], "disc")
+                    .map_err(|e| format!("pattern disc: {e}"))?
+                    .try_as_basic_value().left().unwrap_or_else(|| i64_type.const_int(0, false).into())
+                    .into_int_value();
+                let expected = {
+                    let mut hasher = DefaultHasher::new();
+                    variant_name.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as u64
+                };
+                let expected_val = i64_type.const_int(expected, false);
+                let cmp = builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq")
+                    .map_err(|e| format!("pattern var icmp: {e}"))?;
+                builder.build_int_z_extend(cmp, i64_type, "pat_ext").map_err(|e| format!("pattern zext: {e}"))?
+            }
+            _ => i64_type.const_int(1, false),
+        };
+        vreg_map.insert(dest, result.into());
+        Ok(())
+    }
+
+    /// Compile PatternBind: extract a value by following binding path steps.
+    #[cfg(feature = "llvm")]
+    pub(super) fn compile_pattern_bind(
+        &self,
+        dest: crate::mir::VReg,
+        subject: &crate::mir::VReg,
+        binding: &crate::mir::PatternBinding,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        let i64_type = self.runtime_int_type();
+        let subject_val = self.get_vreg_val(subject, vreg_map, i64_type);
+        let result = if binding.path.is_empty() {
+            subject_val
+        } else {
+            let mut current = subject_val;
+            for step in &binding.path {
+                match step {
+                    crate::mir::BindingStep::EnumPayload => {
+                        let rt_fn = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_enum_payload", fn_type, None)
+                        });
+                        current = builder
+                            .build_call(rt_fn, &[current.into()], "payload")
+                            .map_err(|e| format!("pattern bind payload: {e}"))?
+                            .try_as_basic_value().left().unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    }
+                    crate::mir::BindingStep::TupleIndex(idx) => {
+                        let rt_fn = module.get_function("rt_tuple_get").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                            module.add_function("rt_tuple_get", fn_type, None)
+                        });
+                        let idx_val = i64_type.const_int(*idx as u64, false);
+                        current = builder
+                            .build_call(rt_fn, &[current.into(), idx_val.into()], "tuple_el")
+                            .map_err(|e| format!("pattern bind tuple: {e}"))?
+                            .try_as_basic_value().left().unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    }
+                    crate::mir::BindingStep::FieldName(_) => {}
+                }
+            }
+            current
+        };
+        vreg_map.insert(dest, result);
+        Ok(())
+    }
 }
