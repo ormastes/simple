@@ -188,6 +188,7 @@ pub mod codes {
     pub const FAILED_TO_CAST: &str = "E2007";
     pub const FAILED_BUILD_GEP: &str = "E2008";
     pub const UNSUPPORTED_RETURN_TYPE: &str = "E2009";
+    pub const IMMUTABLE_ASSIGNMENT: &str = "E2010";
 
     // Runtime errors (E30xx)
     pub const DIVISION_BY_ZERO: &str = "E3001";

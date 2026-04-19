@@ -4,7 +4,7 @@
 //! #![skip_todo]
 
 use super::checker_core::LintChecker;
-use super::types::LintName;
+use super::super::types::LintName;
 use simple_common::diagnostic::{EasyFix, FixConfidence, Replacement};
 use simple_parser::ast::{Expr, Node};
 use simple_parser::token::Span;

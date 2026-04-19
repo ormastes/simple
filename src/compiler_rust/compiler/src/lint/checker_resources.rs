@@ -4,7 +4,7 @@
 //! #![skip_todo]
 
 use super::checker_core::{format_type, LintChecker};
-use super::types::{LintLevel, LintName};
+use super::super::types::{LintLevel, LintName};
 use simple_parser::ast::{Expr, FunctionDef, Node, Type};
 use simple_parser::token::Span;
 use std::collections::HashMap;

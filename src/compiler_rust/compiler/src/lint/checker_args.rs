@@ -3,7 +3,7 @@
 //! #![skip_todo]
 
 use super::checker_core::{format_type, FunctionInfo, LintChecker, ParamInfo};
-use super::types::LintName;
+use super::super::types::LintName;
 use simple_parser::ast::{Argument, Expr, Node};
 use simple_parser::token::Span;
 use std::collections::HashMap;

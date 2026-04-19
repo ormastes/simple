@@ -4,8 +4,8 @@
 //! #![skip_todo]
 
 use super::checker_core::{is_pure_math_function, LintChecker};
-use super::rules::{is_bare_bool, is_primitive_type};
-use super::types::LintName;
+use super::super::rules::{is_bare_bool, is_primitive_type};
+use super::super::types::LintName;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node, StructDef, TraitDef, Type};
 use simple_parser::token::Span;
 

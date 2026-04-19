@@ -8,6 +8,16 @@ use crate::error::{codes, CompileError, ErrorContext};
 // Codegen / LLVM Errors
 // ============================================
 
+/// Error when an LLVM feature is required but not compiled in.
+pub fn llvm_feature_required() -> CompileError {
+    CompileError::Codegen("LLVM feature required but not compiled into this build".to_string())
+}
+
+/// Error when an LLVM feature is not enabled.
+pub fn llvm_feature_not_enabled() -> CompileError {
+    CompileError::Codegen("LLVM feature not enabled in this build".to_string())
+}
+
 /// Error when an unsupported language feature is encountered during codegen.
 pub fn unsupported_feature(feature: &str) -> CompileError {
     CompileError::Codegen(format!("unsupported feature: {}", feature))

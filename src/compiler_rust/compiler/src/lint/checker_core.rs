@@ -3,10 +3,10 @@
 //!
 //! #![skip_todo]
 
-use super::config::LintConfig;
-use super::diagnostics::LintDiagnostic;
-use super::rules::{is_bare_bool, is_primitive_type, math_primitive_name};
-use super::types::{LintLevel, LintName};
+use super::super::config::LintConfig;
+use super::super::diagnostics::LintDiagnostic;
+use super::super::rules::{is_bare_bool, is_primitive_type, math_primitive_name};
+use super::super::types::{LintLevel, LintName};
 use simple_common::diagnostic::{EasyFix, FixConfidence, Replacement};
 use simple_parser::ast::{
     Argument, Attribute, ClassDef, Decorator, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type,
