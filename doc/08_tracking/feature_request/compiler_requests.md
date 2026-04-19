@@ -31,6 +31,47 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 
 ## Open Requests
 
+### FR-COMPILER-002 — Fix self-hosted import resolver: same-named structs in different modules shadow each other
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-001 investigation session
+- **Target:** compiler — import resolver / name-resolution pass
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  When two structs share the same short name but live in different fully-qualified
+  module paths (e.g., `compiler.common.driver_core_types.CompileOptions` vs
+  `compiler.backend.backend.backend_types.CompileOptions`), the self-hosted
+  compiler's import resolver picks the wrong struct even when the caller uses an
+  explicit `use compiler.common.driver_core_types.*` import. The Rust-seed
+  bootstrap binary resolves the explicit import correctly. The self-hosted binary
+  must resolve struct names according to the explicitly imported module namespace,
+  not by last-seen or alphabetical order among all loaded modules.
+- **Acceptance-criteria:**
+  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+        `val opts = CompileOptions.default(); print(opts.input_files.len().to_text())`
+        succeeds in the self-hosted binary without "Function not found".
+  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to the
+        7-field backend struct and does NOT expose `mode` / `low_memory`.
+  - [ ] Both can be used in the same file via aliased imports without collision.
+  - [ ] FR-COMPILER-001 acceptance criteria are met after this fix.
+- **Related-upfront:** none
+- **Related-design-doc:** tbd — likely `src/compiler/10.frontend/` or
+  `src/compiler/00.common/` name-resolution / symbol-table pass
+- **Related-issue:** FR-COMPILER-001 (upstream symptom)
+- **Notes:**
+  Root cause confirmed by discriminator test (2026-04-18):
+  - Bootstrap binary: `input_files`, `mode`, `low_memory`, `verbose`, `release`,
+    `gc_off`, `debug_info` all resolve correctly on the 17-field driver struct.
+  - Self-hosted binary: `input_files` (field unique to driver struct) fails first,
+    proving the resolver silently picks the 7-field backend struct instead.
+  The fix must be in the self-hosted import/symbol resolver. Renaming one of the
+  two structs (e.g., `DriverCompileOptions` vs `BackendCompileOptions`) is a
+  valid workaround but requires widespread callers update — prefer fixing the
+  resolver so explicit `use` paths take precedence.
+
+---
+
 ### FR-COMPILER-001 — Fix self-hosted binary missing CompileOptions field accessors
 
 - **Filed-on:** 2026-04-18
@@ -58,22 +99,25 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-upfront:** none
 - **Related-design-doc:** tbd
 - **Related-issue:** none
-- **Suspected cause:**
-  Shallow investigation (2026-04-18): `low_memory` (line 91) and `mode` (line 75)
-  are plain struct fields on `CompileOptions` in
-  `src/compiler/00.common/driver_core_types.spl` — they are **not** methods.
-  The Rust-seed runtime generates field-getter stubs automatically; the
-  self-hosted compiler's runtime dispatch appears to miss this auto-generation
-  step for these fields (or for the `CompileOptions` struct specifically).
-  Suspected areas:
-  1. `src/compiler/80.driver/driver.spl` or `driver_api_types.spl` — compile-mode
-     dispatch path that interprets field reads as method calls.
-  2. Self-hosted codegen for struct field accessor lowering (likely in
-     `src/compiler/70.backend/` or `src/compiler/10.frontend/`).
-  3. The `driver_core_compile_options_default()` free function (line 142) is
-     present; the issue is specifically field read dispatch on struct instances,
-     not the constructor.
-  No source edits were made. Fix is deferred to the compiler track.
+- **Investigation (2026-04-18, Claude Sonnet 4.6):**
+  Deep investigation performed. Root cause is **wrong-struct name collision**
+  (root cause C — compiler-core bug). Two structs named `CompileOptions` exist:
+  - `src/compiler/00.common/driver_core_types.spl` — 17-field driver struct
+    with `mode`, `low_memory`, `input_files`, `verbose`, `release`, etc.
+  - `src/compiler/70.backend/backend/backend_types.spl` — 7-field backend struct
+    with `target`, `opt_level`, `debug_info`, `emit_assembly`, etc.
+  The Rust-seed bootstrap resolves the import `use compiler.common.driver_core_types.*`
+  correctly to the 17-field struct — all fields including `mode` and `low_memory`
+  work. The self-hosted release binary resolves to the 7-field backend struct even
+  with an explicit `use compiler.common.driver_core_types.*` import — fields
+  unique to the driver struct (`input_files`, `mode`, `low_memory`, etc.) all fail
+  as "Function not found"; fields in the 7-field set are silently resolved to the
+  wrong struct. Confirmed with `/tmp/test_compile_options.spl` — `input_files`
+  fails before `mode` and `low_memory`, proving it is not a selective gap.
+  This is an import-resolution name-shadowing bug in the self-hosted compiler:
+  when two structs share a name across different modules, the self-hosted resolver
+  picks the wrong one regardless of explicit import path. See FR-COMPILER-002.
+  No source edits made. Fix requires compiler-core surgery.
 - **Notes:** Blocks pure-Simple end-to-end testing of any new `extern fn`
   (including `rt_time_now_ns`) via the self-hosted binary. Use
   `src/compiler_rust/target/bootstrap/simple` as workaround until resolved.
@@ -85,4 +129,6 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
      print(rt_time_now_ns().to_string())
      ```
   3. `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl`
-  4. Observe "Runtime error: Function 'CompileOptions.low_memory' not found"
+  4. Observe "Runtime error: Function 'CompileOptions.input_files' not found"
+     followed by "Function 'CompileOptions.low_memory' not found" and
+     "Function 'CompileOptions.mode' not found" — wrong-struct collision.

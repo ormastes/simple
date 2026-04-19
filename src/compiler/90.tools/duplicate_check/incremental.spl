@@ -4,7 +4,7 @@
 # Based on src/app/build/incremental.spl pattern.
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig, compute_config_hash}
-use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates_in_file, new_token_interner}
 use compiler.tools.duplicate_check.math_utils.{hash_string}
 use app.io.mod.{file_exists, file_read, file_write, file_hash_sha256, current_time_ms, dir_create_all}
 
@@ -20,6 +20,34 @@ struct IncrementalCache:
     entries: {text: IncrementalCacheEntry}
     cache_path: text
     config_hash: text       # Hash of config to detect config changes
+
+fn escape_cache_text(value: text) -> text:
+    var escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace("|", "\\p")
+    escaped = escaped.replace("\n", "\\n")
+    escaped
+
+fn unescape_cache_text(value: text) -> text:
+    var unescaped = value.replace("\\n", "\n")
+    unescaped = unescaped.replace("\\p", "|")
+    unescaped = unescaped.replace("\\\\", "\\")
+    unescaped
+
+fn stable_block_hash(block: DuplicateBlock) -> i64:
+    int(hash_string("{block.token_count}|{block.line_end - block.line_start}|{block.code}"))
+
+fn normalize_block_hashes(blocks: [DuplicateBlock]) -> [DuplicateBlock]:
+    var normalized = []
+    for block in blocks:
+        normalized.push(DuplicateBlock(
+            file: block.file,
+            line_start: block.line_start,
+            line_end: block.line_end,
+            token_count: block.token_count,
+            hash_value: stable_block_hash(block),
+            code: block.code
+        ))
+    normalized
 
 # Load incremental cache from disk
 fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> IncrementalCache:
@@ -60,16 +88,16 @@ fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> Increm
                 while j < block_count and i + 1 + j < lines.len():
                     val block_line = lines[i + 1 + j].trim()
                     if block_line.len() > 0:
-                        # Parse block: start_line|end_line|token_count|hash
+                        # Parse block: start_line|end_line|token_count|hash|code
                         val block_parts = block_line.split("|")
-                        if block_parts.len() >= 4:
+                        if block_parts.len() >= 5:
                             blocks.push(DuplicateBlock(
                                 file: file_path,
                                 line_start: int(block_parts[0]),
                                 line_end: int(block_parts[1]),
                                 token_count: int(block_parts[2]),
                                 hash_value: int(block_parts[3]),
-                                code: ""  # Code not cached (too large)
+                                code: unescape_cache_text(block_parts[4])
                             ))
                     j = j + 1
 
@@ -115,7 +143,8 @@ fn save_incremental_cache(cache: IncrementalCache):
         lines.push("file:{file_path}|{entry.source_hash}|{entry.timestamp}|{entry.blocks.len()}")
 
         for block in entry.blocks:
-            lines.push("  {block.line_start}|{block.line_end}|{block.token_count}|{block.hash_value}")
+            val code = escape_cache_text(block.code)
+            lines.push("  {block.line_start}|{block.line_end}|{block.token_count}|{block.hash_value}|{code}")
 
         lines.push("")
 
@@ -163,6 +192,31 @@ fn update_cache_entry(
         blocks: blocks
     )
 
+fn process_files_incremental(
+    files: [text],
+    config: DuplicationConfig,
+    cache: IncrementalCache,
+    cache_manager
+) -> ([DuplicateBlock], IncrementalStats):
+    var all_blocks: [DuplicateBlock] = []
+    var cached_files = 0
+    val interner = new_token_interner()
+
+    for file_path in files:
+        if needs_reprocessing(file_path, cache):
+            val raw_blocks = find_duplicates_in_file(file_path, config, cache_manager, interner)
+            val blocks = normalize_block_hashes(raw_blocks)
+            update_cache_entry(cache, file_path, blocks)
+            all_blocks.merge(blocks)
+        else:
+            cached_files = cached_files + 1
+            val cached_blocks = get_cached_blocks(file_path, cache)
+            all_blocks.merge(cached_blocks)
+
+    val stats = compute_incremental_stats(files.len(), cached_files)
+    save_incremental_cache(cache)
+    (all_blocks, stats)
+
 # Incremental analysis statistics
 struct IncrementalStats:
     total_files: i64
@@ -188,4 +242,3 @@ fn compute_incremental_stats(
 
 fn format_incremental_stats(stats: IncrementalStats) -> text:
     "Incremental: {stats.reprocessed_files} changed, {stats.cached_files} cached ({stats.cache_hit_rate}% hit rate)"
-

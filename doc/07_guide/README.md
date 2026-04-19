@@ -94,6 +94,12 @@ User-facing guides for the Simple programming language. For specifications see `
 | [architecture/compiler_architecture.md](architecture/compiler_architecture.md) | Compiler pipeline overview |
 | [architecture/async.md](architecture/async.md) | Async/await, generators, actors |
 
+## Storage / Filesystem
+
+| Guide | Description |
+|-------|-------------|
+| [fs_driver.md](fs_driver.md) | How to add a new filesystem driver and consume FsDriver from an app |
+
 ## Library
 
 | Guide | Description |

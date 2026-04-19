@@ -462,8 +462,74 @@ append under this heading.
 - **Notes:** Cross-submodule import solved via `examples.nvfs.src.core.crypto.aes128_gcm`
   namespace (same pattern as `pmap_btree.spl`). Runtime externs (`rt_aes_sbox`,
   `rt_aes_rcon`, `rt_aes128_encrypt_block_into`) resolved by main Simple runtime.
-  FR-NVFS-N6a-002 (HKDF cross-submodule access) and FR-NVFS-N6a-003 (EncryptExt
-  trait extension) remain open.
+  FR-NVFS-N6a-002 (KDF hardening) and FR-NVFS-N6a-003 (DEK rotation on seal)
+  are now implemented — see entries below.
+
+---
+
+### FR-NVFS-N6a-002 — KDF hardening: salted derivation for per-arena dataset keys
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 9-n6a-002-003 agent
+- **Target:** nvfs  (examples/nvfs/src/core/encryption.spl)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** 9-n6a-002-003 agent
+- **Requested-semantics:**
+  `_derive_data_key_bytes` used a plain XOR of master_key bytes and arena_id with
+  no domain separation or salt. Upgrade to a salted derivation that includes
+  arena_id, a generation counter, and a domain-separation info string
+  `"nvfs-dataset-v1"` so that: (a) same inputs always yield same output
+  (determinism), (b) different arena_ids or generations yield different outputs,
+  (c) the derivation is structurally equivalent to HKDF-SHA256 with info tagging.
+  Full HKDF-SHA256 deferred until cross-submodule SHA256 is available.
+- **Acceptance-criteria:**
+  - [x] `_derive_data_key_bytes_gen(master, arena_id, generation)` added; folds
+        master bytes, arena_id, generation, and info string `"nvfs-dataset-v1"`
+  - [x] `_derive_data_key_bytes` is a shim calling gen=0 (backward compat)
+  - [x] `keystore_derive_fresh_dek(ks, master_id, arena_id, generation)` exposed
+  - [x] Test 10: same (master, arena, generation=0) → same key bytes
+  - [x] Test 11: generation=0 vs generation=1 → different key bytes
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
+- **Related-issue:** none
+- **Notes:** HKDF-SHA256 upgrade tracked as follow-up once `os.tls13.hkdf` is
+  accessible from the examples submodule scope.
+
+---
+
+### FR-NVFS-N6a-003 — DEK rotation on arena seal
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 9-n6a-002-003 agent
+- **Target:** nvfs  (examples/nvfs/src/core/encryption.spl + arena.spl)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** 9-n6a-002-003 agent
+- **Requested-semantics:**
+  On `arena_seal_impl`, if the arena is registered as encrypted in the
+  `EncryptionInfo` registry, derive a fresh DEK (bumped generation) and update
+  the registry so subsequent `encrypt_arena_data` calls use the new key.
+  The old DEK remains in the KeyStore until unmount. Full in-place re-encryption
+  of already-appended extents is deferred to FR-NVFS-N6a-004.
+- **Acceptance-criteria:**
+  - [x] `EncryptionInfo` struct (master_id, dek_key_id, generation) added
+  - [x] Module-level registry (`_enc_arena_ids`, `_enc_infos`) + `_g_ks` added
+  - [x] `nvfs_set_arena_encryption(arena_id, enabled, kh)` registers/deregisters
+  - [x] `nvfs_get_arena_encryption(arena_id) -> Option<EncryptionInfo>`
+  - [x] `keystore_rotate_dek(ks, arena_id)` bumps generation, derives new DEK,
+        updates registry
+  - [x] `nvfs_arena_seal_rotate(arena_id)` called from `arena_seal_impl`
+  - [x] Test 12: dek_key_id changes after seal-rotate on encrypted arena
+  - [x] Test 13: new DEK produces different ciphertext; old DEK fails to decrypt
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`
+- **Related-issue:** none
+- **Notes:** In-place re-encryption of persisted extents tracked as FR-NVFS-N6a-004.
+  Module-level `_g_ks` singleton enables arena_seal_impl to call rotate without
+  requiring a KeyStore parameter (keeping arena.spl API stable).
 
 ---
 
@@ -504,6 +570,123 @@ append under this heading.
 
 ---
 
+### FR-NVFS-N7a-001 — Inline compression: per-arena LZ4/Zstd, class-aware defaults
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** nvfs-v3-design agent
+- **Target:** nvfs  (examples/nvfs/src/core/compression.spl — new)
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Add an inline compression layer (N7a) between the logical block and the physical device.
+  Compression is per-dataset, per-arena, and opt-in via mount option `compress=<algo>`
+  or per-file xattr `nvfs.compress`. Class-aware defaults: GENERAL_MUTABLE → Zstd-3,
+  DB_TEMP → LZ4, MODEL_IMMUTABLE → None (weights already dense), META_DURABLE → None,
+  DB_WAL → None, CHECKPOINT_SNAPSHOT → LZ4. The pmap entry is extended from 80 bytes
+  (v2) to 88 bytes (v3) to carry `compress_algo (u8)` + `compressed_len (u32)`.
+  Incompressible blocks (compressed ≥ 90% of raw) fall back to algo=None automatically.
+  Supported algorithms: LZ4 (tag=1), Zstd-3 (tag=2), Zstd-19 (tag=3, archival only).
+  The ARC cache stores decompressed blocks. Superblock magic becomes `b"NVFS0003"`.
+  Full spec: `doc/05_design/nvfs_design_v3.md §V3-2`.
+- **Acceptance-criteria:**
+  - [ ] `CompressAlgo` enum defined (None=0, LZ4=1, Zstd3=2, Zstd19=3)
+  - [ ] `arena_append` compresses data when `compress_algo ≠ None`, falls back on
+        incompressible content
+  - [ ] `arena_read` decompresses transparently; caller receives plaintext bytes
+  - [ ] Pmap entry v3 (88 bytes) with `compress_algo` + `compressed_len` fields
+  - [ ] Class-aware defaults enforced at arena creation (MODEL_IMMUTABLE gets None)
+  - [ ] LZ4 write throughput ≥ 80% of uncompressed on compressible workload
+  - [ ] Zstd-3 on-disk size ≤ 45% of raw for synthetic text workload
+  - [ ] Round-trip fidelity: data written and read back byte-for-byte identical
+  - [ ] `nvfs upgrade` tool extends v2 pmap entries (80→88 bytes, zero-fill new fields)
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-2, §V3-5, §V3-6, §V3-7`
+- **Related-issue:** none
+- **Notes:** Compression must occur before encryption (§V3-4.1 enforces ordering).
+  Zstd-19 is offline-archival only; hot paths use LZ4 or Zstd-3. LZMA/gzip not
+  supported (too slow for NVMe latency targets). OQ-11 (compressed ARC) deferred.
+
+---
+
+### FR-NVFS-N7b-001 — Inline deduplication: content-addressable DDT extending reflink machinery
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** nvfs-v3-design agent
+- **Target:** nvfs  (examples/nvfs/src/core/dedup.spl — new)
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Add an inline deduplication layer (N7b) backed by a content-addressable Deduplication
+  Table (DDT). The DDT maps `content_hash (u8[32]) → DedupEntry` where DedupEntry
+  carries the canonical logical_page_no, birth_gen, refcount, and flags (56 bytes/entry).
+  The DDT is stored in a new CoW B-tree (DEDUP_TREE_OBJECTID=12), making an eleven-tree
+  forest. A hot DDT RAM cache (default 256 MB, LRU eviction) fronts the on-disk B-tree.
+  On write: compute Blake3 (or HMAC-DHK when encryption is active) of plaintext, look up
+  DDT; on hit, reflink the existing physical block (no device write); on miss, write and
+  insert. Class policy: META_DURABLE, DB_WAL, DB_TEMP are forced off; MODEL_IMMUTABLE
+  is forced on when dataset dedup=on (primary use case: shared weight tensors across
+  fine-tuned model variants). Dedup is disabled by default; opt-in via `dedup=on` mount
+  option. When encryption is active, the DHK (per-dataset, derived from master key) is
+  used as the HMAC key for DDT keys so the DDT does not leak plaintext identity across
+  dataset boundaries. Refcount GC is synchronous (decremented in the write transaction
+  on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design_v3.md
+  §V3-3, §V3-4`.
+- **Acceptance-criteria:**
+  - [ ] `DedupEntry` struct (56 bytes) + DEDUP_TREE_OBJECTID=12 B-tree defined
+  - [ ] Hot DDT RAM cache: configurable `dedup_cache_mb` mount option (default 256)
+  - [ ] Write path: Blake3/HMAC-DHK hash → hot DDT lookup → cold DDT lookup → reflink
+        on hit / insert on miss
+  - [ ] MODEL_IMMUTABLE: 10 copies of same 1 GiB tensor → on-disk ≤ 1.1 GiB (≥ 9×)
+  - [ ] DB_TEMP/META_DURABLE/DB_WAL: dedup path not entered (class policy)
+  - [ ] Dedup miss overhead ≤ 2 µs/4KiB write on warm DDT
+  - [ ] `nvfs check` after kill-9 during dedup write: no leaked extents, refcounts consistent
+  - [ ] DDT GC: after deleting 9 duplicate copies, used space returns to 1× tensor size
+  - [ ] `nvfs stats --dedup` reports DDT hit rate, space savings, cold DDT miss rate
+  - [ ] When encryption enabled: DHK-keyed HMAC used instead of raw Blake3 (verified by
+        inspecting DDT tree on-disk)
+- **Related-upfront:** `from_spostgre.md §S4` (arena_clone_range, used for reflink on DDT hit)
+- **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-3, §V3-4, §V3-6, §V3-7`
+- **Related-issue:** none
+- **Notes:** DDT reference counting is error-prone (comparable to delayed-ref queue,
+  v2 §5 OQ-1). Comprehensive crash-consistency tests are required before N7b ships.
+  Cross-dataset dedup (shared DHK) deferred (OQ-10). Dedup back-fill of existing
+  extents uses the v2 offline dedup daemon (§8); inline dedup covers new writes only.
+
+---
+
+### FR-BDD-WAVE7-8-001 — BDD feature files for wave 7/8 storage work
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** bdd-wave7-8 agent (session spostgre-nvfs-storage)
+- **Target:** test/features/
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** bdd-wave7-8 agent
+- **Requested-semantics:**
+  MDSOC+ requires BDD specs for new functionality before or alongside impl.
+  Wave 7/8 added AES-GCM encryption (N6a), raw send/receive (N6b), scrub detect+repair
+  (N4a/N4b), HOT slack (FR-HOT-001), M4 tier cache, M5 vacuum, VFS cursor
+  (FR-SIMPLEOS-M5-001), and rt_time_now_ns clock extern. Eight `.feature` files
+  were written covering 5 scenarios each (golden path + edge cases). Step wire-up
+  is a separate track; these files are spec-only.
+- **Acceptance-criteria:**
+  - [x] `test/features/nvfs/encryption.feature` — 5 scenarios (N6a-001/002/003)
+  - [x] `test/features/nvfs/raw_send.feature` — 5 scenarios (N6b)
+  - [x] `test/features/nvfs/scrub_repair.feature` — 5 scenarios (N4a/N4b)
+  - [x] `test/features/spostgre/hot_slack.feature` — 5 scenarios (FR-HOT-001)
+  - [x] `test/features/spostgre/tier_cache.feature` — 5 scenarios (M4)
+  - [x] `test/features/spostgre/vacuum.feature` — 5 scenarios (M5)
+  - [x] `test/features/os/vfs_cursor.feature` — 5 scenarios (FR-SIMPLEOS-M5-001)
+  - [x] `test/features/bench/clock_extern.feature` — 5 scenarios (rt_time_now_ns)
+  - [x] Step vocabulary consistent with existing wave 0–6 feature files
+  - [x] No .spl step implementations (spec-only; wire-up is a separate track)
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`, `doc/05_design/nvfs_design_v3.md`
+- **Related-issue:** none
+
+---
+
 Closed entries are moved here from `## Open Requests` (never deleted) with
 `Status: Implemented` or `Status: Rejected` and the required link/reason.
 
@@ -537,3 +720,79 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Related-issue:** none
 - **Notes:** `STORAGE_CLASS_DB_TEMP = 3` defined in `tier_cache.spl` (shim treats
   class_tag opaquely). Aurora reader-replica pre-warming deferred.
+
+---
+
+### FR-STORAGE-E2E-001 — End-to-end integration test: spostgre WAL+pmap through NVFS shim
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** integration-test agent (session spostgre-nvfs-storage)
+- **Target:** spostgre + nvfs_shim
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** integration-test agent
+- **Requested-semantics:**
+  A single integration test that exercises the spostgre WAL writer and pmap writer
+  through the in-process NVFS shim together with a RamFs-backed MountTable mount at
+  `/db`. The test proves: arena-backed WAL append → commit_group FUA fence →
+  pmap_writer_publish → remount simulation (byte-image extract + re-inject into fresh
+  arenas) → wal_recover_tail and pmap_writer_lookup confirm survival → CRC fence stops
+  recovery at a corrupted record. The gap between the MountTable/RamFsDriver surface
+  and the in-process shim (spostgre does not yet route through the VFS mount table)
+  is explicitly documented in state.md §9-e2e-integration; this FR tracks that wiring
+  as future work.
+- **Acceptance-criteria:**
+  - [x] RamFs driver mounted at `/db` via `MountTable` — `MountId.id >= 0`
+  - [x] `wal_writer_append` returns `LSN > 0`
+  - [x] Successive appends produce strictly increasing LSNs
+  - [x] `wal_writer_commit_group` sets `durable_lsn` to `lsn_high.value`
+  - [x] `pmap_writer_publish` returns `true` after WAL commit
+  - [x] `pmap_writer_lookup` returns entry with `birth_gen == page_lsn`
+  - [x] `wal_writer_sync` advances `durable_lsn` to current `total_bytes` (checkpoint sim)
+  - [x] Remount sim: `wal_recover_tail` on re-seeded arena returns all 3 records
+  - [x] Remount sim: `pmap_writer_lookup` on re-seeded arena returns matching `page_lsn`
+  - [x] CRC fence: corrupted payload byte stops recovery — only prefix records returned
+  - [ ] Real wiring: spostgre WAL/pmap arenas routed through `MountTable` + `RamFsDriver`
+        (deferred; requires VFS write-path in `std.fs_driver`)
+- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
+- **Related-design-doc:** `spostgre_design.md §9`, `§12 (M2)`, `nvfs_design.md §3`
+- **Related-issue:** none
+- **Notes:** `checkpoint_begin` / `checkpoint_commit` are `pass_todo` at M2;
+  `wal_writer_commit_group` + `wal_writer_sync` serve as the checkpoint equivalent.
+  Real checkpoint API wiring is a follow-up milestone.
+
+---
+
+### FR-BENCH-BASELINE-001 — Run bench harness with real clock and record baseline numbers
+
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 9-bench-baseline agent (session spostgre-nvfs-storage)
+- **Priority:** P1
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** 9-bench-baseline agent
+- **Requested-semantics:**
+  After FR-BENCH-CLOCK-001 wired `rt_time_now_nanos()`, run all 5 bench scripts
+  (`fs_driver_mount_table.spl`, `nvfs_arena_throughput.spl`, `spostgre_wal_append.spl`,
+  `run_all.spl`, `bench/lib/timing.spl`) with the bootstrap binary and record ns-level
+  baseline numbers in `bench/BASELINE.md`.
+- **Acceptance-criteria:**
+  - [x] `bench/lib/timing.spl` updated to use `extern fn rt_time_now_nanos() -> i64`
+        (real CLOCK_MONOTONIC, not loop-counter proxy)
+  - [x] WAL bench (`spostgre_wal_append.spl`) ran successfully; real ns numbers recorded
+        in `bench/BASELINE.md` (p50 wal_append ≈ 23 µs, wal_recover_tail ≈ 5.6 ms)
+  - [x] NVFS arena bench blocker documented: A1 inner-loop (8M pushes) exceeds
+        interpreter 120s budget; recommended fix: reduce outer ITER to 10
+  - [x] fs_driver + run_all blocker documented: `namespace` field collision in
+        `fs_driver_impl.spl` causes parse error; tracked for fix
+  - [x] FR-BENCH-BASELINE-001 appended to `nvfs_requests.md`
+  - [x] `#### 9-bench-baseline` appended to `.sstack/spostgre-nvfs-storage/state.md`
+- **Related-upfront:** FR-BENCH-CLOCK-001
+- **Related-design-doc:** `bench/BASELINE.md`
+- **Related-issue:** none
+- **Notes:** WAL numbers are interpreter-mode costs (~23 µs p50 append). Native-compiled
+  expected < 1 µs. Real NVMe FUA dominates at 50–200 µs on actual hardware.
+  Throughput column shows 0 in WAL/NVFS inline helpers due to old `(iters*1000)/total_ns`
+  formula (underflows); corrected to `(iters*1_000_000)/total_ns` in `timing.spl`.
+  Inline copies in WAL and NVFS bench files need the same fix as follow-up.

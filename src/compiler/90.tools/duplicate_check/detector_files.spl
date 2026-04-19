@@ -1,0 +1,96 @@
+# File selection helpers for duplicate detector
+
+use compiler.tools.duplicate_check.config.{DuplicationConfig}
+use app.io.mod.{shell}
+
+fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
+    if path.ends_with(".spl"):
+        if should_exclude_detector_path(path, config):
+            return []
+        return [path]
+
+    val result = shell("find {path} -name '*.spl' 2>/dev/null || true")
+    val output = result.stdout
+    val lines = output.split("\n")
+
+    var files = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if should_exclude_detector_path(trimmed, config):
+            continue
+        files.push(trimmed)
+
+    files
+
+fn should_exclude_detector_path(path: text, config: DuplicationConfig) -> bool:
+    for pattern in config.exclude_patterns:
+        if matches_detector_exclude(path, pattern):
+            return true
+    false
+
+fn matches_detector_exclude(path: text, pattern: text) -> bool:
+    val trimmed_pattern = pattern.trim()
+    if trimmed_pattern.len() == 0:
+        return false
+
+    if trimmed_pattern.contains("*"):
+        if wildcard_match(path, trimmed_pattern):
+            return true
+
+        val base_name = basename_text(path)
+        return wildcard_match(base_name, trimmed_pattern)
+
+    if trimmed_pattern.ends_with("/"):
+        val segment = trimmed_pattern[0:trimmed_pattern.len() - 1]
+        if segment.len() == 0:
+            return false
+        return path.contains("/{segment}/") or path.starts_with("{segment}/") or path.contains("{segment}/")
+
+    path.contains(trimmed_pattern)
+
+fn basename_text(path: text) -> text:
+    var i = path.len() - 1
+    while i >= 0:
+        if path[i:i+1] == "/":
+            return path[i + 1:]
+        i = i - 1
+    path
+
+fn wildcard_match(value: text, pattern: text) -> bool:
+    var value_idx = 0
+    var pattern_idx = 0
+    var star_idx = -1
+    var match_idx = 0
+
+    while value_idx < value.len():
+        val pattern_matches = (
+            pattern_idx < pattern.len() and
+            pattern[pattern_idx:pattern_idx + 1] == value[value_idx:value_idx + 1]
+        )
+
+        if pattern_matches:
+            value_idx = value_idx + 1
+            pattern_idx = pattern_idx + 1
+            continue
+
+        val is_star = pattern_idx < pattern.len() and pattern[pattern_idx:pattern_idx + 1] == "*"
+        if is_star:
+            star_idx = pattern_idx
+            match_idx = value_idx
+            pattern_idx = pattern_idx + 1
+            continue
+
+        if star_idx >= 0:
+            pattern_idx = star_idx + 1
+            match_idx = match_idx + 1
+            value_idx = match_idx
+            continue
+
+        return false
+
+    while pattern_idx < pattern.len() and pattern[pattern_idx:pattern_idx + 1] == "*":
+        pattern_idx = pattern_idx + 1
+
+    pattern_idx == pattern.len()

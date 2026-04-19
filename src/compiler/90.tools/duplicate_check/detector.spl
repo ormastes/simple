@@ -7,6 +7,7 @@ use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_st
 use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
 use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens}
+use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
 use app.io.mod.{file_read, shell}
 
 # StringInterner for efficient token code computation
@@ -101,6 +102,9 @@ fn build_duplicate_group(blocks: [DuplicateBlock]) -> DuplicateGroup:
         impact_score: blocks.len() * total_lines
     )
 
+fn duplicate_block_signature(block: DuplicateBlock) -> text:
+    "{block.token_count}|{block.code}"
+
 fn has_signal_word(code: text, word: text) -> bool:
     code.contains("{word} ") or code.contains("{word}(") or code.contains("{word}:")
 
@@ -189,8 +193,8 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_man
             hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
-        var end_idx = i + config.min_tokens
-        val end_line = if end_idx < tokens.len(): tokens[end_idx].line else: tokens[tokens.len() - 1].line
+        val end_idx = (i + config.min_tokens).min(tokens.len())
+        val end_line = tokens[end_idx - 1].line
 
         val line_count = end_line - start_line + 1
 
@@ -243,18 +247,33 @@ fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [Du
         val blocks = hash_map[hash_key]
 
         if blocks.len() >= 2:
-            var low_signal_only = true
+            var exact_map = {}
             for block in blocks:
-                if not is_low_signal_block(block):
-                    low_signal_only = false
-                    break
+                val exact_key = duplicate_block_signature(block)
+                if exact_map.contains_key(exact_key):
+                    var existing = exact_map[exact_key]
+                    existing.push(block)
+                    exact_map[exact_key] = existing
+                else:
+                    exact_map[exact_key] = [block]
 
-            if low_signal_only:
-                continue
+            for exact_key in exact_map.keys():
+                val exact_blocks = exact_map[exact_key]
+                if exact_blocks.len() < 2:
+                    continue
 
-            val group = build_duplicate_group(blocks)
-            if group.impact_score >= config.min_impact:
-                groups.push(group)
+                var low_signal_only = true
+                for block in exact_blocks:
+                    if not is_low_signal_block(block):
+                        low_signal_only = false
+                        break
+
+                if low_signal_only:
+                    continue
+
+                val group = build_duplicate_group(exact_blocks)
+                if group.impact_score >= config.min_impact:
+                    groups.push(group)
 
     groups
 
@@ -276,37 +295,7 @@ fn sort_by_impact(groups: [DuplicateGroup]) -> [DuplicateGroup]:
     sorted
 
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
-    var files = []
-
-    if path.ends_with(".spl"):
-        files = [path]
-    else:
-        val result = shell("find {path} -name '*.spl' 2>/dev/null || true")
-        val output = result.stdout
-        val lines = output.split("\n")
-
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed.len() > 0:
-                var excluded = false
-                for pattern in config.exclude_patterns:
-                    var clean_chars: [text] = []
-                    var i = 0
-                    while i < pattern.len():
-                        val ch = pattern[i:i+1]
-                        if ch != "*" and ch != "/":
-                            clean_chars.push(ch)
-                        i = i + 1
-                    val clean_pattern = clean_chars.join("")
-
-                    if trimmed.contains(clean_pattern):
-                        excluded = true
-                        break
-
-                if not excluded:
-                    files.push(trimmed)
-
-    files
+    collect_detector_files(path, config)
 
 fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""

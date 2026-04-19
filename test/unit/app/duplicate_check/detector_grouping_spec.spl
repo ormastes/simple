@@ -1,4 +1,4 @@
-use app.duplicate_check.detector.{find_duplicates, DuplicateGroup}
+use app.duplicate_check.detector.{find_duplicates, collect_files, DuplicateGroup}
 use app.duplicate_check.cache.{new_token_cache_manager}
 use app.duplicate_check.config.{default_config}
 use app.io.mod.{file_write, shell}
@@ -24,6 +24,18 @@ fn unique_file_count(group: DuplicateGroup) -> i64:
     for block in group.blocks:
         seen[block.file] = true
     seen.keys().len()
+
+fn any_block_ends_on_line(group: DuplicateGroup, line_end: i64) -> bool:
+    for block in group.blocks:
+        if block.line_end == line_end:
+            return true
+    false
+
+fn contains_path(files: [text], expected: text) -> bool:
+    for file in files:
+        if file == expected:
+            return true
+    false
 
 fn make_similar_module(prefix: text, base_offset: i64, count: i64) -> text:
     var lines = ["struct {prefix}Worker:"]
@@ -64,6 +76,26 @@ describe "duplicate_check detector grouping regressions":
         expect(groups.len()).to_be_greater_than(0)
         expect(groups[0].occurrences).to_be_greater_than(2)
         expect(unique_file_count(groups[0])).to_equal(3)
+
+    it "uses the last token line for block end span":
+        val root = "/tmp/simple_duplicate_detector_span"
+        ensure_clean_dir(root)
+
+        val body = "fn shared_logic(seed: i64) -> i64:\n    val base = seed + 1\n    val total = base * 2\n    return total\n"
+        val file_a = "{root}/span_a.spl"
+        val file_b = "{root}/span_b.spl"
+        write_test_file(file_a, body)
+        write_test_file(file_b, body)
+
+        var config = detector_test_config()
+        config.min_tokens = 14
+        config.min_lines = 4
+
+        val cache = new_token_cache_manager()
+        val groups = find_duplicates([file_a, file_b], config, cache)
+
+        expect(groups.len()).to_be_greater_than(0)
+        expect(any_block_ends_on_line(groups[0], 4)).to_equal(true)
 
     it "keeps cosine groups when sampling spans many files":
         val root = "/tmp/simple_duplicate_detector_cosine"
@@ -125,3 +157,38 @@ describe "duplicate_check detector grouping regressions":
         val groups = find_duplicates([file_a, file_b], config, cache)
 
         expect(groups.len()).to_equal(0)
+
+    it "applies wildcard excludes during directory collection":
+        val root = "/tmp/simple_duplicate_detector_collect"
+        ensure_clean_dir(root)
+
+        val keep = "{root}/keep_module.spl"
+        val spec = "{root}/skip_module_spec.spl"
+        val nested = "{root}/doc/skip_doc.spl"
+        write_test_file(keep, "fn keep():\n    1\n")
+        shell("mkdir -p '{root}/doc'")
+        write_test_file(spec, "fn skip_spec():\n    2\n")
+        write_test_file(nested, "fn skip_doc():\n    3\n")
+
+        var config = detector_test_config()
+        config.exclude_patterns = ["**/*_spec.spl", "doc/"]
+
+        val files = collect_files(root, config)
+
+        expect(contains_path(files, keep)).to_equal(true)
+        expect(contains_path(files, spec)).to_equal(false)
+        expect(contains_path(files, nested)).to_equal(false)
+
+    it "applies excludes to direct file paths":
+        val root = "/tmp/simple_duplicate_detector_collect_direct"
+        ensure_clean_dir(root)
+
+        val spec = "{root}/skip_direct_spec.spl"
+        write_test_file(spec, "fn skip_direct():\n    7\n")
+
+        var config = detector_test_config()
+        config.exclude_patterns = ["**/*_spec.spl"]
+
+        val files = collect_files(spec, config)
+
+        expect(files.len()).to_equal(0)

@@ -29,7 +29,8 @@ deterministic IV, and per-arena key isolation.
 use std.sspec.*
 use examples.nvfs.src.core.encryption.{
     keystore_new, keystore_derive_wrapping, keystore_generate_master,
-    keystore_derive_data_key, encrypt_arena_data, decrypt_arena_data,
+    keystore_derive_data_key, keystore_get_raw_key,
+    encrypt_arena_data, decrypt_arena_data,
     KeyHandle, KeyLevel, EncryptedEnvelope,
     nvfs_set_arena_encryption, nvfs_get_arena_encryption,
     keystore_derive_fresh_dek, keystore_rotate_dek,
@@ -357,3 +358,158 @@ describe "encryption — different nonce produces different ciphertext":
                 ct_same = false
             i = i + 1
         expect(ct_same).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Test 10 (N6a-002-a): derive_dataset_key determinism — same input → same output
+# ---------------------------------------------------------------------------
+
+describe "encryption N6a-002 — KDF determinism: same inputs produce same key":
+    """keystore_derive_fresh_dek with the same (master_id, arena_id, generation)
+    must always produce keys with identical raw bytes."""
+
+    it "two fresh DEKs derived from same inputs have identical raw bytes":
+        val ks = keystore_new()
+        val pass: [u8] = [0x6Bu8, 0x64u8, 0x66u8]  # "kdf"
+        val wk = keystore_derive_wrapping(ks, pass)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dek1_res = keystore_derive_fresh_dek(ks, master.key_id, 500, 0)
+        val dek1 = dek1_res.unwrap()
+        val dek2_res = keystore_derive_fresh_dek(ks, master.key_id, 500, 0)
+        val dek2 = dek2_res.unwrap()
+        # Raw keys must be identical (same generation=0).
+        val raw1_opt = keystore_get_raw_key(ks, dek1.key_id)
+        val raw2_opt = keystore_get_raw_key(ks, dek2.key_id)
+        val raw1 = match raw1_opt:
+            case Some(k): k
+            case None: []
+        val raw2 = match raw2_opt:
+            case Some(k): k
+            case None: []
+        expect(raw1.len() as i64).to_equal(raw2.len() as i64)
+        var match_ok = true
+        var i: i64 = 0
+        while i < raw1.len() as i64:
+            if raw1[i] != raw2[i]:
+                match_ok = false
+            i = i + 1
+        expect(match_ok).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 11 (N6a-002-b): different salts (generations) → different keys
+# ---------------------------------------------------------------------------
+
+describe "encryption N6a-002 — KDF salt separation: different generations produce different keys":
+    """keystore_derive_fresh_dek with generation=0 vs generation=1 must produce
+    different raw key bytes for the same (master_id, arena_id)."""
+
+    it "generation 0 key differs from generation 1 key":
+        val ks = keystore_new()
+        val pass: [u8] = [0x73u8, 0x61u8, 0x6Cu8, 0x74u8]  # "salt"
+        val wk = keystore_derive_wrapping(ks, pass)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val dek0_res = keystore_derive_fresh_dek(ks, master.key_id, 600, 0)
+        val dek0 = dek0_res.unwrap()
+        val dek1_res = keystore_derive_fresh_dek(ks, master.key_id, 600, 1)
+        val dek1 = dek1_res.unwrap()
+        val raw0_opt = keystore_get_raw_key(ks, dek0.key_id)
+        val raw1_opt = keystore_get_raw_key(ks, dek1.key_id)
+        val raw0 = match raw0_opt:
+            case Some(k): k
+            case None: []
+        val raw1 = match raw1_opt:
+            case Some(k): k
+            case None: []
+        expect(raw0.len() as i64).to_equal(raw1.len() as i64)
+        var all_same = true
+        var i: i64 = 0
+        while i < raw0.len() as i64:
+            if raw0[i] != raw1[i]:
+                all_same = false
+            i = i + 1
+        expect(all_same).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Test 12 (N6a-003-a): arena_seal of encrypted arena rotates DEK
+# ---------------------------------------------------------------------------
+
+describe "encryption N6a-003 — arena_seal rotates DEK for encrypted arenas":
+    """After nvfs_arena_seal_rotate on an encrypted arena, the DEK key_id in the
+    EncryptionInfo registry must differ from the original DEK key_id."""
+
+    it "dek_key_id changes after nvfs_arena_seal_rotate on encrypted arena":
+        # Use nvfs_keystore_generate_master so the master lives in _g_ks,
+        # which is the same keystore nvfs_arena_seal_rotate uses internally.
+        val master_res = nvfs_keystore_generate_master()
+        val master = master_res.unwrap()
+        val arena_id: i64 = 7001
+        # Register arena as encrypted (uses master key handle).
+        val kh = KeyHandle(level: KeyLevel.Master, kek_ref: -1, key_id: master.key_id)
+        val _ = nvfs_set_arena_encryption(arena_id, true, kh)
+        val info_before_opt = nvfs_get_arena_encryption(arena_id)
+        val dek_before = match info_before_opt:
+            case Some(info): info.dek_key_id
+            case None: -99
+        # Call rotate directly to test the mechanism without arena_seal_impl state.
+        val _ = nvfs_arena_seal_rotate(arena_id)
+        val info_after_opt = nvfs_get_arena_encryption(arena_id)
+        val dek_after = match info_after_opt:
+            case Some(info): info.dek_key_id
+            case None: -99
+        # DEK key_id must have changed after rotation.
+        expect(dek_before).to_equal(master.key_id)
+        expect(dek_after != dek_before).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 13 (N6a-003-b): post-rotation, old DEK cannot decrypt new ciphertext
+# ---------------------------------------------------------------------------
+
+describe "encryption N6a-003 — post-rotation: new DEK produces different ciphertext":
+    """After keystore_rotate_dek, encrypting with the new DEK must produce output
+    that differs from encryption under the old DEK (since keys differ)."""
+
+    it "ciphertext under new DEK differs from ciphertext under old DEK":
+        val ks = keystore_new()
+        val pass: [u8] = [0x6Fu8, 0x6Cu8, 0x64u8]  # "old"
+        val wk = keystore_derive_wrapping(ks, pass)
+        val master_res = keystore_generate_master(ks, wk.key_id)
+        val master = master_res.unwrap()
+        val arena_id: i64 = 8001
+        val kh = KeyHandle(level: KeyLevel.Master, kek_ref: -1, key_id: master.key_id)
+        val _ = nvfs_set_arena_encryption(arena_id, true, kh)
+        # Derive an explicit DEK at generation 0 for "old" encryption.
+        val old_dek_res = keystore_derive_fresh_dek(ks, master.key_id, arena_id, 0)
+        val old_dek = old_dek_res.unwrap()
+        val plaintext: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x44u8]
+        val env_old_res = encrypt_arena_data(ks, old_dek, arena_id, 0, plaintext)
+        val env_old = env_old_res.unwrap()
+        # Rotate DEK.
+        val rot_res = keystore_rotate_dek(ks, arena_id)
+        val new_dek = rot_res.unwrap()
+        # Encrypt same plaintext with new DEK.
+        val env_new_res = encrypt_arena_data(ks, new_dek, arena_id, 0, plaintext)
+        val env_new = env_new_res.unwrap()
+        # Ciphertexts must differ because keys differ.
+        var ct_same2 = true
+        if env_old.ciphertext.len() != env_new.ciphertext.len():
+            ct_same2 = false
+        else:
+            var j: i64 = 0
+            while j < env_old.ciphertext.len() as i64:
+                if env_old.ciphertext[j] != env_new.ciphertext[j]:
+                    ct_same2 = false
+                j = j + 1
+        expect(ct_same2).to_equal(false)
+        # Confirm old DEK fails to decrypt new ciphertext (GCM tag mismatch).
+        val bad_env = EncryptedEnvelope(
+            key_id:     old_dek.key_id,
+            iv:         env_new.iv,
+            ciphertext: env_new.ciphertext,
+            tag:        env_new.tag
+        )
+        val dec_res = decrypt_arena_data(ks, bad_env)
+        val is_corrupt = match dec_res:
+            case Err(FsError.Corrupt): true
+            case _: false
+        expect(is_corrupt).to_equal(true)

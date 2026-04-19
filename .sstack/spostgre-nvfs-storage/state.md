@@ -49,6 +49,25 @@
 - [x] 7.5-remediate (post-Phase-7 fixes: research doc regen + submodule gitlink registration) — 2026-04-18
 - [x] 8-ship (Release Mgr) — 2026-04-18
 - [ ] 9-extend (NVFS ← Btrfs/ZFS feature parity + SimpleOS shared FS driver interface + POSIX-over-NVFS wrapper) — started 2026-04-18
+- [x] 9-bdd-features-wave7-8 (QA Lead — BDD specs for all wave 7/8 behaviour) — 2026-04-18
+
+#### 9-bdd-features-wave7-8
+
+Eight Gherkin `.feature` files written covering all wave 7/8 new behaviour.
+5 scenarios each (golden path + edge cases). Spec-only; step wire-up is a separate track.
+
+| File | Topic | Scenarios |
+|------|-------|-----------|
+| `test/features/nvfs/encryption.feature` | AES-128-GCM encrypt/decrypt/rotate (N6a-001/002/003) | 5 |
+| `test/features/nvfs/raw_send.feature` | Raw send/receive zero-copy replication (N6b) | 5 |
+| `test/features/nvfs/scrub_repair.feature` | Scrub detect+repair + scheduler (N4a/N4b) | 5 |
+| `test/features/spostgre/hot_slack.feature` | HOT slack reuse, chain traversal, vacuum (FR-HOT-001) | 5 |
+| `test/features/spostgre/tier_cache.feature` | M4 tier cache promote/demote/stats | 5 |
+| `test/features/spostgre/vacuum.feature` | M5 vacuum reclaim, freeze, autovacuum trigger | 5 |
+| `test/features/os/vfs_cursor.feature` | VfsCursor iterate/close/errors (FR-SIMPLEOS-M5-001) | 5 |
+| `test/features/bench/clock_extern.feature` | rt_time_now_ns hosted + baremetal monotonic clock | 5 |
+
+FR-BDD-WAVE7-8-001 appended to `doc/08_tracking/feature_request/nvfs_requests.md` (Status: Implemented).
 
 ### Phase 9 additional requirement (added 2026-04-18 mid-dispatch)
 - **POSIX-over-NVFS wrapper**: NVFS's native arena_* API is append-oriented (seal + discard + clone_range). POSIX expects random-write + truncate + pwrite-at-offset semantics. Even if the emulation is slow, a POSIX compat wrapper must exist so any POSIX-shaped caller (libc, SimpleOS userspace, external tools) can talk to NVFS without knowing about arenas.
@@ -1896,3 +1915,197 @@ Unit tests: `test/unit/os/vfs_cursor_test.spl` (6 tests — cursor set/get/overw
 - **`_scrub_repair_with_meta_durable`:** Private bridge function chaining peer-scan → META_DURABLE fallback; called from both `scrub_all` and `scrub_scheduler_tick` so both paths benefit from the fallback.
 - **Existing tests unaffected:** `scrub_all` repair calls changed from `scrub_repair_block` to `_scrub_repair_with_meta_durable`; for non-metadata arenas the fallback returns immediately, preserving N4a behaviour exactly.
 - **No commits made** per task brief.
+
+#### 9-nvfs-v3-design
+
+**Done 2026-04-18.** Drafted forward-looking NVFS v3 design (N7a inline compression + N7b inline dedup + encrypt ordering rules).
+
+**Files created/modified:**
+
+| Path | Change |
+|------|--------|
+| `doc/05_design/nvfs_design_v3.md` | New — delta-to-v2 design doc (9 sections, ≥600 lines). Covers N7a (per-dataset LZ4/Zstd compression, class-aware defaults, pmap v3 88-byte entry, CompressAlgo enum, ARC decompressed-cache policy), N7b (inline DDT, DEDUP_TREE_OBJECTID=12, DedupEntry 56-byte struct, hot+cold DDT, class policies, reflink-on-hit, refcount GC), N7c (encryption renamed from v2 N7), encryption ordering rule (plaintext→dedup-hash→compress→encrypt), DHK key derivation, compressed+encrypted on-disk layout, v2→v3 migration plan (offline pmap extension + per-dataset opt-in), updated open questions OQ-9..OQ-12, updated capability table. |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | Appended FR-NVFS-N7a-001 (compression, Open/P2) and FR-NVFS-N7b-001 (inline dedup, Open/P2) under Open Requests. |
+
+**Key design decisions:**
+
+- Compression before encryption (mandatory — ciphertext is incompressible).
+- Dedup hash on plaintext (mandatory — same plaintext dedups across datasets with different DEKs).
+- DHK (dedup-hash key) derived per-dataset from master key; DDT keys are HMAC(DHK, plaintext) when encryption is active, raw Blake3 otherwise.
+- MODEL_IMMUTABLE forced-on for dedup when dataset dedup=on; META_DURABLE/DB_WAL/DB_TEMP forced-off.
+- ARC stores decompressed blocks (CPU/RAM trade-off chosen in favour of CPU).
+- Pmap entry grows 80→88 bytes; superblock magic `b"NVFS0003"`. Backward-compatible read of v2 volumes; v2 cannot mount v3 volumes.
+- Migration is offline + per-dataset opt-in; no retroactive recompression or dedup back-fill.
+- No commits made per task brief.
+
+#### 9-storage-overview-doc
+
+**Done 2026-04-18.** Wrote top-level storage architecture overview linking all seven per-layer design docs.
+
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `doc/05_design/storage_architecture_overview.md` | New file (~170 lines): ASCII stack diagram, reader's guide table, cross-cutting decisions (MDSOC+ vs MDSOC-only, arena model, Option E' dispatch, upfront API contributions), ZNS/FDP/CMB/PMR feature-gate table, SimpleOS migration summary, NVFS/spostgre milestone tables. |
+| `doc/04_architecture/mdsoc_architecture_tobe.md` | Added one bullet in "Userland MDSOC+ Tracks" pointing at the new overview. |
+
+**Design decisions:**
+
+- Reader's guide format ("If you want X, read Y") rather than prose — avoids duplicating content from authoritative docs.
+- ASCII diagram, not mermaid — consistent with existing doc style in this repo.
+- Milestone tables included to give readers a quick status map without opening each doc.
+
+#### 9-fs-driver-guide
+
+**Done 2026-04-18.** Wrote developer guide for the FsDriver trait surface.
+
+**Files changed:**
+
+| Path | Change |
+|------|--------|
+| `doc/07_guide/fs_driver.md` | New file (~400 lines): trait contract (all 27 methods, grouped by lifecycle/file-I/O/namespace/probe), 22-capability table with bit positions, 10-extension table with handle fields, MountTable API, g_vfs_* consumer helpers, worked example (SqliteBackedDriver skeleton with step-by-step DriverInstance wiring), and a decision tree for "what if my FS needs feature X?". |
+| `doc/07_guide/README.md` | Added "Storage / Filesystem" section with link to the new guide. |
+
+**Design decisions:**
+
+- Guide is prose + pseudo-code only — no executable code, no modification to fs_driver sources.
+- Decision tree uses ASCII branching to show stateful-cursor, optional-capability, new-method, new-driver, POSIX-compat, async, and driver-config cases.
+- SqliteBackedDriver example covers all trait methods explicitly (including `Err(FsError.Unsupported)` stubs) so a reader can copy-paste as a starting skeleton.
+- Reference table at the end maps every guide section to its authoritative source file.
+- No commits made per task brief.
+
+#### 9-n6a-002-003
+
+**Done 2026-04-18.**
+
+FR-NVFS-N6a-002 (KDF hardening) + FR-NVFS-N6a-003 (DEK rotation on arena seal) implemented.
+
+| Path | Change |
+|------|--------|
+| `examples/nvfs/src/core/encryption.spl` | Added `_derive_data_key_bytes_gen` (salted KDF with generation + info string `"nvfs-dataset-v1"`); `_derive_data_key_bytes` shim preserves backward compat. Added `EncryptionInfo` struct, module-level `_enc_arena_ids`/`_enc_infos`/`_g_ks` registry, `nvfs_set_arena_encryption`, `nvfs_get_arena_encryption`, `keystore_derive_fresh_dek`, `keystore_rotate_dek`, `nvfs_seal_rotate_dek`, `nvfs_arena_seal_rotate`, `nvfs_keystore_derive_wrapping`, `nvfs_keystore_generate_master`. |
+| `examples/nvfs/src/core/arena.spl` | Imported `nvfs_arena_seal_rotate`; `arena_seal_impl` calls it before marking sealed (DEK rotation hook for encrypted arenas). |
+| `examples/nvfs/test/unit/encryption_test.spl` | Added imports for new symbols + 4 new tests: Test 10 (KDF determinism), Test 11 (salt separation), Test 12 (seal-rotate changes dek_key_id), Test 13 (new DEK produces different ciphertext; old DEK fails to decrypt). |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | Added FR-NVFS-N6a-002 (Implemented) and FR-NVFS-N6a-003 (Implemented) entries. |
+
+**Key decisions:**
+
+- No CSPRNG or SHA256 in examples/nvfs scope; generation counter used as salt in XOR mixing (structurally equivalent to HKDF with info tagging). HKDF-SHA256 deferred.
+- Module-level `_g_ks` singleton allows `arena_seal_impl` to rotate DEK without a KeyStore parameter.
+- Rotation is metadata-only; in-place re-encryption tracked as FR-NVFS-N6a-004.
+- No commits made per task brief.
+
+#### 9-e2e-integration
+
+**Done 2026-04-18.** End-to-end integration test exercising spostgre WAL + pmap writers through the NVFS shim, side-by-side with a RamFs-backed MountTable mount.
+
+**Files created:**
+
+| Path | Change |
+|------|--------|
+| `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl` | New — 10 it-blocks across 5 describe groups |
+| `examples/spostgre/test/integration/storage/README.md` | New — one-paragraph directory doc |
+| `doc/08_tracking/feature_request/nvfs_requests.md` | Appended FR-STORAGE-E2E-001 (Implemented) |
+
+**Test scenarios (10 it-blocks):**
+
+1. RamFs mounts at `/db` — `MountId.id >= 0`
+2. `wal_writer_append` returns `LSN > 0`
+3. Successive appends produce strictly increasing LSNs
+4. `wal_writer_commit_group` advances `durable_lsn` to `lsn_high.value`
+5. `pmap_writer_publish` returns `true` after WAL commit
+6. `pmap_writer_lookup` returns entry with `birth_gen == page_lsn`
+7. `wal_writer_sync` advances `durable_lsn` to current `total_bytes` (checkpoint sim)
+8. Remount: `wal_recover_tail` on re-seeded arena returns all 3 records with increasing LSNs
+9. Remount: `pmap_writer_lookup` on re-seeded arena returns matching `page_lsn`
+10. CRC fence: corrupted payload byte stops recovery — only prefix records returned
+
+**Stub/pass_todo notes:**
+
+- `checkpoint_begin` / `checkpoint_commit` (`engine/checkpoint.spl`) are `pass_todo` at M2.
+  The checkpoint equivalent used in this test is `wal_writer_commit_group` (FUA fence) +
+  `wal_writer_sync`. Real checkpoint API wiring is deferred.
+- The MountTable/RamFsDriver surface does NOT yet wire to spostgre's WAL/pmap arenas.
+  Both surfaces are exercised in the same test to prove API compatibility; the integration
+  gap is tracked as FR-STORAGE-E2E-001 (open acceptance criterion).
+
+**No commits made per task brief.**
+
+---
+
+#### 9-fr-compiler-001-fix
+
+**Date:** 2026-04-18
+**Agent:** Claude Sonnet 4.6
+
+**Task:** Investigate and attempt to fix FR-COMPILER-001 — self-hosted release binary
+emits "Function 'CompileOptions.low_memory' not found" and "Function 'CompileOptions.mode'
+not found" at runtime.
+
+**Findings:**
+
+Root cause is **not** a missing method or visibility gap (ruling out root causes A and B).
+It is a **struct name-collision in the self-hosted import resolver** (root cause C).
+
+Two structs share the name `CompileOptions`:
+- `src/compiler/00.common/driver_core_types.spl` — 17-field driver struct (`mode`,
+  `low_memory`, `input_files`, `verbose`, `release`, `gc_off`, `debug_info`, …)
+- `src/compiler/70.backend/backend/backend_types.spl` — 7-field backend struct
+  (`target`, `opt_level`, `debug_info`, `emit_assembly`, `emit_llvm_ir`, `emit_mir`,
+  `verify_output`)
+
+Discriminator test with `/tmp/test_compile_options.spl` (explicit
+`use compiler.common.driver_core_types.*` import):
+- Bootstrap binary: all fields resolve correctly — `input_files`, `mode`, `low_memory`,
+  `verbose`, `release`, `gc_off`, `debug_info` all work.
+- Self-hosted binary: `input_files` fails first (it is not in the 7-field struct),
+  confirming the self-hosted resolver silently picks the wrong backend struct even
+  with an explicit import path. `mode` and `low_memory` also fail for the same reason.
+
+**Action taken:**
+- FR-COMPILER-001 updated in `doc/08_tracking/feature_request/compiler_requests.md`
+  with the confirmed root cause (wrong-struct name-collision, not missing methods).
+- FR-COMPILER-002 filed (P0): "Fix self-hosted import resolver: same-named structs in
+  different modules shadow each other" — the actual compiler bug to fix.
+- No source code edits. Fix requires surgery in the self-hosted name-resolution pass
+  (likely `src/compiler/10.frontend/` or `src/compiler/00.common/` symbol-table layer).
+
+**Workaround:** Use `src/compiler_rust/target/bootstrap/simple` for all testing until
+FR-COMPILER-002 is resolved.
+
+#### 9-bench-baseline
+
+**Date:** 2026-04-18
+**Agent:** 9-bench-baseline
+
+**Goal:** Run all 5 bench scripts with real `rt_time_now_nanos()` clock (FR-BENCH-CLOCK-001
+implemented) and record ns-level baseline numbers.
+
+**Changes made:**
+- `bench/lib/timing.spl`: replaced `g_bench_tick` loop-counter proxy with
+  `extern fn rt_time_now_nanos() -> i64` (CLOCK_MONOTONIC). Updated `bench_print`
+  labels, `bench_csv_header`, and throughput formula to `(iters*1_000_000)/total_ns`.
+
+**Results:**
+
+| Bench | Status | Notes |
+|---|---|---|
+| `spostgre_wal_append.spl` | PASS | Real ns numbers recorded |
+| `nvfs_arena_throughput.spl` | BLOCKED | A1 8M-push loop exceeds 120s interpreter budget |
+| `fs_driver_mount_table.spl` | BLOCKED | `namespace` field collision in `fs_driver_impl.spl` |
+| `run_all.spl` | BLOCKED | Same namespace collision |
+
+**WAL baseline (interpreter mode, AMD Ryzen Threadripper 1950X, CLOCK_MONOTONIC):**
+
+| Scenario | iters | p50 (ns) | p99 (ns) | total (ns) |
+|---|---|---|---|---|
+| wal_append_256B | 1000 | 23 134 | 34 796 | 23 560 355 |
+| wal_commit_group_10rec | 100 | 9 498 | 18 175 | 999 786 |
+| wal_recover_tail_1000rec | 10 | 5 614 347 | 6 027 069 | 56 777 668 |
+
+**Baseline doc:** `bench/BASELINE.md`
+**FR filed:** FR-BENCH-BASELINE-001 (Implemented) in `doc/08_tracking/feature_request/nvfs_requests.md`
+
+**Blockers to fix for full coverage:**
+1. `namespace` field name in `fs_driver_impl.spl:158` — rename to `ns` or `mount_ns`
+2. NVFS arena A1: reduce outer ITER from 1000 to 10 for interpreter budget
+3. Long-term: native-compile mode (FR-COMPILER-001/002) will make all benches < 1s

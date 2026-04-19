@@ -1,0 +1,248 @@
+# @cover examples/spostgre/src/engine/wal.spl 60%
+# @cover examples/spostgre/src/engine/pmap.spl 60%
+# @cover examples/spostgre/src/engine/nvfs_shim.spl 80%
+"""
+# spostgre + NVFS Shim — End-to-End Integration Test
+
+**Feature IDs:** FR-STORAGE-E2E-001
+**Category:** Integration
+**Difficulty:** 3/5
+**Status:** Implemented
+**Design:** spostgre_design.md §4.4, §6.3, §6.5, §9, §12
+
+## Overview
+
+Exercises the spostgre WAL + pmap writers through the NVFS shim together:
+
+  1. Mount: A RamFs-backed MountTable is mounted at "/db" via std.fs_driver — this
+     represents the "storage namespace" that a real NVFS integration would own.
+     spostgre currently interacts with NVFS via the in-process nvfs_shim (arena API).
+     Both surfaces are exercised side-by-side; the wiring gap is documented as
+     FR-STORAGE-E2E-001 (shim does not yet route through the MountTable/RamFsDriver).
+
+  2. WAL write: one WAL record (tuple-insert payload) is appended via WalWriter;
+     LSN is derived from byte offset (M2 convention).
+
+  3. pmap publish: after commit_group makes the record durable, pmap_writer_publish
+     records the (logical, phys, offset, page_lsn) mapping.
+
+  4. Checkpoint simulation: checkpoint_begin / checkpoint_commit are pass_todo
+     at M2. The equivalent is wal_writer_commit_group (FUA fence) + wal_writer_sync.
+     See state.md §9-e2e-integration for the API-gap note.
+
+  5. Remount simulation: WAL and pmap arena byte-images are extracted, re-injected
+     into fresh arenas (simulating a process restart with durable storage), and
+     wal_recover_tail + pmap_writer_lookup confirm data survived.
+
+  6. CRC verification: a separate scenario corrupts one payload byte; recover_tail
+     stops before the corrupt record, confirming the CRC fence.
+
+Scenarios (10 it-blocks):
+  1. RamFs mount at "/db" succeeds → MountId is valid
+  2. WAL append returns LSN > 0
+  3. LSNs are strictly increasing across two appends
+  4. commit_group advances durable_lsn to lsn_high
+  5. pmap_writer_publish returns true
+  6. pmap_writer_lookup returns the correct page_lsn (birth_gen)
+  7. wal_writer_sync advances durable_lsn to current total_bytes
+  8. Remount: wal_recover_tail on re-seeded arena returns all 3 records
+  9. Remount: pmap_writer_lookup on re-seeded arena returns matching page_lsn
+ 10. CRC fence: corrupted record stops recovery — only prefix records returned
+"""
+
+use std.sspec.*
+use std.fs_driver.mount_table.{MountTable, MountId}
+use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+use engine.wal.{WalWriter, wal_writer_append, wal_writer_commit_group,
+                wal_writer_sync, wal_recover_tail, wal_record_encode,
+                WAL_HDR_LEN}
+use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
+use engine.nvfs_shim.{shim_arena_create, shim_arena_readv,
+                      shim_arena_append, shim_arena_total_bytes,
+                      shim_arena_corrupt_byte_for_test,
+                      STORAGE_CLASS_DB_WAL, STORAGE_CLASS_META_DURABLE}
+use std.spostgre_if.types.{TxnId, Lsn}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn db_path() -> Path:
+    Path(raw: "/db")
+
+fn make_opts() -> MountOptions:
+    MountOptions.default()
+
+fn make_ramfs_driver() -> DriverInstance:
+    DriverInstance.RamFs(driver: RamFsDriver.new())
+
+fn tuple_insert_payload() -> [u8]:
+    # Minimal "users" rel tuple: [rel_tag=1, col0=42, col1=99]
+    [1u8, 42u8, 99u8]
+
+# ============================================================================
+# Scenario 1 — RamFs mount at "/db" succeeds
+# ============================================================================
+
+describe "E2E spostgre+NVFS — mount surface":
+    it "RamFs driver mounts at /db and returns a valid MountId":
+        # NOTE: spostgre's WalWriter/PmapWriter go through the in-process
+        # nvfs_shim, not through this MountTable. Both surfaces are exercised
+        # side-by-side to prove API compatibility. Real wiring is FR-STORAGE-E2E-001.
+        var table = MountTable.new()
+        val driver = make_ramfs_driver()
+        val (ok, mid, table2) = table.mount(db_path(), driver, make_opts())
+        expect(ok).to_equal(true)
+        expect(mid.id >= 0).to_equal(true)
+
+# ============================================================================
+# Scenario 2-4 — WAL write and commit
+# ============================================================================
+
+describe "E2E spostgre+NVFS — WAL append":
+    it "wal_writer_append returns LSN > 0":
+        val writer = WalWriter.new()
+        val payload = tuple_insert_payload()
+        val (lsn, _w) = wal_writer_append(writer, TxnId(id: 1), payload)
+        expect(lsn.value > 0).to_equal(true)
+
+    it "successive appends produce strictly increasing LSNs":
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 1), p)
+        val (lsn2, _w2) = wal_writer_append(w1, TxnId(id: 1), p)
+        expect(lsn1.precedes(lsn2)).to_equal(true)
+
+    it "wal_writer_commit_group advances durable_lsn to lsn_high":
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 2), p)
+        val w2 = wal_writer_commit_group(w1, lsn1)
+        expect(w2.durable_lsn).to_equal(lsn1.value)
+
+# ============================================================================
+# Scenarios 5-7 — pmap publish + sync (checkpoint equivalent at M2)
+# ============================================================================
+
+describe "E2E spostgre+NVFS — pmap publish + checkpoint sim":
+    it "pmap_writer_publish returns true after WAL commit":
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 3), p)
+        val _wc = wal_writer_commit_group(w1, lsn1)
+        val pmap = PmapWriter.new()
+        val page_lsn: i64 = lsn1.value
+        # logical=0 (first block of "users" rel), phys=pmap.arena_id (placeholder),
+        # offset=0, page_lsn = WAL LSN at which this version was written.
+        val ok = pmap_writer_publish(pmap, 0, pmap.arena_id, 0, page_lsn)
+        expect(ok).to_equal(true)
+
+    it "pmap_writer_lookup returns entry with matching page_lsn (birth_gen)":
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 4), p)
+        val _wc = wal_writer_commit_group(w1, lsn1)
+        val pmap = PmapWriter.new()
+        val page_lsn: i64 = lsn1.value
+        val _ok = pmap_writer_publish(pmap, 0, pmap.arena_id, 0, page_lsn)
+        val entry = pmap_writer_lookup(pmap, 0)
+        expect(entry.phys != -1).to_equal(true)
+        expect(entry.birth_gen).to_equal(page_lsn)
+
+    it "wal_writer_sync advances durable_lsn to current total bytes (checkpoint sim)":
+        # checkpoint_begin/checkpoint_commit are pass_todo at M2.
+        # Equivalent is wal_writer_sync which FUA-fences and sets durable_lsn.
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 5), p)
+        val ws = wal_writer_sync(w1)
+        val total = shim_arena_total_bytes(ws.arena_id)
+        expect(ws.durable_lsn).to_equal(total)
+
+# ============================================================================
+# Scenarios 8-9 — remount simulation: extract + re-inject arenas
+# ============================================================================
+
+describe "E2E spostgre+NVFS — remount simulation":
+    it "wal_recover_tail on re-seeded arena returns all 3 records with increasing LSNs":
+        # Phase A: original "process" — write 3 WAL records + sync.
+        val w0 = WalWriter.new()
+        val p1: [u8] = [1u8, 2u8, 3u8]
+        val p2: [u8] = [4u8, 5u8, 6u8]
+        val p3: [u8] = [7u8, 8u8, 9u8]
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 10), p1)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 10), p2)
+        val (lsn3, w3) = wal_writer_append(w2, TxnId(id: 10), p3)
+        val ws = wal_writer_sync(w3)
+
+        # Extract byte image (simulates durable NVFS storage that survives restart).
+        val image_len = shim_arena_total_bytes(ws.arena_id)
+        val image = shim_arena_readv(ws.arena_id, 0, image_len)
+
+        # Phase B: simulated remount — new arena, re-inject the durable image.
+        val new_aid = shim_arena_create(STORAGE_CLASS_DB_WAL, image_len)
+        val _written = shim_arena_append(new_aid, image)
+
+        # Recovery: must see all 3 records.
+        val records = wal_recover_tail(new_aid)
+        expect(records.len()).to_equal(3)
+        expect(records[0].lsn < records[1].lsn).to_equal(true)
+        expect(records[1].lsn < records[2].lsn).to_equal(true)
+
+    it "pmap_writer_lookup on re-seeded arena returns matching page_lsn":
+        # Phase A: original process — WAL + pmap write.
+        val w0 = WalWriter.new()
+        val p = tuple_insert_payload()
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 20), p)
+        val _wc = wal_writer_commit_group(w1, lsn1)
+        val pmap = PmapWriter.new()
+        val page_lsn: i64 = lsn1.value
+        val _ok = pmap_writer_publish(pmap, 0, pmap.arena_id, 0, page_lsn)
+
+        # Extract pmap byte image.
+        val pmap_len = shim_arena_total_bytes(pmap.arena_id)
+        val pmap_image = shim_arena_readv(pmap.arena_id, 0, pmap_len)
+
+        # Phase B: remount — new pmap arena, re-inject.
+        val new_pmap_aid = shim_arena_create(STORAGE_CLASS_META_DURABLE, pmap_len)
+        val _pw = shim_arena_append(new_pmap_aid, pmap_image)
+        val recovered_pmap = PmapWriter.new_with_arena(new_pmap_aid)
+
+        # Lookup must find the original entry with correct birth_gen.
+        val entry = pmap_writer_lookup(recovered_pmap, 0)
+        expect(entry.phys != -1).to_equal(true)
+        expect(entry.birth_gen).to_equal(page_lsn)
+
+# ============================================================================
+# Scenario 10 — CRC fence: corrupted record stops recovery
+# ============================================================================
+
+describe "E2E spostgre+NVFS — CRC fence on remount":
+    it "corrupted payload byte causes recover_tail to stop — prefix records only":
+        # Write 2 good records, then a 3rd that will be corrupted.
+        val w0 = WalWriter.new()
+        val p: [u8] = [0u8, 1u8, 2u8]
+        val (lsn1, w1) = wal_writer_append(w0, TxnId(id: 30), p)
+        val (lsn2, w2) = wal_writer_append(w1, TxnId(id: 30), p)
+        val (lsn3, w3) = wal_writer_append(w2, TxnId(id: 30), p)
+        val _ws = wal_writer_sync(w3)
+
+        # Extract full image then re-inject into fresh arena for corruption.
+        val img_len = shim_arena_total_bytes(w3.arena_id)
+        val img = shim_arena_readv(w3.arena_id, 0, img_len)
+        val corrupt_aid = shim_arena_create(STORAGE_CLASS_DB_WAL, img_len)
+        val _n = shim_arena_append(corrupt_aid, img)
+
+        # Corrupt a byte in the body of the 3rd record.
+        # Records 1 and 2 each occupy WAL_HDR_LEN + 3 payload bytes = 31 bytes.
+        # 3rd record body starts at offset 62 + WAL_HDR_LEN = 90; body byte at 90+24=114.
+        val rec_size: i64 = WAL_HDR_LEN + 3
+        val third_body_off: i64 = rec_size + rec_size + WAL_HDR_LEN + 4
+        val _corrupted = shim_arena_corrupt_byte_for_test(corrupt_aid, third_body_off, 0xFFu8)
+
+        # Recovery must stop before the corrupt record.
+        val records = wal_recover_tail(corrupt_aid)
+        expect(records.len()).to_equal(2)
+        expect(records[0].lsn < records[1].lsn).to_equal(true)
