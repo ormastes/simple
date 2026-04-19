@@ -100,6 +100,50 @@ These will be fixed when the benches are next updated.
 
 Baseline recorded for WAL bench. NVFS arena and MountTable benches status:
 1. ~~Fix `namespace` field name in `fs_driver_impl.spl`~~ — DONE 2026-04-18 (FR-BENCH-NS-KEYWORD-001).
-2. Reduce NVFS arena A1 outer iterations to 10 (unblocks arena bench in interpreter).
+2. ~~Reduce NVFS arena A1 outer iterations~~ — DONE 2026-04-18 (FR-BENCH-ARENA-ITER-001); see Wave 10 re-run below.
 3. Or: native-compile mode once FR-COMPILER-001/002 resolved (all benches will run
    in < 1s at native speed).
+
+---
+
+## Wave 10 re-run — 2026-04-18
+
+Post namespace→ns_tree rename. Bootstrap binary: `src/compiler_rust/target/bootstrap/simple` (Apr 19 02:55, fresh).
+
+### Bench: NVFS arena throughput (`bench/nvfs_arena_throughput.spl`)
+
+Iter counts reduced (FR-BENCH-ARENA-ITER-001) to fit interpreter budget:
+- A1: outer 1000→5, inner 1000→100 (was 8M push ops; now ~4k word pushes total)
+- A2: outer 100→5, inner 100→5 (64KB = 8192 words/append; was 819k; now ~205k)
+- A3: outer 100→10, fill 100→10, clone_len 200KB→20KB
+- A4: outer 100→10
+
+| Scenario | iters | min (ns) | p50 (ns) | p99 (ns) | p99.9 (ns) | max (ns) | total (ns) |
+|---|---|---|---|---|---|---|---|
+| arena_append_small_64B_x1000 | 5 | 6 982 134 | 7 460 157 | 8 780 193 | 8 780 193 | 8 780 193 | 38 178 315 |
+| arena_append_large_64KB_x100 | 5 | 9 587 279 576 | 10 070 442 298 | 10 156 801 861 | 10 156 801 861 | 10 156 801 861 | 49 726 598 222 |
+| arena_clone_range_200KB | 10 | 32 836 870 | 34 056 014 | 34 879 005 | 34 879 005 | 34 879 005 | 338 072 965 |
+| arena_seal_readv_40KB | 10 | 19 297 | 36 870 | 42 090 | 42 090 | 42 090 | 338 847 |
+
+**Note:** Label names (x1000, x100) are stale cosmetic artifacts from pre-reduction; actual iter counts shown in table.
+A2 p50 ≈ 10s per iter — dominated by interpreter overhead for 8192-word inner push loop (5 appends × 8192 words = 40960 pushes/iter). Native expect < 100 µs.
+
+### CSV (Wave 10 arena)
+```
+label,iters,p50_ns,p99_ns,p99_9_ns,min_ns,max_ns,total_ns,kops_per_s
+arena_append_small_64B_x1000,5,7460157,8780193,8780193,6982134,8780193,38178315,0
+arena_append_large_64KB_x100,5,10070442298,10156801861,10156801861,9587279576,10156801861,49726598222,0
+arena_clone_range_200KB,10,34056014,34879005,34879005,32836870,34879005,338072965,0
+arena_seal_readv_40KB,10,36870,42090,42090,19297,42090,338847,0
+```
+
+### Bench: fs_driver MountTable (`bench/fs_driver_mount_table.spl`)
+
+**TIMEOUT (90s).** Parse unblocked (namespace keyword fix landed). Bench starts and
+enters timing loop but 10k×resolve iterations exceed interpreter budget. DO NOT touch
+iter counts per task scope. Record as interpreter-limited; native-compile will resolve.
+
+### Bench: run_all (`bench/run_all.spl`)
+
+**TIMEOUT (90s).** Same root cause — 10k mount-resolve iters in `run_mount_bench()`.
+Starts cleanly (no parse errors), times out before producing output.

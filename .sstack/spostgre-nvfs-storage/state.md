@@ -2225,3 +2225,41 @@ implemented) and record ns-level baseline numbers.
 - `_choose_clock_source(hpet_base: u64?, pmtmr_port: u32?) -> str` is a pure, side-effect-free dispatcher imported directly by tests.
 - HPET and PMTMR calibration branches (`_calibrate_tsc_hpet`, `_calibrate_tsc_pmtmr`) are structurally wired but fall through to PIT until FR-SIMPLEOS-ACPI-001 delivers real ACPI table walk.
 - FR-BENCH-CLOCK-002 flipped to Implemented (scaffolded); 0.1% accuracy criterion requires FR-SIMPLEOS-ACPI-001.
+
+#### 9-bench-rerun
+
+**Status:** DONE (2026-04-18)
+**Trigger:** namespace→ns_tree rename landed (FR-BENCH-NS-KEYWORD-001). Two previously-blocked benches should now parse.
+
+**Step 1 — namespace rename verified:** `grep -rn 'namespace' examples/nvfs/src/` shows only comments/docstrings and the renamed `ns_tree.spl` file. No field-name or path-segment hits. Rename confirmed clean.
+
+**Step 2 — Bootstrap rebuild:** Binary `src/compiler_rust/target/bootstrap/simple` was already fresh (Apr 19 02:55). No rebuild needed (no-op cargo build).
+
+**Step 3 — NVFS arena throughput (FR-BENCH-ARENA-ITER-001):**
+Iter counts reduced in `bench/nvfs_arena_throughput.spl` to fit 90s interpreter budget:
+- A1 outer: 1000→5, inner: 1000→100
+- A2 outer: 100→5, inner: 100→5
+- A3 outer: 100→10, fill: 100→10, clone_len: 200KB→20KB
+- A4 outer: 100→10
+
+Results recorded (all 4 scenarios completed):
+
+| Scenario | iters | p50 (ns) | p99 (ns) | total (ns) |
+|---|---|---|---|---|
+| arena_append_small | 5 | 7 460 157 | 8 780 193 | 38 178 315 |
+| arena_append_large | 5 | 10 070 442 298 | 10 156 801 861 | 49 726 598 222 |
+| arena_clone_range | 10 | 34 056 014 | 34 879 005 | 338 072 965 |
+| arena_seal_readv | 10 | 36 870 | 42 090 | 338 847 |
+
+A2 p50 ≈ 10s/iter — interpreter overhead for 8192 word-push inner loop.
+
+**Step 4 — fs_driver_mount_table.spl:** Parse unblocked. TIMEOUT (90s) — 10k×resolve exceeds interpreter budget. DO NOT touch per task scope.
+
+**Step 5 — run_all.spl:** Parse unblocked. TIMEOUT (90s) — same 10k mount-resolve bottleneck.
+
+**Deliverables:**
+- `bench/BASELINE.md` — "Wave 10 re-run" section appended with arena numbers + timeout records
+- `bench/nvfs_arena_throughput.spl` — iter counts reduced (FR-BENCH-ARENA-ITER-001)
+- `doc/08_tracking/feature_request/nvfs_requests.md` — FR-BENCH-BASELINE-001 updated; FR-BENCH-ARENA-ITER-001 filed
+
+**No commits made per task brief.**

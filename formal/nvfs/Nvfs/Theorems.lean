@@ -555,8 +555,11 @@ theorem arena_clone_range_preserves_all
             intro a ha hsealed
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
+            -- beta-reduce the lambda so split can see the if-expression
+            simp only [] at hba
             split at hba
-            · subst hba; exact h.i2 b hb hsealed
+            · -- b mapped to ar'; sealed is unchanged (ar'.sealed = b.sealed = ar.sealed)
+              subst hba; exact h.i2 b hb hsealed
             · subst hba; exact h.i2 b hb hsealed
           · -- I3: refcount consistency
             intro a ha
