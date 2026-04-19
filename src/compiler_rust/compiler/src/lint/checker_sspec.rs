@@ -784,19 +784,4 @@ impl LintChecker {
         }
     }
 
-    /// Check for file-level lint allow attribute
-    pub(super) fn has_file_level_allow(&self, lint_name: &str) -> bool {
-        if let Some(ref path) = self.source_file {
-            if let Ok(source) = std::fs::read_to_string(path) {
-                let pattern = format!("#![allow({})]", lint_name);
-                // Check first 50 lines for file-level allow
-                for line in source.lines().take(50) {
-                    if line.contains(&pattern) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
 }

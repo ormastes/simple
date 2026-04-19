@@ -1,0 +1,438 @@
+# HTML5 Tree Builder — InSelect, InTemplate, InFrameset, and After* modes.
+#
+# Extension block for TreeBuilder. Split from html_tree_builder.spl for
+# size management. Covers WHATWG HTML5 spec §13.2.6 modes:
+#   • InSelect             — inside <select>
+#   • InSelectInTable      — select inside table context
+#   • InTemplate           — inside <template>
+#   • InFrameset           — inside <frameset>
+#   • AfterFrameset        — after </frameset>
+#   • AfterAfterBody       — after </html> in body context
+#   • AfterAfterFrameset   — after </html> in frameset context
+
+use examples.browser.entity.dom.node_types
+use examples.browser.feature.parser.html_tokenizer
+use examples.browser.shared.logging
+
+impl TreeBuilder:
+
+    # ===================================================================
+    # InSelect mode — inside <select>
+    # ===================================================================
+
+    me process_in_select(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if data == "\0":
+                    self.logger.warn("InSelect: null character, ignoring")
+                else:
+                    self.insert_text(data)
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("InSelect: unexpected doctype, ignoring")
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "option":
+                        # Close previous option if current node is option
+                        val cn = self.current_node()
+                        val cn_tag = self.get_element_tag(cn)
+                        if cn_tag == "option":
+                            self.pop_current()
+                        self.insert_element("option", attributes)
+                    "optgroup":
+                        # Close previous option if current
+                        val cn = self.current_node()
+                        val cn_tag = self.get_element_tag(cn)
+                        if cn_tag == "option":
+                            self.pop_current()
+                        # Close previous optgroup if current
+                        val cn2 = self.current_node()
+                        val cn2_tag = self.get_element_tag(cn2)
+                        if cn2_tag == "optgroup":
+                            self.pop_current()
+                        self.insert_element("optgroup", attributes)
+                    "select":
+                        # Act as if </select> was seen
+                        self.logger.warn("InSelect: nested <select>, closing current")
+                        if self.has_in_scope("select"):
+                            self.pop_until("select")
+                            self.reset_insertion_mode()
+                    "input":
+                        # Close select, reprocess
+                        self.logger.warn("InSelect: <input>, closing select")
+                        if self.has_in_scope("select"):
+                            self.pop_until("select")
+                            self.reset_insertion_mode()
+                            self.process_token(token)
+                    "textarea":
+                        self.logger.warn("InSelect: <textarea>, closing select")
+                        if self.has_in_scope("select"):
+                            self.pop_until("select")
+                            self.reset_insertion_mode()
+                            self.process_token(token)
+                    "script":
+                        self.process_in_head(token)
+                    "template":
+                        self.process_in_head(token)
+                    _:
+                        self.logger.warn("InSelect: unexpected <{name}>, ignoring")
+            HtmlToken.EndTag(name):
+                match name:
+                    "optgroup":
+                        # If current is option inside optgroup, pop option first
+                        val cn = self.current_node()
+                        val cn_tag = self.get_element_tag(cn)
+                        if cn_tag == "option":
+                            # Check if parent is optgroup
+                            if self.open_elements.len() >= 2:
+                                val parent_id = self.open_elements.get(self.open_elements.len() - 2)
+                                val parent_tag = self.get_element_tag(parent_id)
+                                if parent_tag == "optgroup":
+                                    self.pop_current()
+                        val cn2 = self.current_node()
+                        val cn2_tag = self.get_element_tag(cn2)
+                        if cn2_tag == "optgroup":
+                            self.pop_current()
+                        else:
+                            self.logger.warn("InSelect: </optgroup> without matching <optgroup>")
+                    "option":
+                        val cn = self.current_node()
+                        val cn_tag = self.get_element_tag(cn)
+                        if cn_tag == "option":
+                            self.pop_current()
+                        else:
+                            self.logger.warn("InSelect: </option> without matching <option>")
+                    "select":
+                        if self.has_in_scope("select"):
+                            self.pop_until("select")
+                            self.reset_insertion_mode()
+                        else:
+                            self.logger.warn("InSelect: </select> without <select> in scope")
+                    "template":
+                        self.process_in_head(token)
+                    _:
+                        self.logger.warn("InSelect: unexpected </{name}>, ignoring")
+            HtmlToken.Eof:
+                self.process_in_body(token)
+
+    # ===================================================================
+    # InSelectInTable mode — select inside table context
+    # ===================================================================
+
+    me process_in_select_in_table(token: HtmlToken):
+        match token:
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "caption":
+                        self.logger.warn("InSelectInTable: <caption> closes select")
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "table":
+                        self.logger.warn("InSelectInTable: <table> closes select")
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tbody":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tfoot":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "thead":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tr":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "td":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "th":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    _:
+                        self.process_in_select(token)
+            HtmlToken.EndTag(name):
+                match name:
+                    "caption":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "table":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tbody":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tfoot":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "thead":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "tr":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "td":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    "th":
+                        self.pop_until("select")
+                        self.reset_insertion_mode()
+                        self.process_token(token)
+                    _:
+                        self.process_in_select(token)
+            _:
+                self.process_in_select(token)
+
+    # ===================================================================
+    # InTemplate mode — inside <template>
+    # ===================================================================
+
+    me process_in_template(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                self.process_in_body(token)
+            HtmlToken.CommentToken(data):
+                self.process_in_body(token)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.process_in_body(token)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "base":
+                        self.process_in_head(token)
+                    "basefont":
+                        self.process_in_head(token)
+                    "link":
+                        self.process_in_head(token)
+                    "meta":
+                        self.process_in_head(token)
+                    "script":
+                        self.process_in_head(token)
+                    "style":
+                        self.process_in_head(token)
+                    "template":
+                        self.process_in_head(token)
+                    "title":
+                        self.process_in_head(token)
+                    "caption":
+                        self.push_template_mode_and_switch(InsertionMode.InTable, token)
+                    "colgroup":
+                        self.push_template_mode_and_switch(InsertionMode.InColumnGroup, token)
+                    "col":
+                        self.push_template_mode_and_switch(InsertionMode.InColumnGroup, token)
+                    "tbody":
+                        self.push_template_mode_and_switch(InsertionMode.InTableBody, token)
+                    "tfoot":
+                        self.push_template_mode_and_switch(InsertionMode.InTableBody, token)
+                    "thead":
+                        self.push_template_mode_and_switch(InsertionMode.InTableBody, token)
+                    "tr":
+                        self.push_template_mode_and_switch(InsertionMode.InRow, token)
+                    "td":
+                        self.push_template_mode_and_switch(InsertionMode.InCell, token)
+                    "th":
+                        self.push_template_mode_and_switch(InsertionMode.InCell, token)
+                    _:
+                        self.push_template_mode_and_switch(InsertionMode.InBody, token)
+            HtmlToken.EndTag(name):
+                match name:
+                    "template":
+                        self.process_in_head(token)
+                    _:
+                        self.logger.warn("InTemplate: unexpected </{name}>, ignoring")
+            HtmlToken.Eof:
+                if not self.has_template_on_stack():
+                    pass_do_nothing  # stop parsing
+                else:
+                    self.logger.warn("InTemplate: EOF with open template")
+                    self.pop_until("template")
+                    self.clear_formatting_to_marker()
+                    self.pop_template_mode()
+                    self.reset_insertion_mode()
+                    self.process_token(token)
+
+    me push_template_mode_and_switch(mode: InsertionMode, token: HtmlToken):
+        # Pop current template insertion mode, push new one, switch, reprocess
+        self.pop_template_mode()
+        self.template_modes.push(mode)
+        self.insertion_mode = mode
+        self.process_token(token)
+
+    me pop_template_mode():
+        if self.template_modes.len() > 0:
+            self.template_modes.pop()
+
+    fn has_template_on_stack() -> bool:
+        var idx = self.open_elements.len() - 1
+        while idx >= 0:
+            val node_id = self.open_elements.get(idx)
+            val node_tag = self.get_element_tag(node_id)
+            if node_tag == "template":
+                return true
+            idx = idx - 1
+        false
+
+    # ===================================================================
+    # InFrameset mode — inside <frameset>
+    # ===================================================================
+
+    me process_in_frameset(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.insert_text(data)
+                else:
+                    self.logger.warn("InFrameset: non-whitespace character, ignoring")
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("InFrameset: unexpected doctype, ignoring")
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "frameset":
+                        self.insert_element("frameset", attributes)
+                    "frame":
+                        self.insert_element("frame", attributes)
+                        self.pop_current()  # frame is void
+                    "noframes":
+                        # Process as InHead (raw text)
+                        self.insert_element("noframes", attributes)
+                        self.original_insertion_mode = self.insertion_mode
+                        self.insertion_mode = InsertionMode.Text
+                    _:
+                        self.logger.warn("InFrameset: unexpected <{name}>, ignoring")
+            HtmlToken.EndTag(name):
+                match name:
+                    "frameset":
+                        if self.current_node() == self.open_elements.get(0):
+                            # Fragment case: do not pop the root html element
+                            self.logger.warn("InFrameset: </frameset> on root element, ignoring")
+                        else:
+                            self.pop_current()
+                            val cn = self.current_node()
+                            val cn_tag = self.get_element_tag(cn)
+                            if cn_tag != "frameset":
+                                self.insertion_mode = InsertionMode.AfterFrameset
+                    _:
+                        self.logger.warn("InFrameset: unexpected </{name}>, ignoring")
+            HtmlToken.Eof:
+                if self.current_node() != self.open_elements.get(0):
+                    self.logger.warn("InFrameset: EOF with open frameset")
+
+    # ===================================================================
+    # AfterFrameset mode — after </frameset>
+    # ===================================================================
+
+    me process_after_frameset(token: HtmlToken):
+        match token:
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.insert_text(data)
+                else:
+                    self.logger.warn("AfterFrameset: non-whitespace character, ignoring")
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.logger.warn("AfterFrameset: unexpected doctype, ignoring")
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "noframes":
+                        # Process as InHead (raw text)
+                        self.insert_element("noframes", attributes)
+                        self.original_insertion_mode = self.insertion_mode
+                        self.insertion_mode = InsertionMode.Text
+                    _:
+                        self.logger.warn("AfterFrameset: unexpected <{name}>, ignoring")
+            HtmlToken.EndTag(name):
+                match name:
+                    "html":
+                        self.insertion_mode = InsertionMode.AfterAfterFrameset
+                    _:
+                        self.logger.warn("AfterFrameset: unexpected </{name}>, ignoring")
+            HtmlToken.Eof:
+                pass_do_nothing  # Stop parsing
+
+    # ===================================================================
+    # AfterAfterBody mode — after </html> in body context
+    # ===================================================================
+
+    me process_after_after_body(token: HtmlToken):
+        match token:
+            HtmlToken.CommentToken(data):
+                # Append comment to the document node
+                val comment_id = self.create_node(NodeKind.Comment, data)
+                self.append_child(self.document_node, comment_id)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.process_in_body(token)
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.process_in_body(token)
+                else:
+                    self.logger.warn("AfterAfterBody: non-whitespace character, switching to InBody")
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "html":
+                    self.process_in_body(token)
+                else:
+                    self.logger.warn("AfterAfterBody: unexpected <{name}>, switching to InBody")
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            HtmlToken.Eof:
+                pass_do_nothing  # Stop parsing
+            _:
+                self.logger.warn("AfterAfterBody: unexpected token, switching to InBody")
+                self.insertion_mode = InsertionMode.InBody
+                self.process_in_body(token)
+
+    # ===================================================================
+    # AfterAfterFrameset mode — after </html> in frameset context
+    # ===================================================================
+
+    me process_after_after_frameset(token: HtmlToken):
+        match token:
+            HtmlToken.CommentToken(data):
+                # Append comment to the document node
+                val comment_id = self.create_node(NodeKind.Comment, data)
+                self.append_child(self.document_node, comment_id)
+            HtmlToken.Doctype(name, public_id, system_id, force_quirks):
+                self.process_in_body(token)
+            HtmlToken.Character(data):
+                if self.is_whitespace(data):
+                    self.process_in_body(token)
+                else:
+                    self.logger.warn("AfterAfterFrameset: non-whitespace character, ignoring")
+            HtmlToken.StartTag(name, attributes, self_closing):
+                match name:
+                    "html":
+                        self.process_in_body(token)
+                    "noframes":
+                        # Process as InHead
+                        self.process_in_head(token)
+                    _:
+                        self.logger.warn("AfterAfterFrameset: unexpected <{name}>, ignoring")
+            HtmlToken.Eof:
+                pass_do_nothing  # Stop parsing
+            _:
+                self.logger.warn("AfterAfterFrameset: unexpected token, ignoring")
