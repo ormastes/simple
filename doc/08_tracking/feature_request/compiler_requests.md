@@ -56,8 +56,8 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [ ] Both can be used in the same file via aliased imports without collision.
   - [ ] FR-COMPILER-001 acceptance criteria are met after this fix.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd — likely `src/compiler/10.frontend/` or
-  `src/compiler/00.common/` name-resolution / symbol-table pass
+- **Related-design-doc:** tbd — `src/compiler/20.hir/hir_lowering/items.spl` and
+  `src/compiler/20.hir/hir_types.spl`
 - **Related-issue:** FR-COMPILER-001 (upstream symptom)
 - **Notes:**
   Root cause confirmed by discriminator test (2026-04-18):
@@ -69,6 +69,84 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   two structs (e.g., `DriverCompileOptions` vs `BackendCompileOptions`) is a
   valid workaround but requires widespread callers update — prefer fixing the
   resolver so explicit `use` paths take precedence.
+
+- **Deep-diagnosis (2026-04-18, Claude Sonnet 4.6):**
+
+  **Two divergence points pinpointed:**
+
+  **Divergence A — `src/compiler/20.hir/hir_lowering/items.spl:210-225`
+  (`lower_import`):**
+  The self-hosted `lower_import` produces a metadata `HirImport` record
+  (module_path + items list) and returns. It does NOT walk the imported module's
+  AST, does NOT call `symbols.define` for imported types, and does NOT create any
+  scope binding for names brought in by the `use` statement. The import is
+  recorded for later IR emission but has no effect on the live symbol scope during
+  HIR lowering.
+
+  Contrast with the Rust seed
+  `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`: it runs a
+  two-pass import loading pipeline — `preregister_imported_type_names` (Pass 0.5a)
+  registers empty placeholders for names from *each specific imported module's
+  AST*, filtered by `should_import_symbol(target)` — then `load_imported_types`
+  (Pass 0.5b) fills in full field lists via `register_named`/`register_struct`/
+  `register_class` and inserts into `globals`. The explicit import target
+  (`ImportTarget::Glob` for `use mod.*` or `ImportTarget::Named(names)` for
+  selective imports) gates *which* module's struct wins.
+
+  **Divergence B — `src/compiler/20.hir/hir_types.spl:201-245`
+  (`SymbolTable.define` / `SymbolTable.lookup`):**
+  `define()` at line 224 stores `scope_syms[name] = id` — keyed by the bare
+  short name. When a second module's struct with the same short name is registered
+  (e.g., via `declare_module_symbols` pulling in both loaded modules), the dict
+  entry is overwritten. Last-write-wins; module load order determines which struct
+  survives.
+
+  The `Symbol` struct carries a `defining_module: text?` field (populated from
+  `self.module_filename` at line 216), but `lookup()` at lines 230-245 walks the
+  scope chain matching only on `name` — it never consults `defining_module` or the
+  import list. The `module_filename` context is set once per `HirLowering`
+  instance for the *current compilation unit's own file*
+  (`HirLowering.with_filename(filename)`), not per imported module, so all symbols
+  from all imported modules appear under the same `module_filename` value anyway —
+  the disambiguation data is never written in the first place.
+
+  **Combined effect:** Two `CompileOptions` structs compete in the same flat scope.
+  `lower_import` does not register the explicitly-named import into scope, so the
+  `use compiler.common.driver_core_types.*` declaration is a no-op on the symbol
+  table. `lookup("CompileOptions")` returns whichever struct was last defined by
+  `declare_module_symbols`, which is load-order-dependent.
+
+  **Minimum repro (2-file + driver, no existing codebase needed):**
+  ```
+  # a_types.spl
+  class Foo:
+      only_in_a: i64
+
+  # b_types.spl
+  class Foo:
+      only_in_b: i64
+
+  # driver.spl
+  use a_types.*
+  val x = Foo(only_in_a: 1)
+  print(x.only_in_a.to_text())   # fails "Function not found" in self-hosted
+                                  # if b_types loads after a_types
+  ```
+
+  **Proposed fix direction:**
+  Mirror the Rust seed's two-pass approach in the self-hosted HIR lowering.
+  In `src/compiler/20.hir/hir_lowering/items.spl`, extend `lower_import` (or
+  add a new `resolve_import_symbols` pass called from `lower_module` before body
+  lowering) to: (1) load the imported module's AST, (2) filter by the import
+  target (wildcard vs. named list), and (3) call `self.symbols.define` for each
+  matching struct/class/enum, supplying the imported module's path as
+  `defining_module`. In `src/compiler/20.hir/hir_types.spl`, update
+  `SymbolTable.define` to refuse re-registration of an already-bound short name
+  (i.e., first-write-wins, matching the Rust seed's `is_none()` guard in
+  `preregister_imported_type_names`), so the explicit `use` path's types take
+  precedence over any later load of a conflicting module.
+
+  Do NOT attempt this fix here — dedicated compiler-core agent required.
 
 ---
 

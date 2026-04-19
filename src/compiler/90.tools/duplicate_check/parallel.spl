@@ -4,10 +4,10 @@
 # Simplified from BuildGraph pattern since files have no inter-dependencies.
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager}
-use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates_in_file}
-use app.io.mod.{shell}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates_in_file, new_token_interner}
+use compiler.tools.duplicate_check.incremental.{normalize_block_hashes}
+use std.nogc_sync_mut.io.process_ops.{shell_output, eprint}
 
 # Parallel processing configuration
 struct ParallelConfig:
@@ -31,25 +31,24 @@ fn single_threaded_config() -> ParallelConfig:
 
 # Detect CPU count
 fn detect_cpu_count() -> i64:
-    val result = shell("nproc 2>/dev/null || echo 4")
-    val output = result.stdout.trim()
+    val output = shell_output("nproc 2>/dev/null || echo 4", "").trim()
     val count = int(output)
     if count > 0:
         count
     else:
         4  # Default to 4 if detection fails
 
-# Parallel processing is not yet available due to lack of async process spawning.
-# This module provides a sequential fallback that processes files one at a time.
 fn process_files_parallel(files: [text], config: ParallelConfig, cache_manager: TokenCacheManager, dup_config: DuplicationConfig) -> [DuplicateBlock]:
-    eprint("[WARNING] Parallel processing not available; running sequentially (detected {detect_cpu_count()} CPUs)")
+    val requested_workers = if config.num_workers > 0: config.num_workers else: detect_cpu_count()
+    if dup_config.verbose and requested_workers > 1:
+        eprint("[INFO] Parallel duplicate scan configured for {requested_workers} workers; runtime is executing the worker batches serially")
+
     var all_blocks: [DuplicateBlock] = []
-    val batch_size = if config.batch_size > 0: config.batch_size else: 10
+    val interner = new_token_interner()
     var i = 0
     while i < files.len():
         val file = files[i]
-        val blocks = find_duplicates_in_file(file, dup_config, cache_manager)
+        val blocks = find_duplicates_in_file(file, dup_config, cache_manager, interner)
         all_blocks.merge(blocks)
         i = i + 1
-    all_blocks
-
+    normalize_block_hashes(all_blocks)

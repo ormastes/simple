@@ -1,0 +1,273 @@
+# NVFS offline integrity audit tool — N8 skeleton.
+#
+# Walks the full filesystem structure offline and reports structural issues:
+# orphaned extents, pmap entries without backing arenas, checkpoint ring
+# inconsistencies, reflink refcount mismatches, and intent-log tail anomalies.
+#
+# Reference tools: btrfs-check, zpool scrub.
+# Design: doc/05_design/nvfs/check_tool.md
+# FR-NVFS-N8-001 (skeleton) — Implemented
+# FR-NVFS-N8-002 (full walker impl) — Open
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+
+pub struct NvfsCheckOpts:
+    """Options parsed from the CLI before dispatch.
+
+    path            — path to the NVFS volume root or block device.
+    verbose         — emit per-entry progress lines in addition to the summary.
+    check_checksums — phase 1: re-verify stored checksums on every extent.
+    check_refcount  — phase 4: compare reflink table refcounts against actual
+                      reflink back-references in the pmap B-tree.
+    """
+    path:            text
+    verbose:         bool
+    check_checksums: bool
+    check_refcount:  bool
+
+# ---------------------------------------------------------------------------
+# Report types
+# ---------------------------------------------------------------------------
+
+pub struct CheckIssue:
+    """One problem entry in a CheckReport.
+
+    severity — INFO / WARN / ERROR / FATAL (string tag).
+    phase    — which check phase produced this issue (1–5).
+    message  — human-readable description.
+    detail   — optional structured detail (arena_id, offset, etc.) or empty.
+    """
+    severity: text
+    phase:    i32
+    message:  text
+    detail:   text
+
+pub struct CheckReport:
+    """Aggregated output of nvfs_check_main.
+
+    info_count  — total INFO-severity entries.
+    warn_count  — total WARN-severity entries.
+    error_count — total ERROR-severity entries.
+    fatal_count — total FATAL-severity entries.
+    issues      — sample problem entries (capped; full set deferred to N8-full).
+    clean       — true iff error_count == 0 and fatal_count == 0.
+    """
+    info_count:  u64
+    warn_count:  u64
+    error_count: u64
+    fatal_count: u64
+    issues:      [CheckIssue]
+    clean:       bool
+
+# ---------------------------------------------------------------------------
+# CheckReport helpers
+# ---------------------------------------------------------------------------
+
+pub fn check_report_new() -> CheckReport:
+    """Return a zero-initialised CheckReport."""
+    val empty: [CheckIssue] = []
+    CheckReport(
+        info_count:  0,
+        warn_count:  0,
+        error_count: 0,
+        fatal_count: 0,
+        issues:      empty,
+        clean:       true,
+    )
+
+pub fn check_report_add(report: CheckReport, issue: CheckIssue) -> CheckReport:
+    """Append one issue and update severity counters + clean flag."""
+    var r = report
+    r.issues.push(issue)
+    if issue.severity == "INFO":
+        r.info_count = r.info_count + 1
+    if issue.severity == "WARN":
+        r.warn_count = r.warn_count + 1
+    if issue.severity == "ERROR":
+        r.error_count = r.error_count + 1
+        r.clean = false
+    if issue.severity == "FATAL":
+        r.fatal_count = r.fatal_count + 1
+        r.clean = false
+    r
+
+pub fn check_report_pretty(report: CheckReport) -> text:
+    """Return a JSON-like structured summary string for the report.
+
+    Format (one block per severity tier, counts, then sample issues):
+      { "clean": true/false, "info": N, "warn": N, "error": N, "fatal": N,
+        "issues": [ { "severity": "...", "phase": N, "message": "..." }, ... ] }
+    """
+    var out = "{ "
+    if report.clean:
+        out = out + "\"clean\": true, "
+    else:
+        out = out + "\"clean\": false, "
+    out = out + "\"info\": "
+    out = out + (report.info_count as text)
+    out = out + ", \"warn\": "
+    out = out + (report.warn_count as text)
+    out = out + ", \"error\": "
+    out = out + (report.error_count as text)
+    out = out + ", \"fatal\": "
+    out = out + (report.fatal_count as text)
+    out = out + ", \"issues\": ["
+    var idx = 0
+    while idx < report.issues.len():
+        val iss = report.issues[idx]
+        if idx > 0:
+            out = out + ", "
+        out = out + "{ \"severity\": \""
+        out = out + iss.severity
+        out = out + "\", \"phase\": "
+        out = out + (iss.phase as text)
+        out = out + ", \"message\": \""
+        out = out + iss.message
+        out = out + "\" }"
+        idx = idx + 1
+    out = out + "] }"
+    out
+
+# ---------------------------------------------------------------------------
+# Phase stubs — each returns an updated CheckReport
+# ---------------------------------------------------------------------------
+
+fn _check_phase1_superblock(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
+    """Phase 1: walk superblock replicas.
+
+    For each of the N superblock replicas:
+      - Re-read raw bytes from the device at the replica's fixed offset.
+      - Verify the stored CRC32C (or Blake3) checksum matches recomputed value.
+      - Check magic bytes == b"NVFS0002" (or b"NVFS0003" for v3 volumes).
+      - Confirm generation counters are monotonically non-decreasing across replicas.
+      - Flag any replica whose generation lags the most-recent by > 1 (WARN) or
+        whose checksum is wrong (ERROR).
+
+    TODO (N8-full): open the block device at opts.path, seek to replica offsets
+    (superblock.spl exports SUPERBLOCK_OFFSET_0 / _1 / _2), and invoke
+    superblock_parse + checksum verify.
+    """
+    pass_todo
+    report
+
+fn _check_phase2_checkpoint_ring(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
+    """Phase 2: walk the checkpoint ring.
+
+    Walk every slot in the on-disk checkpoint ring (checkpoint.spl):
+      - Verify each slot's CRC32C.
+      - Confirm generation numbers are gapless and monotonically increasing.
+      - Detect wrap-around anomalies: newest_gen > oldest_gen + ring_capacity.
+      - Cross-check: the generation in the checkpoint slot matches the
+        superblock's last_checkpoint_gen field.
+      - Flag slots that reference arena_ids outside the live arena table (ERROR).
+
+    TODO (N8-full): iterate checkpoint ring slots via checkpoint_ring_read_all;
+    compare each slot's arena_list against the live pmap B-tree root.
+    """
+    pass_todo
+    report
+
+fn _check_phase3_pmap_btree(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
+    """Phase 3: walk the pmap B-tree.
+
+    For every PmapEntry in the B-tree (pmap_btree.spl):
+      - Confirm the (arena_id, offset) key is within a live arena's byte range.
+      - If opts.check_checksums: re-read the extent bytes from the arena and
+        verify the stored checksum (same logic as N4a scrub_all, but offline).
+      - Detect orphaned extents: arena_id in pmap but arena_id absent from the
+        arena table → ERROR "orphaned pmap extent".
+      - Detect unreachable pmap entries: logical_page_no not reachable from any
+        inode tree → WARN "unreachable pmap entry".
+
+    TODO (N8-full): call nvfs_pmap_sidecar_snapshot to get all entries; cross-
+    reference against arena_list from the most-recent checkpoint slot.
+    """
+    pass_todo
+    report
+
+fn _check_phase4_reflink_refcount(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
+    """Phase 4: walk the reflink refcount table.
+
+    Only runs when opts.check_refcount is true.
+    For every entry in the reflink table (reflink.spl):
+      - Count actual back-references in the pmap B-tree that share the same
+        logical_page_no.
+      - Compare against the stored refcount field.
+      - Mismatch by 1 → WARN "refcount off-by-one".
+      - Mismatch by > 1 → ERROR "refcount mismatch: stored N actual M".
+      - Stored refcount == 0 but entry not freed → WARN "dangling reflink entry".
+
+    TODO (N8-full): build a (logical_page_no → actual_refs) map via full pmap
+    B-tree walk, then compare against the reflink table's stored refcounts.
+    """
+    pass_todo
+    report
+
+fn _check_phase5_intent_log(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
+    """Phase 5: walk the intent-log tail.
+
+    Walk WAL/intent-log records from the tail pointer back to the last
+    checkpointed LSN (intent_log.spl):
+      - Verify each record's CRC32C.
+      - Confirm LSNs are monotonically increasing within the tail window.
+      - Flag records referencing arena_ids that do not exist in the live
+        arena table → ERROR "intent-log references unknown arena".
+      - Flag records that appear to have already been replayed (LSN <=
+        checkpoint_lsn from the most-recent checkpoint) → WARN "replayed
+        record in intent-log tail".
+
+    TODO (N8-full): call intent_log_recover_tail; compare each record's LSN
+    against the checkpointed LSN from phase 2 output.
+    """
+    pass_todo
+    report
+
+# ---------------------------------------------------------------------------
+# Main dispatcher
+# ---------------------------------------------------------------------------
+
+pub fn nvfs_check_main(opts: NvfsCheckOpts) -> i32:
+    """Run all enabled check phases and return an exit code.
+
+    Exit codes:
+      0 — clean (no warnings, no errors)
+      1 — warnings found, no errors
+      2 — errors found (but volume is still mountable)
+      3 — fatal structural corruption (do not mount)
+
+    Phases are run in order 1–5.  Each phase updates the report.
+    verbose output is emitted after each phase when opts.verbose is true.
+    """
+    var report = check_report_new()
+
+    report = _check_phase1_superblock(opts, report)
+    if opts.verbose:
+        pass_do_nothing
+
+    report = _check_phase2_checkpoint_ring(opts, report)
+    if opts.verbose:
+        pass_do_nothing
+
+    report = _check_phase3_pmap_btree(opts, report)
+    if opts.verbose:
+        pass_do_nothing
+
+    if opts.check_refcount:
+        report = _check_phase4_reflink_refcount(opts, report)
+        if opts.verbose:
+            pass_do_nothing
+
+    report = _check_phase5_intent_log(opts, report)
+    if opts.verbose:
+        pass_do_nothing
+
+    # Determine exit code from severity counts.
+    if report.fatal_count > 0:
+        return 3
+    if report.error_count > 0:
+        return 2
+    if report.warn_count > 0:
+        return 1
+    0

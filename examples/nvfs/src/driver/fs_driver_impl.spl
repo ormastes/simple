@@ -12,7 +12,7 @@ use std.fs_driver.capability.{Capability, CapabilitySet}
 use std.fs_driver.extension.{Extension, SnapshotExt, DedupExt, ChecksumExt, SendRecvExt, ScrubExt, CompressExt, EncryptExt, ReflinkExt}
 use std.fs_driver.ops.{FsDriver}
 use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl}
-use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
+use examples.nvfs.src.core.ns_tree.{Namespace, NsInodeKind}
 use examples.nvfs.src.core.pmap.{PmapEntry, pmap_entry_verify, pmap_entry_checksum_for}
 use examples.nvfs.src.core.pmap_btree.{PmapBTree, PmapBTreeEntry, PmapKey, pmap_btree_new, pmap_btree_insert, pmap_btree_lookup, pmap_btree_snapshot}
 use examples.nvfs.src.core.reflink.{reflink_bump, reflink_drop, reflink_get}
@@ -155,7 +155,7 @@ struct NvfsDriver:
     name:      text
     mounted:   bool
     read_only: bool
-    namespace: Namespace
+    ns: Namespace
 
 impl NvfsDriver:
 
@@ -164,7 +164,7 @@ impl NvfsDriver:
             name:      name,
             mounted:   false,
             read_only: false,
-            namespace: Namespace.new()
+            ns: Namespace.new()
         )
 
 impl FsDriver for NvfsDriver:
@@ -346,12 +346,12 @@ impl FsDriver for NvfsDriver:
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         """readdir — list children of the directory identified by handle.id."""
-        val raw_entries = self.namespace.readdir(handle.id)?
+        val raw_entries = self.ns.readdir(handle.id)?
         var out: [DirEntry] = []
         var i = 0
         while i < raw_entries.len() as i64:
             val e = raw_entries[i]
-            val child_opt = self.namespace._get_inode(e.child_ino)
+            val child_opt = self.ns._get_inode(e.child_ino)
             val is_dir = match child_opt:
                 case None: false
                 case Some(n):
@@ -368,18 +368,18 @@ impl FsDriver for NvfsDriver:
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         """mkdir — create a directory; resolve parent path."""
-        val pair = self.namespace.resolve_parent(path.raw)?
+        val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.namespace.mkdir(parent_ino, leaf, mode)?
+        val _ = self.ns.mkdir(parent_ino, leaf, mode)?
         Ok(())
 
     fn rmdir(path: Path) -> Result<(), FsError>:
         """rmdir — remove an empty directory."""
-        val pair = self.namespace.resolve_parent(path.raw)?
+        val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        self.namespace.rmdir(parent_ino, leaf)
+        self.ns.rmdir(parent_ino, leaf)
 
     fn unlink(path: Path) -> Result<(), FsError>:
         """unlink — remove a file or symlink via namespace.
@@ -387,10 +387,10 @@ impl FsDriver for NvfsDriver:
         Decrements the reflink refcount for the arena.  Discards the arena
         only when the refcount drops to zero.
         """
-        val pair = self.namespace.resolve_parent(path.raw)?
+        val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val removed = self.namespace.unlink(parent_ino, leaf)?
+        val removed = self.ns.unlink(parent_ino, leaf)?
         if removed.arena_id >= 0:
             val should_discard = reflink_drop(removed.arena_id)
             if should_discard:
@@ -399,26 +399,26 @@ impl FsDriver for NvfsDriver:
 
     fn rename(old: Path, new: Path) -> Result<(), FsError>:
         """rename — atomic move within namespace."""
-        val old_pair = self.namespace.resolve_parent(old.raw)?
+        val old_pair = self.ns.resolve_parent(old.raw)?
         val old_parent = old_pair.0
         val old_leaf = old_pair.1
-        val new_pair = self.namespace.resolve_parent(new.raw)?
+        val new_pair = self.ns.resolve_parent(new.raw)?
         val new_parent = new_pair.0
         val new_leaf = new_pair.1
-        self.namespace.rename(old_parent, old_leaf, new_parent, new_leaf)
+        self.ns.rename(old_parent, old_leaf, new_parent, new_leaf)
 
     fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         """symlink — create a symlink at `link` pointing to `target`."""
-        val pair = self.namespace.resolve_parent(link.raw)?
+        val pair = self.ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.namespace.symlink(parent_ino, leaf, target.raw)?
+        val _ = self.ns.symlink(parent_ino, leaf, target.raw)?
         Ok(())
 
     fn readlink(path: Path) -> Result<Path, FsError>:
         """readlink — resolve symlink target for path."""
-        val ns_inode = self.namespace.resolve_path(path.raw)?
-        val target = self.namespace.readlink(ns_inode.ino)?
+        val ns_inode = self.ns.resolve_path(path.raw)?
+        val target = self.ns.readlink(ns_inode.ino)?
         Ok(Path(raw: target))
 
     fn link(target: Path, link: Path) -> Result<(), FsError>:
@@ -427,13 +427,13 @@ impl FsDriver for NvfsDriver:
 
         Returns Err(NotFound) if target does not exist in the namespace.
         """
-        val ns_inode = self.namespace.resolve_path(target.raw)?
+        val ns_inode = self.ns.resolve_path(target.raw)?
         val arena_id = ns_inode.arena_id
         val _ = reflink_bump(arena_id)
-        val pair = self.namespace.resolve_parent(link.raw)?
+        val pair = self.ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        self.namespace.link(parent_ino, leaf, ns_inode.ino)
+        self.ns.link(parent_ino, leaf, ns_inode.ino)
 
     # --- Extension probe ---
 

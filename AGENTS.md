@@ -130,6 +130,11 @@ Run `/verify` — production readiness check:
 | Architecture | `doc/04_architecture/` missing or outdated |
 | Design | `doc/05_design/` missing or outdated |
 
+Additional required checks for compiler/core/lib or MCP/LSP changes:
+- `sh scripts/check-core-runtime-smoke.sh <runtime>`
+- `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
+- If npm/package/release path changed: `sh scripts/check-mcp-package-smoke.sh`
+
 Must show `STATUS: PASS` before release.
 
 ---
@@ -159,6 +164,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 - User MUST select requirements — never auto-select
 - Unchosen options are DELETED, not archived
 - For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
+- When `src/compiler/**` or `src/lib/**` changes can affect MCP/LSP startup or language surface, finish by running the core runtime smoke and MCP native smoke checks; if publish/package flow changed, also run the isolated npm package smoke check
 - Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
 - Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
 - Verify perf-sensitive tooling with warm startup time, representative request latency, and max RSS on realistic fixtures

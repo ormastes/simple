@@ -1,109 +1,102 @@
-describe "Phase1 Integration":
-    it "skipped":
-        pending("pre-existing test failures - functions/imports not available")
+use app.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
+use app.duplicate_check.config.{default_config, DuplicationConfig}
+use app.duplicate_check.detector.{find_duplicates}
+use app.io.mod.{file_write, shell}
 
-# # Phase 1 Integration Tests - Verify cache, interner, lazy features, and progress reporting
-# 
-# use app.duplicate_check.config.{DuplicationConfig}
-# use app.duplicate_check.detector.{find_duplicates, collect_files}
-# use app.duplicate_check.cache.{new_token_cache_manager}
-# use test.app.duplicate_check.test_helpers.{create_test_file_in, cleanup_test_dir, minimal_test_config, verbose_test_config}
-# 
-# val TEST_DIR = "/tmp/test_duplicate_phase1"
-# 
-# fn create_test_file(path: text, content: text):
-#     create_test_file_in(TEST_DIR, path, content)
-# 
-# fn cleanup_test_files():
-#     cleanup_test_dir(TEST_DIR)
-# 
-# fn slow_it(name: text, block: fn()):
-#     it(name, block)
-# 
-# describe "Phase 1: File caching optimization":
-#     it "uses cache manager for tokenization":
-#         create_test_file("/tmp/test_duplicate_phase1/test1.spl", "fn test(): 42")
-#         create_test_file("/tmp/test_duplicate_phase1/test2.spl", "fn test(): 42")
-# 
-#         val config = minimal_test_config()
-# 
-#         val cache_manager = new_token_cache_manager()
-#         val files = ["/tmp/test_duplicate_phase1/test1.spl", "/tmp/test_duplicate_phase1/test2.spl"]
-#         val groups = find_duplicates(files, config, cache_manager)
-# 
-#         expect(groups.len()).to_be_greater_than(0)
-# 
-#         cleanup_test_files()
-# 
-# describe "Phase 1: Verbose and quiet modes":
-#     it "respects quiet mode":
-#         create_test_file("/tmp/test_duplicate_phase1/quiet_test.spl", "fn quiet_test(): 1")
-# 
-#         val config = minimal_test_config()
-# 
-#         val cache_manager = new_token_cache_manager()
-#         val files = ["/tmp/test_duplicate_phase1/quiet_test.spl"]
-#         val groups = find_duplicates(files, config, cache_manager)
-# 
-#         expect(config.quiet).to_equal(true)
-# 
-#         cleanup_test_files()
-# 
-#     it "enables verbose mode":
-#         create_test_file("/tmp/test_duplicate_phase1/verbose_test.spl", "fn verbose_test(): 2")
-# 
-#         val config = verbose_test_config()
-# 
-#         val cache_manager = new_token_cache_manager()
-#         val files = ["/tmp/test_duplicate_phase1/verbose_test.spl"]
-#         val groups = find_duplicates(files, config, cache_manager)
-# 
-#         expect(config.verbose).to_equal(true)
-# 
-#         cleanup_test_files()
-# 
-# describe "Phase 1: StringInterner integration":
-#     it "processes files with token interning":
-#         create_test_file("/tmp/test_duplicate_phase1/interner1.spl", "fn test1(): x + y + z")
-#         create_test_file("/tmp/test_duplicate_phase1/interner2.spl", "fn test2(): x + y + z")
-# 
-#         val config = minimal_test_config()
-# 
-#         val cache_manager = new_token_cache_manager()
-#         val files = ["/tmp/test_duplicate_phase1/interner1.spl", "/tmp/test_duplicate_phase1/interner2.spl"]
-#         val groups = find_duplicates(files, config, cache_manager)
-# 
-#         expect(groups.len()).to_be_greater_than(0)
-# 
-#         cleanup_test_files()
-# 
-# describe "Phase 1: Lazy feature extraction":
-#     slow_it "extracts features only when needed for cosine similarity":
-#         # Requires use_cosine_similarity which is slow in interpreter mode
-#         create_test_file("/tmp/test_duplicate_phase1/lazy1.spl", "fn lazy1(): val x = 42; x")
-#         create_test_file("/tmp/test_duplicate_phase1/lazy2.spl", "fn lazy2(): val y = 43; y")
-# 
-#         val config = DuplicationConfig(
-#             min_tokens: 5,
-#             min_lines: 1,
-#             ignore_identifiers: false,
-#             ignore_literals: false,
-#             ignore_comments: true,
-#             ignore_whitespace: true,
-#             similarity_threshold: 0.85,
-#             output_format: "text",
-#             report_path: "doc/analysis/duplicate_db.sdn",
-#             max_allowed: 0,
-#             min_impact: 10,
-#             exclude_patterns: [],
-#             use_ast_features: false,
-#             use_cosine_similarity: true,
-#             verbose: true,
-#             quiet: false
-#         )
-# 
-#         val cache_manager = new_token_cache_manager()
-#         val files = ["/tmp/test_duplicate_phase1/lazy1.spl", "/tmp/test_duplicate_phase1/lazy2.spl"]
-#         val groups = find_duplicates(files, config, cache_manager)
-# 
-#         cleanup_test_files()
+val TEST_DIR = "/tmp/test_duplicate_phase1"
+
+fn ensure_clean_dir(path: text):
+    shell("rm -rf '{path}'")
+    shell("mkdir -p '{path}'")
+
+fn create_test_file(path: text, content: text):
+    file_write(path, content)
+
+fn phase1_test_config() -> DuplicationConfig:
+    var config = default_config()
+    config.min_tokens = 8
+    config.min_lines = 3
+    config.min_impact = 1
+    config.exclude_patterns = []
+    config.quiet = true
+    config
+
+fn shared_logic_body(name: text, local_name: text, literal_value: i64) -> text:
+    [
+        "fn {name}(seed: i64) -> i64:",
+        "    val {local_name}_base = seed + {literal_value}",
+        "    val {local_name}_total = {local_name}_base * 2",
+        "    if {local_name}_total > seed:",
+        "        return {local_name}_total",
+        "    return seed"
+    ].join("\n")
+
+describe "Phase1 Integration":
+    it "reuses the token cache across repeated scans":
+        ensure_clean_dir(TEST_DIR)
+
+        val file_a = "{TEST_DIR}/cache_a.spl"
+        val file_b = "{TEST_DIR}/cache_b.spl"
+        val body = shared_logic_body("shared_cache", "cache", 1)
+        create_test_file(file_a, body)
+        create_test_file(file_b, body)
+
+        val config = phase1_test_config()
+        val cache_manager = new_token_cache_manager()
+
+        val first_groups = find_duplicates([file_a, file_b], config, cache_manager)
+        val first_stats = get_cache_stats(cache_manager)
+        val second_groups = find_duplicates([file_a, file_b], config, cache_manager)
+        val second_stats = get_cache_stats(cache_manager)
+
+        expect(first_groups.len()).to_be_greater_than(0)
+        expect(second_groups.len()).to_equal(first_groups.len())
+        expect(first_stats).to_contain("2 files")
+        expect(second_stats).to_equal(first_stats)
+
+    it "detects renamed logic when identifier normalization is enabled":
+        ensure_clean_dir(TEST_DIR)
+
+        val file_a = "{TEST_DIR}/normalize_a.spl"
+        val file_b = "{TEST_DIR}/normalize_b.spl"
+        create_test_file(file_a, shared_logic_body("alpha_logic", "alpha", 5))
+        create_test_file(file_b, shared_logic_body("beta_logic", "beta", 5))
+
+        val config = phase1_test_config()
+        config.ignore_identifiers = true
+        config.ignore_literals = false
+
+        val cache_manager = new_token_cache_manager()
+        val groups = find_duplicates([file_a, file_b], config, cache_manager)
+
+        expect(groups.len()).to_be_greater_than(0)
+        expect(groups[0].occurrences).to_equal(2)
+
+    it "keeps duplicate results stable between quiet and verbose scans":
+        ensure_clean_dir(TEST_DIR)
+
+        val file_a = "{TEST_DIR}/stable_a.spl"
+        val file_b = "{TEST_DIR}/stable_b.spl"
+        val file_c = "{TEST_DIR}/stable_c.spl"
+        val body = shared_logic_body("stable_logic", "stable", 7)
+        create_test_file(file_a, body)
+        create_test_file(file_b, body)
+        create_test_file(file_c, body)
+
+        var quiet_config = phase1_test_config()
+        quiet_config.quiet = true
+
+        var verbose_config = phase1_test_config()
+        verbose_config.quiet = false
+        verbose_config.verbose = true
+
+        val quiet_cache = new_token_cache_manager()
+        val verbose_cache = new_token_cache_manager()
+        val files = [file_a, file_b, file_c]
+
+        val quiet_groups = find_duplicates(files, quiet_config, quiet_cache)
+        val verbose_groups = find_duplicates(files, verbose_config, verbose_cache)
+
+        expect(quiet_groups.len()).to_be_greater_than(0)
+        expect(verbose_groups.len()).to_equal(quiet_groups.len())
+        expect(verbose_groups[0].occurrences).to_equal(quiet_groups[0].occurrences)

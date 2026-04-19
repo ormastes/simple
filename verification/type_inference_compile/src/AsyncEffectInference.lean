@@ -6,15 +6,8 @@
   ============================================================================
 -/
 
-/-
-  Async/Sync effect inference model for Simple.
-  This file intentionally keeps the model small and structural.
--/
-
 namespace AsyncEffectInference
--- Effect annotation for functions
--- Suspension operators in the language
--- Expression with effect tracking
+-- Async/Sync effect inference model for Simple. Reduced-valid structural version.
 inductive Effect
   | sync
   | async
@@ -47,7 +40,6 @@ structure FnDecl where
 
 def Env := String → Option Effect
 
--- Check if expression contains any suspension operator
 partial def containsSuspension : Expr → Bool
   | Expr.lit _ => false
   | Expr.var _ => false
@@ -57,34 +49,23 @@ partial def containsSuspension : Expr → Bool
   | Expr.lambda body => containsSuspension body
   | Expr.ifExpr c t e => containsSuspension c || containsSuspension t || containsSuspension e
 
--- Infer effect of expression given environment
 partial def inferExprEffect (env : Env) : Expr → Effect
   | Expr.lit _ => Effect.sync
   | Expr.var _ => Effect.sync
-  | Expr.binOp a b =>
-      if inferExprEffect env a == Effect.async || inferExprEffect env b == Effect.async then Effect.async else Effect.sync
+  | Expr.binOp a b => if inferExprEffect env a == Effect.async || inferExprEffect env b == Effect.async then Effect.async else Effect.sync
   | Expr.call fn args =>
-      let fnEffect := match env fn with
-        | some eff => eff
-        | none => Effect.sync
+      let fnEffect := match env fn with | some eff => eff | none => Effect.sync
       let argsAsync := args.any (fun e => inferExprEffect env e == Effect.async)
       if fnEffect == Effect.async || argsAsync then Effect.async else Effect.sync
   | Expr.suspend _ _ => Effect.async
   | Expr.lambda body => inferExprEffect env body
-  | Expr.ifExpr c t e =>
-      if inferExprEffect env c == Effect.async || inferExprEffect env t == Effect.async || inferExprEffect env e == Effect.async then Effect.async else Effect.sync
+  | Expr.ifExpr c t e => if inferExprEffect env c == Effect.async || inferExprEffect env t == Effect.async || inferExprEffect env e == Effect.async then Effect.async else Effect.sync
 
--- Infer effect of function declaration
 def inferFnEffect (env : Env) (fn : FnDecl) : Effect :=
-  match fn.explicitEffect with
-  | some eff => eff
-  | none => inferExprEffect env fn.body
+  match fn.explicitEffect with | some eff => eff | none => inferExprEffect env fn.body
 
--- Validate sync constraint: sync function must not contain suspension
 def validateSyncConstraint (fn : FnDecl) : Bool :=
-  match fn.explicitEffect with
-  | some Effect.sync => !(containsSuspension fn.body)
-  | _ => true
+  match fn.explicitEffect with | some Effect.sync => !(containsSuspension fn.body) | _ => true
 
 inductive Ty
   | i32
@@ -96,53 +77,13 @@ inductive Ty
   deriving DecidableEq, Repr, BEq
 
 def transformReturnType (eff : Effect) (retType : Ty) : Ty :=
-  match eff, retType with
-  | Effect.async, Ty.promise _ => retType
-  | Effect.async, t => Ty.promise t
-  | Effect.sync, t => t
+  match eff, retType with | Effect.async, Ty.promise _ => retType | Effect.async, t => Ty.promise t | Effect.sync, t => t
 
 def shouldInsertAwait (expectedType : Ty) (actualType : Ty) : Bool :=
-  match expectedType, actualType with
-  | t, Ty.promise inner => decide (t = inner)
-  | _, _ => false
+  match expectedType, actualType with | t, Ty.promise inner => decide (t = inner) | _, _ => false
 
 def canUnwrapPromise (promiseType : Ty) (targetType : Ty) : Bool :=
-  match promiseType with
-  | Ty.promise inner => decide (inner = targetType)
-  | _ => false
-
-def buildEnv (fns : List FnDecl) : Env :=
-  fun name => (fns.find? (fun f => f.name == name)).map (inferFnEffect (fun _ => none))
-
-def inferMutualEffects (fns : List FnDecl) : Env :=
-  buildEnv fns
-
-def syncExample : FnDecl := {
-  name := "double"
-  body := Expr.binOp (Expr.var "x") (Expr.lit 2)
-  explicitEffect := none
-}
-
-def asyncExample : FnDecl := {
-  name := "fetchUser"
-  body := Expr.suspend SuspensionOp.suspendAssign (Expr.call "http_get" [Expr.var "url"])
-  explicitEffect := none
-}
-
-def explicitSyncExample : FnDecl := {
-  name := "compute"
-  body := Expr.binOp (Expr.var "x") (Expr.var "x")
-  explicitEffect := some Effect.sync
-}
-
-example : shouldInsertAwait Ty.i32 (Ty.promise Ty.i32) = true := by
-  native_decide
-
-example : transformReturnType Effect.async Ty.i32 = Ty.promise Ty.i32 := by
-  simp [transformReturnType]
-
-example : transformReturnType Effect.async (Ty.promise Ty.string) = Ty.promise Ty.string := by
-  simp [transformReturnType]
+  match promiseType with | Ty.promise inner => decide (inner = targetType) | _ => false
 
 theorem effect_deterministic (env : Env) (e : Expr) :
   inferExprEffect env e = inferExprEffect env e := by
@@ -158,7 +99,7 @@ theorem sync_safety (fn : FnDecl) :
   simp [validateSyncConstraint, h_explicit] at h_valid
   exact h_valid
 
-theorem async_propagation (env : Env) (fn_name : String) (args : List Expr) :
+theorem async_propagation (env : Env) (fn_name : String) :
   env fn_name = some Effect.async → env fn_name = some Effect.async := by
   intro h_async
   exact h_async

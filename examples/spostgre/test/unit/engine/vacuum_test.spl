@@ -1,0 +1,171 @@
+# spostgre engine — vacuum unit tests (M5).
+#
+# Covers:
+#   1. vacuum with no dead tuples → dead_versions = 0, pages_updated = 0.
+#   2. vacuum with 1 dead tuple   → dead_versions = 1, pages_updated = 1,
+#      pmap birth_gen incremented.
+#   3. vacuum invalidates tier_cache → tier_cache_get returns empty after vacuum
+#      removes a dead version from the same page.
+#
+# Design ref: spostgre_design.md §vacuum (M5).
+
+use std.sspec.*
+use engine.vacuum.{VacuumState, vacuum_relation}
+use engine.hot.{HotChain, HotChainMap, HotVersion, hot_chain_map_put}
+use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
+use engine.tier_cache.{TierCache, tier_cache_new, tier_cache_put, tier_cache_get}
+use engine.txn.{TxnManager}
+
+# ---------------------------------------------------------------------------
+# Helper: build a TxnManager with no active transactions but next_id set so
+# that a committed version with xmax < next_id is visible to vacuum.
+# ---------------------------------------------------------------------------
+
+fn make_txn_mgr(next_id: i64) -> TxnManager:
+    TxnManager(next_id: next_id, active: [])
+
+# ---------------------------------------------------------------------------
+# Helper: build a minimal VacuumState.
+# ---------------------------------------------------------------------------
+
+fn make_state(hot_map: HotChainMap, pmap: PmapWriter, cache: TierCache, next_xid: i64) -> VacuumState:
+    VacuumState(
+        hot_map: hot_map,
+        pmap:    pmap,
+        cache:   cache,
+        txn_mgr: make_txn_mgr(next_xid))
+
+# ---------------------------------------------------------------------------
+# Helper: seed a HotChain with one live version, attached to a HotChainMap.
+# logical_page must satisfy (logical / 1_000_000) == rel_id.
+# ---------------------------------------------------------------------------
+
+fn make_chain_one_live(logical: i64, xmin: i64) -> HotChain:
+    val v = HotVersion(
+        tuple_id: 1,
+        xmin: xmin,
+        xmax: 0,
+        physical_page_id: 1,
+        changed_indexed_cols: false)
+    var versions: [HotVersion] = []
+    versions.push(v)
+    HotChain(
+        head_logical_page: logical,
+        versions: versions,
+        next_tuple_id: 2,
+        free_bytes: 4096)
+
+# ---------------------------------------------------------------------------
+# Helper: seed a HotChain with 2 versions — one dead (xmax committed and
+# xmax < oldest_running_xmin) plus one still-live version.
+# ---------------------------------------------------------------------------
+
+fn make_chain_one_dead(logical: i64, dead_xmax: i64, live_xmin: i64) -> HotChain:
+    val dead_v = HotVersion(
+        tuple_id: 1,
+        xmin: 1,
+        xmax: dead_xmax,
+        physical_page_id: 1,
+        changed_indexed_cols: false)
+    val live_v = HotVersion(
+        tuple_id: 2,
+        xmin: live_xmin,
+        xmax: 0,
+        physical_page_id: 2,
+        changed_indexed_cols: false)
+    var versions: [HotVersion] = []
+    versions.push(dead_v)
+    versions.push(live_v)
+    HotChain(
+        head_logical_page: logical,
+        versions: versions,
+        next_tuple_id: 3,
+        free_bytes: 3584)
+
+# ---------------------------------------------------------------------------
+# describe 1 — vacuum with no dead tuples.
+# ---------------------------------------------------------------------------
+
+describe "vacuum M5 — no dead tuples":
+
+    it "returns dead_versions = 0 and pages_updated = 0 on empty map":
+        val pmap = PmapWriter.new()
+        val cache = tier_cache_new()
+        val hot_map = HotChainMap.new()
+        # next_xid = 100, no active txns → oldest_running_xmin = 100
+        val state0 = make_state(hot_map, pmap, cache, 100)
+        val (state1, report) = vacuum_relation(state0, 1)
+        expect(report.dead_versions).to_equal(0)
+        expect(report.pages_updated).to_equal(0)
+        expect(report.cache_invalidated).to_equal(0)
+        expect(report.rel_id).to_equal(1)
+
+    it "returns dead_versions = 0 when chain has only a live version":
+        val pmap = PmapWriter.new()
+        # Seed pmap so pmap_writer_lookup can return something for the page.
+        val logical: i64 = 1000000   # rel_id = 1
+        val _pub = pmap_writer_publish(pmap, logical, 10, 0, 1)
+        val cache = tier_cache_new()
+        # Chain with one live version (xmax = 0 → never expires)
+        val chain = make_chain_one_live(logical, 5)
+        val hot_map0 = HotChainMap.new()
+        val hot_map = hot_chain_map_put(hot_map0, logical, chain)
+        val state0 = make_state(hot_map, pmap, cache, 100)
+        val (state1, report) = vacuum_relation(state0, 1)
+        expect(report.dead_versions).to_equal(0)
+        expect(report.pages_updated).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# describe 2 — vacuum with 1 dead tuple.
+# ---------------------------------------------------------------------------
+
+describe "vacuum M5 — one dead tuple":
+
+    it "removes dead version and increments pmap birth_gen":
+        val pmap = PmapWriter.new()
+        val logical: i64 = 2000000   # rel_id = 2
+        # Publish initial pmap entry with birth_gen = 1.
+        val _pub = pmap_writer_publish(pmap, logical, 20, 0, 1)
+        val cache = tier_cache_new()
+        # Chain: tuple_id=1 expired with xmax=50 (dead); tuple_id=2 still live.
+        # oldest_running_xmin = 100, so xmax=50 <= 100 → dead.
+        val chain = make_chain_one_dead(logical, 50, 60)
+        val hot_map0 = HotChainMap.new()
+        val hot_map = hot_chain_map_put(hot_map0, logical, chain)
+        val state0 = make_state(hot_map, pmap, cache, 100)
+        val (state1, report) = vacuum_relation(state0, 2)
+        expect(report.dead_versions).to_equal(1)
+        expect(report.pages_updated).to_equal(1)
+        expect(report.oldest_xmin).to_equal(100)
+        # pmap birth_gen must have incremented from 1 to 2.
+        val new_entry = pmap_writer_lookup(state1.pmap, logical)
+        expect(new_entry.birth_gen).to_equal(2)
+
+# ---------------------------------------------------------------------------
+# describe 3 — vacuum invalidates tier_cache.
+# ---------------------------------------------------------------------------
+
+describe "vacuum M5 — tier_cache invalidation":
+
+    it "tier_cache_get returns empty after vacuum removes a dead version":
+        val pmap = PmapWriter.new()
+        val rel_id: i64 = 3
+        val logical: i64 = 3000000   # (3000000 / 1000000) == 3 → rel_id = 3
+        val _pub = pmap_writer_publish(pmap, logical, 30, 0, 1)
+        # Put page bytes into tier_cache before vacuum.
+        val bytes: [u8] = [1u8, 2u8, 3u8]
+        val cache0 = tier_cache_new()
+        val cache1 = tier_cache_put(cache0, rel_id, logical, bytes)
+        # Confirm cache has the entry before vacuum.
+        val pre = tier_cache_get(cache1, rel_id, logical)
+        expect(pre.len()).to_equal(3)
+        # Chain: one dead version (xmax=70 <= oldest_xmin=100) + one live.
+        val chain = make_chain_one_dead(logical, 70, 80)
+        val hot_map0 = HotChainMap.new()
+        val hot_map = hot_chain_map_put(hot_map0, logical, chain)
+        val state0 = make_state(hot_map, pmap, cache1, 100)
+        val (state1, report) = vacuum_relation(state0, rel_id)
+        expect(report.cache_invalidated).to_equal(1)
+        # tier_cache entry must be gone after vacuum.
+        val post = tier_cache_get(state1.cache, rel_id, logical)
+        expect(post.len()).to_equal(0)

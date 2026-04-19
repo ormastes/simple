@@ -33,6 +33,10 @@ description: Production readiness verification. Checks SSpec tests for stubs/dum
 - Performance benchmarks exist
 - Security: input validation, no secrets
 - Reliability: error handling paths
+- Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
+  - `sh scripts/check-core-runtime-smoke.sh <runtime>`
+  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
+  - If npm packaging/release flow changed: `sh scripts/check-mcp-package-smoke.sh`
 
 ### 5. Architecture & Design Docs
 - `doc/04_architecture/` updated for new modules
@@ -52,3 +56,4 @@ description: Production readiness verification. Checks SSpec tests for stubs/dum
 - Zero FAIL items
 - WARN items reviewed
 - STATUS: PASS before release
+- Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

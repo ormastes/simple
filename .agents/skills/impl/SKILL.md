@@ -28,7 +28,7 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 9-10: Unit + IT Tests (80%+ coverage) + Doctest
 11-13: Bug Reports + Duplication Check + Refactoring
 14: Full Test Suite (`bin/simple test && bin/simple build lint`)
-15: Run $verify + VCS Sync
+15: Run $verify + final smoke checks + VCS Sync
 
 ## Rules
 
@@ -37,3 +37,7 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 - 80%+ branch coverage target
 - Files > 800 lines must be split
 - Run $verify before VCS sync
+- If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
+  - `sh scripts/check-core-runtime-smoke.sh <runtime>`
+  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
+  - If publish/package flow changed: `sh scripts/check-mcp-package-smoke.sh`

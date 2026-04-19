@@ -1,35 +1,97 @@
 #!/usr/bin/env simple
 # Duplication detection CLI
 
-use compiler.tools.duplicate_check.config (load_config, default_config, DuplicationConfig)
-use compiler.tools.duplicate_check.detector (find_duplicates, collect_files)
+use compiler.tools.duplicate_check.config (load_config, DuplicationConfig)
+use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_in_file, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, DuplicateGroup, DuplicateBlock}
 use compiler.tools.duplicate_check.formatter (print_text_report, print_json_report, write_sdn_database)
 use compiler.tools.duplicate_check.debug (init_debug)
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
-use compiler.tools.duplicate_check.benchmark.{run_benchmark, run_benchmark_iterations, format_benchmark_result, format_benchmark_stats, save_benchmark_results, load_benchmark_results, compare_benchmarks}
+use compiler.tools.duplicate_check.parallel.{process_files_parallel, ParallelConfig}
+use compiler.tools.duplicate_check.incremental.{load_incremental_cache, process_files_incremental, format_incremental_stats, normalize_block_hashes}
 use compiler.tools.duplicate_check.semantic.{run_semantic_analysis}
 use compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
-use app.io.mod.{file_read, file_write, cli_get_args}
+use std.ffi.cli.{cli_get_args, cli_exit}
+
+fn normalize_argv(all_args: [text]) -> [text]:
+    var args: [text] = []
+    var entry_idx = -1
+    var command_idx = -1
+
+    var i = 0
+    while i < all_args.len():
+        val arg = all_args[i]
+        if command_idx < 0 and arg == "duplicate-check":
+            command_idx = i
+        if entry_idx < 0 and arg.ends_with("duplicate_check/main.spl"):
+            entry_idx = i
+        elif entry_idx < 0 and arg.ends_with("main.spl"):
+            entry_idx = i
+        i = i + 1
+
+    var start_idx = 0
+    if command_idx >= 0:
+        start_idx = command_idx
+    elif entry_idx >= 0:
+        start_idx = entry_idx + 1
+        args.push("duplicate-check")
+    elif all_args.len() > 0:
+        start_idx = 1
+        args.push("duplicate-check")
+
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
 
 fn collect_command_args(all_args: [text]) -> [text]:
-    var start_idx = 0
-
-    if all_args.len() > 0 and all_args[0].ends_with("main.spl"):
-        start_idx = 1
-    elif all_args.len() > 1 and all_args[1].ends_with("main.spl"):
-        start_idx = 2
-    elif all_args.len() > 2 and all_args[2].ends_with("main.spl"):
-        start_idx = 3
-
-    if all_args.len() > start_idx and all_args[start_idx] == "duplicate-check":
-        start_idx = start_idx + 1
+    val argv = normalize_argv(all_args)
+    if argv.len() <= 1:
+        return []
 
     var cmd_args = []
-    var i = start_idx
-    while i < all_args.len():
-        cmd_args.push(all_args[i])
+    var i = 1
+    while i < argv.len():
+        cmd_args.push(argv[i])
         i = i + 1
     cmd_args
+
+fn build_groups_from_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager) -> [DuplicateGroup]:
+    val exact_groups = group_by_hash(all_blocks, config)
+    val refined_groups = if config.use_cosine_similarity:
+        refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
+    else:
+        exact_groups
+    sort_by_impact(refined_groups)
+
+fn scan_files_sequential(files: [text], config: DuplicationConfig, cache_manager) -> [DuplicateBlock]:
+    var all_blocks: [DuplicateBlock] = []
+    val interner = new_token_interner()
+
+    for file in files:
+        val blocks = find_duplicates_in_file(file, config, cache_manager, interner)
+        all_blocks.merge(blocks)
+
+    normalize_block_hashes(all_blocks)
+
+fn scan_files(files: [text], config: DuplicationConfig, cache_manager) -> ([DuplicateBlock], text):
+    if config.use_incremental:
+        val incremental_cache = load_incremental_cache(config.incremental_cache_path, config)
+        val result = process_files_incremental(files, config, incremental_cache, cache_manager)
+        val blocks = result.0
+        val stats = format_incremental_stats(result.1)
+        return (blocks, stats)
+
+    if config.use_parallel:
+        val parallel_config = ParallelConfig(
+            num_workers: config.num_workers,
+            batch_size: 10,
+            enabled: true
+        )
+        val blocks = process_files_parallel(files, parallel_config, cache_manager, config)
+        return (blocks, "")
+
+    (scan_files_sequential(files, config, cache_manager), "")
 
 fn print_usage():
     print "Usage: simple duplicate-check [path] [options]"
@@ -121,7 +183,7 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             i = i + 2
         elif arg == "--help" or arg == "-h":
             print_usage()
-            exit(0)
+            cli_exit(0)
         elif not arg.starts_with("-"):
             target_path = arg
             i = i + 1
@@ -133,12 +195,13 @@ fn parse_args(args: [text]) -> DuplicationConfig:
 fn main():
     init_debug()
 
-    val args = cli_get_args() ?? []
-    if args.len() == 0:
+    val raw_args = cli_get_args() ?? []
+    val argv = normalize_argv(raw_args)
+    if argv.len() <= 1:
         print_usage()
-        exit(0)
+        cli_exit(0)
 
-    val cmd_args = collect_command_args(args)
+    val cmd_args = collect_command_args(raw_args)
 
     val config = parse_args(cmd_args)
 
@@ -155,20 +218,23 @@ fn main():
         else:
             print_semantic_text_report(report, config)
         val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
-        exit(exit_code)
+        cli_exit(exit_code)
 
     val files = collect_files(target_path, config)
 
     if files.len() == 0:
         print "No files found to scan"
-        exit(1)
+        cli_exit(1)
 
     val cache_manager = new_token_cache_manager()
 
-    val groups = find_duplicates(files, config, cache_manager)
+    val scan_result = scan_files(files, config, cache_manager)
+    val groups = build_groups_from_blocks(scan_result.0, config, cache_manager)
 
     if config.verbose and not config.quiet:
         print ""
+        if scan_result.1.len() > 0:
+            print scan_result.1
         print get_cache_stats(cache_manager)
         print ""
     elif not config.quiet:
@@ -183,4 +249,4 @@ fn main():
         print_text_report(groups)
 
     val exit_code = if groups.len() > config.max_allowed: 1 else: 0
-    exit(exit_code)
+    cli_exit(exit_code)

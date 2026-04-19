@@ -110,13 +110,18 @@ structure CloneRangeArgs where
 
 /-- Create a reflink: install a new `shared` pmap entry and bump the
 source arena's refcount.  Rejects if any existing entry at the same
-`(phys, offset)` is non-shared (I8 preservation). -/
+`(phys, offset)` is non-shared (I8 preservation), or if no matching
+WAL record is durable (I5 preservation). -/
 def arena_clone_range (s : FsState) (args : CloneRangeArgs)
     : Except FsError FsState :=
   match s.findArena args.src with
   | none => Except.error FsError.arenaNotFound
   | some ar =>
     if ar.discarded then Except.error FsError.alreadyDiscarded
+    else if !(s.wal.any (fun r =>
+              decide (r.op = WalOp.pmapPublish) && decide (r.birthGen = args.birthGen)
+                && decide (r.lsn ≤ s.durableLsn))) then
+      Except.error FsError.publishBeforeDurable
     else if s.pmap.any (fun e =>
               e.phys == args.src && decide (e.offset = args.offset) && !e.shared) then
       Except.error FsError.arenaNotFound  -- non-shared entry at (phys,offset): I8 violation

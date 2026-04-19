@@ -3,6 +3,7 @@
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use compiler.tools.duplicate_check.doc_extractor.{DocEntry}
 use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport}
+use compiler.tools.duplicate_check.formatter.{format_ratio_tenths, format_score_hundredths}
 
 use std.text.{escape_json}
 use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
@@ -37,14 +38,14 @@ fn print_semantic_text_report(report: SemanticReport, config: DuplicationConfig)
     val all_similar = copy_paste_matches + similar_matches
 
     if all_similar.len() > 0:
-        print "Similar Docs (>{format_threshold(config.semantic_threshold)}): {all_similar.len()} pairs"
+        print "Similar Docs (>{format_score_hundredths(config.semantic_threshold)}): {all_similar.len()} pairs"
         for m in all_similar:
             val line = format_match_line(m)
             print line
         print ""
 
     if drift_matches.len() > 0:
-        print "Drift Warnings (<{format_threshold(config.semantic_drift_threshold)}): {drift_matches.len()} items"
+        print "Drift Warnings (<{format_score_hundredths(config.semantic_drift_threshold)}): {drift_matches.len()} items"
         for m in drift_matches:
             val line = format_match_line(m)
             print line
@@ -58,11 +59,7 @@ fn print_semantic_text_report(report: SemanticReport, config: DuplicationConfig)
             val current = file_counts[entry.file_path] ?? 0
             file_counts[entry.file_path] = current + 1
 
-        val pct = if report.total_items > 0:
-            val missing_f = report.missing_docs.len() * 1000 / report.total_items
-            missing_f / 10.0
-        else:
-            0.0
+        val pct = format_ratio_tenths(report.missing_docs.len(), report.total_items)
 
         print "Missing Docs: {report.missing_docs.len()} items ({pct}%)"
         val file_keys = file_counts.keys()
@@ -72,11 +69,7 @@ fn print_semantic_text_report(report: SemanticReport, config: DuplicationConfig)
         print ""
 
     # Summary
-    val doc_pct = if report.total_items > 0:
-        val doc_f = report.items_with_docs * 1000 / report.total_items
-        doc_f / 10.0
-    else:
-        0.0
+    val doc_pct = format_ratio_tenths(report.items_with_docs, report.total_items)
 
     print "Summary: {report.total_items} total, {report.items_with_docs} documented ({doc_pct}%), {all_similar.len()} similar, {drift_matches.len()} drift"
 
@@ -131,7 +124,7 @@ fn format_entry_json(entry: DocEntry) -> text:
     lb + q + "file" + q + ": " + q + escape_json(entry.file_path) + q + ", " + q + "line" + q + ": {entry.line_number}, " + q + "name" + q + ": " + q + escape_json(entry.item_name) + q + ", " + q + "kind" + q + ": " + q + entry.item_kind + q + rb
 
 fn format_match_line(m: SemanticMatch) -> text:
-    val sim_str = format_sim(m.similarity)
+    val sim_str = format_score_hundredths(m.similarity)
     val kind = severity_label(m.similarity, m.match_kind)
     "  [{sim_str}] {m.entry_a.file_path}:{m.entry_a.item_name} (L{m.entry_a.line_number}) <-> {m.entry_b.file_path}:{m.entry_b.item_name} (L{m.entry_b.line_number}) {kind}"
 
@@ -143,17 +136,3 @@ fn severity_label(score: f64, kind: text) -> text:
     if score >= 0.95:
         return "[NEAR-IDENTICAL]"
     "[SIMILAR]"
-
-fn format_sim(sim: f64) -> text:
-    # Format as 0.XX
-    val pct = (sim * 100.0) as i64
-    val whole = pct / 100
-    val frac = pct % 100
-    if frac < 10:
-        "{whole}.0{frac}"
-    else:
-        "{whole}.{frac}"
-
-fn format_threshold(t: f64) -> text:
-    format_sim(t)
-

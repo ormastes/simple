@@ -1,0 +1,108 @@
+# @cover examples/nvfs/src/tool/nvfs_check.spl 60%
+"""
+# NVFS N8 Check Tool Unit Tests (skeleton)
+
+**Feature IDs:** #NVFS-N8-CHECK
+**Category:** Structural Integrity / Offline Audit
+**Difficulty:** 2/5
+**Status:** Skeleton — phase stubs use pass_todo; tests validate CLI dispatch
+             plumbing and report types only.  Full walker tests tracked in
+             FR-NVFS-N8-002.
+**Design:** doc/05_design/nvfs/check_tool.md
+
+## Overview
+
+Three structural tests for the skeleton nvfs_check_main dispatcher:
+  1. Clean-volume fixture returns exit code 0 and report.clean == true.
+  2. Verbose flag is accepted without panic; report type is intact.
+  3. check_report_pretty produces non-empty output containing severity keys.
+
+Synthetic corruption fixture tests (orphaned extents, refcount mismatches, etc.)
+require the full phase walkers and are deferred to FR-NVFS-N8-002.
+"""
+
+use std.sspec.*
+use examples.nvfs.src.tool.nvfs_check.{
+    NvfsCheckOpts,
+    CheckReport,
+    CheckIssue,
+    check_report_new,
+    check_report_add,
+    check_report_pretty,
+    nvfs_check_main,
+}
+
+# ---------------------------------------------------------------------------
+# Test 1: clean-volume fixture — exit code 0, report.clean == true
+# ---------------------------------------------------------------------------
+
+it "nvfs_check_main returns 0 and clean report on stub (no corruption injected)":
+    val opts = NvfsCheckOpts(
+        path:            "/dev/null",
+        verbose:         false,
+        check_checksums: false,
+        check_refcount:  false,
+    )
+    val code = nvfs_check_main(opts)
+    # All phases are pass_todo stubs — no issues can be added.
+    # Expected: exit code 0 (clean).
+    expect(code).to_equal(0)
+
+    # Also verify CheckReport zero state is sane.
+    val report = check_report_new()
+    expect(report.clean).to_equal(true)
+    expect(report.error_count).to_equal(0)
+    expect(report.fatal_count).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Test 2: verbose flag accepted; check_refcount path does not panic
+# ---------------------------------------------------------------------------
+
+it "nvfs_check_main accepts verbose + check_refcount flags without panic":
+    val opts = NvfsCheckOpts(
+        path:            "/dev/null",
+        verbose:         true,
+        check_checksums: true,
+        check_refcount:  true,
+    )
+    val code = nvfs_check_main(opts)
+    # Stubs produce no issues regardless of flags.
+    expect(code).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Test 3: check_report_pretty produces structured output with severity keys
+# ---------------------------------------------------------------------------
+
+it "check_report_pretty output contains severity and clean fields":
+    var report = check_report_new()
+
+    # Add one WARN and one ERROR manually to exercise the formatter.
+    val warn_issue = CheckIssue(
+        severity: "WARN",
+        phase:    3,
+        message:  "orphaned pmap extent at arena_id=7 offset=4096",
+        detail:   "arena_id=7",
+    )
+    val err_issue = CheckIssue(
+        severity: "ERROR",
+        phase:    4,
+        message:  "refcount mismatch: stored 3 actual 1",
+        detail:   "logical_page_no=42",
+    )
+    report = check_report_add(report, warn_issue)
+    report = check_report_add(report, err_issue)
+
+    val pretty = check_report_pretty(report)
+
+    # Must contain the top-level clean flag.
+    expect(pretty.contains("clean")).to_equal(true)
+    # Must contain severity tiers.
+    expect(pretty.contains("warn")).to_equal(true)
+    expect(pretty.contains("error")).to_equal(true)
+    # Must not be empty.
+    expect(pretty.len() > 0).to_equal(true)
+
+    # After adding an ERROR the report is no longer clean.
+    expect(report.clean).to_equal(false)
+    expect(report.warn_count).to_equal(1)
+    expect(report.error_count).to_equal(1)

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Strict MCP/LSP native smoke check for dev pipeline use.
+# Uses scripts/mcp_native_diag.shs and fails if any integrated request returns 0 bytes.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TMP_OUT="$(mktemp "${TMPDIR:-/tmp}/simple-mcp-native-smoke.XXXXXX")"
+trap 'rm -f "$TMP_OUT"' EXIT
+
+info() { printf '[INFO] %s\n' "$1"; }
+fail() { printf '[FAIL] %s\n' "$1" >&2; }
+
+cd "$PROJECT_ROOT"
+sh scripts/mcp_native_diag.shs | tee "$TMP_OUT"
+
+require_positive_bytes() {
+    key="$1"
+    bytes="$(sed -n "s/^${key} bytes=\\([0-9][0-9]*\\).*/\\1/p" "$TMP_OUT" | head -n 1)"
+    if [ -z "$bytes" ] || [ "$bytes" -le 0 ]; then
+        fail "${key} did not produce a valid response"
+        exit 1
+    fi
+    info "${key} bytes=${bytes}"
+}
+
+require_positive_bytes "mcp_init"
+require_positive_bytes "mcp_tools"
+require_positive_bytes "lsp_init"
+require_positive_bytes "lsp_tools"
+
+if grep -F 'classification=framework-native-miscompile' "$TMP_OUT" >/dev/null 2>&1; then
+    fail 'Known MCP native miscompile signature detected'
+    exit 1
+fi
+
+info "Native MCP/LSP smoke passed"

@@ -57,22 +57,24 @@ No numbers recorded. Reduction to ITER=10 outer recommended for next run.
 
 ## Bench: fs_driver MountTable (`bench/fs_driver_mount_table.spl`)
 
-**BLOCKER — compiler error.** `examples/nvfs/src/driver/fs_driver_impl.spl` uses
-`namespace` as a struct field name, which collides with the Simple reserved keyword
-`namespace` (treated as `mod` keyword). The import chain
-`std.fs_driver.mount_table → fs_driver_impl.spl` fails at parse time.
+**FIXED (2026-04-18) — namespace keyword collision resolved.** Renamed:
+- Module file `namespace.spl` → `ns_tree.spl` (path segment `namespace` is reserved)
+- Struct field `namespace: Namespace` → `ns: Namespace` in both `src/driver/fs_driver_impl.spl`
+  and `src/posix/fs_driver_impl.spl`
+- All `self.namespace.` accesses renamed to `self.ns.`
+- All three `use examples.nvfs.src.core.namespace.{...}` imports updated to `ns_tree`
+- Also fixed `case Aes128GcmResult.Ok(data: plaintext):` → positional pattern in `encryption.spl`
 
-Error site: `fs_driver_impl.spl:158` — `namespace: Namespace` field declaration.
-Root cause: pre-existing field-naming conflict; tracked separately.
-No numbers recorded.
+Bench now loads past parse/compile; terminates via interpreter-bulk-buffer limit (expected).
+No timing numbers recorded (interpreter budget). See FR-BENCH-NS-KEYWORD-001.
 
 ---
 
 ## Bench: run_all (`bench/run_all.spl`)
 
-**BLOCKER — same namespace collision** as fs_driver bench above.
-`run_all.spl` imports `std.fs_driver.mount_table` for the mount-table mini-bench.
-No numbers recorded.
+**FIXED (2026-04-18) — same namespace collision resolved** as fs_driver bench above.
+`run_all.spl` imports `std.fs_driver.mount_table`; now loads cleanly.
+No timing numbers recorded (interpreter budget).
 
 ---
 
@@ -96,9 +98,8 @@ These will be fixed when the benches are next updated.
 
 ## Pending: FR-BENCH-BASELINE-001
 
-Baseline recorded for WAL bench. NVFS arena and MountTable benches blocked
-as noted above. Re-run after:
-1. Fix `namespace` field name in `fs_driver_impl.spl` (unblocks fs_driver + run_all).
+Baseline recorded for WAL bench. NVFS arena and MountTable benches status:
+1. ~~Fix `namespace` field name in `fs_driver_impl.spl`~~ — DONE 2026-04-18 (FR-BENCH-NS-KEYWORD-001).
 2. Reduce NVFS arena A1 outer iterations to 10 (unblocks arena bench in interpreter).
 3. Or: native-compile mode once FR-COMPILER-001/002 resolved (all benches will run
    in < 1s at native speed).

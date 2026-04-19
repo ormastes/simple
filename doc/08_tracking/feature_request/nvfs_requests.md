@@ -796,3 +796,31 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   Throughput column shows 0 in WAL/NVFS inline helpers due to old `(iters*1000)/total_ns`
   formula (underflows); corrected to `(iters*1_000_000)/total_ns` in `timing.spl`.
   Inline copies in WAL and NVFS bench files need the same fix as follow-up.
+
+---
+
+## FR-BENCH-NS-KEYWORD-001 — Fix `namespace` reserved-keyword collision in NVFS drivers
+
+- **id:** FR-BENCH-NS-KEYWORD-001
+- **title:** Fix `namespace` reserved-keyword collision blocking fs_driver and run_all benches
+- **Filed-on:** 2026-04-18
+- **Filed-by:** Claude (session: spostgre-nvfs-storage namespace-kw-fix)
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:** The Simple parser rejects `namespace` as both a field name and a
+  module path segment (it is a reserved keyword aliased to `mod`). The NVFS driver structs
+  used `namespace: Namespace` as a field, and the module was in `src/core/namespace.spl`,
+  causing parse errors that blocked the `fs_driver_mount_table` and `run_all` benches.
+- **Acceptance-criteria:**
+  - [x] `namespace.spl` renamed to `ns_tree.spl`
+  - [x] All `use examples.nvfs.src.core.namespace.{...}` imports updated to `ns_tree`
+  - [x] `namespace: Namespace` field renamed to `ns: Namespace` in both driver structs
+  - [x] All `self.namespace.` accesses renamed to `self.ns.`
+  - [x] Also fixed `case Aes128GcmResult.Ok(data: plaintext):` → positional pattern in `encryption.spl`
+  - [x] Bench exits via interpreter-budget (SIGTERM) rather than parse error — confirmed
+- **Related-upfront:** none
+- **Related-design-doc:** `bench/BASELINE.md`
+- **Related-issue:** none
+- **Notes:** The module rename (`namespace` → `ns_tree`) is required because `namespace`
+  appears as a path segment in `use` statements, which the parser also flags. The `Namespace`
+  type name itself is not a keyword and was left unchanged.

@@ -50,6 +50,43 @@
 - [x] 8-ship (Release Mgr) — 2026-04-18
 - [ ] 9-extend (NVFS ← Btrfs/ZFS feature parity + SimpleOS shared FS driver interface + POSIX-over-NVFS wrapper) — started 2026-04-18
 - [x] 9-bdd-features-wave7-8 (QA Lead — BDD specs for all wave 7/8 behaviour) — 2026-04-18
+- [x] 9-fr-compiler-002-diag (FR-COMPILER-002 deep diagnosis) — 2026-04-18
+
+#### 9-fr-compiler-002-diag
+
+**Goal:** Pinpoint why the self-hosted import resolver ignores explicit `use` paths when
+two modules define same-named structs. Diagnosis only — no fix.
+
+**Divergence A — `src/compiler/20.hir/hir_lowering/items.spl:210-225` (`lower_import`):**
+`lower_import` produces a `HirImport` metadata record and returns without touching the
+`SymbolTable`. No imported type is bound into the current scope during HIR lowering.
+Contrast: Rust seed `import_loader.rs` runs a two-pass pipeline
+(`preregister_imported_type_names` + `load_imported_types`) that walks each imported
+module's AST, filters by import target (glob vs. named list), and calls
+`register_named` / `register_struct` / `register_class` + `globals.insert`.
+
+**Divergence B — `src/compiler/20.hir/hir_types.spl:201-245` (`SymbolTable.define` /
+`SymbolTable.lookup`):**
+`define()` at line 224 stores `scope_syms[name] = id` keyed by bare short name —
+last-write-wins. `Symbol.defining_module` (line 216) is populated from
+`HirLowering.module_filename`, but that field is set once per compile unit (not per
+imported module), so all imported symbols share the same value. `lookup()` at lines
+230-245 matches on `name` only — it never consults `defining_module` or the import list.
+
+**Combined effect:** `use compiler.common.driver_core_types.*` is a no-op on the symbol
+table. Both `CompileOptions` structs land in the same scope under the same key; whichever
+loads last survives. The backend struct wins by load order, causing
+"Function not found" for all fields unique to the 17-field driver struct.
+
+**Fix direction:** In `items.spl`, extend `lower_import` (or add a new pass in
+`lower_module`) to walk the imported module's AST, filter by import target, and call
+`self.symbols.define` for each matching type with the imported module's path as
+`defining_module`. In `hir_types.spl`, add a first-write-wins guard to `define` (mirror
+Rust seed `is_none()` check in `preregister_imported_type_names`) so explicitly-imported
+types are not silently overwritten by later loads.
+
+**Status:** Diagnosis complete. Full write-up in
+`doc/08_tracking/feature_request/compiler_requests.md` under FR-COMPILER-002.
 
 #### 9-bdd-features-wave7-8
 
@@ -2109,3 +2146,32 @@ implemented) and record ns-level baseline numbers.
 1. `namespace` field name in `fs_driver_impl.spl:158` — rename to `ns` or `mount_ns`
 2. NVFS arena A1: reduce outer ITER from 1000 to 10 for interpreter budget
 3. Long-term: native-compile mode (FR-COMPILER-001/002) will make all benches < 1s
+
+#### 9-spostgre-m5-vacuum-tests
+
+**Status:** DONE (2026-04-18)
+**File:** `examples/spostgre/test/unit/engine/vacuum_test.spl`
+**Covers 3 describe blocks:**
+1. `vacuum M5 — no dead tuples` — empty HotChainMap and live-only chain both yield `dead_versions = 0, pages_updated = 0`.
+2. `vacuum M5 — one dead tuple` — chain with xmax=50 pruned when oldest_running_xmin=100; asserts `dead_versions = 1, pages_updated = 1`, and pmap `birth_gen` incremented from 1 → 2.
+3. `vacuum M5 — tier_cache invalidation` — pre-vacuum `tier_cache_get` returns 3 bytes; post-vacuum returns empty slice; `cache_invalidated = 1`.
+**Key design notes:**
+- `rel_id` convention: `head_logical_page / 1_000_000 == rel_id` (vacuum.spl:92).
+- `TxnManager(next_id: 100, active: [])` drives `oldest_running_xmin` = 100 so `xmax <= 100` versions are pruned.
+
+#### 9-namespace-kw-fix
+
+**Status:** DONE (2026-04-18)
+**Blocker resolved:** `namespace` reserved-keyword collision in NVFS drivers blocking `fs_driver_mount_table` and `run_all` benches.
+
+**Changes:**
+- `examples/nvfs/src/core/namespace.spl` → renamed to `ns_tree.spl` (path segment `namespace` is reserved keyword)
+- `namespace: Namespace` field → `ns: Namespace` in `src/driver/fs_driver_impl.spl` and `src/posix/fs_driver_impl.spl`
+- All `self.namespace.` accesses → `self.ns.` (replace_all in both files)
+- All three `use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}` imports → `ns_tree`
+- Fixed `case Aes128GcmResult.Ok(data: plaintext):` → `case Aes128GcmResult.Ok(plaintext):` in `encryption.spl` (named field binding not supported in match patterns)
+- Updated blockers list in `bench/BASELINE.md` (item 1 struck through as DONE)
+- Filed FR-BENCH-NS-KEYWORD-001 (Implemented) in `doc/08_tracking/feature_request/nvfs_requests.md`
+
+**Verification:** Bench exits via SIGTERM (interpreter-budget) rather than parse error — namespace keyword errors are gone.
+- Checksum NOT asserted (pmap always zero-fills checksum on publish); `birth_gen` increment is the correct post-vacuum invariant.

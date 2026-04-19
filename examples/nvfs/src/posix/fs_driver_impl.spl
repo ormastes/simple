@@ -16,7 +16,7 @@ use std.fs_driver.capability.{Capability, CapabilitySet}
 use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.fs_driver.ops.{FsDriver}
 use examples.nvfs.src.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl, arena_clone_range_impl}
-use examples.nvfs.src.core.namespace.{Namespace, NsInodeKind}
+use examples.nvfs.src.core.ns_tree.{Namespace, NsInodeKind}
 use examples.nvfs.src.core.reflink.{reflink_bump, reflink_drop}
 use examples.nvfs.src.posix.fd_table.{FdEntry, FdTable}
 use examples.nvfs.src.posix.cow_engine.{CowShadow}
@@ -40,7 +40,7 @@ struct NvfsPosixDriver:
     read_only: bool
     fd_table:  FdTable
     names:     [NameEntry]
-    namespace: Namespace
+    ns: Namespace
 
 impl NvfsPosixDriver:
 
@@ -51,7 +51,7 @@ impl NvfsPosixDriver:
             read_only: false,
             fd_table:  FdTable.new(),
             names:     [],
-            namespace: Namespace.new()
+            ns: Namespace.new()
         )
 
     fn _find_name(path: Path) -> i64:
@@ -276,12 +276,12 @@ impl FsDriver for NvfsPosixDriver:
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         """readdir — list children of the directory identified by handle.id."""
-        val raw_entries = self.namespace.readdir(handle.id)?
+        val raw_entries = self.ns.readdir(handle.id)?
         var out: [DirEntry] = []
         var i = 0
         while i < raw_entries.len() as i64:
             val e = raw_entries[i]
-            val child_opt = self.namespace._get_inode(e.child_ino)
+            val child_opt = self.ns._get_inode(e.child_ino)
             val is_dir = match child_opt:
                 case None: false
                 case Some(n):
@@ -298,18 +298,18 @@ impl FsDriver for NvfsPosixDriver:
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         """mkdir — create a directory via namespace."""
-        val pair = self.namespace.resolve_parent(path.raw)?
+        val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.namespace.mkdir(parent_ino, leaf, mode)?
+        val _ = self.ns.mkdir(parent_ino, leaf, mode)?
         Ok(())
 
     fn rmdir(path: Path) -> Result<(), FsError>:
         """rmdir — remove an empty directory via namespace."""
-        val pair = self.namespace.resolve_parent(path.raw)?
+        val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        self.namespace.rmdir(parent_ino, leaf)
+        self.ns.rmdir(parent_ino, leaf)
 
     fn unlink(path: Path) -> Result<(), FsError>:
         """Unlink: drop path mapping; mark every open fd for that arena dead.
@@ -356,16 +356,16 @@ impl FsDriver for NvfsPosixDriver:
 
     fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         """symlink — create a symlink at `link` pointing at `target`."""
-        val pair = self.namespace.resolve_parent(link.raw)?
+        val pair = self.ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.namespace.symlink(parent_ino, leaf, target.raw)?
+        val _ = self.ns.symlink(parent_ino, leaf, target.raw)?
         Ok(())
 
     fn readlink(path: Path) -> Result<Path, FsError>:
         """readlink — resolve symlink target for path."""
-        val ns_inode = self.namespace.resolve_path(path.raw)?
-        val target = self.namespace.readlink(ns_inode.ino)?
+        val ns_inode = self.ns.resolve_path(path.raw)?
+        val target = self.ns.readlink(ns_inode.ino)?
         Ok(Path(raw: target))
 
     fn link(target: Path, link: Path) -> Result<(), FsError>:

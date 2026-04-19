@@ -1,0 +1,84 @@
+name: Core + MCP Dev Pipeline
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'src/compiler/**'
+      - 'src/lib/**'
+      - 'src/app/mcp/**'
+      - 'src/app/simple_lsp_mcp/**'
+      - 'tools/mcp-registry/**'
+      - 'tools/lsp-mcp-registry/**'
+      - 'scripts/check-core-runtime-smoke.sh'
+      - 'scripts/check-mcp-native-smoke.sh'
+      - 'scripts/check-mcp-package-smoke.sh'
+      - 'scripts/mcp_native_diag.shs'
+      - 'scripts/deploy-marketplaces.shs'
+      - '.github/workflows/core-mcp-dev-pipeline.yml'
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - 'src/compiler/**'
+      - 'src/lib/**'
+      - 'src/app/mcp/**'
+      - 'src/app/simple_lsp_mcp/**'
+      - 'tools/mcp-registry/**'
+      - 'tools/lsp-mcp-registry/**'
+      - 'scripts/check-core-runtime-smoke.sh'
+      - 'scripts/check-mcp-native-smoke.sh'
+      - 'scripts/check-mcp-package-smoke.sh'
+      - 'scripts/mcp_native_diag.shs'
+      - 'scripts/deploy-marketplaces.shs'
+      - '.github/workflows/core-mcp-dev-pipeline.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-mcp-guard:
+    name: Core + MCP Guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: core-mcp-guard-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            core-mcp-guard-${{ runner.os }}-
+
+      - name: Build bootstrap runtime + native_all
+        working-directory: src/compiler_rust
+        run: |
+          cargo build --profile bootstrap -p simple-driver
+          cargo build --profile bootstrap -p simple-native-all
+
+      - name: Verify runtime exists
+        run: |
+          test -x src/compiler_rust/target/bootstrap/simple
+          src/compiler_rust/target/bootstrap/simple --version
+
+      - name: Core runtime smoke
+        env:
+          SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          sh scripts/check-core-runtime-smoke.sh "$SIMPLE_BINARY"
+
+      - name: Native MCP/LSP smoke
+        env:
+          SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          sh scripts/check-mcp-native-smoke.sh

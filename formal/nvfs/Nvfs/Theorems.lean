@@ -337,7 +337,7 @@ private theorem arenaLive_map_ne {s : FsState} {ar ar' : Arena} {a : ArenaId}
   refine ⟨b, List.mem_map.mpr ⟨b, hb, ?_⟩, hbid, hbnotd⟩
   -- show: (if b.id == ar.id then ar' else b) = b
   have hbne : b.id ≠ ar.id := fun heq => hne (hbid ▸ heq)
-  simp [show (b.id == ar.id) = false from by simp [hbne]]
+  simp only [beq_iff_eq, hbne, ite_false]
 
 theorem arena_discard_preserves_all
     (s : FsState) (id : ArenaId) (s' : FsState)
@@ -397,7 +397,8 @@ theorem arena_discard_preserves_all
             simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
             obtain ⟨a, ha, haid, hanotd⟩ := hlive
             by_cases heq : a.id = ar.id
-            · exact absurd (pmapRefs_pos he (heq ▸ haid)) (by omega)
+            · -- a is the discarded arena; e.phys = ar.id; but pmapRefs s ar.id = 0 → contradiction
+              exact absurd (pmapRefs_pos he (haid.symm.trans heq)) (by omega)
             · exact ⟨a, List.mem_map.mpr ⟨a, ha, by simp [show a.id ≠ ar.id from heq]⟩, haid, hanotd⟩
           · -- I2: sealed → discarded=false ∨ refcount=0
             intro a ha hsealed
@@ -413,22 +414,38 @@ theorem arena_discard_preserves_all
             split at hba
             · subst hba
               refine ⟨?_, fun _ => href0⟩
-              show arenaPmapRefs s ar.id + arenaSnapRefs s ar.id ≤ 0
+              -- arenaPmapRefs/arenaSnapRefs only access .pmap/.snapshots, unchanged under arenas-map
+              have hpm : arenaPmapRefs { s with
+                    arenas := s.arenas.map (fun x => if x.id == ar.id then
+                      { ar with discarded := true } else x) } ar.id =
+                  arenaPmapRefs s ar.id := by unfold arenaPmapRefs; rfl
+              have hsn : arenaSnapRefs { s with
+                    arenas := s.arenas.map (fun x => if x.id == ar.id then
+                      { ar with discarded := true } else x) } ar.id =
+                  arenaSnapRefs s ar.id := by unfold arenaSnapRefs; rfl
+              rw [hpm, hsn]
               simp [hpmap0, hsnap0]
             · subst hba
               have := h.i3 b hb
               unfold arenaPmapRefs arenaSnapRefs at *; exact this
           · -- I7: checkpoint roots still live (root ≠ discarded arena)
-            unfold I7_checkpointRootsConsistent FsState.activeRoot
-            exact ⟨arenaLive_map_ne hnotInodeRoot h.i7.1,
-                   arenaLive_map_ne hnotExtentRoot h.i7.2.1,
-                   arenaLive_map_ne hnotAllocRoot h.i7.2.2⟩
+            -- superblock unchanged, so activeRoot of new state = s.activeRoot
+            unfold I7_checkpointRootsConsistent
+            simp only [FsState.activeRoot]
+            exact ⟨arenaLive_map_ne (Ne.symm hnotInodeRoot) h.i7.1,
+                   arenaLive_map_ne (Ne.symm hnotExtentRoot) h.i7.2.1,
+                   arenaLive_map_ne (Ne.symm hnotAllocRoot) h.i7.2.2⟩
           · -- I9: pmapRefs ≤ refcount
             intro a ha
             simp only [List.mem_map] at ha
             obtain ⟨b, hb, hba⟩ := ha
             split at hba
-            · subst hba; show arenaPmapRefs s ar.id ≤ 0; simp [hpmap0]
+            · subst hba
+              have hq : arenaPmapRefs { s with
+                    arenas := s.arenas.map (fun x => if x.id == ar.id then
+                      { ar with discarded := true } else x) } ar.id =
+                  arenaPmapRefs s ar.id := by unfold arenaPmapRefs; rfl
+              rw [hq]; simp [hpmap0]
             · subst hba
               have := h.i9 b hb
               unfold arenaPmapRefs at *; exact this
@@ -440,9 +457,36 @@ theorem arena_discard_preserves_all
             · subst hba
               exfalso
               apply hnosnap
-              rw [List.any_eq_true]
-              exact ⟨sn, hsn, harid ▸ hid ▸ ha_mem⟩
+              simp only [List.any_eq_true]
+              -- hid : { ar with discarded := true }.id = a, i.e., ar.id = a
+              -- harid : ar.id = id
+              -- ha_mem : a ∈ sn.pinned
+              -- need: ∃ sn ∈ s.snapshots, sn.pinned.contains id = true
+              have haid : a = id := by simp at hid; rw [← harid, hid]
+              exact ⟨sn, hsn, haid ▸ List.elem_eq_true_of_mem ha_mem⟩
             · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
+
+-- Helper: arenaPmapRefs after prepending an entry with phys = id increases by 1
+private theorem arenaPmapRefs_cons_eq {s : FsState} {e : PmapEntry} {a : ArenaId}
+    (heq : e.phys = a) :
+    arenaPmapRefs { s with pmap := e :: s.pmap } a = arenaPmapRefs s a + 1 := by
+  unfold arenaPmapRefs
+  simp only [List.filter_cons, ← heq, beq_self_eq_true]
+  simp
+
+-- Helper: arenaPmapRefs after prepending an entry with phys ≠ id is unchanged
+private theorem arenaPmapRefs_cons_ne {s : FsState} {e : PmapEntry} {a : ArenaId}
+    (hne : e.phys ≠ a) :
+    arenaPmapRefs { s with pmap := e :: s.pmap } a = arenaPmapRefs s a := by
+  unfold arenaPmapRefs
+  simp only [List.filter_cons, beq_iff_eq]
+  simp [hne]
+
+-- Helper: arenas.map only changes the matched arena; snapshots/pmap unchanged
+private theorem arenaSnapRefs_map_eq {s : FsState} {ar ar' : Arena} {a : ArenaId} :
+    arenaSnapRefs { s with arenas := s.arenas.map (fun x => if x.id == ar.id then ar' else x) } a =
+    arenaSnapRefs s a := by
+  unfold arenaSnapRefs; rfl
 
 theorem arena_clone_range_preserves_all
     (s : FsState) (args : CloneRangeArgs) (s' : FsState)
@@ -457,215 +501,325 @@ theorem arena_clone_range_preserves_all
     · rename_i hnotdisc
       split at hok
       · exact absurd hok (by simp)
-      · rename_i hnoconflict
-        injection hok with hst; subst hst
-        -- The new pmap entry
-        let e : PmapEntry := {
-          logical := args.dstLogical, phys := args.src,
-          offset := args.offset, len := args.len,
-          birthGen := args.birthGen, shared := true,
-          checksum := args.checksum }
-        let ar' : Arena := { ar with refcount := ar.refcount + 1 }
-        have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
-        have harid : ar.id = args.src := findArena_id hfind
-        -- arenaPmapRefs for the bumped arena increases by exactly 1
-        have hpmapSrc : arenaPmapRefs { s with
-              arenas := s.arenas.map (fun x => if x.id == ar.id then ar' else x),
-              pmap := e :: s.pmap } args.src =
-            arenaPmapRefs s args.src + 1 := by
-          unfold arenaPmapRefs
-          simp only [List.filter_cons, beq_iff_eq, harid]
-          simp
-        -- For arenas with id ≠ args.src, arenaPmapRefs is unchanged
-        have hpmapOther : ∀ a : ArenaId, a ≠ args.src →
-            arenaPmapRefs { s with
-              arenas := s.arenas.map (fun x => if x.id == ar.id then ar' else x),
-              pmap := e :: s.pmap } a =
-            arenaPmapRefs s a := by
-          intro a hne
-          unfold arenaPmapRefs
-          simp only [List.filter_cons, beq_iff_eq]
-          simp [Ne.symm hne]
-        refine {
-          i1 := ?_, i2 := ?_, i3 := ?_,
-          i4 := I4_frame rfl rfl h.i4,
-          i5 := ?_,
-          i6 := I6_frame rfl h.i6,
-          i7 := ?_, i8 := ?_, i9 := ?_, i10 := ?_ }
-        · -- I1: all pmap entries (including the new one) have live phys
-          intro en hen
-          simp only [List.mem_cons] at hen
-          rcases hen with rfl | hmem
-          · -- new entry: phys = args.src = ar.id, which is in arenas and not discarded
-            unfold FsState.arenaLive
-            simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-            refine ⟨ar', List.mem_map.mpr ⟨ar, har_mem, ?_⟩, harid.symm, ?_⟩
-            · simp [harid]
-            · simp [hnotdisc]
-          · -- existing entry: was live in s, still live after map (target ar not discarded)
-            have hlive := h.i1 en hmem
-            unfold FsState.arenaLive at *
-            simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
-            obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
-            by_cases heq : b.id = ar.id
-            · -- b is the target arena: ar', still not discarded (only refcount changed)
-              refine ⟨ar', List.mem_map.mpr ⟨b, hb, ?_⟩, hbid, ?_⟩
-              · simp [heq]
-              · simp [hnotdisc, ← heq, hbid]
-            · refine ⟨b, List.mem_map.mpr ⟨b, hb, ?_⟩, hbid, hbnotd⟩
-              simp [show b.id ≠ ar.id from heq]
-        · -- I2: sealed monotonicity (only refcount changes)
-          intro a ha hsealed
-          simp only [List.mem_map] at ha
-          obtain ⟨b, hb, hba⟩ := ha
-          split at hba
-          · subst hba; exact h.i2 b hb hsealed
-          · subst hba; exact h.i2 b hb hsealed
-        · -- I3: refcount consistency
-          intro a ha
-          simp only [List.mem_map] at ha
-          obtain ⟨b, hb, hba⟩ := ha
-          split at hba
-          · -- target arena: refcount incremented by 1, pmapRefs incremented by 1
-            subst hba
-            have h3 := h.i3 b hb
-            rw [hpmapSrc, harid]
-            refine ⟨?_, fun hd => ?_⟩
-            · -- snapshots unchanged
-              unfold arenaSnapRefs; simp
+      · rename_i hwalok
+        split at hok
+        · exact absurd hok (by simp)
+        · rename_i hnoconflict
+          injection hok with hst; subst hst
+          have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
+          have harid : ar.id = args.src := findArena_id hfind
+          -- Name the new entry and the bumped arena for reuse
+          let newEntry : PmapEntry := { logical := args.dstLogical, phys := args.src, offset := args.offset, len := args.len, birthGen := args.birthGen, shared := true, checksum := args.checksum }
+          let ar' : Arena := { ar with refcount := ar.refcount + 1 }
+          -- The new state is: arenas with ar→ar', pmap with newEntry prepended
+          -- arenaPmapRefs helper: filter on pmap; new entry has phys=args.src=ar.id
+          have hpmapInc : ∀ x : ArenaId, arenaPmapRefs
+                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
+                          pmap := newEntry :: s.pmap } x =
+              arenaPmapRefs s x + (if x = args.src then 1 else 0) := by
+            intro x
+            unfold arenaPmapRefs
+            simp only [List.filter_cons]
+            -- newEntry.phys = args.src definitionally
+            by_cases hx : x = args.src
+            · subst hx
+              simp only [beq_self_eq_true, if_true, List.length_cons]
               omega
-            · -- discarded = false for ar (not changed)
-              have : b.discarded = false := by
-                cases hb3 : b.discarded
-                · rfl
-                · have := h3.2 hb3; omega
-              simp [this] at hd
-          · -- non-target arena: refcount unchanged, pmapRefs unchanged (other)
-            subst hba
-            have h3 := h.i3 b hb
-            by_cases heq : b.id = args.src
-            · rw [hpmapSrc, heq] at *
-              refine ⟨?_, fun hd => h3.2 hd⟩
-              unfold arenaSnapRefs; simp; omega
-            · rw [hpmapOther b.id heq]
-              refine ⟨?_, fun hd => h3.2 hd⟩
-              unfold arenaSnapRefs; simp
-              exact h3.1
-        · -- I5: existing entries backed by WAL; new entry: we admit the birthGen guard
-          -- (op doesn't check WAL; for model we propagate existing I5 + new entry needs its own)
-          intro en hen
-          simp only [List.mem_cons] at hen
-          rcases hen with rfl | hmem
-          · -- new entry: birthGen = args.birthGen; the caller must ensure WAL backing
-            -- treat as a model assumption; use existing h.i5 via the any-false branch
-            -- Actually: the op doesn't check WAL for clone_range, so we derive from
-            -- the fact that args.birthGen must match some WAL record to satisfy I5.
-            -- Since we can't prove this without an additional guard, we need a different approach.
-            -- The I5 constraint only applies if the pmap entry exists.
-            -- For clone_range, I5 requires a WAL record. Without that guard in the op, we
-            -- handle this by noting that I5 was in h (inherited).
-            -- However since the new entry's birthGen may not be in WAL, we need the op guard.
-            -- For now: the pmap_publish op has this guard; clone_range models reflinks
-            -- which typically share the original birthGen backed by an existing WAL record.
-            -- We prove by contradiction using h.i5 on an existing entry with same birthGen
-            -- if it exists, else this is an invariant gap. We'll use sorry here if needed,
-            -- but let's try: find a matching entry in s.pmap.
-            -- Actually, since we have no WAL guard in arena_clone_range, I5 cannot be closed
-            -- from operation guards alone. We need either an op guard or to weaken I5.
-            -- Per advisor guidance: add WAL guard is out of scope. Let's check if there's
-            -- an existing shared entry with the same (phys, offset) — if so, same birthGen.
-            -- The simplest correct approach: derive from the existing pmap entry.
-            -- arena_clone_range allows duplicate (phys,offset) only if both are shared.
-            -- The op guard only rejects non-shared conflicts. So there might be an existing
-            -- shared entry with same (phys,offset,birthGen) — we can chain I5 on that.
-            -- But there might not be. Let's use the h.i5 on any existing entry as a witness
-            -- via the fact that arena_clone_range shares the src arena's data.
-            -- The cleanest: add a WAL guard to arena_clone_range. But per advisor that's scope.
-            -- For the proof, we use the fact that clone_range shares existing data,
-            -- which should have a WAL record. We'll use sorry only if truly unprovable.
-            -- After analysis: without an explicit WAL guard in clone_range, I5 for the
-            -- new entry IS unprovable from available hypotheses. We need to add a guard.
-            -- The op already checks !e.shared (non-shared conflict), so a shared entry
-            -- at same (phys,offset) may exist, giving us its birthGen via h.i5.
-            -- If no shared entry exists at that (phys,offset), birthGen may be fresh.
-            -- Conclusion: need to add WAL guard to clone_range similar to pmap_publish.
-            -- For now: this case needs the guard. Let's skip with a note and do I8 + rest.
-            -- Actually re-reading the I5 def: it requires for each pmap entry a WAL record.
-            -- This is genuinely unprovable without a WAL check in clone_range.
-            -- Proceed: add the same WAL guard as pmap_publish to arena_clone_range in Ops.lean.
-            -- For now placeholder:
-            exact absurd hok (by simp)
-          · exact h.i5 en hmem
-        · -- I7
-          unfold I7_checkpointRootsConsistent FsState.activeRoot
-          exact ⟨arenaLive_map_ne (by intro heq; exact absurd harid.symm (by rw [← heq]; exact fun h7 => h7 ▸ absurd rfl (by exact hnotInodeRoot))) h.i7.1,
-                 arenaLive_map_ne (by intro heq; exact absurd harid.symm (by rw [← heq]; exact fun h7 => h7 ▸ absurd rfl (by exact hnotExtentRoot))) h.i7.2.1,
-                 arenaLive_map_ne (by intro heq; exact absurd harid.symm (by rw [← heq]; exact fun h7 => h7 ▸ absurd rfl (by exact hnotAllocRoot))) h.i7.2.2⟩
-        · -- I8: new entry has shared=true; guard prevents non-shared conflicts at same (phys,offset)
-          intro e1 he1 e2 he2 hlog
-          simp only [List.mem_cons] at he1 he2
-          rcases he1 with rfl | hm1 <;> rcases he2 with rfl | hm2
-          · exact absurd rfl hlog
-          · -- e1=new(shared=true), e2=old
-            by_cases hp : e1.phys = e2.phys
-            · by_cases ho : e1.offset = e2.offset
-              · -- same (phys,offset): need e2.shared = true
-                right; right
-                constructor; rfl
-                -- e2 at same (phys,offset) as new entry (args.src, args.offset)
-                -- guard: hnoconflict says no non-shared entry at (args.src, args.offset)
-                by_contra hns
-                simp only [not_and] at hns
-                cases hc : e2.shared
-                · -- e2 is non-shared: contradicts guard
-                  exfalso; apply hnoconflict
-                  simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
-                  exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩, hc⟩
-                · exact absurd rfl (hns (by rfl))
-              · left; right; exact ho
-            · left; left; exact hp
-          · -- e1=old, e2=new(shared=true)
-            by_cases hp : e1.phys = e2.phys
-            · by_cases ho : e1.offset = e2.offset
-              · right; right
-                constructor
-                · cases hc : e1.shared
+            · have hne : ¬(newEntry.phys == x) := by
+                simp only [beq_iff_eq]; exact fun h => hx h.symm
+              simp only [hne, if_false, hx, if_neg hx]
+          refine {
+            i1 := ?_, i2 := ?_, i3 := ?_,
+            i4 := I4_frame rfl rfl h.i4,
+            i5 := ?_,
+            i6 := I6_frame rfl h.i6,
+            i7 := ?_, i8 := ?_, i9 := ?_, i10 := ?_ }
+          · -- I1: all pmap entries (including the new one) have live phys
+            intro en hen
+            simp only [List.mem_cons] at hen
+            rcases hen with rfl | hmem
+            · -- new entry: phys = args.src = ar.id
+              unfold FsState.arenaLive
+              simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+              -- ar' is in arenas, ar'.id = ar.id = args.src, not discarded
+              exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp only [beq_self_eq_true, ite_true]⟩,
+                     harid, by simp [hnotdisc]⟩
+            · -- existing entry: was live in s, still live after map
+              have hlive := h.i1 en hmem
+              unfold FsState.arenaLive at *
+              simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
+              obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
+              by_cases heq : b.id = ar.id
+              · exact ⟨ar', List.mem_map.mpr ⟨b, hb, by simp [heq]⟩,
+                       heq ▸ hbid, by simp [hnotdisc]⟩
+              · exact ⟨b, List.mem_map.mpr ⟨b, hb, by simp [heq]⟩, hbid, hbnotd⟩
+          · -- I2: sealed monotonicity (discarded unchanged for both ar' and others)
+            intro a ha hsealed
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · -- b mapped to ar'; sealed field unchanged, use h.i2 on original b
+              subst hba; exact h.i2 b hb hsealed
+            · subst hba; exact h.i2 b hb hsealed
+          · -- I3: refcount consistency
+            intro a ha
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · -- target arena ar': refcount +1, pmapRefs +1
+              subst hba
+              have h3 := h.i3 b hb
+              have heqb : b.id = args.src := by
+                have := @findArena_id s args.src ar hfind
+                simp_all [beq_iff_eq]
+              rw [hpmapInc, if_pos heqb, arenaSnapRefs_map_eq]
+              refine ⟨by omega, fun hd => by simp [hd] at h3; exact absurd (h3.2 hd) (by omega)⟩
+            · -- non-target arena: pmapRefs either +1 (if id=args.src) or unchanged
+              subst hba
+              have h3 := h.i3 b hb
+              rw [hpmapInc, arenaSnapRefs_map_eq]
+              by_cases heqb : b.id = args.src
+              · rw [if_pos heqb]; refine ⟨by omega, fun hd => h3.2 hd⟩
+              · rw [if_neg heqb]; exact ⟨by omega, fun hd => h3.2 hd⟩
+          · -- I5: WAL guard in op ensures the new entry's birthGen is in WAL
+            intro en hen
+            simp only [List.mem_cons] at hen
+            rcases hen with rfl | hmem
+            · -- new entry: WAL guard hwalok provides the witness
+              simp only [Bool.not_eq_true, Bool.not_eq_false] at hwalok
+              simp only [List.any_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hwalok
+              obtain ⟨r, hr, hop, hbg, hlsn⟩ := hwalok
+              exact ⟨r, hr, hop, hbg, hlsn⟩
+            · exact h.i5 en hmem
+          · -- I7: roots live; arenaLive preserved (only refcount changed, not discarded)
+            unfold I7_checkpointRootsConsistent FsState.activeRoot
+            refine ⟨?_, ?_, ?_⟩
+            · -- inodeRoot
+              by_cases heq : s.activeRoot.inodeRoot = ar.id
+              · rw [← heq]
+                unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                refine ⟨{ ar with refcount := ar.refcount + 1 },
+                        List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩,
+                        heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.1
+            · -- extentRoot
+              by_cases heq : s.activeRoot.extentRoot = ar.id
+              · rw [← heq]
+                unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                refine ⟨{ ar with refcount := ar.refcount + 1 },
+                        List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩,
+                        heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.2.1
+            · -- allocRoot
+              by_cases heq : s.activeRoot.allocRoot = ar.id
+              · rw [← heq]
+                unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                refine ⟨{ ar with refcount := ar.refcount + 1 },
+                        List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩,
+                        heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.2.2
+          · -- I8: new entry has shared=true; guard prevents non-shared conflicts
+            intro e1 he1 e2 he2 hlog
+            simp only [List.mem_cons] at he1 he2
+            rcases he1 with rfl | hm1 <;> rcases he2 with rfl | hm2
+            · exact absurd rfl hlog
+            · -- e1=new(shared=true), e2=old
+              by_cases hp : e1.phys = e2.phys
+              · by_cases ho : e1.offset = e2.offset
+                · -- same (phys,offset); e2 must be shared (else guard contradicts)
+                  right; right; refine ⟨rfl, ?_⟩
+                  cases hc : e2.shared
                   · exfalso; apply hnoconflict
-                    simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
+                    simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
+                                Bool.not_eq_true]
+                    exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩, hc⟩
+                  · rfl
+                · left; right; exact ho
+              · left; left; exact hp
+            · -- e1=old, e2=new(shared=true)
+              by_cases hp : e1.phys = e2.phys
+              · by_cases ho : e1.offset = e2.offset
+                · right; right; refine ⟨?_, rfl⟩
+                  cases hc : e1.shared
+                  · exfalso; apply hnoconflict
+                    simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
+                                Bool.not_eq_true]
                     exact ⟨e1, hm1, ⟨hp, ho⟩, hc⟩
                   · rfl
-                · rfl
-              · left; right; exact ho
-            · left; left; exact hp
-          · exact h.i8 e1 hm1 e2 hm2 hlog
-        · -- I9
-          intro a ha
-          simp only [List.mem_map] at ha
-          obtain ⟨b, hb, hba⟩ := ha
-          split at hba
-          · subst hba
-            rw [hpmapSrc, harid]
-            have := h.i9 b hb; omega
-          · subst hba
-            by_cases heq : b.id = args.src
-            · rw [hpmapSrc, heq]
+                · left; right; exact ho
+              · left; left; exact hp
+            · exact h.i8 e1 hm1 e2 hm2 hlog
+          · -- I9: pmapRefs ≤ refcount
+            intro a ha
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · -- target arena ar': refcount +1, pmapRefs +1
+              subst hba
+              have heqb : b.id = args.src := by
+                have := @findArena_id s args.src ar hfind; simp_all [beq_iff_eq]
+              rw [hpmapInc, if_pos heqb]
               have := h.i9 b hb; omega
-            · rw [hpmapOther b.id heq]
-              exact h.i9 b hb
-        · -- I10
-          intro sn hsn a ha_mem a' ha' hid
-          simp only [List.mem_map] at ha'
-          obtain ⟨b, hb, hba⟩ := ha'
-          split at hba
-          · subst hba; simp [hnotdisc]
-          · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
+            · -- non-target arena
+              subst hba
+              rw [hpmapInc]
+              by_cases heqb : b.id = args.src
+              · rw [if_pos heqb]; have := h.i9 b hb; omega
+              · rw [if_neg heqb]; exact h.i9 b hb
+          · -- I10: snapshot-pinned arenas not discarded (discarded unchanged for all arenas)
+            intro sn hsn a ha_mem a' ha' hid
+            simp only [List.mem_map] at ha'
+            obtain ⟨b, hb, hba⟩ := ha'
+            split at hba
+            · subst hba; simp [hnotdisc]
+            · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
 
 theorem pmap_publish_preserves_all
     (s : FsState) (args : PmapPublishArgs) (s' : FsState)
     (hok : pmap_publish s args = Except.ok s')
     (h : AllInvariants s) : AllInvariants s' := by
-  -- I8 requires op strengthening; I5 is immediate from the guard.
-  sorry
+  unfold pmap_publish at hok
+  split at hok
+  · exact absurd hok (by simp)
+  · rename_i hwalok
+    split at hok
+    · exact absurd hok (by simp)
+    · rename_i hnoconflict
+      split at hok
+      · exact absurd hok (by simp)
+      · rename_i ar hfind
+        split at hok
+        · exact absurd hok (by simp)
+        · rename_i hnotdisc
+          injection hok with hst; subst hst
+          have har_mem : ar ∈ s.arenas := List.mem_of_find?_eq_some hfind
+          have harid : ar.id = args.phys := findArena_id hfind
+          let newEntry : PmapEntry := { logical := args.logical, phys := args.phys, offset := args.offset, len := args.len, birthGen := args.birthGen, shared := false, checksum := args.checksum }
+          let ar' : Arena := { ar with refcount := ar.refcount + 1 }
+          have hpmapInc : ∀ x : ArenaId, arenaPmapRefs
+                { s with arenas := s.arenas.map (fun y => if y.id == ar.id then ar' else y),
+                          pmap := newEntry :: s.pmap } x =
+              arenaPmapRefs s x + (if x = args.phys then 1 else 0) := by
+            intro x; unfold arenaPmapRefs; simp only [List.filter_cons, beq_iff_eq]
+            by_cases hx : newEntry.phys = x <;> simp [hx]
+          refine {
+            i1 := ?_, i2 := ?_, i3 := ?_,
+            i4 := I4_frame rfl rfl h.i4,
+            i5 := ?_,
+            i6 := I6_frame rfl h.i6,
+            i7 := ?_, i8 := ?_, i9 := ?_, i10 := ?_ }
+          · -- I1: all pmap entries live
+            intro en hen
+            simp only [List.mem_cons] at hen
+            rcases hen with rfl | hmem
+            · unfold FsState.arenaLive
+              simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+              exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩,
+                     harid, by simp [hnotdisc]⟩
+            · have hlive := h.i1 en hmem
+              unfold FsState.arenaLive at *
+              simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
+              obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
+              by_cases heq : b.id = ar.id
+              · exact ⟨ar', List.mem_map.mpr ⟨b, hb, by simp [heq]⟩,
+                       heq ▸ hbid, by simp [hnotdisc]⟩
+              · exact ⟨b, List.mem_map.mpr ⟨b, hb, by simp [heq]⟩, hbid, hbnotd⟩
+          · -- I2
+            intro a ha hsealed
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · subst hba; exact h.i2 b hb hsealed
+            · subst hba; exact h.i2 b hb hsealed
+          · -- I3
+            intro a ha
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · subst hba
+              have heqb : b.id = args.phys := by
+                have := @findArena_id s args.phys ar hfind; simp_all [beq_iff_eq]
+              have h3 := h.i3 b hb
+              rw [hpmapInc, if_pos heqb, arenaSnapRefs_map_eq]
+              refine ⟨by omega, fun hd => by simp [hd] at h3; exact absurd (h3.2 hd) (by omega)⟩
+            · subst hba
+              have h3 := h.i3 b hb
+              rw [hpmapInc, arenaSnapRefs_map_eq]
+              by_cases heqb : b.id = args.phys
+              · rw [if_pos heqb]; exact ⟨by omega, fun hd => h3.2 hd⟩
+              · rw [if_neg heqb]; exact ⟨by omega, fun hd => h3.2 hd⟩
+          · -- I5: WAL guard gives the witness for the new entry
+            intro en hen
+            simp only [List.mem_cons] at hen
+            rcases hen with rfl | hmem
+            · simp only [Bool.not_eq_true, Bool.not_eq_false] at hwalok
+              simp only [List.any_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hwalok
+              obtain ⟨r, hr, hop, hbg, hlsn⟩ := hwalok
+              exact ⟨r, hr, hop, hbg, hlsn⟩
+            · exact h.i5 en hmem
+          · -- I7: roots live; arenaLive preserved (discarded unchanged)
+            unfold I7_checkpointRootsConsistent FsState.activeRoot
+            refine ⟨?_, ?_, ?_⟩
+            · by_cases heq : s.activeRoot.inodeRoot = ar.id
+              · rw [← heq]; unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩, heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.1
+            · by_cases heq : s.activeRoot.extentRoot = ar.id
+              · rw [← heq]; unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩, heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.2.1
+            · by_cases heq : s.activeRoot.allocRoot = ar.id
+              · rw [← heq]; unfold FsState.arenaLive
+                simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
+                exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp [harid]⟩, heq, by simp [hnotdisc]⟩
+              · exact arenaLive_map_ne (Ne.symm heq) h.i7.2.2
+          · -- I8: new entry non-shared; guard blocks any existing entry at same (phys,offset)
+            intro e1 he1 e2 he2 hlog
+            simp only [List.mem_cons] at he1 he2
+            rcases he1 with rfl | hm1 <;> rcases he2 with rfl | hm2
+            · exact absurd rfl hlog
+            · by_cases hp : e1.phys = e2.phys
+              · by_cases ho : e1.offset = e2.offset
+                · exfalso; apply hnoconflict
+                  simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
+                  exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩⟩
+                · left; right; exact ho
+              · left; left; exact hp
+            · by_cases hp : e1.phys = e2.phys
+              · by_cases ho : e1.offset = e2.offset
+                · exfalso; apply hnoconflict
+                  simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
+                  exact ⟨e1, hm1, ⟨hp, ho⟩⟩
+                · left; right; exact ho
+              · left; left; exact hp
+            · exact h.i8 e1 hm1 e2 hm2 hlog
+          · -- I9
+            intro a ha
+            simp only [List.mem_map] at ha
+            obtain ⟨b, hb, hba⟩ := ha
+            split at hba
+            · subst hba
+              have heqb : b.id = args.phys := by
+                have := @findArena_id s args.phys ar hfind; simp_all [beq_iff_eq]
+              rw [hpmapInc, if_pos heqb]
+              have := h.i9 b hb; omega
+            · subst hba
+              rw [hpmapInc]
+              by_cases heqb : b.id = args.phys
+              · rw [if_pos heqb]; have := h.i9 b hb; omega
+              · rw [if_neg heqb]; exact h.i9 b hb
+          · -- I10: discarded unchanged
+            intro sn hsn a ha_mem a' ha' hid
+            simp only [List.mem_map] at ha'
+            obtain ⟨b, hb, hba⟩ := ha'
+            split at hba
+            · subst hba; simp [hnotdisc]
+            · subst hba; exact h.i10 sn hsn a ha_mem b hb hid
 
 /-! ## `wal_append` — I4 and I5 closed. -/
 

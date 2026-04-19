@@ -61,6 +61,10 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Security:** input validation present, no hardcoded secrets
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
+- **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
+  - `sh scripts/check-core-runtime-smoke.sh <runtime>`
+  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
+  - If npm packaging/release flow changed: `sh scripts/check-mcp-package-smoke.sh`
 
 ### Phase 6: Documentation Freshness
 
@@ -105,3 +109,4 @@ STATUS: FAIL (2 failures, 1 warning)
 - Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact
 - Verify cache invalidation exists for write flows that affect cached or indexed data
 - Require startup and representative request performance evidence for performance-sensitive tooling changes
+- Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
