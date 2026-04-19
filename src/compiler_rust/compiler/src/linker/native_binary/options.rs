@@ -119,7 +119,7 @@ impl Default for NativeBinaryOptions {
 }
 
 impl NativeBinaryOptions {
-    fn detect_system_library_paths() -> Vec<PathBuf> {
+    pub(super) fn detect_system_library_paths() -> Vec<PathBuf> {
         Self::detect_library_paths_for_target(&Target::host())
     }
 
