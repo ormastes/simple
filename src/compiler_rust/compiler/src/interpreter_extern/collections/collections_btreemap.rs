@@ -25,6 +25,12 @@ pub(super) fn get_btreemap_registry() -> BTreeMapRegistry {
         .clone()
 }
 
+pub(super) fn clear_btreemap_registry() {
+    if let Some(reg) = BTREEMAP_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+}
+
 fn alloc_btreemap_handle() -> BTreeMapHandle {
     NEXT_BTREEMAP_ID.fetch_add(1, Ordering::Relaxed)
 }

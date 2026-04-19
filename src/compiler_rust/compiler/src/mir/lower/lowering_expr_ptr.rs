@@ -1,7 +1,7 @@
 //! Pointer/reference expression lowering: PointerNew, Ref, Deref, ContractOld, NeighborAccess, GpuIntrinsic dispatch.
 
 use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, PointerKind};
+use crate::hir::{HirExpr, NeighborDirection, PointerKind};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {

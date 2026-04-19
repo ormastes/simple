@@ -25,6 +25,12 @@ pub(super) fn get_hashset_registry() -> HashSetRegistry {
         .clone()
 }
 
+pub(super) fn clear_hashset_registry() {
+    if let Some(reg) = HASHSET_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+}
+
 fn alloc_hashset_handle() -> HashSetHandle {
     NEXT_HASHSET_ID.fetch_add(1, Ordering::Relaxed)
 }

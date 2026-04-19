@@ -8,7 +8,8 @@
 //! Tests are split by instruction category:
 //! - `scalar`      — constants, basic ops, binop, cast
 //! - `memory`      — memory, boxing, drop, coverage, units, enums, unions, result, pointers, contracts, spread
-//! - `aggregates`  — collections, strings, structs, closures, methods, patterns, interpreter, async, parallel
+//! - `aggregates`  — collections, strings, structs, closures, methods, patterns, interpreter, globals
+//! - `concurrent`  — async, generators, actors, parallel iterators
 //! - `gpu`         — GPU/SIMD, atomic, intrinsics, actors, call
 
 use crate::codegen::Codegen;
@@ -54,6 +55,9 @@ mod memory;
 
 #[path = "codegen_instr_tests_aggregates.rs"]
 mod aggregates;
+
+#[path = "codegen_instr_tests_concurrent.rs"]
+mod concurrent;
 
 #[path = "codegen_instr_tests_gpu.rs"]
 mod gpu;

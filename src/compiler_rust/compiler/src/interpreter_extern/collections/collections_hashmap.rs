@@ -25,6 +25,12 @@ pub(super) fn get_hashmap_registry() -> HashMapRegistry {
         .clone()
 }
 
+pub(super) fn clear_hashmap_registry() {
+    if let Some(reg) = HASHMAP_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+}
+
 fn alloc_hashmap_handle() -> HashMapHandle {
     NEXT_HASHMAP_ID.fetch_add(1, Ordering::Relaxed)
 }
