@@ -778,7 +778,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
-- **Implemented-by:** 9-bench-baseline agent
+- **Implemented-by:** 9-bench-baseline agent; extended 2026-04-18 by 9-bench-rerun agent
 - **Requested-semantics:**
   After FR-BENCH-CLOCK-001 wired `rt_time_now_nanos()`, run all 5 bench scripts
   (`fs_driver_mount_table.spl`, `nvfs_arena_throughput.spl`, `spostgre_wal_append.spl`,
@@ -789,20 +789,59 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
         (real CLOCK_MONOTONIC, not loop-counter proxy)
   - [x] WAL bench (`spostgre_wal_append.spl`) ran successfully; real ns numbers recorded
         in `bench/BASELINE.md` (p50 wal_append ≈ 23 µs, wal_recover_tail ≈ 5.6 ms)
-  - [x] NVFS arena bench blocker documented: A1 inner-loop (8M pushes) exceeds
-        interpreter 120s budget; recommended fix: reduce outer ITER to 10
-  - [x] fs_driver + run_all blocker documented: `namespace` field collision in
-        `fs_driver_impl.spl` causes parse error; tracked for fix
+  - [x] NVFS arena bench: iter counts reduced (FR-BENCH-ARENA-ITER-001); all 4 scenarios
+        completed (Wave 10 re-run, 2026-04-18). Numbers in `bench/BASELINE.md §Wave 10`.
+  - [x] fs_driver + run_all: parse now clean (namespace rename done); bench times out at
+        10k×resolve iterations — interpreter-budget limit, not keyword error. Documented.
   - [x] FR-BENCH-BASELINE-001 appended to `nvfs_requests.md`
   - [x] `#### 9-bench-baseline` appended to `.sstack/spostgre-nvfs-storage/state.md`
+  - [x] `#### 9-bench-rerun` appended to `.sstack/spostgre-nvfs-storage/state.md`
 - **Related-upfront:** FR-BENCH-CLOCK-001
 - **Related-design-doc:** `bench/BASELINE.md`
-- **Related-issue:** none
+- **Related-issue:** FR-BENCH-ARENA-ITER-001
 - **Notes:** WAL numbers are interpreter-mode costs (~23 µs p50 append). Native-compiled
   expected < 1 µs. Real NVMe FUA dominates at 50–200 µs on actual hardware.
   Throughput column shows 0 in WAL/NVFS inline helpers due to old `(iters*1000)/total_ns`
   formula (underflows); corrected to `(iters*1_000_000)/total_ns` in `timing.spl`.
   Inline copies in WAL and NVFS bench files need the same fix as follow-up.
+  MountTable/run_all benches remain interpreter-budget-limited at 10k iterations;
+  blocked on native-compile (FR-COMPILER-001/002).
+
+---
+
+### FR-BENCH-ARENA-ITER-001 — Reduce nvfs_arena_throughput iter counts for interpreter budget
+
+- **id:** FR-BENCH-ARENA-ITER-001
+- **title:** Reduce nvfs_arena_throughput.spl iter counts to fit interpreter budget
+- **Filed-on:** 2026-04-18
+- **Filed-by:** 9-bench-rerun agent (session spostgre-nvfs-storage)
+- **Priority:** P2
+- **Status:** Implemented
+- **Implemented-on:** 2026-04-18
+- **Implemented-by:** 9-bench-rerun agent
+- **Requested-semantics:**
+  A1 scenario (outer=1000, inner=1000 appends × 8 words = ~8M word-push ops) exceeded the
+  90s interpreter budget even after an initial reduction to outer=10. Root cause: each
+  `shim_arena_append(arena, 64)` call pushes `(64+7)/8 = 8` i64 words via interpreter
+  list-push; 1000 inner × 8 words = 8000 pushes per outer iter, and interpreter list-push
+  overhead (~7ms/iter as measured) makes even outer=5 with inner=100 take ~38s for A1.
+  A2 (64KB appends = 8192 words each) is even heavier: even 5 outer × 5 inner × 8192 words
+  = 204k pushes → p50 ≈ 10s/iter under interpreter.
+  Reduction is bench-only (does not affect the correctness of the shim or production code).
+- **Acceptance-criteria:**
+  - [x] A1: outer 1000→5, inner 1000→100; completes in < 90s (actual: ~38s)
+  - [x] A2: outer 100→5, inner 100→5; completes in < 90s (actual: ~50s total)
+  - [x] A3: outer 100→10, fill 100→10, clone_len 200KB→20KB
+  - [x] A4: outer 100→10
+  - [x] All 4 scenarios produce timing output (no SIGTERM)
+  - [x] Numbers appended to `bench/BASELINE.md` under "Wave 10 re-run"
+- **Related-upfront:** none
+- **Related-design-doc:** `bench/BASELINE.md §Wave 10 re-run`
+- **Related-issue:** FR-BENCH-BASELINE-001
+- **Notes:** Long-term fix is native-compile (FR-COMPILER-001/002); at native speed all
+  benches complete in < 1s and original iter counts are appropriate. The iter reductions
+  here are interpreter-mode accommodations only — restore to original counts when native
+  mode is available.
 
 ---
 

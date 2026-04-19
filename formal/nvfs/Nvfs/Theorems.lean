@@ -539,7 +539,7 @@ theorem arena_clone_range_preserves_all
             · -- new entry: phys = args.src = ar.id
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, harid, by simp [hnotdisc]⟩
+              refine ⟨ar', ?_, harid, Bool.not_eq_true.mp hnotdisc⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
             · -- existing entry: was live in s, still live after map
               have hlive := h.i1 en hmem
@@ -547,7 +547,7 @@ theorem arena_clone_range_preserves_all
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
               obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
               by_cases heq : b.id = ar.id
-              · refine ⟨ar', ?_, heq ▸ hbid, by simp [hnotdisc]⟩
+              · refine ⟨ar', ?_, heq ▸ hbid, Bool.not_eq_true.mp hnotdisc⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
               · refine ⟨b, ?_, hbid, hbnotd⟩
                 apply List.mem_map.mpr; exact ⟨b, hb, by simp [heq]⟩
@@ -604,7 +604,7 @@ theorem arena_clone_range_preserves_all
                           pmap := newEntry :: s.pmap } ar.id = true := by
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
-              refine ⟨ar', ?_, rfl, by simp [hnotdisc]⟩
+              refine ⟨ar', ?_, rfl, Bool.not_eq_true.mp hnotdisc⟩
               apply List.mem_map.mpr; exact ⟨ar, har_mem, by simp⟩
             refine ⟨?_, ?_, ?_⟩
             · -- inodeRoot
@@ -729,14 +729,14 @@ theorem pmap_publish_preserves_all
             · unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
               exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp only [beq_self_eq_true, ite_true]⟩,
-                     harid, by simp [hnotdisc]⟩
+                     harid, Bool.not_eq_true.mp hnotdisc⟩
             · have hlive := h.i1 en hmem
               unfold FsState.arenaLive at *
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at *
               obtain ⟨b, hb, hbid, hbnotd⟩ := hlive
               by_cases heq : b.id = ar.id
               · exact ⟨ar', List.mem_map.mpr ⟨b, hb, by simp only [beq_iff_eq, heq, ite_true]⟩,
-                       heq ▸ hbid, by simp [hnotdisc]⟩
+                       heq ▸ hbid, Bool.not_eq_true.mp hnotdisc⟩
               · exact ⟨b, List.mem_map.mpr ⟨b, hb, by simp only [beq_iff_eq, heq, if_false]⟩, hbid, hbnotd⟩
           · -- I2
             intro a ha hsealed
@@ -780,7 +780,7 @@ theorem pmap_publish_preserves_all
               unfold FsState.arenaLive
               simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq]
               exact ⟨ar', List.mem_map.mpr ⟨ar, har_mem, by simp only [beq_self_eq_true, ite_true]⟩,
-                     rfl, by simp [hnotdisc]⟩
+                     rfl, Bool.not_eq_true.mp hnotdisc⟩
             refine ⟨?_, ?_, ?_⟩
             · by_cases heq : s.activeRoot.inodeRoot = ar.id
               · rwa [← heq] at har'live ⊢; exact har'live
