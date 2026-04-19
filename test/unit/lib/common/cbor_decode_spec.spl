@@ -1,0 +1,768 @@
+# @covers src/lib/common/cbor/decode.spl 80%
+# @allow(unnamed_duplicate_typed_args)
+# @allow(primitive_api)
+# CBOR Decode Coverage Test
+# Branch coverage for decode.spl: header parsing, type detection, int/string/bool/null decoding
+#
+# **Feature IDs:** #CBOR-COVERAGE
+# **Category:** Testing
+# **Status:** Implemented
+
+use std.common.cbor.major_types.*
+use std.common.cbor.types.*
+use std.common.cbor.encode.*
+use std.common.cbor.decode.*
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn empty_i64_list() -> [i64]:
+    var r = [0]
+    r = []
+    r
+
+# ============================================================================
+# Test Group 4: decode.spl - Header Parsing (decode_uint_value)
+# ============================================================================
+
+describe "CBOR Decode - decode_uint_value via cbor_decode_unsigned":
+    context "when decoding immediate values (0..23)":
+        it "decodes value 0":
+            val encoded = cbor_encode_unsigned(0)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(1)
+
+        it "decodes value 23":
+            val encoded = cbor_encode_unsigned(23)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(23)
+            expect(result.1).to_equal(1)
+
+        it "decodes value 10":
+            val encoded = cbor_encode_unsigned(10)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(10)
+            expect(result.1).to_equal(1)
+
+    context "when decoding uint8 values (24..255)":
+        it "decodes value 24":
+            val encoded = cbor_encode_unsigned(24)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(24)
+            expect(result.1).to_equal(2)
+
+        it "decodes value 255":
+            val encoded = cbor_encode_unsigned(255)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(255)
+            expect(result.1).to_equal(2)
+
+    context "when decoding uint16 values (256..65535)":
+        it "decodes value 256":
+            val encoded = cbor_encode_unsigned(256)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(256)
+            expect(result.1).to_equal(3)
+
+        it "decodes value 1000":
+            val encoded = cbor_encode_unsigned(1000)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(1000)
+            expect(result.1).to_equal(3)
+
+        it "decodes value 65535":
+            val encoded = cbor_encode_unsigned(65535)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(65535)
+            expect(result.1).to_equal(3)
+
+    context "when decoding uint32 values":
+        it "decodes value 65536":
+            val encoded = cbor_encode_unsigned(65536)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(65536)
+            expect(result.1).to_equal(5)
+
+        it "decodes value 1000000":
+            val encoded = cbor_encode_unsigned(1000000)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(1000000)
+            expect(result.1).to_equal(5)
+
+    context "when bytes are truncated for uint8":
+        it "returns error tuple":
+            # Major type 0 + addl 24 (uint8 follows) but no second byte
+            val encoded = [make_initial_byte(0, 24)]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when bytes are truncated for uint16":
+        it "returns error tuple":
+            # Major type 0 + addl 25 (uint16 follows) but only 1 extra byte
+            val encoded = [make_initial_byte(0, 25), 0]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when bytes are truncated for uint32":
+        it "returns error tuple":
+            # Major type 0 + addl 26 (uint32 follows) but only 2 extra bytes
+            val encoded = [make_initial_byte(0, 26), 0, 0]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when bytes are truncated for uint64":
+        it "returns error tuple":
+            # Major type 0 + addl 27 (uint64 follows) but only 4 extra bytes
+            val encoded = [make_initial_byte(0, 27), 0, 0, 0, 0]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when major type is wrong":
+        it "returns error for negative int bytes":
+            # Negative int initial byte
+            val encoded = [make_initial_byte(1, 5)]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 5: decode.spl - Type Detection
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_type":
+    context "when offset is beyond array length":
+        it "returns zero tuple":
+            val bytes = [0]
+            val result = cbor_decode_type(bytes, 5)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+            expect(result.2).to_equal(0)
+
+    context "when decoding unsigned int header":
+        it "returns major type 0 with correct header size for immediate":
+            val bytes = cbor_encode_unsigned(5)
+            val result = cbor_decode_type(bytes, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(5)
+            expect(result.2).to_equal(1)
+
+    context "when decoding with addl_uint8":
+        it "returns header_size 2":
+            val bytes = cbor_encode_unsigned(100)
+            val result = cbor_decode_type(bytes, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(24)
+            expect(result.2).to_equal(2)
+
+    context "when decoding with addl_uint16":
+        it "returns header_size 3":
+            val bytes = cbor_encode_unsigned(500)
+            val result = cbor_decode_type(bytes, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(25)
+            expect(result.2).to_equal(3)
+
+    context "when decoding with addl_uint32":
+        it "returns header_size 5":
+            val bytes = cbor_encode_unsigned(100000)
+            val result = cbor_decode_type(bytes, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(26)
+            expect(result.2).to_equal(5)
+
+describe "CBOR Decode - cbor_is_unsigned_int":
+    context "when byte is unsigned int":
+        it "returns true":
+            val bytes = cbor_encode_unsigned(42)
+            check(cbor_is_unsigned_int(bytes, 0))
+
+    context "when byte is not unsigned int":
+        it "returns false":
+            val bytes = cbor_encode_int(-1)
+            expect(cbor_is_unsigned_int(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_negative_int":
+    context "when byte is negative int":
+        it "returns true":
+            val bytes = cbor_encode_int(-1)
+            check(cbor_is_negative_int(bytes, 0))
+
+    context "when byte is not negative int":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_negative_int(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_byte_string":
+    context "when byte is byte string":
+        it "returns true":
+            val bytes = cbor_encode_bytes([1, 2, 3])
+            check(cbor_is_byte_string(bytes, 0))
+
+    context "when byte is not byte string":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_byte_string(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_text_string":
+    context "when byte is text string":
+        it "returns true":
+            val bytes = cbor_encode_text("hi")
+            check(cbor_is_text_string(bytes, 0))
+
+    context "when byte is not text string":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_text_string(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_array":
+    context "when byte is array":
+        it "returns true":
+            val bytes = cbor_encode_array_header(3)
+            check(cbor_is_array(bytes, 0))
+
+    context "when byte is not array":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_array(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_map":
+    context "when byte is map":
+        it "returns true":
+            val bytes = cbor_encode_map_header(2)
+            check(cbor_is_map(bytes, 0))
+
+    context "when byte is not map":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_map(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_tagged":
+    context "when byte is tagged":
+        it "returns true":
+            val inner = cbor_encode_unsigned(0)
+            val bytes = cbor_encode_tagged(1, inner)
+            check(cbor_is_tagged(bytes, 0))
+
+    context "when byte is not tagged":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_tagged(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_simple":
+    context "when byte is simple value":
+        it "returns true for false":
+            val bytes = cbor_encode_false()
+            check(cbor_is_simple(bytes, 0))
+
+        it "returns true for null":
+            val bytes = cbor_encode_null()
+            check(cbor_is_simple(bytes, 0))
+
+    context "when byte is not simple":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_simple(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_indefinite":
+    context "when byte is indefinite-length array":
+        it "returns true":
+            val bytes = cbor_encode_array_start()
+            check(cbor_is_indefinite(bytes, 0))
+
+    context "when byte is definite-length":
+        it "returns false":
+            val bytes = cbor_encode_array_header(3)
+            expect(cbor_is_indefinite(bytes, 0)).to_equal(false)
+
+describe "CBOR Decode - cbor_is_break":
+    context "when byte is break code":
+        it "returns true":
+            val bytes = cbor_encode_break()
+            check(cbor_is_break(bytes, 0))
+
+    context "when byte is not break":
+        it "returns false":
+            val bytes = cbor_encode_unsigned(0)
+            expect(cbor_is_break(bytes, 0)).to_equal(false)
+
+    context "when offset is beyond array length":
+        it "returns false":
+            val bytes = [0xFF]
+            expect(cbor_is_break(bytes, 5)).to_equal(false)
+
+# ============================================================================
+# Test Group 6: decode.spl - Integer Decoding
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_int":
+    context "when decoding positive integer":
+        it "decodes as unsigned":
+            val encoded = cbor_encode_int(42)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(42)
+            expect(result.1).to_be_greater_than(0)
+
+    context "when decoding negative integer":
+        it "decodes -1":
+            val encoded = cbor_encode_int(-1)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(-1)
+            expect(result.1).to_equal(1)
+
+        it "decodes -100":
+            val encoded = cbor_encode_int(-100)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(-100)
+            expect(result.1).to_equal(2)
+
+        it "decodes -1000":
+            val encoded = cbor_encode_int(-1000)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(-1000)
+            expect(result.1).to_equal(3)
+
+    context "when decoding zero":
+        it "returns 0":
+            val encoded = cbor_encode_int(0)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(1)
+
+    context "when major type is wrong":
+        it "returns error for text string":
+            val encoded = cbor_encode_text("abc")
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 7: decode.spl - String Decoding
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_bytes":
+    context "when decoding definite-length byte string":
+        it "decodes empty byte string":
+            val encoded = cbor_encode_bytes([])
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(0)
+            expect(result.1).to_be_greater_than(0)
+
+        it "decodes short byte string":
+            val data = [1, 2, 3, 4, 5]
+            val encoded = cbor_encode_bytes(data)
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(5)
+            expect(result.0[0]).to_equal(1)
+            expect(result.0[4]).to_equal(5)
+
+    context "when decoding indefinite-length byte string":
+        it "decodes chunked byte string with break":
+            # Build indefinite byte string: 0x5F [chunk1] [chunk2] 0xFF
+            var encoded = [make_initial_byte(2, 31)]
+            # Chunk 1: definite byte string [10, 20]
+            val chunk1 = cbor_encode_bytes([10, 20])
+            encoded = bytes_concat(encoded, chunk1)
+            # Chunk 2: definite byte string [30]
+            val chunk2 = cbor_encode_bytes([30])
+            encoded = bytes_concat(encoded, chunk2)
+            # Break code: 0xFF
+            encoded = encoded.push(0xFF)
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(3)
+            expect(result.0[0]).to_equal(10)
+            expect(result.0[1]).to_equal(20)
+            expect(result.0[2]).to_equal(30)
+            expect(result.1).to_be_greater_than(0)
+
+    context "when major type is wrong":
+        it "returns empty array and 0":
+            val encoded = cbor_encode_unsigned(42)
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when bytes are truncated":
+        it "returns error for too-short data":
+            # Byte string header claiming 10 bytes but only 2 available
+            val header = make_initial_byte(2, 24)  # Major 2 + addl 24 (uint8 follows)
+            val encoded = [header, 10, 0, 0]  # Claims 10 bytes, has only 2
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(0)
+            expect(result.1).to_equal(0)
+
+describe "CBOR Decode - cbor_decode_text":
+    context "when decoding definite-length text":
+        it "decodes empty text":
+            val encoded = cbor_encode_text("")
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("")
+            expect(result.1).to_be_greater_than(0)
+
+        it "decodes simple ASCII text":
+            # Single-char text (multi-char limited by runtime substring bug)
+            val encoded = cbor_encode_text("h")
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("h")
+
+        it "decodes text with space":
+            val encoded = cbor_encode_text(" ")
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal(" ")
+
+    context "when decoding indefinite-length text":
+        it "decodes chunked text with break":
+            # Build indefinite text string: 0x7F [chunk1] [chunk2] 0xFF
+            var encoded = [make_initial_byte(3, 31)]
+            # Chunk 1: definite text "a"
+            val chunk1 = cbor_encode_text("a")
+            encoded = bytes_concat(encoded, chunk1)
+            # Chunk 2: definite text "b"
+            val chunk2 = cbor_encode_text("b")
+            encoded = bytes_concat(encoded, chunk2)
+            # Break code: 0xFF
+            encoded = encoded.push(0xFF)
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("ab")
+            expect(result.1).to_be_greater_than(0)
+
+    context "when major type is wrong":
+        it "returns empty text and 0":
+            val encoded = cbor_encode_unsigned(42)
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("")
+            expect(result.1).to_equal(0)
+
+    context "when text bytes are truncated":
+        it "returns error for too-short data":
+            # Text string header claiming 10 bytes but only 2 available
+            val header = make_initial_byte(3, 24)  # Major 3 + addl 24 (uint8 follows)
+            val encoded = [header, 10, 65, 66]  # Claims 10 bytes, has only 2
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("")
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 9: decode.spl - Simple Values
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_bool":
+    context "when decoding false":
+        it "returns false with 1 byte consumed":
+            val encoded = cbor_encode_false()
+            val result = cbor_decode_bool(encoded, 0)
+            expect(result.0).to_equal(false)
+            expect(result.1).to_equal(1)
+
+    context "when decoding true":
+        it "returns true with 1 byte consumed":
+            val encoded = cbor_encode_true()
+            val result = cbor_decode_bool(encoded, 0)
+            expect(result.0).to_equal(true)
+            expect(result.1).to_equal(1)
+
+    context "when major type is wrong":
+        it "returns false and 0":
+            val encoded = cbor_encode_unsigned(0)
+            val result = cbor_decode_bool(encoded, 0)
+            expect(result.0).to_equal(false)
+            expect(result.1).to_equal(0)
+
+    context "when simple value is not boolean":
+        it "returns false and 0 for null":
+            val encoded = cbor_encode_null()
+            val result = cbor_decode_bool(encoded, 0)
+            expect(result.0).to_equal(false)
+            expect(result.1).to_equal(0)
+
+describe "CBOR Decode - cbor_decode_null":
+    context "when decoding null":
+        it "returns 1 with 1 byte consumed":
+            val encoded = cbor_encode_null()
+            val result = cbor_decode_null(encoded, 0)
+            expect(result.0).to_equal(1)
+            expect(result.1).to_equal(1)
+
+    context "when major type is wrong":
+        it "returns 0 and 0":
+            val encoded = cbor_encode_unsigned(0)
+            val result = cbor_decode_null(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when simple value is not null":
+        it "returns 0 and 0 for true":
+            val encoded = cbor_encode_true()
+            val result = cbor_decode_null(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+describe "CBOR Decode - cbor_decode_undefined":
+    context "when decoding undefined":
+        it "returns 1 with 1 byte consumed":
+            val encoded = cbor_encode_undefined()
+            val result = cbor_decode_undefined(encoded, 0)
+            expect(result.0).to_equal(1)
+            expect(result.1).to_equal(1)
+
+    context "when major type is wrong":
+        it "returns 0 and 0":
+            val encoded = cbor_encode_unsigned(0)
+            val result = cbor_decode_undefined(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when simple value is not undefined":
+        it "returns 0 and 0 for null":
+            val encoded = cbor_encode_null()
+            val result = cbor_decode_undefined(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+describe "CBOR Decode - cbor_decode_simple_value":
+    context "when decoding immediate simple value (0..19)":
+        it "decodes value 0":
+            val encoded = cbor_encode_simple(0)
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(1)
+
+        it "decodes value 19":
+            val encoded = cbor_encode_simple(19)
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(19)
+            expect(result.1).to_equal(1)
+
+    context "when decoding extended simple value (32..255)":
+        it "decodes value 32":
+            val encoded = cbor_encode_simple(32)
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(32)
+            expect(result.1).to_equal(2)
+
+        it "decodes value 255":
+            val encoded = cbor_encode_simple(255)
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(255)
+            expect(result.1).to_equal(2)
+
+    context "when major type is wrong":
+        it "returns 0 and 0":
+            val encoded = cbor_encode_unsigned(0)
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when truncated for uint8 extended simple":
+        it "returns error":
+            # Major 7, addl 24 (uint8) but no following byte
+            val encoded = [make_initial_byte(7, 24)]
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when addl is not immediate or uint8":
+        it "returns 0 and 0 for boolean-range addl":
+            # simple_false = 20, simple_true = 21 are not <= 19 and not addl_uint8
+            val encoded = cbor_encode_false()
+            val result = cbor_decode_simple_value(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 16: Offset-based decoding (non-zero offset)
+# ============================================================================
+
+describe "CBOR Decode - non-zero offset":
+    context "when multiple items are concatenated":
+        it "decodes second item at correct offset":
+            var data = cbor_encode_unsigned(10)
+            val second = cbor_encode_unsigned(20)
+            data = bytes_concat(data, second)
+            # First item is 1 byte (value 10), second starts at offset 1
+            val result = cbor_decode_unsigned(data, 1)
+            expect(result.0).to_equal(20)
+
+        it "decodes text after integer":
+            var data = cbor_encode_unsigned(5)
+            val text_enc = cbor_encode_text("A")
+            data = bytes_concat(data, text_enc)
+            # Integer 5 is 1 byte, text starts at offset 1
+            val result = cbor_decode_text(data, 1)
+            expect(result.0).to_equal("A")
+
+    context "when offset points to boolean after int":
+        it "decodes the boolean correctly":
+            var data = cbor_encode_unsigned(100)
+            val bool_bytes = cbor_encode_true()
+            data = bytes_concat(data, bool_bytes)
+            # Int 100 uses 2 bytes (uint8), bool at offset 2
+            val result = cbor_decode_bool(data, 2)
+            expect(result.0).to_equal(true)
+            expect(result.1).to_equal(1)
+
+# ============================================================================
+# Test Group 17: decode_uint_value - reserved/indefinite additional info
+# ============================================================================
+
+describe "CBOR Decode - decode_uint_value reserved additional info":
+    context "when additional info is reserved (28, 29, 30)":
+        it "returns (0,0) for addl 28 via unsigned":
+            # Major 0 + addl 28 = 0*32+28 = 28
+            val encoded = [28]
+            val result = cbor_decode_unsigned(encoded, 0)
+            # addl=28 is not <=23, not 24,25,26,27 => falls through to (0,0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+        it "returns (0,0) for addl 29 via unsigned":
+            val encoded = [29]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+        it "returns (0,0) for addl 30 via unsigned":
+            val encoded = [30]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when additional info is indefinite (31) on integer":
+        it "returns (0,0) for unsigned with addl 31":
+            # Major 0 + addl 31 = 31
+            val encoded = [31]
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 18: cbor_decode_type - uint64 header size
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_type uint64 header":
+    context "when additional info is addl_uint64 (27)":
+        it "returns header_size 9":
+            # Major 0 + addl 27 = 27, need 8 payload bytes
+            val encoded = [27, 0, 0, 0, 0, 0, 0, 0, 1]
+            val result = cbor_decode_type(encoded, 0)
+            expect(result.0).to_equal(0)   # major_unsigned_int
+            expect(result.1).to_equal(27)  # addl_uint64
+            expect(result.2).to_equal(9)   # header_size
+
+# ============================================================================
+# Test Group 19: cbor_decode_int - neither unsigned nor negative
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_int wrong major types":
+    context "when major type is byte string":
+        it "returns (0,0)":
+            val encoded = cbor_encode_bytes([1, 2])
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when major type is array":
+        it "returns (0,0)":
+            val encoded = cbor_encode_array_header(2)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when major type is map":
+        it "returns (0,0)":
+            val encoded = cbor_encode_map_header(1)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+    context "when major type is simple/float":
+        it "returns (0,0)":
+            val encoded = cbor_encode_true()
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(0)
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 20: Indefinite-length error paths
+# ============================================================================
+
+describe "CBOR Decode - indefinite byte string error paths":
+    context "when indefinite byte string has bad chunk":
+        it "returns error when chunk decoding fails":
+            # Indefinite byte string header + a non-byte-string item + break
+            # 0x5F (indef byte string), then 0x01 (unsigned int 1, not a byte string chunk)
+            var encoded = [make_initial_byte(2, 31)]
+            # Put a non-byte-string as chunk - unsigned int, which will fail cbor_decode_bytes
+            encoded = encoded.push(1)  # unsigned int 1
+            encoded = encoded.push(0xFF)  # break
+            val result = cbor_decode_bytes(encoded, 0)
+            # The chunk decode should fail (major!=2), returning ([], 0)
+            expect(result.0.len()).to_equal(0)
+            expect(result.1).to_equal(0)
+
+describe "CBOR Decode - indefinite text string error paths":
+    context "when indefinite text string has bad chunk":
+        it "returns error when chunk decoding fails":
+            # Indefinite text string header + non-text-string item
+            var encoded = [make_initial_byte(3, 31)]
+            # Put a non-text-string as chunk - unsigned int 1
+            encoded = encoded.push(1)  # unsigned int 1
+            encoded = encoded.push(0xFF)  # break
+            val result = cbor_decode_text(encoded, 0)
+            expect(result.0).to_equal("")
+            expect(result.1).to_equal(0)
+
+# ============================================================================
+# Test Group 25: decode.spl - cbor_decode_unsigned with uint64
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_unsigned uint64":
+    context "when decoding uint64 value":
+        it "decodes a large value":
+            val encoded = cbor_encode_unsigned(4294967296)
+            val result = cbor_decode_unsigned(encoded, 0)
+            expect(result.0).to_equal(4294967296)
+            expect(result.1).to_equal(9)
+
+# ============================================================================
+# Test Group 28: cbor_decode_bytes/text with longer strings
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_bytes uint8-length":
+    context "when decoding byte string with 24+ bytes":
+        it "decodes correctly":
+            # Build a byte string with 25 bytes
+            var data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+            val encoded = cbor_encode_bytes(data)
+            val result = cbor_decode_bytes(encoded, 0)
+            expect(result.0.len()).to_equal(25)
+            expect(result.0[0]).to_equal(1)
+            expect(result.0[24]).to_equal(25)
+            expect(result.1).to_be_greater_than(0)
+
+# ============================================================================
+# Test Group 30: cbor_decode_int - negative uint8/uint16/uint32 ranges
+# ============================================================================
+
+describe "CBOR Decode - cbor_decode_int negative ranges":
+    context "when decoding negative uint16-range":
+        it "decodes -1000":
+            val encoded = cbor_encode_int(-1000)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(-1000)
+
+    context "when decoding negative uint32-range":
+        it "decodes -100000":
+            val encoded = cbor_encode_int(-100000)
+            val result = cbor_decode_int(encoded, 0)
+            expect(result.0).to_equal(-100000)
+            expect(result.1).to_equal(5)
+

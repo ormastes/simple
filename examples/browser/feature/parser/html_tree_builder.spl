@@ -23,6 +23,7 @@ use examples.browser.entity.dom.attribute_types
 use examples.browser.feature.parser.html_tokenizer
 use examples.browser.shared.error
 use examples.browser.shared.logging
+use examples.browser.feature.parser.html_tree_builder_text
 
 # ---------------------------------------------------------------------------
 # InsertionMode — the tree construction insertion modes
@@ -966,126 +967,6 @@ class TreeBuilder:
             # --- Default: walk up the stack (any other end tag) ---
             _:
                 self.close_inline_element(name)
-
-    # ===================================================================
-    # Text mode — raw text content (script, style, title, etc.)
-    # ===================================================================
-
-    me process_text(token: HtmlToken):
-        match token:
-            HtmlToken.Character(data):
-                self.insert_text(data)
-            HtmlToken.EndTag(name):
-                self.pop_current()
-                self.insertion_mode = self.original_insertion_mode
-            HtmlToken.Eof:
-                self.logger.warn("Text mode: unexpected EOF")
-                self.pop_current()
-                self.insertion_mode = self.original_insertion_mode
-            _:
-                pass_do_nothing
-
-    # ===================================================================
-    # AfterBody mode — after </body>
-    # ===================================================================
-
-    me process_after_body(token: HtmlToken):
-        match token:
-            HtmlToken.Character(data):
-                if self.is_whitespace(data):
-                    # Process as InBody for whitespace
-                    self.insert_text(data)
-                else:
-                    self.logger.warn("AfterBody: unexpected character, switching to InBody")
-                    self.insertion_mode = InsertionMode.InBody
-                    self.process_in_body(token)
-            HtmlToken.CommentToken(data):
-                # Append comment to html element
-                val comment_id = self.create_node(NodeKind.Comment, data)
-                if self.open_elements.len() > 0:
-                    val html_node = self.open_elements.get(0)
-                    self.append_child(html_node, comment_id)
-                else:
-                    self.append_child(self.document_node, comment_id)
-            HtmlToken.StartTag(name, attributes, self_closing):
-                self.logger.warn("AfterBody: unexpected start tag <{name}>, switching to InBody")
-                self.insertion_mode = InsertionMode.InBody
-                self.process_in_body(token)
-            HtmlToken.EndTag(name):
-                if name == "html":
-                    self.logger.debug("AfterBody: </html>, parsing complete")
-                    # Done — stay in AfterBody
-                else:
-                    self.logger.warn("AfterBody: unexpected end tag </{name}>, switching to InBody")
-                    self.insertion_mode = InsertionMode.InBody
-                    self.process_in_body(token)
-            _:
-                self.insertion_mode = InsertionMode.InBody
-                self.process_in_body(token)
-
-    # ===================================================================
-    # InHeadNoscript mode — inside <noscript> in <head> with scripting off
-    # ===================================================================
-
-    me process_in_head_noscript(token: HtmlToken):
-        match token:
-            HtmlToken.Character(data):
-                if self.is_whitespace(data):
-                    self.insert_text(data)
-                else:
-                    # Act as if </noscript> was seen
-                    self.logger.warn("InHeadNoscript: non-whitespace character, closing noscript")
-                    self.pop_current()
-                    self.insertion_mode = InsertionMode.InHead
-                    self.process_in_head(token)
-            HtmlToken.CommentToken(data):
-                self.insert_comment(data)
-            HtmlToken.StartTag(name, attributes, self_closing):
-                match name:
-                    "html":
-                        self.process_in_body(token)
-                    "link":
-                        # Process as InHead
-                        self.insert_element(name, attributes)
-                        self.pop_current()
-                    "meta":
-                        self.insert_element(name, attributes)
-                        self.pop_current()
-                    "style":
-                        # Process as InHead — raw text element
-                        self.insert_element(name, attributes)
-                        self.original_insertion_mode = self.insertion_mode
-                        self.insertion_mode = InsertionMode.Text
-                    "basefont":
-                        self.insert_element(name, attributes)
-                        self.pop_current()
-                    "head":
-                        self.logger.warn("InHeadNoscript: unexpected <head>, ignoring")
-                    "noscript":
-                        self.logger.warn("InHeadNoscript: unexpected <noscript>, ignoring")
-                    _:
-                        # Act as if </noscript> was seen, reprocess in InHead
-                        self.logger.warn("InHeadNoscript: unexpected <{name}>, closing noscript")
-                        self.pop_current()
-                        self.insertion_mode = InsertionMode.InHead
-                        self.process_in_head(token)
-            HtmlToken.EndTag(name):
-                match name:
-                    "noscript":
-                        self.pop_current()
-                        self.insertion_mode = InsertionMode.InHead
-                    "br":
-                        # Act as if </noscript> was seen, reprocess
-                        self.pop_current()
-                        self.insertion_mode = InsertionMode.InHead
-                        self.process_in_head(token)
-                    _:
-                        self.logger.warn("InHeadNoscript: unexpected </{name}>, ignoring")
-            _:
-                # Act as if </noscript> was seen
-                self.pop_current()
-                self.insertion_mode = InsertionMode.InHead
-                self.process_in_head(token)
 
     # ===================================================================
     # InTable mode — handle table structure elements, foster parenting
