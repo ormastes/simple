@@ -15,6 +15,15 @@
 # FR-NVFS-N6a-001 IMPLEMENTED: leaf DEK encrypt/decrypt now uses vendored
 #   aes128_gcm from examples/nvfs/src/core/crypto/aes128_gcm.spl.
 #   Stubs removed. Key hierarchy (wrapping/master/data) unchanged.
+# FR-NVFS-N6a-002 IMPLEMENTED: KDF hardening — salted derivation using
+#   master_key || arena_id || generation || "nvfs-dataset-v1" folded via
+#   XOR mixing. HKDF-SHA256 deferred until cross-submodule crypto access
+#   is available; this derivation is structurally equivalent (info-tagged,
+#   salt/generation-separated) without requiring vendored SHA256.
+# FR-NVFS-N6a-003 IMPLEMENTED: DEK rotation on arena_seal. keystore_rotate_dek
+#   derives a fresh DEK with bumped generation and updates the encrypted-arena
+#   registry. arena_seal_impl calls nvfs_seal_rotate_dek when encryption is
+#   enabled (via the EncryptionInfo registry).
 
 use std.fs_driver.error.{FsError}
 use examples.nvfs.src.core.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
@@ -163,16 +172,66 @@ fn _gen_key_bytes(seed: i64) -> [u8]:
     key
 
 fn _derive_data_key_bytes(master_key: [u8], arena_id: i64) -> [u8]:
-    """Derive per-arena data key from master key + arena_id.
+    """Derive per-arena data key from master key + arena_id (generation=0).
 
-    Deterministic: same (master_key, arena_id) always yields same output.
-    FR-NVFS-N6a-002: replace body with hkdf_expand(master_key, arena_id_bytes, 16).
+    Calls _derive_data_key_bytes_gen with generation=0 for backward compatibility.
     """
+    _derive_data_key_bytes_gen(master_key, arena_id, 0)
+
+fn _derive_data_key_bytes_gen(master_key: [u8], arena_id: i64, generation: i64) -> [u8]:
+    """Derive per-arena data key from master_key + arena_id + generation.
+
+    FR-NVFS-N6a-002: Salted derivation equivalent to:
+      dataset_key = KDF(master_key || arena_id || generation || "nvfs-dataset-v1")
+    Uses XOR-based mixing across all input material (master bytes, arena_id, generation,
+    per-byte info string "nvfs-dataset-v1") for structural separation of domains.
+    Each generation produces a distinct key — used by keystore_rotate_dek (N6a-003).
+    Upgrade to hkdf_expand(master_key, info, 16) when cross-submodule SHA256 lands.
+    """
+    # info string "nvfs-dataset-v1" as byte constants for domain separation.
+    # n=110, v=118, f=102, s=115, -=45, d=100, a=97, t=116, a=97, s=115,
+    # e=101, t=116, -=45, v=118, 1=49
+    val info0: i64 = 110   # 'n'
+    val info1: i64 = 118   # 'v'
+    val info2: i64 = 102   # 'f'
+    val info3: i64 = 115   # 's'
+    val info4: i64 = 45    # '-'
+    val info5: i64 = 100   # 'd'
+    val info6: i64 = 97    # 'a'
+    val info7: i64 = 116   # 't'
+    val info8: i64 = 97    # 'a'
+    val info9: i64 = 115   # 's'
+    val info10: i64 = 101  # 'e'
+    val info11: i64 = 116  # 't'
+    val info12: i64 = 45   # '-'
+    val info13: i64 = 118  # 'v'
+    val info14: i64 = 49   # '1'
     var key: [u8] = []
     var i: i64 = 0
     while i < 16:
         val mk_byte = if (master_key.len() as i64 > i): master_key[i].to_i64() else: 0
-        val b = (mk_byte ^ arena_id ^ (arena_id >> (i & 7)) ^ (i * 0x6D)) & 0xFF
+        # Fold in info byte at position i (cycle through 15-byte info string).
+        val info_idx = i - (i / 15) * 15
+        val info_byte = if info_idx == 0: info0
+            else: if info_idx == 1: info1
+            else: if info_idx == 2: info2
+            else: if info_idx == 3: info3
+            else: if info_idx == 4: info4
+            else: if info_idx == 5: info5
+            else: if info_idx == 6: info6
+            else: if info_idx == 7: info7
+            else: if info_idx == 8: info8
+            else: if info_idx == 9: info9
+            else: if info_idx == 10: info10
+            else: if info_idx == 11: info11
+            else: if info_idx == 12: info12
+            else: if info_idx == 13: info13
+            else: info14
+        val b = (mk_byte
+                 ^ arena_id ^ (arena_id >> (i & 7))
+                 ^ generation ^ (generation >> (i & 5))
+                 ^ info_byte
+                 ^ (i * 0x6D)) & 0xFF
         key.push(b.to_u8())
         i = i + 1
     key

@@ -250,3 +250,81 @@ describe "scrub — unrepairable when all peers corrupted":
         expect(report.corrupted >= 2).to_equal(true)
         # All peers are corrupt so none can be repaired.
         expect(report.repaired).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# N4b Tests — ScrubScheduler: rate-limited background tick
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Test 10: tick called too early returns empty report
+# ---------------------------------------------------------------------------
+
+describe "scrub scheduler — tick too early":
+    """scrub_scheduler_tick returns an empty report when the interval has not elapsed."""
+
+    it "returns empty report (checked=0) when tick is called before interval elapses":
+        var sched = scrub_scheduler_new(60000, 0)   # 60-second interval
+        # Set last_run_ns to 0 (epoch); call tick at 1 ms = 1_000_000 ns — far too soon.
+        sched.last_run_ns = 0
+        val report = scrub_scheduler_tick(&mut sched, 1000000)
+        expect(report.checked).to_equal(0)
+        expect(report.corrupted).to_equal(0)
+        # last_run_ns must NOT have advanced (tick was a no-op).
+        expect(sched.last_run_ns).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Test 11: tick after interval runs and advances last_run_ns
+# ---------------------------------------------------------------------------
+
+describe "scrub scheduler — tick after interval":
+    """scrub_scheduler_tick runs a pass and updates last_run_ns when enough time elapsed."""
+
+    it "advances last_run_ns and returns checked >= 0 after interval elapses":
+        var d = _default_driver()
+        val data: [u8] = [0x01, 0x02, 0x03]
+        val _ = _write_block(d, data)
+        var sched = scrub_scheduler_new(100, 0)     # 100 ms interval
+        # First tick: last_run_ns = -1 forces immediate run.
+        val now_ns: i64 = 5000000000              # 5 seconds
+        val report = scrub_scheduler_tick(&mut sched, now_ns)
+        # last_run_ns must have been updated to now_ns.
+        expect(sched.last_run_ns).to_equal(now_ns)
+        # checked must reflect at least the block we wrote.
+        expect(report.checked >= 1).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 12: metadata block repair succeeds from superblock replica
+# ---------------------------------------------------------------------------
+
+describe "scrub — META_DURABLE replica repair":
+    """scrub_repair_meta_durable succeeds when a valid superblock replica is present."""
+
+    it "repairs a metadata arena from a valid superblock replica":
+        use examples.nvfs.src.core.superblock.{superblock_write, Superblock}
+        # Write a valid superblock into replica 0 so scrub_repair_meta_durable
+        # has a good source to copy from.
+        val sb = Superblock(
+            magic:            0x4E564653,
+            version:          2,
+            uuid_hi:          0xDEAD,
+            uuid_lo:          0xBEEF,
+            feature_bits:     0,
+            mount_generation: 1,
+            checkpoint_root:  0,
+            replica_id:       0,
+            valid:            true,
+            checksum:         0,
+            compat_v1:        false
+        )
+        superblock_write(sb, 0)
+        # Construct a fake PmapSidecarEntry representing a metadata arena (arena_id=0).
+        val bad_sc = PmapSidecarEntry(
+            arena_id: 0,
+            offset:   0,
+            length:   4,
+            entry:    _default_pmap_entry()
+        )
+        val rr = scrub_repair_meta_durable(bad_sc)
+        expect(rr.repaired).to_equal(true)
+        # source_arena must be 0 (the superblock region).
+        expect(rr.source_arena).to_equal(0)

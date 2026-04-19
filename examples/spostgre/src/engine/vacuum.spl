@@ -1,13 +1,129 @@
-# spostgre engine — vacuum / space reclamation.
+# spostgre engine — vacuum / space reclamation (M5).
 #
-# Walks pmap, discards dead page versions, drops orphaned arena ranges.
+# Birth-generation-aware garbage collection: walks all HotChain entries for a
+# relation, identifies dead tuple versions (xmax committed and xmax < oldest
+# running xmin), prunes them via hot_prune, updates pmap (appending a new
+# generation-bumped v2 entry), and invalidates any tier_cache entries for
+# modified pages.
+#
+# Design ref: spostgre_design.md §vacuum (M5).
 
-use std.spostgre_if.types.{Rel, BlkNo}
+use engine.hot.{HotChain, HotChainMap, hot_prune, hot_chain_map_get, hot_chain_map_put}
+use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
+use engine.tier_cache.{TierCache, tier_cache_invalidate}
+use engine.txn.{TxnManager, oldest_running_xmin}
 
-fn vacuum_range(rel: Rel, lo: BlkNo, hi: BlkNo) -> i64:
-    """Reclaim dead versions in [lo, hi]. Returns bytes freed."""
-    pass_todo
+# ---------------------------------------------------------------------------
+# VacuumReport — summary returned by vacuum_relation.
+# ---------------------------------------------------------------------------
 
-fn vacuum_scan_dead(rel: Rel) -> i64:
-    """Count dead tuples across the relation without freeing."""
-    pass_todo
+pub struct VacuumReport:
+    """Summary of one vacuum_relation pass.
+
+    rel_id          — relation that was vacuumed.
+    dead_versions   — total HotVersion rows removed across all chains.
+    pages_updated   — number of logical pages whose pmap entry was refreshed.
+    cache_invalidated — number of tier_cache entries dropped.
+    oldest_xmin     — the oldest_running_xmin snapshot used for this pass.
+    """
+    rel_id:            i64
+    dead_versions:     i32
+    pages_updated:     i32
+    cache_invalidated: i32
+    oldest_xmin:       i64
+
+# ---------------------------------------------------------------------------
+# VacuumState — groups all mutable state vacuum needs to thread through.
+# ---------------------------------------------------------------------------
+
+pub struct VacuumState:
+    """Mutable state threaded through a vacuum pass.
+
+    hot_map  — in-memory HOT chain map (updated in place during prune).
+    pmap     — arena-backed page-indirection map (append-only publish).
+    cache    — L2 NVMe tier cache (entries invalidated on page update).
+    txn_mgr  — transaction manager (source of oldest_running_xmin).
+    """
+    hot_map: HotChainMap
+    pmap:    PmapWriter
+    cache:   TierCache
+    txn_mgr: TxnManager
+
+# ---------------------------------------------------------------------------
+# vacuum_relation — main entry point.
+#
+# Walks every entry in hot_map looking for chains that belong to rel_id.
+# For each chain it calls hot_prune(oldest_running_xmin); if any versions
+# were removed it:
+#   1. Appends a new pmap v2 entry (generation = birth_gen + 1) so that the
+#      latest-wins scan in pmap_writer_lookup returns updated metadata.
+#   2. Calls tier_cache_invalidate for the logical page so stale cached
+#      bytes are not served after compaction.
+# ---------------------------------------------------------------------------
+
+pub fn vacuum_relation(state: VacuumState, rel_id: i64) -> (VacuumState, VacuumReport):
+    """Vacuum all HOT chains belonging to rel_id.
+
+    Identifies dead versions (xmax != 0 AND xmax < oldest_running_xmin),
+    prunes them, refreshes pmap, and invalidates tier_cache for changed pages.
+
+    Returns (updated_state, report).
+    @coverage: spostgre_design.md §vacuum (M5)
+    """
+    val snap_xmin = oldest_running_xmin(state.txn_mgr)
+
+    val n = state.hot_map.entries.len()
+    var hot_map   = state.hot_map
+    var cache     = state.cache
+    var total_dead: i32 = 0
+    var pages_updated: i32 = 0
+    var cache_inv: i32 = 0
+
+    var i = 0
+    while i < n:
+        val entry = hot_map.entries[i]
+        if entry.valid:
+            val logical = entry.chain.head_logical_page
+            # Check whether this chain belongs to rel_id.
+            # Convention: chains for rel_id live in logical pages where
+            # (logical / 1000000) == rel_id.  (Birth-gen-aware: a chain
+            # born in a generation < snap_xmin that is fully dead can be
+            # pruned entirely; hot_prune already handles this correctly.)
+            val chain_rel = logical / 1000000
+            if chain_rel == rel_id:
+                val (pruned, new_chain) = hot_prune(entry.chain, snap_xmin)
+                if pruned > 0:
+                    total_dead = total_dead + pruned
+                    pages_updated = pages_updated + 1
+
+                    # Look up the current pmap entry to get phys/offset/birth_gen.
+                    val old_pmap = pmap_writer_lookup(state.pmap, logical)
+                    val new_birth = old_pmap.birth_gen + 1
+                    # Publish a new (generation-bumped) pmap entry.
+                    val _ok = pmap_writer_publish(
+                        state.pmap, logical,
+                        old_pmap.phys, old_pmap.offset, new_birth)
+
+                    # Invalidate the tier_cache entry for this page.
+                    cache = tier_cache_invalidate(cache, rel_id, logical)
+                    cache_inv = cache_inv + 1
+
+                    # Update the hot_map entry with the pruned chain.
+                    hot_map = hot_chain_map_put(hot_map, logical, new_chain)
+
+        i = i + 1
+
+    val new_state = VacuumState(
+        hot_map: hot_map,
+        pmap:    state.pmap,
+        cache:   cache,
+        txn_mgr: state.txn_mgr)
+
+    val report = VacuumReport(
+        rel_id:            rel_id,
+        dead_versions:     total_dead,
+        pages_updated:     pages_updated,
+        cache_invalidated: cache_inv,
+        oldest_xmin:       snap_xmin)
+
+    (new_state, report)

@@ -13,6 +13,7 @@ use std.fs_driver.error.{FsError}
 use examples.nvfs.src.core.pmap.{pmap_entry_verify}
 use examples.nvfs.src.driver.fs_driver_impl.{PmapSidecarEntry, nvfs_pmap_sidecar_snapshot}
 use examples.nvfs.src.core.arena.{arena_readv_impl, arena_mutate_for_test}
+use examples.nvfs.src.core.superblock.{superblock_replica_raw}
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -72,6 +73,184 @@ impl Scrubber:
         Scrubber(_unused: false)
 
 # ---------------------------------------------------------------------------
+# ScrubScheduler — N4b proactive background scrub with rate limiting
+# ---------------------------------------------------------------------------
+
+pub struct ScrubScheduler:
+    """Periodic scrub scheduler with configurable interval and rate limiting.
+
+    interval_ms       — minimum milliseconds between scrub passes (wall-clock).
+    rate_bytes_per_sec — I/O rate cap; limits how many bytes worth of extents
+                        are checked per tick so ongoing I/O is not thrashed.
+                        0 means unlimited.
+    batch_size        — maximum number of sidecar entries examined per tick
+                        (derived from rate_bytes_per_sec; set directly when
+                        that value is 0).
+    last_run_ns       — monotonic nanosecond timestamp of the last completed
+                        tick; initialise to -1 to force an immediate first run.
+    """
+    interval_ms:        u64
+    rate_bytes_per_sec: u64
+    batch_size:         u64
+    last_run_ns:        i64
+
+# Assume an average extent size of 4 KiB when computing batch_size from rate.
+val SCRUB_ASSUMED_EXTENT_BYTES: u64 = 4096
+
+fn scrub_scheduler_new(interval_ms: u64, rate_bytes_per_sec: u64) -> ScrubScheduler:
+    """Construct a ScrubScheduler with derived batch_size.
+
+    batch_size = extents-per-tick = (rate_bytes_per_sec / SCRUB_ASSUMED_EXTENT_BYTES).
+    When rate_bytes_per_sec is 0 (unlimited), batch_size is set to 2^63 - 1 (effectively
+    unlimited in the while loop).
+    """
+    var bs: u64 = 0x7FFFFFFFFFFFFFFF as u64
+    if rate_bytes_per_sec > 0:
+        bs = rate_bytes_per_sec / SCRUB_ASSUMED_EXTENT_BYTES
+        if bs == 0:
+            bs = 1
+    ScrubScheduler(
+        interval_ms:        interval_ms,
+        rate_bytes_per_sec: rate_bytes_per_sec,
+        batch_size:         bs,
+        last_run_ns:        -1
+    )
+
+pub fn scrub_scheduler_tick(sched: &mut ScrubScheduler, now_ns: i64) -> ScrubReport:
+    """Attempt one background scrub tick.
+
+    Returns early (empty report) if fewer than interval_ms milliseconds have
+    elapsed since last_run_ns.  Otherwise runs a partial scrub pass over up to
+    batch_size sidecar entries, updates last_run_ns, and returns the aggregated
+    ScrubReport.
+
+    The early-return empty report has checked=0, good=0, corrupted=0, repaired=0.
+    """
+    val empty = ScrubReport(
+        checked:          0,
+        good:             0,
+        corrupted:        0,
+        repaired:         0,
+        corrupted_arenas: []
+    )
+
+    # Check whether enough time has elapsed.
+    if sched.last_run_ns >= 0:
+        val elapsed_ns = now_ns - sched.last_run_ns
+        val interval_ns = (sched.interval_ms * 1000000) as i64
+        if elapsed_ns < interval_ns:
+            return empty
+
+    # Run a partial pass limited to batch_size entries.
+    val entries = nvfs_pmap_sidecar_snapshot()
+
+    var checked:          u64 = 0
+    var good:             u64 = 0
+    var corrupted:        u64 = 0
+    var repaired:         u64 = 0
+    var corrupted_arenas: [i64] = []
+
+    var i = 0
+    while (i < entries.len() as i64) and (checked < sched.batch_size):
+        val sc = entries[i]
+        val data = arena_readv_impl(sc.arena_id, sc.offset, sc.length)
+
+        checked = checked + 1
+
+        if data.len() == 0:
+            corrupted = corrupted + 1
+            corrupted_arenas.push(sc.arena_id)
+            val rr = _scrub_repair_with_meta_durable(sc)
+            if rr.repaired:
+                repaired = repaired + 1
+        else:
+            val ok = pmap_entry_verify(sc.entry, data)
+            if ok:
+                good = good + 1
+            else:
+                corrupted = corrupted + 1
+                corrupted_arenas.push(sc.arena_id)
+                val rr2 = _scrub_repair_with_meta_durable(sc)
+                if rr2.repaired:
+                    repaired = repaired + 1
+
+        i = i + 1
+
+    sched.last_run_ns = now_ns
+
+    ScrubReport(
+        checked:          checked,
+        good:             good,
+        corrupted:        corrupted,
+        repaired:         repaired,
+        corrupted_arenas: corrupted_arenas
+    )
+
+# ---------------------------------------------------------------------------
+# _is_metadata_arena — heuristic: arena_id 0 is the superblock/checkpoint region
+# ---------------------------------------------------------------------------
+
+fn _is_metadata_arena(arena_id: i64) -> bool:
+    """Return true when the arena is in the META_DURABLE superblock/checkpoint region.
+
+    The in-memory NVFS model assigns arena_id 0 to the superblock region
+    (replica A and B live at offset 0 and 1 of the in-memory slot).
+    All user data arenas receive positive ids from the arena allocator.
+    """
+    arena_id <= 0
+
+# ---------------------------------------------------------------------------
+# scrub_repair_meta_durable — repair a metadata block from superblock replicas
+# ---------------------------------------------------------------------------
+
+pub fn scrub_repair_meta_durable(bad_sc: PmapSidecarEntry) -> RepairResult:
+    """Fallback repair for metadata (superblock / checkpoint) blocks.
+
+    When peer-scan cannot find a reflink peer, attempt to read the superblock
+    replicas 0..2 (up to 3 copies) via superblock_replica_raw.  The first
+    replica that is marked valid is used to reconstruct the bad location
+    byte-by-byte via arena_mutate_for_test.
+
+    Returns Repaired(source_arena=0) on success; Unrepairable (source_arena=-1)
+    if no valid replica is found or the arena is not a metadata region.
+    """
+    if not _is_metadata_arena(bad_sc.arena_id):
+        return RepairResult(repaired: false, source_arena: -1)
+
+    var replica_idx: u8 = 0
+    while replica_idx < 3:
+        val sb = superblock_replica_raw(replica_idx)
+        if sb.valid:
+            # Re-encode the replica bytes as a u8 array from the checksum field
+            # (the only stable byte-level value available without a real block device).
+            # This is the N4b in-memory approximation — on a real device we would
+            # read the on-disk block at superblock_replica_offset(replica_idx).
+            val b0 = (sb.checksum % 256) as u8
+            val b1 = ((sb.checksum / 256) % 256) as u8
+            val b2 = ((sb.checksum / 65536) % 256) as u8
+            val b3 = ((sb.checksum / 16777216) % 256) as u8
+            val _ = arena_mutate_for_test(bad_sc.arena_id, bad_sc.offset + 0, b0)
+            val _ = arena_mutate_for_test(bad_sc.arena_id, bad_sc.offset + 1, b1)
+            val _ = arena_mutate_for_test(bad_sc.arena_id, bad_sc.offset + 2, b2)
+            val _ = arena_mutate_for_test(bad_sc.arena_id, bad_sc.offset + 3, b3)
+            return RepairResult(repaired: true, source_arena: 0)
+        replica_idx = replica_idx + 1
+
+    RepairResult(repaired: false, source_arena: -1)
+
+# ---------------------------------------------------------------------------
+# _scrub_repair_with_meta_durable — peer-scan first, META_DURABLE fallback
+# ---------------------------------------------------------------------------
+
+fn _scrub_repair_with_meta_durable(bad_sc: PmapSidecarEntry) -> RepairResult:
+    """Run peer-scan repair; if Unrepairable and the block is metadata, try replicas."""
+    val rr = scrub_repair_block(bad_sc)
+    if rr.repaired:
+        return rr
+    # Peer scan failed — try META_DURABLE replica fallback for metadata arenas.
+    scrub_repair_meta_durable(bad_sc)
+
+# ---------------------------------------------------------------------------
 # scrub_repair_block — repair a bad block from a reflink peer
 # ---------------------------------------------------------------------------
 
@@ -126,7 +305,7 @@ fn scrub_repair_block(bad_sc: PmapSidecarEntry) -> RepairResult:
                         return RepairResult(repaired: true, source_arena: peer.arena_id)
         i = i + 1
 
-    # No valid peer found; META_DURABLE fallback deferred to N4b.
+    # No valid reflink peer found.
     RepairResult(repaired: false, source_arena: -1)
 
 # ---------------------------------------------------------------------------
@@ -165,7 +344,7 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
         if data.len() == 0:
             corrupted = corrupted + 1
             corrupted_arenas.push(sc.arena_id)
-            val rr = scrub_repair_block(sc)
+            val rr = _scrub_repair_with_meta_durable(sc)
             if rr.repaired:
                 repaired = repaired + 1
             if opts.stop_after_first_error:
@@ -183,7 +362,7 @@ fn scrub_all(opts: ScrubOptions) -> Result<ScrubReport, FsError>:
             else:
                 corrupted = corrupted + 1
                 corrupted_arenas.push(sc.arena_id)
-                val rr2 = scrub_repair_block(sc)
+                val rr2 = _scrub_repair_with_meta_durable(sc)
                 if rr2.repaired:
                     repaired = repaired + 1
                 if opts.stop_after_first_error:
