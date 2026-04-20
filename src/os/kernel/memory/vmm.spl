@@ -31,7 +31,7 @@ use os.kernel.types.vmspace_types.{
     VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW,
     MAX_VMAS
 }
-use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_write8}
+use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
 
@@ -912,10 +912,35 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 # Phase-2 VMM APIs
 # ============================================================================
 
-fn vmm_write_byte_through_hhdm(phys: u64, byte: u8):
-    """Write a single byte to a physical address via the HHDM mapping."""
-    val virt = _phys_to_virt(phys)
-    mmio_write8(virt, byte)
+# rt_memcpy / rt_memset: bulk copy / fill primitives provided by the baremetal
+# runtime. See src/os/drivers/virtio/virtio_blk.spl for the slice-pointer trick
+# used below — the Simple fat-pointer layout is [data_ptr: u64, len: u64], so
+# dereferencing the header address with mmio_read64 yields the raw data base.
+extern fn rt_memcpy(dest: i64, src: i64, len: i64)
+extern fn rt_memset(dest: i64, val: i64, len: i64) -> i64
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
+    """Bulk-copy `len` bytes from `src[src_offset..]` to physical `dst_phys` via HHDM.
+
+    Replaces per-byte copy loops used by the ELF segment mapper and the
+    user-stack initializer. Caller must ensure the destination range lies in
+    an HHDM-mapped physical page and that [src_offset, src_offset + len) is
+    in-bounds for `src`.
+    """
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val src_hdr = unsafe_addr_of(src)
+    val src_data = mmio_read64(src_hdr)
+    rt_memcpy(dst_virt.to_i64(), (src_data + src_offset).to_i64(), len.to_i64())
+
+fn vmm_zero_phys_range(dst_phys: u64, len: u64):
+    """Zero `len` bytes at physical `dst_phys` via HHDM. Used for BSS tails."""
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val _ = rt_memset(dst_virt.to_i64(), 0, len.to_i64())
 
 fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a 4KB page in an explicit address space without switching CR3.

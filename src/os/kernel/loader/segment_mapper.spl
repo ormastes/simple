@@ -24,7 +24,7 @@ use os.kernel.types.task_types.{
 }
 use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags, phys_addr_value}
 use os.kernel.memory.pmm.{pmm_alloc_page}
-use os.kernel.memory.vmm.{vmm_map_page_in, vmm_write_byte_through_hhdm}
+use os.kernel.memory.vmm.{vmm_map_page_in, vmm_copy_bytes_to_phys, vmm_zero_phys_range}
 
 # ============================================================================
 # ELF program-header permission bits (PF_*)
@@ -41,14 +41,10 @@ val PAGE_SIZE: u64 = 4096
 # ============================================================================
 
 extern fn serial_println(msg: text)
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
 # Helpers
 # ============================================================================
-
-fn _byte_at(data: [u8], offset: u64) -> u8:
-    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
 
 fn _page_align_down(addr: u64) -> u64:
     """Round a u64 down to the nearest page boundary."""
@@ -80,7 +76,14 @@ fn _flags_from_pf(flags: u32) -> VmFlags:
     VmFlags(bits: bits)
 
 fn _copy_segment_page(page_phys: u64, page_va: u64, seg_va: u64, file_size: u64, mem_size: u64, src: [u8]):
-    """Copy one mapped segment page without retaining all page frames."""
+    """Copy one mapped segment page without retaining all page frames.
+
+    The copy is split into a file-backed range (`rt_memcpy`) and a BSS tail
+    (`rt_memset`). The previous implementation looped byte-by-byte, which
+    induced ~5 allocations per byte through `rt_bytes_u8_at` and caused the
+    syscall 13 "enqueue stall" investigated in
+    doc/08_tracking/bug/syscall13_enqueue_stall_2026-04-21.md.
+    """
     val page_end = page_va + PAGE_SIZE
     val seg_end = seg_va + mem_size
     var copy_start = page_va
@@ -89,14 +92,23 @@ fn _copy_segment_page(page_phys: u64, page_va: u64, seg_va: u64, file_size: u64,
     var copy_end = page_end
     if copy_end > seg_end:
         copy_end = seg_end
+    if copy_start >= copy_end:
+        return
 
-    var cur = copy_start
-    while cur < copy_end:
-        val seg_off = cur - seg_va
-        val page_off = cur - page_va
-        val b = if seg_off < file_size: _byte_at(src, seg_off) else: 0 as u8
-        _write_u8(page_phys + page_off, b)
-        cur = cur + 1
+    val page_off = copy_start - page_va
+    val seg_off = copy_start - seg_va
+    val total = copy_end - copy_start
+
+    var file_len: u64 = 0
+    if seg_off < file_size:
+        val remaining_file = file_size - seg_off
+        file_len = if total < remaining_file: total else: remaining_file
+    val zero_len = total - file_len
+
+    if file_len > 0:
+        vmm_copy_bytes_to_phys(page_phys + page_off, src, seg_off, file_len)
+    if zero_len > 0:
+        vmm_zero_phys_range(page_phys + page_off + file_len, zero_len)
 
 fn _copy_stack_page(page_phys: u64, page_va: u64, frame_start: u64, stack_top: u64, stack_bytes: [u8]):
     """Copy the initial stack bytes that overlap one mapped stack page."""
@@ -113,16 +125,10 @@ fn _copy_stack_page(page_phys: u64, page_va: u64, frame_start: u64, stack_top: u
     if copy_start >= copy_end:
         return
 
-    var cur = copy_start
-    while cur < copy_end:
-        val src_off = cur - frame_start
-        val page_off = cur - page_va
-        _write_u8(page_phys + page_off, _byte_at(stack_bytes, src_off))
-        cur = cur + 1
-
-fn _write_u8(addr: u64, value: u8):
-    """Write one byte through a physical address via the HHDM writer."""
-    vmm_write_byte_through_hhdm(addr, value)
+    val page_off = copy_start - page_va
+    val src_off = copy_start - frame_start
+    val len = copy_end - copy_start
+    vmm_copy_bytes_to_phys(page_phys + page_off, stack_bytes, src_off, len)
 
 # ============================================================================
 # Public API
