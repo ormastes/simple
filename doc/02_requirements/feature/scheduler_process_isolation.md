@@ -12,6 +12,6 @@
 
 ## Deferred
 
-- EDF/CBS deadline admission and runtime replenishment.
+- CBS runtime replenishment and deadline-miss recovery.
 - Full RT FIFO/RR starvation/bandwidth guard implementation.
 - Hosted sandbox backend changes.
