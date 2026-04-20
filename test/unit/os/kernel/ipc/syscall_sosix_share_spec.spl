@@ -13,6 +13,7 @@ use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.ipc.shared_dataset.{shared_dataset_init, shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_read_byte}
 use os.kernel.ipc.process_queue.{process_queue_init, PROCESS_QUEUE_NO_HANDLE, PROCESS_QUEUE_POLL_READ}
+use os.posix.fd_table.{fd_table_init, fd_set, fd_set_offset, fd_get_offset, FD_TYPE_FILE, O_RDONLY, O_WRONLY}
 
 fn _dispatch(args: SyscallArgs) -> i64:
     syscall_handler(args, Scheduler.new(), IpcManager.new(), KernelLog.new(16)).value
@@ -32,13 +33,30 @@ describe "SOSIX dataset syscalls":
         expect(mapped).to_be_greater_than(0)
         expect(_dispatch(SyscallArgs(id: 125, arg0: mapped as u64, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
 
-    it "creates sealed file-backed dataset handles through the ABI":
+    it "rejects invalid file-backed dataset descriptors":
         shared_dataset_init()
+        fd_table_init()
 
         val handle = _dispatch(SyscallArgs(id: 121, arg0: 3, arg1: 0, arg2: 8, arg3: 0, arg4: 0, arg5: 0))
-        expect(handle).to_equal(0)
-        expect(_dispatch(SyscallArgs(id: 122, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(-22)
-        expect(_dispatch(SyscallArgs(id: 126, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(handle).to_equal(-9)
+
+    it "rejects write-only file-backed dataset descriptors and preserves offset":
+        shared_dataset_init()
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_WRONLY, 30u64)
+        fd_set_offset(3, 44u64)
+
+        val handle = _dispatch(SyscallArgs(id: 121, arg0: 3, arg1: 7, arg2: 8, arg3: 0, arg4: 0, arg5: 0))
+        expect(handle).to_equal(-9)
+        expect(fd_get_offset(3)).to_equal(44u64)
+
+    it "rejects zero-length file-backed dataset snapshots":
+        shared_dataset_init()
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 30u64)
+
+        val handle = _dispatch(SyscallArgs(id: 121, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        expect(handle).to_equal(-22)
 
 describe "SOSIX process queue syscalls":
     it "creates sends polls and receives queue messages":

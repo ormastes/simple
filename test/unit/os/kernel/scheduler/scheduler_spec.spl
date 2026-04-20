@@ -567,6 +567,95 @@ describe "Scheduler":
                 val task = tcb
                 expect(task.assigned_cpu).to_equal(0u32)
 
+        it "tracks current task per CPU and records wakeup preemption":
+            var sched = Scheduler.new()
+            val running = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val sleeper = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            var run_cfg = default_task_schedule(TaskPriority.Normal)
+            run_cfg.virtual_deadline = 1000
+            sched.set_schedule_config(running, run_cfg)
+            var wake_cfg = default_task_schedule(TaskPriority.Normal)
+            wake_cfg.virtual_deadline = 10
+            sched.set_schedule_config(sleeper, wake_cfg)
+            sched.block_task(sleeper, BlockReason.Sleep(until_ns: 10000000))
+            sched.schedule_on_cpu(0u32)
+
+            val decision = sched.unblock_task_on_cpu(sleeper, 0u32)
+
+            expect(decision.should_preempt).to_equal(true)
+            expect(decision.reason).to_equal(SchedulerPreemptionReason.EarlierVirtualDeadline)
+            val pending = sched.preempt_pending_on_cpu(0u32)
+            if pending != nil:
+                val task = pending
+                expect(task.id).to_equal(sleeper.id)
+            expect(sched.trace_event_count(SchedulerTraceKind.WakePreempt)).to_equal(1)
+
+        it "idle balance pulls one fair task and traces the pull":
+            var sched = Scheduler.new()
+            val id1 = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            val moved = sched.idle_balance_once(1u32)
+
+            expect(moved).to_equal(true)
+            expect(sched.cpu_runnable_count(1u32)).to_equal(1)
+            expect(sched.trace_event_count(SchedulerTraceKind.IdlePull)).to_equal(1)
+
+        it "rt budget throttling allows fair tasks to run":
+            var sched = Scheduler.new()
+            expect(sched.configure_rt_bandwidth(0u32, 10000000, 30000000)).to_equal(0)
+            val rt_id = sched.create_task(0x1000, TaskPriority.Realtime, CapabilitySet.full())
+            val fair_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+
+            sched.schedule()
+            val rt_task = sched.get_task(rt_id)
+            if rt_task != nil:
+                val task = rt_task
+                sched.timer_tick(task.context)
+
+            expect(sched.rt_throttled(0u32)).to_equal(true)
+            val ctx = sched.schedule()
+            expect(sched.get_current().id).to_equal(fair_id.id)
+            expect(sched.trace_event_count(SchedulerTraceKind.RtThrottle)).to_be_greater_than(0)
+
+        it "priority inheritance boosts and restores mutex owner priority":
+            var sched = Scheduler.new()
+            val owner = sched.create_task(0x1000, TaskPriority.Realtime, CapabilitySet.full())
+            val waiter = sched.create_task(0x2000, TaskPriority.Realtime, CapabilitySet.full())
+            var owner_cfg = default_task_schedule(TaskPriority.Realtime)
+            owner_cfg.priority = 50
+            var waiter_cfg = default_task_schedule(TaskPriority.Realtime)
+            waiter_cfg.priority = 10
+            sched.set_schedule_config(owner, owner_cfg)
+            sched.set_schedule_config(waiter, waiter_cfg)
+            var mutex = PiMutex.new()
+            mutex = sched.pi_mutex_lock(mutex, owner)
+            mutex = sched.pi_mutex_lock(mutex, waiter)
+
+            val boosted = sched.get_task(owner)
+            if boosted != nil:
+                val task = boosted
+                expect(task.schedule.priority).to_equal(10)
+
+            mutex = sched.pi_mutex_unlock(mutex, owner)
+            val restored = sched.get_task(owner)
+            if restored != nil:
+                val task = restored
+                expect(task.schedule.priority).to_equal(50)
+
+        it "deadline CBS records overrun and miss traces":
+            var sched = Scheduler.new()
+            val dl_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            expect(sched.admit_deadline(dl_id, 10000000, 10000000, 10000000, 0)).to_equal(0)
+            sched.schedule()
+            val dl_task = sched.get_task(dl_id)
+            if dl_task != nil:
+                val task = dl_task
+                sched.timer_tick(task.context)
+                sched.timer_tick(task.context)
+
+            expect(sched.trace_event_count(SchedulerTraceKind.DeadlineOverrun)).to_be_greater_than(0)
+            expect(sched.deadline_miss_count(dl_id)).to_be_greater_than(0)
+
     describe "process isolation":
         it "monotonically restricts isolation metadata":
             var sched = Scheduler.new()
