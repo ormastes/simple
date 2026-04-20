@@ -66,9 +66,10 @@ The first SOSIX slice returns negative POSIX-compatible errno values so POSIX
 wrappers can forward results without a translation table. The public owner is
 SOSIX; POSIX names are compatibility only.
 
-`dataset_create_from_file` currently creates a sealed immutable object with the
-right ABI shape. VFS-backed byte snapshot population remains a follow-up because
-the current syscall dispatcher does not expose synchronous file bytes.
+`dataset_create_from_file` reads exact bytes through the fd read-at helper,
+restores the shared open-file-description offset, writes into an unsealed
+dataset, seals it, and closes the dataset slot on failure. Short reads return
+`-EIO`; invalid descriptors and write-only descriptors return `-EBADF`.
 
 ## Bitfield Policy
 

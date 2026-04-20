@@ -60,8 +60,9 @@ queue operations. It avoids POSIX shared-memory aliasing as the default model.
    Done; POSIX keeps forwarding wrappers.
 5. Wire dataset/queue handles into kernel capability and VM mapping syscalls.
    Done for fixed-table kernel managers and syscall IDs 120-131.
-6. Follow-up: migrate socket and dylib async ownership into SOSIX, then add
-   VFS-backed dataset byte population for `dataset_create_from_file`.
+6. Follow-up: migrate socket and dylib async ownership into SOSIX. VFS-backed
+   dataset byte population for `dataset_create_from_file` is now implemented
+   through the fd read-at helper.
 
 ## Current Coverage And Remaining Work
 
@@ -77,10 +78,9 @@ Implemented source paths:
 
 Remaining SOSIX logic is intentionally explicit:
 
-- `dataset_create_from_file` has the ABI and sealed-handle behavior, but
-  syscall dispatch still lacks a clean synchronous VFS byte snapshot API that
-  can read from an fd at `(offset, len)` into kernel-owned bytes without adding
-  scheduler or VFS service coupling.
+- `dataset_create_from_file` now reads exact bytes from the current task's fd,
+  seals the immutable dataset, restores fd offset on success/failure, and
+  closes the dataset builder on read/write/seal failures.
 - Queue send/receive is bounded and deterministic. Read/write/HUP readiness is
   externally checkable through poll, but scheduler wakeups for blocked
   readers/writers remain a follow-up because that requires scheduler wait-queue
