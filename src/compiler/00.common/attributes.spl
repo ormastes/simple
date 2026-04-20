@@ -361,9 +361,9 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
 fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [text]) -> TaskPolicyValidation:
     """Validate @task scheduler policy against runtime family/effects.
 
-    V1 accepts fair/background everywhere, accepts RT metadata only in
-    noalloc runtime code, and rejects deadline activation until EDF/CBS
-    admission is implemented.
+    Fair/background policies are valid in any runtime family. RT and deadline
+    policies require noalloc runtime code; deadline additionally requires a
+    valid runtime/period/deadline tuple for scheduler admission.
     """
     var diagnostics: [TaskPolicyDiagnostic] = []
     var has_errors = false
@@ -392,17 +392,34 @@ fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [tex
             has_errors = true
 
     if is_deadline:
-        diagnostics.push(TaskPolicyDiagnostic(
-            level: "error",
-            message: "@task(policy='deadline') is metadata-only in scheduler v1; EDF/CBS admission is not enabled"
-        ))
-        has_errors = true
         if attr.runtime_ns == nil or attr.period_ns == nil or attr.deadline_ns == nil:
             diagnostics.push(TaskPolicyDiagnostic(
                 level: "error",
                 message: "@task(policy='deadline') requires runtime, period, and deadline parameters"
             ))
             has_errors = true
+        else:
+            val runtime = attr.runtime_ns ?? 0
+            val period = attr.period_ns ?? 0
+            val deadline = attr.deadline_ns ?? 0
+            if runtime <= 0 or period <= 0 or deadline <= 0:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires positive runtime, period, and deadline parameters"
+                ))
+                has_errors = true
+            elif runtime > deadline:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires runtime <= deadline"
+                ))
+                has_errors = true
+            elif deadline > period:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires deadline <= period"
+                ))
+                has_errors = true
 
     if is_rt or is_deadline:
         for effect in effects:
