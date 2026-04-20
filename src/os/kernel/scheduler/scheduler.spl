@@ -838,8 +838,6 @@ impl Scheduler:
         var picked: TaskId? = nil
         if queue_name == "deadline":
             picked = rq.deadline_queue.dequeue()
-        elif queue_name == "rt":
-            picked = rq.rt_queue.dequeue()
         elif queue_name == "idle":
             picked = rq.idle_queue.dequeue()
         if picked != nil:
@@ -857,6 +855,53 @@ impl Scheduler:
                         rq.weighted_load = 0
             self.cpu_runqueues[cpu as i64] = rq
         picked
+
+    me _pick_rt_from(cpu: u32) -> TaskId?:
+        """Pick the runnable RT task with the highest static priority."""
+        var rq = self.cpu_runqueues[cpu as i64]
+        var q = rq.rt_queue
+        if q.count == 0:
+            return nil
+
+        var best: TaskId? = nil
+        var best_priority: i64 = 9223372036854775807
+        var scan = q.head
+        var scanned = 0
+        while scanned < q.count:
+            val idx = scan % q.capacity
+            val candidate = TaskId(id: q.entries[idx])
+            val slot = self._find_slot(candidate)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if task.schedule.priority < best_priority:
+                        best = candidate
+                        best_priority = task.schedule.priority
+            scan = scan + 1
+            scanned = scanned + 1
+
+        if best == nil:
+            best = q.dequeue()
+        else:
+            q.remove(best.unwrap())
+
+        rq.rt_queue = q
+        if best != nil:
+            val task_id = best.unwrap()
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if rq.runnable_count > 0:
+                        rq.runnable_count = rq.runnable_count - 1
+                    if rq.weighted_load >= task.schedule.weight:
+                        rq.weighted_load = rq.weighted_load - task.schedule.weight
+                    else:
+                        rq.weighted_load = 0
+        self.cpu_runqueues[cpu as i64] = rq
+        best
 
     me _pick_fair_from(cpu: u32, background: bool) -> TaskId?:
         """Pick earliest eligible virtual deadline from fair/background lane."""
@@ -914,7 +959,7 @@ impl Scheduler:
         val dl = self._pick_fifo_from("deadline", cpu)
         if dl != nil:
             return dl
-        val rt = self._pick_fifo_from("rt", cpu)
+        val rt = self._pick_rt_from(cpu)
         if rt != nil:
             return rt
         val fair = self._pick_fair_from(cpu, false)
