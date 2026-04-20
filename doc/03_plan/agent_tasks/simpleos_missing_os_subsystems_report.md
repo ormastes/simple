@@ -155,6 +155,13 @@ is closed. The next blocker is making `build_user_process_image` plus
 `Scheduler.create_user_task` safe for real FAT32 app ELFs under the full QEMU
 desktop smoke and then removing the shared resident compatibility fallback.
 
+2026-04-20 follow-up: the live `simpleos_desktop_disk_boot_spec.spl` FAT32
+desktop lane is green again with the compatibility fallback guarded away from
+process-backed PIDs. The remaining QEMU blocker is still the C-side syscall-13
+fallback in `baremetal_stubs.c`, which can emit
+`[c-syscall13] fat32 app image validated; resident pid allocated` after the
+SPL trap bridge declines a direct process spawn.
+
 ## Completion Criteria
 
 The missing-subsystems work is complete only when packaged apps launch from

@@ -1,0 +1,70 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# VMM Copy-In Helper Specification
+
+Focused tests for copy-in helper result/status behavior that does not require a
+booted page table. Readable mapped-range success is covered by kernel smoke
+paths because it needs real VMM/MMIO state.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.memory.vmm.{
+    vmm_verify_user_read,
+    vmm_copyin_bytes,
+    vmm_copyin_u64,
+    vmm_copyin_cstr,
+    vmm_copyin_string_vector
+}
+use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
+
+describe "vmm copy-in status":
+    """
+    These cases cover result contracts that return before the helpers touch
+    MMIO-backed page tables or identity-mapped user bytes.
+    """
+
+    it "rejects null byte pointers":
+        val result = vmm_copyin_bytes(0, 1)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)
+
+    it "allows zero-length byte copies from non-null pointers":
+        val result = vmm_copyin_bytes(0x1000, 0)
+        expect(result.status.ok).to_equal(true)
+        expect(result.status.errno).to_equal(ESUCCESS)
+        expect(result.status.bytes_read).to_equal(0)
+        expect(result.bytes.len()).to_equal(0)
+
+    it "rejects null u64 pointers":
+        val result = vmm_copyin_u64(0)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)
+
+    it "rejects null cstr pointers":
+        val result = vmm_copyin_cstr(0, 16)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)
+
+    it "reports bounded cstr exhaustion as E2BIG before dereference":
+        val result = vmm_copyin_cstr(0x1000, 0)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(E2BIG)
+
+    it "treats null string vector as empty":
+        val result = vmm_copyin_string_vector(0, 4, 16, 64)
+        expect(result.status.ok).to_equal(true)
+        expect(result.status.errno).to_equal(ESUCCESS)
+        expect(result.values.len()).to_equal(0)
+
+    it "requires non-null vectors to terminate within max_count":
+        val result = vmm_copyin_string_vector(0x1000, 0, 16, 64)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(E2BIG)
+
+    it "rejects wrapping byte ranges without dereference":
+        val result = vmm_copyin_bytes(0xFFFFFFFFFFFFFFF8, 16)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)
+
+    it "rejects wrapping read verification ranges":
+        expect(vmm_verify_user_read(0xFFFFFFFFFFFFFFF8, 16)).to_equal(false)

@@ -7,8 +7,9 @@ native pipe descriptors to the pipe backend, not through VFS IPC.
 """
 
 use std.spec
-use os.posix.fd_table.{fd_table_init, fd_set, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_offset, fd_set_offset, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, FD_TYPE_FREE, O_RDONLY, O_WRONLY}
-use os.posix.fd_io.{fd_io_read_route, fd_io_write_route, fd_io_close_route, posix_dup2, FD_IO_ROUTE_INVALID, FD_IO_ROUTE_FILE, FD_IO_ROUTE_SERIAL, FD_IO_ROUTE_PIPE, FD_IO_ROUTE_SOCKET}
+use os.posix.errno.{EBADF}
+use os.posix.fd_table.{fd_table_init, fd_set, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_offset, fd_set_offset, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, FD_TYPE_FREE, O_RDONLY, O_WRONLY, O_RDWR}
+use os.posix.fd_io.{fd_io_read_route, fd_io_write_route, fd_io_close_route, posix_dup2, posix_pread_exact_bytes, FD_IO_ROUTE_INVALID, FD_IO_ROUTE_FILE, FD_IO_ROUTE_SERIAL, FD_IO_ROUTE_PIPE, FD_IO_ROUTE_SOCKET}
 
 describe "POSIX fd_io backend routing":
     it "routes file descriptors to the file backend":
@@ -67,3 +68,43 @@ describe "POSIX fd_io backend routing":
         expect(fd_ports[4]).to_equal(33u64)
         expect(fd_get_offset(4)).to_equal(7u64)
         expect(fd_get_cloexec(4)).to_equal(false)
+
+    it "pread exact rejects invalid descriptors":
+        fd_table_init()
+
+        val result = posix_pread_exact_bytes(99, 0u64, 4u64)
+
+        expect(result.status).to_equal(0 - EBADF as i64)
+        expect(result.len).to_equal(0u64)
+        expect(result.data.len()).to_equal(0)
+
+    it "pread exact rejects non-file descriptors":
+        fd_table_init()
+
+        val result = posix_pread_exact_bytes(0, 0u64, 1u64)
+
+        expect(result.status).to_equal(0 - EBADF as i64)
+        expect(result.len).to_equal(0u64)
+
+    it "pread exact rejects write-only file descriptors without moving offset":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_WRONLY, 33u64)
+        expect(fd_set_offset(3, 91u64)).to_equal(0)
+
+        val result = posix_pread_exact_bytes(3, 7u64, 8u64)
+
+        expect(result.status).to_equal(0 - EBADF as i64)
+        expect(result.len).to_equal(0u64)
+        expect(fd_get_offset(3)).to_equal(91u64)
+
+    it "pread exact restores offset for zero-byte file reads":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDWR, 33u64)
+        expect(fd_set_offset(3, 91u64)).to_equal(0)
+
+        val result = posix_pread_exact_bytes(3, 7u64, 0u64)
+
+        expect(result.status).to_equal(0)
+        expect(result.len).to_equal(0u64)
+        expect(result.data.len()).to_equal(0)
+        expect(fd_get_offset(3)).to_equal(91u64)

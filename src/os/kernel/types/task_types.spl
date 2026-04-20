@@ -83,6 +83,19 @@ struct SchedulerTopology:
     cpu_count: u32
     domains: [SchedulerDomain]
 
+struct CpuTopologyInfo:
+    """Hardware-discovered CPU topology entry in scheduler CPU order.
+
+    `cpu_id` is expected to be the zero-based logical CPU id for this entry.
+    Domains are emitted as contiguous scheduler CPU ranges, so callers should
+    pass entries sorted by `cpu_id` without gaps. Invalid or empty input falls
+    back to a flat topology.
+    """
+    cpu_id: u32
+    smt_id: u32
+    cache_id: u32
+    numa_id: u32
+
 struct TaskScheduleConfig:
     """Scheduler class metadata and fair/deadline accounting.
 
@@ -103,7 +116,7 @@ struct TaskScheduleConfig:
     affinity_mask: u64
     home_cpu: u32
 
-fn default_scheduler_topology(cpu_count: u32) -> SchedulerTopology:
+fn scheduler_flat_topology(cpu_count: u32) -> SchedulerTopology:
     """Build the scheduler's flat fallback topology."""
     val normalized = if cpu_count == 0u32: 1u32 else: cpu_count
     SchedulerTopology(
@@ -118,6 +131,188 @@ fn default_scheduler_topology(cpu_count: u32) -> SchedulerTopology:
             wake_affine_threshold: 1
         )]
     )
+
+fn default_scheduler_topology(cpu_count: u32) -> SchedulerTopology:
+    """Build the scheduler's legacy-compatible default topology."""
+    scheduler_flat_topology(cpu_count)
+
+fn _cpu_topology_info_is_contiguous(cpu_info: [CpuTopologyInfo]) -> bool:
+    var idx = 0
+    while idx < cpu_info.len():
+        if cpu_info[idx].cpu_id != idx.to_u32():
+            return false
+        idx = idx + 1
+    true
+
+fn _topology_has_numa_split(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    val first = cpu_info[0].numa_id
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].numa_id != first:
+            return true
+        idx = idx + 1
+    false
+
+fn _topology_has_cache_split(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    val first = cpu_info[0].cache_id
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].cache_id != first:
+            return true
+        idx = idx + 1
+    false
+
+fn _topology_has_smt_siblings(cpu_info: [CpuTopologyInfo]) -> bool:
+    if cpu_info.len() <= 1:
+        return false
+    var idx = 1
+    while idx < cpu_info.len():
+        if cpu_info[idx].smt_id == cpu_info[idx - 1].smt_id:
+            return true
+        idx = idx + 1
+    false
+
+fn _domain_contains_cpu(domain: SchedulerDomain, cpu_id: u32) -> bool:
+    cpu_id >= domain.first_cpu and cpu_id < domain.first_cpu + domain.cpu_count
+
+fn _find_parent_domain(domains: [SchedulerDomain], kind: SchedulerDomainKind, cpu_id: u32) -> u32?:
+    var idx = 0
+    while idx < domains.len():
+        val domain = domains[idx]
+        if domain.kind == kind and _domain_contains_cpu(domain, cpu_id):
+            return domain.id
+        idx = idx + 1
+    nil
+
+fn _cache_parent_domain(domains: [SchedulerDomain], cpu_id: u32) -> u32?:
+    val numa_parent = _find_parent_domain(domains, SchedulerDomainKind.Numa, cpu_id)
+    if numa_parent != nil:
+        return numa_parent
+    0u32
+
+fn _smt_parent_domain(domains: [SchedulerDomain], cpu_id: u32) -> u32?:
+    val cache_parent = _find_parent_domain(domains, SchedulerDomainKind.Cache, cpu_id)
+    if cache_parent != nil:
+        return cache_parent
+    val numa_parent = _find_parent_domain(domains, SchedulerDomainKind.Numa, cpu_id)
+    if numa_parent != nil:
+        return numa_parent
+    0u32
+
+fn _domain_rebalance_threshold(kind: SchedulerDomainKind) -> i32:
+    if kind == SchedulerDomainKind.Smt:
+        1
+    elif kind == SchedulerDomainKind.Cache:
+        3
+    elif kind == SchedulerDomainKind.Numa:
+        8
+    else:
+        2
+
+fn _domain_wake_affine_threshold(kind: SchedulerDomainKind) -> i32:
+    if kind == SchedulerDomainKind.Smt:
+        1
+    elif kind == SchedulerDomainKind.Cache:
+        2
+    elif kind == SchedulerDomainKind.Numa:
+        4
+    else:
+        1
+
+fn _make_scheduler_domain(id: u32, kind: SchedulerDomainKind, parent_id: u32?, first_cpu: u32, cpu_count: u32) -> SchedulerDomain:
+    SchedulerDomain(
+        id: id,
+        kind: kind,
+        parent_id: parent_id,
+        first_cpu: first_cpu,
+        cpu_count: cpu_count,
+        rebalance_threshold: _domain_rebalance_threshold(kind),
+        wake_affine_threshold: _domain_wake_affine_threshold(kind)
+    )
+
+fn _append_numa_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val numa_id = cpu_info[start].numa_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].numa_id == numa_id:
+            end = end + 1
+        out.push(_make_scheduler_domain(
+            out.len().to_u32(),
+            SchedulerDomainKind.Numa,
+            0u32,
+            cpu_info[start].cpu_id,
+            (end - start).to_u32()
+        ))
+        start = end
+    out
+
+fn _append_cache_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val cache_id = cpu_info[start].cache_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].cache_id == cache_id:
+            end = end + 1
+        out.push(_make_scheduler_domain(
+            out.len().to_u32(),
+            SchedulerDomainKind.Cache,
+            _cache_parent_domain(out, cpu_info[start].cpu_id),
+            cpu_info[start].cpu_id,
+            (end - start).to_u32()
+        ))
+        start = end
+    out
+
+fn _append_smt_domains(domains: [SchedulerDomain], cpu_info: [CpuTopologyInfo]) -> [SchedulerDomain]:
+    var out = domains
+    var start = 0
+    while start < cpu_info.len():
+        val smt_id = cpu_info[start].smt_id
+        var end = start + 1
+        while end < cpu_info.len() and cpu_info[end].smt_id == smt_id:
+            end = end + 1
+        if end - start > 1:
+            out.push(_make_scheduler_domain(
+                out.len().to_u32(),
+                SchedulerDomainKind.Smt,
+                _smt_parent_domain(out, cpu_info[start].cpu_id),
+                cpu_info[start].cpu_id,
+                (end - start).to_u32()
+            ))
+        start = end
+    out
+
+fn scheduler_topology_from_cpu_info(cpu_info: [CpuTopologyInfo]) -> SchedulerTopology:
+    """Build scheduler domains from ordered hardware CPU topology data."""
+    if cpu_info.len() == 0:
+        return scheduler_flat_topology(1u32)
+    if not _cpu_topology_info_is_contiguous(cpu_info):
+        return scheduler_flat_topology(cpu_info.len().to_u32())
+
+    val cpu_count = cpu_info.len().to_u32()
+    var domains: [SchedulerDomain] = [_make_scheduler_domain(
+        0u32,
+        SchedulerDomainKind.Flat,
+        nil,
+        0u32,
+        cpu_count
+    )]
+
+    if _topology_has_numa_split(cpu_info):
+        domains = _append_numa_domains(domains, cpu_info)
+    if _topology_has_cache_split(cpu_info):
+        domains = _append_cache_domains(domains, cpu_info)
+    if _topology_has_smt_siblings(cpu_info):
+        domains = _append_smt_domains(domains, cpu_info)
+
+    SchedulerTopology(cpu_count: cpu_count, domains: domains)
 
 struct TaskIsolationProfile:
     """Per-task isolation metadata used by process, capability, and VMM code."""

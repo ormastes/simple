@@ -26,7 +26,7 @@ use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
@@ -41,8 +41,9 @@ use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_register
 use os.kernel.ipc.shared_dataset.{shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
 use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
 use os.posix.pipe_compat.{posix_pipe}
-use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write}
+use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
+use os.posix.errno.{E2BIG, EBADF, EFAULT, EIO, EINVAL, ENAMETOOLONG}
 extern fn serial_println(msg: text)
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -1225,19 +1226,24 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     val arch = CURRENT_EXEC_ARCH
     val _sp_argv: [text] = []
     val _sp_envp: [text] = []
+    serial_println("[syscall13] build_user_process_image begin")
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
+        serial_println("[syscall13] build_user_process_image ok")
         val priority = _u64_to_priority(priority_raw)
         val caps = CapabilitySet.full()
         var sched = scheduler
         val task_id = sched.create_user_task(image_result.unwrap(), priority, caps)
         if task_id.id == 0:
+            serial_println("[syscall13] create_user_task failed")
             return -12
 
         var ulog = klog
         ulog.write(6, 1, task_id.id, "spawn_binary launched user process {path}")
+        serial_println("[syscall13] create_user_task ok")
         return task_id.id.to_i64()
 
+    serial_println("[syscall13] build_user_process_image failed")
     val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
     if resident_entry != nil:
         val priority = _u64_to_priority(priority_raw)

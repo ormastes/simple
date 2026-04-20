@@ -41,7 +41,8 @@ use os.compositor.engine2d_display.{create_fb_engine}
 use os.desktop.shell.{DesktopShell}
 use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launcher_get_process_count,
     launcher_get_process_pid, launcher_shortcut_dispatch, launcher_find_process_by_pid,
-    launcher_get_process_window_count}
+    launcher_get_process_window_count, launcher_process_is_process_backed,
+    launcher_process_uses_resident_manifest}
 use os.services.vfs.vfs_init.{vfs_boot_init}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
@@ -117,6 +118,14 @@ fn _latest_launcher_pid() -> u64:
     if process_count <= 0:
         return 0
     launcher_get_process_pid((process_count - 1).to_u64())
+
+fn _log_process_backing(app: text, pid: u64):
+    if launcher_process_is_process_backed(pid):
+        serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
+    elif launcher_process_uses_resident_manifest(pid):
+        serial_println("[desktop-e2e] process-backed:resident app={app} pid={pid}")
+    else:
+        serial_println("[desktop-e2e] process-backed:unknown app={app} pid={pid}")
 
 fn _ps2_wait_input_clear():
     var timeout: i64 = 100000
@@ -379,6 +388,7 @@ fn desktop_e2e_main() -> bool:
                 serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
                 return false
             serial_println("[desktop-e2e] resident fallback done")
+        _log_process_backing("browser_demo", browser_pid)
         serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid={browser_pid}")
 
     # The shell owns the compositor + wm services; drain its WM action queue
@@ -403,6 +413,7 @@ fn desktop_e2e_main() -> bool:
         if hello_pid <= 0:
             hello_pid = HELLO_MANIFEST_PID
         shell.materialize_resident_launch("Hello World", hello_pid)
+        _log_process_backing("hello_world", hello_pid)
         serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
     else:
         serial_println("[desktop-e2e] hello:shortcut:fail")
@@ -430,6 +441,7 @@ fn desktop_e2e_main() -> bool:
         val materialized = shell.materialize_resident_launch("Editor", editor_pid)
         val remote_ready = _wait_for_process_window(shell, editor_pid, 1)
         if materialized or remote_ready:
+            _log_process_backing("editor", editor_pid)
             serial_println("[desktop-e2e] editor-shortcut:ok key=meta+e app=editor")
         else:
             serial_println("[desktop-e2e] editor-shortcut:fail")

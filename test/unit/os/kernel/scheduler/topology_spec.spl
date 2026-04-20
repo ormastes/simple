@@ -1,0 +1,124 @@
+"""
+# Scheduler Topology Specification
+
+Tests for pure scheduler topology construction helpers.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{
+    CpuTopologyInfo, SchedulerDomainKind,
+    default_scheduler_topology, scheduler_flat_topology, scheduler_topology_from_cpu_info
+}
+
+fn _cpu(cpu_id: u32, smt_id: u32, cache_id: u32, numa_id: u32) -> CpuTopologyInfo:
+    CpuTopologyInfo(
+        cpu_id: cpu_id,
+        smt_id: smt_id,
+        cache_id: cache_id,
+        numa_id: numa_id
+    )
+
+describe "Scheduler topology helpers":
+    describe "flat topology":
+        it "keeps default scheduler topology compatible":
+            val legacy = default_scheduler_topology(4u32)
+            val flat = scheduler_flat_topology(4u32)
+
+            expect(legacy.cpu_count).to_equal(flat.cpu_count)
+            expect(legacy.domains.len()).to_equal(flat.domains.len())
+            expect(legacy.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+            expect(legacy.domains[0].first_cpu).to_equal(0u32)
+            expect(legacy.domains[0].cpu_count).to_equal(4u32)
+            expect(legacy.domains[0].rebalance_threshold).to_equal(2)
+            expect(legacy.domains[0].wake_affine_threshold).to_equal(1)
+
+        it "normalizes zero CPUs to one flat CPU":
+            val topology = scheduler_flat_topology(0u32)
+
+            expect(topology.cpu_count).to_equal(1u32)
+            expect(topology.domains.len()).to_equal(1)
+            expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+            expect(topology.domains[0].cpu_count).to_equal(1u32)
+
+        it "falls back to flat topology for empty CPU info":
+            val topology = scheduler_topology_from_cpu_info([])
+
+            expect(topology.cpu_count).to_equal(1u32)
+            expect(topology.domains.len()).to_equal(1)
+            expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+
+    describe "hardware topology":
+        it "builds SMT cache and NUMA domains from synthetic CPU info":
+            val topology = scheduler_topology_from_cpu_info([
+                _cpu(0u32, 0u32, 0u32, 0u32),
+                _cpu(1u32, 0u32, 0u32, 0u32),
+                _cpu(2u32, 1u32, 0u32, 0u32),
+                _cpu(3u32, 1u32, 0u32, 0u32),
+                _cpu(4u32, 2u32, 1u32, 1u32),
+                _cpu(5u32, 2u32, 1u32, 1u32),
+                _cpu(6u32, 3u32, 1u32, 1u32),
+                _cpu(7u32, 3u32, 1u32, 1u32)
+            ])
+
+            expect(topology.cpu_count).to_equal(8u32)
+            expect(topology.domains.len()).to_equal(9)
+
+            expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+            expect(topology.domains[0].first_cpu).to_equal(0u32)
+            expect(topology.domains[0].cpu_count).to_equal(8u32)
+
+            expect(topology.domains[1].kind).to_equal(SchedulerDomainKind.Numa)
+            expect(topology.domains[1].parent_id).to_equal(0u32)
+            expect(topology.domains[1].first_cpu).to_equal(0u32)
+            expect(topology.domains[1].cpu_count).to_equal(4u32)
+            expect(topology.domains[1].rebalance_threshold).to_equal(8)
+            expect(topology.domains[1].wake_affine_threshold).to_equal(4)
+
+            expect(topology.domains[2].kind).to_equal(SchedulerDomainKind.Numa)
+            expect(topology.domains[2].parent_id).to_equal(0u32)
+            expect(topology.domains[2].first_cpu).to_equal(4u32)
+            expect(topology.domains[2].cpu_count).to_equal(4u32)
+
+            expect(topology.domains[3].kind).to_equal(SchedulerDomainKind.Cache)
+            expect(topology.domains[3].parent_id).to_equal(1u32)
+            expect(topology.domains[3].first_cpu).to_equal(0u32)
+            expect(topology.domains[3].cpu_count).to_equal(4u32)
+            expect(topology.domains[3].rebalance_threshold).to_equal(3)
+            expect(topology.domains[3].wake_affine_threshold).to_equal(2)
+
+            expect(topology.domains[4].kind).to_equal(SchedulerDomainKind.Cache)
+            expect(topology.domains[4].parent_id).to_equal(2u32)
+            expect(topology.domains[4].first_cpu).to_equal(4u32)
+            expect(topology.domains[4].cpu_count).to_equal(4u32)
+
+            expect(topology.domains[5].kind).to_equal(SchedulerDomainKind.Smt)
+            expect(topology.domains[5].parent_id).to_equal(3u32)
+            expect(topology.domains[5].first_cpu).to_equal(0u32)
+            expect(topology.domains[5].cpu_count).to_equal(2u32)
+            expect(topology.domains[5].rebalance_threshold).to_equal(1)
+
+            expect(topology.domains[6].kind).to_equal(SchedulerDomainKind.Smt)
+            expect(topology.domains[6].parent_id).to_equal(3u32)
+            expect(topology.domains[6].first_cpu).to_equal(2u32)
+            expect(topology.domains[6].cpu_count).to_equal(2u32)
+
+            expect(topology.domains[7].kind).to_equal(SchedulerDomainKind.Smt)
+            expect(topology.domains[7].parent_id).to_equal(4u32)
+            expect(topology.domains[7].first_cpu).to_equal(4u32)
+            expect(topology.domains[7].cpu_count).to_equal(2u32)
+
+            expect(topology.domains[8].kind).to_equal(SchedulerDomainKind.Smt)
+            expect(topology.domains[8].parent_id).to_equal(4u32)
+            expect(topology.domains[8].first_cpu).to_equal(6u32)
+            expect(topology.domains[8].cpu_count).to_equal(2u32)
+
+        it "uses flat fallback when CPU ids are not contiguous":
+            val topology = scheduler_topology_from_cpu_info([
+                _cpu(0u32, 0u32, 0u32, 0u32),
+                _cpu(2u32, 1u32, 1u32, 1u32)
+            ])
+
+            expect(topology.cpu_count).to_equal(2u32)
+            expect(topology.domains.len()).to_equal(1)
+            expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+            expect(topology.domains[0].cpu_count).to_equal(2u32)

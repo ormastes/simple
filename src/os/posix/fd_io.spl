@@ -27,6 +27,12 @@ val FD_IO_ROUTE_FILE: u8 = 1
 val FD_IO_ROUTE_SERIAL: u8 = 2
 val FD_IO_ROUTE_PIPE: u8 = 3
 val FD_IO_ROUTE_SOCKET: u8 = 4
+val POSIX_PREAD_EXACT_CHUNK_MAX: u64 = 4084
+
+struct PosixPreadExactBytes:
+    status: i64
+    len: u64
+    data: [u8]
 
 fn fd_io_read_route(fd_type: u8) -> u8:
     """Return the native backend route used by posix_read for an FD type."""
@@ -145,6 +151,71 @@ fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
 
     # File reads are owned by async_io; POSIX blocks on its completion.
     sync_read(fd, buf, count)
+
+fn _fd_io_is_write_only(flags: u32) -> bool:
+    (flags & 3u32) == O_WRONLY
+
+fn _posix_pread_exact_error(status: i64) -> PosixPreadExactBytes:
+    PosixPreadExactBytes(status: status, len: 0, data: [])
+
+fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactBytes:
+    """Read exactly `len` bytes from a file descriptor at `offset`.
+
+    The descriptor's shared open-file-description offset is restored before
+    returning, whether the read succeeds, short-reads, or fails.
+    """
+    if not fd_is_valid(fd):
+        return _posix_pread_exact_error(0 - EBADF as i64)
+    val idx: u64 = fd as u64
+    if fd_io_read_route(fd_types[idx]) != FD_IO_ROUTE_FILE:
+        return _posix_pread_exact_error(0 - EBADF as i64)
+    if _fd_io_is_write_only(fd_flags[idx]):
+        return _posix_pread_exact_error(0 - EBADF as i64)
+
+    val original_offset = fd_get_offset(fd)
+    fd_set_offset(fd, offset)
+    if len == 0:
+        fd_set_offset(fd, original_offset)
+        return PosixPreadExactBytes(status: 0, len: 0, data: [])
+
+    var data: [u8] = []
+    var total: u64 = 0
+    while total < len:
+        var chunk_len = len - total
+        if chunk_len > POSIX_PREAD_EXACT_CHUNK_MAX:
+            chunk_len = POSIX_PREAD_EXACT_CHUNK_MAX
+
+        var chunk: [u8] = []
+        var zi: u64 = 0
+        while zi < chunk_len:
+            chunk.push(0u8)
+            zi = zi + 1
+
+        val chunk_addr = unsafe_addr_of(chunk)
+        val read_result = posix_read(fd, buf: chunk_addr, count: chunk_len)
+        if read_result < 0:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(read_result)
+        if read_result == 0:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(0 - EIO as i64)
+
+        val bytes_read = read_result as u64
+        if bytes_read > chunk_len:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(0 - EIO as i64)
+        if bytes_read < chunk_len:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(0 - EIO as i64)
+
+        var ci: u64 = 0
+        while ci < bytes_read:
+            data.push(chunk[ci])
+            ci = ci + 1
+        total = total + bytes_read
+
+    fd_set_offset(fd, original_offset)
+    PosixPreadExactBytes(status: total as i64, len: total, data: data)
 
 fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     """Write to a file descriptor. Returns bytes written or -errno.
