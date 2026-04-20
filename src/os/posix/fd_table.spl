@@ -27,11 +27,22 @@ val O_CREAT: u32 = 64
 val O_TRUNC: u32 = 512
 val O_APPEND: u32 = 1024
 val O_NONBLOCK: u32 = 2048
+val O_CLOEXEC: u32 = 0x80000
+
+# Per-fd flags
+val FD_CLOEXEC: u32 = 1
 
 # Seek whence
 val SEEK_SET: u32 = 0
 val SEEK_CUR: u32 = 1
 val SEEK_END: u32 = 2
+
+# Poll event flags (POSIX-compatible)
+val POLLIN: i16 = 1
+val POLLOUT: i16 = 4
+val POLLERR: i16 = 8
+val POLLHUP: i16 = 16
+val POLLNVAL: i16 = 32
 
 # FD entry
 struct FdEntry:
@@ -48,6 +59,22 @@ var fd_flags: [u32; 256]
 var fd_ports: [u64; 256]
 var fd_offsets: [u64; 256]
 var fd_refcounts: [u32; 256]
+var fd_fd_flags: [u32; 256]    # per-fd flags such as FD_CLOEXEC
+var fd_objects: [u64; 256]     # open-file-description id, 0 when free
+
+# Open file descriptions. dup/dup2 share one object, including status flags
+# and file offset. fd_* arrays above stay as compatibility mirrors.
+var of_types: [u8; 256]
+var of_flags: [u32; 256]
+var of_ports: [u64; 256]
+var of_offsets: [u64; 256]
+var of_refcounts: [u32; 256]
+var of_path_hashes: [u64; 256]
+var of_ready_events: [i16; 256]
+var of_read_notifs: [u64; 256]
+var of_write_notifs: [u64; 256]
+var of_error_notifs: [u64; 256]
+var of_ready_generations: [u64; 256]
 
 fn fd_table_init():
     """Initialize FD table with stdin/stdout/stderr on serial."""
@@ -58,23 +85,78 @@ fn fd_table_init():
         fd_ports[i] = 0
         fd_offsets[i] = 0
         fd_refcounts[i] = 0
+        fd_fd_flags[i] = 0
+        fd_objects[i] = 0
+        of_types[i] = FD_TYPE_FREE
+        of_flags[i] = 0
+        of_ports[i] = 0
+        of_offsets[i] = 0
+        of_refcounts[i] = 0
+        of_path_hashes[i] = 0
+        of_ready_events[i] = 0
+        of_read_notifs[i] = 0
+        of_write_notifs[i] = 0
+        of_error_notifs[i] = 0
+        of_ready_generations[i] = 0
         i = i + 1
-    # FD 0: stdin (serial input)
-    fd_types[0] = FD_TYPE_SERIAL
-    fd_flags[0] = O_RDONLY
-    fd_refcounts[0] = 1
-    # FD 1: stdout (serial output)
-    fd_types[1] = FD_TYPE_SERIAL
-    fd_flags[1] = O_WRONLY
-    fd_refcounts[1] = 1
-    # FD 2: stderr (serial output)
-    fd_types[2] = FD_TYPE_SERIAL
-    fd_flags[2] = O_WRONLY
-    fd_refcounts[2] = 1
+    # FD 0: stdin (serial input), FD 1/2: stdout/stderr.
+    fd_set(0, FD_TYPE_SERIAL, O_RDONLY, 0)
+    fd_set(1, FD_TYPE_SERIAL, O_WRONLY, 0)
+    fd_set(2, FD_TYPE_SERIAL, O_WRONLY, 0)
+
+fn _fd_object_alloc() -> u64:
+    var i: u64 = 1
+    while i < MAX_FDS:
+        if of_refcounts[i] == 0:
+            return i
+        i = i + 1
+    0
+
+fn _fd_mirror_from_object(fd: i32):
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if obj == 0:
+        fd_types[idx] = FD_TYPE_FREE
+        fd_flags[idx] = 0
+        fd_ports[idx] = 0
+        fd_offsets[idx] = 0
+        fd_refcounts[idx] = 0
+        return
+    fd_types[idx] = of_types[obj]
+    fd_flags[idx] = of_flags[obj]
+    fd_ports[idx] = of_ports[obj]
+    fd_offsets[idx] = of_offsets[obj]
+    fd_refcounts[idx] = of_refcounts[obj]
+
+fn _fd_refresh_object_mirrors(obj: u64):
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_objects[i] == obj:
+            _fd_mirror_from_object(i as i32)
+        i = i + 1
+
+fn _fd_release_object_ref(obj: u64):
+    if obj == 0:
+        return
+    if of_refcounts[obj] > 0:
+        of_refcounts[obj] = of_refcounts[obj] - 1
+    if of_refcounts[obj] == 0:
+        of_types[obj] = FD_TYPE_FREE
+        of_flags[obj] = 0
+        of_ports[obj] = 0
+        of_offsets[obj] = 0
+        of_path_hashes[obj] = 0
+        of_ready_events[obj] = 0
+        of_read_notifs[obj] = 0
+        of_write_notifs[obj] = 0
+        of_error_notifs[obj] = 0
+        of_ready_generations[obj] = 0
+    else:
+        _fd_refresh_object_mirrors(obj)
 
 fn fd_alloc() -> i32:
     """Find the lowest free FD. Returns -EMFILE if table full."""
-    var i: u64 = 3  # skip stdin/stdout/stderr
+    var i: u64 = 0
     while i < MAX_FDS:
         if fd_types[i] == FD_TYPE_FREE:
             return i as i32
@@ -94,23 +176,41 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64):
     """Configure an FD entry."""
     val idx: u64 = fd as u64
     if idx < MAX_FDS:
-        fd_types[idx] = fd_type
-        fd_flags[idx] = flags
-        fd_ports[idx] = ipc_port
-        fd_offsets[idx] = 0
-        fd_refcounts[idx] = 1
+        if fd_objects[idx] != 0:
+            fd_close(fd)
+        val obj = _fd_object_alloc()
+        if obj == 0:
+            return
+        val status_flags = flags & ~O_CLOEXEC
+        of_types[obj] = fd_type
+        of_flags[obj] = status_flags
+        of_ports[obj] = ipc_port
+        of_offsets[obj] = 0
+        of_refcounts[obj] = 1
+        of_path_hashes[obj] = 0
+        of_ready_events[obj] = 0
+        of_read_notifs[obj] = 0
+        of_write_notifs[obj] = 0
+        of_error_notifs[obj] = 0
+        of_ready_generations[obj] = 0
+        fd_objects[idx] = obj
+        fd_fd_flags[idx] = if (flags & O_CLOEXEC) != 0: FD_CLOEXEC else: 0
+        _fd_mirror_from_object(fd)
 
 fn fd_close(fd: i32) -> i32:
     """Close an FD. Returns 0 on success, -EBADF on error."""
     if not fd_is_valid(fd):
         return 0 - EBADF
     val idx: u64 = fd as u64
-    fd_refcounts[idx] = fd_refcounts[idx] - 1
-    if fd_refcounts[idx] == 0:
-        fd_types[idx] = FD_TYPE_FREE
-        fd_flags[idx] = 0
-        fd_ports[idx] = 0
-        fd_offsets[idx] = 0
+    val obj = fd_objects[idx]
+    fd_objects[idx] = 0
+    fd_fd_flags[idx] = 0
+    fd_types[idx] = FD_TYPE_FREE
+    fd_flags[idx] = 0
+    fd_ports[idx] = 0
+    fd_offsets[idx] = 0
+    fd_refcounts[idx] = 0
+    _fd_release_object_ref(obj)
     0
 
 fn fd_dup(old_fd: i32) -> i32:
@@ -122,13 +222,11 @@ fn fd_dup(old_fd: i32) -> i32:
         return new_fd
     val old_idx: u64 = old_fd as u64
     val new_idx: u64 = new_fd as u64
-    fd_types[new_idx] = fd_types[old_idx]
-    fd_flags[new_idx] = fd_flags[old_idx]
-    fd_ports[new_idx] = fd_ports[old_idx]
-    fd_offsets[new_idx] = fd_offsets[old_idx]
-    fd_refcounts[new_idx] = 1
-    # Bump ref count on underlying resource
-    fd_refcounts[old_idx] = fd_refcounts[old_idx] + 1
+    val obj = fd_objects[old_idx]
+    fd_objects[new_idx] = obj
+    fd_fd_flags[new_idx] = 0
+    of_refcounts[obj] = of_refcounts[obj] + 1
+    _fd_refresh_object_mirrors(obj)
     new_fd
 
 fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
@@ -136,7 +234,7 @@ fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
     if not fd_is_valid(old_fd):
         return 0 - EBADF
     if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
-        return 0 - EINVAL
+        return 0 - EBADF
     if old_fd == new_fd:
         return new_fd
     # Close new_fd if it's open
@@ -144,10 +242,210 @@ fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
         fd_close(new_fd)
     val old_idx: u64 = old_fd as u64
     val new_idx: u64 = new_fd as u64
-    fd_types[new_idx] = fd_types[old_idx]
-    fd_flags[new_idx] = fd_flags[old_idx]
-    fd_ports[new_idx] = fd_ports[old_idx]
-    fd_offsets[new_idx] = fd_offsets[old_idx]
-    fd_refcounts[new_idx] = 1
-    fd_refcounts[old_idx] = fd_refcounts[old_idx] + 1
+    val obj = fd_objects[old_idx]
+    fd_objects[new_idx] = obj
+    fd_fd_flags[new_idx] = 0
+    of_refcounts[obj] = of_refcounts[obj] + 1
+    _fd_refresh_object_mirrors(obj)
     new_fd
+
+fn fd_get_cloexec(fd: i32) -> bool:
+    """Return true when FD_CLOEXEC is set on this descriptor."""
+    if not fd_is_valid(fd):
+        return false
+    val idx: u64 = fd as u64
+    (fd_fd_flags[idx] & FD_CLOEXEC) != 0
+
+fn fd_set_cloexec(fd: i32, enabled: bool) -> i32:
+    """Set or clear FD_CLOEXEC on a descriptor."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    if enabled:
+        fd_fd_flags[idx] = fd_fd_flags[idx] | FD_CLOEXEC
+    else:
+        fd_fd_flags[idx] = fd_fd_flags[idx] & ~FD_CLOEXEC
+    0
+
+fn fd_close_on_exec() -> u32:
+    """Close every descriptor marked FD_CLOEXEC and return the close count."""
+    var closed: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE and (fd_fd_flags[i] & FD_CLOEXEC) != 0:
+            fd_close(i as i32)
+            closed = closed + 1
+        i = i + 1
+    closed
+
+fn fd_exec_cleanup() -> u32:
+    """Apply execve descriptor cleanup rules for the current process."""
+    fd_close_on_exec()
+
+fn fd_prepare_fork() -> u32:
+    """Duplicate live descriptor references for a forked child.
+
+    The current fd table is process-global in this runtime slice, so this
+    helper records the extra child references on each inherited open file
+    description. Per-descriptor flags, including FD_CLOEXEC, remain unchanged
+    and are handled later by fd_exec_cleanup().
+    """
+    var inherited: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE:
+            val obj = fd_objects[i]
+            if obj != 0:
+                of_refcounts[obj] = of_refcounts[obj] + 1
+                inherited = inherited + 1
+        i = i + 1
+    i = 0
+    while i < MAX_FDS:
+        if fd_objects[i] != 0:
+            _fd_mirror_from_object(i as i32)
+        i = i + 1
+    inherited
+
+fn fd_fork_inherit() -> u32:
+    """Compatibility alias for fd_prepare_fork."""
+    fd_prepare_fork()
+
+fn fd_release_on_process_exit() -> u32:
+    """Close every live descriptor for process teardown and return count."""
+    var released: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE:
+            fd_close(i as i32)
+            released = released + 1
+        i = i + 1
+    released
+
+fn fd_get_status_flags(fd: i32) -> u32:
+    """Return shared open-file-description status flags such as O_NONBLOCK."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_flags[fd_objects[idx]]
+
+fn fd_set_status_flags(fd: i32, flags: u32) -> i32:
+    """Replace shared open-file-description status flags."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    of_flags[obj] = flags & ~O_CLOEXEC
+    _fd_refresh_object_mirrors(obj)
+    0
+
+fn fd_get_offset(fd: i32) -> u64:
+    """Return the shared open-file-description offset."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_offsets[fd_objects[idx]]
+
+fn fd_set_offset(fd: i32, offset: u64) -> i32:
+    """Set the shared open-file-description offset."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    of_offsets[obj] = offset
+    _fd_refresh_object_mirrors(obj)
+    0
+
+fn fd_get_type(fd: i32) -> u8:
+    """Return the descriptor backend type, or FD_TYPE_FREE for invalid fds."""
+    if not fd_is_valid(fd):
+        return FD_TYPE_FREE
+    val idx: u64 = fd as u64
+    of_types[fd_objects[idx]]
+
+fn fd_get_backend_handle(fd: i32) -> u64:
+    """Return the backend handle stored on the open file description."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_ports[fd_objects[idx]]
+
+fn fd_get_refcount(fd: i32) -> u32:
+    """Return the shared open-file-description reference count."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_refcounts[fd_objects[idx]]
+
+fn fd_poll_ready(fd: i32, events: i16) -> i16:
+    """Return current readiness for poll/select without blocking."""
+    if not fd_is_valid(fd):
+        return POLLNVAL
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    val fd_type = of_types[obj]
+    var revents: i16 = 0
+    if fd_type == FD_TYPE_SERIAL or fd_type == FD_TYPE_FILE:
+        if (events & POLLIN) != 0:
+            revents = revents | POLLIN
+        if (events & POLLOUT) != 0:
+            revents = revents | POLLOUT
+        return revents
+    of_ready_events[obj] & (events | POLLERR | POLLHUP)
+
+fn fd_set_poll_notification(fd: i32, events: i16, notif_id: u64) -> i32:
+    """Attach backend wake notifications to the shared open description."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if (events & POLLIN) != 0:
+        of_read_notifs[obj] = notif_id
+    if (events & POLLOUT) != 0:
+        of_write_notifs[obj] = notif_id
+    if (events & (POLLERR | POLLHUP)) != 0:
+        of_error_notifs[obj] = notif_id
+    0
+
+fn fd_poll_notification(fd: i32, events: i16) -> u64:
+    """Return a notification that can wake the requested poll interest."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if (events & POLLIN) != 0 and of_read_notifs[obj] != 0:
+        return of_read_notifs[obj]
+    if (events & POLLOUT) != 0 and of_write_notifs[obj] != 0:
+        return of_write_notifs[obj]
+    if (events & (POLLERR | POLLHUP)) != 0 and of_error_notifs[obj] != 0:
+        return of_error_notifs[obj]
+    0
+
+fn fd_update_ready(fd: i32, set_events: i16, clear_events: i16) -> i32:
+    """Update readiness bits on the shared open file description."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    val before = of_ready_events[obj]
+    of_ready_events[obj] = (of_ready_events[obj] | set_events) & ~clear_events
+    if of_ready_events[obj] != before:
+        of_ready_generations[obj] = of_ready_generations[obj] + 1
+    0
+
+fn fd_update_ready_by_backend(fd_type: u8, backend_handle: u64, set_events: i16, clear_events: i16) -> u32:
+    """Update readiness for every descriptor object matching a backend handle."""
+    var updated: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] == fd_type and fd_ports[i] == backend_handle:
+            fd_update_ready(i as i32, set_events: set_events, clear_events: clear_events)
+            updated = updated + 1
+        i = i + 1
+    updated
+
+fn fd_get_ready_generation(fd: i32) -> u64:
+    """Return the readiness generation for future edge-triggered epoll."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_ready_generations[fd_objects[idx]]

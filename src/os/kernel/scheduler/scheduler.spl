@@ -14,7 +14,7 @@ use os.kernel.types.task_types.{
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.x86_64.context.{X86ContextSwitch}
-use os.kernel.memory.vmm.{create_user_address_space, vmm_cow_clone_pages}
+use os.kernel.memory.vmm.{create_user_address_space, destroy_user_address_space, vmm_cow_clone_pages}
 use os.kernel.loader.segment_mapper.{map_all}
 
 # Forward declaration: implemented by IpcManager wiring in kernel main.
@@ -766,15 +766,14 @@ impl Scheduler:
         self._enqueue_ready(task_id)
         true
 
-    # -- IF-02 Fork/Exec Contract (wave-3 scaffolds) -------------------------
-    # Real COW page-table clone + ELF load arrive in wave 4.
+    # -- IF-02 Fork/Exec Contract -------------------------------------------
 
     me clone_task(parent_id: TaskId) -> TaskId:
         """Clone parent task into new child task (IF-02).
 
-        Wave-4 scaffold: looks up parent TCB, allocates a fresh TaskId,
-        copies registers/priority/parent linkage, marks child Ready,
-        and enqueues it. Page-table COW arrives in wave-4b.
+        Looks up parent TCB, allocates a fresh TaskId, copies register and
+        policy state, marks child Ready, and COW-clones real user address
+        spaces. Kernel/sentinel address spaces remain shared sentinels.
         """
         val parent_slot = self._find_slot(parent_id)
         if parent_slot < 0:
@@ -791,7 +790,14 @@ impl Scheduler:
         if child_slot < 0:
             return TaskId(id: 0)
 
-        val child_as = vmm_cow_clone_pages(parent.address_space)
+        val child_as = if parent.address_space == 0 or parent.address_space == 1:
+            parent.address_space
+        else:
+            vmm_cow_clone_pages(parent.address_space)
+        val child_as_id = if parent.address_space == 0 or parent.address_space == 1:
+            parent.isolation.address_space_id
+        else:
+            child_as
 
         val child = TaskControlBlock(
             id: child_id,
@@ -807,7 +813,7 @@ impl Scheduler:
             capabilities: parent.capabilities,
             parent: Some(parent_id),
             schedule: parent.schedule,
-            isolation: default_task_isolation(child_as),
+            isolation: default_task_isolation(child_as_id),
             assigned_cpu: parent.assigned_cpu,
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
@@ -822,7 +828,69 @@ impl Scheduler:
 
         child_id
 
-    fn exec_into(task_id: TaskId, argv: [Text], envp: [Text]) -> i32:
+    me exec_image(task_id: TaskId, image: UserProcessImage) -> i32:
+        """Replace a task's user image while preserving TaskId and parentage."""
+        val slot = self._find_slot(task_id)
+        if slot < 0:
+            return -10
+        val old_tcb = self.tasks[slot]
+        if old_tcb == nil:
+            return -10
+        val old_task = old_tcb
+        val is_zombie = match old_task.state:
+            case TaskState.Zombie: true
+            case _: false
+        if is_zombie:
+            return -22
+
+        val was_ready = match old_task.state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(task_id)
+
+        val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+        val arch_user_ctx = X86ContextSwitch.create(image.entry, user_sp, true)
+        val user_ctx = TaskContext(
+            rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
+            rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
+            rsi: arch_user_ctx.rsi, rdi: arch_user_ctx.rdi,
+            rbp: arch_user_ctx.rbp, rsp: arch_user_ctx.rsp,
+            r8: arch_user_ctx.r8, r9: arch_user_ctx.r9,
+            r10: arch_user_ctx.r10, r11: arch_user_ctx.r11,
+            r12: arch_user_ctx.r12, r13: arch_user_ctx.r13,
+            r14: arch_user_ctx.r14, r15: arch_user_ctx.r15,
+            rip: arch_user_ctx.rip,
+            rflags: arch_user_ctx.rflags,
+            cs: arch_user_ctx.cs,
+            ss: arch_user_ctx.ss,
+            fpu_state: arch_user_ctx.fpu_state
+        )
+        val new_as: AddressSpace = create_user_address_space()
+
+        self._release_task_address_space(old_task)
+
+        var new_isolation = old_task.isolation
+        new_isolation.address_space_id = new_as.id
+        new_isolation.capability_generation = new_isolation.capability_generation + 1
+
+        var task = old_task
+        task.is_user = true
+        task.entry_point = image.entry
+        task.context = user_ctx
+        task.user_context = Some(user_ctx)
+        task.address_space = new_as.phys_root
+        task.user_stack = image.stack_top
+        task.isolation = new_isolation
+        task.exit_code = 0
+        task.ticks_remaining = TIME_SLICE_TICKS
+        self.tasks[slot] = task
+
+        if was_ready:
+            self._enqueue_ready(task_id)
+        0
+
+    me exec_into(task_id: TaskId, argv: [Text], envp: [Text]) -> i32:
         """Replace task image with ELF at argv[0] (IF-02).
 
         Wave-3 scaffold returns -38 (ENOSYS). Wave-4 parses ELF, maps
@@ -865,6 +933,7 @@ impl Scheduler:
                         case TaskState.Zombie:
                             val status = task.exit_code
                             self._remove_ready(task.id)
+                            self._release_task_address_space(task)
                             self.tasks[i] = nil
                             return status
                         case _:
@@ -916,6 +985,14 @@ impl Scheduler:
         var rq = self.cpu_runqueues[cpu as i64]
         rq.remove(id, task.schedule)
         self.cpu_runqueues[cpu as i64] = rq
+
+    me _release_task_address_space(task: TaskControlBlock):
+        """Release the user address space held by a task being reaped/replaced."""
+        if task.is_user:
+            destroy_user_address_space(AddressSpace(
+                phys_root: task.address_space,
+                id: task.isolation.address_space_id
+            ))
 
     me _pick_fifo_from(queue_name: text, cpu: u32) -> TaskId?:
         """Pick from fixed-order class queues on a CPU."""

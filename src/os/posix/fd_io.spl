@@ -6,7 +6,7 @@
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
 use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOSYS, EMFILE, EIO}
-use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_types, fd_flags, fd_offsets, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_types, fd_flags, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
 use os.posix.async_io.{sync_read, sync_write}
 use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.userlib.syscall_raw.{syscall}
@@ -201,9 +201,9 @@ fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
         return 0 - EBADF as i64
     val idx: u64 = fd as u64
     if whence == SEEK_SET:
-        fd_offsets[idx] = offset as u64
+        fd_set_offset(fd, offset as u64)
     elif whence == SEEK_CUR:
-        fd_offsets[idx] = (fd_offsets[idx] as i64 + offset) as u64
+        fd_set_offset(fd, (fd_get_offset(fd) as i64 + offset) as u64)
     elif whence == SEEK_END:
         # Query VFS for file size
         val vfs_handle = fd_ports[idx]
@@ -223,10 +223,10 @@ fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
         if status < 0:
             return status as i64
         val file_size = _read_u64(reply_buf, 4)
-        fd_offsets[idx] = (file_size as i64 + offset) as u64
+        fd_set_offset(fd, (file_size as i64 + offset) as u64)
     else:
         return 0 - EINVAL as i64
-    fd_offsets[idx] as i64
+    fd_get_offset(fd) as i64
 
 fn posix_dup(fd: i32) -> i32:
     """Duplicate a file descriptor."""

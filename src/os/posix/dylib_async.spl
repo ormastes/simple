@@ -1,0 +1,189 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Async Dynamic Library API — primary SimpleOS dynamic loading facade
+#
+# libc dlfcn is a synchronous compatibility wrapper. Native SimpleOS code
+# should use this async request API first, then block only at POSIX boundaries.
+
+use os.posix.errno.{EBADF, EINVAL, EIO, ENOENT, ENOSYS}
+
+val DYLIB_MAX_REQUESTS: u64 = 64
+val DYLIB_MAIN_HANDLE: i64 = 1
+
+val DYLIB_REQ_FREE: u8 = 0
+val DYLIB_REQ_PENDING: u8 = 1
+val DYLIB_REQ_COMPLETE: u8 = 2
+val DYLIB_REQ_ERROR: u8 = 3
+
+val DYLIB_OP_NONE: u8 = 0
+val DYLIB_OP_OPEN: u8 = 1
+val DYLIB_OP_SYMBOL: u8 = 2
+val DYLIB_OP_CLOSE: u8 = 3
+
+val DYLIB_BACKEND_INVALID: u8 = 0
+val DYLIB_BACKEND_SELF: u8 = 1
+val DYLIB_BACKEND_KERNEL: u8 = 2
+
+var dylib_req_states: [u8; 64]
+var dylib_req_ops: [u8; 64]
+var dylib_req_results: [i64; 64]
+var dylib_req_handles: [i64; 64]
+
+fn dylib_async_init():
+    """Initialize dynamic-library async request slots."""
+    var i: u64 = 0
+    while i < DYLIB_MAX_REQUESTS:
+        dylib_req_states[i] = DYLIB_REQ_FREE
+        dylib_req_ops[i] = DYLIB_OP_NONE
+        dylib_req_results[i] = 0
+        dylib_req_handles[i] = 0
+        i = i + 1
+
+fn dylib_backend_for_path(path: text) -> u8:
+    """Return the backend that owns a dlopen path."""
+    if path == "" or path == "self" or path == "<main>":
+        return DYLIB_BACKEND_SELF
+    if path.starts_with("/") or path.ends_with(".smf") or path.ends_with(".so"):
+        return DYLIB_BACKEND_KERNEL
+    DYLIB_BACKEND_INVALID
+
+fn dylib_builtin_symbol_id(name: text) -> i64:
+    """Return a stable pseudo-symbol id for libc self-handle symbols."""
+    match name:
+        case "simpleos_syscall":
+            1
+        case "malloc":
+            2
+        case "free":
+            3
+        case "open":
+            4
+        case "read":
+            5
+        case "write":
+            6
+        case "close":
+            7
+        case "dlopen":
+            8
+        case "dlsym":
+            9
+        case "dlclose":
+            10
+        case "dlerror":
+            11
+        case _:
+            0
+
+fn dylib_async_alloc_request() -> u64:
+    var i: u64 = 0
+    while i < DYLIB_MAX_REQUESTS:
+        if dylib_req_states[i] == DYLIB_REQ_FREE:
+            dylib_req_states[i] = DYLIB_REQ_PENDING
+            return i
+        i = i + 1
+    DYLIB_MAX_REQUESTS
+
+fn dylib_async_free_request(req: u64):
+    if req < DYLIB_MAX_REQUESTS:
+        dylib_req_states[req] = DYLIB_REQ_FREE
+        dylib_req_ops[req] = DYLIB_OP_NONE
+        dylib_req_results[req] = 0
+        dylib_req_handles[req] = 0
+
+fn dylib_async_is_complete(req: u64) -> bool:
+    if req >= DYLIB_MAX_REQUESTS:
+        return true
+    dylib_req_states[req] == DYLIB_REQ_COMPLETE or dylib_req_states[req] == DYLIB_REQ_ERROR
+
+fn dylib_async_result(req: u64) -> i64:
+    if req >= DYLIB_MAX_REQUESTS:
+        return 0 - EIO as i64
+    dylib_req_results[req]
+
+fn dylib_async_open(path: text, mode: u32) -> u64:
+    """Start an async dynamic-library open request."""
+    val req = dylib_async_alloc_request()
+    if req >= DYLIB_MAX_REQUESTS:
+        return req
+    dylib_req_ops[req] = DYLIB_OP_OPEN
+    val backend = dylib_backend_for_path(path)
+    if backend == DYLIB_BACKEND_SELF:
+        dylib_req_states[req] = DYLIB_REQ_COMPLETE
+        dylib_req_results[req] = DYLIB_MAIN_HANDLE
+        return req
+    if backend == DYLIB_BACKEND_KERNEL:
+        # Kernel SMF/ELF library mapping is reserved but not implemented yet.
+        dylib_req_states[req] = DYLIB_REQ_ERROR
+        dylib_req_results[req] = 0 - ENOSYS as i64
+        return req
+    dylib_req_states[req] = DYLIB_REQ_ERROR
+    dylib_req_results[req] = 0 - ENOENT as i64
+    req
+
+fn dylib_async_symbol(handle: i64, name: text) -> u64:
+    """Start an async symbol lookup request."""
+    val req = dylib_async_alloc_request()
+    if req >= DYLIB_MAX_REQUESTS:
+        return req
+    dylib_req_ops[req] = DYLIB_OP_SYMBOL
+    dylib_req_handles[req] = handle
+    if handle == DYLIB_MAIN_HANDLE:
+        val sym = dylib_builtin_symbol_id(name)
+        if sym == 0:
+            dylib_req_states[req] = DYLIB_REQ_ERROR
+            dylib_req_results[req] = 0 - ENOENT as i64
+        else:
+            dylib_req_states[req] = DYLIB_REQ_COMPLETE
+            dylib_req_results[req] = sym
+        return req
+    dylib_req_states[req] = DYLIB_REQ_ERROR
+    dylib_req_results[req] = 0 - ENOSYS as i64
+    req
+
+fn dylib_async_close(handle: i64) -> u64:
+    """Start an async dynamic-library close request."""
+    val req = dylib_async_alloc_request()
+    if req >= DYLIB_MAX_REQUESTS:
+        return req
+    dylib_req_ops[req] = DYLIB_OP_CLOSE
+    dylib_req_handles[req] = handle
+    if handle == DYLIB_MAIN_HANDLE:
+        dylib_req_states[req] = DYLIB_REQ_COMPLETE
+        dylib_req_results[req] = 0
+        return req
+    dylib_req_states[req] = DYLIB_REQ_ERROR
+    dylib_req_results[req] = 0 - ENOSYS as i64
+    req
+
+fn dylib_open(path: text, mode: u32) -> i64:
+    """Synchronous compatibility wrapper over dylib_async_open."""
+    val req = dylib_async_open(path, mode)
+    if req >= DYLIB_MAX_REQUESTS:
+        return 0 - EIO as i64
+    while not dylib_async_is_complete(req):
+        pass_dn
+    val result = dylib_async_result(req)
+    dylib_async_free_request(req)
+    result
+
+fn dylib_symbol(handle: i64, name: text) -> i64:
+    """Synchronous compatibility wrapper over dylib_async_symbol."""
+    val req = dylib_async_symbol(handle, name)
+    if req >= DYLIB_MAX_REQUESTS:
+        return 0 - EIO as i64
+    while not dylib_async_is_complete(req):
+        pass_dn
+    val result = dylib_async_result(req)
+    dylib_async_free_request(req)
+    result
+
+fn dylib_close(handle: i64) -> i64:
+    """Synchronous compatibility wrapper over dylib_async_close."""
+    val req = dylib_async_close(handle)
+    if req >= DYLIB_MAX_REQUESTS:
+        return 0 - EIO as i64
+    while not dylib_async_is_complete(req):
+        pass_dn
+    val result = dylib_async_result(req)
+    dylib_async_free_request(req)
+    result

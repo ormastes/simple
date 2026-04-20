@@ -1,0 +1,75 @@
+# @cover src/os/posix/dylib_async.spl 80%
+"""
+# Async Dynamic Library Specification
+
+Native SimpleOS dynamic loading is async-first. The POSIX/libc `dlfcn` surface
+is a synchronous compatibility layer over this request model.
+"""
+
+use std.spec
+use os.posix.errno.{ENOENT, ENOSYS}
+use os.posix.dylib_async.{
+    DYLIB_BACKEND_SELF,
+    DYLIB_BACKEND_KERNEL,
+    DYLIB_BACKEND_INVALID,
+    DYLIB_MAIN_HANDLE,
+    dylib_async_init,
+    dylib_backend_for_path,
+    dylib_builtin_symbol_id,
+    dylib_async_open,
+    dylib_async_symbol,
+    dylib_async_close,
+    dylib_async_is_complete,
+    dylib_async_result,
+    dylib_async_free_request,
+    dylib_open,
+    dylib_symbol,
+    dylib_close
+}
+
+describe "dylib_async backend ownership":
+    it "routes self handles without kernel dynamic loader":
+        expect(dylib_backend_for_path("")).to_equal(DYLIB_BACKEND_SELF)
+        expect(dylib_backend_for_path("self")).to_equal(DYLIB_BACKEND_SELF)
+
+    it "routes SMF and absolute paths to kernel dynamic loader":
+        expect(dylib_backend_for_path("/lib/app.smf")).to_equal(DYLIB_BACKEND_KERNEL)
+        expect(dylib_backend_for_path("plugin.smf")).to_equal(DYLIB_BACKEND_KERNEL)
+        expect(dylib_backend_for_path("plugin.so")).to_equal(DYLIB_BACKEND_KERNEL)
+
+    it "rejects ambiguous relative paths":
+        expect(dylib_backend_for_path("plugin")).to_equal(DYLIB_BACKEND_INVALID)
+
+describe "dylib_async request lifecycle":
+    it "opens the self handle as an already-complete async request":
+        dylib_async_init()
+        val req = dylib_async_open("", 0)
+        expect(dylib_async_is_complete(req)).to_equal(true)
+        expect(dylib_async_result(req)).to_equal(DYLIB_MAIN_HANDLE)
+        dylib_async_free_request(req)
+
+    it "resolves known self symbols to stable ids":
+        expect(dylib_builtin_symbol_id("simpleos_syscall")).to_equal(1)
+        expect(dylib_builtin_symbol_id("dlopen")).to_equal(8)
+        expect(dylib_builtin_symbol_id("missing")).to_equal(0)
+
+    it "returns ENOSYS for kernel-backed loads until mapper lands":
+        dylib_async_init()
+        val req = dylib_async_open("/lib/plugin.smf", 0)
+        expect(dylib_async_is_complete(req)).to_equal(true)
+        expect(dylib_async_result(req)).to_equal(0 - ENOSYS as i64)
+        dylib_async_free_request(req)
+
+    it "returns ENOENT for missing self symbols":
+        dylib_async_init()
+        val req = dylib_async_symbol(DYLIB_MAIN_HANDLE, "missing")
+        expect(dylib_async_is_complete(req)).to_equal(true)
+        expect(dylib_async_result(req)).to_equal(0 - ENOENT as i64)
+        dylib_async_free_request(req)
+
+    it "sync wrappers block over the async request surface":
+        dylib_async_init()
+        val handle = dylib_open("", 0)
+        expect(handle).to_equal(DYLIB_MAIN_HANDLE)
+        expect(dylib_symbol(handle, "malloc")).to_equal(2)
+        expect(dylib_close(handle)).to_equal(0)

@@ -6,6 +6,13 @@
 #define RTLD_GLOBAL 0x00100
 #define RTLD_LOCAL  0x00000
 
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+#define RTLD_DEFAULT ((void *)0)
+#define RTLD_NEXT    ((void *)-1)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -215,15 +215,16 @@ describe "syscall_handler":
         )
         expect(result.value).to_equal(-10)
 
-    it "exec syscall remains explicit ENOSYS until image replacement lands":
+    it "exec syscall replaces current task image and preserves pid":
+        val path = "/sys/services/vfs"
         var scheduler = Scheduler.new()
-        scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
         scheduler.schedule()
         val result = syscall_handler(
             SyscallArgs(
                 id: 59,
-                arg0: 0,
-                arg1: 0,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
                 arg2: 0,
                 arg3: 0,
                 arg4: 0,
@@ -233,7 +234,12 @@ describe "syscall_handler":
             IpcManager.new(),
             KernelLog.new(16)
         )
-        expect(result.value).to_equal(-38)
+        expect(result.value).to_equal(0)
+        val current = scheduler.get_task(task)
+        if current != nil:
+            val tcb = current
+            expect(tcb.is_user).to_equal(true)
+            expect(tcb.id.id).to_equal(task.id)
 
     it "queries scheduler policy through schedctl":
         var scheduler = Scheduler.new()

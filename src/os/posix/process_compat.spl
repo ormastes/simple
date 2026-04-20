@@ -1,7 +1,8 @@
-# POSIX Process Compatibility — spawn-based (no fork)
+# POSIX Process Compatibility — synchronous process syscalls
 #
-# SimpleOS uses spawn_binary (L4 style), not fork+exec (UNIX style).
-# This layer provides posix_spawn() as the closest POSIX equivalent.
+# SimpleOS keeps spawn_binary for service launch and now exposes fork/execve
+# wrappers for UNIX-style process control. The wrappers are synchronous user
+# library calls over the raw syscall ABI.
 #
 # Kernel syscalls used:
 #   2  = Spawn (from function address)
@@ -9,6 +10,9 @@
 #   4  = GetPid (returns current process ID)
 #   7  = Signal (send signal to process)
 #   13 = SpawnBinary (from ELF binary path)
+#   57 = Fork
+#   59 = Execve (path pointer + length; argv/envp copy-in pending)
+#   61 = Waitpid
 
 use os.posix.errno.{EINVAL, ECHILD, ENOENT, ENOMEM}
 use os.userlib.syscall_raw.{syscall}
@@ -21,8 +25,29 @@ val _SYS_WAIT: u64 = 3
 val _SYS_GETPID: u64 = 4
 val _SYS_SIGNAL: u64 = 7
 val _SYS_SPAWN_BINARY: u64 = 13
+val _SYS_FORK: u64 = 57
+val _SYS_EXECVE: u64 = 59
+val _SYS_WAITPID: u64 = 61
 
 val WNOHANG: u32 = 1
+
+fn posix_fork() -> i64:
+    """Fork the current process. Parent receives child PID; child returns 0."""
+    syscall(_SYS_FORK, 0, 0, 0, 0, 0)
+
+fn posix_execve(path: text, args: [text], envp: [text]) -> i64:
+    """Replace the current process image.
+
+    The kernel ABI currently accepts path bytes only. args/envp are retained
+    in the signature so callers can use the POSIX shape while argv/envp copy-in
+    is wired through the syscall layer.
+    """
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+    val _ignored_args = args
+    val _ignored_envp = envp
+    val path_ptr = spl_str_ptr(path) as u64
+    syscall(_SYS_EXECVE, path_ptr, path.len().to_u64(), 0, 0, 0)
 
 fn posix_spawn(path: text, priority: u8) -> i64:
     """Spawn a new process from an ELF binary path.
@@ -69,17 +94,18 @@ fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
 fn posix_waitpid(pid: i64, options: u32) -> i64:
     """Wait for a child process to exit.
 
-    Uses kernel syscall 3 (Wait).
+    Uses kernel syscall 61 (Waitpid).
     Args:
       pid:     process ID to wait for (-1 = any child)
       options: WNOHANG (1) for non-blocking, 0 for blocking wait
 
     Returns:
-      >= 0: exit status of the child
+      > 0:  PID of the collected child
+      = 0:  no status available yet with WNOHANG / nonblocking kernel block
       < 0:  -errno on failure (-ECHILD if no children)
     """
     val pid_u64 = if pid < 0: 0xFFFFFFFFFFFFFFFF as u64 else: pid as u64
-    val result = syscall(_SYS_WAIT, pid_u64, options as u64, 0, 0, 0)
+    val result = syscall(_SYS_WAITPID, pid_u64, 0, options as u64, 0, 0)
     result
 
 fn posix_exit(code: i32):

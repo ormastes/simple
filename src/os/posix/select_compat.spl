@@ -10,21 +10,13 @@
 # any of a set of notifications fires.
 
 use os.posix.errno.{EBADF, EINVAL, EIO}
-use os.posix.fd_table.{fd_is_valid, fd_types, fd_ports, FD_TYPE_FREE, FD_TYPE_SERIAL, FD_TYPE_FILE, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, MAX_FDS}
-use os.posix.pipe_compat.{pipe_has_data, pipe_has_space, pipe_get_data_notif, pipe_get_space_notif}
+use os.posix.fd_table.{fd_is_valid, fd_poll_ready, fd_poll_notification, POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, MAX_FDS}
 use os.userlib.syscall_raw.{syscall}
 
 # Syscall numbers
 val _SYS_NOTIF_POLL: u64 = 27
 val _SYS_NOTIF_WAIT_ANY: u64 = 29
 val _SYS_NOTIF_REGISTER_MULTI: u64 = 30
-
-# Poll event flags (POSIX-compatible)
-val POLLIN: i16 = 1      # Data available for reading
-val POLLOUT: i16 = 4     # Writing possible
-val POLLERR: i16 = 8     # Error condition
-val POLLHUP: i16 = 16    # Hang up (write end closed)
-val POLLNVAL: i16 = 32   # Invalid fd
 
 # Maximum FDs we can poll at once
 val MAX_POLL_FDS: u64 = 64
@@ -165,75 +157,14 @@ fn posix_select(nfds: i32, readfds: [i32], writefds: [i32], timeout_ms: i64) -> 
 
 fn _check_fd_events(fd: i32, events: i16) -> i16:
     """Non-blocking check of a single fd's readiness. Returns revents bitmask."""
-    if not fd_is_valid(fd):
-        return POLLNVAL
-
-    val idx = fd as u64
-    val fd_type = fd_types[idx]
-    var revents: i16 = 0
-
-    if fd_type == FD_TYPE_SERIAL:
-        # Serial is always ready for read/write (no buffering)
-        if (events & POLLIN) != 0:
-            revents = revents | POLLIN
-        if (events & POLLOUT) != 0:
-            revents = revents | POLLOUT
-        return revents
-
-    if fd_type == FD_TYPE_PIPE_READ:
-        if (events & POLLIN) != 0 and pipe_has_data(fd):
-            revents = revents | POLLIN
-        return revents
-
-    if fd_type == FD_TYPE_PIPE_WRITE:
-        if (events & POLLOUT) != 0 and pipe_has_space(fd):
-            revents = revents | POLLOUT
-        return revents
-
-    if fd_type == FD_TYPE_SOCKET:
-        # Socket readiness requires polling the netstack service.
-        # For now, use non-blocking poll via notification.
-        val notif = _get_fd_notification(fd, events)
-        if notif != 0:
-            val poll_result = syscall(_SYS_NOTIF_POLL, notif, 0, 0, 0, 0)
-            if poll_result > 0:
-                # Notification was signaled
-                if (events & POLLIN) != 0:
-                    revents = revents | POLLIN
-                if (events & POLLOUT) != 0:
-                    revents = revents | POLLOUT
-        return revents
-
-    if fd_type == FD_TYPE_FILE:
-        # Files are always ready for I/O (VFS handles blocking internally)
-        if (events & POLLIN) != 0:
-            revents = revents | POLLIN
-        if (events & POLLOUT) != 0:
-            revents = revents | POLLOUT
-        return revents
-
-    POLLNVAL
+    fd_poll_ready(fd, events)
 
 fn _get_fd_notification(fd: i32, events: i16) -> u64:
     """Get the notification ID to wait on for a given fd and event mask.
 
     Returns 0 if the fd type doesn't support notification-based waiting.
     """
-    if not fd_is_valid(fd):
-        return 0
-    val idx = fd as u64
-    val fd_type = fd_types[idx]
-
-    if fd_type == FD_TYPE_PIPE_READ and (events & POLLIN) != 0:
-        return pipe_get_data_notif(fd)
-
-    if fd_type == FD_TYPE_PIPE_WRITE and (events & POLLOUT) != 0:
-        return pipe_get_space_notif(fd)
-
-    # Socket and file FDs don't have per-fd notifications yet.
-    # In a full implementation, the netstack service would provide
-    # a notification per socket for I/O readiness signaling.
-    0
+    fd_poll_notification(fd, events)
 
 fn _recheck_all(fds: [PollFd]) -> i64:
     """Re-check all fds and update revents. Returns count of ready fds."""

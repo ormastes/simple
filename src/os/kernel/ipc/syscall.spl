@@ -37,6 +37,9 @@ use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vm
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
+use os.posix.pipe_compat.{posix_pipe}
+use os.posix.fd_io.{posix_dup, posix_dup2}
+use os.posix.fd_table.{fd_exec_cleanup, fd_prepare_fork, fd_release_on_process_exit}
 extern fn serial_println(msg: text)
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -450,10 +453,16 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 61:    # WaitPid
             _handle_waitpid(args, scheduler)
         case 62:    # Pipe
-            SyscallResult(value: -38)
+            _handle_pipe(args)
         case 63:    # Dup2
-            SyscallResult(value: -38)
+            _handle_dup2(args)
         case 64:    # Dup
+            _handle_dup(args)
+        case 65:    # DlOpen
+            SyscallResult(value: -38)
+        case 66:    # DlSym
+            SyscallResult(value: -38)
+        case 67:    # DlClose
             SyscallResult(value: -38)
 
         # -- Privilege Control (G11) -----------------------------------------
@@ -526,7 +535,10 @@ fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> Sys
     var ipc_mgr = ipc
     ipc_mgr.cap_manager.revoke_all_for_task(exiting_task)
 
-    # Step 3: Mark as zombie in scheduler
+    # Step 3: Close process descriptors for the current process lifecycle.
+    fd_release_on_process_exit()
+
+    # Step 4: Mark as zombie in scheduler
     sched.exit_task(code.to_i32())
 
     # exit_task does not return to the caller; the scheduler picks next task.
@@ -582,17 +594,40 @@ fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val child = sched.clone_task(parent)
     if child.id == 0:
         return SyscallResult(value: -12)
+    fd_prepare_fork()
     SyscallResult(value: child.id.to_i64())
 
 fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Execve process-image replacement placeholder.
+    """Execve process-image replacement.
 
-    Full argv/envp copy-in and address-space replacement are still handled by
-    the process-image work; fail explicitly instead of pretending success.
+    This kernel-facing ABI accepts arg0=path pointer and arg1=path length.
+    argv/envp copy-in is still pending, so the image builder seeds argv[0]
+    from the executable path.
     """
-    val _a = args
-    val _s = scheduler
-    SyscallResult(value: -38)
+    if args.arg0 == 0 or args.arg1 == 0:
+        return SyscallResult(value: -22)
+    val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
+    if path_bytes_result.is_err():
+        return SyscallResult(value: -22)
+
+    val path_bytes = path_bytes_result.unwrap()
+    val path = _path_bytes_to_text(path_bytes)
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, CURRENT_EXEC_ARCH)
+    if bytes_result.is_err():
+        return SyscallResult(value: -2)
+
+    val _exec_argv: [text] = []
+    val _exec_envp: [text] = []
+    val image_result = build_user_process_image(path, bytes_result.unwrap(), CURRENT_EXEC_ARCH, _exec_argv, _exec_envp)
+    if image_result.is_err():
+        return SyscallResult(value: -8)
+
+    var sched = scheduler
+    val current = sched.get_current()
+    val result = sched.exec_image(current, image_result.unwrap())
+    if result == 0:
+        fd_exec_cleanup()
+    SyscallResult(value: result.to_i64())
 
 fn _encode_wait_status(exit_code: i32) -> u32:
     """Encode a normal-exit status compatible with WEXITSTATUS."""
@@ -633,6 +668,24 @@ fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     if any_child:
         return SyscallResult(value: result.to_i64())
     SyscallResult(value: args.arg0.to_i64())
+
+fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
+    """Create a POSIX pipe and copy fd[0]/fd[1] to the user array."""
+    if args.arg0 == 0:
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(args.arg0):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(args.arg0, 8):
+        return SyscallResult(value: -14)
+    SyscallResult(value: posix_pipe(args.arg0, args.arg0 + 4) as i64)
+
+fn _handle_dup2(args: SyscallArgs) -> SyscallResult:
+    """Duplicate oldfd onto newfd using POSIX dup2 replacement semantics."""
+    SyscallResult(value: posix_dup2(args.arg0 as i32, args.arg1 as i32) as i64)
+
+fn _handle_dup(args: SyscallArgs) -> SyscallResult:
+    """Duplicate oldfd to the lowest available descriptor."""
+    SyscallResult(value: posix_dup(args.arg0 as i32) as i64)
 
 fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
     """Return the current task's ID."""

@@ -1,0 +1,47 @@
+# @cover src/os/kernel/ipc/syscall.spl 80%
+"""
+# POSIX fd syscall dispatch
+
+Syscalls 62, 63, and 64 provide pipe, dup2, and dup to libc.
+"""
+
+use std.spec
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.posix.fd_table.{fd_table_init, fd_set, fd_get_offset, fd_set_offset, fd_is_valid, FD_TYPE_FILE, O_RDONLY}
+
+fn _dispatch(args: SyscallArgs) -> i64:
+    syscall_handler(args, Scheduler.new(), IpcManager.new(), KernelLog.new(16)).value
+
+describe "POSIX fd syscalls":
+    it "provides syscall 64 dup through the dispatcher":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        expect(fd_set_offset(3, 21u64)).to_equal(0)
+
+        val result = _dispatch(SyscallArgs(id: 64, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(4)
+        expect(fd_is_valid(4)).to_equal(true)
+        expect(fd_get_offset(4)).to_equal(21u64)
+
+    it "provides syscall 63 dup2 replacement through the dispatcher":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_RDONLY, 20u64)
+        expect(fd_set_offset(3, 34u64)).to_equal(0)
+
+        val result = _dispatch(SyscallArgs(id: 63, arg0: 3, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(4)
+        expect(fd_get_offset(4)).to_equal(34u64)
+
+    it "provides syscall 62 pipe and validates the output pointer":
+        fd_table_init()
+
+        val result = _dispatch(SyscallArgs(id: 62, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(-14)

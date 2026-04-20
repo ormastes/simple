@@ -11,7 +11,7 @@
 #   The FD table entry's ipc_port field stores the pipe index.
 
 use os.posix.errno.{EBADF, EINVAL, EMFILE, EPIPE, EAGAIN, ENOSYS}
-use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_types, fd_ports, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, MAX_FDS, O_RDONLY, O_WRONLY}
+use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_refcount, fd_get_status_flags, fd_set_poll_notification, fd_update_ready, fd_update_ready_by_backend, fd_types, fd_ports, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, MAX_FDS, O_RDONLY, O_WRONLY, O_NONBLOCK, POLLIN, POLLOUT, POLLERR, POLLHUP}
 use os.userlib.syscall_raw.{syscall}
 
 # Syscall numbers for notifications
@@ -117,6 +117,7 @@ fn posix_pipe(fds_out_read: u64, fds_out_write: u64) -> i32:
         return read_fd  # -EMFILE
 
     fd_set(read_fd, FD_TYPE_PIPE_READ, O_RDONLY, pidx)
+    fd_set_poll_notification(read_fd, POLLIN, data_notif as u64)
 
     val write_fd = fd_alloc()
     if write_fd < 0:
@@ -125,6 +126,8 @@ fn posix_pipe(fds_out_read: u64, fds_out_write: u64) -> i32:
         return write_fd  # -EMFILE
 
     fd_set(write_fd, FD_TYPE_PIPE_WRITE, O_WRONLY, pidx)
+    fd_set_poll_notification(write_fd, POLLOUT, space_notif as u64)
+    fd_update_ready(write_fd, POLLOUT, 0 as i16)
 
     # Write FDs to output addresses
     extern fn mmio_write32(addr: u64, val_: u32)
@@ -152,6 +155,8 @@ fn pipe_read(fd: i32, buf_addr: u64, count: u64) -> i64:
     while _pipe_count[pidx] == 0:
         if _pipe_write_closed[pidx]:
             return 0  # EOF: write end closed, no more data
+        if (fd_get_status_flags(fd) & O_NONBLOCK) != 0:
+            return 0 - EAGAIN as i64
         # Wait on data notification
         syscall(_SYS_NOTIF_WAIT, _pipe_data_notif[pidx], 0, 0, 0, 0)
 
@@ -168,6 +173,9 @@ fn pipe_read(fd: i32, buf_addr: u64, count: u64) -> i64:
 
     # Signal space available for writers
     if bytes_read > 0:
+        fd_update_ready_by_backend(FD_TYPE_PIPE_WRITE, pidx, POLLOUT, 0 as i16)
+        if _pipe_count[pidx] == 0:
+            fd_update_ready_by_backend(FD_TYPE_PIPE_READ, pidx, 0 as i16, POLLIN)
         syscall(_SYS_NOTIF_SIGNAL, _pipe_space_notif[pidx], 0, 0, 0, 0)
 
     bytes_read as i64
@@ -201,6 +209,10 @@ fn pipe_write(fd: i32, buf_addr: u64, count: u64) -> i64:
                 if bytes_written > 0:
                     return bytes_written as i64
                 return 0 - EPIPE as i64
+            if (fd_get_status_flags(fd) & O_NONBLOCK) != 0:
+                if bytes_written > 0:
+                    return bytes_written as i64
+                return 0 - EAGAIN as i64
             syscall(_SYS_NOTIF_WAIT, _pipe_space_notif[pidx], 0, 0, 0, 0)
 
         # Write bytes into ring buffer
@@ -214,6 +226,9 @@ fn pipe_write(fd: i32, buf_addr: u64, count: u64) -> i64:
 
     # Signal data available for readers
     if bytes_written > 0:
+        fd_update_ready_by_backend(FD_TYPE_PIPE_READ, pidx, POLLIN, 0 as i16)
+        if _pipe_count[pidx] >= PIPE_BUF_SIZE:
+            fd_update_ready_by_backend(FD_TYPE_PIPE_WRITE, pidx, 0 as i16, POLLOUT)
         syscall(_SYS_NOTIF_SIGNAL, _pipe_data_notif[pidx], 0, 0, 0, 0)
 
     bytes_written as i64
@@ -227,14 +242,17 @@ fn pipe_close_read(fd: i32) -> i32:
         return 0 - EBADF
 
     val pidx = fd_ports[idx]
-    _pipe_read_closed[pidx] = true
+    val last_ref = fd_get_refcount(fd) <= 1
+    if last_ref:
+        _pipe_read_closed[pidx] = true
 
-    # Wake any blocked writers (they'll see EPIPE)
-    syscall(_SYS_NOTIF_SIGNAL, _pipe_space_notif[pidx], 0, 0, 0, 0)
+        # Wake any blocked writers (they'll see EPIPE)
+        fd_update_ready_by_backend(FD_TYPE_PIPE_WRITE, pidx, POLLERR | POLLHUP, POLLOUT)
+        syscall(_SYS_NOTIF_SIGNAL, _pipe_space_notif[pidx], 0, 0, 0, 0)
 
-    # If both ends closed, free the pipe
-    if _pipe_write_closed[pidx]:
-        _pipe_free(pidx)
+        # If both ends closed, free the pipe
+        if _pipe_write_closed[pidx]:
+            _pipe_free(pidx)
 
     fd_close(fd)
 
@@ -247,14 +265,17 @@ fn pipe_close_write(fd: i32) -> i32:
         return 0 - EBADF
 
     val pidx = fd_ports[idx]
-    _pipe_write_closed[pidx] = true
+    val last_ref = fd_get_refcount(fd) <= 1
+    if last_ref:
+        _pipe_write_closed[pidx] = true
 
-    # Wake any blocked readers (they'll see EOF)
-    syscall(_SYS_NOTIF_SIGNAL, _pipe_data_notif[pidx], 0, 0, 0, 0)
+        # Wake any blocked readers (they'll see EOF)
+        fd_update_ready_by_backend(FD_TYPE_PIPE_READ, pidx, POLLIN | POLLHUP, 0 as i16)
+        syscall(_SYS_NOTIF_SIGNAL, _pipe_data_notif[pidx], 0, 0, 0, 0)
 
-    # If both ends closed, free the pipe
-    if _pipe_read_closed[pidx]:
-        _pipe_free(pidx)
+        # If both ends closed, free the pipe
+        if _pipe_read_closed[pidx]:
+            _pipe_free(pidx)
 
     fd_close(fd)
 

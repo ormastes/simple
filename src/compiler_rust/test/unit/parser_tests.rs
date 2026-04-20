@@ -710,6 +710,26 @@ extern fn some_ffi_function() -> i32
 }
 
 #[test]
+fn test_parse_export_keyword_attribute_before_fn() {
+    let source = r#"
+@export("C", name: "spl_test_symbol")
+fn spl_test() -> i64:
+    return 0
+"#;
+    let module = parse(source).expect("Should parse @export before fn");
+
+    match &module.items[0] {
+        Node::Function(function) => {
+            assert_eq!(function.attributes.len(), 1);
+            assert_eq!(function.attributes[0].name, "export");
+            assert!(function.attributes[0].named_args.is_some());
+            assert!(function.decorators.is_empty());
+        }
+        other => panic!("Expected function, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_parse_multiple_attributes_before_extern_fn() {
     let source = r#"
 #[allow(primitive_api)]

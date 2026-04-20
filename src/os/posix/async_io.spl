@@ -9,7 +9,7 @@
 # completion or wait (blocking the thread via notification).
 
 use os.posix.errno.{EBADF, EINVAL, EIO, EAGAIN}
-use os.posix.fd_table.{fd_is_valid, fd_types, fd_flags, fd_ports, fd_offsets, FD_TYPE_FREE, FD_TYPE_FILE, FD_TYPE_SERIAL, MAX_FDS}
+use os.posix.fd_table.{fd_is_valid, fd_get_offset, fd_set_offset, fd_types, fd_flags, fd_ports, FD_TYPE_FREE, FD_TYPE_FILE, FD_TYPE_SERIAL, MAX_FDS}
 use os.userlib.syscall_raw.{syscall}
 
 # Well-known VFS service IPC port
@@ -135,7 +135,7 @@ fn async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
 
         # Build IPC payload: vfs_handle(u64) | offset(u64) | count(u64)
         val vfs_handle = fd_ports[idx]
-        val offset = fd_offsets[idx]
+        val offset = fd_get_offset(fd)
         var payload: [u8] = []
         _async_push_u32(payload, VFS_READ)
         _async_push_u64(payload, vfs_handle)
@@ -167,7 +167,7 @@ fn async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
                     while ci < bytes_read and ci < count:
                         mmio_write8(buf_addr + ci, reply_buf[12 + ci])
                         ci = ci + 1
-                    fd_offsets[idx] = fd_offsets[idx] + bytes_read
+                    fd_set_offset(fd, fd_get_offset(fd) + bytes_read)
                     req_states[req] = ASYNC_COMPLETE
                     req_results[req] = bytes_read as i64
     req
@@ -200,7 +200,7 @@ fn async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
 
         # Build IPC payload: vfs_handle(u64) | offset(u64) | count(u64) | data(bytes)
         val vfs_handle = fd_ports[idx]
-        val offset = fd_offsets[idx]
+        val offset = fd_get_offset(fd)
         var payload: [u8] = []
         _async_push_u32(payload, VFS_WRITE)
         _async_push_u64(payload, vfs_handle)
@@ -233,7 +233,7 @@ fn async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
                     req_results[req] = status as i64
                 else:
                     val bytes_written = _async_read_u64(reply_buf, 4)
-                    fd_offsets[idx] = fd_offsets[idx] + bytes_written
+                    fd_set_offset(fd, fd_get_offset(fd) + bytes_written)
                     req_states[req] = ASYNC_COMPLETE
                     req_results[req] = bytes_written as i64
     req

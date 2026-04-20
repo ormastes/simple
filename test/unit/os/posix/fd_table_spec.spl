@@ -1,0 +1,182 @@
+# @cover src/os/posix/fd_table.spl 80%
+"""
+# POSIX fd table specification
+
+The fd table maps descriptors to open file descriptions. Duplicated
+descriptors share status flags and file offsets, while FD_CLOEXEC remains
+per descriptor.
+"""
+
+use std.spec
+use os.posix.errno.{EBADF}
+use os.posix.fd_table.{fd_table_init, fd_alloc, fd_set, fd_close, fd_is_valid, fd_dup, fd_dup2, fd_get_cloexec, fd_set_cloexec, fd_close_on_exec, fd_exec_cleanup, fd_prepare_fork, fd_release_on_process_exit, fd_get_status_flags, fd_set_status_flags, fd_get_offset, fd_set_offset, fd_get_type, fd_get_backend_handle, fd_get_refcount, fd_poll_ready, fd_set_poll_notification, fd_poll_notification, fd_update_ready, fd_get_ready_generation, fd_types, fd_ports, fd_refcounts, FD_TYPE_FREE, FD_TYPE_FILE, FD_TYPE_PIPE_READ, FD_TYPE_SERIAL, O_RDONLY, O_WRONLY, O_RDWR, O_NONBLOCK, O_CLOEXEC, POLLIN, POLLOUT, POLLHUP, POLLNVAL}
+
+describe "POSIX fd table":
+    it "initializes stdio descriptors and allocates the lowest free descriptor":
+        fd_table_init()
+
+        expect(fd_is_valid(0)).to_equal(true)
+        expect(fd_is_valid(1)).to_equal(true)
+        expect(fd_is_valid(2)).to_equal(true)
+        expect(fd_types[0]).to_equal(FD_TYPE_SERIAL)
+        expect(fd_alloc()).to_equal(3)
+
+        expect(fd_close(0)).to_equal(0)
+        expect(fd_alloc()).to_equal(0)
+
+    it "keeps O_CLOEXEC as a per-descriptor flag":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDWR | O_NONBLOCK | O_CLOEXEC, 99u64)
+
+        expect(fd_get_cloexec(3)).to_equal(true)
+        expect(fd_get_status_flags(3) & O_CLOEXEC).to_equal(0u32)
+        expect(fd_get_status_flags(3) & O_NONBLOCK).to_equal(O_NONBLOCK)
+
+    it "duplicates descriptors onto a shared open file description":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDWR | O_CLOEXEC, 99u64)
+        expect(fd_set_offset(3, 44u64)).to_equal(0)
+        expect(fd_set_status_flags(3, O_RDWR | O_NONBLOCK)).to_equal(0)
+
+        val dup_fd = fd_dup(3)
+
+        expect(dup_fd).to_equal(4)
+        expect(fd_get_cloexec(dup_fd)).to_equal(false)
+        expect(fd_refcounts[3]).to_equal(2u32)
+        expect(fd_refcounts[4]).to_equal(2u32)
+        expect(fd_get_offset(dup_fd)).to_equal(44u64)
+        expect(fd_get_status_flags(dup_fd) & O_NONBLOCK).to_equal(O_NONBLOCK)
+
+        expect(fd_set_offset(dup_fd, 88u64)).to_equal(0)
+        expect(fd_get_offset(3)).to_equal(88u64)
+
+        expect(fd_set_status_flags(dup_fd, O_RDWR)).to_equal(0)
+        expect(fd_get_status_flags(3) & O_NONBLOCK).to_equal(0u32)
+
+    it "implements dup2 replacement semantics":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_WRONLY | O_CLOEXEC, 20u64)
+        expect(fd_set_offset(3, 7u64)).to_equal(0)
+        expect(fd_set_offset(4, 99u64)).to_equal(0)
+
+        expect(fd_dup2(3, 4)).to_equal(4)
+
+        expect(fd_ports[4]).to_equal(10u64)
+        expect(fd_get_cloexec(4)).to_equal(false)
+        expect(fd_refcounts[3]).to_equal(2u32)
+        expect(fd_refcounts[4]).to_equal(2u32)
+        expect(fd_get_offset(4)).to_equal(7u64)
+
+        expect(fd_set_offset(4, 12u64)).to_equal(0)
+        expect(fd_get_offset(3)).to_equal(12u64)
+
+    it "preserves descriptor flags when dup2 targets the same descriptor":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY | O_CLOEXEC, 10u64)
+
+        expect(fd_dup2(3, 3)).to_equal(3)
+        expect(fd_get_cloexec(3)).to_equal(true)
+        expect(fd_refcounts[3]).to_equal(1u32)
+
+    it "rejects invalid dup descriptors with EBADF":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        expect(fd_dup(-1)).to_equal(0 - EBADF)
+        expect(fd_dup2(99, 4)).to_equal(0 - EBADF)
+        expect(fd_dup2(3, -1)).to_equal(0 - EBADF)
+        expect(fd_dup2(3, 256)).to_equal(0 - EBADF)
+
+    it "closes only descriptors marked close-on-exec":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_RDONLY, 20u64)
+        expect(fd_set_cloexec(3, true)).to_equal(0)
+        expect(fd_set_cloexec(4, false)).to_equal(0)
+
+        expect(fd_close_on_exec()).to_equal(1u32)
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(4)).to_equal(true)
+        expect(fd_types[3]).to_equal(FD_TYPE_FREE)
+
+    it "applies exec cleanup through the exec lifecycle alias":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY | O_CLOEXEC, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_RDONLY, 20u64)
+
+        expect(fd_exec_cleanup()).to_equal(1u32)
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(4)).to_equal(true)
+
+    it "inherits live descriptors across fork without changing cloexec flags":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY | O_CLOEXEC, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_WRONLY, 20u64)
+
+        expect(fd_get_refcount(3)).to_equal(1u32)
+        expect(fd_prepare_fork()).to_equal(5u32)
+
+        expect(fd_get_refcount(3)).to_equal(2u32)
+        expect(fd_get_refcount(4)).to_equal(2u32)
+        expect(fd_get_cloexec(3)).to_equal(true)
+        expect(fd_get_cloexec(4)).to_equal(false)
+
+    it "releases every live descriptor on process exit":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        fd_set(4, FD_TYPE_FILE, O_WRONLY, 20u64)
+
+        expect(fd_release_on_process_exit()).to_equal(5u32)
+        expect(fd_is_valid(0)).to_equal(false)
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(4)).to_equal(false)
+
+    it "keeps duplicated open descriptions alive until the last close":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        expect(fd_set_offset(3, 55u64)).to_equal(0)
+
+        val dup_fd = fd_dup(3)
+        expect(dup_fd).to_equal(4)
+        expect(fd_close(3)).to_equal(0)
+
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(4)).to_equal(true)
+        expect(fd_get_offset(4)).to_equal(55u64)
+        expect(fd_refcounts[4]).to_equal(1u32)
+
+        expect(fd_close(4)).to_equal(0)
+        expect(fd_is_valid(4)).to_equal(false)
+
+    it "exposes fd backend metadata without direct table access":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 77u64)
+
+        expect(fd_get_type(3)).to_equal(FD_TYPE_FILE)
+        expect(fd_get_backend_handle(3)).to_equal(77u64)
+        expect(fd_get_type(99)).to_equal(FD_TYPE_FREE)
+
+    it "tracks readiness and notifications on the shared open description":
+        fd_table_init()
+        fd_set(3, FD_TYPE_PIPE_READ, O_RDONLY, 11u64)
+        expect(fd_set_poll_notification(3, POLLIN, 500u64)).to_equal(0)
+
+        val dup_fd = fd_dup(3)
+        expect(dup_fd).to_equal(4)
+        expect(fd_poll_notification(dup_fd, POLLIN)).to_equal(500u64)
+        expect(fd_poll_ready(dup_fd, POLLIN)).to_equal(0 as i16)
+        expect(fd_get_ready_generation(3)).to_equal(0u64)
+
+        expect(fd_update_ready(3, POLLIN, 0 as i16)).to_equal(0)
+        expect(fd_poll_ready(dup_fd, POLLIN)).to_equal(POLLIN)
+        expect(fd_get_ready_generation(dup_fd)).to_equal(1u64)
+
+        expect(fd_update_ready(dup_fd, POLLHUP, POLLIN)).to_equal(0)
+        expect(fd_poll_ready(3, POLLIN)).to_equal(POLLHUP)
+        expect(fd_get_ready_generation(3)).to_equal(2u64)
+
+    it "reports invalid descriptors through poll readiness":
+        fd_table_init()
+
+        expect(fd_poll_ready(99, POLLIN | POLLOUT)).to_equal(POLLNVAL)

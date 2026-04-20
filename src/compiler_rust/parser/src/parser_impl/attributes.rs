@@ -100,6 +100,7 @@ impl<'a> Parser<'a> {
             TokenKind::Default => true,
             TokenKind::Async => true,
             TokenKind::Extern => true,
+            TokenKind::Export => true,
             _ => false,
         }
     }
@@ -261,6 +262,10 @@ impl<'a> Parser<'a> {
             TokenKind::Extern => {
                 self.advance();
                 "extern".to_string()
+            }
+            TokenKind::Export => {
+                self.advance();
+                "export".to_string()
             }
             _ => {
                 return Err(ParseError::unexpected_token(
