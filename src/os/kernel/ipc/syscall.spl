@@ -44,8 +44,13 @@ use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 val MAX_BINARY_PATH_LEN: u64 = 256
+val MAX_EXEC_ARG_COUNT: u64 = 64
+val MAX_EXEC_ENV_COUNT: u64 = 128
+val MAX_EXEC_STRING_LEN: u64 = 4096
+val MAX_EXEC_TOTAL_STRING_BYTES: u64 = 32768
 
 # Error code for permission denied
 val SYSCALL_EPERM: i64 = -1
@@ -693,7 +698,8 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Execve process-image replacement.
 
     This kernel-facing ABI accepts arg0=path pointer and arg1=path length.
-    argv/envp copy-in is still pending, so the image builder seeds argv[0]
+    arg2/arg3 are optional userspace char** vectors for argv/envp. Null
+    vectors preserve the legacy path where the image builder seeds argv[0]
     from the executable path.
     """
     if args.arg0 == 0 or args.arg1 == 0:
@@ -708,9 +714,20 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     if bytes_result.is_err():
         return SyscallResult(value: -2)
 
-    val _exec_argv: [text] = []
-    val _exec_envp: [text] = []
-    val image_result = build_user_process_image(path, bytes_result.unwrap(), CURRENT_EXEC_ARCH, _exec_argv, _exec_envp)
+    val argv_result = _copy_user_string_vector(args.arg2, MAX_EXEC_ARG_COUNT)
+    if argv_result.is_err():
+        return SyscallResult(value: -14)
+    val envp_result = _copy_user_string_vector(args.arg3, MAX_EXEC_ENV_COUNT)
+    if envp_result.is_err():
+        return SyscallResult(value: -14)
+
+    val image_result = build_user_process_image(
+        path,
+        bytes_result.unwrap(),
+        CURRENT_EXEC_ARCH,
+        argv_result.unwrap(),
+        envp_result.unwrap()
+    )
     if image_result.is_err():
         return SyscallResult(value: -8)
 
@@ -1005,6 +1022,81 @@ fn _copy_user_text(ptr_addr: u64, len: u64) -> Result<text, text>:
     serial_println("[syscall13] copy_user_text ok")
     Ok(_path_bytes_to_text(bytes_result.unwrap()))
 
+fn _is_user_read_range(ptr: u64, len: u64) -> bool:
+    if not _is_userspace_range(ptr, len):
+        return false
+    if g_current_vmspace.vma_count > 0 as u64:
+        return _vma_range_readable(g_current_vmspace, ptr, len)
+    true
+
+fn _copy_user_u64(ptr_addr: u64) -> Result<u64, text>:
+    if not _is_user_read_range(ptr_addr, 8):
+        return Err("bad user pointer")
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val current = ptr_addr + i
+        if current < ptr_addr:
+            return Err("u64 pointer overflow")
+        if not _is_user_read_range(current, 1):
+            return Err("bad user pointer")
+        unsafe:
+            val byte_ptr = current as *const u8
+            value = value | ((*byte_ptr).to_u64() << (i * 8))
+        i = i + 1
+    Ok(value)
+
+fn _copy_user_cstr(ptr_addr: u64, max_len: u64) -> Result<text, text>:
+    if ptr_addr == 0:
+        return Err("null string pointer")
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < max_len:
+        val current = ptr_addr + i
+        if current < ptr_addr:
+            return Err("string pointer overflow")
+        if not _is_user_read_range(current, 1):
+            return Err("bad string pointer")
+        unsafe:
+            val byte_ptr = current as *const u8
+            val b = *byte_ptr
+            if b == 0u8:
+                return Ok(_path_bytes_to_text(bytes))
+            bytes.push(b)
+        i = i + 1
+    Err("unterminated string")
+
+fn _copy_user_string_vector(vec_ptr: u64, max_count: u64) -> Result<[text], text>:
+    if vec_ptr == 0:
+        return Ok([])
+    var out: [text] = []
+    var total_bytes: u64 = 0
+    var i: u64 = 0
+    while i < max_count:
+        val offset = i * 8
+        val slot = vec_ptr + offset
+        if slot < vec_ptr:
+            return Err("vector pointer overflow")
+        val item_ptr_result = _copy_user_u64(slot)
+        if item_ptr_result.is_err():
+            return Err(item_ptr_result.err().unwrap())
+        val item_ptr = item_ptr_result.unwrap()
+        if item_ptr == 0:
+            return Ok(out)
+        val item_result = _copy_user_cstr(item_ptr, MAX_EXEC_STRING_LEN)
+        if item_result.is_err():
+            return Err(item_result.err().unwrap())
+        val item = item_result.unwrap()
+        val item_bytes = (item.len() as u64) + 1
+        if total_bytes + item_bytes < total_bytes:
+            return Err("argument byte overflow")
+        total_bytes = total_bytes + item_bytes
+        if total_bytes > MAX_EXEC_TOTAL_STRING_BYTES:
+            return Err("argument bytes too large")
+        out.push(item)
+        i = i + 1
+    Err("string vector not terminated")
+
 fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SyscallResult:
     """Spawn a task from a binary path.
 
@@ -1115,6 +1207,58 @@ fn _resolve_validated_resident_entry(path: text, path_bytes: [u8]) -> u64?:
         return nil
     resolve_builtin_binary(canonical_path)
 
+fn _direct_spawn_app_id_from_path(path: text) -> u64:
+    match path:
+        case "/sys/apps/browser_demo":
+            1
+        case "/sys/apps/file_manager":
+            2
+        case "/sys/apps/hello_world":
+            3
+        case "/sys/apps/shell":
+            4
+        case "/sys/apps/editor":
+            5
+        case _:
+            0
+
+fn _has_elf_magic(bytes: [u8]) -> bool:
+    """Return true when resolved executable bytes start with the ELF magic."""
+    if bytes.len() < 4:
+        return false
+    rt_bytes_u8_at(bytes, 0) == 0x7F and
+        rt_bytes_u8_at(bytes, 1) == 0x45 and
+        rt_bytes_u8_at(bytes, 2) == 0x4C and
+        rt_bytes_u8_at(bytes, 3) == 0x46
+
+fn _spawn_validated_resident_handoff(path: text, path_bytes: [u8], bytes: [u8], klog: KernelLog) -> i64:
+    """Return the transitional resident pid after filesystem ELF validation.
+
+    This is the x86 desktop compatibility bridge used until full user-image
+    execution is safe for real FAT32 app ELFs. It keeps the handoff inside the
+    Simple syscall dispatcher, so the C syscall shim no longer allocates the
+    app pid or owns launch success.
+    """
+    serial_println("[syscall13] direct resident enter")
+    if not _has_elf_magic(bytes):
+        serial_println("[syscall13] direct resident bad magic")
+        return -8
+    serial_println("[syscall13] direct resident magic ok")
+    val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
+    if resident_entry == nil:
+        serial_println("[syscall13] direct resident no entry")
+        return -2
+    serial_println("[syscall13] direct resident entry ok")
+    val app_id = _direct_spawn_app_id_from_path(path)
+    if app_id == 0:
+        return -2
+    val pid = 4100 + app_id
+
+    var log = klog
+    log.write(6, 1, pid, "spawn_binary direct resident handoff {path}")
+    serial_println("[syscall13] direct resident handoff path={path} pid={pid}")
+    pid.to_i64()
+
 fn _direct_spawn_app_id_path(app_id: u64) -> text?:
     match app_id:
         case 1:
@@ -1173,7 +1317,7 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
             val path = sentinel_path.unwrap()
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
-                return -14
+                return _spawn_validated_resident_handoff(path, [], bytes_result.unwrap(), klog)
         return -14
 
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)

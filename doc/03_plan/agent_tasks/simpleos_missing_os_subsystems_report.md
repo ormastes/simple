@@ -45,7 +45,7 @@ Detailed feature requests:
 
 1. Fix syscall/trap correctness, especially syscall 13 direct spawn return behavior.
 2. Make VFS return stable executable bytes for packaged FAT32 apps without C array lifetime corruption.
-3. Finish ELF loading into a `UserProcessImage`, including segments, stack, entry point, argv/envp, and auxv.
+3. Finish filesystem-backed ELF launch into a scheduler-owned `UserProcessImage`; segment, stack, entry point, auxv, and syscall-level argv/envp materialization exist, but the FAT32 app ELF handoff still faults before resident fallback can be removed.
 4. Complete user address spaces and process isolation, including CR3/page-table switching and safe user pointer validation.
 5. Re-enable scheduler-backed user task creation, launch, reaping, and launcher PID tracking.
 6. Build the app-facing userlib/runtime around the stable syscall ABI.

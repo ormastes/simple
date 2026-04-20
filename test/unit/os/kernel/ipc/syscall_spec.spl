@@ -1,5 +1,5 @@
 use std.spec
-use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch}
+use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch, dispatch_spawn_binary_direct}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallTrapDisposition}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -11,11 +11,11 @@ use os.kernel.memory.vmm.{vmm_map_page}
 use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState, BlockReason}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
+use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH, _set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
-use os.kernel.boot.mmio.{mmio_read32, mmio_write16, mmio_write32}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 
 """
 Syscall dispatcher tests for process launch and scheduler control paths.
@@ -40,6 +40,13 @@ fn _write_pollfd(ptr: u64, index: u64, fd: i32, events: i16):
     mmio_write32(entry, fd as u32)
     mmio_write16(entry + 4, events as u16)
     mmio_write16(entry + 6, 0)
+
+fn _write_user_cstr(ptr: u64, bytes: [u8]):
+    var i: u64 = 0
+    while i < bytes.len() as u64:
+        mmio_write8(ptr + i, bytes[i])
+        i = i + 1
+    mmio_write8(ptr + i, 0)
 
 describe "syscall_handler":
     it "launches built-in service binaries through spawn_binary":
@@ -381,6 +388,14 @@ describe "syscall_handler":
             val task = spawned
             expect(task.is_user).to_equal(false)
             expect(task.entry_point).to_equal(hello_world_remote_main as u64)
+
+    it "direct sentinel spawn validates filesystem bytes and returns resident pid":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
+        var scheduler = Scheduler.new()
+        val pid = dispatch_spawn_binary_direct(3, 0, 2, scheduler, KernelLog.new(16))
+        expect(pid).to_equal(4103)
+        _clear_synthetic_vfs_for_test()
 
     it "rejects unknown spawn_binary paths":
         val path = "/sys/apps/does_not_exist"
@@ -756,6 +771,88 @@ describe "syscall_handler":
             val tcb = current
             expect(tcb.is_user).to_equal(true)
             expect(tcb.id.id).to_equal(task.id)
+
+    it "exec syscall copies argv and envp vectors from userspace":
+        val path = "/sys/services/vfs"
+        val argv_ptr = 0x10100000u64
+        val envp_ptr = 0x10101000u64
+        val arg0_ptr = 0x10100100u64
+        val arg1_ptr = 0x10100140u64
+        val env0_ptr = 0x10101100u64
+        expect(_map_user_pollfd_page(argv_ptr)).to_equal(true)
+        expect(_map_user_pollfd_page(envp_ptr)).to_equal(true)
+        _write_user_cstr(arg0_ptr, [0x76u8, 0x66u8, 0x73u8])
+        _write_user_cstr(arg1_ptr, [0x2Du8, 0x2Du8, 0x66u8, 0x67u8])
+        _write_user_cstr(env0_ptr, [0x53u8, 0x49u8, 0x4Du8, 0x50u8, 0x4Cu8, 0x45u8, 0x3Du8, 0x31u8])
+        mmio_write64(argv_ptr, arg0_ptr)
+        mmio_write64(argv_ptr + 8, arg1_ptr)
+        mmio_write64(argv_ptr + 16, 0)
+        mmio_write64(envp_ptr, env0_ptr)
+        mmio_write64(envp_ptr + 8, 0)
+
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: argv_ptr,
+                arg3: envp_ptr,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val current = scheduler.get_task(task)
+        if current != nil:
+            val tcb = current
+            expect(tcb.is_user).to_equal(true)
+
+    it "exec syscall rejects invalid argv and envp vector pointers":
+        val path = "/sys/services/vfs"
+        var argv_scheduler = Scheduler.new()
+        argv_scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        argv_scheduler.schedule()
+        val argv_result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            argv_scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(argv_result.value).to_equal(-14)
+
+        var envp_scheduler = Scheduler.new()
+        envp_scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        envp_scheduler.schedule()
+        val envp_result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 0,
+                arg3: 1,
+                arg4: 0,
+                arg5: 0
+            ),
+            envp_scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(envp_result.value).to_equal(-14)
 
     it "exec syscall closes only close-on-exec descriptors on success":
         fd_table_init()
