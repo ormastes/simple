@@ -192,10 +192,10 @@ fn Scheduler::clone_task(self, parent: TaskId) -> Result<TaskId, KernelError>
   # Parent returns child_id (> 0); child starts at same rip+rsp but
   # syscall return value is 0 (matches POSIX fork() semantics).
 
-fn Scheduler::exec_into(self, task: TaskId, elf_bytes: [u8],
+fn Scheduler::exec_into(self, task: TaskId,
                         argv: List<text>, envp: List<text>) -> Result<(), KernelError>
-  # Overwrites the task's address space with a freshly-parsed ELF.
-  # Drops all COW pages. argv/envp are materialized on the new stack.
+  # Resolves argv[0], builds a UserProcessImage, and delegates to exec_image.
+  # argv/envp are materialized on the new stack by the process-image builder.
   # TaskId is preserved across the exec; the old mapping tree is freed.
 
 fn Scheduler::wait_for(self, parent: TaskId, child: Option<TaskId>,
@@ -747,9 +747,10 @@ port-dev-chain maintainer before merge.
 
 New wave-4 code citations for interfaces with real implementations this cycle:
 
-- **IF-02** (Fork/exec kernel contract) — `Scheduler::clone_task` real COW scaffold:
-  `src/os/kernel/scheduler/scheduler.spl:492` (commit `d339203a4f`).
-  `exec_into` at line 540, `wait_for` at line 552 remain scaffold (return ENOSYS).
+- **IF-02** (Fork/exec kernel contract) — `Scheduler::clone_task` real COW scaffold
+  and `Scheduler::exec_into` resolves `argv[0]`, builds a process image, maps
+  PT_LOAD segments plus initial stack bytes, and preserves the task ID through
+  `exec_image`. `wait_for` is implemented through waitpid-compatible collection.
 - **IF-07** (FAT32 disk image) — `Fat32Filesystem.mount()` real BPB parser + cluster-to-lba:
   `src/os/services/fat32/fat32.spl:394` (commit `def2569894`). 22/22 fat32 tests pass.
   Mount call site wired at `2a6bbb32c3` (scaffold log pending BlockDevice implementor).

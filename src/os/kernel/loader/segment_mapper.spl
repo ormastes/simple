@@ -70,21 +70,30 @@ fn _flags_from_pf(flags: u32) -> VmFlags:
         bits = bits | 32      # VM_NO_EXECUTE
     VmFlags(bits: bits)
 
-fn _copy_and_zero(dest_virt: u64, src: [u8], src_off: u64, file_size: u64, mem_size: u64):
-    """Copy `file_size` bytes from `src[src_off..]` into `dest_virt`, then zero
-    the remaining `mem_size - file_size` bytes (BSS).
+fn _write_mapped_byte(page_phys: [u64], offset: u64, value: u8):
+    """Write one byte to the allocated physical page backing a user VA."""
+    val page_idx = offset / PAGE_SIZE
+    val page_off = offset % PAGE_SIZE
+    if page_idx >= (page_phys.len() as u64):
+        return
+    _write_u8(page_phys[page_idx as i64] + page_off, value)
 
-    `dest_virt` must already be mapped as writable in the current address
-    space (or reachable via HHDM if the caller is writing through the
-    identity map).
-    """
+fn _copy_and_zero(page_phys: [u64], dest_off: u64, src: [u8], src_off: u64, file_size: u64, mem_size: u64):
+    """Copy `file_size` bytes into mapped frames, then zero BSS bytes."""
     var i: u64 = 0
     while i < file_size:
         val b = src[(src_off + i) as i64]
-        _write_u8(dest_virt + i, b)
+        _write_mapped_byte(page_phys, dest_off + i, b)
         i = i + 1
     while i < mem_size:
-        _write_u8(dest_virt + i, 0 as u8)
+        _write_mapped_byte(page_phys, dest_off + i, 0 as u8)
+        i = i + 1
+
+fn _copy_bytes(page_phys: [u64], dest_off: u64, src: [u8]):
+    """Copy a byte blob into mapped frames at `dest_off`."""
+    var i: u64 = 0
+    while i < (src.len() as u64):
+        _write_mapped_byte(page_phys, dest_off + i, src[i as i64])
         i = i + 1
 
 fn _write_u8(addr: u64, value: u8):
@@ -119,6 +128,7 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
     val vm_flags = _flags_from_pf(seg.flags)
 
     # First, map all the pages.
+    var page_phys: [u64] = []
     var va = va_start
     while va < va_end:
         val opt_frame = pmm_alloc_page()
@@ -126,18 +136,49 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
             return Err("pmm_alloc_page failed while mapping PT_LOAD")
         val frame = opt_frame
         val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
+        page_phys.push(phys.addr)
         val virt = VirtAddr(addr: va)
         val ok = vmm_map_page_in(as_handle, virt, phys, vm_flags)
         if not ok:
             return Err("vmm_map_page_in failed for PT_LOAD page")
         va = va + PAGE_SIZE
 
-    # Then copy+zero. `dest_virt` points at the in-page offset within the
-    # first page; we stream straight through the contiguous virtual range.
-    val dest = va_start + in_page_off
-    _copy_and_zero(dest, file_bytes, seg.file_offset, seg.file_size, seg.mem_size)
+    _copy_and_zero(page_phys, in_page_off, file_bytes, seg.file_offset, seg.file_size, seg.mem_size)
 
     Ok(1)
+
+fn map_stack(as_handle: AddressSpace, stack_top: u64, stack_size: u64, stack_bytes: [u8]) -> Result<i32, text>:
+    """Map the user stack and copy the serialized initial stack frame."""
+    if stack_size == 0:
+        return Err("stack_size must be nonzero")
+    if (stack_bytes.len() as u64) > stack_size:
+        return Err("initial stack frame exceeds stack size")
+    if stack_top < stack_size:
+        return Err("stack range underflows")
+
+    val stack_bottom = stack_top - stack_size
+    val va_start = _page_align_down(stack_bottom)
+    val va_end = _page_align_up(stack_top)
+    val frame_start = stack_top - (stack_bytes.len() as u64)
+    val frame_off = frame_start - va_start
+    val flags = VmFlags.user_rw()
+
+    var page_phys: [u64] = []
+    var va = va_start
+    while va < va_end:
+        val opt_frame = pmm_alloc_page()
+        if opt_frame == nil:
+            return Err("pmm_alloc_page failed while mapping user stack")
+        val frame = opt_frame
+        val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
+        page_phys.push(phys.addr)
+        val ok = vmm_map_page_in(as_handle, VirtAddr(addr: va), phys, flags)
+        if not ok:
+            return Err("vmm_map_page_in failed for user stack page")
+        va = va + PAGE_SIZE
+
+    _copy_bytes(page_phys, frame_off, stack_bytes)
+    Ok((page_phys.len()) as i32)
 
 fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8]) -> Result<i32, text>:
     """Map every PT_LOAD segment in order; abort on first error.

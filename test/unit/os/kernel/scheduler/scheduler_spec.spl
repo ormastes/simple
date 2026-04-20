@@ -27,11 +27,69 @@ use os.kernel.types.task_types.{
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
+use os.kernel.loader.executable_source.{_set_synthetic_initramfs_for_test, _clear_synthetic_initramfs_for_test}
 
 """
 Scheduler tests cover queue behavior, task state transitions, policy metadata,
 and virtual-deadline ordering for the kernel scheduler.
 """
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 62)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 64)
+    bytes = _push_u64_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u64_le(bytes, 0x1000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes
 
 # ============================================================================
 # Test Group 1: ReadyQueue
@@ -257,6 +315,25 @@ describe "Scheduler":
                 if val user_ctx = task.user_context:
                     expect(user_ctx.rip).to_equal(0x500000)
                     expect(user_ctx.rsp).to_equal(0x4fffffff80)
+
+        it "exec_into resolves argv0 and replaces the task image":
+            _clear_synthetic_initramfs_for_test()
+            _set_synthetic_initramfs_for_test("/usr/bin/scheduler_exec_probe", _make_x86_64_exec())
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            val result = sched.exec_into(id, ["/usr/bin/scheduler_exec_probe"], [])
+
+            expect(result).to_equal(0)
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                expect(task.id.id).to_equal(id.id)
+                expect(task.is_user).to_equal(true)
+                expect(task.entry_point).to_equal(0x400000)
+                if val user_ctx = task.user_context:
+                    expect(user_ctx.rip).to_equal(0x400000)
+            _clear_synthetic_initramfs_for_test()
 
     describe "multiple tasks with different priorities":
         it "can create tasks at all priority levels":
@@ -486,6 +563,15 @@ describe "Scheduler":
                     _: false
                 expect(is_ready).to_equal(true)
 
+        it "unblock ignores tasks that are already runnable":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val before = sched.cpu_runnable_count(0u32)
+
+            sched.unblock_task(id)
+
+            expect(sched.cpu_runnable_count(0u32)).to_equal(before)
+
         it "blocked task is not scheduled":
             var sched = Scheduler.new()
             val id1 = sched.create_task(0x1000, TaskPriority.High, CapabilitySet.full())
@@ -498,6 +584,30 @@ describe "Scheduler":
             val ctx = sched.schedule()
             val current = sched.get_current()
             expect(current.id).to_equal(id2.id)
+
+        it "wake_expired_sleepers unblocks only expired sleep deadlines":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+
+            sched.block_task(id, BlockReason.Sleep(until_ns: 20000000))
+            expect(sched.wake_expired_sleepers(10000000)).to_equal(0u32)
+
+            var tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_blocked = match task.state:
+                    TaskState.Blocked(reason): true
+                    _: false
+                expect(is_blocked).to_equal(true)
+
+            expect(sched.wake_expired_sleepers(20000000)).to_equal(1u32)
+            tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
 
     describe "exit_task":
         it "sets current task to Zombie state":
