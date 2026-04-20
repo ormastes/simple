@@ -2,7 +2,7 @@
 #
 # SMF v1.1 places a 128-byte header trailer at EOF-128.
 # Magic bytes: [83, 77, 70, 0]  ("SMF\0") at bytes[len-128..len-124].
-# Entry-point is a u64 LE at offset 80 within that 128-byte trailer.
+# Entry-point is a u64 LE at offset 44 within that 128-byte trailer.
 #
 # Wave 2 implementation returns -ENOSYS; real layout parsing is deferred.
 # TODO(mdsoc+): real SMF layout lookup — parse 128-byte trailer at EOF-128,
@@ -18,7 +18,9 @@ val SMF64_MAGIC_2: u8 = 70    # 'F'
 val SMF64_MAGIC_3: u8 = 0     # '\0'
 
 val SMF_HEADER_TRAILER_SIZE: i64 = 128
-val SMF_ENTRY_POINT_OFFSET: i64  = 80  # offset within trailer
+val SMF_ENTRY_POINT_OFFSET: i64  = 44  # offset within trailer
+val SMF_STUB_SIZE_OFFSET: i64    = 52  # offset within trailer
+val SMF_DATA_OFFSET_OFFSET: i64  = 56  # offset within trailer
 
 # ============================================================================
 # Structs
@@ -26,8 +28,11 @@ val SMF_ENTRY_POINT_OFFSET: i64  = 80  # offset within trailer
 
 struct SmfHeader:
     """Parsed fields from the 128-byte SMF trailer."""
-    magic_ok:    bool   # True if magic validated
-    entry_point: i64    # Entry-point vaddr (from trailer offset 80)
+    magic_ok:        bool   # True if magic validated
+    entry_point:     i64    # Entry-point vaddr (from trailer offset 44)
+    header_offset:   i64    # Absolute offset of parsed header
+    stub_size:       i64    # v1.1 executable stub size
+    smf_data_offset: i64    # v1.1 offset where SMF payload begins
 
 # ============================================================================
 # Internal helpers
@@ -44,35 +49,71 @@ fn _smf_read_u64_le(data: [u8], off: i64) -> i64:
     val b7 = data[off + 7] as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
 
+fn _smf_read_u32_le(data: [u8], off: i64) -> i64:
+    val b0 = data[off]     as i64
+    val b1 = data[off + 1] as i64
+    val b2 = data[off + 2] as i64
+    val b3 = data[off + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _smf_magic_at(bytes: [u8], off: i64) -> bool:
+    if off < 0:
+        return false
+    if off + 4 > bytes.len():
+        return false
+    (bytes[off] == SMF64_MAGIC_0 and
+     bytes[off + 1] == SMF64_MAGIC_1 and
+     bytes[off + 2] == SMF64_MAGIC_2 and
+     bytes[off + 3] == SMF64_MAGIC_3)
+
+fn smf_header_offset(bytes: [u8]) -> i64:
+    """Return header offset, preferring the v1.1 EOF-128 trailer.
+
+    Returns -1 when neither the trailer nor legacy offset 0 contains SMF magic.
+    """
+    if bytes.len() < 4:
+        return -1
+    if bytes.len() >= SMF_HEADER_TRAILER_SIZE:
+        val trailer = bytes.len() - SMF_HEADER_TRAILER_SIZE
+        if _smf_magic_at(bytes, trailer):
+            return trailer
+    if _smf_magic_at(bytes, 0):
+        return 0
+    -1
+
 # ============================================================================
 # Public API
 # ============================================================================
 
 fn smf_check_magic(bytes: [u8]) -> bool:
     """Return true if `bytes` starts with the SMF magic 'SMF\\0'."""
-    if bytes.len() < 4:
-        return false
-    (bytes[0] == SMF64_MAGIC_0 and
-     bytes[1] == SMF64_MAGIC_1 and
-     bytes[2] == SMF64_MAGIC_2 and
-     bytes[3] == SMF64_MAGIC_3)
+    _smf_magic_at(bytes, 0)
+
+fn smf_has_header(bytes: [u8]) -> bool:
+    """Return true if bytes contain a supported SMF header location."""
+    smf_header_offset(bytes) >= 0
 
 fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
-    """Validate SMF magic (at start of bytes) and return a parsed header.
+    """Validate SMF magic and return a parsed header.
 
-    NOTE: Full SMF v1.1 files carry the 128-byte trailer at EOF-128.
-    This function checks magic at offset 0 (bare header for testing).
-    TODO(mdsoc+): handle v1.1 trailer-at-EOF layout in production path.
+    Full SMF v1.1 files carry the 128-byte trailer at EOF-128. Legacy test
+    fixtures and archive slices can still use offset 0.
     """
-    if bytes.len() < 4:
+    val off = smf_header_offset(bytes)
+    if off < 0:
         return nil
-    if not smf_check_magic(bytes):
+    if off + SMF_HEADER_TRAILER_SIZE > bytes.len():
         return nil
-    # If we have the full trailer, read entry_point; else default to 0.
-    var entry: i64 = 0
-    if bytes.len() >= SMF_HEADER_TRAILER_SIZE:
-        entry = _smf_read_u64_le(bytes, SMF_ENTRY_POINT_OFFSET)
-    Some(SmfHeader(magic_ok: true, entry_point: entry))
+    val entry = _smf_read_u64_le(bytes, off + SMF_ENTRY_POINT_OFFSET)
+    val stub_size = _smf_read_u32_le(bytes, off + SMF_STUB_SIZE_OFFSET)
+    val smf_data_offset = _smf_read_u32_le(bytes, off + SMF_DATA_OFFSET_OFFSET)
+    Some(SmfHeader(
+        magic_ok: true,
+        entry_point: entry,
+        header_offset: off,
+        stub_size: stub_size,
+        smf_data_offset: smf_data_offset
+    ))
 
 fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:
     """Map an SMF image into `space` and return its entry-point.

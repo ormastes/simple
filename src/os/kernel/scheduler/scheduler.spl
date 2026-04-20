@@ -497,7 +497,12 @@ impl Scheduler:
 
         If no task is ready, returns the idle task context (task 0).
         """
-        val next_id = self._pick_next_on_cpu(0u32)
+        self.schedule_on_cpu(0u32)
+
+    me schedule_on_cpu(cpu_id: u32) -> TaskContext:
+        """Pick the next task to run on a specific CPU run queue."""
+        val cpu = self._normalize_cpu(cpu_id)
+        val next_id = self._pick_next_on_cpu(cpu)
         if next_id != nil:
             val task_id = next_id
             self._remove_ready(task_id)
@@ -625,13 +630,64 @@ impl Scheduler:
         if was_ready:
             self._remove_ready(id)
 
+        var new_config = config
+        val selected_cpu = self._select_cpu_for_config(new_config)
+        new_config.home_cpu = selected_cpu
+
         var task = tcb
-        task.schedule = config
-        task.assigned_cpu = config.home_cpu
+        task.schedule = new_config
+        task.assigned_cpu = selected_cpu
         self.tasks[slot] = task
 
         if was_ready:
             self._enqueue_ready(id)
+        true
+
+    fn cpu_runnable_count(cpu_id: u32) -> i32:
+        """Return runnable task count for one CPU run queue."""
+        val cpu = self._normalize_cpu(cpu_id)
+        self.cpu_runqueues[cpu as i64].runnable_count
+
+    me rebalance_once() -> bool:
+        """Move one fair/background task from the busiest CPU to the idlest CPU."""
+        var busiest = 0u32
+        var idlest = 0u32
+        var max_load = -1
+        var min_load = 2147483647
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            val load = self.cpu_runqueues[cpu as i64].runnable_count
+            if load > max_load:
+                max_load = load
+                busiest = cpu
+            if load < min_load:
+                min_load = load
+                idlest = cpu
+            cpu = cpu + 1u32
+
+        if max_load - min_load <= 1:
+            return false
+
+        val candidate = self._pick_migration_candidate(busiest, idlest)
+        if candidate == nil:
+            return false
+
+        val task_id = candidate.unwrap()
+        self._remove_ready(task_id)
+        val slot = self._find_slot(task_id)
+        if slot < 0:
+            return false
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+
+        var task = tcb
+        var config = task.schedule
+        config.home_cpu = idlest
+        task.schedule = config
+        task.assigned_cpu = idlest
+        self.tasks[slot] = task
+        self._enqueue_ready(task_id)
         true
 
     # -- IF-02 Fork/Exec Contract (wave-3 scaffolds) -------------------------
@@ -726,9 +782,7 @@ impl Scheduler:
         val queue_idx = _priority_to_index(task.priority)
         self.ready_queues[queue_idx].enqueue(id)
 
-        var cpu = task.assigned_cpu
-        if (cpu as i64) >= self.cpu_runqueues.len():
-            cpu = 0u32
+        val cpu = self._normalize_cpu(task.assigned_cpu)
         var rq = self.cpu_runqueues[cpu as i64]
         rq.enqueue(id, task.schedule)
         self.cpu_runqueues[cpu as i64] = rq
@@ -748,9 +802,7 @@ impl Scheduler:
             self.ready_queues[p].remove(id)
             p = p + 1
 
-        var cpu = task.assigned_cpu
-        if (cpu as i64) >= self.cpu_runqueues.len():
-            cpu = 0u32
+        val cpu = self._normalize_cpu(task.assigned_cpu)
         var rq = self.cpu_runqueues[cpu as i64]
         rq.remove(id, task.schedule)
         self.cpu_runqueues[cpu as i64] = rq
@@ -766,8 +818,18 @@ impl Scheduler:
         elif queue_name == "idle":
             picked = rq.idle_queue.dequeue()
         if picked != nil:
-            if rq.runnable_count > 0:
-                rq.runnable_count = rq.runnable_count - 1
+            val task_id = picked.unwrap()
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if rq.runnable_count > 0:
+                        rq.runnable_count = rq.runnable_count - 1
+                    if rq.weighted_load >= task.schedule.weight:
+                        rq.weighted_load = rq.weighted_load - task.schedule.weight
+                    else:
+                        rq.weighted_load = 0
             self.cpu_runqueues[cpu as i64] = rq
         picked
 
@@ -806,8 +868,19 @@ impl Scheduler:
             rq.background_queue = q
         else:
             rq.fair_queue = q
-        if best != nil and rq.runnable_count > 0:
-            rq.runnable_count = rq.runnable_count - 1
+        if best != nil:
+            val task_id = best.unwrap()
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if rq.runnable_count > 0:
+                        rq.runnable_count = rq.runnable_count - 1
+                    if rq.weighted_load >= task.schedule.weight:
+                        rq.weighted_load = rq.weighted_load - task.schedule.weight
+                    else:
+                        rq.weighted_load = 0
         self.cpu_runqueues[cpu as i64] = rq
         best
 
@@ -826,6 +899,60 @@ impl Scheduler:
         if bg != nil:
             return bg
         self._pick_fifo_from("idle", cpu)
+
+    fn _pick_migration_candidate(from_cpu: u32, to_cpu: u32) -> TaskId?:
+        """Find a fair/background task that can move between two CPU queues."""
+        val cpu = self._normalize_cpu(from_cpu)
+        val target = self._normalize_cpu(to_cpu)
+        val rq = self.cpu_runqueues[cpu as i64]
+        val fair = self._scan_migration_queue(rq.fair_queue, target)
+        if fair != nil:
+            return fair
+        self._scan_migration_queue(rq.background_queue, target)
+
+    fn _scan_migration_queue(queue: ReadyQueue, to_cpu: u32) -> TaskId?:
+        """Return the first queued task whose affinity allows the target CPU."""
+        var scan = queue.head
+        var scanned = 0
+        while scanned < queue.count:
+            val idx = scan % queue.capacity
+            val candidate = TaskId(id: queue.entries[idx])
+            val slot = self._find_slot(candidate)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if _affinity_allows_cpu(task.schedule.affinity_mask, to_cpu):
+                        return candidate
+            scan = scan + 1
+            scanned = scanned + 1
+        nil
+
+    fn _select_cpu_for_config(config: TaskScheduleConfig) -> u32:
+        """Choose the least-loaded allowed CPU, preferring the requested home CPU."""
+        val requested = self._normalize_cpu(config.home_cpu)
+        if _affinity_allows_cpu(config.affinity_mask, requested):
+            return requested
+
+        var best = 0u32
+        var best_load = 2147483647
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            if _affinity_allows_cpu(config.affinity_mask, cpu):
+                val load = self.cpu_runqueues[cpu as i64].runnable_count
+                if load < best_load:
+                    best_load = load
+                    best = cpu
+            cpu = cpu + 1u32
+        best
+
+    fn _normalize_cpu(cpu_id: u32) -> u32:
+        """Clamp an external CPU id into the configured run-queue range."""
+        if self.cpu_runqueues.len() == 0:
+            return 0u32
+        if (cpu_id as i64) >= self.cpu_runqueues.len():
+            return 0u32
+        cpu_id
 
     fn _find_slot(id: TaskId) -> i32:
         """Find the slot index for a given task ID. Returns -1 if not found."""
@@ -860,3 +987,10 @@ fn _priority_to_index(priority: TaskPriority) -> i32:
         case Normal: 2
         case Low: 3
         case Idle: 4
+
+fn _affinity_allows_cpu(mask: u64, cpu: u32) -> bool:
+    """Return true when an affinity mask permits a CPU id."""
+    if cpu >= 64u32:
+        return false
+    val bit = 1u64 << cpu
+    (mask & bit) != 0

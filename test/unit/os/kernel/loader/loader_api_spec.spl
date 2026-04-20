@@ -7,6 +7,7 @@ Verifies loader_dispatch's magic-sniff branching between ELF64 and SMF.
 """
 use std.spec.*
 use os.kernel.loader.loader_api.{loader_dispatch}
+use os.kernel.loader.smf.{SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3, SMF_HEADER_TRAILER_SIZE}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 
 fn _empty_space() -> ProcessVmSpace:
@@ -36,6 +37,17 @@ fn _elf_magic_prefix() -> [u8]:
         i = i + 1
     b
 
+fn _smf_trailer_bytes() -> [u8]:
+    """A v1.1-style SMF image with magic at EOF-128, not offset 0."""
+    var b: [u8] = [9u8, 8u8, 7u8, 6u8, 5u8]
+    b.push(SMF64_MAGIC_0)
+    b.push(SMF64_MAGIC_1)
+    b.push(SMF64_MAGIC_2)
+    b.push(SMF64_MAGIC_3)
+    while b.len() < 5 + (SMF_HEADER_TRAILER_SIZE as i32):
+        b.push(0u8)
+    b
+
 describe "loader_dispatch":
     """Magic-sniff routing."""
 
@@ -56,3 +68,8 @@ describe "loader_dispatch":
         val rc = loader_dispatch(_elf_magic_prefix(), _empty_space())
         val dispatched: bool = rc != -8i64 or rc < 0i64
         expect dispatched.to_equal(true)
+
+    it "SMF trailer magic dispatches to smf path":
+        """SMF v1.1 packages should not be rejected just because byte zero is payload/stub."""
+        val rc = loader_dispatch(_smf_trailer_bytes(), _empty_space())
+        expect rc.to_equal(-38i64)
