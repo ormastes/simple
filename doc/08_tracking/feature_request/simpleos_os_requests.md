@@ -266,5 +266,20 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Notes:** Current diagnostics show syscall 13 can validate and build the
   user process image, map/load it, create the TCB, and register capabilities.
   The path is still gated by `[syscall13] user image handoff gated; scheduler
-  enqueue pending`, so the next remaining blocker is the runqueue/trap-return
-  handoff rather than image construction.
+  enqueue pending`.
+  Re-diagnosis on 2026-04-21
+  (`doc/08_tracking/bug/syscall13_enqueue_stall_2026-04-21.md`) corrected the
+  earlier "scheduler enqueue pending" framing: the root cause was a
+  per-byte allocation storm in
+  `src/os/kernel/loader/segment_mapper.spl` (`_copy_segment_page` /
+  `_copy_stack_page`) that fired via `rt_bytes_u8_at` +
+  `vmm_write_byte_through_hhdm` before any scheduler-side handoff could
+  run. Commit `9e62c438` replaced those per-byte loops with
+  `rt_memcpy`-based bulk primitives
+  (`vmm_copy_bytes_to_phys`, `vmm_zero_phys_range`) in
+  `src/os/kernel/memory/vmm.spl`. Live end-to-end verification of the
+  fix is separately blocked by a pre-existing x86_64 desktop-lane
+  kernel fault tracked in
+  `doc/08_tracking/bug/simpleos_desktop_lane_mouse_compositor_fault_2026-04-21.md`,
+  which must be cleared before the `-12` gate at
+  `src/os/kernel/ipc/syscall.spl:1246` can be lifted.
