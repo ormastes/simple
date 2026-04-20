@@ -7,8 +7,9 @@ Related: `doc/04_architecture/cross_platform_wm.md`, `doc/03_plan/gui_drawing_la
 This document locks the minimal method surface that every compositor
 backend, input backend, and 2D-engine backend MUST implement. It is the
 work-plan item #1 ("Lock Compositor + Engine2D trait surfaces") from
-`gui_drawing_layer_variations.md`. Once merged, any backend that drops
-or renames a method here is a breaking change and must update this doc.
+the restored `gui_drawing_layer_variations.md` handoff. Once merged, any
+backend that drops or renames a method here is a breaking change and must
+update this doc.
 
 ## 1. `CompositorBackend` — locked surface
 
@@ -69,6 +70,10 @@ Trait declared in `src/os/compositor/input_backend.spl`. Implemented
 by `Ps2InputBackend` (baremetal) and `HostedInputBackend` (winit).
 Browser / Electron variations reuse `HostedInputBackend` through winit
 event loop or a thin JS bridge.
+
+Current implementation note: Browser/Electron live surfaces still depend on
+the JavaScript host bridge for DOM/WebSocket/Electron preload APIs. Static
+snapshot rendering is the only documented no-JavaScript fallback.
 
 | Method | Signature | Semantics |
 |---|---|---|

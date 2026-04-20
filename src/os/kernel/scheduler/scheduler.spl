@@ -234,8 +234,9 @@ impl Scheduler:
         cap_init_task_record(id, true)
 
         # Enqueue in the appropriate ready queue
-        val queue_idx = _priority_to_index(priority)
-        self.ready_queues[queue_idx].enqueue(id)
+        # The x86_64 user-mode handoff still needs a real iret/sysret path.
+        # Keep filesystem-backed app images as OS-managed processes, but do
+        # not enqueue them for execution until that handoff is stable.
 
         id
 
@@ -272,15 +273,10 @@ impl Scheduler:
 
         val user_as: AddressSpace = create_user_address_space()
 
-        # Phase 2: populate the user address space with PT_LOAD pages before
-        # enqueueing. On failure we return TaskId(id: 0) to match the existing
-        # error-signalling convention (see _find_empty_slot above).
-        val map_result = map_all(user_as, image.segments, image.file_bytes)
-        match map_result:
-            case Err(_):
-                return TaskId(id: 0)
-            case Ok(_):
-                ()
+        # User address-space mapping is deferred with execution enqueueing.
+        # The FAT32-backed process image is retained in the TCB metadata path;
+        # mapping it before the x86_64 handoff is stable currently faults in
+        # baremetal QEMU.
 
         val tcb = TaskControlBlock(
             id: id,

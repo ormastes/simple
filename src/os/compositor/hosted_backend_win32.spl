@@ -1,9 +1,13 @@
-# Hosted Compositor Backend — Win32 / Windows surface shim
+# Hosted Compositor Backend — Win32 / Windows winit-alias shim
 #
 # Routes through the cross-platform winit pixel-buffer backend
 # (`rt_winit_buffer_*`) instead of native HWND / DIB-section symbols.
 # The window is owned by the caller (created via `rt_winit_window_new`);
 # this backend only manages the pixel buffer and drawing operations.
+#
+# Naming boundary: `HostedWin32Backend` is retained as the selector-facing
+# Windows backend name, but this Simple-side class is a documented alias over
+# the winit buffer implementation. It does not call `rt_win32_*` symbols.
 #
 # Selection: routed by `hosted_backend.spl::select_hosted_backend()`
 # at construct time based on `rt_hosted_select_surface()` returning 2
@@ -36,10 +40,11 @@ var _win32_h: i32 = 0
 # ============================================================================
 
 class HostedWin32Backend:
-    """CompositorBackend for Windows that renders through the winit pixel buffer.
+    """Windows selector alias that renders through the winit pixel buffer.
 
     Drawing is delegated to `rt_winit_buffer_*` SFFI symbols. The window
-    is owned by the caller; this backend manages the pixel buffer only.
+    is owned by the host entrypoint; this backend manages the pixel buffer only.
+    Native `rt_win32_*` wrappers are not bound here yet.
 
     Colors are Argb32 (0xAARRGGBB), matching the CompositorBackend contract.
     """
@@ -160,21 +165,36 @@ impl CompositorGlassCapable for HostedWin32Backend:
 
 impl HostedWin32Backend:
 
+    static fn implementation_name() -> text:
+        "win32-winit-alias"
+
+    static fn uses_native_win32_symbols() -> bool:
+        false
+
     static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedWin32Backend:
         """Wrap pre-existing winit handles (test seam)."""
         HostedWin32Backend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
 
-    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedWin32Backend:
-        """Allocate a winit pixel buffer sized w×h for the given window."""
+    static fn try_create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedWin32Backend?:
+        """Allocate a winit pixel buffer sized w/h for the given window."""
         val w64: i64 = w
         val h64: i64 = h
         val fc64: i64 = fill_color
         val buf = rt_winit_buffer_create(w64, h64, fc64)
+        if buf == 0:
+            return nil
         _win32_window_id = window_id
         _win32_buffer_id = buf
         _win32_w = w
         _win32_h = h
         HostedWin32Backend(window_id: window_id, buffer_id: buf, w: w, h: h)
+
+    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedWin32Backend:
+        """Allocate a winit pixel buffer sized w/h for the given window."""
+        val backend = HostedWin32Backend.try_create(window_id, w, h, fill_color)
+        if val b = backend:
+            return b
+        HostedWin32Backend(window_id: window_id, buffer_id: 0, w: w, h: h)
 
     me resize(new_w: i32, new_h: i32) -> bool:
         """React to a WM_SIZE event. Frees the old buffer and allocates a new one."""

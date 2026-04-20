@@ -4,8 +4,14 @@
 // and the main process via contextBridge.
 
 const { contextBridge, ipcRenderer } = require('electron');
+const path = require('path');
+const { pathToFileURL } = require('url');
+
+const repoRoot = path.resolve(__dirname, '..', '..');
 
 contextBridge.exposeInMainWorld('simpleUI', {
+    rendererModuleUrl: pathToFileURL(path.join(repoRoot, 'src', 'app', 'ui.web', 'retained_renderer.js')).href,
+
     // Receive HTML render updates from the Simple process (desktop chrome).
     onRender(callback) {
         ipcRenderer.on('render', (event, html) => {
@@ -13,12 +19,11 @@ contextBridge.exposeInMainWorld('simpleUI', {
         });
     },
 
-    // Receive window-manager messages forwarded from main.js. These
-    // previously spawned separate BrowserWindow instances; now they are
-    // forwarded verbatim to the renderer so SimpleWindowManager can
-    // draw floating windows inside the main Electron window.
+    // Receive legacy window-manager messages forwarded from main.js. These
+    // are adapted by wm.js receiveElectronMessage() so the shell no longer
+    // depends on the removed handleMessage() path.
     //
-    // Message shape matches wm.js handleMessage():
+    // Message shape:
     //   { type: 'openWindow'  | 'closeWindow' | 'renderWindow'
     //           | 'moveWindow' | 'resizeWindow' | 'focusWindow'
     //           | 'minimizeWindow',
@@ -27,6 +32,16 @@ contextBridge.exposeInMainWorld('simpleUI', {
         ipcRenderer.on('wm-message', (event, msg) => {
             callback(msg);
         });
+    },
+
+    onWmFrame(callback) {
+        ipcRenderer.on('wm-frame', (event, frame) => {
+            callback(frame);
+        });
+    },
+
+    sendFrame(frame) {
+        ipcRenderer.send('wm-frame-to-simple', frame || {});
     },
 
     onNativeWindowEvent(callback) {

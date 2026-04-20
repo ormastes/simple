@@ -2,37 +2,73 @@
 """
 # Host Compositor Entry Spec
 
-**Feature IDs:** N/A
-**Category:** Infrastructure
-**Difficulty:** 2/5
-**Status:** Implemented
-
-## Overview
-
-Unit tests for `host_compositor_entry.spl` — the unified WM startup path
-that lets host-side apps (Electron, Browser, Cocoa, Win32) share the same
-Compositor + WmService code as SimpleOS.
+Deterministic unit tests for the shared host compositor bootstrap boundary.
+Tests avoid creating real host windows except for the TUI nil boundary, which
+returns before touching SFFI.
 """
 
-use std.sspec.*
-use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
+use std.spec.{describe, it, expect}
 use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    HOST_WM_IDLE_SLEEP_MS,
+    HostBackendKind,
+    HostCompositor,
+    HostWmConfig,
+    HostWmHandle,
+    WmService,
+    host_wm_surface_failure_reason,
+    init_host_wm,
+}
 
-# ============================================================================
-# HostWmConfig construction
-# ============================================================================
+var _fake_present_count: i64 = 0
+
+class FakeCompositorBackend:
+    w: i32
+    h: i32
+
+impl CompositorBackend for FakeCompositorBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _fake_present_count = _fake_present_count
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        _fake_present_count = _fake_present_count
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        _fake_present_count = _fake_present_count
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me present():
+        _fake_present_count = _fake_present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _fake_present_count = _fake_present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _browser_config() -> HostWmConfig:
+    HostWmConfig(
+        backend: HostBackendKind.Browser,
+        initial_size: Size.wh(320, 240),
+        title: "browser-wm"
+    )
 
 describe "HostWmConfig":
 
-    it "constructs with Browser backend":
-        val cfg = HostWmConfig(
-            backend: HostBackendKind.Browser,
-            initial_size: Size.wh(800, 600),
-            title: "test-window"
-        )
-        expect(cfg.title).to_equal("test-window")
-
-    it "constructs with Electron backend":
+    it "keeps title in the bootstrap contract":
         val cfg = HostWmConfig(
             backend: HostBackendKind.Electron,
             initial_size: Size.wh(1280, 800),
@@ -40,67 +76,31 @@ describe "HostWmConfig":
         )
         expect(cfg.title).to_equal("electron-test")
 
-# ============================================================================
-# init_host_wm — Browser backend (no native FFI needed)
-# ============================================================================
+describe "host surface failure boundaries":
 
-describe "init_host_wm Browser":
+    it "accepts a nonzero event loop and window surface":
+        val reason = host_wm_surface_failure_reason(_browser_config(), 10, 20)
+        expect(reason == nil).to_equal(true)
 
-    it "returns a non-nil HostWmHandle for Browser backend":
+    it "documents the TUI stub boundary":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Tui,
+            initial_size: Size.wh(80, 24),
+            title: "tui-wm"
+        )
+        val reason = host_wm_surface_failure_reason(cfg, 10, 20)
+        expect(reason).to_equal("tui host compositor bootstrap is not implemented")
+
+    it "rejects zero-sized host surfaces before SFFI bootstrap":
         val cfg = HostWmConfig(
             backend: HostBackendKind.Browser,
-            initial_size: Size.wh(320, 240),
-            title: "browser-wm"
+            initial_size: Size.wh(0, 240),
+            title: "bad-size"
         )
-        val result = init_host_wm(cfg)
-        expect(result == nil).to_equal(false)
+        val reason = host_wm_surface_failure_reason(cfg, 10, 20)
+        expect(reason).to_equal("host compositor size must be nonzero")
 
-    it "handle.compositor is non-nil for Browser backend":
-        val cfg = HostWmConfig(
-            backend: HostBackendKind.Browser,
-            initial_size: Size.wh(320, 240),
-            title: "browser-wm-2"
-        )
-        val result = init_host_wm(cfg)
-        if val h = result:
-            expect(true).to_equal(true)
-        else:
-            expect(false).to_equal(true)
-
-    it "handle.wm is initialized (running=false before init()) for Browser backend":
-        val cfg = HostWmConfig(
-            backend: HostBackendKind.Browser,
-            initial_size: Size.wh(320, 240),
-            title: "browser-wm-3"
-        )
-        val result = init_host_wm(cfg)
-        if val h = result:
-            expect(h.wm.running).to_equal(false)
-        else:
-            expect(false).to_equal(true)
-
-# ============================================================================
-# init_host_wm — WebCanvas backend (same BrowserCompositorBackend)
-# ============================================================================
-
-describe "init_host_wm WebCanvas":
-
-    it "returns a non-nil HostWmHandle for WebCanvas backend":
-        val cfg = HostWmConfig(
-            backend: HostBackendKind.WebCanvas,
-            initial_size: Size.wh(640, 480),
-            title: "webcanvas-wm"
-        )
-        val result = init_host_wm(cfg)
-        expect(result == nil).to_equal(false)
-
-# ============================================================================
-# init_host_wm — Tui backend (stub, should return nil)
-# ============================================================================
-
-describe "init_host_wm Tui stub":
-
-    it "returns nil for Tui backend (not yet implemented)":
+    it "returns nil for TUI without touching host window SFFI":
         val cfg = HostWmConfig(
             backend: HostBackendKind.Tui,
             initial_size: Size.wh(80, 24),
@@ -108,3 +108,45 @@ describe "init_host_wm Tui stub":
         )
         val result = init_host_wm(cfg)
         expect(result == nil).to_equal(true)
+
+describe "HostWmHandle loop behavior":
+
+    it "runs one tick without host event polling when no event loop is attached":
+        _fake_present_count = 0
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        val handle = HostWmHandle(
+            compositor: comp,
+            wm: WmService.new(),
+            event_loop_id: 0,
+            window_id: 0
+        )
+        val pumped = handle.pump_host_events()
+        handle.run_once()
+        expect(pumped).to_equal(0)
+        expect(_fake_present_count).to_equal(1)
+
+    it "records compositor resize dimensions":
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.resize(640, 480)
+        expect(comp.width).to_equal(640)
+        expect(comp.height).to_equal(480)
+
+    it "does not tick after the WM has stopped":
+        _fake_present_count = 0
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        val wm = WmService.new()
+        wm.stop()
+        val handle = HostWmHandle(
+            compositor: comp,
+            wm: wm,
+            event_loop_id: 0,
+            window_id: 0
+        )
+        handle.run_once()
+        expect(_fake_present_count).to_equal(0)
+
+    it "uses a nonzero idle sleep interval for tick_forever":
+        expect(HOST_WM_IDLE_SLEEP_MS).to_be_greater_than(0)

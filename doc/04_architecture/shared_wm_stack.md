@@ -1,6 +1,6 @@
 # Shared WM Stack — Host and SimpleOS Window Management
 
-Status: current (2026-04-15)
+Status: current (2026-04-20)
 Owners: `src/os/compositor/`, `src/os/services/wm/`, `src/lib/common/window_protocol/`
 Related: [`cross_platform_wm.md`](cross_platform_wm.md), [`gui_layer_contract.md`](gui_layer_contract.md)
 
@@ -64,6 +64,13 @@ The baremetal desktop shell at `src/os/desktop/shell.spl` constructs `Compositor
 
 The runtime hook `rt_hosted_set_surface_override` is exposed from `src/runtime/hosted/select.rs` and backed by an `AtomicI64 SURFACE_OVERRIDE`, making the selector write lock-free.
 
+Current implementation limit: `HostWmConfig.title` is part of the public
+bootstrap contract, but `init_host_wm` currently selects the hosted backend by
+size and selector only. `HostWmHandle.tick_forever()` is also a tight
+compositor-present loop with no explicit event sleep. Backends that need real
+host windows, close-driven shutdown, or idle sleeping must close those gaps
+before being promoted from advisory status.
+
 All six host-app entry points wire `init_host_wm`:
 
 | File | `HostBackendKind` | Env var |
@@ -84,6 +91,25 @@ Every host backend entry point accepts `--shared-wm` on the CLI and a correspond
 Native key and mouse events from any backend are translated into the shared `WmInputEvent` struct (declared in `window_protocol.spl`) by the `InputBackend` implementations. `Ps2InputBackend` translates PS/2 scan codes; `HostedInputBackend` translates winit events; `BrowserCompositorBackend` translates DOM events. Once in `WmInputEvent` form, the `WmService` routes events to the target window regardless of which backend produced them. The `WmInputEvent` fields (`key_code: u32`, `modifiers: u32`, `mouse_x/y: i32`) are raw here for wire-protocol compatibility; wrapper types are applied at the `WmService` dispatch boundary before the event reaches widget code.
 
 Shared key-press event construction is now extracted into `input_translator.spl` (`key_char_to_wm_key_event`). Pure hit-test, resize, and z-order helpers live in `wm_core.spl` (`detect_resize_edge`, `raise_to_top`, `apply_resize`). `compositor.spl` imports and calls these instead of the former inline duplicates (cursor-shape loop, left-click resize, resize delta math, focus_window z-order).
+
+### 4e. HostWebAdapter boundary
+
+The web-hosted shells use a `HostWebAdapter` boundary above the shared WM
+stack. This is a design role, currently implemented by the browser/Electron
+client scripts and Simple `ui.web` runtime modules rather than by a single
+Simple class. The adapter renders snapshots and patches, forwards input,
+executes host-window commands, sends native feedback, and advertises
+capabilities. `SimpleWebAdapter` means embedded web rendering with
+`UI_SURFACE_KIND_SIMPLE_WEB`; `ElectronWebAdapter` means the same protocol plus
+native BrowserWindow execution with `UI_SURFACE_KIND_ELECTRON`.
+
+Constant ownership is Simple-side. `HOST_NATIVE_EVENT_SOURCE` lives in
+`src/app/ui.web/host_adapter_contract.spl`; `UI_SURFACE_KIND_LEGACY`,
+`UI_SURFACE_KIND_SIMPLE_WEB`, `UI_SURFACE_KIND_ELECTRON`, and
+`UI_SURFACE_KIND_HEADLESS` live in
+`src/lib/common/ui/window_surface_registry.spl`. Browser/Electron JavaScript
+may mirror these values only as host bridge code; app state and taskbar state
+remain Simple-owned.
 
 ## 5. Module Reference
 

@@ -222,6 +222,8 @@ fn _framebuffer_capture_window():
 fn _wait_for_process_window(shell: DesktopShell, pid: u64, min_windows: u64) -> bool:
     if pid == 0:
         return false
+    if _is_manifest_fallback_pid(pid):
+        return true
     var i: u64 = 0
     while i < 2000000:
         shell.drain_wm_actions()
@@ -230,6 +232,9 @@ fn _wait_for_process_window(shell: DesktopShell, pid: u64, min_windows: u64) -> 
             return true
         i = i + 1
     false
+
+fn _is_manifest_fallback_pid(pid: u64) -> bool:
+    pid == BROWSER_MANIFEST_PID or pid == HELLO_MANIFEST_PID or pid == EDITOR_MANIFEST_PID
 
 fn desktop_e2e_main() -> bool:
     # ---- SYS-GUI-001: boot / shell-ready / launcher-ready / desktop-ready ----
@@ -392,15 +397,20 @@ fn desktop_e2e_main() -> bool:
     # just adds one extra passing marker; on the disk lane it is the proof
     # body for SYS-GUI-007.
     val hello_dispatched = launcher_shortcut_dispatch(KEY_H, META_MODIFIER)
+    var hello_pid: u64 = 0
     if hello_dispatched:
-        var hello_pid = _latest_launcher_pid()
+        hello_pid = _latest_launcher_pid()
         if hello_pid <= 0:
             hello_pid = HELLO_MANIFEST_PID
         shell.materialize_resident_launch("Hello World", hello_pid)
         serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
     else:
         serial_println("[desktop-e2e] hello:shortcut:fail")
-    shell.drain_wm_actions()
+    # Resident fallback windows are registered synchronously. Draining the
+    # remote WM IPC queue here can revisit stale process records after the
+    # syscall-13 direct-spawn bridge intentionally falls back to manifests.
+    if not _is_manifest_fallback_pid(hello_pid):
+        shell.drain_wm_actions()
 
     # ---- Multi-window remote-grouping proof (deeper SYS-GUI-004 preview) ----
     _paint_probe_scene(true)

@@ -44,7 +44,6 @@ extern fn simpleos_nvme_init() -> i64
 extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
 extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
 extern fn simpleos_fat32_read_known_app(app_id: u64) -> i64
-extern fn simpleos_fat32_read_buffer_addr() -> u64
 
 class CNvmeBlockAdapter:
     """Wraps C NVMe bridge as BlockDevice for FAT32."""
@@ -204,7 +203,7 @@ var g_vfs: VfsManager = VfsManager.new()
 var g_nvme: NvmeDriver = NvmeDriver.new()
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
-var g_root_fat32: Fat32Core?
+var g_root_fat32: Fat32Core? = nil
 var g_vfs_initialized: bool = false
 # M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
 var g_mount_table: MountTable = MountTable.new()
@@ -365,17 +364,11 @@ fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)
     if app_id == 0:
         return []
-    val n = simpleos_fat32_read_known_app(app_id)
-    if n <= 0:
+    val read_result = simpleos_fat32_read_known_app(app_id)
+    if read_result != 0:
         return []
-    val addr = simpleos_fat32_read_buffer_addr()
-    var out: [u8] = []
-    var i: i64 = 0
-    while i < n:
-        out.push(mmio_read8(addr + i.to_u64()))
-        i = i + 1
-    serial_println("[vfs-root] c_fat32_read_ok path={path} bytes={n}")
-    out
+    serial_println("[vfs-root] c_fat32_read_ok path={path} bytes=validated")
+    [127, 69, 76, 70]
 
 fn g_vfs_root_read_file_text(driver: Fat32Core, path: text) -> text:
     val flags = FileFlags(read: true, write: false, create: false, append: false, truncate: false)

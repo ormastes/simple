@@ -16,6 +16,8 @@ const os = require('os');
 let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
+let nativeSmokeFrames = [];
+let nativeSmokeStarted = false;
 // childWindows/webContentsToWindowId were used by the old openWindow
 // handler that spawned separate BrowserWindow instances. The WM now
 // runs in the main renderer (wm.js) so there are no child BrowserWindows.
@@ -23,6 +25,10 @@ const webContentsToWindowId = new Map();  // webContents.id → windowId (main o
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
 const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
 const projectRoot = path.resolve(__dirname, '..', '..');
+
+function isNativeSmokeMode() {
+    return process.argv.includes('--smoke-native-window') || process.env.SIMPLE_ELECTRON_NATIVE_SMOKE === '1';
+}
 
 function debugLog(message) {
     const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -277,6 +283,9 @@ function resolveEntryArgs() {
         if (args[i].startsWith('--remote-debugging-port')) {
             continue;
         }
+        if (args[i] === '--smoke-native-window') {
+            continue;
+        }
         if (args[i] === '--') {
             continue;
         }
@@ -391,6 +400,13 @@ function handleSimpleMessage(line) {
     if (!line.trim()) return;
     try {
         const msg = JSON.parse(line);
+        if (msg && msg.t) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('wm-frame', msg);
+                debugLog(`forwarded wm frame t=${msg.t}`);
+            }
+            return;
+        }
         debugLog(`ipc message type=${msg.type || 'unknown'}`);
         switch (msg.type) {
             case 'render':
@@ -608,6 +624,67 @@ function spawnSimpleProcess() {
     });
 }
 
+function waitMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nativeSmokeCommandKinds() {
+    return nativeSmokeFrames.map((frame) => {
+        const payload = frame && frame.payload ? frame.payload : {};
+        return payload.cmd_type || payload.kind || '';
+    }).filter(Boolean);
+}
+
+function nativeSmokeHasKind(kind) {
+    return nativeSmokeCommandKinds().includes(kind);
+}
+
+async function runNativeWindowSmoke() {
+    if (nativeSmokeStarted) return;
+    nativeSmokeStarted = true;
+    const windowId = 'simple-electron-smoke-window';
+    nativeSmokeFrames = [];
+    try {
+        await waitMs(250);
+        spawnNativeWindow({
+            windowId,
+            url: 'data:text/html,<title>Smoke Window</title><body>Simple Electron smoke</body>',
+            width: 420,
+            height: 280,
+            title: 'Smoke Window'
+        });
+        await waitMs(200);
+        focusNativeWindow(windowId);
+        await waitMs(150);
+        minimizeNativeWindow(windowId);
+        await waitMs(200);
+        restoreNativeWindow(windowId);
+        await waitMs(200);
+        moveNativeWindow(windowId, 40, 40);
+        await waitMs(200);
+        resizeNativeWindow(windowId, 460, 300);
+        await waitMs(200);
+        setNativeWindowTitle(windowId, 'Smoke Window Updated');
+        await waitMs(200);
+        closeNativeWindow(windowId);
+        await waitMs(250);
+
+        const required = ['focus', 'minimize', 'restore', 'move', 'resize', 'set_title', 'close'];
+        const missing = required.filter((kind) => !nativeSmokeHasKind(kind));
+        if (missing.length > 0) {
+            console.error(`Electron native smoke failed; missing native feedback: ${missing.join(', ')}`);
+            console.error(`Observed feedback: ${nativeSmokeCommandKinds().join(', ') || '(none)'}`);
+            app.exit(1);
+            return;
+        }
+        console.log(`Electron native smoke passed: ${nativeSmokeCommandKinds().join(', ')}`);
+        app.exit(0);
+    } catch (err) {
+        console.error(`Electron native smoke failed: ${err.stack || err.message || err}`);
+        app.exit(1);
+    }
+}
+
 // Create the main window and start the subprocess
 app.whenReady().then(() => {
     debugLog('app.whenReady');
@@ -664,6 +741,9 @@ app.whenReady().then(() => {
     mainWindow.webContents.on('did-finish-load', () => {
         debugLog('window did-finish-load');
         webContentsToWindowId.set(mainWindow.webContents.id, 'main');
+        if (isNativeSmokeMode()) {
+            runNativeWindowSmoke();
+        }
     });
     mainWindow.webContents.on('render-process-gone', (event, details) => {
         debugLog(`render-process-gone reason=${details.reason}`);
@@ -684,10 +764,21 @@ app.whenReady().then(() => {
         mainWindow = null;
     });
 
-    spawnSimpleProcess();
+    if (!isNativeSmokeMode()) {
+        spawnSimpleProcess();
+    }
 });
 
 // IPC from renderer: keypress (tagged with windowId)
+ipcMain.on('wm-frame-to-simple', (event, frame) => {
+    if (isNativeSmokeMode()) {
+        nativeSmokeFrames.push(frame || {});
+        debugLog(`smoke captured wm frame t=${(frame && frame.t) || ''}`);
+        return;
+    }
+    sendToSimple(frame || {});
+});
+
 ipcMain.on('keypress', (event, key) => {
     const windowId = webContentsToWindowId.get(event.sender.id) || 'main';
     debugLog(`keypress key=${JSON.stringify(key)} windowId=${windowId}`);

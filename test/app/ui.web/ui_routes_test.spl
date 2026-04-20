@@ -9,6 +9,7 @@ use common.ui.builder.{column, label, build_tree_with_title}
 use app.ui.web.bounded_channel.{BoundedChannel}
 use app.ui.web.ui_routes.{_handle_window_cmd}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_reset, host_taskbar_runtime_enable}
+use app.ui.web.host_adapter_contract.{native_feedback_window_cmd_frame_to_json}
 use examples.hello_taskbar.app_manifest.{APP_ID}
 
 fn _session() -> UISession:
@@ -51,4 +52,32 @@ describe "ui_routes window_cmd dispatch":
         val native_frame = "{\"t\":\"window_cmd\",\"cmd_type\":\"minimize\",\"payload\":{\"window_id_hint\":\"host-window-1\",\"source\":\"native_event\"}}"
         _handle_window_cmd(native_frame, session, "sess-route", out)
 
+        expect(out.try_recv() == nil).to_equal(true)
+
+    it "queues Electron host commands when feedback source is absent or not native":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        val launch_frame = "{\"t\":\"window_cmd\",\"cmd_type\":\"launch\",\"payload\":{\"app_id\":\"{APP_ID}\"}}"
+        _handle_window_cmd(launch_frame, session, "sess-route", out)
+        val _ = out.try_recv()
+
+        val no_source_frame = "{\"t\":\"window_cmd\",\"v\":1,\"s\":\"sess-route\",\"seq\":null,\"payload\":{\"cmd_type\":\"focus\",\"kind\":\"focus\",\"window_id_hint\":\"host-window-1\"}}"
+        _handle_window_cmd(no_source_frame, session, "sess-route", out)
+        val no_source_host_frame = out.try_recv()
+        expect(no_source_host_frame != nil).to_equal(true)
+        val no_source_text = no_source_host_frame as text
+        expect(no_source_text.contains("\"action\":\"focus_native_window\"")).to_equal(true)
+        expect(out.try_recv() == nil).to_equal(true)
+
+        val client_source_frame = "{\"t\":\"window_cmd\",\"v\":1,\"s\":\"sess-route\",\"seq\":null,\"payload\":{\"cmd_type\":\"minimize\",\"kind\":\"minimize\",\"window_id_hint\":\"host-window-1\",\"source\":\"client_event\"}}"
+        _handle_window_cmd(client_source_frame, session, "sess-route", out)
+        val client_source_host_frame = out.try_recv()
+        expect(client_source_host_frame != nil).to_equal(true)
+        val client_source_text = client_source_host_frame as text
+        expect(client_source_text.contains("\"action\":\"minimize_native_window\"")).to_equal(true)
+        expect(out.try_recv() == nil).to_equal(true)
+
+        _handle_window_cmd(native_feedback_window_cmd_frame_to_json("sess-route", "restore", "host-window-1", "", 0, 0, 0, 0), session, "sess-route", out)
         expect(out.try_recv() == nil).to_equal(true)

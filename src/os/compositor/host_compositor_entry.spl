@@ -10,7 +10,19 @@
 
 use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend}
-use os.compositor.hosted_backend.{HostedCompositorBackend, select_hosted_backend, rt_hosted_set_surface_override}
+use os.compositor.hosted_backend.{select_hosted_backend, rt_hosted_set_surface_override}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_sleep_ms(ms: i64)
+
+val HOST_WM_EVENT_CLOSE: i64 = 3
+val HOST_WM_IDLE_SLEEP_MS: i64 = 16
 
 # =========================================================================
 # Public types
@@ -28,6 +40,10 @@ struct HostWmConfig:
     backend: HostBackendKind
     initial_size: Size
     title: text
+
+struct HostSurface:
+    event_loop_id: i64
+    window_id: i64
 
 # WmService — thin lifecycle wrapper around the host event loop
 class WmService:
@@ -55,20 +71,63 @@ class HostCompositor:
         """Process one compositor frame through the hosted backend."""
         self.backend.present()
 
+    me resize(w: i32, h: i32):
+        """Record the current host surface size after an external resize."""
+        self.width = w
+        self.height = h
+
 # HostWmHandle — returned by init_host_wm; owns compositor and wm
 class HostWmHandle:
     compositor: HostCompositor
     wm: WmService
+    event_loop_id: i64
+    window_id: i64
 
     me run_once():
-        """Run a single compositor tick."""
+        """Pump host events and run a single compositor tick."""
         if self.wm.is_running():
-            self.compositor.tick()
+            self.pump_host_events()
+            if self.wm.is_running():
+                self.compositor.tick()
 
     me tick_forever():
-        """Block-loop: run compositor ticks until the WM stops."""
+        """Block-loop: run compositor ticks until the WM stops.
+
+        The loop pumps host events when an event loop is present and sleeps
+        after each tick so this entrypoint cannot spin at 100% CPU while idle.
+        """
         while self.wm.is_running():
-            self.compositor.tick()
+            self.run_once()
+            rt_sleep_ms(HOST_WM_IDLE_SLEEP_MS)
+
+    me pump_host_events() -> i64:
+        """Drain a small batch of host events. A close event stops the WM."""
+        if self.event_loop_id == 0:
+            return 0
+        var count: i64 = 0
+        var remaining: i64 = 16
+        while remaining > 0:
+            remaining = remaining - 1
+            val ev = rt_winit_event_loop_poll_events(self.event_loop_id, 1)
+            if ev == 0:
+                return count
+            count = count + 1
+            val ev_type = rt_winit_event_get_type(ev)
+            rt_winit_event_free(ev)
+            if ev_type == HOST_WM_EVENT_CLOSE:
+                self.wm.stop()
+                return count
+        count
+
+    me shutdown():
+        """Stop the WM and release host handles owned by this bootstrap."""
+        self.wm.stop()
+        if self.window_id != 0:
+            rt_winit_window_free(self.window_id)
+            self.window_id = 0
+        if self.event_loop_id != 0:
+            rt_winit_event_loop_free(self.event_loop_id)
+            self.event_loop_id = 0
 
 # =========================================================================
 # Factory
@@ -94,16 +153,66 @@ fn _host_backend_selector(kind: HostBackendKind) -> i64:
     # `src/runtime/hosted/select.rs` dispatcher implementation.
     0
 
+fn host_wm_surface_failure_reason(config: HostWmConfig, event_loop_id: i64, window_id: i64) -> text?:
+    """Return the explicit bootstrap boundary that would prevent host startup."""
+    if config.backend == HostBackendKind.Tui:
+        return "tui host compositor bootstrap is not implemented"
+    if config.initial_size.w <= 0 or config.initial_size.h <= 0:
+        return "host compositor size must be nonzero"
+    if event_loop_id == 0:
+        return "host event loop creation failed"
+    if window_id == 0:
+        return "host window creation failed"
+    nil
+
+fn _create_host_surface(config: HostWmConfig) -> HostSurface?:
+    """Create the native host event loop/window, using config.title."""
+    if config.backend == HostBackendKind.Tui:
+        return nil
+    if config.initial_size.w <= 0 or config.initial_size.h <= 0:
+        return nil
+
+    val event_loop_id = rt_winit_event_loop_new()
+    if event_loop_id == 0:
+        return nil
+
+    val w64: i64 = config.initial_size.w
+    val h64: i64 = config.initial_size.h
+    val window_id = rt_winit_window_new(event_loop_id, w64, h64, config.title)
+    if window_id == 0:
+        rt_winit_event_loop_free(event_loop_id)
+        return nil
+
+    HostSurface(event_loop_id: event_loop_id, window_id: window_id)
+
 fn init_host_wm(config: HostWmConfig) -> HostWmHandle?:
     """Initialise a shared HostCompositor + WmService for the given host backend.
 
-    Returns nil if the backend cannot be created (e.g. missing driver).
+    Returns nil if the host event loop/window or pixel-buffer backend cannot be
+    created. TUI currently has an explicit nil boundary because it does not own
+    a winit host surface.
     """
+    val surface = _create_host_surface(config)
+    if surface == nil:
+        return nil
+
+    var event_loop_id: i64 = 0
+    var window_id: i64 = 0
+    if val s = surface:
+        event_loop_id = s.event_loop_id
+        window_id = s.window_id
     rt_hosted_set_surface_override(_host_backend_selector(config.backend))
-    val backend = select_hosted_backend(0, config.initial_size.w, config.initial_size.h, 0)
-    val comp = HostCompositor.new(backend, config.initial_size)
-    val wm = WmService.new()
-    HostWmHandle(compositor: comp, wm: wm)
+    val backend = select_hosted_backend(window_id, config.initial_size.w, config.initial_size.h, 0)
+    if backend == nil:
+        rt_winit_window_free(window_id)
+        rt_winit_event_loop_free(event_loop_id)
+        return nil
+
+    if val b = backend:
+        val comp = HostCompositor.new(b, config.initial_size)
+        val wm = WmService.new()
+        return HostWmHandle(compositor: comp, wm: wm, event_loop_id: event_loop_id, window_id: window_id)
+    nil
 
 fn init_webcanvas_host_wm(title: text, initial_size: Size) -> HostWmHandle?:
     """Initialise a shared host WM for the WebCanvas backend."""

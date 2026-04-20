@@ -2140,7 +2140,8 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
     return 0;
 }
 
-static uint8_t simpleos_fat32_read_buf[131072];
+static uint8_t simpleos_fat32_read_buf[32768];
+static const uint32_t simpleos_fat32_read_buf_size = 32768;
 
 uint64_t simpleos_fat32_read_buffer_addr(void)
 {
@@ -2153,11 +2154,11 @@ int64_t simpleos_fat32_read_known_app(uint64_t app_id)
     uint32_t bytes_read = 0;
 
     switch (app_id) {
-    case 1: name = "/SYS/APPS/BROWSE~1"; break;
-    case 2: name = "/SYS/APPS/FILE_M~1"; break;
-    case 3: name = "/SYS/APPS/HELLO_~1"; break;
-    case 4: name = "/SYS/APPS/SHELL"; break;
-    case 5: name = "/SYS/APPS/EDITOR"; break;
+    case 1: name = "/BROWSE~1.ELF"; break;
+    case 2: name = "/FILE_M~1.ELF"; break;
+    case 3: name = "/HELLO_~1.ELF"; break;
+    case 4: name = "/TERMIN~1.ELF"; break;
+    case 5: name = "/EDITOR~1.ELF"; break;
     case 11: name = "/BROWSE~1.ELF"; break;
     case 12: name = "/FILE_M~1.ELF"; break;
     case 13: name = "/HELLO_~1.ELF"; break;
@@ -2166,11 +2167,45 @@ int64_t simpleos_fat32_read_known_app(uint64_t app_id)
     default: return -1;
     }
 
-    __builtin_memset(simpleos_fat32_read_buf, 0, sizeof(simpleos_fat32_read_buf));
+    __builtin_memset(simpleos_fat32_read_buf, 0, simpleos_fat32_read_buf_size);
     if (fat32_read_file(name, simpleos_fat32_read_buf,
-                        (uint32_t)sizeof(simpleos_fat32_read_buf), &bytes_read) != 0)
+                        simpleos_fat32_read_buf_size, &bytes_read) != 0)
         return -1;
-    return (int64_t)bytes_read;
+    (void)bytes_read;
+    return 0;
+}
+
+RuntimeValue simpleos_fat32_read_known_app_array(uint64_t app_id)
+{
+    int64_t rc = simpleos_fat32_read_known_app(app_id);
+    uint32_t cluster = 0;
+    uint32_t file_size = 0;
+    const char *name = NULL;
+
+    if (rc != 0)
+        return rt_array_new((RuntimeValue)0);
+
+    switch (app_id) {
+    case 1: name = "/BROWSE~1.ELF"; break;
+    case 2: name = "/FILE_M~1.ELF"; break;
+    case 3: name = "/HELLO_~1.ELF"; break;
+    case 4: name = "/TERMIN~1.ELF"; break;
+    case 5: name = "/EDITOR~1.ELF"; break;
+    default: return rt_array_new((RuntimeValue)0);
+    }
+    if (fat32_find_file(name, &cluster, &file_size) != 0 || file_size > simpleos_fat32_read_buf_size)
+        return rt_array_new((RuntimeValue)0);
+
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    if (!a)
+        return rt_array_new((RuntimeValue)0);
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    a->len = file_size;
+    a->cap = file_size;
+    for (uint32_t i = 0; i < file_size; i++)
+        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_read_buf[i]);
+    return ENCODE_PTR(a);
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
@@ -4052,6 +4087,30 @@ extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_a
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 ) __attribute__((weak));
 
+static int simpleos_path_eq(uint64_t ptr, uint64_t len, const char *expected)
+{
+    const char *p = (const char *)(uintptr_t)ptr;
+    uint64_t i = 0;
+    if (!p || !expected)
+        return 0;
+    while (expected[i]) {
+        if (i >= len || p[i] != expected[i])
+            return 0;
+        i++;
+    }
+    return i == len;
+}
+
+static uint64_t simpleos_known_app_id_from_path(uint64_t ptr, uint64_t len)
+{
+    if (simpleos_path_eq(ptr, len, "/sys/apps/browser_demo")) return 1;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/file_manager")) return 2;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/hello_world")) return 3;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/terminal")) return 4;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/editor")) return 5;
+    return 0;
+}
+
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
 {
@@ -4063,12 +4122,19 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 4:  /* GetPid */
             return 1; /* bare-metal: PID 1 */
         case 13: /* SpawnBinary */
+        {
+            uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
+            if (app_id != 0 && simpleos_fat32_read_known_app(app_id) == 0) {
+                serial_puts("[c-syscall13] fat32 app image validated; exec deferred\n");
+                return -38; /* ENOSYS until user-mode ELF handoff is fixed */
+            }
             if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
                 return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
                     id, a0, a1, a2, a3, a4, 0
                 );
             }
             return -38; /* ENOSYS */
+        }
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;
@@ -6510,6 +6576,9 @@ static void serial_hex(uint64_t v) {
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
     uint32_t width = (uint32_t)(uint64_t)w;
+    if (width < 64 || width > 8192) {
+        width = 1024;
+    }
     /* Initialize BGA display mode (1024x768x32) before setting fb params */
     bga_init(width, 768, 32);
     g_fb_addr = g_fb_addr ? g_fb_addr : (uint64_t)addr;  /* prefer PCI-detected addr */

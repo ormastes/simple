@@ -212,18 +212,27 @@ impl HostedCompositorBackend:
         """
         HostedCompositorBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
 
-    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCompositorBackend:
-        """Create a hosted compositor backend, allocating a new pixel buffer."""
+    static fn try_create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCompositorBackend?:
+        """Create a hosted compositor backend, or nil if the buffer fails."""
         val w64: i64 = w
         val h64: i64 = h
         val fc64: i64 = fill_color
         val buf = rt_winit_buffer_create(w64, h64, fc64)
+        if buf == 0:
+            return nil
         # Store in module-level vars (interpreter trait dispatch loses struct fields)
         _hosted_window_id = window_id
         _hosted_buffer_id = buf
         _hosted_w = w
         _hosted_h = h
         HostedCompositorBackend(window_id: window_id, buffer_id: buf, w: w, h: h)
+
+    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCompositorBackend:
+        """Create a hosted compositor backend, allocating a new pixel buffer."""
+        val backend = HostedCompositorBackend.try_create(window_id, w, h, fill_color)
+        if val b = backend:
+            return b
+        HostedCompositorBackend(window_id: window_id, buffer_id: 0, w: w, h: h)
 
     me free():
         """Release the native pixel buffer.
@@ -252,7 +261,7 @@ impl HostedCompositorBackend:
 extern fn rt_hosted_select_surface() -> i64
 extern fn rt_hosted_set_surface_override(sel: i64)
 
-fn select_hosted_backend(window_id: i64, w: i32, h: i32, fill_color: u32) -> CompositorBackend:
+fn select_hosted_backend(window_id: i64, w: i32, h: i32, fill_color: u32) -> CompositorBackend?:
     """Return the right `CompositorBackend` for this host.
 
     Reads the runtime's `rt_hosted_select_surface()` selector:
@@ -266,7 +275,7 @@ fn select_hosted_backend(window_id: i64, w: i32, h: i32, fill_color: u32) -> Com
     """
     val sel = rt_hosted_select_surface()
     if sel == 1:
-        return HostedCocoaBackend.create(window_id, w, h, fill_color)
+        return HostedCocoaBackend.try_create(window_id, w, h, fill_color)
     if sel == 2:
-        return HostedWin32Backend.create(window_id, w, h, fill_color)
-    HostedCompositorBackend.create(window_id, w, h, fill_color)
+        return HostedWin32Backend.try_create(window_id, w, h, fill_color)
+    HostedCompositorBackend.try_create(window_id, w, h, fill_color)

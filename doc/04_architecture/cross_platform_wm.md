@@ -317,10 +317,10 @@ src/app/wm_compare/                # Cross-backend parity harness
 | V2 | Windows | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Win32 | `backend_cpu` (DX WIP) | hosted shim WIP |
 | V2 | FreeBSD | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Xlib | `backend_cpu` | exists, untested |
 | V3 | simple_browser shell | `browser_compositor_backend` + `browser_backend` | DOM → `input_event` | winit → HTMLCanvas / WebGPU | `backend_software` / `backend_webgpu` | ✅ Row 5 Done 2026-04-14 — M1–M12 landed, wm_compare parity green, Acid2 passes |
-| V4 | Electron | `browser_compositor_backend` + `electron_capture` | IPC → `input_event` | BrowserWindow (main+renderer) | `backend_software` | `ui.electron` exists; CI not wired |
+| V4 | Electron | `browser_compositor_backend` + `electron_capture` | IPC → `input_event` | BrowserWindow (main+renderer) | `backend_software` | advisory/dev-preview; unit state covered, live OS smoke not default CI |
 
 See [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
-for the gap-by-gap work plan.
+for the restored handoff and current gap summary.
 
 ## FFI Coverage Matrix
 

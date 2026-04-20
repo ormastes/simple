@@ -97,6 +97,33 @@ Client                                     Server
 
 All message payloads are carried inside the top-level envelope defined in Section 6.
 
+### HostWebAdapter design
+
+`HostWebAdapter` is the design name for the thin client-side endpoint that
+speaks this protocol. It is not an application runtime: Simple remains the
+owner of app state, `UISession`, taskbar state, and window-surface metadata.
+The adapter has five responsibilities:
+
+1. Render `snapshot` and `patch_batch` frames into its host surface.
+2. Forward host input as `input_event` or `window_cmd` frames.
+3. Execute `host_window_command` frames when the host supports native windows.
+4. Send native host feedback as `window_cmd` frames.
+5. Report client capabilities during `hello`.
+
+`SimpleWebAdapter` means an embedded browser/web renderer surface using this
+same wire protocol, with no native BrowserWindow side effects.
+`ElectronWebAdapter` means the same protocol plus Electron BrowserWindow
+execution and native feedback. Browser and Electron JavaScript belongs to this
+adapter layer as host bridge and renderer code; app logic must stay in Simple.
+
+Canonical protocol constants are owned by Simple code, not by the JavaScript
+adapter. `HOST_NATIVE_EVENT_SOURCE` is owned by
+`src/app/ui.web/host_adapter_contract.spl` and currently has the value
+`"native_event"`. `UI_SURFACE_KIND_LEGACY`, `UI_SURFACE_KIND_SIMPLE_WEB`,
+`UI_SURFACE_KIND_ELECTRON`, and `UI_SURFACE_KIND_HEADLESS` are owned by
+`src/lib/common/ui/window_surface_registry.spl`; dispatch code should import
+those constants rather than duplicating their string values.
+
 | Message          | Direction | Fields                                                                                   | Maps to (existing Simple type / file)                                                                                                                          |
 |------------------|-----------|------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `hello`          | C→S       | `protocol_version: u16`, `client_caps: u64` (bitset)                                    | `protocol_version` mirrors `UiAccessSnapshot.protocol_version` in `src/lib/common/ui/access.spl`; `client_caps` has no existing type — will be defined in `src/app/ui.web/session_token.spl` |
@@ -270,13 +297,36 @@ The currently defined host actions are `spawn_native_window`, `close_native_wind
 | `taskbar_only` | Launch records authoritative Simple session/taskbar state but does not open an embedded surface. | Launch queues `spawn_native_window`; later lifecycle commands queue host-native actions. |
 | `headless` | Launch records authoritative session/taskbar state only. | No local surface and no host-native command are created. |
 
-Native Electron feedback is sent back as `window_cmd` with `payload.source = "native_event"` and `payload.window_id_hint = "<host-window-id>"`. The server treats these frames as authoritative feedback for focus, minimize, restore, close, title, move, resize, and maximize state, and must not echo them back as new `host_window_command` frames.
+Native Electron feedback is sent back as `window_cmd` with
+`payload.source = HOST_NATIVE_EVENT_SOURCE` and
+`payload.window_id_hint = "<host-window-id>"`. The server treats these frames
+as authoritative feedback for focus, minimize, restore, close, title, move,
+resize, maximize, and unmaximize state, and must not echo them back as new
+`host_window_command` frames.
+
+Native-window dispatch is guarded by the Simple-owned
+`ui_surface_kind_is_native_host` predicate in
+`src/lib/common/ui/window_surface_registry.spl`, so additional native host
+surface kinds can join the same contract without duplicating Electron-specific
+string checks through the runtime.
+
+### JavaScript-disabled fallback
+
+The live v1 protocol requires a browser/Electron host bridge because browser
+DOM, WebSocket, and Electron preload APIs are exposed through JavaScript in
+the current implementation. With JavaScript disabled, `ui.web` may only offer
+static snapshot rendering or exported HTML. Live taskbar updates, window
+launches, native-window commands, input forwarding, reconnect, and patch
+application are unavailable until a non-JavaScript transport is implemented.
 
 ### Host taskbar app catalog
 
 The host taskbar runtime resolves launches through a small catalog, not through server-route hardcoding. The catalog contains the cross-platform `examples/hello_taskbar` app and the built-in desktop manifests from `src/os/desktop/app_manifest.spl`. Manifest-backed apps use their manifest binary path as `app_id`, e.g. `/sys/apps/terminal`, are exposed as pinned taskbar items by default, and receive generic SimpleWeb/Electron HTML until the app provides richer host content.
 
-Remaining work for the host WM shell backends is tracked in [`doc/03_plan/agent_tasks/host_wm_shell_backends_remaining.md`](../03_plan/agent_tasks/host_wm_shell_backends_remaining.md).
+Remaining work for the host WM shell backends is tracked in
+[`doc/03_plan/agent_tasks/host_wm_shell_backends_remaining.md`](../03_plan/agent_tasks/host_wm_shell_backends_remaining.md).
+Electron is advisory/dev-preview: unit-level state coverage exists, but a real
+display-gated Electron OS smoke is not part of default CI yet.
 
 ---
 

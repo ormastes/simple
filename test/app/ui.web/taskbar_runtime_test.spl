@@ -9,9 +9,14 @@ use std.spec
 use common.ui.session.{UISession}
 use common.ui.window_surface_registry.{UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS}
 use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.taskbar_model.{AppRef, TrayItem}
 use app.ui.web.taskbar_runtime.{
     host_taskbar_runtime_reset,
     host_taskbar_runtime_enable,
+    host_taskbar_runtime_adapter_capabilities,
+    host_taskbar_runtime_save_layout,
+    host_taskbar_runtime_clear_persisted_layout,
+    host_taskbar_runtime_mark_persisted_layout_corrupt_for_test,
     host_taskbar_runtime_catalog,
     host_taskbar_runtime_launch,
     host_taskbar_runtime_native_window_html,
@@ -19,6 +24,7 @@ use app.ui.web.taskbar_runtime.{
     host_taskbar_runtime_move,
     host_taskbar_runtime_minimize,
     host_taskbar_runtime_maximize,
+    host_taskbar_runtime_unmaximize,
     host_taskbar_runtime_resize,
     host_taskbar_runtime_restore,
     host_taskbar_runtime_close,
@@ -37,6 +43,15 @@ fn _session() -> UISession:
     UISession.new(tree)
 
 describe "taskbar_runtime desktop_embedded":
+    it "reports embedded adapter capabilities":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", true)
+        val caps = host_taskbar_runtime_adapter_capabilities()
+        expect(caps.supports_native_windows).to_equal(false)
+        expect(caps.supports_embedded_surfaces).to_equal(true)
+        expect(caps.supports_headless_session).to_equal(false)
+        expect(caps.requires_js_host_bridge).to_equal(true)
+
     it "launches the demo app into a SimpleWeb surface":
         host_taskbar_runtime_reset()
         host_taskbar_runtime_enable("desktop_embedded", false)
@@ -45,6 +60,8 @@ describe "taskbar_runtime desktop_embedded":
         expect(result.is_ok()).to_equal(true)
         expect(session.has_surface("host-surface-1")).to_equal(true)
         expect(session.window_surfaces.len()).to_equal(1)
+        val frames = host_taskbar_runtime_take_client_frames("sess-simpleweb")
+        expect(frames.len()).to_equal(0)
 
     it "reports minimized state in the taskbar frame":
         host_taskbar_runtime_reset()
@@ -94,11 +111,83 @@ describe "taskbar_runtime app catalog":
         val html = host_taskbar_runtime_native_window_html("/sys/apps/terminal")
         expect(html == nil).to_equal(false)
         expect(html.unwrap().contains("<h1>Terminal</h1>")).to_equal(true)
+        expect(html.unwrap().contains("Host terminal surface ready")).to_equal(true)
         expect(html.unwrap().contains("/sys/apps/terminal")).to_equal(true)
+
+    it "returns an unsupported host content page for manifests without hooks":
+        val html = host_taskbar_runtime_native_window_html("/sys/apps/editor")
+        expect(html == nil).to_equal(false)
+        expect(html.unwrap().contains("This app has no host content hook yet.")).to_equal(true)
+        expect(html.unwrap().contains("Unsupported host content")).to_equal(true)
 
     it "returns nil for unsupported native window apps":
         val html = host_taskbar_runtime_native_window_html("missing.app")
         expect(html == nil).to_equal(true)
+
+describe "taskbar_runtime persisted layout":
+    it "loads defaults when no persisted layout store exists":
+        host_taskbar_runtime_clear_persisted_layout()
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        val frame = host_taskbar_runtime_taskbar_frame("sess-default-layout", session)
+        expect(frame.contains("\"app_id\":\"/sys/apps/terminal\"")).to_equal(true)
+        expect(frame.contains("\"item_id\":\"host-runtime\"")).to_equal(true)
+
+    it "saves pinned order and tray state across runtime reset":
+        host_taskbar_runtime_clear_persisted_layout()
+        val saved = host_taskbar_runtime_save_layout(
+            [
+                AppRef(app_id: "/sys/apps/settings", display_name: "Settings", icon: "settings"),
+                AppRef(app_id: "/sys/apps/terminal", display_name: "Terminal", icon: "term")
+            ],
+            [TrayItem(item_id: "net", label: "online", icon: "net")]
+        )
+        expect(saved.is_ok()).to_equal(true)
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        val frame = host_taskbar_runtime_taskbar_frame("sess-saved-layout", session)
+        val settings_idx = frame.index_of("\"app_id\":\"/sys/apps/settings\"") ?? -1
+        val terminal_idx = frame.index_of("\"app_id\":\"/sys/apps/terminal\"") ?? -1
+        expect(settings_idx).to_be_less_than(terminal_idx)
+        expect(frame.contains("\"item_id\":\"net\"")).to_equal(true)
+        expect(frame.contains("\"item_id\":\"host-runtime\"")).to_equal(false)
+        host_taskbar_runtime_clear_persisted_layout()
+
+    it "rejects corrupt saved layouts before they become runtime state":
+        host_taskbar_runtime_clear_persisted_layout()
+        val saved = host_taskbar_runtime_save_layout(
+            [
+                AppRef(app_id: "/sys/apps/terminal", display_name: "Terminal", icon: "term"),
+                AppRef(app_id: "/sys/apps/terminal", display_name: "Terminal Again", icon: "term")
+            ],
+            []
+        )
+        expect(saved.is_err()).to_equal(true)
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        val frame = host_taskbar_runtime_taskbar_frame("sess-rejected-layout", session)
+        expect(frame.contains("\"app_id\":\"/sys/apps/settings\"")).to_equal(true)
+        host_taskbar_runtime_clear_persisted_layout()
+
+    it "falls back to defaults when the persisted layout store is corrupt":
+        host_taskbar_runtime_clear_persisted_layout()
+        val saved = host_taskbar_runtime_save_layout(
+            [AppRef(app_id: "/sys/apps/settings", display_name: "Settings", icon: "settings")],
+            [TrayItem(item_id: "net", label: "online", icon: "net")]
+        )
+        expect(saved.is_ok()).to_equal(true)
+        host_taskbar_runtime_mark_persisted_layout_corrupt_for_test()
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        val frame = host_taskbar_runtime_taskbar_frame("sess-corrupt-layout", session)
+        expect(frame.contains("\"app_id\":\"/sys/apps/terminal\"")).to_equal(true)
+        expect(frame.contains("\"item_id\":\"host-runtime\"")).to_equal(true)
+        expect(frame.contains("\"item_id\":\"net\"")).to_equal(false)
+        host_taskbar_runtime_clear_persisted_layout()
 
     it "launches built-in desktop manifests into embedded surfaces":
         host_taskbar_runtime_reset()
@@ -111,8 +200,33 @@ describe "taskbar_runtime app catalog":
         expect(binding == nil).to_equal(false)
         expect(binding.app_id).to_equal("/sys/apps/terminal")
         expect(binding.title).to_equal("Terminal")
+        val frames = host_taskbar_runtime_take_client_frames("sess-terminal-simpleweb")
+        expect(frames.len()).to_equal(0)
+
+    it "smokes SimpleWeb no-native launches for demo and terminal apps":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        val demo = host_taskbar_runtime_launch(session, APP_ID)
+        val terminal = host_taskbar_runtime_launch(session, "/sys/apps/terminal")
+        expect(demo.is_ok()).to_equal(true)
+        expect(terminal.is_ok()).to_equal(true)
+        expect(session.has_surface("host-surface-1")).to_equal(true)
+        expect(session.has_surface("host-surface-2")).to_equal(true)
+        expect(session.window_surfaces.len()).to_equal(2)
+        val frames = host_taskbar_runtime_take_client_frames("sess-no-native")
+        expect(frames.len()).to_equal(0)
 
 describe "taskbar_runtime headless":
+    it "reports headless adapter capabilities":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("headless", true)
+        val caps = host_taskbar_runtime_adapter_capabilities()
+        expect(caps.supports_native_windows).to_equal(false)
+        expect(caps.supports_embedded_surfaces).to_equal(false)
+        expect(caps.supports_headless_session).to_equal(true)
+        expect(caps.requires_js_host_bridge).to_equal(false)
+
     it "records launch state without opening a local surface or native window":
         host_taskbar_runtime_reset()
         host_taskbar_runtime_enable("headless", false)
@@ -131,6 +245,26 @@ describe "taskbar_runtime headless":
         expect(taskbar.contains("\"app_id\":\"examples/hello_taskbar\"")).to_equal(true)
 
 describe "taskbar_runtime taskbar_only":
+    it "reports native adapter capabilities":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val caps = host_taskbar_runtime_adapter_capabilities()
+        expect(caps.supports_native_windows).to_equal(true)
+        expect(caps.supports_embedded_surfaces).to_equal(false)
+        expect(caps.supports_headless_session).to_equal(false)
+        expect(caps.requires_js_host_bridge).to_equal(true)
+
+    it "surfaces launch errors in the taskbar frame":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", false)
+        val session = _session()
+        val result = host_taskbar_runtime_launch(session, APP_ID)
+        expect(result.is_err()).to_equal(true)
+        val taskbar = host_taskbar_runtime_taskbar_frame("sess-launch-error", session)
+        expect(taskbar.contains("\"launch_errors\"")).to_equal(true)
+        expect(taskbar.contains("\"app_id\":\"examples/hello_taskbar\"")).to_equal(true)
+        expect(taskbar.contains("native-window capable host adapter")).to_equal(true)
+
     it "queues a native-window spawn command":
         host_taskbar_runtime_reset()
         host_taskbar_runtime_enable("taskbar_only", true)
@@ -202,6 +336,11 @@ describe "taskbar_runtime taskbar_only":
         val maximize_frames = host_taskbar_runtime_take_client_frames("sess-3")
         expect(maximize_frames.len()).to_equal(1)
         expect(maximize_frames[0].contains("\"maximize_native_window\"")).to_equal(true)
+
+        val _ = host_taskbar_runtime_unmaximize(session, "host-surface-1")
+        val unmaximize_frames = host_taskbar_runtime_take_client_frames("sess-3")
+        expect(unmaximize_frames.len()).to_equal(1)
+        expect(unmaximize_frames[0].contains("\"unmaximize_native_window\"")).to_equal(true)
 
         val _ = host_taskbar_runtime_set_title(session, "host-surface-1", "Renamed")
         val title_frames = host_taskbar_runtime_take_client_frames("sess-3")

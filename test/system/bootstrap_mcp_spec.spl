@@ -91,6 +91,13 @@ fn send_initialize_request(binary_path: text) -> (text, text, i64):
     val cmd = "echo -n '{request}' | timeout 10 {binary_path} 2>/dev/null || true"
     rt_process_run("bash", ["-c", cmd])
 
+fn send_tool_call_request(binary_path: text, tool_name: text, arguments_json: text) -> (text, text, i64):
+    val json_body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"{tool_name}\",\"arguments\":{arguments_json}}}"
+    val content_length = json_body.len()
+    val request = "Content-Length: {content_length}\r\n\r\n{json_body}"
+    val cmd = "echo -n '{request}' | timeout 20 {binary_path} 2>/dev/null || true"
+    rt_process_run("bash", ["-c", cmd])
+
 
 # ============================================================================
 # Test Group 1: MCP Binary Existence (AC-1, AC-6)
@@ -189,6 +196,27 @@ describe "Bootstrap MCP — JSON-RPC initialize":
             val output = stdout + stderr
             val has_server_info = output.contains("serverInfo") or output.contains("server_info")
             expect(has_server_info or output.contains("simple")).to_equal(true)
+
+    it "simple_mcp_server handles simple_status tool calls":
+        val binary = "bin/simple_mcp_server"
+        if not file_exists(binary):
+            expect(true).to_equal(true)
+        else:
+            val args = "{\"paths\":\"src/app/simple_lsp_mcp/main.spl\"}"
+            val (stdout, stderr, rc) = send_tool_call_request(binary, "simple_status", args)
+            val output = stdout + stderr
+            expect(output.contains("Project Diagnostics")).to_equal(true)
+
+    it "simple_lsp_mcp_server reads tool name from params":
+        val binary = "bin/simple_lsp_mcp_server"
+        if not file_exists(binary):
+            expect(true).to_equal(true)
+        else:
+            val args = "{\"file\":\"src/app/simple_lsp_mcp/main.spl\"}"
+            val (stdout, stderr, rc) = send_tool_call_request(binary, "lsp_symbols", args)
+            val output = stdout + stderr
+            expect(output.contains("Missing tool name")).to_equal(false)
+            expect(output.contains("SERVER_NAME") or output.contains("main")).to_equal(true)
 
 
 # ============================================================================

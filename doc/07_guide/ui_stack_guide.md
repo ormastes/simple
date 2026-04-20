@@ -74,7 +74,7 @@ the pixels (or characters) go.
 | `ui.tui_web` | browser-hosted TUI | debugging TUI over a webpage | experimental |
 | `ui.browser` | HTMLCanvas in a browser | V3 drawing stack (pure Simple in browser) | experimental |
 | `ui.web` | DOM via widget→HTML mapping | static-site export | experimental |
-| `ui.electron` | Electron BrowserWindow | V4 drawing stack | experimental |
+| `ui.electron` | Electron BrowserWindow | V4 drawing stack | advisory/dev-preview |
 | `ui.tauri` | Tauri webview | alt-desktop shell | experimental |
 
 Pure-Simple GUI — the V1 (SimpleOS baremetal) and V2 (hosted winit)
@@ -124,6 +124,15 @@ directly; they should accept whatever the factory returns.
 The widget tree, `UIEvent`, lifecycle hooks, state updates, and change
 logs are **identical**. The only axis of variation is the projection of
 `Patch[]` to an output and the translation of input to `UIEvent`.
+
+### JavaScript-disabled web behavior
+
+`ui.web`, `ui.browser`, and `ui.electron` currently use JavaScript as host
+bridge code for DOM rendering, WebSocket transport, and Electron preload
+integration. With JavaScript disabled, treat web output as static snapshot or
+exported HTML only. Live taskbar/window manipulation, input forwarding, native
+window commands, and patch application require the host bridge until a
+non-JavaScript transport lands.
 
 ### Practical consequences
 

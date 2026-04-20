@@ -22,9 +22,14 @@ const RECONNECT_MAX_MS  = 16000;
 const ACK_INTERVAL_MS   = 500;
 const GHOST_TTL_MS      = 60;  // optimistic ghost lifetime
 const HOST_NATIVE_EVENT_SOURCE = 'native_event';
+const NATIVE_SUPPRESSION_TTL_MS = 500;
+const NATIVE_BURST_DEBOUNCE_MS = 80;
 
 class SimpleWindowManager {
-  constructor() {
+  constructor(options = {}) {
+    this.transport = options.transport || 'websocket';
+    this.rendererModuleUrl = options.rendererModuleUrl || './retained_renderer.js';
+
     // DOM roots (populated from server state, not local decisions).
     this.desktop  = document.getElementById('wm-desktop');
     this.taskbar  = document.getElementById('wm-taskbar');
@@ -46,6 +51,8 @@ class SimpleWindowManager {
     // Periodic ack timer.
     this._ackTimer = null;
     this._nativeWindowEventSuppressions = new Map();
+    this._nativeWindowBurstTimers = new Map();
+    this._electronWindows = new Map();
 
     // Load renderer then begin auth.
     this._init();
@@ -56,13 +63,30 @@ class SimpleWindowManager {
   // -------------------------------------------------------------------------
 
   async _init() {
-    const mod = await import('./retained_renderer.js');
-    this.renderer = new mod.RetainedRenderer(this.desktop);
+    await this._loadRenderer(this.transport !== 'electron-ipc');
     this._bindGlobalEvents();
     if (window.simpleUI && window.simpleUI.onNativeWindowEvent) {
       window.simpleUI.onNativeWindowEvent((msg) => this._handleNativeWindowEvent(msg || {}));
     }
+    if (this.transport === 'electron-ipc') {
+      this.sessionId = 'electron-ipc';
+      return;
+    }
     await this._authenticate();
+  }
+
+  async _loadRenderer(required) {
+    try {
+      const mod = await import(this.rendererModuleUrl);
+      this.renderer = new mod.RetainedRenderer(this.desktop);
+      return true;
+    } catch (err) {
+      if (required) {
+        console.error('[WM] retained renderer load failed:', err);
+      }
+      this.renderer = null;
+      return false;
+    }
   }
 
   async _authenticate() {
@@ -250,6 +274,12 @@ class SimpleWindowManager {
   // -------------------------------------------------------------------------
 
   _send(frame) {
+    if (this.transport === 'electron-ipc') {
+      if (window.simpleUI && typeof window.simpleUI.sendFrame === 'function') {
+        window.simpleUI.sendFrame(frame);
+      }
+      return;
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame));
     }
@@ -342,41 +372,33 @@ class SimpleWindowManager {
     const windowId = payload.window_id || '';
     try {
       if (action === 'spawn_native_window' && api.spawnNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'focus');
-        await api.spawnNativeWindow(
-          windowId,
-          payload.url || '',
-          payload.width || 800,
-          payload.height || 600,
-          payload.title || ''
+        await this._runSuppressedNativeCommand(windowId, ['focus'], () =>
+          api.spawnNativeWindow(
+            windowId,
+            payload.url || '',
+            payload.width || 800,
+            payload.height || 600,
+            payload.title || ''
+          )
         );
       } else if (action === 'close_native_window' && api.closeNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'close');
-        await api.closeNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['close'], () => api.closeNativeWindow(windowId));
       } else if (action === 'focus_native_window' && api.focusNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'focus');
-        await api.focusNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['focus'], () => api.focusNativeWindow(windowId));
       } else if (action === 'minimize_native_window' && api.minimizeNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'minimize');
-        await api.minimizeNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['minimize'], () => api.minimizeNativeWindow(windowId));
       } else if (action === 'restore_native_window' && api.restoreNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'restore');
-        await api.restoreNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['restore'], () => api.restoreNativeWindow(windowId));
       } else if (action === 'move_native_window' && api.moveNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'move');
-        await api.moveNativeWindow(windowId, payload.x || 0, payload.y || 0);
+        await this._runSuppressedNativeCommand(windowId, ['move'], () => api.moveNativeWindow(windowId, payload.x || 0, payload.y || 0));
       } else if (action === 'resize_native_window' && api.resizeNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'resize');
-        await api.resizeNativeWindow(windowId, payload.width || 800, payload.height || 600);
+        await this._runSuppressedNativeCommand(windowId, ['resize'], () => api.resizeNativeWindow(windowId, payload.width || 800, payload.height || 600));
       } else if (action === 'maximize_native_window' && api.maximizeNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'maximize');
-        await api.maximizeNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['maximize'], () => api.maximizeNativeWindow(windowId));
       } else if (action === 'unmaximize_native_window' && api.unmaximizeNativeWindow) {
-        this._suppressNativeWindowEvent(windowId, 'unmaximize');
-        await api.unmaximizeNativeWindow(windowId);
+        await this._runSuppressedNativeCommand(windowId, ['unmaximize'], () => api.unmaximizeNativeWindow(windowId));
       } else if (action === 'set_native_window_title' && api.setNativeWindowTitle) {
-        this._suppressNativeWindowEvent(windowId, 'title');
-        await api.setNativeWindowTitle(windowId, payload.title || '');
+        await this._runSuppressedNativeCommand(windowId, ['title'], () => api.setNativeWindowTitle(windowId, payload.title || ''));
       }
     } catch (err) {
       console.error('[WM] host window command failed:', action, err);
@@ -397,46 +419,206 @@ class SimpleWindowManager {
     } else if (type === 'maximize') {
       this._sendWindowCmd('maximize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'unmaximize') {
-      this._sendWindowCmd('restore', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+      this._sendWindowCmd('unmaximize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'move') {
-      this._sendWindowCmd('move', {
+      this._sendNativeWindowCmdDebounced(windowId, type, () => this._sendWindowCmd('move', {
         window_id_hint: windowId,
         source: HOST_NATIVE_EVENT_SOURCE,
         x: Math.round(msg.x ?? msg.bounds?.x ?? 0),
         y: Math.round(msg.y ?? msg.bounds?.y ?? 0)
-      });
+      }));
     } else if (type === 'resize') {
-      this._sendWindowCmd('resize', {
+      this._sendNativeWindowCmdDebounced(windowId, type, () => this._sendWindowCmd('resize', {
         window_id_hint: windowId,
         source: HOST_NATIVE_EVENT_SOURCE,
         w: Math.round(msg.width ?? msg.bounds?.width ?? 0),
         h: Math.round(msg.height ?? msg.bounds?.height ?? 0)
-      });
+      }));
     } else if (type === 'title') {
-      this._sendWindowCmd('set_title', {
+      this._sendNativeWindowCmdDebounced(windowId, type, () => this._sendWindowCmd('set_title', {
         window_id_hint: windowId,
         source: HOST_NATIVE_EVENT_SOURCE,
         title: msg.title || ''
-      });
+      }));
     } else if (type === 'close') {
       this._sendWindowCmd('close', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     }
   }
 
-  _suppressNativeWindowEvent(windowId, type) {
-    if (!windowId || !type) return;
+  async _runSuppressedNativeCommand(windowId, types, invoke) {
+    const tokens = types.map((type) => this._beginNativeWindowEventSuppression(windowId, type));
+    try {
+      const result = await invoke();
+      const accepted = result !== false;
+      for (const token of tokens) this._finishNativeWindowEventSuppression(token, accepted);
+      return result;
+    } catch (err) {
+      for (const token of tokens) this._finishNativeWindowEventSuppression(token, false);
+      throw err;
+    }
+  }
+
+  _beginNativeWindowEventSuppression(windowId, type) {
+    if (!windowId || !type) return null;
     const key = `${windowId}:${type}`;
-    const count = this._nativeWindowEventSuppressions.get(key) || 0;
-    this._nativeWindowEventSuppressions.set(key, count + 1);
+    const existing = this._nativeWindowEventSuppressions.get(key);
+    if (existing && existing.timer) clearTimeout(existing.timer);
+    const entry = {
+      key,
+      expiresAt: Date.now() + NATIVE_SUPPRESSION_TTL_MS,
+      timer: setTimeout(() => this._nativeWindowEventSuppressions.delete(key), NATIVE_SUPPRESSION_TTL_MS)
+    };
+    this._nativeWindowEventSuppressions.set(key, entry);
+    return key;
+  }
+
+  _finishNativeWindowEventSuppression(token, accepted) {
+    if (!token) return;
+    if (accepted) return;
+    const entry = this._nativeWindowEventSuppressions.get(token);
+    if (entry && entry.timer) clearTimeout(entry.timer);
+    this._nativeWindowEventSuppressions.delete(token);
   }
 
   _consumeNativeWindowEventSuppression(windowId, type) {
     const key = `${windowId}:${type}`;
-    const count = this._nativeWindowEventSuppressions.get(key) || 0;
-    if (count <= 0) return false;
-    if (count === 1) this._nativeWindowEventSuppressions.delete(key);
-    else this._nativeWindowEventSuppressions.set(key, count - 1);
+    const entry = this._nativeWindowEventSuppressions.get(key);
+    if (!entry) return false;
+    if (Date.now() > entry.expiresAt) {
+      if (entry.timer) clearTimeout(entry.timer);
+      this._nativeWindowEventSuppressions.delete(key);
+      return false;
+    }
     return true;
+  }
+
+  _sendNativeWindowCmdDebounced(windowId, type, sendFn) {
+    const key = `${windowId}:${type}`;
+    const existing = this._nativeWindowBurstTimers.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this._nativeWindowBurstTimers.delete(key);
+      sendFn();
+    }, NATIVE_BURST_DEBOUNCE_MS);
+    this._nativeWindowBurstTimers.set(key, timer);
+  }
+
+  receiveFrame(frame) {
+    if (!frame || typeof frame !== 'object') return;
+    this._dispatch(frame);
+  }
+
+  receiveElectronMessage(msg) {
+    if (!msg || !msg.type) return;
+    switch (msg.type) {
+      case 'openWindow':
+        this._electronOpenWindow(msg);
+        break;
+      case 'renderWindow':
+        this._electronRenderWindow(msg.windowId, msg.html || '');
+        break;
+      case 'closeWindow':
+        this._electronCloseWindow(msg.windowId);
+        break;
+      case 'moveWindow':
+        this._electronMoveWindow(msg.windowId, msg.x, msg.y);
+        break;
+      case 'resizeWindow':
+        this._electronResizeWindow(msg.windowId, msg.width, msg.height);
+        break;
+      case 'focusWindow':
+        this._electronFocusWindow(msg.windowId);
+        break;
+      case 'minimizeWindow':
+        this._electronMinimizeWindow(msg.windowId);
+        break;
+      default:
+        break;
+    }
+  }
+
+  _electronOpenWindow(msg) {
+    const windowId = String(msg.windowId || '');
+    if (!windowId || !this.desktop) return;
+    if (this._electronWindows.has(windowId)) {
+      this._electronRenderWindow(windowId, msg.html || '');
+      this._electronFocusWindow(windowId);
+      return;
+    }
+    const winEl = document.createElement('div');
+    winEl.className = 'wm-window';
+    winEl.dataset.surfaceId = windowId;
+    winEl.dataset.canonicalId = `${windowId}#root`;
+    winEl.style.left = `${Number(msg.x) || 80}px`;
+    winEl.style.top = `${Number(msg.y) || 80}px`;
+    winEl.style.width = `${Number(msg.width) || 720}px`;
+    winEl.style.height = `${Number(msg.height) || 480}px`;
+
+    const titlebar = document.createElement('div');
+    titlebar.className = 'wm-titlebar';
+    const lights = document.createElement('div');
+    lights.className = 'wm-traffic-lights';
+    for (const [action, label] of [['close', 'x'], ['minimize', '-'], ['maximize', '+']]) {
+      const btn = document.createElement('button');
+      btn.dataset.action = action;
+      btn.textContent = label;
+      lights.appendChild(btn);
+    }
+    const title = document.createElement('div');
+    title.className = 'wm-title';
+    title.textContent = msg.title || windowId;
+    titlebar.appendChild(lights);
+    titlebar.appendChild(title);
+    winEl.appendChild(titlebar);
+
+    const body = document.createElement('div');
+    body.className = 'wm-body';
+    body.dataset.surfaceId = windowId;
+    body.innerHTML = msg.html || '';
+    winEl.appendChild(body);
+    this.desktop.appendChild(winEl);
+    this._electronWindows.set(windowId, { winEl, body, title });
+    this._electronFocusWindow(windowId);
+  }
+
+  _electronRenderWindow(windowId, html) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (entry) entry.body.innerHTML = html;
+  }
+
+  _electronCloseWindow(windowId) {
+    const key = String(windowId || '');
+    const entry = this._electronWindows.get(key);
+    if (!entry) return;
+    entry.winEl.remove();
+    this._electronWindows.delete(key);
+  }
+
+  _electronMoveWindow(windowId, x, y) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry) return;
+    if (x != null) entry.winEl.style.left = `${Number(x) || 0}px`;
+    if (y != null) entry.winEl.style.top = `${Number(y) || 0}px`;
+  }
+
+  _electronResizeWindow(windowId, width, height) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry) return;
+    if (width != null) entry.winEl.style.width = `${Number(width) || 1}px`;
+    if (height != null) entry.winEl.style.height = `${Number(height) || 1}px`;
+  }
+
+  _electronFocusWindow(windowId) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry) return;
+    for (const item of this._electronWindows.values()) item.winEl.classList.remove('focused');
+    entry.winEl.classList.add('focused');
+    entry.winEl.style.display = '';
+  }
+
+  _electronMinimizeWindow(windowId) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (entry) entry.winEl.style.display = 'none';
   }
 
   // -------------------------------------------------------------------------

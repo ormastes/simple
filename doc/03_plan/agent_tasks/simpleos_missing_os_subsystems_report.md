@@ -1,0 +1,84 @@
+# SimpleOS Missing OS Subsystems Report
+
+## Purpose
+
+This report records what SimpleOS still needs before GUI apps can behave like
+normal host-OS applications. Drivers may keep baremetal assumptions and direct
+hardware knowledge, but apps must run through filesystem, process, memory,
+syscall, IPC, and scheduler services owned by the OS.
+
+Related plan: `doc/03_plan/agent_tasks/simpleos_process_apps_plan.md`.
+
+## Current Status
+
+| Subsystem | Status | Current State | Concrete Blocker |
+| --- | --- | --- | --- |
+| File I/O | Partial | FAT32, VFS, and direct NVMe/FAT bridges exist; desktop smoke can find packaged app names. | App executable reads still depend on special fallback bridges instead of a stable generic VFS byte stream. |
+| Scheduler | Partial | Scheduler/task types and launch scaffolding exist. | Filesystem-loaded apps are not yet reliably enqueued and run as scheduler-owned user tasks. |
+| Process isolation | Blocked | User-process image and page-table work exists as scaffolding. | Per-process address spaces, safe user/kernel transitions, and reliable page fault handling are not complete. |
+| System memory allocator | Partial | Kernel heap and page-level infrastructure exist. | GUI/app fallback paths can exhaust heap; user heap, `mmap`/`brk`-style growth, OOM policy, and allocator hardening are incomplete. |
+| Executable loader | Partial | ELF/user-process image code exists. | Syscall 13 direct spawn is currently deferred because the real filesystem-loaded process path faults. |
+| System API/lib | Partial | Syscall shims and userlib pieces exist. | App-facing ABI is not complete enough for normal programs: file descriptors, process APIs, stdio, timers, IPC, and error mapping remain incomplete. |
+| Dynamic library loading | Missing | Shared-library design exists in other compiler/SFFI contexts. | No in-guest app dynamic linker/loader path for SimpleOS processes. |
+
+## Additional Required Subsystems
+
+| Subsystem | Why It Is Needed |
+| --- | --- |
+| Syscall/trap return correctness | Apps cannot trust the OS API until syscall entry, dispatch, return values, and fault recovery are stable. |
+| Process lifecycle | Normal apps need `exec`, `exit`, `wait`, PID ownership, zombie cleanup, exit codes, crash classification, and reaping. |
+| IPC/window protocol | GUI apps must create/update windows through WM/compositor IPC, not direct framebuffer or resident shell fallback. |
+| App runtime startup | Each app needs a `crt0`-style startup path: heap init, argv/envp, stdio, TLS if supported, panic handling, and call into app `main`. |
+| User/kernel ABI boundary | Kernel must validate user pointers and buffers, define errno/result rules, and preserve ABI compatibility. |
+| Filesystem namespace | Stable paths such as `/bin`, `/sys/apps`, `/lib`, `/etc`, `/home`, and `/tmp` are needed for normal app behavior. |
+| Timers and preemption | Apps need sleep/timeouts and fair scheduling, backed by timer interrupts or equivalent wakeups. |
+| Stdio, terminal, and pipes | CLI and GUI helper apps need stdin/stdout/stderr, terminal sessions, logs, and eventually pipes. |
+| Permissions or capabilities | Apps should not access all files, devices, or windows by default. A capability model fits SimpleOS better than full Unix permissions. |
+| Networking API | Not required for first GUI proof, but normal host-style apps eventually need socket or network-service APIs. |
+| App manifest/package system | Manifests should describe app id, executable path, icon, permissions, args, dependencies, and GUI/CLI/service mode. |
+| Debuggability | Process list, syscall trace, crash dumps, kernel logs, and fault decoding are required to debug process-backed apps. |
+
+## Priority Order
+
+1. Fix syscall/trap correctness, especially syscall 13 direct spawn return behavior.
+2. Make VFS return stable executable bytes for packaged FAT32 apps without C array lifetime corruption.
+3. Finish ELF loading into a `UserProcessImage`, including segments, stack, entry point, argv/envp, and auxv.
+4. Complete user address spaces and process isolation, including CR3/page-table switching and safe user pointer validation.
+5. Re-enable scheduler-backed user task creation, launch, reaping, and launcher PID tracking.
+6. Build the app-facing userlib/runtime around the stable syscall ABI.
+7. Add dynamic library loading only after static filesystem-loaded app execution is reliable.
+
+## Current QEMU Evidence
+
+The current x86_64 desktop E2E binary boots in QEMU with the FAT32 NVMe image
+attached and reaches:
+
+- `[desktop-e2e] desktop-ready`
+- `[desktop-e2e] shortcut:ok key=meta+b app=browser_demo`
+- `[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world`
+- `[desktop-e2e] remote-grouping:ok pid=4242 windows=2`
+- `[desktop-e2e] editor-shortcut:ok key=meta+e app=editor`
+- `TEST PASSED`
+
+This proves boot, framebuffer initialization, launcher shortcut routing, WM
+window registration, and resident app window materialization. It does not yet
+prove that apps are normal filesystem-loaded, process-isolated, scheduler-owned
+programs. The active app path still emits:
+
+- `[syscall13] installed direct bridge deferred`
+- resident manifest fallback markers
+
+Those markers must disappear before the process-backed app requirement is
+closed.
+
+## Completion Criteria
+
+The missing-subsystems work is complete only when packaged apps launch from
+filesystem paths as independent OS-managed processes and QEMU evidence shows:
+
+- launcher records a process-backed PID for each packaged app;
+- scheduler can inspect and reap those app tasks;
+- WM windows are registered through app IPC using the scheduler-owned PID;
+- no packaged app relies on resident manifest fallback;
+- file I/O, memory allocation, and syscall behavior remain stable across the
+  Browser Demo, Hello World, Editor, Terminal, and File Manager smoke paths.

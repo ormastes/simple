@@ -58,12 +58,19 @@ done
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
 host_kernel=$(uname -s 2>/dev/null || echo unknown)
+host_machine=$(uname -m 2>/dev/null || echo unknown)
 host_runtime_os="unknown"
 case "${host_kernel}" in
   Linux) host_runtime_os="linux" ;;
   Darwin) host_runtime_os="darwin" ;;
   FreeBSD) host_runtime_os="freebsd" ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT) host_runtime_os="windows" ;;
+esac
+host_runtime_arch="${host_machine}"
+case "${host_machine}" in
+  x86_64|amd64) host_runtime_arch="x86_64" ;;
+  arm64|aarch64) host_runtime_arch="aarch64" ;;
+  i686|i386) host_runtime_arch="i686" ;;
 esac
 
 # Returns 0 if file is (or transitively resolves to) a Rust build artifact.
@@ -271,14 +278,14 @@ if [ "${dry_run}" -eq 1 ]; then
     [ -n "${msvc_bin}" ]  && echo "  bin/simple.cmd  (copied from scripts/setup/bin_scripts/)"
     [ -n "${msvc_bin}" ]  && echo "  bin/simple.exe → release/${msvc_bin}"
   else
-    if [ -n "${preferred_runtime}" ]; then
+    if [ -n "${release_bin}" ]; then
+      echo "  bin/simple                      (copied from scripts/setup/bin_scripts/)"
+      echo "  bin/release/<platform>/simple → ${release_bin}"
+    elif [ -n "${preferred_runtime}" ]; then
       echo "  bin/simple                      (copied from scripts/setup/bin_scripts/)"
       echo "  bin/release/<platform>/simple → ${preferred_runtime}"
       echo "  bin/release/${PLATFORM}/simple → ${preferred_runtime}"
       echo "  bin/release/${os}-${arch}/simple → ${preferred_runtime}"
-    else
-      echo "  bin/simple                      (copied from scripts/setup/bin_scripts/)"
-      echo "  bin/release/<platform>/simple → ${release_bin}"
     fi
   fi
   echo "  bin/simple.cmd                  (copied from scripts/setup/bin_scripts/ when present)"
@@ -386,6 +393,22 @@ LAUNCHER_EOF
   chmod +x "${launcher}"
 }
 
+sources_newer_than() {
+  local target="$1"
+  shift
+  local src
+  for src in "$@"; do
+    if [ -d "$src" ]; then
+      if find "$src" -type f -name '*.spl' -newer "$target" -print -quit | grep . >/dev/null 2>&1; then
+        return 0
+      fi
+    elif [ -f "$src" ] && [ "$src" -nt "$target" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 echo ""
 echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 
@@ -395,10 +418,12 @@ echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 # --runtime-path src/compiler_rust/target/release/deps`.
 mcp_native_src="${repo_root}/build/native/simple_mcp_native"
 mcp_target="${mcp_release_dir}/simple_mcp_server"
-if [ -s "${mcp_target}" ] && ! head -c 2 "${mcp_target}" | grep -q '#!'; then
+if [ -s "${mcp_target}" ] && ! head -c 2 "${mcp_target}" | grep -q '#!' \
+   && ! sources_newer_than "${mcp_target}" "${repo_root}/src/app/mcp" "${repo_root}/src/lib/nogc_sync_mut/mcp_sdk"; then
   # Target is already a non-empty native binary (deployed by bootstrap), keep it
   echo "  simple_mcp_server (native binary — already deployed)"
-elif [ -f "${mcp_native_src}" ]; then
+elif [ "${os}" = "${host_runtime_os}" ] && [ "${arch}" = "${host_runtime_arch}" ] && [ -f "${mcp_native_src}" ] \
+     && ! sources_newer_than "${mcp_native_src}" "${repo_root}/src/app/mcp" "${repo_root}/src/lib/nogc_sync_mut/mcp_sdk"; then
   cp "${mcp_native_src}" "${mcp_target}"
   chmod +x "${mcp_target}"
   echo "  simple_mcp_server (native binary)"
@@ -414,10 +439,12 @@ fi
 # fall back to the shell-launcher path.
 lsp_mcp_native_src="${repo_root}/build/native/simple_lsp_mcp_native"
 lsp_mcp_target="${mcp_release_dir}/simple_lsp_mcp_server"
-if [ -s "${lsp_mcp_target}" ] && ! head -c 2 "${lsp_mcp_target}" | grep -q '#!'; then
+if [ -s "${lsp_mcp_target}" ] && ! head -c 2 "${lsp_mcp_target}" | grep -q '#!' \
+   && ! sources_newer_than "${lsp_mcp_target}" "${repo_root}/src/app/simple_lsp_mcp"; then
   # Target is already a non-empty native binary (deployed by bootstrap), keep it
   echo "  simple_lsp_mcp_server (native binary — already deployed)"
-elif [ -f "${lsp_mcp_native_src}" ]; then
+elif [ "${os}" = "${host_runtime_os}" ] && [ "${arch}" = "${host_runtime_arch}" ] && [ -f "${lsp_mcp_native_src}" ] \
+     && ! sources_newer_than "${lsp_mcp_native_src}" "${repo_root}/src/app/simple_lsp_mcp"; then
   cp "${lsp_mcp_native_src}" "${lsp_mcp_target}"
   chmod +x "${lsp_mcp_target}"
   echo "  simple_lsp_mcp_server (native binary)"

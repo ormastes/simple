@@ -1,9 +1,13 @@
-# Hosted Compositor Backend — Cocoa / macOS surface shim
+# Hosted Compositor Backend — Cocoa / macOS winit-alias shim
 #
 # Routes through the cross-platform winit pixel-buffer backend
 # (`rt_winit_buffer_*`) instead of native NSWindow / CAMetalLayer symbols.
 # The window is owned by the caller (created via `rt_winit_window_new`);
 # this backend only manages the pixel buffer and drawing operations.
+#
+# Naming boundary: `HostedCocoaBackend` is retained as the selector-facing
+# macOS backend name, but this Simple-side class is a documented alias over
+# the winit buffer implementation. It does not call `rt_cocoa_*` symbols.
 #
 # Selection: routed by `hosted_backend.spl::select_hosted_backend()`
 # at construct time based on `rt_hosted_select_surface()` returning 1
@@ -37,10 +41,11 @@ var _cocoa_h: i32 = 0
 # ============================================================================
 
 class HostedCocoaBackend:
-    """CompositorBackend for macOS that renders through the winit pixel buffer.
+    """macOS selector alias that renders through the winit pixel buffer.
 
     Drawing is delegated to `rt_winit_buffer_*` SFFI symbols. The window
-    is owned by the caller; this backend manages the pixel buffer only.
+    is owned by the host entrypoint; this backend manages the pixel buffer only.
+    Native `rt_cocoa_*` wrappers are not bound here yet.
 
     Colors are u32 ARGB (0xAARRGGBB), matching `CompositorBackend`.
     """
@@ -161,21 +166,36 @@ impl CompositorGlassCapable for HostedCocoaBackend:
 
 impl HostedCocoaBackend:
 
+    static fn implementation_name() -> text:
+        "cocoa-winit-alias"
+
+    static fn uses_native_cocoa_symbols() -> bool:
+        false
+
     static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedCocoaBackend:
         """Wrap pre-existing winit handles (test seam)."""
         HostedCocoaBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
 
-    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCocoaBackend:
-        """Allocate a winit pixel buffer sized w×h for the given window."""
+    static fn try_create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCocoaBackend?:
+        """Allocate a winit pixel buffer sized w/h for the given window."""
         val w64: i64 = w
         val h64: i64 = h
         val fc64: i64 = fill_color
         val buf = rt_winit_buffer_create(w64, h64, fc64)
+        if buf == 0:
+            return nil
         _cocoa_window_id = window_id
         _cocoa_buffer_id = buf
         _cocoa_w = w
         _cocoa_h = h
         HostedCocoaBackend(window_id: window_id, buffer_id: buf, w: w, h: h)
+
+    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCocoaBackend:
+        """Allocate a winit pixel buffer sized w/h for the given window."""
+        val backend = HostedCocoaBackend.try_create(window_id, w, h, fill_color)
+        if val b = backend:
+            return b
+        HostedCocoaBackend(window_id: window_id, buffer_id: 0, w: w, h: h)
 
     me resize(new_w: i32, new_h: i32) -> bool:
         """React to a window resize. Frees the old buffer and allocates a new one."""

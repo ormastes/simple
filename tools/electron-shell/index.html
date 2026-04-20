@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-src http://localhost:* http://127.0.0.1:* https: data:; img-src 'self' data: https:; connect-src 'self' http://localhost:* ws://localhost:*;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' file:; frame-src http://localhost:* http://127.0.0.1:* https: data:; img-src 'self' data: https:; connect-src 'self' http://localhost:* ws://localhost:* file:;">
     <title>Simple UI</title>
     <style>
         * {
@@ -127,11 +127,12 @@
             document.body.classList.add('is-mac');
         }
 
-        // SimpleWindowManager ships WebSocket-shaped handleMessage() — we
-        // stub out its _sendEvent so it stops trying to reach a ws server
-        // when running inside Electron's stdin/stdout IPC path.
-        window.simpleWM = new SimpleWindowManager();
-        window.simpleWM._sendEvent = function() { /* no-op under Electron */ };
+        // Electron keeps the Simple subprocess stdin/stdout transport while
+        // reusing the shared wm.js frame dispatcher for taskbar/native frames.
+        window.simpleWM = new SimpleWindowManager({
+            transport: 'electron-ipc',
+            rendererModuleUrl: window.simpleUI && window.simpleUI.rendererModuleUrl
+        });
 
         function applyRuntimeStyle(cssText) {
             let styleEl = document.getElementById(runtimeStyleId);
@@ -186,9 +187,20 @@
             window.simpleUI.onWmMessage(function(msg) {
                 if (!window.simpleWM || !msg || !msg.type) return;
                 try {
-                    window.simpleWM.handleMessage(msg);
+                    window.simpleWM.receiveElectronMessage(msg);
                 } catch (err) {
-                    console.error('wm handleMessage failed', err, msg);
+                    console.error('wm electron message dispatch failed', err, msg);
+                }
+            });
+        }
+
+        if (window.simpleUI && typeof window.simpleUI.onWmFrame === 'function') {
+            window.simpleUI.onWmFrame(function(frame) {
+                if (!window.simpleWM || !frame || !frame.t) return;
+                try {
+                    window.simpleWM.receiveFrame(frame);
+                } catch (err) {
+                    console.error('wm frame dispatch failed', err, frame);
                 }
             });
         }

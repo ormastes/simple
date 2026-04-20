@@ -6,14 +6,14 @@
 #   * headless:         no local shell window; remote UI still gets taskbar state
 
 use common.ui.session.{UISession}
-use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS}
-use common.ui.taskbar_model.{AppRef, TrayItem}
+use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS, ui_surface_kind_is_native_host}
+use common.ui.taskbar_model.{AppRef, TrayItem, TaskbarLaunchError}
 use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height, with_visible}
-use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json}
+use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json_with_launch_errors}
 use app.ui.web.host_adapter_contract.{HostWindowCommand, host_window_command_to_json}
 use examples.hello_taskbar.main.{hello_html, hello_title, hello_size_width, hello_size_height}
 use examples.hello_taskbar.app_manifest.{APP_ID, DISPLAY_NAME, ICON, resolve_for_local_host}
-use os.desktop.app_manifest.{AppManifest, UiBackendKind, default_manifests, host_caps_host, resolve_backend}
+use os.desktop.app_manifest.{AppManifest, AppHostContent, UiBackendKind, default_manifests, host_caps_host, host_content_for_manifest, resolve_backend}
 
 struct HostTaskbarApp:
     app_id: text
@@ -24,6 +24,12 @@ struct HostTaskbarApp:
     width: i32
     height: i32
     native_html: text
+
+struct HostTaskbarAdapterCapabilities:
+    supports_native_windows: bool
+    supports_embedded_surfaces: bool
+    supports_headless_session: bool
+    requires_js_host_bridge: bool
 
 enum HostShellMode:
     DesktopEmbedded
@@ -36,9 +42,11 @@ class HostTaskbarRuntime:
     electron_available: bool
     next_window_ordinal: i64
     next_process_id: u64
+    adapter_capabilities: HostTaskbarAdapterCapabilities
     pinned: [AppRef]
     tray: [TrayItem]
     minimized_surface_ids: [text]
+    launch_errors: [TaskbarLaunchError]
     pending_commands: [HostWindowCommand]
 
     static fn new() -> HostTaskbarRuntime:
@@ -48,25 +56,50 @@ class HostTaskbarRuntime:
             electron_available: false,
             next_window_ordinal: 0,
             next_process_id: 1000u64,
+            adapter_capabilities: _adapter_capabilities_for(HostShellMode.DesktopEmbedded, false),
             pinned: _default_pinned(),
             tray: _default_tray(),
             minimized_surface_ids: [],
+            launch_errors: [],
             pending_commands: []
         )
 
 var _host_taskbar_runtime: HostTaskbarRuntime? = nil
+var _persisted_pinned: [AppRef]? = nil
+var _persisted_tray: [TrayItem]? = nil
+var _persisted_layout_corrupt: bool = false
 
 fn host_taskbar_runtime_reset():
     _host_taskbar_runtime = Some(HostTaskbarRuntime.new())
+
+fn host_taskbar_runtime_save_layout(pinned: [AppRef], tray: [TrayItem]) -> Result<Unit, text>:
+    if _layout_has_duplicate_apps(pinned):
+        return Err("persisted taskbar layout has duplicate app ids")
+    if _layout_has_duplicate_tray_items(tray):
+        return Err("persisted taskbar layout has duplicate tray item ids")
+    _persisted_pinned = Some(pinned)
+    _persisted_tray = Some(tray)
+    _persisted_layout_corrupt = false
+    Ok(())
+
+fn host_taskbar_runtime_clear_persisted_layout():
+    _persisted_pinned = nil
+    _persisted_tray = nil
+    _persisted_layout_corrupt = false
+
+fn host_taskbar_runtime_mark_persisted_layout_corrupt_for_test():
+    _persisted_layout_corrupt = true
 
 fn host_taskbar_runtime_enable(mode_name: text, electron_available: bool):
     val rt = _get_host_taskbar_runtime()
     rt.enabled = true
     rt.mode = _parse_mode(mode_name)
     rt.electron_available = electron_available
+    rt.adapter_capabilities = _adapter_capabilities_for(rt.mode, electron_available)
     rt.next_window_ordinal = 0
     rt.next_process_id = 1000u64
     rt.minimized_surface_ids = []
+    rt.launch_errors = []
     rt.pending_commands = []
 
 fn host_taskbar_runtime_is_enabled() -> bool:
@@ -77,6 +110,10 @@ fn host_taskbar_runtime_mode_name() -> text:
     val rt = _get_host_taskbar_runtime()
     _mode_name(rt.mode)
 
+fn host_taskbar_runtime_adapter_capabilities() -> HostTaskbarAdapterCapabilities:
+    val rt = _get_host_taskbar_runtime()
+    rt.adapter_capabilities
+
 fn host_taskbar_runtime_taskbar_frame(session_id: text, session: UISession) -> text:
     val rt = _get_host_taskbar_runtime()
     val model = build_taskbar_model_with_minimized(
@@ -85,7 +122,7 @@ fn host_taskbar_runtime_taskbar_frame(session_id: text, session: UISession) -> t
         rt.tray,
         rt.minimized_surface_ids
     )
-    val payload = taskbar_model_to_json(model)
+    val payload = taskbar_model_to_json_with_launch_errors(model, rt.launch_errors)
     _make_frame("taskbar_model", session_id, "null", payload)
 
 fn host_taskbar_runtime_take_client_frames(session_id: text) -> [text]:
@@ -113,10 +150,10 @@ fn host_taskbar_runtime_catalog() -> [HostTaskbarApp]:
 fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit, text>:
     val rt = _get_host_taskbar_runtime()
     if not rt.enabled:
-        return Err("host taskbar runtime not enabled")
+        return _record_launch_error(rt, app_id, "host taskbar runtime not enabled")
     val app = _find_app(app_id)
     if app == nil:
-        return Err("unknown pinned app: {app_id}")
+        return _record_launch_error(rt, app_id, "unknown pinned app: {app_id}")
     val title = app.title
     val width = app.width
     val height = app.height
@@ -128,21 +165,23 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
     val surface_id = "host-surface-{ordinal}"
     val window_id = "host-window-{ordinal}"
 
-    if _mode_is_headless(rt.mode):
+    if rt.adapter_capabilities.supports_headless_session:
+        _clear_launch_errors(rt)
         session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_HEADLESS)
         return Ok(())
 
     val resolved_backend = _resolve_app_backend(app_id, rt.electron_available)
     val backend = match resolved_backend:
         Err(e):
-            return Err(e)
+            return _record_launch_error(rt, app_id, e)
         Ok(kind):
             kind
 
-    if _mode_is_taskbar_only(rt.mode) and backend != UiBackendKind.Electron:
-        return Err("taskbar-only mode requires an Electron-resolved backend")
+    if _mode_is_taskbar_only(rt.mode) and not rt.adapter_capabilities.supports_native_windows:
+        return _record_launch_error(rt, app_id, "taskbar-only mode requires a native-window capable host adapter")
 
-    if _mode_is_taskbar_only(rt.mode) and backend == UiBackendKind.Electron:
+    if _mode_is_taskbar_only(rt.mode) and _backend_is_native_host(backend):
+        _clear_launch_errors(rt)
         session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_ELECTRON)
         session.set_active_surface(surface_id)
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
@@ -159,6 +198,7 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
         ))
         return Ok(())
 
+    _clear_launch_errors(rt)
     val _ = session.open_surface(surface_id, _build_app_tree(surface_id, title, width, height, true))
     session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_SIMPLE_WEB)
     session.set_active_surface(surface_id)
@@ -170,7 +210,7 @@ fn host_taskbar_runtime_focus(session: UISession, surface_id: text) -> Result<Un
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
+    if ui_surface_kind_is_native_host(binding.surface_kind):
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "focus_native_window",
             window_id: binding.window_id,
@@ -204,7 +244,7 @@ fn host_taskbar_runtime_minimize(session: UISession, surface_id: text) -> Result
         return Err("unknown surface")
     if not _contains_text(rt.minimized_surface_ids, surface_id):
         rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)
-    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
+    if ui_surface_kind_is_native_host(binding.surface_kind):
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "minimize_native_window",
             window_id: binding.window_id,
@@ -236,7 +276,7 @@ fn host_taskbar_runtime_restore(session: UISession, surface_id: text) -> Result<
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
+    if ui_surface_kind_is_native_host(binding.surface_kind):
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "restore_native_window",
             window_id: binding.window_id,
@@ -269,7 +309,7 @@ fn host_taskbar_runtime_close(session: UISession, surface_id: text) -> Result<Un
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
+    if ui_surface_kind_is_native_host(binding.surface_kind):
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "close_native_window",
             window_id: binding.window_id,
@@ -309,7 +349,7 @@ fn host_taskbar_runtime_move(session: UISession, surface_id: text, x: i32, y: i3
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
+    if not ui_surface_kind_is_native_host(binding.surface_kind):
         return Err("surface is not native")
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
         action: "move_native_window",
@@ -341,7 +381,7 @@ fn host_taskbar_runtime_resize(session: UISession, surface_id: text, width: i32,
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
+    if not ui_surface_kind_is_native_host(binding.surface_kind):
         return Err("surface is not native")
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
         action: "resize_native_window",
@@ -373,7 +413,7 @@ fn host_taskbar_runtime_maximize(session: UISession, surface_id: text) -> Result
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
+    if not ui_surface_kind_is_native_host(binding.surface_kind):
         return Err("surface is not native")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
@@ -402,12 +442,43 @@ fn host_taskbar_runtime_sync_maximize(session: UISession, surface_id: text) -> R
         val _ = session.set_surface_widget_prop(surface_id, root_id, "maximized", "true")
     return Ok(())
 
+fn host_taskbar_runtime_unmaximize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if not ui_surface_kind_is_native_host(binding.surface_kind):
+        return Err("surface is not native")
+    rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+        action: "unmaximize_native_window",
+        window_id: binding.window_id,
+        surface_id: surface_id,
+        app_id: binding.app_id,
+        title: binding.title,
+        url: "",
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+    ))
+    return Ok(())
+
+fn host_taskbar_runtime_sync_unmaximize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    val tree = session.get_surface(surface_id)
+    if tree != nil:
+        val root_id = tree.root_node().id
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "maximized", "false")
+    return Ok(())
+
 fn host_taskbar_runtime_set_title(session: UISession, surface_id: text, title: text) -> Result<Unit, text>:
     val rt = _get_host_taskbar_runtime()
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
+    if not ui_surface_kind_is_native_host(binding.surface_kind):
         return Err("surface is not native")
     val _ = session.update_window_surface_title(surface_id, title)
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
@@ -437,6 +508,9 @@ fn _get_host_taskbar_runtime() -> HostTaskbarRuntime:
     _host_taskbar_runtime.unwrap()
 
 fn _default_pinned() -> [AppRef]:
+    val persisted = _load_persisted_pinned()
+    if persisted != nil:
+        return persisted.unwrap()
     var pinned: [AppRef] = []
     for app in host_taskbar_runtime_catalog():
         pinned = pinned.push(AppRef(
@@ -445,6 +519,20 @@ fn _default_pinned() -> [AppRef]:
             icon: app.icon
         ))
     pinned
+
+fn _load_persisted_pinned() -> [AppRef]?:
+    if _persisted_layout_corrupt:
+        return nil
+    if _persisted_pinned != nil:
+        return _persisted_pinned
+    return nil
+
+fn _load_persisted_tray() -> [TrayItem]?:
+    if _persisted_layout_corrupt:
+        return nil
+    if _persisted_tray != nil:
+        return _persisted_tray
+    return nil
 
 fn _find_app(app_id: text) -> HostTaskbarApp?:
     _find_app_in(host_taskbar_runtime_catalog(), app_id)
@@ -477,7 +565,7 @@ fn _manifest_catalog_app(manifest: AppManifest) -> HostTaskbarApp:
         title: title,
         width: 640,
         height: 420,
-        native_html: _generic_manifest_html(manifest)
+        native_html: _manifest_host_html(manifest)
     )
 
 fn _resolve_app_backend(app_id: text, electron_available: bool) -> Result<UiBackendKind, text>:
@@ -488,7 +576,68 @@ fn _resolve_app_backend(app_id: text, electron_available: bool) -> Result<UiBack
         Ok(kind): Ok(kind)
         Err(_): Err("Electron not available on this host")
 
-fn _generic_manifest_html(manifest: AppManifest) -> text:
+fn _backend_is_native_host(kind: UiBackendKind) -> bool:
+    match kind:
+        UiBackendKind.Electron: true
+        _: false
+
+fn _adapter_capabilities_for(mode: HostShellMode, electron_available: bool) -> HostTaskbarAdapterCapabilities:
+    match mode:
+        HostShellMode.DesktopEmbedded:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: false,
+                supports_embedded_surfaces: true,
+                supports_headless_session: false,
+                requires_js_host_bridge: true
+            )
+        HostShellMode.TaskbarOnly:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: electron_available,
+                supports_embedded_surfaces: false,
+                supports_headless_session: false,
+                requires_js_host_bridge: true
+            )
+        HostShellMode.Headless:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: false,
+                supports_embedded_surfaces: false,
+                supports_headless_session: true,
+                requires_js_host_bridge: false
+            )
+
+fn _record_launch_error(rt: HostTaskbarRuntime, app_id: text, message: text) -> Result<Unit, text>:
+    rt.launch_errors = [TaskbarLaunchError(app_id: app_id, message: message)]
+    Err(message)
+
+fn _clear_launch_errors(rt: HostTaskbarRuntime):
+    rt.launch_errors = []
+
+fn _manifest_host_html(manifest: AppManifest) -> text:
+    val content = host_content_for_manifest(manifest)
+    if content != nil:
+        return _manifest_host_content_html(manifest, content.unwrap())
+    return _unsupported_manifest_html(manifest)
+
+fn _manifest_host_content_html(manifest: AppManifest, content: AppHostContent) -> text:
+    val title = _html_escape(content.title)
+    val body = _html_escape(content.body)
+    val status = _html_escape(content.status)
+    val category = _html_escape(manifest.category)
+    "<!doctype html>" +
+    "<html><head><meta charset='utf-8'>" +
+    "<title>{title}</title>" +
+    "<style>" +
+    "body { margin: 0; min-height: 100vh; padding: 28px; background: #101724; color: #f3f0dc; font-family: system-ui, sans-serif; }" +
+    "h1 { margin: 0 0 10px 0; font-size: 28px; }" +
+    "p { margin: 8px 0; font-size: 15px; line-height: 1.45; }" +
+    ".status { margin-top: 14px; color: #9fc5ff; }" +
+    "</style></head><body>" +
+    "<h1>{title}</h1>" +
+    "<p>{body}</p>" +
+    "<p class='status'>{category} - {status}</p>" +
+    "</body></html>"
+
+fn _unsupported_manifest_html(manifest: AppManifest) -> text:
     val title = _html_escape(manifest.name)
     val desc = _html_escape(manifest.description)
     val category = _html_escape(manifest.category)
@@ -504,7 +653,8 @@ fn _generic_manifest_html(manifest: AppManifest) -> text:
     "</style></head><body>" +
     "<h1>{title}</h1>" +
     "<p>{desc}</p>" +
-    "<p class='tag'>{category} - {binary}</p>" +
+    "<p>This app has no host content hook yet.</p>" +
+    "<p class='tag'>Unsupported host content - {category} - {binary}</p>" +
     "</body></html>"
 
 fn _html_escape(s: text) -> text:
@@ -516,7 +666,26 @@ fn _html_escape(s: text) -> text:
     r
 
 fn _default_tray() -> [TrayItem]:
+    val persisted = _load_persisted_tray()
+    if persisted != nil:
+        return persisted.unwrap()
     [TrayItem(item_id: "host-runtime", label: "host", icon: "host")]
+
+fn _layout_has_duplicate_apps(pinned: [AppRef]) -> bool:
+    var seen: [text] = []
+    for item in pinned:
+        if _contains_text(seen, item.app_id):
+            return true
+        seen = seen.push(item.app_id)
+    false
+
+fn _layout_has_duplicate_tray_items(tray: [TrayItem]) -> bool:
+    var seen: [text] = []
+    for item in tray:
+        if _contains_text(seen, item.item_id):
+            return true
+        seen = seen.push(item.item_id)
+    false
 
 fn _parse_mode(mode_name: text) -> HostShellMode:
     val m = mode_name.to_lower()
