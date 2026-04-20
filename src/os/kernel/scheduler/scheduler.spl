@@ -30,6 +30,8 @@ val MAX_TASKS: i32 = 256
 val PRIORITY_LEVELS: i32 = 5      # Realtime, High, Normal, Low, Idle
 val TIME_SLICE_TICKS: u64 = 10    # Ticks per time slice before preemption
 val SCHED_TICK_NS: u64 = 10000000 # Accounting tick used by fair scheduling
+val DEADLINE_BANDWIDTH_SCALE: u64 = 1000000
+val DEADLINE_CPU_BANDWIDTH_CAP: u64 = 800000
 
 # ============================================================================
 # Task Control Block
@@ -145,8 +147,8 @@ struct CpuRunQueue:
     """Per-CPU run queues separated by scheduler class.
 
     Deadline and RT queues are carried as metadata lanes in v1 so schedctl and
-    compiler policy can round-trip those classes without enabling full EDF/CBS
-    admission yet. Fair/background are the default runnable lanes.
+    compiler policy can round-trip those classes. Deadline tasks enter the lane
+    only through admission control; fair/background are the default lanes.
     """
     cpu_id: u32
     deadline_queue: ReadyQueue
@@ -645,6 +647,53 @@ impl Scheduler:
             self._enqueue_ready(id)
         true
 
+    me admit_deadline(id: TaskId, runtime_ns: u64, period_ns: u64, deadline_ns: u64, affinity_mask: u64) -> i32:
+        """Admit a task into the deadline class after local bandwidth checks."""
+        if runtime_ns == 0 or period_ns == 0 or deadline_ns == 0:
+            return -22
+        if runtime_ns > deadline_ns:
+            return -22
+        if deadline_ns > period_ns:
+            return -22
+
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return -3
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return -3
+
+        val selected_cpu = self._select_deadline_cpu(runtime_ns, period_ns, affinity_mask, id)
+        if selected_cpu < 0:
+            return -28
+
+        val was_ready = match tcb.state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(id)
+
+        var task = tcb
+        var config = task.schedule
+        config.policy = SchedulerPolicy.Deadline
+        config.weight = 4096
+        config.priority = -1
+        config.requested_slice_ns = runtime_ns
+        config.runtime_ns = runtime_ns
+        config.period_ns = period_ns
+        config.deadline_ns = deadline_ns
+        config.lag = 0
+        config.affinity_mask = if affinity_mask > 0: affinity_mask else: 0xFFFFFFFFFFFFFFFF
+        config.home_cpu = selected_cpu.to_u32()
+        config.virtual_deadline = ((self.tick_count * SCHED_TICK_NS) + deadline_ns).to_i64()
+        task.schedule = config
+        task.assigned_cpu = selected_cpu.to_u32()
+        self.tasks[slot] = task
+
+        if was_ready:
+            self._enqueue_ready(id)
+        0
+
     fn cpu_runnable_count(cpu_id: u32) -> i32:
         """Return runnable task count for one CPU run queue."""
         val cpu = self._normalize_cpu(cpu_id)
@@ -838,9 +887,7 @@ impl Scheduler:
         """Pick from fixed-order class queues on a CPU."""
         var rq = self.cpu_runqueues[cpu as i64]
         var picked: TaskId? = nil
-        if queue_name == "deadline":
-            picked = rq.deadline_queue.dequeue()
-        elif queue_name == "idle":
+        if queue_name == "idle":
             picked = rq.idle_queue.dequeue()
         if picked != nil:
             val task_id = picked.unwrap()
@@ -889,6 +936,53 @@ impl Scheduler:
             q.remove(best.unwrap())
 
         rq.rt_queue = q
+        if best != nil:
+            val task_id = best.unwrap()
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if rq.runnable_count > 0:
+                        rq.runnable_count = rq.runnable_count - 1
+                    if rq.weighted_load >= task.schedule.weight:
+                        rq.weighted_load = rq.weighted_load - task.schedule.weight
+                    else:
+                        rq.weighted_load = 0
+        self.cpu_runqueues[cpu as i64] = rq
+        best
+
+    me _pick_deadline_from(cpu: u32) -> TaskId?:
+        """Pick the admitted deadline task with the earliest absolute deadline."""
+        var rq = self.cpu_runqueues[cpu as i64]
+        var q = rq.deadline_queue
+        if q.count == 0:
+            return nil
+
+        var best: TaskId? = nil
+        var best_deadline: i64 = 9223372036854775807
+        var scan = q.head
+        var scanned = 0
+        while scanned < q.count:
+            val idx = scan % q.capacity
+            val candidate = TaskId(id: q.entries[idx])
+            val slot = self._find_slot(candidate)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if task.schedule.virtual_deadline < best_deadline:
+                        best = candidate
+                        best_deadline = task.schedule.virtual_deadline
+            scan = scan + 1
+            scanned = scanned + 1
+
+        if best == nil:
+            best = q.dequeue()
+        else:
+            q.remove(best.unwrap())
+
+        rq.deadline_queue = q
         if best != nil:
             val task_id = best.unwrap()
             val slot = self._find_slot(task_id)
@@ -958,7 +1052,7 @@ impl Scheduler:
 
     me _pick_next_on_cpu(cpu: u32) -> TaskId?:
         """Class-order pick for one CPU run queue."""
-        val dl = self._pick_fifo_from("deadline", cpu)
+        val dl = self._pick_deadline_from(cpu)
         if dl != nil:
             return dl
         val rt = self._pick_rt_from(cpu)
@@ -971,6 +1065,41 @@ impl Scheduler:
         if bg != nil:
             return bg
         self._pick_fifo_from("idle", cpu)
+
+    fn _select_deadline_cpu(runtime_ns: u64, period_ns: u64, affinity_mask: u64, task_id: TaskId) -> i32:
+        """Choose an affinity-compatible CPU whose deadline bandwidth admits the task."""
+        val requested_util = _deadline_util(runtime_ns, period_ns)
+        if requested_util == 0:
+            return -22
+        var best = -1
+        var best_util = DEADLINE_CPU_BANDWIDTH_CAP + 1
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            if _affinity_allows_cpu(affinity_mask, cpu):
+                val used = self._deadline_cpu_util(cpu, task_id)
+                if used + requested_util <= DEADLINE_CPU_BANDWIDTH_CAP:
+                    if used < best_util:
+                        best_util = used
+                        best = cpu as i32
+            cpu = cpu + 1u32
+        best
+
+    fn _deadline_cpu_util(cpu: u32, exclude_task: TaskId) -> u64:
+        """Return admitted deadline utilization for one CPU, excluding a replaced task."""
+        var total = 0u64
+        var i = 0
+        while i < MAX_TASKS:
+            val tcb = self.tasks[i]
+            if tcb != nil:
+                val task = tcb
+                val active = match task.state:
+                    case TaskState.Zombie: false
+                    case _: true
+                if active and task.id.id != exclude_task.id and task.assigned_cpu == cpu:
+                    if task.schedule.policy == SchedulerPolicy.Deadline:
+                        total = total + _deadline_util(task.schedule.runtime_ns, task.schedule.period_ns)
+            i = i + 1
+        total
 
     fn _pick_migration_candidate(from_cpu: u32, to_cpu: u32) -> TaskId?:
         """Find a fair/background task that can move between two CPU queues."""
@@ -1062,10 +1191,18 @@ fn _priority_to_index(priority: TaskPriority) -> i32:
 
 fn _affinity_allows_cpu(mask: u64, cpu: u32) -> bool:
     """Return true when an affinity mask permits a CPU id."""
+    if mask == 0:
+        return true
     if cpu >= 64u32:
         return false
     val bit = 1u64 << cpu
     (mask & bit) != 0
+
+fn _deadline_util(runtime_ns: u64, period_ns: u64) -> u64:
+    """Convert runtime/period into fixed-point deadline bandwidth."""
+    if period_ns == 0:
+        return 0
+    (runtime_ns * DEADLINE_BANDWIDTH_SCALE) / period_ns
 
 fn _account_task_tick(task: TaskControlBlock) -> TaskControlBlock:
     """Advance fair/background virtual runtime for one scheduler tick."""

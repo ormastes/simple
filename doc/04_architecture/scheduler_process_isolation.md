@@ -3,13 +3,14 @@
 
 ## Decision
 
-Use a class-based SMP scheduler core with per-CPU run queues and fair/background execution in v1. Carry RT/deadline metadata end-to-end, but keep deadline disabled until admission control and CBS runtime accounting are implemented.
+Use a class-based SMP scheduler core with per-CPU run queues and fair/background execution by default. Carry RT/deadline metadata end-to-end, and admit deadline tasks only through explicit runtime/period/deadline validation plus per-CPU bandwidth checks.
 
 ## Kernel Mechanism
 
 - `TaskControlBlock` owns `TaskScheduleConfig` and `TaskIsolationProfile`.
-- `CpuRunQueue` owns class lanes: deadline metadata, RT metadata, fair, background, idle.
-- Scheduler pick order is deadline metadata lane, fixed-priority RT lane, fair, background, idle. Deadline activation is rejected by syscall policy in v1.
+- `CpuRunQueue` owns class lanes: admitted deadline, RT metadata, fair, background, idle.
+- Scheduler pick order is admitted deadline, fixed-priority RT, fair, background, idle. Direct metadata-only deadline activation remains rejected; admission uses the dedicated schedctl operation.
+- Deadline admission rejects invalid budget tuples and per-CPU overload, then picks by earliest absolute virtual deadline.
 - RT selection uses static priority within the RT lane and preserves queue order for equal priorities.
 - Fair/background selection uses eligible virtual-deadline ordering and weighted virtual-runtime accounting on timer ticks.
 - Per-CPU scheduling is exposed through `schedule_on_cpu`; the compatibility `schedule` path dispatches on CPU 0.

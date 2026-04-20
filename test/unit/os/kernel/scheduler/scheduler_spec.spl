@@ -23,7 +23,7 @@ hardware. We test the scheduling logic and state machine.
 use std.spec.{describe, it, expect}
 use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
-    UserProcessImage, UserLoadSegment, default_task_schedule
+    UserProcessImage, UserLoadSegment, SchedulerPolicy, default_task_schedule
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
@@ -293,6 +293,47 @@ describe "Scheduler":
             val ctx = sched.schedule()
             val current = sched.get_current()
             expect(current.id).to_equal(high_rt.id)
+
+        it "admits deadline task and schedules it before realtime":
+            var sched = Scheduler.new()
+            val rt_id = sched.create_task(0x1000, TaskPriority.Realtime, CapabilitySet.full())
+            val dl_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val result = sched.admit_deadline(dl_id, 100000, 1000000, 500000, 0)
+            expect(result).to_equal(0)
+
+            val task = sched.get_task(dl_id)
+            if task != nil:
+                val tcb = task
+                expect(tcb.schedule.policy).to_equal(SchedulerPolicy.Deadline)
+                expect(tcb.schedule.runtime_ns).to_equal(100000)
+                expect(tcb.schedule.period_ns).to_equal(1000000)
+                expect(tcb.schedule.deadline_ns).to_equal(500000)
+
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(dl_id.id)
+
+        it "picks admitted deadline task with earliest deadline":
+            var sched = Scheduler.new()
+            val later_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val earlier_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val later = sched.admit_deadline(later_id, 100000, 1000000, 900000, 0)
+            val earlier = sched.admit_deadline(earlier_id, 100000, 1000000, 200000, 0)
+            expect(later).to_equal(0)
+            expect(earlier).to_equal(0)
+
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(earlier_id.id)
+
+        it "rejects invalid and overcommitted deadline admission":
+            var sched = Scheduler.new()
+            val invalid_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val overloaded_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val bad = sched.admit_deadline(invalid_id, 800000, 1000000, 400000, 1)
+            expect(bad).to_equal(-22)
+            val overloaded = sched.admit_deadline(overloaded_id, 900000, 1000000, 900000, 1)
+            expect(overloaded).to_equal(-28)
 
         it "picks fair task with earliest virtual deadline":
             var sched = Scheduler.new()
