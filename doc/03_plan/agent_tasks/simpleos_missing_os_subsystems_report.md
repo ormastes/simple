@@ -66,6 +66,9 @@ Required follow-up work:
 
 - Audit sync-first paths in POSIX fd I/O, pipe compatibility, shell builtins,
   terminal/TTY, process wait/spawn, timers, sockets, and libc stdio.
+- POSIX pipe fd read/write/close now route to the native pipe backend instead
+  of the generic VFS async compatibility path; keep extending this pattern to
+  TTY, socket, timer, and stdio descriptors.
 - Promote native async APIs for fd/VFS, pipe, TTY/PTY, process lifecycle,
   timers, sockets, and window/event operations before adding or extending sync
   wrappers.
