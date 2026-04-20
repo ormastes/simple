@@ -181,12 +181,23 @@ struct X86Boot:
 
 var g_hhdm_offset: u64 = 0
 
+fn _limine_response_ptr(raw: u64) -> u64?:
+    """Validate a Limine response pointer before MMIO reads."""
+    if raw == 0u64:
+        return nil
+    if raw < 0x1000u64:
+        return nil
+    if (raw & 0x7u64) != 0u64:
+        return nil
+    Some(raw)
+
 fn _parse_hhdm():
     """Parse HHDM response to get virtual-to-physical mapping offset."""
-    val resp_ptr = hhdm_request.response
-    if resp_ptr == 0:
+    val resp = _limine_response_ptr(hhdm_request.response)
+    if resp == nil:
         serial_writeln("[BOOT] WARNING: No HHDM response from Limine")
         return
+    val resp_ptr = resp.unwrap()
 
     val resp_revision = mmio_read64(resp_ptr)
     val offset = mmio_read64(resp_ptr + 8)
@@ -226,10 +237,11 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
     """Parse Limine memory map response into BootMemoryRegion list."""
     var regions: [BootMemoryRegion] = []
 
-    val resp_ptr = memmap_request.response
-    if resp_ptr == 0:
+    val resp = _limine_response_ptr(memmap_request.response)
+    if resp == nil:
         serial_writeln("[BOOT] WARNING: No memory map response from Limine")
         return regions
+    val resp_ptr = resp.unwrap()
 
     # Read LimineMemMapResponse fields
     val _revision = mmio_read64(resp_ptr)
@@ -270,8 +282,8 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
 
 fn _parse_framebuffer() -> FramebufferInfo:
     """Parse Limine framebuffer response."""
-    val resp_ptr = framebuffer_request.response
-    if resp_ptr == 0:
+    val resp = _limine_response_ptr(framebuffer_request.response)
+    if resp == nil:
         serial_writeln("[BOOT] WARNING: No framebuffer response from Limine")
         return FramebufferInfo(
             addr: PhysAddr(addr: 0),
@@ -280,6 +292,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
             pitch: 0,
             bpp: 0
         )
+    val resp_ptr = resp.unwrap()
 
     val _revision = mmio_read64(resp_ptr)
     val fb_count = mmio_read64(resp_ptr + 8)
@@ -321,10 +334,11 @@ fn _parse_framebuffer() -> FramebufferInfo:
 
 fn _parse_rsdp() -> PhysAddr?:
     """Parse Limine RSDP response."""
-    val resp_ptr = rsdp_request.response
-    if resp_ptr == 0:
+    val resp = _limine_response_ptr(rsdp_request.response)
+    if resp == nil:
         serial_writeln("[BOOT] No RSDP from Limine (ACPI unavailable)")
         return nil
+    val resp_ptr = resp.unwrap()
 
     val _revision = mmio_read64(resp_ptr)
     val address = mmio_read64(resp_ptr + 8)
@@ -339,10 +353,11 @@ fn _parse_rsdp() -> PhysAddr?:
 
 fn _parse_kernel_address() -> (PhysAddr, VirtAddr):
     """Parse Limine kernel address response."""
-    val resp_ptr = kernel_addr_request.response
-    if resp_ptr == 0:
+    val resp = _limine_response_ptr(kernel_addr_request.response)
+    if resp == nil:
         serial_writeln("[BOOT] WARNING: No kernel address response")
         return (PhysAddr(addr: 0), VirtAddr(addr: 0))
+    val resp_ptr = resp.unwrap()
 
     val _revision = mmio_read64(resp_ptr)
     val phys_base = mmio_read64(resp_ptr + 8)
@@ -402,6 +417,10 @@ impl X86Boot:
     fn build_boot_output() -> BootOutputPort:
         """Assemble BootOutputPort from all parsed Limine responses."""
         _build_boot_output()
+
+    fn rsdp_phys() -> PhysAddr?:
+        """Return Limine-provided RSDP physical address, if available."""
+        _parse_rsdp()
 
     fn hhdm_offset() -> u64:
         """Return the HHDM offset for physical-to-virtual conversions."""

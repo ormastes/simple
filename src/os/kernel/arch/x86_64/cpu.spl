@@ -8,6 +8,10 @@
 # on other architectures (e.g., RISC-V uses CSRs instead of MSRs,
 # MMIO instead of port I/O).
 
+use os.kernel.interrupts.apic.{apic_send_init, apic_send_sipi, apic_get_id}
+use os.kernel.smp.percpu.{percpu_apic_id, percpu_is_online}
+use os.kernel.smp.smp.{smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id}
+
 # ============================================================================
 # Port I/O
 # ============================================================================
@@ -240,6 +244,30 @@ fn halt_loop():
     cli()
     while true:
         hlt()
+
+# ============================================================================
+# AP Startup
+# ============================================================================
+
+fn x86_send_startup_to_cpu(cpu_id: u32, sipi_vector: u8) -> bool:
+    """Send INIT/SIPI startup sequence to one firmware-present AP.
+
+    The AP is not marked online here. The AP trampoline must call
+    x86_mark_current_ap_online() after it has entered kernel code.
+    """
+    if cpu_id == 0u32 or percpu_is_online(cpu_id) or smp_ap_startup_sent(cpu_id):
+        return false
+    val apic_id = percpu_apic_id(cpu_id)
+    if apic_id == nil:
+        return false
+    val target_apic_id = apic_id.unwrap()
+    apic_send_init(target_apic_id)
+    apic_send_sipi(target_apic_id, sipi_vector)
+    smp_mark_ap_startup_sent(cpu_id)
+
+fn x86_mark_current_ap_online() -> bool:
+    """Called by the AP trampoline once the current CPU reaches kernel code."""
+    smp_mark_ap_started_by_apic_id(apic_get_id())
 
 # ============================================================================
 # Descriptor Table Loading

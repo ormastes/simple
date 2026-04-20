@@ -51,8 +51,9 @@ Implemented source paths:
 
 The first production slice is intentionally bounded. Remaining scheduler/process logic is:
 
-- Extend x86_64 topology discovery from the current CPUID BSP shape plus online
-  CPU count to full MADT/AP bring-up APIC ID enumeration.
+- Wire the Limine/ACPI boot adapter to feed MADT APIC IDs into the scheduler
+  topology registry, then extend x86_64 SMP bring-up so those APIC IDs are
+  started and marked online after the AP trampoline lands.
 - Add non-x86 topology providers for ARM/RISC-V package or NUMA data where the
   platform exposes it.
 - Extend fair scheduling from EEVDF-like virtual-deadline selection to full lag/sleeper decay and wakeup-preemption behavior.

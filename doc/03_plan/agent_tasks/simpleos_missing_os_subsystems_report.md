@@ -124,6 +124,7 @@ Latest checked artifact:
 The current x86_64 desktop E2E binary boots in QEMU with the FAT32 NVMe image
 attached and reaches:
 
+- `[arch-init] scheduler topology probed`
 - `[desktop-e2e] desktop-ready`
 - `[desktop-e2e] shortcut:ok key=meta+b app=browser_demo`
 - `[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world`
@@ -143,6 +144,8 @@ launcher intentionally falls back to resident-manifest materialization:
 - `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
 - `[syscall13] build_user_process_image ok`
 - `[syscall13] user image handoff gated; using validated resident handoff`
+- no `[c-syscall13] fat32 app image validated` marker
+- no `EXCEPTION`, `cr2=...`, `cr3=...`, `heap exhausted`, or `PANIC` marker
 - `build_user_process_image` takes an owned copy of resolved VFS/FAT32 bytes
   before ELF parsing and stores owned segment/file-byte copies in the image
 - `stack_builder` uses literal stack-size constants so the native baremetal
@@ -174,6 +177,13 @@ and VMM from that adapter, then re-enable `create_user_task` mapping. The plain
 resident `create_task` path can also stall in ready-queue enqueue when called
 from the direct trap bridge, so scheduler enqueue from syscall context remains a
 second blocker after VMM bootstrap.
+
+The x86_64 desktop lane now uses a minimal `Scheduler.new_bootstrap()` for
+early syscall/trap globals and clamps impossible early CPUID/SMP topology
+counts. This avoids allocating the full 32-CPU scheduler state during direct
+`-kernel` boot and prevents the pre-desktop heap exhaustion seen while tracing
+the direct-handoff blocker. `Scheduler.new()` still keeps the normal
+platform-topology behavior for unit-tested scheduler construction.
 
 ## Completion Criteria
 

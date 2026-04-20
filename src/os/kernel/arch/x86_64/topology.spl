@@ -5,7 +5,8 @@
 # during early arch init.
 
 use os.kernel.types.task_types.{CpuTopologyInfo, scheduler_register_platform_cpu_topology}
-use os.kernel.smp.smp.{smp_online_count}
+use os.kernel.acpi.madt.{acpi_madt_lapic_ids}
+use os.kernel.smp.smp.{smp_online_count, smp_register_firmware_apic_ids}
 
 val X86_CPUID_TOPOLOGY_V2: u32 = 0x1F
 val X86_CPUID_TOPOLOGY_V1: u32 = 0x0B
@@ -54,7 +55,7 @@ fn x86_make_topology_entry(logical_cpu: u32, smt_shift: u32, core_shift: u32, ba
     """Build one scheduler CPU topology entry from x2APIC-style ids."""
     val apic_id = base_apic_id + logical_cpu
     val smt_id = if smt_shift > 0u32: apic_id >> smt_shift else: apic_id
-    val cache_id = if core_shift > 0u32: apic_id >> core_shift else: smt_id
+    val cache_id = if core_shift > 0u32: apic_id >> core_shift else: 0u32
     CpuTopologyInfo(
         cpu_id: logical_cpu,
         smt_id: smt_id,
@@ -75,6 +76,31 @@ fn x86_scheduler_topology_from_shape(cpu_count: u32, smt_shift: u32, core_shift:
             base_apic_id: base_apic_id
         ))
         cpu = cpu + 1u32
+    out
+
+fn x86_scheduler_topology_from_apic_ids(apic_ids: [u32], smt_shift: u32, core_shift: u32) -> [CpuTopologyInfo]:
+    """Build scheduler topology entries from firmware-enumerated APIC ids."""
+    if apic_ids.len() == 0:
+        return x86_scheduler_topology_from_shape(
+            cpu_count: 1u32,
+            smt_shift: smt_shift,
+            core_shift: core_shift,
+            base_apic_id: 0u32
+        )
+
+    var out: [CpuTopologyInfo] = []
+    var idx = 0
+    while idx < apic_ids.len():
+        val apic_id = apic_ids[idx]
+        val smt_id = if smt_shift > 0u32: apic_id >> smt_shift else: apic_id
+        val cache_id = if core_shift > 0u32: apic_id >> core_shift else: 0u32
+        out.push(CpuTopologyInfo(
+            cpu_id: idx.to_u32(),
+            smt_id: smt_id,
+            cache_id: cache_id,
+            numa_id: 0u32
+        ))
+        idx = idx + 1
     out
 
 fn x86_decode_topology_shape(leaf: u32) -> X86TopologyShape:
@@ -101,24 +127,24 @@ fn x86_decode_topology_shape(leaf: u32) -> X86TopologyShape:
         core_shift = smt_shift
     X86TopologyShape(smt_shift: smt_shift, core_shift: core_shift, x2apic_id: x2apic_id)
 
-fn x86_install_scheduler_topology_from_cpuid():
-    """Register x86 CPUID-derived scheduler topology for later Scheduler.new()."""
+fn _x86_current_topology_shape() -> X86TopologyShape:
     val max_leaf = x86_cpuid_regs(leaf: 0u32, subleaf: 0u32).eax
     val topology_leaf = x86_select_topology_leaf(max_leaf)
+    if topology_leaf == 0u32:
+        return X86TopologyShape(smt_shift: 0u32, core_shift: 0u32, x2apic_id: 0u32)
+    x86_decode_topology_shape(topology_leaf)
+
+fn x86_install_scheduler_topology_from_cpuid():
+    """Register x86 CPUID-derived scheduler topology for later Scheduler.new()."""
     var cpu_count = smp_online_count()
     if cpu_count == 0u32:
         cpu_count = 1u32
+    # The direct QEMU -kernel desktop lane does not bring up SMP before this
+    # probe. If the early SMP counter is garbage, keep boot on a safe flat CPU.
+    if cpu_count > 64u32:
+        cpu_count = 1u32
 
-    if topology_leaf == 0u32:
-        scheduler_register_platform_cpu_topology(x86_scheduler_topology_from_shape(
-            cpu_count: cpu_count,
-            smt_shift: 0u32,
-            core_shift: 0u32,
-            base_apic_id: 0u32
-        ))
-        return
-
-    val shape = x86_decode_topology_shape(topology_leaf)
+    val shape = _x86_current_topology_shape()
     scheduler_register_platform_cpu_topology(
         x86_scheduler_topology_from_shape(
             cpu_count: cpu_count,
@@ -127,3 +153,21 @@ fn x86_install_scheduler_topology_from_cpuid():
             base_apic_id: shape.x2apic_id
         )
     )
+
+fn x86_install_scheduler_topology_from_rsdp(rsdp_phys: u64) -> bool:
+    """Register scheduler topology using MADT APIC ids plus CPUID shape."""
+    if rsdp_phys == 0u64:
+        return false
+    val apic_ids = acpi_madt_lapic_ids(rsdp_phys)
+    if apic_ids.len() == 0:
+        return false
+    smp_register_firmware_apic_ids(apic_ids)
+    val shape = _x86_current_topology_shape()
+    scheduler_register_platform_cpu_topology(
+        x86_scheduler_topology_from_apic_ids(
+            apic_ids: apic_ids,
+            smt_shift: shape.smt_shift,
+            core_shift: shape.core_shift
+        )
+    )
+    true

@@ -116,8 +116,9 @@ The implemented slice now covers the scheduler/process behavior needed by
 SOSIX process isolation tests:
 
 - Scheduler topology has typed CPU entries plus flat fallback, synthetic
-  SMT/cache/NUMA domain construction for tests, and x86_64 CPUID topology
-  probing during early arch init.
+  SMT/cache/NUMA domain construction for tests, x86_64 CPUID topology shape
+  probing during direct early arch init, and an ACPI MADT APIC-ID parser for
+  Limine/ACPI boot adapters.
 - Rebalancing includes explicit rebalance, idle-pull balancing, wake-affine
   placement, per-CPU current mirrors, and wakeup preemption metadata.
 - Fair scheduling keeps virtual-deadline ordering and tick accounting.

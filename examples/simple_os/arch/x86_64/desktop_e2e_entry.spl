@@ -46,6 +46,9 @@ use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launch
 use os.services.vfs.vfs_init.{vfs_boot_init}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
+use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.types.memory_types.{phys_addr_value}
 # Pull syscall shim into the build graph so its @export("C", name: "spl_handle_*")
 # strong definitions override the weak -ENOSYS stubs in baremetal_stubs.c.
 use os.kernel.abi.syscall_shim.{shim_init}
@@ -91,6 +94,10 @@ val MOUSE_CMD_ENABLE_REPORTING: u8 = 0xF4
 val MOUSE_STATUS_PORT: u16 = 0x64
 val MOUSE_STATUS_OUTPUT_FULL: u8 = 0x01
 val MOUSE_STATUS_INPUT_FULL: u8 = 0x02
+val DIRECT_QEMU_TOTAL_MEMORY: u64 = 0x20000000
+val DIRECT_QEMU_KERNEL_START: u64 = 0x100000
+# Reserve kernel image, C runtime heap, linker heap, stack, and growth slack.
+val DIRECT_QEMU_RESERVED_END: u64 = 0x14000000
 
 fn pack(hi: i64, lo: i64) -> u64:
     ((hi.to_u64() & 0xFFFFFFFF) << 32) | (lo.to_u64() & 0xFFFFFFFF)
@@ -112,6 +119,13 @@ fn _paint_probe_scene(include_apps: bool):
         rt_gui_fill4(pack(180, 180), pack(340, 26), 0xFFE74C3C, 0)
         rt_gui_fill4(pack(560, 220), pack(280, 200), 0xFF1E1E2E, 0)
         rt_gui_fill4(pack(560, 220), pack(280, 26), 0xFF27AE60, 0)
+
+fn _direct_qemu_memory_bootstrap():
+    if pmm_init_identity_range(DIRECT_QEMU_TOTAL_MEMORY, DIRECT_QEMU_KERNEL_START, DIRECT_QEMU_RESERVED_END):
+        vmm_init(g_pmm, 0)
+        serial_println("[desktop-e2e] memory-bootstrap:ok")
+    else:
+        serial_println("[desktop-e2e] memory-bootstrap:failed")
 
 fn _latest_launcher_pid() -> u64:
     val process_count = launcher_get_process_count()
@@ -252,6 +266,7 @@ fn desktop_e2e_main() -> bool:
     # Initialise kernel IDT + rich fault dumpers (Wave 7C).
     # Replaces crt0 legacy IDT before any driver or user code can fault.
     arch_x86_64_early_init()
+    _direct_qemu_memory_bootstrap()
 
     # Install strong SYSCALL handlers over the weak -ENOSYS defaults in
     # baremetal_stubs.c. Must run after arch_x86_64_early_init so the IDT
@@ -259,7 +274,7 @@ fn desktop_e2e_main() -> bool:
     # module-level g_shim_* vars in syscall_shim.spl). This call also pulls
     # _shim_keepalive() into the reachable graph, preventing DCE from
     # dropping the 62 spl_handle_* strong definitions.
-    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(256))
+    shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(256))
 
     # Install the minimal bootstrap trap runtime for syscall/trap dispatch.
     # Done AFTER arch_x86_64_early_init so the kernel IDT is live first.
@@ -288,7 +303,7 @@ fn desktop_e2e_main() -> bool:
         pitch: FB_PITCH,
         bpp: FB_BPP
     )
-    rt_gui_set_fb(fb_info.addr.addr, FB_W.to_u64())
+    rt_gui_set_fb(phys_addr_value(fb_info.addr), FB_W.to_u64())
     serial_println("[desktop-e2e] fb-runtime bound")
     var fb = FramebufferDriver.from_boot_info(fb_info)
     serial_println("[desktop-e2e] fb-driver ready")

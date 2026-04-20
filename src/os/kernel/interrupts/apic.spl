@@ -42,6 +42,15 @@ val APIC_REG_TIMER_INIT: u32    = 0x380   # Timer Initial Count
 val APIC_REG_TIMER_CURRENT: u32 = 0x390   # Timer Current Count (read-only)
 val APIC_REG_TIMER_DIV: u32     = 0x3E0   # Timer Divide Configuration
 
+# --- ICR Delivery Modes ---
+
+val APIC_ICR_DELIVERY_FIXED: u32   = 0x000
+val APIC_ICR_DELIVERY_INIT: u32    = 0x500
+val APIC_ICR_DELIVERY_STARTUP: u32 = 0x600
+val APIC_ICR_LEVEL_ASSERT: u32     = 0x4000
+val APIC_ICR_TRIGGER_LEVEL: u32    = 0x8000
+val APIC_ICR_DEST_PHYSICAL: u32    = 0x0000
+
 # --- SVR Flags ---
 
 val SVR_APIC_ENABLE: u32       = 0x100    # Bit 8: APIC Software Enable
@@ -74,6 +83,22 @@ var apic_calibrated_ticks_per_ms: u32 = 0
 
 # --- Public API ---
 
+fn apic_icr_high_for_apic_id(apic_id: u32) -> u32:
+    """Build the xAPIC ICR high dword for a physical APIC destination."""
+    (apic_id & 0xFFu32) << 24
+
+fn apic_icr_low_fixed(vector: u8) -> u32:
+    """Build the ICR low dword for a fixed interrupt vector."""
+    APIC_ICR_DEST_PHYSICAL | APIC_ICR_DELIVERY_FIXED | (vector as u32)
+
+fn apic_icr_low_init() -> u32:
+    """Build the ICR low dword for INIT assert."""
+    APIC_ICR_DEST_PHYSICAL | APIC_ICR_DELIVERY_INIT | APIC_ICR_LEVEL_ASSERT | APIC_ICR_TRIGGER_LEVEL
+
+fn apic_icr_low_sipi(vector: u8) -> u32:
+    """Build the ICR low dword for Startup IPI."""
+    APIC_ICR_DEST_PHYSICAL | APIC_ICR_DELIVERY_STARTUP | (vector as u32)
+
 fn apic_read(reg: u32) -> u32:
     """Read a 32-bit APIC register via MMIO."""
     val addr = APIC_BASE + (reg as u64)
@@ -83,6 +108,21 @@ fn apic_write(reg: u32, value: u32):
     """Write a 32-bit value to an APIC register via MMIO."""
     val addr = APIC_BASE + (reg as u64)
     mmio_write32(addr, value)
+
+fn apic_send_ipi(apic_id: u32, vector: u8):
+    """Send a fixed-vector physical-destination IPI via Local APIC."""
+    apic_write(APIC_REG_ICR_HIGH, apic_icr_high_for_apic_id(apic_id))
+    apic_write(APIC_REG_ICR_LOW, apic_icr_low_fixed(vector))
+
+fn apic_send_init(apic_id: u32):
+    """Send INIT assert to an APIC id as the first AP startup step."""
+    apic_write(APIC_REG_ICR_HIGH, apic_icr_high_for_apic_id(apic_id))
+    apic_write(APIC_REG_ICR_LOW, apic_icr_low_init())
+
+fn apic_send_sipi(apic_id: u32, vector: u8):
+    """Send Startup IPI to an APIC id. vector is trampoline_phys >> 12."""
+    apic_write(APIC_REG_ICR_HIGH, apic_icr_high_for_apic_id(apic_id))
+    apic_write(APIC_REG_ICR_LOW, apic_icr_low_sipi(vector))
 
 fn apic_init():
     """Initialize the Local APIC.

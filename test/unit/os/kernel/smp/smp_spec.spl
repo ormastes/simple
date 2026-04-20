@@ -4,8 +4,8 @@
 **Category:** Kernel / SMP
 """
 use std.spec.*
-use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_online_count, smp_send_ipi, smp_take_ipi, smp_num_cpus, IPI_RESCHED, IPI_TLB_FLUSH, IPI_HALT, IPI_CALL_FUNC}
-use os.kernel.smp.percpu.{percpu_is_online, percpu_preempt_disable, percpu_preempt_enable, percpu_preempt_enabled, MAX_CPUS}
+use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_online_count, smp_send_ipi, smp_take_ipi, smp_num_cpus, smp_register_firmware_apic_ids, smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id, IPI_RESCHED, IPI_TLB_FLUSH, IPI_HALT, IPI_CALL_FUNC}
+use os.kernel.smp.percpu.{percpu_is_online, percpu_is_present, percpu_apic_id, percpu_preempt_disable, percpu_preempt_enable, percpu_preempt_enabled, MAX_CPUS}
 
 describe "smp_init":
     """Verify that smp_init sets up the per-CPU table with BSP online and all APs offline."""
@@ -31,6 +31,36 @@ describe "smp_bringup_ap":
         smp_init()
         val ok = smp_bringup_ap(MAX_CPUS)
         expect ok.to_equal(false)
+
+describe "firmware APIC registration":
+    it "records firmware APIC ids without marking APs online":
+        smp_init()
+
+        val count = smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
+
+        expect count.to_equal(3u32)
+        expect smp_num_cpus().to_equal(3u32)
+        expect percpu_is_present(2u32).to_equal(true)
+        expect percpu_apic_id(1u32).unwrap().to_equal(9u32)
+        expect percpu_is_online(1u32).to_equal(false)
+        expect smp_online_count().to_equal(1u32)
+
+    it "tracks AP startup and marks online by APIC id":
+        smp_init()
+        smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
+
+        expect smp_mark_ap_startup_sent(1u32).to_equal(true)
+        expect smp_ap_startup_sent(1u32).to_equal(true)
+        expect smp_mark_ap_started_by_apic_id(13u32).to_equal(true)
+
+        expect percpu_is_online(2u32).to_equal(true)
+        expect smp_online_count().to_equal(2u32)
+
+    it "rejects unknown APIC ids":
+        smp_init()
+        smp_register_firmware_apic_ids([4u32, 9u32])
+
+        expect smp_mark_ap_started_by_apic_id(99u32).to_equal(false)
 
 describe "smp IPIs":
     """IPI send/take and bitmask accumulation via g_percpu[].ipi_pending."""

@@ -2,7 +2,20 @@
 # Does NOT call INIT/SIPI yet — that's platform glue added when the x86_64 AP
 # trampoline lands. This module exposes the kernel-level surface.
 
-use os.kernel.smp.percpu.{percpu_init, percpu_mark_online, percpu_online_count, percpu_is_online, MAX_CPUS, g_percpu, g_num_cpus}
+use os.kernel.smp.percpu.{
+    percpu_init,
+    percpu_ensure_init,
+    percpu_register_apic_id,
+    percpu_find_cpu_by_apic_id,
+    percpu_mark_startup_sent,
+    percpu_startup_sent,
+    percpu_mark_online,
+    percpu_online_count,
+    percpu_is_online,
+    MAX_CPUS,
+    g_percpu,
+    g_num_cpus
+}
 
 # IPI reason bitmask — each bit means "please do X on the target CPU".
 val IPI_RESCHED: u32 = 0x1        # wake the target to re-pick a task
@@ -20,6 +33,38 @@ fn smp_bringup_ap(cpu_id: u32) -> bool:
     call just flips the online flag after the arch layer has the AP running."""
     if cpu_id == 0u32 or cpu_id >= MAX_CPUS:
         return false
+    percpu_mark_online(cpu_id)
+
+fn smp_register_firmware_apic_ids(apic_ids: [u32]) -> u32:
+    """Register firmware-enumerated logical CPUs and APIC ids.
+
+    This records CPU presence only. APs remain offline until the arch
+    trampoline calls smp_mark_ap_started_by_apic_id().
+    """
+    percpu_ensure_init()
+    var registered: u32 = 0u32
+    var idx = 0
+    while idx < apic_ids.len() and idx.to_u32() < MAX_CPUS:
+        if percpu_register_apic_id(idx.to_u32(), apic_ids[idx]):
+            registered = registered + 1u32
+        idx = idx + 1
+    registered
+
+fn smp_mark_ap_startup_sent(cpu_id: u32) -> bool:
+    """Record that the arch layer sent INIT/SIPI to an AP."""
+    percpu_mark_startup_sent(cpu_id)
+
+fn smp_ap_startup_sent(cpu_id: u32) -> bool:
+    percpu_startup_sent(cpu_id)
+
+fn smp_mark_ap_started_by_apic_id(apic_id: u32) -> bool:
+    """Mark a CPU online after the AP enters kernel code and reports its APIC id."""
+    val cpu = percpu_find_cpu_by_apic_id(apic_id)
+    if cpu == nil:
+        return false
+    val cpu_id = cpu.unwrap()
+    if cpu_id == 0u32:
+        return percpu_is_online(0u32)
     percpu_mark_online(cpu_id)
 
 fn smp_online_count() -> u32:

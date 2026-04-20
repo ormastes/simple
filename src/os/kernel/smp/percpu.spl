@@ -6,7 +6,10 @@ val MAX_CPUS: u32 = 32
 
 struct PerCpu:
     cpu_id: u32
+    present: bool       # firmware enumerated this CPU
+    apic_id: u32        # firmware APIC/x2APIC id for arch startup IPIs
     online: bool
+    startup_sent: bool  # arch layer sent AP startup sequence
     idle_task_id: u32   # task id reserved for idle loop; 0 if unset
     current_task_id: u32
     runqueue_len: u32   # how many tasks this CPU currently runs (filled in later pass)
@@ -15,6 +18,7 @@ struct PerCpu:
 
 var g_percpu: [PerCpu; 32]
 var g_num_cpus: u32 = 1   # BSP only until smp_bringup runs
+var g_percpu_initialized: bool = false
 
 fn percpu_init():
     """Reset all per-CPU entries to a known state. Called once by BSP at boot."""
@@ -22,7 +26,10 @@ fn percpu_init():
     while i < MAX_CPUS:
         g_percpu[i] = PerCpu(
             cpu_id: i,
+            present: false,
+            apic_id: i,
             online: false,
+            startup_sent: false,
             idle_task_id: 0u32,
             current_task_id: 0u32,
             runqueue_len: 0u32,
@@ -31,10 +38,62 @@ fn percpu_init():
         )
         i = i + 1
     # BSP is online by definition
+    g_percpu[0].present = true
     g_percpu[0].online = true
     g_num_cpus = 1
+    g_percpu_initialized = true
+
+fn percpu_ensure_init():
+    if not g_percpu_initialized:
+        percpu_init()
+
+fn percpu_register_apic_id(cpu_id: u32, apic_id: u32) -> bool:
+    """Record firmware CPU presence and APIC id without marking APs online."""
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].present = true
+    g_percpu[cpu_id].apic_id = apic_id
+    if cpu_id + 1u32 > g_num_cpus:
+        g_num_cpus = cpu_id + 1u32
+    true
+
+fn percpu_is_present(cpu_id: u32) -> bool:
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].present
+
+fn percpu_apic_id(cpu_id: u32) -> u32?:
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS or not g_percpu[cpu_id].present:
+        return nil
+    Some(g_percpu[cpu_id].apic_id)
+
+fn percpu_find_cpu_by_apic_id(apic_id: u32) -> u32?:
+    percpu_ensure_init()
+    var i: u32 = 0u32
+    while i < MAX_CPUS:
+        if g_percpu[i].present and g_percpu[i].apic_id == apic_id:
+            return Some(i)
+        i = i + 1u32
+    nil
+
+fn percpu_mark_startup_sent(cpu_id: u32) -> bool:
+    percpu_ensure_init()
+    if cpu_id == 0u32 or cpu_id >= MAX_CPUS or not g_percpu[cpu_id].present:
+        return false
+    g_percpu[cpu_id].startup_sent = true
+    true
+
+fn percpu_startup_sent(cpu_id: u32) -> bool:
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS:
+        return false
+    g_percpu[cpu_id].startup_sent
 
 fn percpu_online_count() -> u32:
+    percpu_ensure_init()
     var c: u32 = 0
     var i: u32 = 0
     while i < MAX_CPUS:
@@ -44,27 +103,33 @@ fn percpu_online_count() -> u32:
     c
 
 fn percpu_mark_online(cpu_id: u32) -> bool:
+    percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
+    g_percpu[cpu_id].present = true
     g_percpu[cpu_id].online = true
     if cpu_id + 1 > g_num_cpus:
         g_num_cpus = cpu_id + 1
     true
 
 fn percpu_is_online(cpu_id: u32) -> bool:
+    percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
     g_percpu[cpu_id].online
 
 fn percpu_preempt_disable(cpu_id: u32):
+    percpu_ensure_init()
     if cpu_id < MAX_CPUS:
         g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable + 1
 
 fn percpu_preempt_enable(cpu_id: u32):
+    percpu_ensure_init()
     if cpu_id < MAX_CPUS and g_percpu[cpu_id].preempt_disable > 0:
         g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable - 1
 
 fn percpu_preempt_enabled(cpu_id: u32) -> bool:
+    percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
     g_percpu[cpu_id].preempt_disable == 0

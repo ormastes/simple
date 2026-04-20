@@ -206,6 +206,72 @@ fn pmm_init(boot_info: BootOutputPort):
     serial_println("[PMM] Free pages: {g_pmm.free_pages} ({g_pmm.free_memory() / 1024}KB)")
     serial_println("[PMM] Used pages: {g_pmm.used_pages()}")
 
+fn _align_up(value: u64, align: u64) -> u64:
+    if align == 0:
+        return value
+    ((value + align - 1) / align) * align
+
+fn _reserve_page_if_free(page_idx: u64):
+    if page_idx >= g_pmm.total_pages:
+        return
+    if not _bitmap_test(g_pmm, page_idx):
+        _bitmap_set(g_pmm, page_idx)
+        if g_pmm.free_pages > 0:
+            g_pmm.free_pages = g_pmm.free_pages - 1
+
+fn _reserve_page_range(start_page: u64, page_count: u64):
+    var p: u64 = 0
+    while p < page_count:
+        _reserve_page_if_free(start_page + p)
+        p = p + 1
+
+fn pmm_init_identity_range(total_memory: u64, kernel_start: u64, kernel_end: u64) -> bool:
+    """Initialize PMM from scalar identity-mapped boot memory bounds.
+
+    This is for direct boot lanes that already identity-map physical memory but
+    do not yet have a safe BootOutputPort object bridge.
+    """
+    serial_println("[PMM] Initializing scalar identity memory manager...")
+    if total_memory <= PAGE_SIZE or kernel_end <= kernel_start:
+        serial_println("[PMM] scalar init failed: invalid bounds")
+        return false
+
+    val total_pages = total_memory / PAGE_SIZE
+    val bitmap_bytes = (total_pages + 7) / BITS_PER_BYTE
+    val bitmap_addr = _align_up(kernel_end, PAGE_SIZE)
+    val bitmap_end = bitmap_addr + bitmap_bytes
+    if bitmap_end > total_memory:
+        serial_println("[PMM] scalar init failed: bitmap outside memory")
+        return false
+
+    _bitmap_clear_all(bitmap_addr, bitmap_bytes)
+    g_pmm = PhysMemManager(
+        bitmap_addr: bitmap_addr,
+        total_pages: total_pages,
+        free_pages: 0,
+        last_alloc_index: 256
+    )
+
+    val usable_start_page = 0x100000 / PAGE_SIZE
+    if total_pages > usable_start_page:
+        var page = usable_start_page
+        while page < total_pages:
+            _bitmap_clear(g_pmm, page)
+            g_pmm.free_pages = g_pmm.free_pages + 1
+            page = page + 1
+
+    val bitmap_start_page = bitmap_addr / PAGE_SIZE
+    val bitmap_page_count = (bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE
+    _reserve_page_range(bitmap_start_page, bitmap_page_count)
+
+    val kernel_start_page = kernel_start / PAGE_SIZE
+    val kernel_page_count = (kernel_end - kernel_start + PAGE_SIZE - 1) / PAGE_SIZE
+    _reserve_page_range(kernel_start_page, kernel_page_count)
+    _reserve_page_range(0, 256)
+
+    serial_println("[PMM] scalar init complete")
+    true
+
 # ============================================================================
 # Page Allocation
 # ============================================================================

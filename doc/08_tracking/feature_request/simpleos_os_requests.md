@@ -48,9 +48,13 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         during `Scheduler.new()`.
   - [x] x86_64 architecture probes populate the boot topology registry from
         CPUID topology leaves instead of synthetic boot data.
-  - [ ] MADT/AP bring-up should populate per-CPU APIC IDs for all online APs;
-        until then the x86_64 CPUID probe uses the BSP shape plus online CPU
-        count.
+  - [x] MADT parsing enumerates usable Local APIC/x2APIC IDs and exposes an
+        x86_64 topology registry helper for Limine/ACPI boot adapters.
+  - [ ] A real Limine/ACPI boot adapter should call the MADT topology helper
+        after RSDP/HHDM validation; direct `qemu -kernel` early init stays on
+        the CPUID fallback to avoid probing absent Limine response pointers.
+  - [ ] AP bring-up should mark all firmware-enumerated APs online; until
+        then only online CPUs actually run tasks.
   - [x] Domain kinds distinguish `Smt`, `Cache`, and `Numa` where available.
   - [x] Rebalance and wake-affine placement prefer local domains before wider
         domains.
@@ -59,9 +63,10 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
 - **Related-issue:** none
-- **Notes:** Synthetic topology construction, scheduler install hooks, and the
-  x86_64 CPUID topology probe are implemented. Full AP enumeration remains
-  blocked on MADT/AP bring-up plumbing.
+- **Notes:** Synthetic topology construction, scheduler install hooks, x86_64
+  CPUID shape probing, and ACPI MADT APIC-ID enumeration helpers are
+  implemented. Limine/ACPI adapter wiring and AP startup/online marking remain
+  the next SMP bring-up tasks.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
