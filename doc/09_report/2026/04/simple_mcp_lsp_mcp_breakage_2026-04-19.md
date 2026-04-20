@@ -69,7 +69,7 @@ Current deployment checks version strings and file presence, but not whether a r
 
 New guard:
 
-- `scripts/check-mcp-package-smoke.sh`
+- `scripts/check-mcp-package-smoke.shs`
 
 What it does:
 

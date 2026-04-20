@@ -295,7 +295,7 @@ real `syscall` instruction wrapper targeting the SimpleOS SYSCALL ABI.
 export SDKROOT=$SIMPLEOS_SYSROOT   # = build/os/sysroot/
 ```
 
-**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.sh`
+**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.shs`
 
 ---
 
@@ -325,8 +325,8 @@ Rebuild:
 sh src/os/port/llvm/sysroot.shs
 ```
 
-**Consumers:** `scripts/build_llvm_simpleos_cross.sh`,
-`scripts/build_rust_simpleos_cross.sh`, any `cargo build --target x86_64-unknown-simpleos.json`
+**Consumers:** `scripts/build_llvm_simpleos_cross.shs`,
+`scripts/build_rust_simpleos_cross.shs`, any `cargo build --target x86_64-unknown-simpleos.json`
 
 ---
 
@@ -531,7 +531,7 @@ directory = "vendor"
 3. Cross-build: `cargo build --target x86_64-unknown-simpleos.json` reads from
    `vendor/` with no network access.
 
-**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.sh`,
+**Consumers:** `src/compiler_rust/`, `scripts/build_rust_simpleos_cross.shs`,
 in-guest self-build once fork/exec lands
 
 ---
@@ -746,7 +746,7 @@ New wave-4 code citations for interfaces with real implementations this cycle:
 Cross-toolchain milestones (not IF-id changes, recorded here for traceability):
 
 - I3 LLVM cross-clang green: `ec87deb5ef` + `f874b685c1`. Artifact: `build/os/llvm/cross-x86_64/bin/clang`.
-- I4 Rust cross-build green (out-of-tree): `e25b0de45c`. Script: `scripts/build_rust_hello_simpleos.sh`.
+- I4 Rust cross-build green (out-of-tree): `e25b0de45c`. Script: `scripts/build_rust_hello_simpleos.shs`.
 - W4-A1 compiler-rt SimpleOS variant: `5fe74ee9ec` (main) / `6f4502542` (llvm-project fork).
   Archive: `build/os/llvm/cross-x86_64/lib/clang/20/lib/x86_64-unknown-simpleos/libclang_rt.builtins.a`.
 
@@ -802,7 +802,7 @@ build workstream (separate wave).
   (320 KB), `libcompiler_builtins-*.rlib` (3.6 MB) under
   `/home/ormastes/rust/build/*/stage1/lib/rustlib/x86_64-unknown-simpleos/lib/`.
 - **Stage1 sysroot verification script (Agent H)** — commit `8974a794a8`.
-  New `scripts/build_rust_hello_with_stage1.sh` (173 lines) cross-compiles
+  New `scripts/build_rust_hello_with_stage1.shs` (173 lines) cross-compiles
   against the fork's stage1 sysroot via `--sysroot` + bare triple
   (fork registers simpleos as a built-in target). libstd smoke build
   produces a 35544-byte ELF with 39 demangled `std::/alloc::/core::` symbols

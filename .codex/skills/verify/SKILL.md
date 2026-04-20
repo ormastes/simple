@@ -62,9 +62,9 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
-  - `sh scripts/check-core-runtime-smoke.sh <runtime>`
-  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
-  - If npm packaging/release flow changed: `sh scripts/check-mcp-package-smoke.sh`
+  - `sh scripts/check-core-runtime-smoke.shs <runtime>`
+  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs`
+  - If npm packaging/release flow changed: `sh scripts/check-mcp-package-smoke.shs`
 
 ### Phase 6: Documentation Freshness
 

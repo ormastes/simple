@@ -42,10 +42,12 @@ function resolveNativeServer(rootDir) {
   const candidates = [];
   for (const platformDir of platformDirs()) {
     candidates.push(path.join(rootDir, 'bin', 'release', platformDir, `simple_lsp_mcp_server${ext}`));
+    candidates.push(path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', platformDir, `simple_lsp_mcp_server${ext}`));
   }
   candidates.push(
     path.join(rootDir, 'bin', 'release', `simple_lsp_mcp_server${ext}`),
-    path.join(rootDir, 'bin', `simple_lsp_mcp_server${ext}`)
+    path.join(rootDir, 'bin', `simple_lsp_mcp_server${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', `simple_lsp_mcp_server${ext}`)
   );
 
   for (const candidate of candidates) {
@@ -57,10 +59,61 @@ function resolveNativeServer(rootDir) {
   return null;
 }
 
+function resolveRuntimeBinary(rootDir) {
+  const ext = os.platform() === 'win32' ? '.exe' : '';
+  const candidates = [
+    path.join(rootDir, 'src', 'compiler_rust', 'target', 'bootstrap', `simple${ext}`),
+    path.join(rootDir, 'bin', `simple${ext}`)
+  ];
+
+  for (const platformDir of platformDirs()) {
+    candidates.push(path.join(rootDir, 'bin', 'release', platformDir, `simple${ext}`));
+    candidates.push(path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', platformDir, `simple${ext}`));
+  }
+
+  candidates.push(
+    path.join(rootDir, 'bin', 'release', `simple${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'target', 'release', `simple${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`)
+  );
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveEnvRuntime(repoRoot) {
+  const explicit = process.env.SIMPLE_BINARY;
+  if (explicit && fs.existsSync(explicit) && fs.existsSync(path.join(repoRoot, ENTRY))) {
+    return { command: explicit, args: ['run', path.join(repoRoot, ENTRY)], repoRoot, mode: 'runtime' };
+  }
+  return null;
+}
+
 function findRuntime() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
   const nativeDir = path.join(__dirname, '..', 'native');
   const projectRoot = path.join(__dirname, '..', '..', '..');
+  const sourceRoot = process.env.SIMPLE_SOURCE_ROOT;
+
+  if (sourceRoot && fs.existsSync(path.join(sourceRoot, ENTRY))) {
+    const envSourceRuntime = resolveEnvRuntime(sourceRoot);
+    if (envSourceRuntime) {
+      return envSourceRuntime;
+    }
+    const sourceServer = resolveNativeServer(sourceRoot);
+    if (sourceServer) {
+      return { command: sourceServer, args: [], repoRoot: sourceRoot, mode: 'native' };
+    }
+    const sourceRuntime = resolveRuntimeBinary(sourceRoot);
+    if (sourceRuntime) {
+      return { command: sourceRuntime, args: ['run', path.join(sourceRoot, ENTRY)], repoRoot: sourceRoot, mode: 'runtime' };
+    }
+  }
 
   // 1. Prefer a live project checkout over any cached bootstrap bundle.
   // The native bundle can lag behind the current source tree during development.
@@ -68,23 +121,13 @@ function findRuntime() {
   if (devServer) {
     return { command: devServer, args: [], repoRoot: projectRoot, mode: 'native' };
   }
-  for (const platformDir of platformDirs()) {
-    const devBinary = path.join(projectRoot, 'bin', 'release', platformDir, `simple${ext}`);
-    if (fs.existsSync(devBinary)) {
-      return { command: devBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
-    }
+  const envDevRuntime = resolveEnvRuntime(projectRoot);
+  if (envDevRuntime) {
+    return envDevRuntime;
   }
-  const flatDevBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
-  if (fs.existsSync(flatDevBinary)) {
-    return { command: flatDevBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
-  }
-  const nativeBinary = path.join(projectRoot, 'src', 'compiler_rust', 'target', 'release', `simple${ext}`);
-  if (fs.existsSync(nativeBinary)) {
-    return { command: nativeBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
-  }
-  const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);
-  if (fs.existsSync(devSymlink)) {
-    return { command: devSymlink, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+  const devRuntime = resolveRuntimeBinary(projectRoot);
+  if (devRuntime) {
+    return { command: devRuntime, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
   }
 
   // 2. Check extracted bootstrap package
@@ -96,15 +139,13 @@ function findRuntime() {
       if (nativeServer) {
         return { command: nativeServer, args: [], repoRoot: pkgDir, mode: 'native' };
       }
-      // Primary: bin/simple (correct packaging)
-      const binary = path.join(pkgDir, 'bin', `simple${ext}`);
-      if (fs.existsSync(binary)) {
-        return { command: binary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+      const envBundledRuntime = resolveEnvRuntime(pkgDir);
+      if (envBundledRuntime) {
+        return envBundledRuntime;
       }
-      // Fallback: platform-specific deployed runtime under bin/release/<platform>/simple
-      const legacyBinary = path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`);
-      if (fs.existsSync(legacyBinary)) {
-        return { command: legacyBinary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+      const bundledRuntime = resolveRuntimeBinary(pkgDir);
+      if (bundledRuntime) {
+        return { command: bundledRuntime, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
       }
     }
   }

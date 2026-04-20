@@ -101,13 +101,22 @@ async function main() {
       const binaries = new Set([
         path.join(pkgDir, 'bin', `simple${ext}`),
         path.join(pkgDir, 'bin', `simple_mcp_server${ext}`),
-        path.join(pkgDir, 'bin', 'release', `simple_mcp_server${ext}`)
+        path.join(pkgDir, 'bin', 'release', `simple_mcp_server${ext}`),
+        path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`),
+        path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple_mcp_server${ext}`)
       ]);
       const releaseRoot = path.join(pkgDir, 'bin', 'release');
       if (fs.existsSync(releaseRoot)) {
         for (const entry of fs.readdirSync(releaseRoot)) {
           binaries.add(path.join(releaseRoot, entry, `simple${ext}`));
           binaries.add(path.join(releaseRoot, entry, `simple_mcp_server${ext}`));
+        }
+      }
+      const legacyReleaseRoot = path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release');
+      if (fs.existsSync(legacyReleaseRoot)) {
+        for (const entry of fs.readdirSync(legacyReleaseRoot)) {
+          binaries.add(path.join(legacyReleaseRoot, entry, `simple${ext}`));
+          binaries.add(path.join(legacyReleaseRoot, entry, `simple_mcp_server${ext}`));
         }
       }
       if (os.platform() !== 'win32') {

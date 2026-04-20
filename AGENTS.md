@@ -131,9 +131,9 @@ Run `/verify` — production readiness check:
 | Design | `doc/05_design/` missing or outdated |
 
 Additional required checks for compiler/core/lib or MCP/LSP changes:
-- `sh scripts/check-core-runtime-smoke.sh <runtime>`
-- `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
-- If npm/package/release path changed: `sh scripts/check-mcp-package-smoke.sh`
+- `sh scripts/check-core-runtime-smoke.shs <runtime>`
+- `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs`
+- If npm/package/release path changed: `sh scripts/check-mcp-package-smoke.shs`
 
 Must show `STATUS: PASS` before release.
 

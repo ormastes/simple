@@ -7,14 +7,14 @@ minimum viable fixture for the Rust cross-compile smoke (see
 ## Build
 
     cd examples/simpleos_hello_rs
-    ../../scripts/cargo_simpleos.sh build --release
+    ../../scripts/cargo_simpleos.shs build --release
 
 Produces `target/x86_64-unknown-simpleos/release/hello_rs` (a tiny `_start`-entry ELF).
 
 ## Interface contracts used
 
 - IF-04 (Rust libstd PAL) — at `#![no_std]` level, no libstd surface touched.
-- IF-05 (LLVM sysroot) — consumed via `scripts/cargo_simpleos.sh` linker env.
+- IF-05 (LLVM sysroot) — consumed via `scripts/cargo_simpleos.shs` linker env.
 - IF-10 (Cargo vendored registry) — `.cargo/config.toml` pins offline mode.
 
 ## Expected output size

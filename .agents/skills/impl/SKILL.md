@@ -38,6 +38,6 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 - Files > 800 lines must be split
 - Run $verify before VCS sync
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
-  - `sh scripts/check-core-runtime-smoke.sh <runtime>`
-  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.sh`
-  - If publish/package flow changed: `sh scripts/check-mcp-package-smoke.sh`
+  - `sh scripts/check-core-runtime-smoke.shs <runtime>`
+  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs`
+  - If publish/package flow changed: `sh scripts/check-mcp-package-smoke.shs`
