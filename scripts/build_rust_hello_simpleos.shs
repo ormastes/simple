@@ -42,16 +42,21 @@ rm -rf "$STAGE"
 cp -r "$SRC_DIR" "$STAGE"
 
 # Patch target JSON in place: add -L to pre-link-args for libsimpleos_c.
-python3 - "$TARGET_JSON_SRC" "$STAGE/target.json" "$SIMPLEOS_SYSROOT/lib" <<'PY'
-import json, sys
-src, dst, libdir = sys.argv[1], sys.argv[2], sys.argv[3]
-t = json.load(open(src))
-args = t.setdefault("pre-link-args", {}).setdefault("gnu-lld-cc", [])
-flag = f"-L{libdir}"
-if flag not in args:
-    args.append(flag)
-json.dump(t, open(dst, "w"), indent=4)
-PY
+awk -v libdir="$SIMPLEOS_SYSROOT/lib" '
+    /"-fuse-ld=lld"/ && !inserted {
+        print "            \"-L" libdir "\","
+        inserted = 1
+    }
+    { print }
+    END {
+        if (!inserted) {
+            exit 7
+        }
+    }
+' "$TARGET_JSON_SRC" > "$STAGE/target.json" || {
+    echo "error: failed to patch target JSON with SimpleOS sysroot lib path"
+    exit 7
+}
 
 echo "[build] cargo +$NIGHTLY_PIN ..."
 env -i HOME="$HOME" PATH="$PATH" CARGO_HOME="$STAGE/.cargo_clean" \
