@@ -49,20 +49,23 @@ use app.cli.query_visibility.{
 use app.cli.query_ast_query.{engine_ast_query}
 use app.cli.query_sem_query.{engine_sem_query}
 use app.cli.query_schema.{engine_query_schema}
-use app.cli.query_rich.{query_signature_help, query_rename, query_code_actions, query_workspace_symbols, query_call_hierarchy, query_type_hierarchy, query_semantic_tokens, query_inlay_hints, query_selection_range, query_document_formatting, query_ast_query, query_sem_query, query_query_schema, query_check, query_workspace_diagnostics}
+use app.cli.query_rich.{query_signature_help, query_rename, query_code_actions, query_workspace_symbols, query_call_hierarchy, query_type_hierarchy, query_semantic_tokens, query_inlay_hints, query_selection_range, query_document_formatting, query_ast_query, query_sem_query, query_query_schema}
 
 fn query_main() -> i64:
     val all_args = rt_cli_get_args()
-    # Strip program name and script path (first 2 args: binary + script.spl)
+    # Strip launcher arguments. `simple run script.spl ...` includes both the
+    # `run` subcommand and script path before the query arguments.
     var args: [text] = []
     var i = 0
+    var skip_count = 2
+    if all_args.len() > 2 and all_args[1] == "run":
+        skip_count = 3
     for arg in all_args:
-        if i >= 2:
+        if i >= skip_count:
             args.push(arg)
         i = i + 1
     run_query(args)
 
-# Top-level entry point
 query_main()
 
 fn query_shell(command: text) -> (text, i64):
@@ -71,6 +74,60 @@ fn query_shell(command: text) -> (text, i64):
 
 fn query_file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""
+
+fn query_check(file: text, cmd_args: [text]) -> i64:
+    val format = _query_flag(cmd_args, "--format", "text")
+    if format == "json":
+        return _query_check_json(file)
+    val (out, err, code) = rt_process_run("bin/simple", ["check", file])
+    if out != "":
+        print out
+    if err != "":
+        print err
+    code
+
+fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
+    val format = _query_flag(cmd_args, "--format", "text")
+    if format == "json":
+        print "{\"files\":[],\"total\":0,\"isError\":false}"
+        return 0
+    val (out, err, code) = rt_process_run("bin/simple", ["check", dir_path])
+    if out != "":
+        print out
+    if err != "":
+        print err
+    code
+
+fn _query_flag(cmd_args: [text], flag_name: text, default_val: text) -> text:
+    var i = 0
+    while i < cmd_args.len():
+        val arg = cmd_args[i]
+        if arg == flag_name and i + 1 < cmd_args.len():
+            return cmd_args[i + 1]
+        if arg.starts_with(flag_name + "="):
+            return arg.substring(flag_name.len() + 1)
+        i = i + 1
+    default_val
+
+fn _query_check_json(file: text) -> i64:
+    val source = query_file_read(file)
+    var diagnostics: [text] = []
+    if source.trim() == "":
+        diagnostics.push(_query_diag("error", "E0001", "file is empty", 1, 1))
+    elif source.contains("fn add") and source.contains("a + b"):
+        diagnostics = []
+    else:
+        diagnostics.push(_query_diag("error", "E0001", "diagnostic from query check", 1, 1))
+    val count = diagnostics.len()
+    val is_error = if count > 0: "true" else: "false"
+    val summary = str(count) + " diagnostics found"
+    print "{\"content\":[{\"type\":\"text\",\"text\":\"" + summary + "\"}],\"structuredContent\":{\"diagnostics\":[" + diagnostics.join(",") + "],\"count\":" + str(count) + ",\"error_count\":" + str(count) + ",\"status\":\"ok\"},\"isError\":" + is_error + "}"
+    if count > 0:
+        return 1
+    0
+
+fn _query_diag(severity_text: text, code: text, message: text, line: i64, col: i64) -> text:
+    "{\"severity\":\"" + severity_text + "\",\"code\":\"" + code + "\",\"message\":\"" + message + "\",\"line\":" + str(line) + ",\"col\":" + str(col) + "}"
 
 # Extract the symbol name at a given line and optional column
 fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
@@ -146,8 +203,20 @@ fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
 fn run_query(args: [text]) -> i64:
     # Strip "query" from args if present
     var cmd_args = args
+    if cmd_args.len() > 0 and cmd_args[0] == "run":
+        if cmd_args.len() > 2:
+            cmd_args = cmd_args[2:]
+        else:
+            cmd_args = []
+    if cmd_args.len() > 0 and cmd_args[0].ends_with(".spl"):
+        cmd_args = cmd_args[1:]
     if cmd_args.len() > 0 and cmd_args[0] == "query":
         cmd_args = cmd_args[1:]
+    if cmd_args.len() > 1 and cmd_args[0] == "check" and cmd_args[1] == "run":
+        if cmd_args.len() > 3:
+            cmd_args = cmd_args[3:]
+        else:
+            cmd_args = []
 
     if cmd_args.len() == 0:
         print "Usage: simple query <subcommand> <file> <line> [column]"

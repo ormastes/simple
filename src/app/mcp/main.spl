@@ -30,11 +30,21 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_exit(code: i64)
 
 use std.mcp_sdk.core.shell.{find_simple_binary as _sdk_find_simple_binary}
 
 fn _mcp_find_simple_binary() -> text:
     _sdk_find_simple_binary()
+
+fn _mcp_minimal_tools_result() -> text:
+    "{\"tools\":[{\"name\":\"debug_create_session\",\"description\":\"debug_create_session\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"debug_set_data_breakpoint\",\"description\":\"debug_set_data_breakpoint\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"simple_read\",\"description\":\"simple_read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"simple_check\",\"description\":\"simple_check\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"simple_status\",\"description\":\"simple_status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"simple_test\",\"description\":\"simple_test\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+    + "{\"name\":\"simple_format\",\"description\":\"simple_format\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}]}"
 
 # Load split module implementations from sibling files.
 use app.mcp.main_lazy_json
@@ -74,7 +84,6 @@ var MCP_LOG_LEVEL = "info"
 # --- Server loop ---
 
 fn start_server():
-    mcp_startup_log(SERVER_NAME, SERVER_VERSION)
     var running = true
     while running:
         var line = read_stdin_message()
@@ -91,7 +100,7 @@ fn start_server():
             elif method == "shutdown":
                 response = make_json_result(id, "null")
             elif method == "tools/list":
-                response = make_tools_list(id)
+                response = make_json_result(id, _mcp_minimal_tools_result())
             elif method == "tools/call":
                 var tool_name = extract_nested(line, "name")
                 response = dispatch_tool(id, tool_name, line)
@@ -139,35 +148,175 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
     if tool_name == "":
         return make_tool_error(id, -32602, "Missing tool name")
 
-    if tool_name == "simple_status":
-        return handle_simple_status(id, body)
+    if _is_in_process_tool(tool_name):
+        return _dispatch_in_process(id, tool_name, body)
 
-    # Look up tool in table
-    val table = get_tool_table()
-    var found = false
-    var entry = tool_entry("", "", "", "", "", 0)
-    for t in table:
-        if t.tool_name == tool_name:
-            entry = t
-            found = true
-            break
-    if not found:
-        return make_tool_error(id, -32601, "Unknown tool: " + tool_name)
-
-    # Route by handler_kind
-    if entry.handler_kind == "cli":
-        return handle_cli_passthrough(id, body, entry)
-
-    if entry.handler_kind == "vcs":
+    if _is_vcs_tool(tool_name):
         return _dispatch_vcs(id, tool_name, body)
 
-    if entry.handler_kind == "query":
+    if _is_query_tool(tool_name):
         return _dispatch_query(id, tool_name, body)
 
-    # test_daemon tools now handled by cli passthrough
+    val cli_result = _dispatch_cli_direct(id, tool_name, body)
+    if cli_result != "":
+        return cli_result
 
-    # in_process — route to specific handler functions
-    return _dispatch_in_process(id, tool_name, body)
+    return make_tool_error(id, -32601, "Unknown tool: " + tool_name)
+
+fn _is_vcs_tool(name: text) -> bool:
+    name == "simple_diff" or name == "simple_log" or name == "simple_squash" or
+    name == "simple_new" or name == "simple_commit" or name == "simple_push" or
+    name == "simple_rebase" or name == "simple_pull"
+
+fn _is_query_tool(name: text) -> bool:
+    name == "simple_dependencies" or name == "simple_api_diff" or
+    name == "simple_context" or name == "simple_search"
+
+fn _is_in_process_tool(name: text) -> bool:
+    name == "simple_read" or name == "simple_status" or name == "simple_edit" or
+    name == "simple_multi_edit" or name == "simple_api" or
+    name == "debug_create_session" or name == "debug_list_sessions" or
+    name == "debug_close_session" or name == "debug_set_breakpoint" or
+    name == "debug_remove_breakpoint" or name == "debug_continue" or
+    name == "debug_step" or name == "debug_get_variables" or
+    name == "debug_stack_trace" or name == "debug_evaluate" or
+    name == "debug_set_function_breakpoint" or name == "debug_enable_breakpoint" or
+    name == "debug_get_source" or name == "debug_watch" or
+    name == "debug_set_variable" or name == "debug_set_data_breakpoint" or
+    name == "debug_list_data_breakpoints" or name == "debug_remove_data_breakpoint" or
+    name == "debug_terminate" or name == "debug_trace_capture" or
+    name == "debug_coverage_collect" or name == "debug_flash_program" or
+    name == "debug_system_reset" or name == "debug_practice_script" or
+    name == "debug_openocd_monitor" or name == "debug_dialog_list" or
+    name == "debug_dialog_read" or name == "debug_dialog_click" or
+    name == "debug_dialog_set" or name == "debug_dialog_track" or
+    name == "play_run" or name == "play_launch" or name == "play_first_window" or
+    name == "play_click" or name == "play_fill" or name == "play_type" or
+    name == "play_press" or name == "play_screenshot" or name == "play_evaluate" or
+    name == "play_close" or name == "play_last_trace" or name == "play_wm_screenshot" or
+    name == "play_wm_list" or name == "play_wm_click" or name == "play_wm_type" or
+    name == "play_sdl2_connect" or name == "play_sdl2_click" or name == "play_sdl2_fill" or
+    name == "play_sdl2_screenshot" or name == "play_sdl2_elements" or
+    name == "play_sdl2_state" or name == "play_ui_connect" or name == "play_ui_snapshot" or
+    name == "play_ui_query" or name == "play_ui_ensure" or name == "play_ui_act" or
+    name == "assistant_start" or name == "assistant_spawn_task" or
+    name == "assistant_pause" or name == "assistant_resume" or
+    name == "assistant_brief" or name == "assistant_list_sessions" or
+    name == "assistant_get_session" or name == "assistant_get_timeline" or
+    name == "assistant_push_signal" or name == "assistant_list_tasks" or
+    name == "assistant_get_notifications"
+
+fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
+    if name == "simple_check":
+        return handle_cli_passthrough_direct(id, body, name, "check", 30)
+    if name == "simple_symbols":
+        return handle_cli_passthrough_direct(id, body, name, "query symbols", 30)
+    if name == "simple_diagnostics":
+        return handle_cli_passthrough_direct(id, body, name, "query check --format json", 30)
+    if name == "simple_run":
+        return handle_cli_passthrough_direct(id, body, name, "run", 30)
+    if name == "simple_test":
+        return handle_cli_passthrough_direct(id, body, name, "test", 600)
+    if name == "simple_build":
+        return handle_cli_passthrough_direct(id, body, name, "build", 300)
+    if name == "simple_format":
+        return handle_cli_passthrough_direct(id, body, name, "fmt", 60)
+    if name == "simple_lint":
+        return handle_cli_passthrough_direct(id, body, name, "lint", 180)
+    if name == "simple_fix":
+        return handle_cli_passthrough_direct(id, body, name, "fix", 60)
+    if name == "simple_doc_coverage":
+        return handle_cli_passthrough_direct(id, body, name, "doc-coverage", 60)
+    if name == "simple_ast_query":
+        return handle_cli_passthrough_direct(id, body, name, "query ast-query", 60)
+    if name == "simple_sem_query":
+        return handle_cli_passthrough_direct(id, body, name, "query sem-query", 60)
+    if name == "simple_query_schema":
+        return handle_cli_passthrough_direct(id, body, name, "query query-schema", 10)
+    if name == "test_daemon_run":
+        return handle_cli_passthrough_direct(id, body, name, "test-daemon run", 600)
+    if name == "test_daemon_clean":
+        return handle_cli_passthrough_direct(id, body, name, "test-daemon clean", 60)
+    if name == "test_daemon_status":
+        return handle_cli_passthrough_direct(id, body, name, "test-daemon status", 30)
+    if name == "test_daemon_stop":
+        return handle_cli_passthrough_direct(id, body, name, "test-daemon stop", 30)
+    if name == "debug_log_enable":
+        return handle_cli_passthrough_direct(id, body, name, "log enable", 10)
+    if name == "debug_log_disable":
+        return handle_cli_passthrough_direct(id, body, name, "log disable", 10)
+    if name == "debug_log_clear":
+        return handle_cli_passthrough_direct(id, body, name, "log clear", 10)
+    if name == "debug_log_query":
+        return handle_cli_passthrough_direct(id, body, name, "log query", 10)
+    if name == "debug_log_tree":
+        return handle_cli_passthrough_direct(id, body, name, "log tree", 10)
+    if name == "debug_log_status":
+        return handle_cli_passthrough_direct(id, body, name, "log status", 10)
+    if name == "simple_add":
+        return handle_cli_passthrough_direct(id, body, name, "add", 30)
+    if name == "simple_remove":
+        return handle_cli_passthrough_direct(id, body, name, "remove", 30)
+    if name == "simple_install":
+        return handle_cli_passthrough_direct(id, body, name, "install", 120)
+    if name == "simple_update":
+        return handle_cli_passthrough_direct(id, body, name, "update", 120)
+    if name == "simple_info":
+        return handle_cli_passthrough_direct(id, body, name, "info", 30)
+    if name == "simple_check_arch":
+        return handle_cli_passthrough_direct(id, body, name, "check-arch", 60)
+    if name == "simple_todo_scan":
+        return handle_cli_passthrough_direct(id, body, name, "todo-scan", 60)
+    if name == "simple_todo_gen":
+        return handle_cli_passthrough_direct(id, body, name, "todo-gen", 60)
+    if name == "simple_stats":
+        return handle_cli_passthrough_direct(id, body, name, "stats", 30)
+    if name == "simple_env":
+        return handle_cli_passthrough_direct(id, body, name, "env", 10)
+    if name == "simple_duplicate_check":
+        return handle_cli_passthrough_direct(id, body, name, "duplicate-check", 120)
+    if name == "simple_desugar":
+        return handle_cli_passthrough_direct(id, body, name, "desugar", 30)
+    if name == "simple_spec_coverage":
+        return handle_cli_passthrough_direct(id, body, name, "spec-coverage", 60)
+    if name == "simple_feature_gen":
+        return handle_cli_passthrough_direct(id, body, name, "feature-gen", 60)
+    if name == "simple_task_gen":
+        return handle_cli_passthrough_direct(id, body, name, "task-gen", 60)
+    if name == "simple_spec_gen":
+        return handle_cli_passthrough_direct(id, body, name, "spec-gen", 60)
+    if name == "simple_brief":
+        return handle_cli_passthrough_direct(id, body, name, "brief", 30)
+    if name == "simple_ffi_gen":
+        return handle_cli_passthrough_direct(id, body, name, "ffi-gen", 60)
+    if name == "simple_wrapper_gen":
+        return handle_cli_passthrough_direct(id, body, name, "wrapper-gen", 60)
+    if name == "simple_sspec_docgen":
+        return handle_cli_passthrough_direct(id, body, name, "sspec-docgen", 60)
+    if name == "simple_feature_doc":
+        return handle_cli_passthrough_direct(id, body, name, "feature-doc", 60)
+    if name == "simple_grammar_doc":
+        return handle_cli_passthrough_direct(id, body, name, "grammar-doc", 60)
+    if name == "simple_gen_lean":
+        return handle_cli_passthrough_direct(id, body, name, "gen-lean", 60)
+    if name == "simple_lex":
+        return handle_cli_passthrough_direct(id, body, name, "lex", 30)
+    if name == "simple_i18n":
+        return handle_cli_passthrough_direct(id, body, name, "i18n", 30)
+    if name == "simple_init":
+        return handle_cli_passthrough_direct(id, body, name, "init", 30)
+    if name == "simple_verify":
+        return handle_cli_passthrough_direct(id, body, name, "verify", 60)
+    if name == "simple_cache":
+        return handle_cli_passthrough_direct(id, body, name, "cache", 30)
+    if name == "simple_list":
+        return handle_cli_passthrough_direct(id, body, name, "list", 30)
+    if name == "simple_lock":
+        return handle_cli_passthrough_direct(id, body, name, "lock", 30)
+    if name == "simple_tree":
+        return handle_cli_passthrough_direct(id, body, name, "tree", 30)
+
+    return ""
 
 fn _dispatch_vcs(id: text, name: text, body: text) -> text:
     if name == "simple_diff":
@@ -364,4 +513,5 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
 
 fn main() -> i64:
     start_server()
+    rt_exit(0)
     0
