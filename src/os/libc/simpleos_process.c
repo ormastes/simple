@@ -1,7 +1,8 @@
 /*
- * SimpleOS Libc Shim — Process stubs, environment, sleep, sysconf
+ * SimpleOS Libc Shim — Environment, identity, sleep, sysconf
  *
- * Process creation (fork/exec) returns ENOSYS — SimpleOS is single-process.
+ * Process creation lives in simpleos_fork.c so C apps link one canonical
+ * fork/exec/wait implementation instead of shadowing it with stubs here.
  * Environment variables are stored in a static table (256 entries max).
  * Sleep delegates to syscall 51 (nanosleep).
  */
@@ -84,25 +85,8 @@ int unsetenv(const char *name) {
 }
 
 /* ====================================================================
- * 2. Process control stubs
+ * 2. Process identity
  * ==================================================================== */
-
-pid_t fork(void) {
-    errno = ENOSYS;
-    return -1;
-}
-
-int execve(const char *path, char *const argv[], char *const envp[]) {
-    (void)path; (void)argv; (void)envp;
-    errno = ENOSYS;
-    return -1;
-}
-
-int execvp(const char *file, char *const argv[]) {
-    (void)file; (void)argv;
-    errno = ENOSYS;
-    return -1;
-}
 
 pid_t getppid(void) {
     return (pid_t)simpleos_syscall(4, 1, 0, 0, 0, 0);
@@ -112,12 +96,6 @@ uid_t getuid(void)  { return 0; }
 gid_t getgid(void)  { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getegid(void) { return 0; }
-
-int system(const char *cmd) {
-    (void)cmd;
-    errno = ENOSYS;
-    return -1;
-}
 
 /* ====================================================================
  * 3. Sleep

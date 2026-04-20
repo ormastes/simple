@@ -364,28 +364,6 @@ int ftruncate(int fd, off_t length) {
     return 0;
 }
 
-int dup(int oldfd) {
-    /* No kernel dup syscall yet */
-    (void)oldfd;
-    errno = ENOSYS;
-    return -1;
-}
-
-int dup2(int oldfd, int newfd) {
-    /* No kernel dup2 syscall yet */
-    (void)oldfd;
-    (void)newfd;
-    errno = ENOSYS;
-    return -1;
-}
-
-int pipe(int pipefd[2]) {
-    /* No kernel pipe syscall yet */
-    (void)pipefd;
-    errno = ENOSYS;
-    return -1;
-}
-
 int fcntl(int fd, int cmd, ...) {
     /* No kernel fcntl syscall yet */
     (void)fd;

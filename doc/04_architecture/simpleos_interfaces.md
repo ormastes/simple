@@ -265,6 +265,26 @@ float  scalbnf(float x, int n);
 Full header tree: `src/os/libc/include/{stdio,stdlib,string,stdint,stddef,
 stdbool,stdarg,signal,setjmp,pthread,math,limits,locale,fcntl,errno,
 dirent,dlfcn,assert,wchar,time,unistd}.h` plus `sys/` subdirectory.
+`sys/wait.h` is part of the C process ABI and exposes `wait`, `waitpid`,
+`WNOHANG`, and the standard `WIF*`/`W*STATUS` status helpers.
+
+### libc syscall numbers
+
+The C libc process/fd-composition wrappers use the normal `simpleos_syscall`
+trampoline. Reserved IDs are:
+
+| libc API | syscall |
+|---|---:|
+| `fork` | 57 |
+| `execve` | 59 |
+| `waitpid` | 61 |
+| `pipe` / `pipe2` | 62 |
+| `dup2` / `dup3` | 63 |
+| `dup` | 64 |
+
+These IDs intentionally avoid existing time (`50`/`51`) and debug-write
+(`60`) syscalls. Until the scheduler/FD-table implementation lands, the
+kernel dispatcher returns `-ENOSYS`; libc converts that to `errno=ENOSYS`.
 
 **Consumers:** `src/compiler_rust/`, LLVM cross-toolchain, any userspace ELF
 compiled for `x86_64-unknown-simpleos`.

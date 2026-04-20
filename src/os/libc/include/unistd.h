@@ -38,7 +38,9 @@ off_t   lseek(int fd, off_t offset, int whence);
 int     ftruncate(int fd, off_t length);
 int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
+int     dup3(int oldfd, int newfd, int flags);
 int     pipe(int pipefd[2]);
+int     pipe2(int pipefd[2], int flags);
 
 /* File management */
 int  access(const char *path, int mode);
@@ -53,6 +55,7 @@ int   chdir(const char *path);
 /* Process */
 pid_t fork(void);
 int   execve(const char *path, char *const argv[], char *const envp[]);
+int   execv(const char *path, char *const argv[]);
 int   execvp(const char *file, char *const argv[]);
 pid_t getpid(void);
 pid_t getppid(void);
