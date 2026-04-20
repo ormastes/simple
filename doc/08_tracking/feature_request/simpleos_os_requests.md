@@ -62,6 +62,9 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [ ] Wire automatic AP startup into the boot lane after APIC/IDT ordering is
         validated; `x86_start_registered_aps()` is available for the explicit
         bring-up step.
+  - [ ] Prove at least one AP reaches `spl_x86_mark_current_ap_online()` from a
+        boot-lane or QEMU diagnostic without faulting or regressing BSP-only
+        boot.
   - [x] Domain kinds distinguish `Smt`, `Cache`, and `Numa` where available.
   - [x] Rebalance and wake-affine placement prefer local domains before wider
         domains.
@@ -74,7 +77,8 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   CPUID shape probing, ACPI MADT APIC-ID enumeration, per-CPU APIC metadata,
   AP startup/online state hooks, and the low-memory x86_64 AP trampoline are
   implemented. Automatic AP startup from the boot lane remains gated on APIC/IDT
-  ordering validation.
+  ordering validation and a live proof that an AP reaches the AP-side online
+  hook.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
@@ -228,3 +232,38 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Notes:** During AP trampoline verification, full native-build progressed
   past C/assembly boot-object checks and parser cleanup, then failed only on
   `wm_entry.spl: timeout (60s)`.
+
+### FR-SOS-024 — Complete syscall 13 direct user-process handoff
+
+- **Filed-on:** 2026-04-20
+- **Filed-by:** Codex scheduler/process follow-up
+- **Target:** simpleos-os process lifecycle
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  Finish the direct syscall 13 app-launch path so a mounted app image can be
+  built, mapped, registered as a scheduler-owned user task, enqueued from the
+  syscall/trap path, and entered through the x86_64 user return path. The
+  resident-manifest launcher fallback must remain available for manifest-only
+  apps and unsupported architectures, but should not mask direct-handoff
+  regressions for process-backed apps.
+- **Acceptance-criteria:**
+  - [ ] syscall 13 can launch `/sys/apps/browser_demo` through the direct
+        process-backed path without returning `-12`.
+  - [ ] The runqueue handoff from syscall/trap context reaches the scheduler
+        ready queue without allocator churn, deadlock, or loss of the current
+        fallback launcher behavior.
+  - [ ] The x86_64 trap-return or scheduler path can switch into the new
+        task's `user_context` and return to ring 3.
+  - [ ] System coverage exercises both the direct process-backed path and the
+        resident-manifest fallback path.
+  - [ ] The live desktop disk lane shows no `EXCEPTION`, `FAULT @`, `cr2=`,
+        `cr3=`, `heap exhausted`, or `PANIC` markers while launching the app.
+- **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
+- **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-issue:** none
+- **Notes:** Current diagnostics show syscall 13 can validate and build the
+  user process image, map/load it, create the TCB, and register capabilities.
+  The path is still gated by `[syscall13] user image handoff gated; scheduler
+  enqueue pending`, so the next remaining blocker is the runqueue/trap-return
+  handoff rather than image construction.
