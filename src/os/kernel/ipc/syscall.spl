@@ -23,13 +23,14 @@ use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
 use os.kernel.loader.disk_launch_manifest.{resolve_disk_launch_entry}
 use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
-use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_NOTIFICATION, RES_IRQ_ROUTE}
@@ -39,7 +40,7 @@ use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
 use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_dup, posix_dup2}
-use os.posix.fd_table.{fd_exec_cleanup, fd_prepare_fork, fd_release_on_process_exit}
+use os.posix.fd_table.{fd_exec_cleanup, fd_prepare_fork, fd_release_on_process_exit, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_poll_ready, fd_poll_notification, POLLERR, POLLHUP, POLLNVAL}
 extern fn serial_println(msg: text)
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -459,11 +460,15 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 64:    # Dup
             _handle_dup(args)
         case 65:    # DlOpen
-            SyscallResult(value: -38)
+            _handle_dlopen(args)
         case 66:    # DlSym
-            SyscallResult(value: -38)
+            _handle_dlsym(args)
         case 67:    # DlClose
-            SyscallResult(value: -38)
+            _handle_dlclose(args)
+        case 68:    # Poll
+            _handle_poll(args, scheduler)
+        case 69:    # Fcntl
+            _handle_fcntl(args)
 
         # -- Privilege Control (G11) -----------------------------------------
         case 98:    # sys_privctl
@@ -654,20 +659,19 @@ fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """
     val any_child = args.arg0 == 0xFFFFFFFFFFFFFFFF
     val selector = if any_child: TaskId(id: 0) else: TaskId(id: args.arg0)
+    val nohang = (args.arg2 & 1) != 0
     var sched = scheduler
     val current = sched.get_current()
-    val result = sched.wait_for(current, selector)
-    if result == -11:
+    val result = sched.wait_for_collect(current, selector, not nohang)
+    if result.error == -11:
         return SyscallResult(value: 0)
-    if result < 0:
-        return SyscallResult(value: result.to_i64())
+    if result.error < 0:
+        return SyscallResult(value: result.error.to_i64())
 
-    val status_write = _write_wait_status(args.arg1, result)
+    val status_write = _write_wait_status(args.arg1, result.status)
     if status_write < 0:
         return SyscallResult(value: status_write)
-    if any_child:
-        return SyscallResult(value: result.to_i64())
-    SyscallResult(value: args.arg0.to_i64())
+    SyscallResult(value: result.pid.to_i64())
 
 fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
     """Create a POSIX pipe and copy fd[0]/fd[1] to the user array."""
@@ -686,6 +690,155 @@ fn _handle_dup2(args: SyscallArgs) -> SyscallResult:
 fn _handle_dup(args: SyscallArgs) -> SyscallResult:
     """Duplicate oldfd to the lowest available descriptor."""
     SyscallResult(value: posix_dup(args.arg0 as i32) as i64)
+
+fn _handle_dlopen(args: SyscallArgs) -> SyscallResult:
+    """Load a path-backed dynamic object and return a kernel registry handle.
+
+    ABI:
+      arg0: path pointer
+      arg1: path length
+      arg2: mode flags (reserved)
+    """
+    val _mode = args.arg2
+    val path_result = _copy_user_text(args.arg0, args.arg1)
+    if path_result.is_err():
+        return SyscallResult(value: -14)
+    val path = path_result.unwrap()
+    val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
+    if bytes_result.is_err():
+        return SyscallResult(value: -2)
+    SyscallResult(value: dylib_registry_register(path, bytes_result.unwrap()))
+
+fn _handle_dlsym(args: SyscallArgs) -> SyscallResult:
+    """Resolve a symbol from a kernel dynamic-library handle.
+
+    ABI:
+      arg0: handle returned by DlOpen
+      arg1: symbol-name pointer
+      arg2: symbol-name length
+    """
+    val name_result = _copy_user_text(args.arg1, args.arg2)
+    if name_result.is_err():
+        return SyscallResult(value: -14)
+    SyscallResult(value: dylib_registry_symbol(args.arg0 as i64, name_result.unwrap()))
+
+fn _handle_dlclose(args: SyscallArgs) -> SyscallResult:
+    """Close one reference to a kernel dynamic-library handle."""
+    SyscallResult(value: dylib_registry_close(args.arg0 as i64))
+
+fn _handle_poll(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """poll(2)-compatible readiness scan over user pollfd entries.
+
+    ABI:
+      arg0: struct pollfd* (fd: i32, events: i16, revents: i16)
+      arg1: nfds
+      arg2: timeout_ms (-1 = block on fd notifications, 0 = nonblocking,
+            >0 = bounded timeout; timer-backed wakeup is pending)
+    """
+    val fds_ptr = args.arg0
+    val nfds = args.arg1
+    if nfds == 0:
+        return SyscallResult(value: 0)
+    if fds_ptr == 0:
+        return SyscallResult(value: -14)
+    if nfds > 64:
+        return SyscallResult(value: -22)
+    val bytes = nfds * 8
+    if fds_ptr + bytes < fds_ptr:
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(fds_ptr):
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(fds_ptr + bytes - 1):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(fds_ptr, bytes):
+        return SyscallResult(value: -14)
+
+    var ready: i64 = 0
+    var i: u64 = 0
+    while i < nfds:
+        val entry = fds_ptr + i * 8
+        val fd = mmio_read32(entry) as i32
+        val events = mmio_read16(entry + 4) as i16
+        var revents: i16 = 0
+        if fd >= 0:
+            revents = fd_poll_ready(fd, events)
+        mmio_write16(entry + 6, revents as u16)
+        if revents != 0:
+            ready = ready + 1
+        i = i + 1
+    if ready > 0:
+        return SyscallResult(value: ready)
+    if args.arg2 == 0:
+        return SyscallResult(value: 0)
+
+    var ids: [u64] = []
+    i = 0
+    while i < nfds and ids.len() < 4:
+        val entry = fds_ptr + i * 8
+        val fd = mmio_read32(entry) as i32
+        val events = mmio_read16(entry + 4) as i16
+        if fd >= 0:
+            val notif = fd_poll_notification(fd, events)
+            if notif != 0:
+                ids.push(notif)
+        i = i + 1
+
+    if ids.len() == 0:
+        return SyscallResult(value: 0)
+
+    var sched = scheduler
+    val current = sched.get_current()
+    val task_id = current.id
+    val count = ids.len()
+    val result = notification_wait_any(g_notification_table, ids, count, task_id)
+    if result != 0:
+        ready = 0
+        i = 0
+        while i < nfds:
+            val entry = fds_ptr + i * 8
+            val fd = mmio_read32(entry) as i32
+            val events = mmio_read16(entry + 4) as i16
+            var revents: i16 = 0
+            if fd >= 0:
+                revents = fd_poll_ready(fd, events)
+            mmio_write16(entry + 6, revents as u16)
+            if revents != 0:
+                ready = ready + 1
+            i = i + 1
+        return SyscallResult(value: ready)
+
+    if args.arg2 == 0xFFFFFFFFFFFFFFFF:
+        notification_register_multi_waiter(g_notification_table, ids, count, task_id)
+        sched.block_task(current, BlockReason.Notification(id: ids[0]))
+    SyscallResult(value: 0)
+
+fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
+    """fcntl subset for descriptor flags and nonblocking status flags."""
+    val fd = args.arg0 as i32
+    val cmd = args.arg1 as i32
+    val arg = args.arg2
+    val F_DUPFD: i32 = 0
+    val F_GETFD: i32 = 1
+    val F_SETFD: i32 = 2
+    val F_GETFL: i32 = 3
+    val F_SETFL: i32 = 4
+    val F_DUPFD_CLOEXEC: i32 = 1030
+
+    if cmd == F_DUPFD:
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, false) as i64)
+    if cmd == F_DUPFD_CLOEXEC:
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, true) as i64)
+    if not fd_is_valid(fd):
+        return SyscallResult(value: -9)
+    if cmd == F_GETFD:
+        return SyscallResult(value: if fd_get_cloexec(fd): 1 else: 0)
+    if cmd == F_SETFD:
+        return SyscallResult(value: fd_set_cloexec(fd, (arg & 1) != 0) as i64)
+    if cmd == F_GETFL:
+        return SyscallResult(value: fd_get_status_flags(fd) as i64)
+    if cmd == F_SETFL:
+        return SyscallResult(value: fd_set_status_flags(fd, arg as u32) as i64)
+    SyscallResult(value: -22)
 
 fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
     """Return the current task's ID."""
@@ -846,10 +999,7 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
         log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return -2
 
-    serial_println("[syscall13] vfs bytes ok; builtin handoff probe")
-    serial_println("[syscall13] vfs bytes ok; exec handoff deferred")
-    return -38
-
+    serial_println("[syscall13] vfs bytes ok; exec handoff active")
     val disk_entry_after_vfs = resolve_disk_launch_entry(path)
     if disk_entry_after_vfs != nil:
         val priority = _u64_to_priority(priority_raw)

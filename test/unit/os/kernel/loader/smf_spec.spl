@@ -6,7 +6,7 @@
 Verifies magic check + header parse of the minimal SMF loader.
 """
 use std.spec.*
-use os.kernel.loader.smf.{smf_check_magic, smf_has_header, smf_header_offset, smf_parse_header, SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3, SMF_HEADER_TRAILER_SIZE}
+use os.kernel.loader.smf.{smf_check_magic, smf_has_header, smf_header_offset, smf_parse_header, smf_extract_executable_stub, SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3, SMF_HEADER_TRAILER_SIZE}
 
 fn _empty() -> [u8]:
     """Zero bytes — too short for any SMF."""
@@ -51,6 +51,35 @@ fn _trailer_magic() -> [u8]:
     b.push(0u8)
     b.push(0u8)
     while b.len() < 5 + (SMF_HEADER_TRAILER_SIZE as i32):
+        b.push(0u8)
+    b
+
+fn _elf_stub_smf() -> [u8]:
+    """SMF envelope whose executable stub starts with ELF magic."""
+    var b: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8, 0u8]
+    val stub_len = b.len()
+    b.push(SMF64_MAGIC_0)
+    b.push(SMF64_MAGIC_1)
+    b.push(SMF64_MAGIC_2)
+    b.push(SMF64_MAGIC_3)
+    var i = 4
+    while i < 44:
+        b.push(0u8)
+        i = i + 1
+    b.push(0u8)
+    i = 45
+    while i < 52:
+        b.push(0u8)
+        i = i + 1
+    b.push(stub_len as u8)
+    b.push(0u8)
+    b.push(0u8)
+    b.push(0u8)
+    b.push(stub_len as u8)
+    b.push(0u8)
+    b.push(0u8)
+    b.push(0u8)
+    while b.len() < stub_len + (SMF_HEADER_TRAILER_SIZE as i32):
         b.push(0u8)
     b
 
@@ -101,3 +130,20 @@ describe "smf_parse_header":
         expect SMF64_MAGIC_1.to_equal(77u8)
         expect SMF64_MAGIC_2.to_equal(70u8)
         expect SMF64_MAGIC_3.to_equal(0u8)
+
+describe "smf_extract_executable_stub":
+    """Executable-stub extraction for SMF-as-package loading."""
+
+    it "extracts an ELF executable stub from a trailer SMF":
+        val stub = smf_extract_executable_stub(_elf_stub_smf())
+        expect stub.is_ok().to_equal(true)
+        val bytes = stub.unwrap()
+        expect bytes.len().to_equal(8)
+        expect bytes[0].to_equal(0x7Fu8)
+        expect bytes[1].to_equal(0x45u8)
+        expect bytes[2].to_equal(0x4Cu8)
+        expect bytes[3].to_equal(0x46u8)
+
+    it "rejects SMF payloads that do not carry an ELF stub":
+        val stub = smf_extract_executable_stub(_trailer_magic())
+        expect stub.is_err().to_equal(true)

@@ -9,7 +9,7 @@
  *   34  = Stat         35  = Mkdir         36  = Readdir
  *   39  = Unlink       43  = Ftruncate     44  = Rename
  *   45  = Rmdir        46  = Lseek         47  = Getcwd
- *   48  = Chdir
+ *   48  = Chdir        69  = Fcntl
  */
 
 #include "include/stdio.h"
@@ -20,6 +20,7 @@
 #include "include/string.h"
 #include "include/stdlib.h"
 #include "include/unistd.h"
+#include "include/stdarg.h"
 
 /* ====================================================================
  * Syscall interface
@@ -365,11 +366,18 @@ int ftruncate(int fd, off_t length) {
 }
 
 int fcntl(int fd, int cmd, ...) {
-    /* No kernel fcntl syscall yet */
-    (void)fd;
-    (void)cmd;
-    errno = ENOSYS;
-    return -1;
+    int64_t arg = 0;
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC ||
+        cmd == F_SETFD || cmd == F_SETFL) {
+        va_list ap;
+        va_start(ap, cmd);
+        arg = (int64_t)va_arg(ap, int);
+        va_end(ap);
+    }
+
+    int64_t r = simpleos_syscall(69, fd, cmd, arg, 0, 0);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (int)r;
 }
 
 int access(const char *path, int mode) {

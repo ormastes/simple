@@ -4,12 +4,12 @@
 # Magic bytes: [83, 77, 70, 0]  ("SMF\0") at bytes[len-128..len-124].
 # Entry-point is a u64 LE at offset 44 within that 128-byte trailer.
 #
-# Wave 2 implementation returns -ENOSYS; real layout parsing is deferred.
-# TODO(mdsoc+): real SMF layout lookup — parse 128-byte trailer at EOF-128,
-#               read entry_point u64 at trailer[44], map code section via
-#               vmm_mmap(space, 0, section_size, VMA_READ|VMA_EXEC, VMA_FILE, ...).
+# SMF executable support is envelope-first: if the package carries a native
+# executable stub, the kernel delegates that embedded image to the ELF loader.
+# Native SMF code-section mapping remains a later stage.
 
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.loader.elf64.{elf64_load}
 
 # SMF magic "SMF\0"
 val SMF64_MAGIC_0: u8 = 83    # 'S'
@@ -115,14 +115,49 @@ fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
         smf_data_offset: smf_data_offset
     ))
 
-fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:
-    """Map an SMF image into `space` and return its entry-point.
+fn _smf_has_elf_magic(bytes: [u8]) -> bool:
+    if bytes.len() < 4:
+        return false
+    bytes[0] == 0x7F.to_u8() and bytes[1] == 0x45.to_u8() and bytes[2] == 0x4C.to_u8() and bytes[3] == 0x46.to_u8()
 
-    Wave 2 stub: returns -ENOSYS.
-    TODO(mdsoc+): real SMF layout lookup — parse trailer, map code section,
-                  return entry_point once vmm copy_to_user / VMA_FILE infra lands.
+fn _smf_copy_range(bytes: [u8], off: i64, size: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        out.push(bytes[off + i])
+        i = i + 1
+    out
+
+fn smf_extract_executable_stub(bytes: [u8]) -> Result<[u8], text>:
+    """Return the embedded native executable stub from an SMF envelope.
+
+    Current SimpleOS support intentionally treats SMF as a package envelope
+    around a normal executable. Only ELF stubs are accepted; native SMF
+    code-section mapping remains owned by a later mapper implementation.
     """
     val hdr_opt = smf_parse_header(bytes)
     if hdr_opt == nil:
+        return Err("invalid SMF header")
+    val hdr = hdr_opt.unwrap()
+    if hdr.stub_size <= 0:
+        return Err("SMF has no executable stub")
+    if hdr.stub_size > hdr.header_offset:
+        return Err("SMF executable stub exceeds package payload")
+    val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
+    if not _smf_has_elf_magic(stub):
+        return Err("SMF executable stub is not ELF")
+    Ok(stub)
+
+fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:
+    """Map an SMF image into `space` and return its entry-point.
+
+    This stage supports SMF packages that carry an ELF executable stub. Native
+    SMF code-section mapping still returns -ENOSYS until the shared-object
+    mapper lands.
+    """
+    if not smf_has_header(bytes):
         return -8   # -ENOEXEC
-    -38             # -ENOSYS — real load deferred to Wave 3
+    val stub = smf_extract_executable_stub(bytes)
+    if stub.is_err():
+        return -38  # -ENOSYS — native SMF mapping deferred
+    elf64_load(stub.unwrap(), space)

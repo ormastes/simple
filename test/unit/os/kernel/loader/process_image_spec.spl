@@ -64,6 +64,24 @@ fn make_x86_64_exec() -> [u8]:
     bytes.push(0xC3.to_u8())
     bytes
 
+fn make_smf_wrapped_x86_64_exec() -> [u8]:
+    var b = make_x86_64_exec()
+    val stub_len = b.len()
+    b.push(83u8)
+    b.push(77u8)
+    b.push(70u8)
+    b.push(0u8)
+    var i = 4
+    while i < 44:
+        b.push(0u8)
+        i = i + 1
+    b = push_u64_le(b, 0x400000)
+    b = push_u32_le(b, stub_len)
+    b = push_u32_le(b, stub_len)
+    while b.len() < stub_len + 128:
+        b.push(0u8)
+    b
+
 describe "process image builder":
     it "builds an rv64 user image from executable bytes":
         val bytes = resolve_executable_bytes("/sys/services/vfs", Architecture.Riscv64).unwrap()
@@ -92,4 +110,16 @@ describe "process image builder":
         val built = image.unwrap()
         expect(built.entry).to_equal(0x400000)
         expect(built.stack_top).to_equal(X86_64_USER_STACK_TOP)
+        _clear_synthetic_initramfs_for_test()
+
+    it "builds an x86_64 user image from an SMF-wrapped executable stub":
+        _clear_synthetic_initramfs_for_test()
+        _set_synthetic_initramfs_for_test("/usr/bin/smf_x86_exec_probe", make_smf_wrapped_x86_64_exec())
+        val bytes = resolve_executable_bytes("/usr/bin/smf_x86_exec_probe", Architecture.X86_64).unwrap()
+        val image = build_user_process_image("/usr/bin/smf_x86_exec_probe", bytes, Architecture.X86_64)
+        expect(image.is_ok()).to_equal(true)
+        val built = image.unwrap()
+        expect(built.entry).to_equal(0x400000)
+        expect(built.stack_top).to_equal(X86_64_USER_STACK_TOP)
+        expect(built.file_bytes[0]).to_equal(0x7Fu8)
         _clear_synthetic_initramfs_for_test()

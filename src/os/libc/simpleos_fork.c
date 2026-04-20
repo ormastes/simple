@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 
 extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
                                 int64_t a2, int64_t a3, int64_t a4);
@@ -26,10 +27,15 @@ pid_t fork(void) {
 }
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
+    if (!path) {
+        errno = EFAULT;
+        return -1;
+    }
+    (void)argv;
+    (void)envp;
     long ret = (long)simpleos_syscall(SYS_EXEC,
         (long)(uintptr_t)path,
-        (long)(uintptr_t)argv,
-        (long)(uintptr_t)envp, 0, 0);
+        (long)strlen(path), 0, 0, 0);
     if (ret < 0) errno = (int)(-ret);
     else errno = EIO;
     return -1;

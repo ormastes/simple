@@ -1,0 +1,149 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Kernel Dylib Registry — path-backed dynamic-library handle table
+#
+# This slice only owns registry bookkeeping. It validates byte blobs as either
+# ELF64 or SMF-with-ELF-stub, assigns stable positive handles, and resolves the
+# entry symbols `_start` and `main` to the stored entry-point address.
+
+use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOEXEC}
+use os.kernel.loader.elf64.{elf64_parse_header}
+use os.kernel.loader.smf.{smf_extract_executable_stub, smf_has_header}
+
+val DYLIB_ENTRY_START: text = "_start"
+val DYLIB_ENTRY_MAIN: text = "main"
+
+struct DylibRegistryEntry:
+    handle: i64
+    path: text
+    bytes: [u8]
+    entry_point: i64
+    refcount: u32
+
+var dylib_registry_entries: [DylibRegistryEntry] = []
+var dylib_registry_next_handle: i64 = 1
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _find_entry_by_path(path: text) -> i64:
+    var i = 0
+    while i < dylib_registry_entries.len():
+        if dylib_registry_entries[i].path == path:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _find_entry_by_handle(handle: i64) -> i64:
+    var i = 0
+    while i < dylib_registry_entries.len():
+        if dylib_registry_entries[i].handle == handle:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _validate_library_entry_point(bytes: [u8]) -> i64?:
+    val elf = elf64_parse_header(bytes)
+    if elf != nil:
+        return Some(elf.e_entry)
+
+    if smf_has_header(bytes):
+        val stub = smf_extract_executable_stub(bytes)
+        if stub.is_err():
+            return nil
+        val stub_elf = elf64_parse_header(stub.unwrap())
+        if stub_elf == nil:
+            return nil
+        return Some(stub_elf.e_entry)
+
+    nil
+
+fn _allocate_handle() -> i64:
+    val handle = dylib_registry_next_handle
+    dylib_registry_next_handle = dylib_registry_next_handle + 1
+    handle
+
+fn _remove_entry_at(index: i64):
+    var next_entries: [DylibRegistryEntry] = []
+    var i = 0
+    while i < dylib_registry_entries.len():
+        if i as i64 != index:
+            next_entries = next_entries + [dylib_registry_entries[i]]
+        i = i + 1
+    dylib_registry_entries = next_entries
+
+fn dylib_registry_reset_for_test():
+    dylib_registry_entries = []
+    dylib_registry_next_handle = 1
+
+fn dylib_registry_register(path: text, bytes: [u8]) -> i64:
+    """Register or retain a path-backed dynamic library."""
+    if path == "":
+        return 0 - EINVAL as i64
+
+    val entry_point_opt = _validate_library_entry_point(bytes)
+    if entry_point_opt == nil:
+        return 0 - ENOEXEC as i64
+    val entry_point = entry_point_opt
+
+    val existing_idx = _find_entry_by_path(path)
+    if existing_idx >= 0:
+        val existing = dylib_registry_entries[existing_idx]
+        if not _bytes_equal(existing.bytes, bytes):
+            return 0 - EINVAL as i64
+        dylib_registry_entries[existing_idx].refcount = existing.refcount + 1
+        return existing.handle
+
+    val handle = _allocate_handle()
+    dylib_registry_entries = dylib_registry_entries + [DylibRegistryEntry(
+        handle: handle,
+        path: path,
+        bytes: bytes,
+        entry_point: entry_point,
+        refcount: 1
+    )]
+    handle
+
+fn dylib_registry_open(path: text) -> i64:
+    """Retain an already-registered library by path."""
+    if path == "":
+        return 0 - EINVAL as i64
+    val idx = _find_entry_by_path(path)
+    if idx < 0:
+        return 0 - ENOENT as i64
+    dylib_registry_entries[idx].refcount = dylib_registry_entries[idx].refcount + 1
+    dylib_registry_entries[idx].handle
+
+fn dylib_registry_close(handle: i64) -> i64:
+    """Drop one registry reference and retire the entry when the count hits 0."""
+    if handle <= 0:
+        return 0 - EBADF as i64
+    val idx = _find_entry_by_handle(handle)
+    if idx < 0:
+        return 0 - EBADF as i64
+
+    val entry = dylib_registry_entries[idx]
+    if entry.refcount > 1:
+        dylib_registry_entries[idx].refcount = entry.refcount - 1
+        return 0
+
+    _remove_entry_at(idx)
+    0
+
+fn dylib_registry_symbol(handle: i64, name: text) -> i64:
+    """Resolve the minimal entry-symbol set for a loaded library."""
+    if handle <= 0:
+        return 0 - EBADF as i64
+    val idx = _find_entry_by_handle(handle)
+    if idx < 0:
+        return 0 - EBADF as i64
+
+    if name == DYLIB_ENTRY_START or name == DYLIB_ENTRY_MAIN:
+        return dylib_registry_entries[idx].entry_point
+    0 - ENOENT as i64

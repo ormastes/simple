@@ -195,6 +195,61 @@ describe "syscall_handler":
                 _: false
             expect(is_blocked).to_equal(true)
 
+    it "waitpid WNOHANG leaves live child and parent runnable":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child = scheduler.clone_task(parent)
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 61,
+                arg0: child.id,
+                arg1: 0,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(0)
+        val parent_tcb = scheduler.get_task(parent)
+        if parent_tcb != nil:
+            val task = parent_tcb
+            val is_blocked = match task.state:
+                TaskState.Blocked(reason): true
+                _: false
+            expect(is_blocked).to_equal(false)
+        expect(scheduler.get_task(child)).to_be_nil.to_equal(false)
+
+    it "waitpid any child returns the reaped child pid":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child = scheduler.clone_task(parent)
+        scheduler.schedule()
+        scheduler.exit_task(9)
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 61,
+                arg0: 0xFFFFFFFFFFFFFFFF,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(child.id.to_i64())
+        expect(scheduler.get_task(child)).to_be_nil
+
     it "waitpid syscall rejects missing children instead of returning ENOSYS":
         var scheduler = Scheduler.new()
         scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())

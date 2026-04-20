@@ -229,6 +229,26 @@ fn fd_dup(old_fd: i32) -> i32:
     _fd_refresh_object_mirrors(obj)
     new_fd
 
+fn fd_dup_from(old_fd: i32, min_fd: i32, cloexec: bool) -> i32:
+    """Duplicate old_fd to the lowest free fd >= min_fd."""
+    if not fd_is_valid(old_fd):
+        return 0 - EBADF
+    if min_fd < 0 or (min_fd as u64) >= MAX_FDS:
+        return 0 - EINVAL
+    var new_fd = min_fd
+    while (new_fd as u64) < MAX_FDS:
+        if not fd_is_valid(new_fd):
+            val old_idx: u64 = old_fd as u64
+            val new_idx: u64 = new_fd as u64
+            val obj = fd_objects[old_idx]
+            fd_objects[new_idx] = obj
+            fd_fd_flags[new_idx] = if cloexec: FD_CLOEXEC else: 0
+            of_refcounts[obj] = of_refcounts[obj] + 1
+            _fd_refresh_object_mirrors(obj)
+            return new_fd
+        new_fd = new_fd + 1
+    0 - EMFILE
+
 fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
     """Duplicate old_fd to new_fd, closing new_fd first if open."""
     if not fd_is_valid(old_fd):

@@ -11,7 +11,7 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.posix.fd_table.{fd_table_init, fd_set, fd_get_offset, fd_set_offset, fd_is_valid, FD_TYPE_FILE, O_RDONLY}
+use os.posix.fd_table.{fd_table_init, fd_set, fd_get_offset, fd_set_offset, fd_is_valid, fd_get_cloexec, fd_get_status_flags, FD_TYPE_FILE, O_RDONLY, O_RDWR, O_NONBLOCK}
 
 fn _dispatch(args: SyscallArgs) -> i64:
     syscall_handler(args, Scheduler.new(), IpcManager.new(), KernelLog.new(16)).value
@@ -43,5 +43,42 @@ describe "POSIX fd syscalls":
         fd_table_init()
 
         val result = _dispatch(SyscallArgs(id: 62, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(-14)
+
+    it "provides syscall 69 fcntl descriptor flags":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        expect(_dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(_dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 2, arg2: 1, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(fd_get_cloexec(3)).to_equal(true)
+        expect(_dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(1)
+
+    it "provides syscall 69 fcntl status flags and min-fd duplication":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDWR, 10u64)
+
+        expect(_dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 4, arg2: O_RDWR | O_NONBLOCK, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(fd_get_status_flags(3) & O_NONBLOCK).to_equal(O_NONBLOCK)
+
+        val dup_fd = _dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 0, arg2: 8, arg3: 0, arg4: 0, arg5: 0))
+        expect(dup_fd).to_equal(8)
+        expect(fd_is_valid(8)).to_equal(true)
+
+    it "provides syscall 69 F_DUPFD_CLOEXEC":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        val result = _dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 1030, arg2: 8, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(8)
+        expect(fd_is_valid(8)).to_equal(true)
+        expect(fd_get_cloexec(8)).to_equal(true)
+
+    it "provides syscall 68 poll and validates the pollfd pointer":
+        fd_table_init()
+
+        val result = _dispatch(SyscallArgs(id: 68, arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
 
         expect(result).to_equal(-14)

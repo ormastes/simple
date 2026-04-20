@@ -62,6 +62,12 @@ struct TaskControlBlock:
     exit_code: i32
     ticks_remaining: u64            # Time slice countdown
 
+struct WaitCollectResult:
+    """Result of collecting child exit state for waitpid-compatible syscalls."""
+    pid: u64
+    status: i32
+    error: i32
+
 # ============================================================================
 # Ready Queue — Per-Priority FIFO
 # ============================================================================
@@ -902,20 +908,19 @@ impl Scheduler:
         val _e = envp
         -38
 
-    me wait_for(parent_id: TaskId, child_id: TaskId) -> i32:
-        """Block parent until child exits, return exit status (IF-02).
+    me wait_for_collect(parent_id: TaskId, child_id: TaskId, block_parent: bool) -> WaitCollectResult:
+        """Collect a child exit event and optionally block when children are live.
 
         A child selector of 0 or u64::MAX means "any child". If a matching
         child is already a zombie, collect its exit status and free the slot.
-        If a matching child is still running, block the parent on Exit and
-        report EAGAIN until the exit path wakes waiters.
+        If a matching child is still running, optionally block the parent on
+        Exit and report EAGAIN until the exit path wakes waiters.
         """
         val parent_slot = self._find_slot(parent_id)
         if parent_slot < 0:
-            return -10
+            return WaitCollectResult(pid: 0, status: 0, error: -10)
 
         val any_child = child_id.id == 0 or child_id.id == 0xFFFFFFFFFFFFFFFF
-        var found_child = false
         var found_live_child = false
         var i = 0
         while i < MAX_TASKS:
@@ -928,24 +933,30 @@ impl Scheduler:
                     parent_matches = parent.id == parent_id.id
                 val child_matches = any_child or task.id.id == child_id.id
                 if parent_matches and child_matches:
-                    found_child = true
                     match task.state:
                         case TaskState.Zombie:
                             val status = task.exit_code
+                            val pid = task.id.id
                             self._remove_ready(task.id)
                             self._release_task_address_space(task)
                             self.tasks[i] = nil
-                            return status
+                            return WaitCollectResult(pid: pid, status: status, error: 0)
                         case _:
                             found_live_child = true
             i = i + 1
 
         if found_live_child:
-            self.block_task(parent_id, BlockReason.Exit)
-            return -11
-        if found_child:
-            return -11
-        -10
+            if block_parent:
+                self.block_task(parent_id, BlockReason.Exit)
+            return WaitCollectResult(pid: 0, status: 0, error: -11)
+        WaitCollectResult(pid: 0, status: 0, error: -10)
+
+    me wait_for(parent_id: TaskId, child_id: TaskId) -> i32:
+        """Block parent until child exits, return exit status (IF-02)."""
+        val result = self.wait_for_collect(parent_id, child_id, true)
+        if result.error < 0:
+            return result.error
+        result.status
 
     # -- Internal Helpers ----------------------------------------------------
 

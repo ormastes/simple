@@ -15,6 +15,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <poll.h>
+#include <sys/epoll.h>
 #include <dirent.h>
 #include <limits.h>
 #include <assert.h>

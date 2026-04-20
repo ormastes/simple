@@ -10,6 +10,7 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.elf_loader.{load_user_executable}
+use os.kernel.loader.smf.{smf_has_header, smf_extract_executable_stub}
 use os.kernel.loader.stack_builder.{build_initial_stack, compute_stack_size, AuxEntry}
 use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
 
@@ -36,6 +37,12 @@ fn _default_stack_top(arch: Architecture) -> Result<u64, text>:
         case _:
             Err("unsupported architecture for process image")
 
+fn _normalise_executable_bytes(data: [u8]) -> Result<[u8], text>:
+    """Unwrap supported executable containers to the native image bytes."""
+    if smf_has_header(data):
+        return smf_extract_executable_stub(data)
+    Ok(data)
+
 fn build_user_process_image(
     path: text,
     data: [u8],
@@ -49,7 +56,8 @@ fn build_user_process_image(
     explicit argv (legacy path), it passes `[]` and we seed argv with the
     binary path so libc `_start` still observes argv[0].
     """
-    val elf = load_user_executable(data, arch)?
+    val native_data = _normalise_executable_bytes(data)?
+    val elf = load_user_executable(native_data, arch)?
     val stack_top = _default_stack_top(arch)?
     val stack_size = compute_stack_size(data.len() as u64)
 
@@ -65,7 +73,7 @@ fn build_user_process_image(
             file_size: seg.file_size,
             flags: seg.flags,
             align: seg.align,
-            data: _slice_bytes(data, seg.file_offset, seg.file_size)
+        data: _slice_bytes(native_data, seg.file_offset, seg.file_size)
         ))
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, val: elf.entry)]  # AT_ENTRY
@@ -79,7 +87,7 @@ fn build_user_process_image(
         argv: effective_argv,
         envp: envp,
         segments: segments,
-        file_bytes: data,
+        file_bytes: native_data,
         initial_sp: stack_frame.sp,
         initial_stack_bytes: stack_frame.bytes
     ))
