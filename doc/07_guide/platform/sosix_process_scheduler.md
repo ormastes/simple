@@ -110,26 +110,26 @@ Kernel syscall IDs 120-131 mirror the same model:
 | 130 | queue poll |
 | 131 | queue close |
 
-## Current Limits
+## Current Scheduler And Sharing Semantics
 
-The implemented slice is enough for deterministic unit and syscall coverage,
-but these parts remain deliberate follow-ups:
+The implemented slice now covers the scheduler/process behavior needed by
+SOSIX process isolation tests:
 
-- Topology balancing is flat. SMT, LLC/package, and NUMA scheduler domains are
-  not modeled yet.
-- Rebalancing is explicit. Timer/idle wake-affine placement is not wired yet.
-- Fair scheduling has virtual-deadline ordering and tick accounting, but not
-  full sleeper decay or wakeup preemption.
-- Realtime scheduling has priority lanes, but not priority-inheritance mutexes
-  or global RT bandwidth throttling.
-- Deadline scheduling validates budget tuples and CPU bandwidth, but does not
-  yet implement CBS replenishment or missed-deadline tracing.
-- `execve` currently accepts the path ABI and builds argv from the executable
-  path when argv/envp vectors are not copied from user space.
-- `dataset_create_from_file` creates a sealed ABI-compatible object, but VFS
-  byte snapshot population is still pending. The blocker is a missing clean
-  syscall-local API to read `(fd, offset, len)` into kernel-owned bytes without
-  coupling this hot syscall path to the async VFS service or scheduler internals.
+- Scheduler topology has typed CPU entries plus flat fallback and synthetic
+  SMT/cache/NUMA domain construction. Hardware discovery still enters through
+  the topology provider boundary.
+- Rebalancing includes explicit rebalance, idle-pull balancing, wake-affine
+  placement, per-CPU current mirrors, and wakeup preemption metadata.
+- Fair scheduling keeps virtual-deadline ordering and tick accounting.
+- Realtime scheduling has fixed-priority lanes, per-CPU RT bandwidth
+  throttling, and scheduler-owned priority-inheritance mutex helpers.
+- Deadline scheduling validates budget tuples, accounts CBS runtime, replenishes
+  budget by period, and records overrun/miss trace events.
+- `execve` copies argv/envp vectors through reusable VMM copy-in helpers before
+  `build_user_process_image`.
+- `dataset_create_from_file` snapshots exact fd bytes at `(offset, len)` into a
+  sealed immutable dataset, restoring the open-file-description offset and
+  closing the dataset builder on failure.
 
 ## Verification
 
@@ -137,6 +137,8 @@ Focused specs:
 
 ```bash
 bin/simple test test/unit/os/kernel/scheduler/scheduler_spec.spl
+bin/simple test test/unit/os/kernel/scheduler/topology_spec.spl
+bin/simple test test/unit/os/kernel/memory/vmm_copyin_spec.spl
 bin/simple test test/unit/os/sosix/process_spec.spl
 bin/simple test test/unit/os/sosix/share_spec.spl
 bin/simple test test/unit/os/kernel/ipc/syscall_sosix_share_spec.spl
