@@ -261,6 +261,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         `cr3=`, `heap exhausted`, or `PANIC` markers while launching the app.
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-todo:** `doc/08_tracking/todo/simpleos_syscall13_direct_handoff_2026-04-20.md`
 - **Related-issue:** none
 - **Notes:** Current diagnostics show syscall 13 can validate and build the
   user process image, map/load it, create the TCB, and register capabilities.
