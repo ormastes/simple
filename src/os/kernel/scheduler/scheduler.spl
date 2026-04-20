@@ -29,6 +29,7 @@ extern fn cap_init_task_record(task: TaskId, full: bool)
 val MAX_TASKS: i32 = 256
 val PRIORITY_LEVELS: i32 = 5      # Realtime, High, Normal, Low, Idle
 val TIME_SLICE_TICKS: u64 = 10    # Ticks per time slice before preemption
+val SCHED_TICK_NS: u64 = 10000000 # Accounting tick used by fair scheduling
 
 # ============================================================================
 # Task Control Block
@@ -551,6 +552,7 @@ impl Scheduler:
 
         var task = tcb
         task.context = ctx
+        task = _account_task_tick(task)
 
         # Decrement time slice
         if task.ticks_remaining > 0:
@@ -1064,3 +1066,29 @@ fn _affinity_allows_cpu(mask: u64, cpu: u32) -> bool:
         return false
     val bit = 1u64 << cpu
     (mask & bit) != 0
+
+fn _account_task_tick(task: TaskControlBlock) -> TaskControlBlock:
+    """Advance fair/background virtual runtime for one scheduler tick."""
+    match task.schedule.policy:
+        case Fair:
+            _account_fair_tick(task)
+        case Background:
+            _account_fair_tick(task)
+        case _:
+            task
+
+fn _account_fair_tick(task: TaskControlBlock) -> TaskControlBlock:
+    """Apply simple weighted vruntime accounting for a fair-class tick."""
+    var updated = task
+    var config = updated.schedule
+    val weight = if config.weight > 0: config.weight else: 1
+    val scaled_delta = ((SCHED_TICK_NS as i64) * 1024) / weight
+    config.vruntime = config.vruntime + scaled_delta
+    config.virtual_deadline = config.vruntime + config.requested_slice_ns.to_i64()
+    if config.lag > 0:
+        if config.lag > scaled_delta:
+            config.lag = config.lag - scaled_delta
+        else:
+            config.lag = 0
+    updated.schedule = config
+    updated

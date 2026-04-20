@@ -11,7 +11,12 @@
 ## Algorithms
 
 - Enqueue mirrors legacy priority queues and per-CPU class queues.
-- Schedule picks from CPU 0 in v1 and uses class order. Fair/background lanes pick the eligible task with the earliest virtual deadline.
+- `schedule_on_cpu(cpu)` picks from a normalized per-CPU queue; `schedule()` remains the CPU 0 compatibility path.
+- Pick order is deadline metadata, fixed-priority RT, fair, background, idle.
+- RT lanes scan for the highest static priority, with FIFO/RR behavior preserved for equal priorities.
+- Fair/background lanes pick the eligible task with the earliest virtual deadline.
+- Timer ticks advance fair/background `vruntime`, recompute virtual deadline, and pay down positive lag.
+- `rebalance_once()` moves one fair/background task from the busiest CPU to the idlest affinity-compatible CPU.
 - `set_priority` and `set_schedule_config` remove/reinsert ready tasks so queue placement stays consistent.
 - `sys_schedctl` queries policy and updates policy metadata; deadline activation returns `-95`.
 
