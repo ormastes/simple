@@ -43,7 +43,7 @@ use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE, process_queue_create, 
 use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
-use os.posix.errno.{E2BIG, EBADF, EFAULT, EIO, EINVAL, ENAMETOOLONG}
+use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 extern fn serial_println(msg: text)
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -703,10 +703,12 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     from the executable path.
     """
     if args.arg0 == 0 or args.arg1 == 0:
-        return SyscallResult(value: -22)
+        return SyscallResult(value: 0 - EINVAL as i64)
+    if args.arg1 > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: 0 - ENAMETOOLONG as i64)
     val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
     if path_bytes_result.is_err():
-        return SyscallResult(value: -22)
+        return SyscallResult(value: 0 - EFAULT as i64)
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
@@ -714,19 +716,29 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     if bytes_result.is_err():
         return SyscallResult(value: -2)
 
-    val argv_result = _copy_user_string_vector(args.arg2, MAX_EXEC_ARG_COUNT)
-    if argv_result.is_err():
-        return SyscallResult(value: -14)
-    val envp_result = _copy_user_string_vector(args.arg3, MAX_EXEC_ENV_COUNT)
-    if envp_result.is_err():
-        return SyscallResult(value: -14)
+    val argv_result = vmm_copyin_string_vector(
+        args.arg2,
+        MAX_EXEC_ARG_COUNT,
+        MAX_EXEC_STRING_LEN,
+        MAX_EXEC_TOTAL_STRING_BYTES
+    )
+    if not argv_result.status.ok:
+        return SyscallResult(value: 0 - argv_result.status.errno as i64)
+    val envp_result = vmm_copyin_string_vector(
+        args.arg3,
+        MAX_EXEC_ENV_COUNT,
+        MAX_EXEC_STRING_LEN,
+        MAX_EXEC_TOTAL_STRING_BYTES
+    )
+    if not envp_result.status.ok:
+        return SyscallResult(value: 0 - envp_result.status.errno as i64)
 
     val image_result = build_user_process_image(
         path,
         bytes_result.unwrap(),
         CURRENT_EXEC_ARCH,
-        argv_result.unwrap(),
-        envp_result.unwrap()
+        argv_result.values,
+        envp_result.values
     )
     if image_result.is_err():
         return SyscallResult(value: -8)
@@ -3288,17 +3300,27 @@ fn _handle_dataset_create(args: SyscallArgs) -> SyscallResult:
 fn _handle_dataset_create_from_file(args: SyscallArgs) -> SyscallResult:
     """dataset_create_from_file(fd, offset, len, flags) -> sealed handle.
 
-    The current kernel VFS path does not expose a synchronous byte snapshot to
-    syscall.spl. This creates the sealed immutable object and records the ABI
-    shape; file-byte population is the next VFS-backed enhancement.
+    Snapshots exactly len bytes from the fd at offset into an immutable sealed
+    dataset. The fd open-file-description offset is restored by the POSIX read
+    helper on every success and failure path.
     """
-    val _fd = args.arg0
-    val _offset = args.arg1
-    val handle = shared_dataset_create(args.arg2, args.arg3.to_u32())
+    val read_result = posix_pread_exact_bytes(args.arg0 as i32, args.arg1, args.arg2)
+    if read_result.status < 0:
+        return SyscallResult(value: read_result.status)
+
+    val handle = shared_dataset_create(read_result.len, args.arg3.to_u32())
     if handle < 0:
         return SyscallResult(value: handle)
+    val write_rc = shared_dataset_write(handle as u64, 0, read_result.data)
+    if write_rc < 0:
+        shared_dataset_close(handle as u64)
+        return SyscallResult(value: write_rc)
+    if write_rc != read_result.len as i64:
+        shared_dataset_close(handle as u64)
+        return SyscallResult(value: 0 - EIO as i64)
     val seal_rc = shared_dataset_seal(handle as u64)
     if seal_rc < 0:
+        shared_dataset_close(handle as u64)
         return SyscallResult(value: seal_rc)
     SyscallResult(value: handle)
 
