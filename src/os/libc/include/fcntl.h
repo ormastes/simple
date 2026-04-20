@@ -30,6 +30,9 @@ extern "C" {
 #define F_SETFL   4
 #define F_DUPFD_CLOEXEC 1030
 
+/* SimpleOS-private command: stable open-file-description token. */
+#define F_SIMPLEOS_GET_OFD 0x534F0001
+
 /* fcntl() flags */
 #define FD_CLOEXEC 1
 

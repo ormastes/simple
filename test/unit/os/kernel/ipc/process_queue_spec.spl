@@ -1,0 +1,107 @@
+# @cover src/os/kernel/ipc/process_queue.spl 80%
+"""
+# Kernel Process Queue Specification
+
+Bounded MPMC queue model for process-level kernel IPC.
+"""
+
+use std.spec.{describe, it, expect}
+use os.posix.errno.{EAGAIN, EBADF, EINVAL}
+use os.kernel.ipc.process_queue.{
+    PROCESS_QUEUE_NO_HANDLE,
+    PROCESS_QUEUE_POLL_READ,
+    PROCESS_QUEUE_POLL_WRITE,
+    PROCESS_QUEUE_POLL_ERR,
+    PROCESS_QUEUE_POLL_HUP,
+    PROCESS_QUEUE_CLOSE_SEND,
+    PROCESS_QUEUE_CLOSE_RECV,
+    process_queue_init,
+    process_queue_create,
+    process_queue_send,
+    process_queue_recv,
+    process_queue_poll,
+    process_queue_close,
+    process_queue_len
+}
+
+describe "kernel process queue manager":
+    it "creates handle zero as a valid bounded queue":
+        process_queue_init()
+
+        val queue = process_queue_create(2u64, 8u64, 0)
+
+        expect(queue).to_equal(0)
+        expect(process_queue_len(queue as u64)).to_equal(0)
+        expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_WRITE).to_equal(PROCESS_QUEUE_POLL_WRITE)
+
+    it "preserves FIFO message ordering":
+        process_queue_init()
+        val queue = process_queue_create(3u64, 8u64, 0)
+
+        expect(process_queue_send(queue as u64, [1u8, 2u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(2)
+        expect(process_queue_send(queue as u64, [3u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(1)
+        expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_READ).to_equal(PROCESS_QUEUE_POLL_READ)
+
+        val first = process_queue_recv(queue as u64)
+        expect(first.status).to_equal(2)
+        expect(first.len).to_equal(2u64)
+        expect(first.data[0]).to_equal(1u8)
+        expect(first.data[1]).to_equal(2u8)
+
+        val second = process_queue_recv(queue as u64)
+        expect(second.status).to_equal(1)
+        expect(second.len).to_equal(1u64)
+        expect(second.data[0]).to_equal(3u8)
+
+    it "returns EAGAIN for full sends and empty receives":
+        process_queue_init()
+        val queue = process_queue_create(1u64, 4u64, 0)
+
+        expect(process_queue_recv(queue as u64).status).to_equal(0 - EAGAIN as i64)
+        expect(process_queue_send(queue as u64, [7u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(1)
+        expect(process_queue_send(queue as u64, [8u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(0 - EAGAIN as i64)
+        expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_WRITE).to_equal(0)
+
+    it "rejects oversized messages":
+        process_queue_init()
+        val queue = process_queue_create(1u64, 2u64, 0)
+
+        expect(process_queue_send(queue as u64, [1u8, 2u8, 3u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(0 - EINVAL as i64)
+
+    it "preserves attached handles without treating zero as empty":
+        process_queue_init()
+        val queue = process_queue_create(2u64, 4u64, 0)
+
+        expect(process_queue_send(queue as u64, [1u8], 0u64)).to_equal(1)
+        expect(process_queue_send(queue as u64, [2u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(1)
+
+        val with_handle_zero = process_queue_recv(queue as u64)
+        expect(with_handle_zero.status).to_equal(1)
+        expect(with_handle_zero.attached_handle).to_equal(0u64)
+
+        val without_handle = process_queue_recv(queue as u64)
+        expect(without_handle.status).to_equal(1)
+        expect(without_handle.attached_handle).to_equal(PROCESS_QUEUE_NO_HANDLE)
+
+    it "reports HUP and EOF when the send side is closed":
+        process_queue_init()
+        val queue = process_queue_create(1u64, 4u64, 0)
+
+        expect(process_queue_close(queue as u64, PROCESS_QUEUE_CLOSE_SEND)).to_equal(0)
+        expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_HUP).to_equal(PROCESS_QUEUE_POLL_HUP)
+        expect(process_queue_recv(queue as u64).status).to_equal(0)
+
+    it "reports HUP when the receive side is closed":
+        process_queue_init()
+        val queue = process_queue_create(1u64, 4u64, 0)
+
+        expect(process_queue_close(queue as u64, PROCESS_QUEUE_CLOSE_RECV)).to_equal(0)
+        expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_HUP).to_equal(PROCESS_QUEUE_POLL_HUP)
+
+    it "returns EBADF and poll error for invalid handles":
+        process_queue_init()
+
+        expect(process_queue_send(99u64, [1u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(0 - EBADF as i64)
+        expect(process_queue_recv(99u64).status).to_equal(0 - EBADF as i64)
+        expect(process_queue_close(99u64, 0)).to_equal(0 - EBADF as i64)
+        expect(process_queue_poll(99u64) & PROCESS_QUEUE_POLL_ERR).to_equal(PROCESS_QUEUE_POLL_ERR)

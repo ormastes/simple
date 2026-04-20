@@ -11,6 +11,9 @@
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.loader.elf64.{elf64_load}
 
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
 # SMF magic "SMF\0"
 val SMF64_MAGIC_0: u8 = 83    # 'S'
 val SMF64_MAGIC_1: u8 = 77    # 'M'
@@ -38,22 +41,25 @@ struct SmfHeader:
 # Internal helpers
 # ============================================================================
 
+fn _smf_byte_at(data: [u8], off: i64) -> u8:
+    rt_bytes_u8_at(data, off).to_u8()
+
 fn _smf_read_u64_le(data: [u8], off: i64) -> i64:
-    val b0 = data[off]     as i64
-    val b1 = data[off + 1] as i64
-    val b2 = data[off + 2] as i64
-    val b3 = data[off + 3] as i64
-    val b4 = data[off + 4] as i64
-    val b5 = data[off + 5] as i64
-    val b6 = data[off + 6] as i64
-    val b7 = data[off + 7] as i64
+    val b0 = _smf_byte_at(data, off)     as i64
+    val b1 = _smf_byte_at(data, off + 1) as i64
+    val b2 = _smf_byte_at(data, off + 2) as i64
+    val b3 = _smf_byte_at(data, off + 3) as i64
+    val b4 = _smf_byte_at(data, off + 4) as i64
+    val b5 = _smf_byte_at(data, off + 5) as i64
+    val b6 = _smf_byte_at(data, off + 6) as i64
+    val b7 = _smf_byte_at(data, off + 7) as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
 
 fn _smf_read_u32_le(data: [u8], off: i64) -> i64:
-    val b0 = data[off]     as i64
-    val b1 = data[off + 1] as i64
-    val b2 = data[off + 2] as i64
-    val b3 = data[off + 3] as i64
+    val b0 = _smf_byte_at(data, off)     as i64
+    val b1 = _smf_byte_at(data, off + 1) as i64
+    val b2 = _smf_byte_at(data, off + 2) as i64
+    val b3 = _smf_byte_at(data, off + 3) as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
 fn _smf_magic_at(bytes: [u8], off: i64) -> bool:
@@ -61,10 +67,10 @@ fn _smf_magic_at(bytes: [u8], off: i64) -> bool:
         return false
     if off + 4 > bytes.len():
         return false
-    (bytes[off] == SMF64_MAGIC_0 and
-     bytes[off + 1] == SMF64_MAGIC_1 and
-     bytes[off + 2] == SMF64_MAGIC_2 and
-     bytes[off + 3] == SMF64_MAGIC_3)
+    (_smf_byte_at(bytes, off) == SMF64_MAGIC_0 and
+     _smf_byte_at(bytes, off + 1) == SMF64_MAGIC_1 and
+     _smf_byte_at(bytes, off + 2) == SMF64_MAGIC_2 and
+     _smf_byte_at(bytes, off + 3) == SMF64_MAGIC_3)
 
 fn smf_header_offset(bytes: [u8]) -> i64:
     """Return header offset, preferring the v1.1 EOF-128 trailer.
@@ -118,13 +124,13 @@ fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
 fn _smf_has_elf_magic(bytes: [u8]) -> bool:
     if bytes.len() < 4:
         return false
-    bytes[0] == 0x7F.to_u8() and bytes[1] == 0x45.to_u8() and bytes[2] == 0x4C.to_u8() and bytes[3] == 0x46.to_u8()
+    _smf_byte_at(bytes, 0) == 0x7F.to_u8() and _smf_byte_at(bytes, 1) == 0x45.to_u8() and _smf_byte_at(bytes, 2) == 0x4C.to_u8() and _smf_byte_at(bytes, 3) == 0x46.to_u8()
 
 fn _smf_copy_range(bytes: [u8], off: i64, size: i64) -> [u8]:
-    var out: [u8] = []
+    var out: [u8] = rt_array_new_with_cap(size)
     var i: i64 = 0
     while i < size:
-        out.push(bytes[off + i])
+        out.push(_smf_byte_at(bytes, off + i))
         i = i + 1
     out
 

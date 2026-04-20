@@ -440,6 +440,40 @@ Need feature X?
 
 ---
 
+## 8. System Test Matrix
+
+Filesystem drivers must have two layers of coverage:
+
+1. Driver-level unit tests close to the implementation.
+2. A system variant entry in `test/system/os_filesystem_variants_spec.spl`.
+
+The system spec is intentionally general-purpose. Each variant declares its
+runner and storage shape, then proves the shared contract appropriate for that
+runner:
+
+| Variant | Runner | What It Proves |
+|---------|--------|----------------|
+| `fat32` | `x64-nvme-fat32` QEMU scenario | SimpleOS boots the dedicated filesystem test entry with an NVMe-backed FAT32 fixture image and reads the canonical fixture files. |
+| `nvfs` | `FsDriver` POSIX shim | NVFS satisfies mount, capabilities, create/write/read, pwrite/pread, stat, mkdir/readdir, rename, unlink, and close through the shared driver surface. |
+
+Run the matrix with:
+
+```bash
+bin/simple test test/system/os_filesystem_variants_spec.spl
+```
+
+For a new filesystem:
+
+- Add the driver-specific unit tests next to the implementation.
+- Add a new `FsSystemVariant` row in `test/system/os_filesystem_variants_spec.spl`.
+- If the driver boots inside SimpleOS, add or reuse a named QEMU scenario in
+  `src/os/qemu_runner.spl` and bind `scenario_target()` to a dedicated entry.
+- If the driver is not boot-wired yet, exercise it through `FsDriver` in-process
+  and keep the variant row in place so the matrix does not silently forget it.
+- Update this table and the SimpleOS platform guide when the runner shape changes.
+
+---
+
 ## Reference: File Locations
 
 | File | Purpose |
@@ -451,4 +485,5 @@ Need feature X?
 | `src/lib/nogc_sync_mut/fs_driver/mount_table.spl` | `MountTable`, `MountEntry`, `MountId` |
 | `src/lib/nogc_sync_mut/fs_driver/ramfs.spl` | `RamFsDriver` — complete reference implementation |
 | `src/os/services/vfs/vfs_init.spl` | `g_vfs_*` consumer helpers + boot init |
+| `test/system/os_filesystem_variants_spec.spl` | SSpec system matrix for FAT32 and NVFS variants |
 | `doc/05_design/fs_driver_interface.md` | Design rationale (§2 trait, §3 dispatch, §4 extensions, §5 caps) |

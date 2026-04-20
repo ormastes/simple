@@ -34,13 +34,19 @@ use compiler.semantics.lint.sffi_lint.{
     check_sffi002_text_field,
     check_sffi003_repr_required,
     check_sffi004_bitfield_width,
-    check_sffi005_platform_dependent
+    check_sffi005_platform_dependent,
+    check_sffi008_platform_attr_diagnostics
 }
 from hir_definitions import {HirClass, HirField, HirExpr, HirExprKind}
 from hir_types import {HirType, HirTypeKind, SymbolId}
 from lexer import {Span}
-use compiler.types.type_layout.{LayoutAttr, LayoutKind}
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind,
+    PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
+    PlatformLayoutDiagnostic, PlatformDiagnosticLevel
+}
 use compiler.common.attributes.{ExportAttr}
+use compiler.core.types.{TYPE_I64, custom_primitive_register, custom_primitive_bind_symbol}
 
 # ============================================================================
 # Helpers: Build test data
@@ -84,6 +90,11 @@ fn make_array_type() -> HirType:
 
 fn make_function_type() -> HirType:
     make_hir_type(HirTypeKind.Function([make_i32_type()], make_i32_type(), []))
+
+fn make_custom_primitive_i64_type(name: text, symbol_id: i64) -> HirType:
+    custom_primitive_register(name, TYPE_I64)
+    custom_primitive_bind_symbol(name, symbol_id)
+    make_hir_type(HirTypeKind.Named(SymbolId(id: symbol_id), []))
 
 fn dummy_expr() -> HirExpr:
     """Create a dummy HirExpr (UnitLit) for fields without defaults."""
@@ -138,11 +149,34 @@ fn make_exported_class(name: text, fields: [HirField], has_repr_c: bool) -> HirC
         layout_attr: layout,
         has_export_attr: true,
         export_attr: ExportAttr(is_export_c: true, export_name: ""),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
         is_generic_template: false,
         has_specialization_of: false,
         specialization_of: "",
         type_bindings: {}
     )
+
+fn make_exported_platform_class(name: text, fields: [HirField], has_repr_c: bool, platform: PlatformParseResult) -> HirClass:
+    val class_def = make_exported_class(name, fields, has_repr_c)
+    class_def.has_platform_attr = true
+    class_def.platform_has_error = false
+    class_def.platform_has_warning = false
+    class_def.platform_diagnostic_message = ""
+    class_def.platform_diagnostic_line = 0
+    if platform.diagnostics.len() > 0:
+        val diag = platform.diagnostics[0]
+        match diag.level():
+            case PlatformDiagnosticLevel.Error:
+                class_def.platform_has_error = true
+            case PlatformDiagnosticLevel.Warning:
+                class_def.platform_has_warning = true
+        class_def.platform_diagnostic_message = diag.message()
+        class_def.platform_diagnostic_line = diag.span().line
+    class_def
 
 fn make_non_exported_class(name: text, fields: [HirField]) -> HirClass:
     """Create a HirClass without @export("C")."""
@@ -160,10 +194,48 @@ fn make_non_exported_class(name: text, fields: [HirField]) -> HirClass:
         layout_attr: LayoutAttr(layout_kind: LayoutKind.Simple, is_packed: false),
         has_export_attr: false,
         export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
         is_generic_template: false,
         has_specialization_of: false,
         specialization_of: "",
         type_bindings: {}
+    )
+
+fn make_platform_default() -> PlatformParseResult:
+    PlatformParseResult(
+        variants: [
+            PlatformVariant(
+                predicate: PlatformPredicate(
+                    has_default: true,
+                    has_cpu: false,
+                    cpu: "",
+                    has_os: false,
+                    os: "",
+                    has_abi: false,
+                    abi: PlatformAbi.Any,
+                    has_bit: false,
+                    bit: PlatformBit.Pointer
+                ),
+                has_explicit_size: false,
+                explicit_size: 0,
+                has_explicit_align: false,
+                explicit_align: 0,
+                span: empty_span()
+            )
+        ],
+        diagnostics: []
+    )
+
+fn make_platform_missing_hint() -> PlatformParseResult:
+    PlatformParseResult(
+        variants: [],
+        diagnostics: [
+            PlatformLayoutDiagnostic.MissingExplicitLayoutHint(empty_span())
+        ]
     )
 
 fn find_by_code(warnings: [SffiLintWarning], code: text) -> [SffiLintWarning]:
@@ -253,6 +325,15 @@ describe "SFFI Lint Rules":
             val cls = make_exported_class("BadClass", fields, true)
             val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
             expect(warnings.len()).to_equal(2)
+
+        it "passes for transparent custom primitive fields":
+            val fd_type = make_custom_primitive_i64_type("SffiFd", 9001)
+            val fields = [
+                make_field("fd", fd_type)
+            ]
+            val cls = make_exported_class("FdWrapper", fields, true)
+            val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
 
     # ============================================================================
     # Test Group 2: SFFI002 — text field warning
@@ -368,6 +449,15 @@ describe "SFFI Lint Rules":
             val warnings = check_sffi004_bitfield_width(cls, "test.spl")
             expect(warnings.len()).to_equal(0)
 
+        it "uses custom primitive capacity for explicit @bits":
+            val flags_type = make_custom_primitive_i64_type("SffiFlags", 9002)
+            val fields = [
+                make_bits_field("flags", flags_type, 32)
+            ]
+            val cls = make_exported_class("FlagRegister", fields, true)
+            val warnings = check_sffi004_bitfield_width(cls, "test.spl")
+            expect(warnings.len()).to_equal(0)
+
     # ============================================================================
     # Test Group 5: SFFI005 — platform-dependent types
     # ============================================================================
@@ -379,7 +469,7 @@ describe "SFFI Lint Rules":
         Reference types have platform-dependent size and should be flagged.
         """
 
-        it "warns on reference types in exported class":
+        it "errors on reference types in exported class without @platform":
             val fields = [
                 make_field("data_ref", make_ref_type())
             ]
@@ -387,8 +477,30 @@ describe "SFFI Lint Rules":
             val warnings = check_sffi005_platform_dependent(cls, "test.spl")
             expect(warnings.len()).to_equal(1)
             expect(warnings[0].code).to_equal("SFFI005")
-            expect(warnings[0].severity).to_equal("WARNING")
+            expect(warnings[0].severity).to_equal("ERROR")
             expect(warnings[0].message).to_contain("reference")
+
+        it "keeps platform-tagged reference layout as warning":
+            val fields = [
+                make_field("data_ref", make_ref_type())
+            ]
+            val cls = make_exported_platform_class("RefHolder", fields, true, make_platform_default())
+            val warnings = check_sffi005_platform_dependent(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI005")
+            expect(warnings[0].severity).to_equal("WARNING")
+            expect(warnings[0].hint).to_contain("@platform")
+
+        it "surfaces @platform missing explicit layout hint as warning":
+            val fields = [
+                make_field("data_ref", make_ref_type())
+            ]
+            val cls = make_exported_platform_class("RefHolder", fields, true, make_platform_missing_hint())
+            val warnings = check_sffi008_platform_attr_diagnostics(cls, "test.spl")
+            expect(warnings.len()).to_equal(1)
+            expect(warnings[0].code).to_equal("SFFI008")
+            expect(warnings[0].severity).to_equal("WARNING")
+            expect(warnings[0].message).to_contain("@platform")
 
         it "no warning for fixed-size types":
             val fields = [

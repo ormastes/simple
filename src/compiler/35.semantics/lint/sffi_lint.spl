@@ -10,8 +10,9 @@
 # SFFI002: text field in exported struct (needs marshalling)          WARNING
 # SFFI003: Struct passed by-value without @repr("C")                  ERROR
 # SFFI004: Bitfield without explicit width                            ERROR
-# SFFI005: Platform-dependent type size in FFI struct                 WARNING
+# SFFI005: Platform-dependent type size in FFI struct                 ERROR/WARNING
 # SFFI006: Callback parameter without ownership documentation         WARNING
+# SFFI008: Invalid @platform layout annotation                         ERROR/WARNING
 #
 # These checks run on HirClass definitions at the semantic analysis stage,
 # catching ABI safety issues before code generation.
@@ -21,6 +22,8 @@
 from hir_definitions import {HirClass, HirStruct, HirField}
 from hir_types import {HirType, HirTypeKind}
 from compiler.types.type_layout import {LayoutKind}
+from compiler.core.types import {TYPE_BOOL, TYPE_I64, TYPE_F64}
+from compiler.core.types import {custom_primitive_underlying_type_tag_by_symbol}
 
 
 # ============================================================================
@@ -57,6 +60,19 @@ fn _is_c_compatible_primitive(kind: HirTypeKind) -> bool:
         case Unit: true
         case Ptr(inner, mutable): true
         case _: false
+
+fn _is_c_compatible_type_tag(tag: i64) -> bool:
+    tag == TYPE_BOOL or tag == TYPE_I64 or tag == TYPE_F64
+
+fn _is_c_compatible_type(type_: HirType) -> bool:
+    match type_.kind:
+        case Named(symbol, args):
+            val underlying = custom_primitive_underlying_type_tag_by_symbol(symbol.id)
+            if underlying >= 0:
+                return _is_c_compatible_type_tag(underlying)
+            false
+        case _:
+            _is_c_compatible_primitive(type_.kind)
 
 fn _is_text_type(kind: HirTypeKind) -> bool:
     """Check if a type is the text/Str type (pointer in C, needs marshalling)."""
@@ -176,7 +192,7 @@ fn check_sffi001_c_compatible_types(class_def: HirClass, file_path: text) -> [Sf
             continue
 
         # Skip C-compatible primitives and Ptr
-        if _is_c_compatible_primitive(kind):
+        if _is_c_compatible_type(field.type_):
             fi = fi + 1
             continue
 
@@ -338,7 +354,7 @@ fn check_sffi004_bitfield_width(class_def: HirClass, file_path: text) -> [SffiLi
             if not field.has_bits_attr:
                 continue
 
-            val capacity = _bit_capacity(field.type_.kind)
+            val capacity = _bit_capacity_type(field.type_)
             val line = _field_line_num(field)
             if capacity == 0:
                 warnings.push(SffiLintWarning(
@@ -415,13 +431,25 @@ fn _bit_capacity(kind: HirTypeKind) -> i64:
         case Bool: 1
         case _: 0
 
+fn _bit_capacity_type(type_: HirType) -> i64:
+    match type_.kind:
+        case Named(symbol, args):
+            val underlying = custom_primitive_underlying_type_tag_by_symbol(symbol.id)
+            if underlying == TYPE_BOOL:
+                return 1
+            if underlying == TYPE_I64:
+                return 64
+            0
+        case _:
+            _bit_capacity(type_.kind)
+
 
 # ============================================================================
 # SFFI005: Platform-dependent type size
 # ============================================================================
 
 fn check_sffi005_platform_dependent(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
-    """Warn if an @export("C") class uses types whose size varies by platform.
+    """Flag @export("C") classes that use types whose size varies by platform.
 
     Currently all Simple primitive types are fixed-size (i32 is always 32 bits).
     The main concern is pointer-sized types (isize, usize) and Named types
@@ -431,6 +459,12 @@ fn check_sffi005_platform_dependent(class_def: HirClass, file_path: text) -> [Sf
     platform-dependent int/long sizes.
     """
     var warnings: [SffiLintWarning] = []
+    val has_platform = class_def.has_platform_attr
+    val severity = if has_platform: "WARNING" else: "ERROR"
+    val hint = if has_platform:
+        "verify each supported target has an explicit @platform bit/size/align contract"
+    else:
+        "add @platform(...) variants for target-specific layout, or replace the field with a fixed-size ABI type"
 
     var fi = 0
     while fi < class_def.fields.len():
@@ -445,9 +479,9 @@ fn check_sffi005_platform_dependent(class_def: HirClass, file_path: text) -> [Sf
                 val line = _field_line_num(field)
                 warnings.push(SffiLintWarning(
                     code: "SFFI005",
-                    severity: "WARNING",
+                    severity: severity,
                     message: "field '{field.name}' uses reference type in @export(\"C\") class '{class_def.name}' — reference size is platform-dependent",
-                    hint: "use Ptr<T> for explicit pointer semantics, or use a fixed-size handle (i64)",
+                    hint: hint,
                     line_num: line,
                     file_path: file_path
                 ))
@@ -455,6 +489,33 @@ fn check_sffi005_platform_dependent(class_def: HirClass, file_path: text) -> [Sf
                 pass_dn
 
         fi = fi + 1
+
+    warnings
+
+fn check_sffi008_platform_attr_diagnostics(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Surface @platform parser diagnostics on exported C classes."""
+    var warnings: [SffiLintWarning] = []
+    if not class_def.has_platform_attr:
+        return warnings
+
+    if class_def.platform_has_error:
+        warnings.push(SffiLintWarning(
+            code: "SFFI008",
+            severity: "ERROR",
+            message: class_def.platform_diagnostic_message,
+            hint: "fix the @platform annotation so ABI layout is target-explicit and unambiguous",
+            line_num: class_def.platform_diagnostic_line,
+            file_path: file_path
+        ))
+    elif class_def.platform_has_warning:
+        warnings.push(SffiLintWarning(
+            code: "SFFI008",
+            severity: "WARNING",
+            message: class_def.platform_diagnostic_message,
+            hint: "fix the @platform annotation so ABI layout is target-explicit and unambiguous",
+            line_num: class_def.platform_diagnostic_line,
+            file_path: file_path
+        ))
 
     warnings
 
@@ -474,8 +535,9 @@ fn lint_sffi_export(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
     - SFFI002: text fields needing marshalling (WARNING)
     - SFFI003: Missing @repr("C") layout (ERROR)
     - SFFI004: Bitfield without explicit width (ERROR)
-    - SFFI005: Platform-dependent type sizes (WARNING)
+    - SFFI005: Platform-dependent type sizes (ERROR unless @platform-tagged)
     - SFFI006: Callback parameter without ownership docs (WARNING)
+    - SFFI008: Invalid @platform annotations (ERROR/WARNING)
     """
     var warnings: [SffiLintWarning] = []
 
@@ -492,6 +554,7 @@ fn lint_sffi_export(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
     warnings = warnings + check_sffi004_bitfield_width(class_def, file_path)
     warnings = warnings + check_sffi005_platform_dependent(class_def, file_path)
     warnings = warnings + check_sffi006_callback_ownership(class_def, file_path)
+    warnings = warnings + check_sffi008_platform_attr_diagnostics(class_def, file_path)
 
     warnings
 
@@ -558,7 +621,7 @@ fn lint_sffi_export_struct(struct_def: HirStruct, file_path: text) -> [SffiLintW
                     val field = struct_def.fields[fi]
                     val kind = field.type_.kind
 
-                    if not _is_c_compatible_primitive(kind) and not _is_text_type(kind) and not _is_callback_function_type(kind):
+                    if not _is_c_compatible_type(field.type_) and not _is_text_type(kind) and not _is_callback_function_type(kind):
                         val type_name = _type_kind_name(kind)
                         val line = _field_line_num(field)
                         # Closures with captures get a specific message
@@ -650,3 +713,4 @@ export check_sffi004_bitfield_width
 export check_sffi005_platform_dependent
 export check_sffi006_callback_ownership
 export check_sffi007_driver_shim
+export check_sffi008_platform_attr_diagnostics

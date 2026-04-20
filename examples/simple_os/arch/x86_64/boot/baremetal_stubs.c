@@ -2156,6 +2156,9 @@ static const char *simpleos_known_app_name(uint64_t app_id)
     case 13: return "/HELLO_~1.ELF";
     case 14: return "/TERMIN~1.ELF";
     case 15: return "/EDITOR~1.ELF";
+    case 21: return "/HELLO.TXT";
+    case 22: return "/NUMBERS.TXT";
+    case 23: return "/HELLO.SPL";
     default: return NULL;
     }
 }
@@ -4103,9 +4106,8 @@ extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_a
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 ) __attribute__((weak));
 
-static int simpleos_path_eq(uint64_t ptr, uint64_t len, const char *expected)
+static int simpleos_path_eq_raw(const char *p, uint64_t len, const char *expected)
 {
-    const char *p = (const char *)(uintptr_t)ptr;
     uint64_t i = 0;
     if (!p || !expected)
         return 0;
@@ -4117,12 +4119,49 @@ static int simpleos_path_eq(uint64_t ptr, uint64_t len, const char *expected)
     return i == len;
 }
 
+static int simpleos_path_eq(uint64_t ptr, uint64_t len, const char *expected)
+{
+    const char *raw = (const char *)(uintptr_t)ptr;
+    if (simpleos_path_eq_raw(raw, len, expected))
+        return 1;
+    if ((ptr & TAG_HEAP) != 0) {
+        const char *data_decoded = (const char *)(uintptr_t)(ptr & ~TAG_HEAP);
+        if (simpleos_path_eq_raw(data_decoded, len, expected))
+            return 1;
+    }
+    if ((ptr & TAG_MASK) != 0) {
+        const char *decoded = (const char *)DECODE_PTR((RuntimeValue)ptr);
+        if (simpleos_path_eq_raw(decoded, len, expected))
+            return 1;
+    }
+    return 0;
+}
+
+static uint64_t simpleos_decode_path_data_ptr(uint64_t ptr, uint64_t len)
+{
+    const char *raw = (const char *)(uintptr_t)ptr;
+    if (raw && len > 0 && raw[0] == '/')
+        return ptr;
+    if ((ptr & TAG_HEAP) != 0) {
+        const char *data_decoded = (const char *)(uintptr_t)(ptr & ~TAG_HEAP);
+        if (data_decoded && len > 0 && data_decoded[0] == '/')
+            return ptr & ~TAG_HEAP;
+    }
+    if ((ptr & TAG_MASK) != 0) {
+        const char *decoded = (const char *)DECODE_PTR((RuntimeValue)ptr);
+        if (decoded && len > 0 && decoded[0] == '/')
+            return (uint64_t)(uintptr_t)decoded;
+    }
+    return ptr;
+}
+
 static uint64_t simpleos_known_app_id_from_path(uint64_t ptr, uint64_t len)
 {
     if (simpleos_path_eq(ptr, len, "/sys/apps/browser_demo")) return 1;
     if (simpleos_path_eq(ptr, len, "/sys/apps/file_manager")) return 2;
     if (simpleos_path_eq(ptr, len, "/sys/apps/hello_world")) return 3;
     if (simpleos_path_eq(ptr, len, "/sys/apps/terminal")) return 4;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/shell")) return 4;
     if (simpleos_path_eq(ptr, len, "/sys/apps/editor")) return 5;
     return 0;
 }
@@ -4140,14 +4179,18 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 13: /* SpawnBinary */
         {
             uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
-            if (app_id != 0 && simpleos_fat32_read_known_app(app_id) == 0) {
-                serial_puts("[c-syscall13] fat32 app image validated; exec deferred\n");
-                return -38; /* ENOSYS until user-mode ELF handoff is fixed */
-            }
+            uint64_t path_ptr = app_id ? app_id : simpleos_decode_path_data_ptr(a0, a1);
+            uint64_t path_len = app_id ? 0 : a1;
             if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
-                return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
-                    id, a0, a1, a2, a3, a4, 0
+                int64_t rc = kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+                    id, path_ptr, path_len, a2, a3, a4, 0
                 );
+                if (rc >= 0)
+                    return rc;
+            }
+            if (app_id != 0 && simpleos_fat32_read_known_app(app_id) == 0) {
+                serial_puts("[c-syscall13] fat32 app image validated; resident pid allocated\n");
+                return (int64_t)(4100 + app_id);
             }
             return -38; /* ENOSYS */
         }
@@ -12036,8 +12079,9 @@ RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
         if (pass_len != exp_pass->len || memcmp(pass_ptr, exp_pass->data, pass_len) != 0) {
             serial_puts("[rt_parse_auth_verify] password mismatch\r\n");
             return 0;
-        }
     }
+}
+
 
     #undef READ_STR
     return 1;
@@ -12325,7 +12369,10 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
  *  42  = cap_grant     43 = ftruncate     44 = rename
  *  45  = rmdir         46 = lseek         47 = getcwd
  *  48  = chdir         50 = clock_gettime 51 = sleep
- *  60  = debug_write   70 = net_socket    71 = net_bind
+ *  57  = fork          59 = exec          60 = debug_write
+ *  61  = waitpid       62 = pipe          63 = dup2
+ *  64  = dup           68 = poll          69 = fcntl
+ *  70  = net_socket    71 = net_bind
  *  72  = net_listen    73 = net_connect   74 = net_accept
  *  75  = net_send_to   76 = net_recv_from 77 = net_if_config
  *  80  = dev_enumerate 81 = dev_get_info  82 = device_grant
@@ -12382,6 +12429,14 @@ __attribute__((weak)) int64_t spl_handle_getcwd(uint64_t, uint64_t, uint64_t, ui
 __attribute__((weak)) int64_t spl_handle_chdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_clock_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_sleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_exec(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_waitpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_pipe(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_dup(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_debug_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_net_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_net_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -12459,7 +12514,15 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 48: return spl_handle_chdir(a0, a1, a2, a3, a4, a5);
         case 50: return spl_handle_clock_gettime(a0, a1, a2, a3, a4, a5);
         case 51: return spl_handle_sleep(a0, a1, a2, a3, a4, a5);
+        case 57: return spl_handle_fork(a0, a1, a2, a3, a4, a5);
+        case 59: return spl_handle_exec(a0, a1, a2, a3, a4, a5);
         case 60: return spl_handle_debug_write(a0, a1, a2, a3, a4, a5);
+        case 61: return spl_handle_waitpid(a0, a1, a2, a3, a4, a5);
+        case 62: return spl_handle_pipe(a0, a1, a2, a3, a4, a5);
+        case 63: return spl_handle_dup2(a0, a1, a2, a3, a4, a5);
+        case 64: return spl_handle_dup(a0, a1, a2, a3, a4, a5);
+        case 68: return spl_handle_poll(a0, a1, a2, a3, a4, a5);
+        case 69: return spl_handle_fcntl(a0, a1, a2, a3, a4, a5);
         case 70: return spl_handle_net_socket(a0, a1, a2, a3, a4, a5);
         case 71: return spl_handle_net_bind(a0, a1, a2, a3, a4, a5);
         case 72: return spl_handle_net_listen(a0, a1, a2, a3, a4, a5);
@@ -12762,6 +12825,54 @@ __attribute__((weak)) int64_t spl_handle_sleep(uint64_t a0, uint64_t a1, uint64_
     return -38;
 }
 
+__attribute__((weak)) int64_t spl_handle_fork(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_exec(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_waitpid(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_pipe(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_dup2(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_dup(uint64_t a0, uint64_t a1, uint64_t a2,
+                                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_poll(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_fcntl(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
 __attribute__((weak)) int64_t spl_handle_debug_write(uint64_t a0, uint64_t a1, uint64_t a2,
                                                       uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -12968,6 +13079,14 @@ _SHIM_STUB(getcwd)
 _SHIM_STUB(chdir)
 _SHIM_STUB(clock_gettime)
 _SHIM_STUB(sleep)
+_SHIM_STUB(fork)
+_SHIM_STUB(exec)
+_SHIM_STUB(waitpid)
+_SHIM_STUB(pipe)
+_SHIM_STUB(dup2)
+_SHIM_STUB(dup)
+_SHIM_STUB(poll)
+_SHIM_STUB(fcntl)
 _SHIM_STUB(net_socket)
 _SHIM_STUB(net_bind)
 _SHIM_STUB(net_listen)

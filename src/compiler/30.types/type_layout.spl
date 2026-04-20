@@ -27,7 +27,92 @@
 
 use compiler.hir.hir_types.{HirType, SymbolId}
 use compiler.hir.hir_definitions.{HirStruct, HirClass, HirField}
+use compiler.common.diagnostics.span.{Span}
 use std.common.target.{TargetArch}
+
+
+# Platform predicate model for @platform layout variants.
+enum PlatformAbi:
+    Any
+    Gnu
+    Musl
+    Msvc
+    Eabi
+    Sysv
+    None_
+
+enum PlatformBit:
+    Pointer
+    Bits16
+    Bits32
+    Bits64
+
+struct PlatformPredicate:
+    has_default: bool
+    has_cpu: bool
+    cpu: text
+    has_os: bool
+    os: text
+    has_abi: bool
+    abi: PlatformAbi
+    has_bit: bool
+    bit: PlatformBit
+
+struct PlatformVariant:
+    predicate: PlatformPredicate
+    has_explicit_size: bool
+    explicit_size: i64
+    has_explicit_align: bool
+    explicit_align: i64
+    span: Span
+
+enum PlatformDiagnosticLevel:
+    Error
+    Warning
+
+enum PlatformLayoutDiagnostic:
+    DuplicatePredicate(predicate: text, span: Span, previous_span: Span)
+    DuplicateDefault(span: Span, previous_span: Span)
+    AmbiguousPredicate(predicate: text, span: Span, previous_span: Span)
+    MissingExplicitLayoutHint(span: Span)
+    UnknownKey(key: text, span: Span)
+    UnknownValue(key: text, value: text, span: Span)
+
+impl PlatformLayoutDiagnostic:
+    fn level() -> PlatformDiagnosticLevel:
+        match self:
+            case PlatformLayoutDiagnostic.MissingExplicitLayoutHint(_):
+                PlatformDiagnosticLevel.Warning
+            case _:
+                PlatformDiagnosticLevel.Error
+
+    fn message() -> text:
+        match self:
+            case PlatformLayoutDiagnostic.DuplicatePredicate(predicate, _, _):
+                "duplicate @platform predicate '{predicate}'"
+            case PlatformLayoutDiagnostic.DuplicateDefault(_, _):
+                "duplicate @platform default fallback"
+            case PlatformLayoutDiagnostic.AmbiguousPredicate(predicate, _, _):
+                "ambiguous @platform predicate '{predicate}'"
+            case PlatformLayoutDiagnostic.MissingExplicitLayoutHint(_):
+                "@platform variant should spell out bit, size, or align explicitly"
+            case PlatformLayoutDiagnostic.UnknownKey(key, _):
+                "unknown @platform key '{key}'"
+            case PlatformLayoutDiagnostic.UnknownValue(key, value, _):
+                "unknown @platform value '{value}' for key '{key}'"
+
+    fn span() -> Span:
+        match self:
+            case PlatformLayoutDiagnostic.DuplicatePredicate(_, span, _): span
+            case PlatformLayoutDiagnostic.DuplicateDefault(span, _): span
+            case PlatformLayoutDiagnostic.AmbiguousPredicate(_, span, _): span
+            case PlatformLayoutDiagnostic.MissingExplicitLayoutHint(span): span
+            case PlatformLayoutDiagnostic.UnknownKey(_, span): span
+            case PlatformLayoutDiagnostic.UnknownValue(_, _, span): span
+
+struct PlatformParseResult:
+    variants: [PlatformVariant]
+    diagnostics: [PlatformLayoutDiagnostic]
 
 
 # Layout kind (from @repr attribute)
@@ -154,6 +239,172 @@ fn primitive_align(type_name: text) -> has_i64:
         case "unit": 1  # ZST has alignment 1
         case "void": 1  # ZST has alignment 1
         case _: nil
+
+fn platform_abi_from_text(name: text) -> PlatformAbi?:
+    match name.lower():
+        case "gnu" | "gnuabi" | "gnueabihf": Some(PlatformAbi.Gnu)
+        case "musl": Some(PlatformAbi.Musl)
+        case "msvc": Some(PlatformAbi.Msvc)
+        case "eabi": Some(PlatformAbi.Eabi)
+        case "sysv": Some(PlatformAbi.Sysv)
+        case "none" | "baremetal": Some(PlatformAbi.None_)
+        case _: nil
+
+fn platform_bit_from_text(name: text) -> PlatformBit?:
+    match name.lower():
+        case "pointer" | "ptr" | "word": Some(PlatformBit.Pointer)
+        case "16" | "bits16" | "bit16": Some(PlatformBit.Bits16)
+        case "32" | "bits32" | "bit32": Some(PlatformBit.Bits32)
+        case "64" | "bits64" | "bit64": Some(PlatformBit.Bits64)
+        case _: nil
+
+fn platform_cpu_from_text(name: text) -> text?:
+    match name.lower():
+        case "x86_64" | "amd64" | "x64": Some("x86_64")
+        case "x86" | "i386" | "i686": Some("x86")
+        case "aarch64" | "arm64": Some("aarch64")
+        case "arm" | "armv7" | "armv6": Some("arm")
+        case "riscv64" | "riscv64gc" | "rv64": Some("riscv64")
+        case "riscv32" | "riscv32gc" | "rv32": Some("riscv32")
+        case "wasm32" | "wasm": Some("wasm32")
+        case "wasm64": Some("wasm64")
+        case "avr" | "atmega" | "attiny": Some("avr")
+        case "mcs51" | "mcs-51" | "8051": Some("mcs51")
+        case "i8086" | "8086" | "8088": Some("i8086")
+        case "msp430": Some("msp430")
+        case _: nil
+
+fn platform_os_from_text(name: text) -> text?:
+    match name.lower():
+        case "linux": Some("linux")
+        case "windows" | "win" | "windows_nt": Some("windows")
+        case "macos" | "darwin" | "mac": Some("macos")
+        case "freebsd": Some("freebsd")
+        case "openbsd": Some("openbsd")
+        case "netbsd": Some("netbsd")
+        case "android": Some("android")
+        case "unix": Some("unix")
+        case "none" | "baremetal": Some("none")
+        case _: nil
+
+fn platform_abi_to_text(abi: PlatformAbi) -> text:
+    match abi:
+        case PlatformAbi.Any: "any"
+        case PlatformAbi.Gnu: "gnu"
+        case PlatformAbi.Musl: "musl"
+        case PlatformAbi.Msvc: "msvc"
+        case PlatformAbi.Eabi: "eabi"
+        case PlatformAbi.Sysv: "sysv"
+        case PlatformAbi.None_: "none"
+
+fn platform_bit_to_text(bit: PlatformBit) -> text:
+    match bit:
+        case PlatformBit.Pointer: "pointer"
+        case PlatformBit.Bits16: "16"
+        case PlatformBit.Bits32: "32"
+        case PlatformBit.Bits64: "64"
+
+fn platform_predicate_default() -> PlatformPredicate:
+    PlatformPredicate(
+        has_default: false,
+        has_cpu: false,
+        cpu: "",
+        has_os: false,
+        os: "",
+        has_abi: false,
+        abi: PlatformAbi.Any,
+        has_bit: false,
+        bit: PlatformBit.Pointer
+    )
+
+fn platform_predicate_signature(pred: PlatformPredicate) -> text:
+    var parts: [text] = []
+    if pred.has_default:
+        parts.push("default")
+    if pred.has_cpu:
+        parts.push("cpu={pred.cpu.lower()}")
+    if pred.has_os:
+        parts.push("os={pred.os.lower()}")
+    if pred.has_abi:
+        parts.push("abi={platform_abi_to_text(pred.abi)}")
+    if pred.has_bit:
+        parts.push("bit={platform_bit_to_text(pred.bit)}")
+    parts.join("|")
+
+fn platform_variant_signature(variant: PlatformVariant) -> text:
+    var parts: [text] = []
+    val pred = variant.predicate
+    parts.push(platform_predicate_signature(pred))
+    if variant.has_explicit_size:
+        parts.push("size={variant.explicit_size}")
+    if variant.has_explicit_align:
+        parts.push("align={variant.explicit_align}")
+    parts.join("|")
+
+fn platform_variant_has_layout_hint(variant: PlatformVariant) -> bool:
+    variant.predicate.has_bit or variant.has_explicit_size or variant.has_explicit_align
+
+fn platform_variant_is_default(variant: PlatformVariant) -> bool:
+    variant.predicate.has_default
+
+fn platform_variant_is_ambiguous(left: PlatformVariant, right: PlatformVariant) -> bool:
+    val same_predicate = platform_predicate_signature(left.predicate) == platform_predicate_signature(right.predicate)
+    val same_layout = platform_variant_signature(left) == platform_variant_signature(right)
+    same_predicate and not same_layout
+
+fn platform_validate_variants(variants: [PlatformVariant]) -> [PlatformLayoutDiagnostic]:
+    var diagnostics: [PlatformLayoutDiagnostic] = []
+    var seen_keys: [text] = []
+    var seen_spans: [Span] = []
+    var seen_default = false
+    var seen_default_span: Span? = nil
+
+    var vi = 0
+    while vi < variants.len():
+        val variant = variants[vi]
+        val key = platform_predicate_signature(variant.predicate)
+        var is_duplicate_default = false
+
+        if variant.predicate.has_default:
+            if seen_default:
+                diagnostics.push(PlatformLayoutDiagnostic.DuplicateDefault(
+                    span: variant.span,
+                    previous_span: seen_default_span ?? variant.span
+                ))
+                is_duplicate_default = true
+            else:
+                seen_default = true
+                seen_default_span = variant.span
+
+        if not is_duplicate_default:
+            var si = 0
+            while si < seen_keys.len():
+                if seen_keys[si] == key:
+                    val previous_span = seen_spans[si]
+                    if platform_variant_is_ambiguous(variants[si], variant):
+                        diagnostics.push(PlatformLayoutDiagnostic.AmbiguousPredicate(
+                            predicate: key,
+                            span: variant.span,
+                            previous_span: previous_span
+                        ))
+                    else:
+                        diagnostics.push(PlatformLayoutDiagnostic.DuplicatePredicate(
+                            predicate: key,
+                            span: variant.span,
+                            previous_span: previous_span
+                        ))
+                    break
+                si = si + 1
+        if not platform_variant_has_layout_hint(variant):
+            diagnostics.push(PlatformLayoutDiagnostic.MissingExplicitLayoutHint(
+                span: variant.span
+            ))
+
+        seen_keys.push(key)
+        seen_spans.push(variant.span)
+        vi = vi + 1
+
+    diagnostics
 
 # Get size of a type
 fn size_of_type(type_: HirType) -> i64:

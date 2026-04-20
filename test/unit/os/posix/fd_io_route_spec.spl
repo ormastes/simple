@@ -7,8 +7,8 @@ native pipe descriptors to the pipe backend, not through VFS IPC.
 """
 
 use std.spec
-use os.posix.fd_table.{FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, FD_TYPE_FREE}
-use os.posix.fd_io.{fd_io_read_route, fd_io_write_route, fd_io_close_route, FD_IO_ROUTE_INVALID, FD_IO_ROUTE_FILE, FD_IO_ROUTE_SERIAL, FD_IO_ROUTE_PIPE, FD_IO_ROUTE_SOCKET}
+use os.posix.fd_table.{fd_table_init, fd_set, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_offset, fd_set_offset, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, FD_TYPE_FREE, O_RDONLY, O_WRONLY}
+use os.posix.fd_io.{fd_io_read_route, fd_io_write_route, fd_io_close_route, posix_dup2, FD_IO_ROUTE_INVALID, FD_IO_ROUTE_FILE, FD_IO_ROUTE_SERIAL, FD_IO_ROUTE_PIPE, FD_IO_ROUTE_SOCKET}
 
 describe "POSIX fd_io backend routing":
     it "routes file descriptors to the file backend":
@@ -40,3 +40,30 @@ describe "POSIX fd_io backend routing":
         expect(fd_io_read_route(FD_TYPE_FREE)).to_equal(FD_IO_ROUTE_INVALID)
         expect(fd_io_write_route(FD_TYPE_FREE)).to_equal(FD_IO_ROUTE_INVALID)
         expect(fd_io_close_route(FD_TYPE_FREE)).to_equal(FD_IO_ROUTE_INVALID)
+
+    it "posix_dup2 keeps target unchanged when old fd is invalid":
+        fd_table_init()
+        fd_set(4, FD_TYPE_FILE, O_WRONLY, 44u64)
+        expect(fd_set_offset(4, 99u64)).to_equal(0)
+        expect(fd_set_cloexec(4, true)).to_equal(0)
+
+        expect(posix_dup2(99, 4)).to_equal(-9)
+
+        expect(fd_is_valid(4)).to_equal(true)
+        expect(fd_ports[4]).to_equal(44u64)
+        expect(fd_get_offset(4)).to_equal(99u64)
+        expect(fd_get_cloexec(4)).to_equal(true)
+
+    it "posix_dup2 replaces target through close semantics":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 33u64)
+        fd_set(4, FD_TYPE_FILE, O_WRONLY, 44u64)
+        expect(fd_set_offset(3, 7u64)).to_equal(0)
+        expect(fd_set_cloexec(4, true)).to_equal(0)
+
+        expect(posix_dup2(3, 4)).to_equal(4)
+
+        expect(fd_is_valid(4)).to_equal(true)
+        expect(fd_ports[4]).to_equal(33u64)
+        expect(fd_get_offset(4)).to_equal(7u64)
+        expect(fd_get_cloexec(4)).to_equal(false)

@@ -1,0 +1,267 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SOSIX async I/O owner.
+#
+# SOSIX is the native async-by-default OS surface. POSIX async_io keeps its
+# historical exported names as compatibility wrappers over this module.
+
+use os.posix.errno.{EBADF, EIO}
+use os.posix.fd_table.{fd_is_valid, fd_get_offset, fd_set_offset, fd_types, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL}
+use os.userlib.syscall_raw.{syscall}
+
+val _VFS_PORT: u64 = 1
+
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+
+val SOSIX_ASYNC_FREE: u8 = 0
+val SOSIX_ASYNC_PENDING: u8 = 1
+val SOSIX_ASYNC_COMPLETE: u8 = 2
+val SOSIX_ASYNC_ERROR: u8 = 3
+
+val SOSIX_IO_BACKEND_INVALID: u8 = 0
+val SOSIX_IO_BACKEND_SERIAL: u8 = 1
+val SOSIX_IO_BACKEND_VFS: u8 = 2
+
+val SOSIX_MAX_ASYNC_REQUESTS: u64 = 128
+
+val VFS_OPEN: u32 = 1
+val VFS_READ: u32 = 2
+val VFS_WRITE: u32 = 3
+val VFS_CLOSE: u32 = 4
+val VFS_STAT: u32 = 5
+val VFS_SEEK: u32 = 6
+val VFS_READDIR: u32 = 7
+val VFS_MKDIR: u32 = 8
+
+var sosix_req_states: [u8; 128]
+var sosix_req_fds: [i32; 128]
+var sosix_req_methods: [u32; 128]
+var sosix_req_results: [i64; 128]
+var sosix_req_notifications: [u64; 128]
+
+fn sosix_io_backend_for_fd_type(fd_type: u8) -> u8:
+    """Return the native SOSIX async backend for an FD type."""
+    if fd_type == FD_TYPE_SERIAL:
+        return SOSIX_IO_BACKEND_SERIAL
+    if fd_type == FD_TYPE_FILE:
+        return SOSIX_IO_BACKEND_VFS
+    SOSIX_IO_BACKEND_INVALID
+
+fn sosix_io_init():
+    """Initialize SOSIX async I/O request state."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_states[i] = SOSIX_ASYNC_FREE
+        sosix_req_fds[i] = -1
+        sosix_req_methods[i] = 0
+        sosix_req_results[i] = 0
+        sosix_req_notifications[i] = 0
+        i = i + 1
+
+fn sosix_async_alloc_request() -> u64:
+    """Allocate a SOSIX async request slot."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_ASYNC_REQUESTS:
+        if sosix_req_states[i] == SOSIX_ASYNC_FREE:
+            sosix_req_states[i] = SOSIX_ASYNC_PENDING
+            return i
+        i = i + 1
+    SOSIX_MAX_ASYNC_REQUESTS
+
+fn sosix_async_free_request(req_id: u64):
+    """Free a SOSIX async request slot."""
+    if req_id < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_states[req_id] = SOSIX_ASYNC_FREE
+
+fn sosix_async_is_complete(req_id: u64) -> bool:
+    """Check whether a SOSIX async request is complete."""
+    if req_id >= SOSIX_MAX_ASYNC_REQUESTS:
+        return true
+    sosix_req_states[req_id] == SOSIX_ASYNC_COMPLETE or sosix_req_states[req_id] == SOSIX_ASYNC_ERROR
+
+fn sosix_async_get_result(req_id: u64) -> i64:
+    """Return a completed SOSIX async request result."""
+    if req_id >= SOSIX_MAX_ASYNC_REQUESTS:
+        return 0 - EIO as i64
+    sosix_req_results[req_id]
+
+fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
+    """Start a SOSIX async read and return its request ID."""
+    if not fd_is_valid(fd):
+        return SOSIX_MAX_ASYNC_REQUESTS
+    val idx: u64 = fd as u64
+
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        val req = sosix_async_alloc_request()
+        if req < SOSIX_MAX_ASYNC_REQUESTS:
+            sosix_req_fds[req] = fd
+            sosix_req_methods[req] = VFS_READ
+            extern fn rt_port_inb(port: u16) -> u8
+            extern fn mmio_write8(addr: u64, val: u8)
+            val byte = rt_port_inb(0x3F8)
+            mmio_write8(buf_addr, byte)
+            sosix_req_states[req] = SOSIX_ASYNC_COMPLETE
+            sosix_req_results[req] = 1
+        return req
+
+    if sosix_io_backend_for_fd_type(fd_types[idx]) != SOSIX_IO_BACKEND_VFS:
+        return SOSIX_MAX_ASYNC_REQUESTS
+
+    val req = sosix_async_alloc_request()
+    if req < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_fds[req] = fd
+        sosix_req_methods[req] = VFS_READ
+
+        val vfs_handle = fd_ports[idx]
+        val offset = fd_get_offset(fd)
+        var payload: [u8] = []
+        _sosix_async_push_u32(payload, VFS_READ)
+        _sosix_async_push_u64(payload, vfs_handle)
+        _sosix_async_push_u64(payload, offset)
+        _sosix_async_push_u64(payload, count)
+
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            sosix_req_states[req] = SOSIX_ASYNC_ERROR
+            sosix_req_results[req] = 0 - EIO as i64
+        else:
+            var reply_buf: [u8; 4096] = [0; 4096]
+            val reply_ptr = unsafe_addr_of(reply_buf)
+            val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 4096, 0, 0)
+            if recv_result < 0:
+                sosix_req_states[req] = SOSIX_ASYNC_ERROR
+                sosix_req_results[req] = 0 - EIO as i64
+            else:
+                val status = _sosix_async_read_i32(reply_buf, 0)
+                if status < 0:
+                    sosix_req_states[req] = SOSIX_ASYNC_ERROR
+                    sosix_req_results[req] = status as i64
+                else:
+                    val bytes_read = _sosix_async_read_u64(reply_buf, 4)
+                    extern fn mmio_write8(addr: u64, val_: u8)
+                    var ci: u64 = 0
+                    while ci < bytes_read and ci < count:
+                        mmio_write8(buf_addr + ci, reply_buf[12 + ci])
+                        ci = ci + 1
+                    fd_set_offset(fd, fd_get_offset(fd) + bytes_read)
+                    sosix_req_states[req] = SOSIX_ASYNC_COMPLETE
+                    sosix_req_results[req] = bytes_read as i64
+    req
+
+fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
+    """Start a SOSIX async write and return its request ID."""
+    if not fd_is_valid(fd):
+        return SOSIX_MAX_ASYNC_REQUESTS
+    val idx: u64 = fd as u64
+
+    if fd_types[idx] == FD_TYPE_SERIAL:
+        val req = sosix_async_alloc_request()
+        if req < SOSIX_MAX_ASYNC_REQUESTS:
+            sosix_req_fds[req] = fd
+            sosix_req_methods[req] = VFS_WRITE
+            sosix_req_states[req] = SOSIX_ASYNC_COMPLETE
+            sosix_req_results[req] = count as i64
+        return req
+
+    if sosix_io_backend_for_fd_type(fd_types[idx]) != SOSIX_IO_BACKEND_VFS:
+        return SOSIX_MAX_ASYNC_REQUESTS
+
+    val req = sosix_async_alloc_request()
+    if req < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_fds[req] = fd
+        sosix_req_methods[req] = VFS_WRITE
+
+        val vfs_handle = fd_ports[idx]
+        val offset = fd_get_offset(fd)
+        var payload: [u8] = []
+        _sosix_async_push_u32(payload, VFS_WRITE)
+        _sosix_async_push_u64(payload, vfs_handle)
+        _sosix_async_push_u64(payload, offset)
+        _sosix_async_push_u64(payload, count)
+
+        extern fn mmio_read8(addr: u64) -> u8
+        var ci: u64 = 0
+        while ci < count:
+            payload.push(mmio_read8(buf_addr + ci))
+            ci = ci + 1
+
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            sosix_req_states[req] = SOSIX_ASYNC_ERROR
+            sosix_req_results[req] = 0 - EIO as i64
+        else:
+            var reply_buf: [u8; 16] = [0; 16]
+            val reply_ptr = unsafe_addr_of(reply_buf)
+            val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
+            if recv_result < 0:
+                sosix_req_states[req] = SOSIX_ASYNC_ERROR
+                sosix_req_results[req] = 0 - EIO as i64
+            else:
+                val status = _sosix_async_read_i32(reply_buf, 0)
+                if status < 0:
+                    sosix_req_states[req] = SOSIX_ASYNC_ERROR
+                    sosix_req_results[req] = status as i64
+                else:
+                    val bytes_written = _sosix_async_read_u64(reply_buf, 4)
+                    fd_set_offset(fd, fd_get_offset(fd) + bytes_written)
+                    sosix_req_states[req] = SOSIX_ASYNC_COMPLETE
+                    sosix_req_results[req] = bytes_written as i64
+    req
+
+fn sosix_sync_read(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Blocking compatibility read over the native SOSIX async request."""
+    val req = sosix_async_read(fd, buf_addr, count)
+    if req >= SOSIX_MAX_ASYNC_REQUESTS:
+        return 0 - EBADF as i64
+    while not sosix_async_is_complete(req):
+        if sosix_req_notifications[req] != 0:
+            syscall(26, sosix_req_notifications[req], 0, 0, 0, 0)
+        # Intentional spin fallback when no completion notification exists.
+        pass_dn
+    val result = sosix_async_get_result(req)
+    sosix_async_free_request(req)
+    result
+
+fn sosix_sync_write(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Blocking compatibility write over the native SOSIX async request."""
+    val req = sosix_async_write(fd, buf_addr, count)
+    if req >= SOSIX_MAX_ASYNC_REQUESTS:
+        return 0 - EBADF as i64
+    while not sosix_async_is_complete(req):
+        if sosix_req_notifications[req] != 0:
+            syscall(26, sosix_req_notifications[req], 0, 0, 0, 0)
+        # Intentional spin fallback when no completion notification exists.
+        pass_dn
+    val result = sosix_async_get_result(req)
+    sosix_async_free_request(req)
+    result
+
+fn _sosix_async_push_u32(buf: [u8], val_: u32):
+    """Push a u32 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+    buf.push(((val_ >> 16) & 0xFF) as u8)
+    buf.push(((val_ >> 24) & 0xFF) as u8)
+
+fn _sosix_async_push_u64(buf: [u8], val_: u64):
+    """Push a u64 in little-endian byte order."""
+    _sosix_async_push_u32(buf, (val_ & 0xFFFFFFFF) as u32)
+    _sosix_async_push_u32(buf, ((val_ >> 32) & 0xFFFFFFFF) as u32)
+
+fn _sosix_async_read_i32(buf: [u8], offset: u64) -> i32:
+    """Read a little-endian i32 from a byte buffer."""
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _sosix_async_read_u64(buf: [u8], offset: u64) -> u64:
+    """Read a little-endian u64 from a byte buffer."""
+    val lo = _sosix_async_read_i32(buf, offset) as u64 & 0xFFFFFFFF
+    val hi = _sosix_async_read_i32(buf, offset + 4) as u64 & 0xFFFFFFFF
+    lo | (hi << 32)

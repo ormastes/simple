@@ -19,7 +19,13 @@
 # Split deferred — spawn_analysis.spl (L1) consumes parse_function_attrs/parse_task_attr,
 # so moving parsing fns to L2 would create a new L1→L2 violation.
 use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
-use compiler.types.type_layout.{LayoutAttr, LayoutKind}
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind,
+    PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
+    PlatformLayoutDiagnostic, platform_abi_from_text, platform_bit_from_text,
+    platform_cpu_from_text, platform_os_from_text,
+    platform_predicate_default, platform_validate_variants
+}
 use compiler.common.diagnostics.span.{Span}
 
 
@@ -471,11 +477,230 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
         is_packed: is_packed
     )
 
+fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
+    """Extract @platform attributes from a list of attributes.
+
+    Parses each @platform occurrence into a typed PlatformVariant and
+    collects diagnostics for unknown keys, duplicate predicates, duplicate
+    defaults, ambiguous variants, and missing explicit layout hints.
+    """
+    var variants: [PlatformVariant] = []
+    var diagnostics: [PlatformLayoutDiagnostic] = []
+
+    for attr in attrs:
+        if attr.name != "platform":
+            continue
+
+        var predicate = platform_predicate_default()
+        var has_explicit_size = false
+        var explicit_size = 0
+        var has_explicit_align = false
+        var explicit_align = 0
+
+        if attr.args.len() == 0:
+            predicate.has_default = true
+
+        for arg in attr.args:
+            match arg.kind:
+                case Ident(name):
+                    if name == "default":
+                        predicate.has_default = true
+                    elif name == "bit":
+                        predicate.has_bit = true
+                        predicate.bit = PlatformBit.Pointer
+                    else:
+                        diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                            key: name,
+                            span: arg.span
+                        ))
+                case IntLit(value):
+                    if not predicate.has_bit:
+                        predicate.has_bit = true
+                        if value == 16:
+                            predicate.bit = PlatformBit.Bits16
+                        elif value == 32:
+                            predicate.bit = PlatformBit.Bits32
+                        elif value == 64:
+                            predicate.bit = PlatformBit.Bits64
+                        else:
+                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                key: "bit",
+                                value: "{value}",
+                                span: arg.span
+                            ))
+                    else:
+                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                            key: "platform",
+                            value: "{value}",
+                            span: arg.span
+                        ))
+                case Assign(left, op, right):
+                    match left.kind:
+                        case Ident(name):
+                            if name == "default":
+                                match right.kind:
+                                    case BoolLit(v):
+                                        predicate.has_default = v
+                                    case Ident(text_value):
+                                        if text_value == "true":
+                                            predicate.has_default = true
+                                        elif text_value == "false":
+                                            predicate.has_default = false
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "default",
+                                                value: text_value,
+                                                span: right.span
+                                            ))
+                                    case _:
+                                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                            key: "default",
+                                            value: "",
+                                            span: right.span
+                                        ))
+                            elif name == "cpu":
+                                val cpu_name = extract_text_arg(right)
+                                val cpu = platform_cpu_from_text(cpu_name)
+                                if cpu.?:
+                                    predicate.has_cpu = true
+                                    predicate.cpu = cpu.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "cpu",
+                                        value: cpu_name,
+                                        span: right.span
+                                    ))
+                            elif name == "os":
+                                val os_name = extract_text_arg(right)
+                                val os = platform_os_from_text(os_name)
+                                if os.?:
+                                    predicate.has_os = true
+                                    predicate.os = os.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "os",
+                                        value: os_name,
+                                        span: right.span
+                                    ))
+                            elif name == "abi":
+                                val abi_name = extract_text_arg(right)
+                                val abi = platform_abi_from_text(abi_name)
+                                if abi.?:
+                                    predicate.has_abi = true
+                                    predicate.abi = abi.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "abi",
+                                        value: abi_name,
+                                        span: right.span
+                                    ))
+                            elif name == "bit":
+                                match right.kind:
+                                    case IntLit(v):
+                                        predicate.has_bit = true
+                                        if v == 16:
+                                            predicate.bit = PlatformBit.Bits16
+                                        elif v == 32:
+                                            predicate.bit = PlatformBit.Bits32
+                                        elif v == 64:
+                                            predicate.bit = PlatformBit.Bits64
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "bit",
+                                                value: "{v}",
+                                                span: right.span
+                                            ))
+                                    case Ident(text_value):
+                                        val bit = platform_bit_from_text(text_value)
+                                        if bit.?:
+                                            predicate.has_bit = true
+                                            predicate.bit = bit.unwrap()
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "bit",
+                                                value: text_value,
+                                                span: right.span
+                                            ))
+                                    case _:
+                                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                            key: "bit",
+                                            value: "",
+                                            span: right.span
+                                        ))
+                            elif name == "size":
+                                val size_val = extract_int_arg(right)
+                                if size_val.? and size_val.unwrap() > 0:
+                                    has_explicit_size = true
+                                    explicit_size = size_val.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "size",
+                                        value: extract_text_arg(right),
+                                        span: right.span
+                                    ))
+                            elif name == "align":
+                                val align_val = extract_int_arg(right)
+                                if align_val.? and align_val.unwrap() > 0:
+                                    has_explicit_align = true
+                                    explicit_align = align_val.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "align",
+                                        value: extract_text_arg(right),
+                                        span: right.span
+                                    ))
+                            else:
+                                diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                                    key: name,
+                                    span: left.span
+                                ))
+                        case _:
+                            diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                                key: extract_text_arg(left),
+                                span: left.span
+                            ))
+                case _:
+                    diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                        key: extract_text_arg(arg),
+                        span: arg.span
+                    ))
+
+        variants.push(PlatformVariant(
+            predicate: predicate,
+            has_explicit_size: has_explicit_size,
+            explicit_size: explicit_size,
+            has_explicit_align: has_explicit_align,
+            explicit_align: explicit_align,
+            span: attr.span
+        ))
+
+    val validation = platform_validate_variants(variants)
+    for diag in validation:
+        diagnostics.push(diag)
+
+    PlatformParseResult(
+        variants: variants,
+        diagnostics: diagnostics
+    )
+
 # Extract string value from an expression (for @repr("C"))
 fn extract_string_arg(expr: Expr) -> text:
     match expr.kind:
         case StringLit(value, _):
             value
+        case _:
+            ""
+
+fn extract_text_arg(expr: Expr) -> text:
+    match expr.kind:
+        case StringLit(value, _):
+            value
+        case Ident(name):
+            name
+        case IntLit(value):
+            "{value}"
+        case BoolLit(value):
+            if value: "true" else: "false"
         case _:
             ""
 

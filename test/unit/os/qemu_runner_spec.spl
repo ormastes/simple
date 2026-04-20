@@ -1,15 +1,25 @@
 use os.qemu_runner.{
     build_qemu_command, build_qemu_command_with_options,
-    get_gui_target, get_target,
+    get_all_targets, get_gui_target, get_target,
     desktop_disk_image_candidates, desktop_disk_image_path_in,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
-    desktop_release_installer_iso_path, qemu_run_options_debug_gui
+    desktop_release_installer_iso_path, native_build_prerequisite_hint,
+    qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
 describe "Qemu runner serial routing":
+    it "enumerates 32-bit x86 as a first-class target":
+        var found_x86_32 = false
+        for target in get_all_targets():
+            if target.arch == Architecture.X86:
+                found_x86_32 = true
+                expect(target.target_triple).to_equal("i686-unknown-none")
+                expect(target.qemu_system).to_equal("qemu-system-i386")
+        expect(found_x86_32).to_equal(true)
+
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)
         val cmd = build_qemu_command(target)
@@ -33,6 +43,19 @@ describe "Qemu runner serial routing":
         expect(cmd).to_contain("stdio")
         expect(cmd.contains("none")).to_equal(false)
         expect(cmd.contains("-display")).to_equal(false)
+
+describe "Qemu runner native-build prerequisites":
+    it "explains when the selected compiler lacks the LLVM backend":
+        val stderr = "LLVM backend requested but 'llvm' feature not enabled"
+        val hint = native_build_prerequisite_hint("llvm", stderr)
+        expect(hint).to_contain("Rust `llvm` feature")
+        expect(hint).to_contain("LLVM 18")
+
+    it "explains when cranelift cannot initialize a freestanding target":
+        val stderr = "Compilation error: Support for this target has not been implemented yet"
+        val hint = native_build_prerequisite_hint("cranelift", stderr)
+        expect(hint).to_contain("Cranelift cannot build this freestanding target")
+        expect(hint).to_contain("LLVM-enabled")
 
 describe "Qemu runner release artifacts":
     it "prefers release disk images before the legacy build fixture":

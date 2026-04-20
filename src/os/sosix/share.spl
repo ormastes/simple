@@ -1,0 +1,281 @@
+# SOSIX immutable dataset and queue sharing.
+
+use os.posix.errno.{EAGAIN, EBADF, EINVAL, EIO, ENOMEM}
+
+val SOSIX_MAX_DATASETS: u64 = 64
+val SOSIX_DATASET_MAX_BYTES: u64 = 4096
+val SOSIX_DATASET_STORAGE_BYTES: u64 = 262144
+
+val SOSIX_MAX_QUEUES: u64 = 32
+val SOSIX_QUEUE_MAX_CAPACITY: u64 = 32
+val SOSIX_QUEUE_MAX_MSG_BYTES: u64 = 128
+val SOSIX_QUEUE_SLOT_COUNT: u64 = 1024
+val SOSIX_QUEUE_STORAGE_BYTES: u64 = 131072
+
+val SOSIX_POLL_READ: u32 = 1
+val SOSIX_POLL_WRITE: u32 = 4
+val SOSIX_POLL_HUP: u32 = 16
+
+val SOSIX_QUEUE_CLOSE_SEND: u32 = 1
+val SOSIX_QUEUE_CLOSE_RECV: u32 = 2
+val SOSIX_NO_DATASET: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct SosixQueueRecv:
+    status: i64
+    len: u64
+    attached_dataset: u64
+    data: [u8]
+
+var sosix_dataset_active: [bool; 64]
+var sosix_dataset_sealed: [bool; 64]
+var sosix_dataset_owner: [u64; 64]
+var sosix_dataset_len: [u64; 64]
+var sosix_dataset_generations: [u64; 64]
+var sosix_dataset_bytes: [u8; 262144]
+
+var sosix_queue_active: [bool; 32]
+var sosix_queue_closed_send: [bool; 32]
+var sosix_queue_closed_recv: [bool; 32]
+var sosix_queue_owner: [u64; 32]
+var sosix_queue_capacity: [u64; 32]
+var sosix_queue_max_msg_bytes: [u64; 32]
+var sosix_queue_head: [u64; 32]
+var sosix_queue_tail: [u64; 32]
+var sosix_queue_count: [u64; 32]
+var sosix_queue_generations: [u64; 32]
+var sosix_queue_slot_len: [u64; 1024]
+var sosix_queue_slot_dataset: [u64; 1024]
+var sosix_queue_bytes: [u8; 131072]
+
+fn sosix_share_init():
+    """Initialize SOSIX dataset and queue tables."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_DATASETS:
+        sosix_dataset_active[i] = false
+        sosix_dataset_sealed[i] = false
+        sosix_dataset_owner[i] = 0
+        sosix_dataset_len[i] = 0
+        sosix_dataset_generations[i] = sosix_dataset_generations[i] + 1
+        i = i + 1
+    i = 0
+    while i < SOSIX_DATASET_STORAGE_BYTES:
+        sosix_dataset_bytes[i] = 0
+        i = i + 1
+    i = 0
+    while i < SOSIX_MAX_QUEUES:
+        sosix_queue_active[i] = false
+        sosix_queue_closed_send[i] = false
+        sosix_queue_closed_recv[i] = false
+        sosix_queue_owner[i] = 0
+        sosix_queue_capacity[i] = 0
+        sosix_queue_max_msg_bytes[i] = 0
+        sosix_queue_head[i] = 0
+        sosix_queue_tail[i] = 0
+        sosix_queue_count[i] = 0
+        sosix_queue_generations[i] = sosix_queue_generations[i] + 1
+        i = i + 1
+    i = 0
+    while i < SOSIX_QUEUE_SLOT_COUNT:
+        sosix_queue_slot_len[i] = 0
+        sosix_queue_slot_dataset[i] = SOSIX_NO_DATASET
+        i = i + 1
+    i = 0
+    while i < SOSIX_QUEUE_STORAGE_BYTES:
+        sosix_queue_bytes[i] = 0
+        i = i + 1
+
+fn _sosix_dataset_valid(handle: u64) -> bool:
+    if handle >= SOSIX_MAX_DATASETS:
+        return false
+    sosix_dataset_active[handle]
+
+fn _sosix_dataset_base(handle: u64) -> u64:
+    handle * SOSIX_DATASET_MAX_BYTES
+
+fn sosix_dataset_create(size: u64, flags: u32) -> i64:
+    """Create an unsealed immutable dataset builder."""
+    val _ignored_flags = flags
+    if size == 0 or size > SOSIX_DATASET_MAX_BYTES:
+        return 0 - EINVAL as i64
+    var i: u64 = 0
+    while i < SOSIX_MAX_DATASETS:
+        if not sosix_dataset_active[i]:
+            sosix_dataset_active[i] = true
+            sosix_dataset_sealed[i] = false
+            sosix_dataset_owner[i] = 0
+            sosix_dataset_len[i] = size
+            sosix_dataset_generations[i] = sosix_dataset_generations[i] + 1
+            val base = _sosix_dataset_base(i)
+            var j: u64 = 0
+            while j < size:
+                sosix_dataset_bytes[base + j] = 0
+                j = j + 1
+            return i as i64
+        i = i + 1
+    0 - ENOMEM as i64
+
+fn sosix_dataset_write(handle: u64, offset: u64, bytes: [u8]) -> i64:
+    """Write bytes into an unsealed dataset."""
+    if not _sosix_dataset_valid(handle):
+        return 0 - EBADF as i64
+    if sosix_dataset_sealed[handle]:
+        return 0 - EINVAL as i64
+    if offset > sosix_dataset_len[handle]:
+        return 0 - EINVAL as i64
+    if offset + bytes.len() > sosix_dataset_len[handle]:
+        return 0 - EINVAL as i64
+    val base = _sosix_dataset_base(handle)
+    var i: u64 = 0
+    while i < bytes.len():
+        sosix_dataset_bytes[base + offset + i] = bytes[i]
+        i = i + 1
+    bytes.len() as i64
+
+fn sosix_dataset_seal(handle: u64) -> i64:
+    """Seal a dataset so it can be shared read-only."""
+    if not _sosix_dataset_valid(handle):
+        return 0 - EBADF as i64
+    sosix_dataset_sealed[handle] = true
+    0
+
+fn sosix_dataset_close(handle: u64) -> i64:
+    """Close a dataset handle in this first in-process SOSIX table."""
+    if not _sosix_dataset_valid(handle):
+        return 0 - EBADF as i64
+    sosix_dataset_active[handle] = false
+    sosix_dataset_sealed[handle] = false
+    sosix_dataset_owner[handle] = 0
+    sosix_dataset_len[handle] = 0
+    0
+
+fn sosix_dataset_is_sealed(handle: u64) -> bool:
+    if not _sosix_dataset_valid(handle):
+        return false
+    sosix_dataset_sealed[handle]
+
+fn sosix_dataset_size(handle: u64) -> u64:
+    if not _sosix_dataset_valid(handle):
+        return 0
+    sosix_dataset_len[handle]
+
+fn sosix_dataset_read_byte(handle: u64, offset: u64) -> i64:
+    """Read one byte from a sealed dataset."""
+    if not _sosix_dataset_valid(handle):
+        return 0 - EBADF as i64
+    if not sosix_dataset_sealed[handle]:
+        return 0 - EINVAL as i64
+    if offset >= sosix_dataset_len[handle]:
+        return 0 - EINVAL as i64
+    sosix_dataset_bytes[_sosix_dataset_base(handle) + offset] as i64
+
+fn _sosix_queue_valid(queue: u64) -> bool:
+    if queue >= SOSIX_MAX_QUEUES:
+        return false
+    sosix_queue_active[queue]
+
+fn _sosix_queue_slot(queue: u64, logical_slot: u64) -> u64:
+    queue * SOSIX_QUEUE_MAX_CAPACITY + logical_slot
+
+fn _sosix_queue_slot_base(slot: u64) -> u64:
+    slot * SOSIX_QUEUE_MAX_MSG_BYTES
+
+fn sosix_queue_create(capacity: u64, max_msg_bytes: u64, flags: u32) -> i64:
+    """Create a bounded SOSIX MPMC queue."""
+    val _ignored_flags = flags
+    if capacity == 0 or capacity > SOSIX_QUEUE_MAX_CAPACITY:
+        return 0 - EINVAL as i64
+    if max_msg_bytes == 0 or max_msg_bytes > SOSIX_QUEUE_MAX_MSG_BYTES:
+        return 0 - EINVAL as i64
+    var i: u64 = 0
+    while i < SOSIX_MAX_QUEUES:
+        if not sosix_queue_active[i]:
+            sosix_queue_active[i] = true
+            sosix_queue_closed_send[i] = false
+            sosix_queue_closed_recv[i] = false
+            sosix_queue_owner[i] = 0
+            sosix_queue_capacity[i] = capacity
+            sosix_queue_max_msg_bytes[i] = max_msg_bytes
+            sosix_queue_head[i] = 0
+            sosix_queue_tail[i] = 0
+            sosix_queue_count[i] = 0
+            sosix_queue_generations[i] = sosix_queue_generations[i] + 1
+            return i as i64
+        i = i + 1
+    0 - ENOMEM as i64
+
+fn sosix_queue_send(queue: u64, bytes: [u8], attached_dataset: u64) -> i64:
+    """Send one message to a bounded SOSIX queue."""
+    if not _sosix_queue_valid(queue):
+        return 0 - EBADF as i64
+    if sosix_queue_closed_send[queue] or sosix_queue_closed_recv[queue]:
+        return 0 - EIO as i64
+    if bytes.len() > sosix_queue_max_msg_bytes[queue]:
+        return 0 - EINVAL as i64
+    if attached_dataset != SOSIX_NO_DATASET:
+        if not _sosix_dataset_valid(attached_dataset) or not sosix_dataset_sealed[attached_dataset]:
+            return 0 - EINVAL as i64
+    if sosix_queue_count[queue] >= sosix_queue_capacity[queue]:
+        return 0 - EAGAIN as i64
+    val tail = sosix_queue_tail[queue]
+    val slot = _sosix_queue_slot(queue, tail)
+    val base = _sosix_queue_slot_base(slot)
+    var i: u64 = 0
+    while i < bytes.len():
+        sosix_queue_bytes[base + i] = bytes[i]
+        i = i + 1
+    sosix_queue_slot_len[slot] = bytes.len()
+    sosix_queue_slot_dataset[slot] = attached_dataset
+    sosix_queue_tail[queue] = (tail + 1) % sosix_queue_capacity[queue]
+    sosix_queue_count[queue] = sosix_queue_count[queue] + 1
+    bytes.len() as i64
+
+fn sosix_queue_recv(queue: u64) -> SosixQueueRecv:
+    """Receive one message from a bounded SOSIX queue."""
+    if not _sosix_queue_valid(queue):
+        return SosixQueueRecv(status: 0 - EBADF as i64, len: 0, attached_dataset: SOSIX_NO_DATASET, data: [])
+    if sosix_queue_count[queue] == 0:
+        if sosix_queue_closed_send[queue]:
+            return SosixQueueRecv(status: 0, len: 0, attached_dataset: SOSIX_NO_DATASET, data: [])
+        return SosixQueueRecv(status: 0 - EAGAIN as i64, len: 0, attached_dataset: SOSIX_NO_DATASET, data: [])
+    val head = sosix_queue_head[queue]
+    val slot = _sosix_queue_slot(queue, head)
+    val base = _sosix_queue_slot_base(slot)
+    val msg_len = sosix_queue_slot_len[slot]
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < msg_len:
+        out.push(sosix_queue_bytes[base + i])
+        sosix_queue_bytes[base + i] = 0
+        i = i + 1
+    val attached = sosix_queue_slot_dataset[slot]
+    sosix_queue_slot_len[slot] = 0
+    sosix_queue_slot_dataset[slot] = SOSIX_NO_DATASET
+    sosix_queue_head[queue] = (head + 1) % sosix_queue_capacity[queue]
+    sosix_queue_count[queue] = sosix_queue_count[queue] - 1
+    SosixQueueRecv(status: msg_len as i64, len: msg_len, attached_dataset: attached, data: out)
+
+fn sosix_queue_poll(queue: u64) -> u32:
+    """Return readiness bits for a SOSIX queue."""
+    if not _sosix_queue_valid(queue):
+        return SOSIX_POLL_HUP
+    var bits: u32 = 0
+    if sosix_queue_count[queue] > 0:
+        bits = bits | SOSIX_POLL_READ
+    if not sosix_queue_closed_send[queue] and sosix_queue_count[queue] < sosix_queue_capacity[queue]:
+        bits = bits | SOSIX_POLL_WRITE
+    if sosix_queue_closed_send[queue] or sosix_queue_closed_recv[queue]:
+        bits = bits | SOSIX_POLL_HUP
+    bits
+
+fn sosix_queue_close(queue: u64, mode: u32) -> i64:
+    """Close one or both sides of a SOSIX queue."""
+    if not _sosix_queue_valid(queue):
+        return 0 - EBADF as i64
+    if (mode & SOSIX_QUEUE_CLOSE_SEND) != 0:
+        sosix_queue_closed_send[queue] = true
+    if (mode & SOSIX_QUEUE_CLOSE_RECV) != 0:
+        sosix_queue_closed_recv[queue] = true
+    if mode == 0:
+        sosix_queue_closed_send[queue] = true
+        sosix_queue_closed_recv[queue] = true
+    0

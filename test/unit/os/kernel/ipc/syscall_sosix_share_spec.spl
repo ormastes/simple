@@ -1,0 +1,65 @@
+# @cover src/os/kernel/ipc/syscall.spl 80%
+"""
+# SOSIX Sharing Syscall Specification
+
+Syscalls 120-131 expose immutable datasets and bounded process queues.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.shared_dataset.{shared_dataset_init, shared_dataset_read_byte}
+use os.kernel.ipc.process_queue.{process_queue_init, PROCESS_QUEUE_NO_HANDLE, PROCESS_QUEUE_POLL_READ}
+
+fn _dispatch(args: SyscallArgs) -> i64:
+    syscall_handler(args, Scheduler.new(), IpcManager.new(), KernelLog.new(16)).value
+
+describe "SOSIX dataset syscalls":
+    it "creates writes seals and maps immutable datasets":
+        shared_dataset_init()
+        var payload: [u8] = [1u8, 2u8, 3u8, 4u8]
+
+        val handle = _dispatch(SyscallArgs(id: 120, arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        expect(handle).to_equal(0)
+        expect(_dispatch(SyscallArgs(id: 122, arg0: handle as u64, arg1: 0, arg2: &payload as u64, arg3: 4, arg4: 0, arg5: 0))).to_equal(4)
+        expect(_dispatch(SyscallArgs(id: 123, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(shared_dataset_read_byte(handle as u64, 2)).to_equal(3)
+
+        val mapped = _dispatch(SyscallArgs(id: 124, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 4, arg4: 0, arg5: 0))
+        expect(mapped).to_be_greater_than(0)
+        expect(_dispatch(SyscallArgs(id: 125, arg0: mapped as u64, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+
+    it "creates sealed file-backed dataset handles through the ABI":
+        shared_dataset_init()
+
+        val handle = _dispatch(SyscallArgs(id: 121, arg0: 3, arg1: 0, arg2: 8, arg3: 0, arg4: 0, arg5: 0))
+        expect(handle).to_equal(0)
+        expect(_dispatch(SyscallArgs(id: 122, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(-22)
+        expect(_dispatch(SyscallArgs(id: 126, arg0: handle as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+
+describe "SOSIX process queue syscalls":
+    it "creates sends polls and receives queue messages":
+        process_queue_init()
+        var payload: [u8] = [9u8, 8u8]
+        var out: [u8] = [0u8, 0u8]
+        var attached: u64 = PROCESS_QUEUE_NO_HANDLE
+
+        val queue = _dispatch(SyscallArgs(id: 127, arg0: 2, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        expect(queue).to_equal(0)
+        expect(_dispatch(SyscallArgs(id: 128, arg0: queue as u64, arg1: &payload as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0))).to_equal(2)
+        expect(_dispatch(SyscallArgs(id: 130, arg0: queue as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)) & PROCESS_QUEUE_POLL_READ as i64).to_equal(PROCESS_QUEUE_POLL_READ as i64)
+
+        expect(_dispatch(SyscallArgs(id: 129, arg0: queue as u64, arg1: &out as u64, arg2: 2, arg3: &attached as u64, arg4: 0, arg5: 0))).to_equal(2)
+        expect(out[0]).to_equal(9u8)
+        expect(out[1]).to_equal(8u8)
+        expect(attached).to_equal(0u64)
+
+    it "closes queue sides through the ABI":
+        process_queue_init()
+
+        val queue = _dispatch(SyscallArgs(id: 127, arg0: 1, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        expect(_dispatch(SyscallArgs(id: 131, arg0: queue as u64, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)
+        expect(_dispatch(SyscallArgs(id: 129, arg0: queue as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))).to_equal(0)

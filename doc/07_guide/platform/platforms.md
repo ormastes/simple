@@ -42,7 +42,20 @@ Covers supported platforms, cross-compilation, platform abstraction library, and
 
 **Requirements:** FreeBSD 13+, 64-bit kernel and userspace.
 
-**32-bit systems are not supported.** Simple requires 64-bit platforms.
+Hosted Simple compiler binaries currently require 64-bit kernel/userspace. SimpleOS guest targets are separate from hosted compiler binaries and include 32-bit OS build lanes.
+
+### SimpleOS Guest Targets
+
+| Target | Architecture | Bits | Boot/Run Status |
+|--------|--------------|------|-----------------|
+| `x86_64-simpleos` | x86_64 | 64 | QEMU `qemu-system-x86_64` |
+| `i686-simpleos` | x86_32 / i686 | 32 | QEMU `qemu-system-i386`, Multiboot1 C/ASM boot support |
+| `aarch64-simpleos` | ARM64 | 64 | QEMU `qemu-system-aarch64` |
+| `armv7-simpleos` | ARM32 | 32 | QEMU `qemu-system-arm` |
+| `riscv64gc-simpleos` | RISC-V 64 | 64 | QEMU `qemu-system-riscv64` |
+| `riscv32imac-simpleos` | RISC-V 32 | 32 | QEMU `qemu-system-riscv32` |
+
+The multi-platform target catalog lives in `src/os/port/simpleos_multiplatform_build.spl`. It records target aliases, C and assembly boot sources, freestanding C/ASM flags, linker scripts, and QEMU defaults.
 
 ---
 

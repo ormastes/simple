@@ -1,14 +1,21 @@
 use std.spec
-use os.kernel.ipc.syscall.{syscall_handler}
-use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallTrapDisposition}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState}
+use os.kernel.ipc.notification.{notification_create, notification_wait}
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.memory.pmm.{pmm_alloc_page_raw}
+use os.kernel.memory.vmm.{vmm_map_page}
+use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState, BlockReason}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
+use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
+use os.kernel.boot.mmio.{mmio_write16, mmio_write32}
 
 """
 Syscall dispatcher tests for process launch and scheduler control paths.
@@ -18,6 +25,22 @@ Syscall dispatcher tests for process launch and scheduler control paths.
 The scheduler-control cases verify reserved sys_schedule/sys_schedctl ABI
 without requiring a full booted kernel.
 """
+fn _map_user_pollfd_page(ptr: u64) -> bool:
+    val phys = pmm_alloc_page_raw()
+    if phys == 0:
+        return false
+    vmm_map_page(
+        VirtAddr(addr: ptr),
+        PhysAddr(addr: phys),
+        VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+    )
+
+fn _write_pollfd(ptr: u64, index: u64, fd: i32, events: i16):
+    val entry = ptr + index * 8
+    mmio_write32(entry, fd as u32)
+    mmio_write16(entry + 4, events as u16)
+    mmio_write16(entry + 6, 0)
+
 describe "syscall_handler":
     it "launches built-in service binaries through spawn_binary":
         val path = "/sys/services/vfs"
@@ -40,6 +63,276 @@ describe "syscall_handler":
         val spawned = scheduler.get_task(TaskId(id: result.value as u64))
         val found = if spawned == nil: 0 else: 1
         expect(found).to_equal(1)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(true)
+
+    it "sleep syscall blocks current task on a scheduler deadline":
+        var scheduler = Scheduler.new()
+        val task_id = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 51,
+                arg0: 15000000,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val tcb = scheduler.get_task(task_id)
+        if tcb != nil:
+            val task = tcb
+            val blocked_until = match task.state:
+                TaskState.Blocked(reason):
+                    match reason:
+                        BlockReason.Sleep(until_ns): until_ns
+                        _: 0u64
+                _: 0u64
+            expect(blocked_until).to_equal(20000000u64)
+
+    it "dispatch marks blocking sleep as BlockCurrent":
+        var scheduler = Scheduler.new()
+        scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_dispatch(
+            SyscallArgs(
+                id: 51,
+                arg0: 15000000,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.result.value).to_equal(0)
+        expect(result.disposition).to_equal(SyscallTrapDisposition.BlockCurrent)
+
+    it "poll with no fds and finite timeout blocks on a scheduler deadline":
+        var scheduler = Scheduler.new()
+        val task_id = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 68,
+                arg0: 0,
+                arg1: 0,
+                arg2: 25,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val tcb = scheduler.get_task(task_id)
+        if tcb != nil:
+            val task = tcb
+            val blocked_until = match task.state:
+                TaskState.Blocked(reason):
+                    match reason:
+                        BlockReason.Sleep(until_ns): until_ns
+                        _: 0u64
+                _: 0u64
+            expect(blocked_until).to_equal(30000000u64)
+
+    it "dispatch marks blocking poll as BlockCurrent":
+        var scheduler = Scheduler.new()
+        scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_dispatch(
+            SyscallArgs(
+                id: 68,
+                arg0: 0,
+                arg1: 0,
+                arg2: 25,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.result.value).to_equal(0)
+        expect(result.disposition).to_equal(SyscallTrapDisposition.BlockCurrent)
+
+    it "poll treats any negative timeout as an infinite wait":
+        var scheduler = Scheduler.new()
+        val task_id = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 68,
+                arg0: 0,
+                arg1: 0,
+                arg2: 0xFFFFFFFFFFFFFFFE,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val tcb = scheduler.get_task(task_id)
+        if tcb != nil:
+            val task = tcb
+            val blocked_until = match task.state:
+                TaskState.Blocked(reason):
+                    match reason:
+                        BlockReason.Sleep(until_ns): until_ns
+                        _: 0u64
+                _: 0u64
+            expect(blocked_until).to_equal(0xFFFFFFFFFFFFFFFF)
+
+    it "poll returns -EINVAL when more than four notification-backed fds are passed":
+        fd_table_init()
+        val pollfds_ptr = 0x10000000u64
+        expect(_map_user_pollfd_page(pollfds_ptr)).to_equal(true)
+
+        var i: u64 = 0
+        while i < 5:
+            val fd = (3 + i) as i32
+            val notif = notification_create(g_notification_table)
+            fd_set(fd, FD_TYPE_PIPE_READ, O_RDONLY, (10 + i) as u64)
+            expect(fd_set_poll_notification(fd, POLLIN, notif)).to_equal(0)
+            _write_pollfd(pollfds_ptr, i, fd, POLLIN)
+            i = i + 1
+
+        var scheduler = Scheduler.new()
+        val task_id = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 68,
+                arg0: pollfds_ptr,
+                arg1: 5,
+                arg2: 25,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(-22)
+        val tcb = scheduler.get_task(task_id)
+        if tcb != nil:
+            val task = tcb
+            val is_blocked = match task.state:
+                TaskState.Blocked(reason): true
+                _: false
+            expect(is_blocked).to_equal(false)
+
+    it "poll with a notification-backed fd and finite timeout blocks on a scheduler deadline":
+        fd_table_init()
+        val pollfds_ptr = 0x10000000u64
+        expect(_map_user_pollfd_page(pollfds_ptr)).to_equal(true)
+
+        val fd = 3
+        val notif = notification_create(g_notification_table)
+        fd_set(fd, FD_TYPE_PIPE_READ, O_RDONLY, 10u64)
+        expect(fd_set_poll_notification(fd, POLLIN, notif)).to_equal(0)
+        _write_pollfd(pollfds_ptr, 0, fd, POLLIN)
+
+        var scheduler = Scheduler.new()
+        val task_id = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 68,
+                arg0: pollfds_ptr,
+                arg1: 1,
+                arg2: 25,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val tcb = scheduler.get_task(task_id)
+        if tcb != nil:
+            val task = tcb
+            val blocked_until = match task.state:
+                TaskState.Blocked(reason):
+                    match reason:
+                        BlockReason.Sleep(until_ns): until_ns
+                        _: 0u64
+                _: 0u64
+            expect(blocked_until).to_equal(30000000u64)
+
+    it "notification signal syscall wakes every staged waiter":
+        var scheduler = Scheduler.new()
+        val first = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val second = scheduler.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+        val notif = notification_create(g_notification_table)
+        expect(notification_wait(g_notification_table, notif, first.id)).to_equal(0u64)
+        expect(notification_wait(g_notification_table, notif, second.id)).to_equal(0u64)
+        scheduler.block_task(first, BlockReason.Notification(id: notif))
+        scheduler.block_task(second, BlockReason.Notification(id: notif))
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 25,
+                arg0: notif,
+                arg1: 1,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        val first_tcb = scheduler.get_task(first)
+        val second_tcb = scheduler.get_task(second)
+        if first_tcb != nil:
+            val task = first_tcb
+            val is_ready = match task.state:
+                TaskState.Ready: true
+                _: false
+            expect(is_ready).to_equal(true)
+        if second_tcb != nil:
+            val task = second_tcb
+            val is_ready = match task.state:
+                TaskState.Ready: true
+                _: false
+            expect(is_ready).to_equal(true)
 
     it "launches the canonical rv64 proof binary path through spawn_binary":
         val path = RV64_PROOF_BINARY_PATH
@@ -271,6 +564,31 @@ describe "syscall_handler":
         )
         expect(result.value).to_equal(-10)
 
+    it "signal kill marks the target as a waitable zombie":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val child = scheduler.clone_task(parent)
+
+        val kill_result = syscall_handler(
+            SyscallArgs(
+                id: 7,
+                arg0: child.id,
+                arg1: 1,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(kill_result.value).to_equal(0)
+
+        val status = scheduler.wait_for(parent, child)
+        expect(status).to_equal(-9)
+        expect(scheduler.get_task(child)).to_be_nil
+
     it "dynamic loading syscalls are wired instead of returning ENOSYS":
         dylib_registry_reset_for_test()
         val missing_path = "/lib/missing.smf"
@@ -349,6 +667,64 @@ describe "syscall_handler":
             val tcb = current
             expect(tcb.is_user).to_equal(true)
             expect(tcb.id.id).to_equal(task.id)
+
+    it "exec syscall closes only close-on-exec descriptors on success":
+        fd_table_init()
+        val path = "/sys/services/vfs"
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        fd_activate_task(task.id)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 30u64)
+        fd_set(4, FD_TYPE_FILE, O_RDONLY, 40u64)
+        expect(fd_set_cloexec(3, true)).to_equal(0)
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(0)
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(4)).to_equal(true)
+
+    it "failed exec leaves close-on-exec descriptors open":
+        fd_table_init()
+        val path = "/sys/apps/does_not_exist"
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        fd_activate_task(task.id)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 30u64)
+        expect(fd_set_cloexec(3, true)).to_equal(0)
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(-2)
+        expect(fd_is_valid(3)).to_equal(true)
 
     it "queries scheduler policy through schedctl":
         var scheduler = Scheduler.new()

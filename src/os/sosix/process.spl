@@ -1,0 +1,177 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SOSIX Process API — Simple-native async process-control facade.
+
+use os.posix.errno.{EINVAL, EIO}
+use os.userlib.syscall_raw.{syscall}
+
+extern fn spl_str_ptr(s: text) -> i64
+
+val SOSIX_PROCESS_MAX_REQUESTS: u64 = 64
+
+val SOSIX_PROCESS_REQ_FREE: u8 = 0
+val SOSIX_PROCESS_REQ_PENDING: u8 = 1
+val SOSIX_PROCESS_REQ_COMPLETE: u8 = 2
+val SOSIX_PROCESS_REQ_ERROR: u8 = 3
+
+val SOSIX_PROCESS_OP_NONE: u8 = 0
+val SOSIX_PROCESS_OP_FORK: u8 = 1
+val SOSIX_PROCESS_OP_EXECVE: u8 = 2
+val SOSIX_PROCESS_OP_SPAWN: u8 = 3
+val SOSIX_PROCESS_OP_WAITPID: u8 = 4
+val SOSIX_PROCESS_OP_EXIT: u8 = 5
+val SOSIX_PROCESS_OP_GETPID: u8 = 6
+val SOSIX_PROCESS_OP_SIGNAL: u8 = 7
+
+val SOSIX_PROCESS_WNOHANG: u32 = 1
+
+val _SOSIX_SYS_EXIT: u64 = 0
+val _SOSIX_SYS_GETPID: u64 = 4
+val _SOSIX_SYS_SIGNAL: u64 = 7
+val _SOSIX_SYS_SPAWN_BINARY: u64 = 13
+val _SOSIX_SYS_FORK: u64 = 57
+val _SOSIX_SYS_EXECVE: u64 = 59
+val _SOSIX_SYS_WAITPID: u64 = 61
+
+var sosix_process_req_states: [u8; 64]
+var sosix_process_req_ops: [u8; 64]
+var sosix_process_req_results: [i64; 64]
+# Baremetal Cranelift currently fails to read back writes to the fixed request
+# tables on the desktop lane; keep the latest immediate request in scalars so
+# the async-first API still has a reliable synchronous compatibility boundary.
+var sosix_process_last_req: u64 = SOSIX_PROCESS_MAX_REQUESTS
+var sosix_process_last_result: i64 = 0
+var sosix_process_last_complete: bool = false
+
+fn sosix_process_init():
+    """Initialize SOSIX async process request slots."""
+    var i: u64 = 0
+    while i < SOSIX_PROCESS_MAX_REQUESTS:
+        sosix_process_req_states[i] = SOSIX_PROCESS_REQ_FREE
+        sosix_process_req_ops[i] = SOSIX_PROCESS_OP_NONE
+        sosix_process_req_results[i] = 0
+        i = i + 1
+
+fn sosix_process_alloc_request() -> u64:
+    var i: u64 = 0
+    while i < SOSIX_PROCESS_MAX_REQUESTS:
+        if sosix_process_req_states[i] == SOSIX_PROCESS_REQ_FREE:
+            sosix_process_req_states[i] = SOSIX_PROCESS_REQ_PENDING
+            sosix_process_req_ops[i] = SOSIX_PROCESS_OP_NONE
+            sosix_process_req_results[i] = 0
+            sosix_process_last_req = i
+            sosix_process_last_result = 0
+            sosix_process_last_complete = false
+            return i
+        i = i + 1
+    SOSIX_PROCESS_MAX_REQUESTS
+
+fn sosix_process_free_request(req: u64):
+    if req < SOSIX_PROCESS_MAX_REQUESTS:
+        sosix_process_req_states[req] = SOSIX_PROCESS_REQ_FREE
+        sosix_process_req_ops[req] = SOSIX_PROCESS_OP_NONE
+        sosix_process_req_results[req] = 0
+        if sosix_process_last_req == req:
+            sosix_process_last_complete = false
+            sosix_process_last_req = SOSIX_PROCESS_MAX_REQUESTS
+
+fn sosix_process_is_complete(req: u64) -> bool:
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return true
+    if sosix_process_last_req == req and sosix_process_last_complete:
+        return true
+    sosix_process_req_states[req] == SOSIX_PROCESS_REQ_COMPLETE or sosix_process_req_states[req] == SOSIX_PROCESS_REQ_ERROR
+
+fn sosix_process_result(req: u64) -> i64:
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return 0 - EIO as i64
+    if sosix_process_last_req == req and sosix_process_last_complete:
+        return sosix_process_last_result
+    sosix_process_req_results[req]
+
+fn _sosix_process_complete(req: u64, op: u8, result: i64) -> u64:
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    sosix_process_req_ops[req] = op
+    sosix_process_req_results[req] = result
+    sosix_process_last_req = req
+    sosix_process_last_result = result
+    sosix_process_last_complete = true
+    if result < 0:
+        sosix_process_req_states[req] = SOSIX_PROCESS_REQ_ERROR
+    else:
+        sosix_process_req_states[req] = SOSIX_PROCESS_REQ_COMPLETE
+    req
+
+fn sosix_process_fork() -> u64:
+    """Start a fork request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_FORK, syscall(_SOSIX_SYS_FORK, 0, 0, 0, 0, 0))
+
+fn sosix_process_execve(path: text, args: [text], envp: [text]) -> u64:
+    """Start an execve request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    val _ignored_args = args
+    val _ignored_envp = envp
+    if path.len() == 0:
+        return _sosix_process_complete(req, SOSIX_PROCESS_OP_EXECVE, 0 - EINVAL as i64)
+    val path_ptr = spl_str_ptr(path) as u64
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_EXECVE, syscall(_SOSIX_SYS_EXECVE, path_ptr, path.len().to_u64(), 0, 0, 0))
+
+fn sosix_process_spawn(path: text, args: [text], priority: u8) -> u64:
+    """Start a spawn-binary request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    val _ignored_args = args
+    if path.len() == 0:
+        return _sosix_process_complete(req, SOSIX_PROCESS_OP_SPAWN, 0 - EINVAL as i64)
+    val path_ptr = spl_str_ptr(path) as u64
+    val spawn_result = syscall(_SOSIX_SYS_SPAWN_BINARY, path_ptr, path.len().to_u64(), priority as u64, 0, 0)
+    val done_req = _sosix_process_complete(req, SOSIX_PROCESS_OP_SPAWN, spawn_result)
+    done_req
+
+fn sosix_process_waitpid(pid: i64, options: u32) -> u64:
+    """Start a waitpid request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    val pid_u64 = if pid < 0: 0xFFFFFFFFFFFFFFFF as u64 else: pid as u64
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_WAITPID, syscall(_SOSIX_SYS_WAITPID, pid_u64, 0, options as u64, 0, 0))
+
+fn sosix_process_getpid() -> u64:
+    """Start a getpid request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_GETPID, syscall(_SOSIX_SYS_GETPID, 0, 0, 0, 0, 0))
+
+fn sosix_process_signal(pid: u64, kern_sig: i32) -> u64:
+    """Start a kernel signal request."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    if kern_sig < 0:
+        return _sosix_process_complete(req, SOSIX_PROCESS_OP_SIGNAL, 0 - EINVAL as i64)
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_SIGNAL, syscall(_SOSIX_SYS_SIGNAL, pid, kern_sig as u64, 0, 0, 0))
+
+fn sosix_process_exit(code: i32) -> u64:
+    """Start process exit. The syscall should not return on a live kernel."""
+    val req = sosix_process_alloc_request()
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return req
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_EXIT, syscall(_SOSIX_SYS_EXIT, code as u64, 0, 0, 0, 0))
+
+fn sosix_process_wait_request(req: u64) -> i64:
+    """Block the caller until a SOSIX process request completes."""
+    if req >= SOSIX_PROCESS_MAX_REQUESTS:
+        return 0 - EIO as i64
+    while not sosix_process_is_complete(req):
+        # Blocking is isolated to compatibility or explicit wait boundaries.
+        pass_dn
+    val result = sosix_process_result(req)
+    sosix_process_free_request(req)
+    result

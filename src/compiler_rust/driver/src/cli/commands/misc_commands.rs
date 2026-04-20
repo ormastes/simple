@@ -104,7 +104,11 @@ pub fn handle_run(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
         return 1;
     }
     let path = PathBuf::from(&args[1]);
-    crate::cli::basic::run_file(&path, gc_log, gc_off)
+    let mut file_args = vec![args[1].clone()];
+    if args.len() > 2 {
+        file_args.extend(args[2..].iter().cloned());
+    }
+    crate::cli::basic::run_file_with_args(&path, gc_log, gc_off, file_args)
 }
 
 /// Handle 'build' command - build system (bootstrap, lint, fmt, check, etc.)

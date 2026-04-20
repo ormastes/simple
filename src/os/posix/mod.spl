@@ -4,32 +4,33 @@
 # Design: async by default, sync POSIX wrappers block on completion.
 #
 # Architecture:
-#   POSIX sync API (this layer) -> async I/O -> IPC to services -> kernel syscalls
+#   POSIX sync API (this layer) -> SOSIX async API -> IPC/syscalls
 #
 # Modules:
 #   errno.spl          — Standard POSIX error codes
 #   fd_table.spl       — Per-process file descriptor table
 #   fd_io.spl          — open/read/write/close/lseek/dup/dup2 (wired to VFS IPC)
-#   async_io.spl       — Non-blocking I/O over IPC (the real implementation)
+#   async_io.spl       — Legacy non-blocking I/O over IPC; migrating to SOSIX
 #   dylib_async.spl    — Async-first dynamic library loading facade
+#   process_async.spl  — Compatibility forwarding to os.sosix.process
 #   pipe_compat.spl    — pipe() via ring buffers + notification pairs
 #   signal_compat.spl  — Signal handlers over SimpleOS signal syscalls
-#   process_compat.spl — posix_spawn/waitpid/exit/getpid (no fork)
+#   process_compat.spl — sync POSIX fork/execve/spawn/waitpid wrappers
 #   socket_compat.spl  — Socket API over netstack IPC (port 2)
 #   select_compat.spl  — select()/poll() via notification multiplexing
 #
 # What's NOT supported (by design, L4 microkernel):
-#   - fork() — use posix_spawn() instead
-#   - exec() — use posix_spawn() instead
-#   - shared memory mmap — use IPC shared pages instead
+#   - writable POSIX shared-memory mmap — use SOSIX datasets and queues instead
 #   - POSIX threads — use kernel threads instead
 
 use os.posix.errno.*
 use os.posix.fd_table.{fd_table_init}
 use os.posix.async_io.{async_io_init}
 use os.posix.dylib_async.{dylib_async_init}
+use os.posix.process_async.{process_async_init}
 use os.posix.signal_compat.{signal_init}
 use os.posix.pipe_compat.{pipe_init}
+use os.sosix.mod.{sosix_init}
 # Socket and select imports moved to individual use-sites to avoid
 # transitive dependency failures in bare-metal mode (inline asm in
 # syscall_raw.spl not supported by Cranelift baremetal backend).
@@ -41,14 +42,18 @@ fn posix_init():
 
     Must be called once at process startup before any POSIX API use.
     Initializes:
+      - SOSIX native async process/share state
       - FD table (stdin/stdout/stderr on serial)
       - Async I/O request pool
       - Async dynamic library request pool
+      - Async process request pool
       - Signal handler table
       - Pipe table
     """
+    sosix_init()
     fd_table_init()
     async_io_init()
     dylib_async_init()
+    process_async_init()
     signal_init()
     pipe_init()

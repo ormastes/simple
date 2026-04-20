@@ -1,9 +1,9 @@
 # Notification Objects — L4-style Async Event Signaling
 #
 # Lightweight notification mechanism using 64-bit bitmasks.
-# Each notification object holds accumulated event bits and an optional
-# waiter thread. When bits are signaled while a thread is waiting,
-# the waiter is woken with the accumulated bits.
+# Each notification object holds accumulated event bits and a waiter list.
+# When bits are signaled while threads are waiting, all current waiters are
+# staged for wakeup and the accumulated bits are cleared.
 #
 # Semantics (L4 style):
 #   - signal: atomically OR bits into word; wake waiter if present
@@ -48,7 +48,7 @@ impl NotificationTable:
         while i < MAX_NOTIFICATIONS:
             slots.push(NotificationSlot(
                 active: false,
-                notif: Notification(id: 0, bits: 0, waiter_id: 0)
+                notif: Notification(id: 0, bits: 0, waiter_ids: [], signaled_waiter_ids: [])
             ))
             i = i + 1
         NotificationTable(slots: slots, count: 0)
@@ -56,6 +56,29 @@ impl NotificationTable:
 # ============================================================================
 # Notification Operations
 # ============================================================================
+
+fn _notification_waiter_contains(waiters: [u64], thread_id: u64) -> bool:
+    var i: u64 = 0
+    while i < waiters.len().to_u64():
+        if waiters[i] == thread_id:
+            return true
+        i = i + 1
+    false
+
+fn _notification_waiter_add(waiters: [u64], thread_id: u64) -> [u64]:
+    var out = waiters
+    if not _notification_waiter_contains(out, thread_id):
+        out.push(thread_id)
+    out
+
+fn _notification_waiter_remove(waiters: [u64], thread_id: u64) -> [u64]:
+    var remaining: [u64] = []
+    var i: u64 = 0
+    while i < waiters.len().to_u64():
+        if waiters[i] != thread_id:
+            remaining.push(waiters[i])
+        i = i + 1
+    remaining
 
 fn notification_create(table: NotificationTable) -> u64:
     """Allocate a new notification object.
@@ -69,7 +92,7 @@ fn notification_create(table: NotificationTable) -> u64:
             val id = i + 1  # 1-based IDs
             var slot = tbl.slots[i]
             slot.active = true
-            slot.notif = Notification(id: id, bits: 0, waiter_id: 0)
+            slot.notif = Notification(id: id, bits: 0, waiter_ids: [], signaled_waiter_ids: [])
             tbl.slots[i] = slot
             tbl.count = tbl.count + 1
             return id
@@ -79,9 +102,8 @@ fn notification_create(table: NotificationTable) -> u64:
 fn notification_signal(table: NotificationTable, id: u64, bits: u64) -> u64:
     """Signal a notification by ORing bits into the notification word.
 
-    If a thread is waiting, wakes it with the accumulated bits and clears
-    the word. Returns the waiter thread ID that should be unblocked
-    (0 = no waiter to wake).
+    If threads are waiting, stages all of them for wakeup, clears the word,
+    and returns the first waiter thread ID for legacy callers.
 
     The caller (syscall dispatcher) is responsible for actually unblocking
     the thread via the scheduler.
@@ -97,15 +119,16 @@ fn notification_signal(table: NotificationTable, id: u64, bits: u64) -> u64:
     # Atomically OR new bits
     slot.notif.bits = slot.notif.bits | bits
 
-    # If a thread is waiting, wake it
-    val waiter = slot.notif.waiter_id
-    if waiter != 0:
-        # Clear bits and waiter — the waiter receives the accumulated value
-        # via the syscall return path (stored before clearing)
+    # If threads are waiting, stage them for wakeup.
+    val waiters = slot.notif.waiter_ids
+    if waiters.len() > 0:
+        slot.notif.signaled_waiter_ids = waiters
+        slot.notif.waiter_ids = []
+        # Clear bits — the staged waiters receive the accumulated value
+        # via the syscall return path (stored before clearing).
         slot.notif.bits = 0
-        slot.notif.waiter_id = 0
         tbl.slots[idx] = slot
-        return waiter
+        return waiters[0]
 
     tbl.slots[idx] = slot
     0  # No waiter
@@ -137,7 +160,7 @@ fn notification_wait(table: NotificationTable, id: u64, thread_id: u64) -> u64:
         return accumulated
 
     # No bits — register as waiter
-    slot.notif.waiter_id = thread_id
+    slot.notif.waiter_ids = _notification_waiter_add(slot.notif.waiter_ids, thread_id)
     tbl.slots[idx] = slot
     0  # Caller must block the thread
 
@@ -203,9 +226,56 @@ fn notification_register_multi_waiter(table: NotificationTable, ids: [u64], coun
                 var tbl = table
                 var slot = tbl.slots[idx]
                 if slot.active:
-                    slot.notif.waiter_id = thread_id
+                    slot.notif.waiter_ids = _notification_waiter_add(slot.notif.waiter_ids, thread_id)
                     tbl.slots[idx] = slot
         i = i + 1
+
+fn notification_drain_signaled_waiters(table: NotificationTable, id: u64) -> [u64]:
+    """Return and clear the waiter list staged by notification_signal().
+
+    This is a compatibility helper for callers that need to observe or
+    unblock every waiter registered on a notification without changing the
+    public signal return type.
+    """
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return []
+    val idx = id - 1
+    var tbl = table
+    var slot = tbl.slots[idx]
+    if not slot.active:
+        return []
+    val staged = slot.notif.signaled_waiter_ids
+    slot.notif.signaled_waiter_ids = []
+    tbl.slots[idx] = slot
+    staged
+
+fn notification_clear_waiter(table: NotificationTable, thread_id: u64) -> u32:
+    """Remove a thread from every notification waiter slot.
+
+    Timeout-backed waits use scheduler Sleep deadlines while also registering
+    fd readiness notifications. If the timeout wins, this removes stale waiter
+    entries so a later signal remains pending for a real waiter instead of
+    being consumed by an already-runnable task.
+    """
+    if thread_id == 0:
+        return 0u32
+    var tbl = table
+    var cleared: u32 = 0u32
+    var i: u64 = 0
+    while i < MAX_NOTIFICATIONS:
+        var slot = tbl.slots[i]
+        if slot.active:
+            val before_waiters = slot.notif.waiter_ids.len()
+            val before_staged = slot.notif.signaled_waiter_ids.len()
+            slot.notif.waiter_ids = _notification_waiter_remove(slot.notif.waiter_ids, thread_id)
+            slot.notif.signaled_waiter_ids = _notification_waiter_remove(slot.notif.signaled_waiter_ids, thread_id)
+            val after_waiters = slot.notif.waiter_ids.len()
+            val after_staged = slot.notif.signaled_waiter_ids.len()
+            if after_waiters != before_waiters or after_staged != before_staged:
+                cleared = cleared + 1u32
+            tbl.slots[i] = slot
+        i = i + 1
+    cleared
 
 fn notification_destroy(table: NotificationTable, id: u64):
     """Free a notification slot.
@@ -221,7 +291,7 @@ fn notification_destroy(table: NotificationTable, id: u64):
     if not slot.active:
         return
     slot.active = false
-    slot.notif = Notification(id: 0, bits: 0, waiter_id: 0)
+    slot.notif = Notification(id: 0, bits: 0, waiter_ids: [], signaled_waiter_ids: [])
     tbl.slots[idx] = slot
     if tbl.count > 0:
         tbl.count = tbl.count - 1

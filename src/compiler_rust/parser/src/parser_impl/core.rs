@@ -131,8 +131,6 @@ impl<'a> Parser<'a> {
                 | CommonMistake::CppTemplate
                 | CommonMistake::CTypeFirst
                 | CommonMistake::MissingColon => ErrorHintLevel::Error,
-                // PythonNone is now a warning because None is also a valid Option variant
-                CommonMistake::PythonNone => ErrorHintLevel::Warning,
                 CommonMistake::VerboseReturnType
                 | CommonMistake::ExplicitSelf
                 | CommonMistake::WrongBrackets

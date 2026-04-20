@@ -54,19 +54,21 @@ fn _os_build_timeout_ms() -> i64:
     val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
     _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
 
-fn _os_build_backend() -> text:
-    """Resolve the active native-build backend for OS wrapper lanes.
+fn _os_build_backend_for_target(target: OsTarget) -> text:
+    """Resolve native-build backend for a concrete OS target.
 
-    SIMPLE_OS_BUILD_BACKEND may be set to `llvm` or `cranelift`.
-    Any other value falls back to `cranelift` so existing callers keep the
-    current behavior.
+    Cranelift in this toolchain does not provide an i686 freestanding target,
+    so 32-bit x86 defaults to LLVM. The environment override still wins for
+    diagnostics and experiments.
     """
     val raw = rt_env_get("SIMPLE_OS_BUILD_BACKEND") ?? ""
     if raw == "llvm":
         return "llvm"
     if raw == "cranelift":
         return "cranelift"
-    "cranelift"
+    match target.arch:
+        Architecture.X86: "llvm"
+        _: "cranelift"
 
 fn _now_ms() -> i64:
     rt_time_now_unix_micros() / 1000
@@ -85,6 +87,22 @@ fn _tail_lines(s: text, n: i64) -> text:
         out = out + lines[i as i32] + "\n"
         i = i + 1
     out
+
+fn native_build_prerequisite_hint(backend: text, stderr: text) -> text:
+    """Return a concise prerequisite hint for known native-build backend failures."""
+    if backend == "llvm" and stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
+        return "LLVM backend unavailable: rebuild the selected Simple compiler with the Rust `llvm` feature and make LLVM 18 discoverable, for example with LLVM_SYS_180_PREFIX."
+    if backend == "llvm" and stderr.contains("No suitable version of LLVM was found"):
+        return "LLVM 18 is not discoverable: set LLVM_SYS_180_PREFIX or install a system LLVM 18 before building the LLVM-enabled Simple compiler."
+    if backend == "cranelift" and stderr.contains("Support for this target has not been implemented yet"):
+        return "Cranelift cannot build this freestanding target; use an LLVM-enabled Simple compiler or unset SIMPLE_OS_BUILD_BACKEND for targets that default to LLVM."
+    ""
+
+fn _print_native_build_failure_hint(arch_label: text, backend_name: text, stderr: text):
+    val hint = native_build_prerequisite_hint(backend_name, stderr)
+    if hint != "":
+        print "[build][{arch_label}] prerequisite: {hint}"
+
 fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
     """Interpret QEMU exit code based on architecture.
 
@@ -274,6 +292,29 @@ fn get_tools_test_target() -> OsTarget:
         gui_mode: false
     )
 
+fn get_fs_test_target() -> OsTarget:
+    """Returns x86_64 filesystem contract target with NVMe + FAT32 media.
+
+    The target entry is filesystem-specific and the disk image is supplied by
+    the x64-nvme-fat32 scenario. Keeping the entry target separate lets SSpec
+    reuse the same named-scenario machinery as other QEMU lanes while binding
+    the FAT32 contract to the dedicated fs test program.
+    """
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/fs_test_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_fs_test_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "384M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
 fn get_browser_soft_target() -> OsTarget:
     """Returns the x86_64 wrapper target for the browser software smoke test.
 
@@ -393,7 +434,7 @@ fn arch_display_name(arch: Architecture) -> text:
 # ===========================================================================
 
 fn build_os(target: OsTarget) -> bool:
-    build_os_with_backend(target, _os_build_backend())
+    build_os_with_backend(target, _os_build_backend_for_target(target))
 
 fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
@@ -439,6 +480,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         val elapsed_ms = _now_ms() - started_ms
         if exit_code != 0:
             print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
+            _print_native_build_failure_hint(arch_label, backend_name, stderr)
             if stdout != "":
                 print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
             if stderr != "":
@@ -453,6 +495,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
         print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
+        _print_native_build_failure_hint(arch_label, backend_name, stderr)
         if stdout != "":
             print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
         if stderr != "":
@@ -523,6 +566,8 @@ fn _build_sources(target: OsTarget) -> [text]:
         return ["src/os", "src/lib", "examples/simple_os"]
     if _is_desktop_wrapper_target(target):
         return ["src/os", "src/lib", "examples/simple_os"]
+    if _is_fs_wrapper_target(target):
+        return ["src/os", "src/lib", "examples/simple_os"]
     ["src", "examples"]
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
@@ -538,7 +583,7 @@ fn _needs_elf32_wrap(target: OsTarget) -> bool:
     _uses_baremetal_wrapper_profile(target)
 
 fn _uses_baremetal_wrapper_profile(target: OsTarget) -> bool:
-    _is_browser_wrapper_target(target) or _is_desktop_wrapper_target(target)
+    _is_browser_wrapper_target(target) or _is_desktop_wrapper_target(target) or _is_fs_wrapper_target(target)
 
 fn _is_browser_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or
@@ -549,6 +594,9 @@ fn _is_desktop_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl" or
         target.entry == "examples/simple_os/arch/x86_64/desktop_probe_entry.spl" or
         target.entry == "examples/simple_os/arch/x86_64/sys_gui_008_entry.spl"
+
+fn _is_fs_wrapper_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_64/fs_test_entry.spl"
 
 # ===========================================================================
 # QEMU Command Construction
@@ -914,16 +962,17 @@ fn scenario_x64_wm_input_test() -> QemuScenario:
 fn scenario_x64_nvme_fat32() -> QemuScenario:
     """x86_64 with NVMe + FAT32 disk image for file I/O testing.
 
-    Prefers the release/installer-built disk artifact when available and
-    falls back to the legacy build fixture for older lanes.
+    Uses the fixture disk built by scripts/make_os_disk.shs. Unlike desktop
+    lanes this does not prefer release images because the filesystem contract
+    asserts on fixture files such as HELLO.TXT, NUMBERS.TXT, and HELLO.SPL.
     """
     QemuScenario(
         name: "x64-nvme-fat32",
         arch: Architecture.X86_64,
         machine: "q35",
         cpu: "qemu64",
-        memory: "256M",
-        qemu_extra: _x64_nvme_disk_args() + ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        memory: "384M",
+        qemu_extra: _x64_nvme_fs_test_disk_args() + ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
         gui_mode: false,
         description: "x86_64 with NVMe + FAT32 disk image for file I/O testing"
     )
@@ -1001,6 +1050,8 @@ fn get_scenario(name: text) -> QemuScenario?:
 
 fn scenario_target(scenario: QemuScenario) -> OsTarget:
     """Resolve which kernel target should be built for a named scenario."""
+    if scenario.name == "x64-nvme-fat32":
+        return get_fs_test_target()
     if scenario.name == "x64-desktop-test":
         return get_desktop_browser_target()
     if scenario.name == "x64-desktop-disk":
@@ -1049,6 +1100,16 @@ fn desktop_disk_image_path_in(release_root: text) -> text:
 
 fn desktop_disk_image_path() -> text:
     desktop_disk_image_path_in("release")
+
+fn fs_test_disk_image_path() -> text:
+    "build/os/fat32.img"
+
+fn _x64_nvme_fs_test_disk_args() -> [text]:
+    val img_path = fs_test_disk_image_path()
+    [
+        "-drive", "file={img_path},if=none,id=nvm,format=raw",
+        "-device", "nvme,serial=deadbeef,drive=nvm"
+    ]
 
 fn desktop_installer_iso_path_in(release_root: text) -> text?:
     val iso_path = desktop_release_installer_iso_path_in(release_root)
@@ -1119,6 +1180,46 @@ fn ensure_desktop_disk_image() -> bool:
         print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
         return false
     true
+
+fn ensure_fs_test_disk_image() -> bool:
+    """Ensure the FAT32 fixture image used by x64-nvme-fat32 exists.
+
+    This is intentionally narrower than ensure_desktop_disk_image(): the
+    filesystem contract needs the canonical fixture files, while desktop lanes
+    need the resident app manifests and may prefer release-built media.
+    """
+    val img_path = fs_test_disk_image_path()
+    if rt_file_exists(img_path) and _fs_test_disk_image_has_required_fixtures(img_path):
+        return true
+    print "[ensure_fs_test_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path], 60000)
+    if stdout != "":
+        print "[ensure_fs_test_disk_image] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_fs_test_disk_image] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_fs_test_disk_image] make_os_disk.shs exited {exit_code}"
+        return false
+    if not rt_file_exists(img_path):
+        return false
+    if not _fs_test_disk_image_has_required_fixtures(img_path):
+        print "[ensure_fs_test_disk_image] image exists but required fixture markers are missing"
+        return false
+    true
+
+fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
+    val cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/HELLO.TXT 2>/dev/null | grep -q 'Hello from SimpleOS' && " +
+        "mtype -i \"{img_path}\" ::/NUMBERS.TXT 2>/dev/null | grep -q '^5$' && " +
+        "mtype -i \"{img_path}\" ::/HELLO.SPL 2>/dev/null | grep -q 'fn main'; " +
+        "else " +
+        "grep -a -q 'Hello from SimpleOS' \"{img_path}\" && " +
+        "grep -a -q 'fn main' \"{img_path}\"; " +
+        "fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
 
 fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     """Best-effort host-side validation that the disk image is populated.
@@ -1220,6 +1321,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
 
 fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     """Return a realistic smoke-test timeout for a named QEMU scenario."""
+    if scenario.name == "x64-nvme-fat32":
+        return 60000
     if scenario.name == "x64-desktop-test":
         return 120000
     if scenario.name == "x64-desktop-disk":

@@ -18,9 +18,8 @@
  *   1. Swaps to a global kernel stack (SMP-unsafe but SimpleOS is single-
  *      CPU today; per-CPU GS-base scratch can be wired in later without
  *      changing the C-side ABI).
- *   2. Builds a struct syscall_regs on the kernel stack matching the
- *      C layout in baremetal_stubs.c.
- *   3. Calls rt_syscall_dispatch(regs*) which returns int64_t in rax.
+ *   2. Adapts the SYSCALL register convention to the System V C ABI.
+ *   3. Calls rt_syscall_dispatch(num, a0..a5) which returns int64_t in rax.
  *   4. Restores user rcx/r11 and user rsp, then executes SYSRETQ.
  *
  * WARNING: this trampoline is NOT currently wired into MSR_LSTAR --
@@ -35,7 +34,7 @@
  *                                   address of the trampoline
  *
  * Symbols referenced (from baremetal_stubs.c):
- *   rt_syscall_dispatch           - C-side dispatcher
+ *   rt_syscall_dispatch           - C-side scalar dispatcher
  *   _kernel_syscall_stack_top     - top of the global kernel stack
  *   _kernel_syscall_scratch_rsp   - scratch slot for user rsp
  */
@@ -51,47 +50,29 @@ kernel_syscall_entry_asm:
     movq    %rsp, _kernel_syscall_scratch_rsp(%rip)
     movq    _kernel_syscall_stack_top(%rip), %rsp
 
-    /* Build struct syscall_regs on the kernel stack.
-     * Layout MUST match struct syscall_regs in baremetal_stubs.c.
-     * Fields are pushed in reverse order (top of struct last). */
-    pushq   $0x23           /* ss     - user SS (GDT user data | RPL3) */
-    pushq   _kernel_syscall_scratch_rsp(%rip)  /* rsp - user rsp */
-    pushq   %r11            /* rflags - user RFLAGS */
-    pushq   $0x1B           /* cs     - user CS (GDT user code | RPL3) */
-    pushq   %rcx            /* rip    - user RIP */
-    pushq   $0              /* pad    - alignment filler */
-    pushq   %rax            /* nr     - syscall number */
-    pushq   %rdi            /* arg0 */
-    pushq   %rsi            /* arg1 */
-    pushq   %rdx            /* arg2 */
-    pushq   %r10            /* arg3 (SYSCALL passes arg3 in r10) */
-    pushq   %r8             /* arg4 */
-    pushq   %r9             /* arg5 */
-
-    /* Ensure 16-byte stack alignment for the System V call.
-     * We pushed 13 * 8 = 104 bytes = 13 qwords, which leaves %rsp
-     * 8-byte aligned but not 16-byte aligned for the callq. Align. */
-    subq    $8, %rsp
-
-    /* rdi = &regs (regs starts right after the alignment pad) */
-    leaq    8(%rsp), %rdi
+    /* Preserve SYSRET state and call the scalar C dispatcher:
+     *   rt_syscall_dispatch(num, a0, a1, a2, a3, a4, a5)
+     * Hardware gives us:
+     *   rax=num, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4, r9=a5
+     * System V C wants:
+     *   rdi=num, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=a4, stack=a5
+     */
+    pushq   %rcx            /* user RIP */
+    pushq   %r11            /* user RFLAGS */
+    subq    $8, %rsp        /* keep 16-byte alignment with one stack arg */
+    pushq   %r9             /* C arg6: a5 */
+    movq    %r8, %r9        /* C arg5: a4 */
+    movq    %r10, %r8       /* C arg4: a3 */
+    movq    %rdx, %rcx      /* C arg3: a2 */
+    movq    %rsi, %rdx      /* C arg2: a1 */
+    movq    %rdi, %rsi      /* C arg1: a0 */
+    movq    %rax, %rdi      /* C arg0: syscall number */
     call    rt_syscall_dispatch
     /* rax now holds the int64_t return value from the dispatcher. */
 
-    /* Undo the alignment pad. */
-    addq    $8, %rsp
-
-    /* Tear down the struct. We do NOT restore rdi/rsi/rdx/r10/r8/r9
-     * because the SYSCALL ABI does not require preserving them -- the
-     * dispatcher owned them via the regs pointer. */
-    addq    $48, %rsp       /* discard arg5..arg0 */
-    addq    $8, %rsp        /* discard nr (rax already holds return value) */
-    addq    $8, %rsp        /* discard pad */
-    popq    %rcx            /* restore user RIP */
-    addq    $8, %rsp        /* discard cs */
+    addq    $16, %rsp       /* discard a5 and alignment pad */
     popq    %r11            /* restore user RFLAGS */
-    addq    $8, %rsp        /* discard user rsp slot */
-    addq    $8, %rsp        /* discard user ss */
+    popq    %rcx            /* restore user RIP */
 
     /* Restore user rsp from scratch and return to user mode. */
     movq    _kernel_syscall_scratch_rsp(%rip), %rsp

@@ -1,0 +1,291 @@
+# SimpleOS Multi-Platform Build Catalog
+#
+# Centralizes target triples, C/ASM boot inputs, and freestanding compiler
+# flags for SimpleOS kernel and boot-wrapper binaries.
+
+use os.kernel.arch.arch_context.{Architecture}
+
+class SimpleOsPlatformBuildTarget:
+    name: text
+    aliases: [text]
+    arch: Architecture
+    arch_name: text
+    bits: i64
+    native_target: text
+    clang_target: text
+    qemu_system: text
+    qemu_machine: text
+    qemu_cpu: text
+    linker_script: text
+    default_entry: text
+    output: text
+    source_roots: [text]
+    boot_c_sources: [text]
+    boot_asm_sources: [text]
+    c_flags: [text]
+    asm_flags: [text]
+    link_flags: [text]
+    notes: text
+
+fn _common_c_flags(clang_target: text) -> [text]:
+    [
+        "--target={clang_target}",
+        "-ffreestanding",
+        "-nostdlib",
+        "-fno-builtin",
+        "-fno-stack-protector",
+        "-fno-exceptions",
+        "-fno-unwind-tables",
+        "-fno-asynchronous-unwind-tables",
+        "-O2"
+    ]
+
+fn _common_asm_flags(clang_target: text) -> [text]:
+    [
+        "--target={clang_target}",
+        "-ffreestanding"
+    ]
+
+fn _x86_32_c_flags() -> [text]:
+    var flags = _common_c_flags("i686-unknown-none-elf")
+    flags.push("-m32")
+    flags.push("-march=i686")
+    flags.push("-mno-sse")
+    flags.push("-mno-mmx")
+    flags.push("-fno-pic")
+    flags.push("-DSIMPLEOS_ARCH_X86_32=1")
+    flags
+
+fn _x86_32_asm_flags() -> [text]:
+    var flags = _common_asm_flags("i686-unknown-none-elf")
+    flags.push("-m32")
+    flags.push("-march=i686")
+    flags
+
+fn _x86_64_c_flags() -> [text]:
+    var flags = _common_c_flags("x86_64-unknown-none-elf")
+    flags.push("-mno-red-zone")
+    flags.push("-DSIMPLEOS_ARCH_X86_64=1")
+    flags
+
+fn _aarch64_c_flags() -> [text]:
+    var flags = _common_c_flags("aarch64-unknown-none-elf")
+    flags.push("-DSIMPLEOS_ARCH_AARCH64=1")
+    flags
+
+fn _arm32_c_flags() -> [text]:
+    var flags = _common_c_flags("armv7-unknown-none-eabihf")
+    flags.push("-DSIMPLEOS_ARCH_ARM32=1")
+    flags
+
+fn _riscv64_c_flags() -> [text]:
+    var flags = _common_c_flags("riscv64-unknown-none-elf")
+    flags.push("-march=rv64gc")
+    flags.push("-mabi=lp64d")
+    flags.push("-DSIMPLEOS_ARCH_RISCV64=1")
+    flags
+
+fn _riscv32_c_flags() -> [text]:
+    var flags = _common_c_flags("riscv32-unknown-none-elf")
+    flags.push("-march=rv32imac")
+    flags.push("-mabi=ilp32")
+    flags.push("-DSIMPLEOS_ARCH_RISCV32=1")
+    flags
+
+fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
+    """Return all first-class SimpleOS binary build targets."""
+    [
+        SimpleOsPlatformBuildTarget(
+            name: "x86_64-simpleos",
+            aliases: ["x86_64", "amd64", "x64"],
+            arch: Architecture.X86_64,
+            arch_name: "x86_64",
+            bits: 64,
+            native_target: "x86_64-unknown-none",
+            clang_target: "x86_64-unknown-none-elf",
+            qemu_system: "qemu-system-x86_64",
+            qemu_machine: "q35",
+            qemu_cpu: "qemu64",
+            linker_script: "src/os/kernel/arch/x86_64/linker.ld",
+            default_entry: "src/os/kernel/arch/x86_64/boot.spl",
+            output: "build/os/simpleos_x86_64.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: [],
+            boot_asm_sources: [],
+            c_flags: _x86_64_c_flags(),
+            asm_flags: _common_asm_flags("x86_64-unknown-none-elf"),
+            link_flags: ["-nostdlib", "-static", "-z", "max-page-size=0x1000"],
+            notes: "64-bit x86 baremetal kernel and default hosted-wrapper lane"
+        ),
+        SimpleOsPlatformBuildTarget(
+            name: "i686-simpleos",
+            aliases: ["x86_32", "x86", "i386", "i686"],
+            arch: Architecture.X86,
+            arch_name: "x86",
+            bits: 32,
+            native_target: "i686-unknown-none",
+            clang_target: "i686-unknown-none-elf",
+            qemu_system: "qemu-system-i386",
+            qemu_machine: "pc",
+            qemu_cpu: "qemu32",
+            linker_script: "src/os/kernel/arch/x86_32/linker.ld",
+            default_entry: "src/os/kernel/arch/x86_32/boot.spl",
+            output: "build/os/simpleos_x86_32.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: ["examples/simple_os/arch/x86_32/boot/baremetal_stubs.c"],
+            boot_asm_sources: ["examples/simple_os/arch/x86_32/boot/crt0.s"],
+            c_flags: _x86_32_c_flags(),
+            asm_flags: _x86_32_asm_flags(),
+            link_flags: ["-nostdlib", "-static", "-Wl,-m,elf_i386"],
+            notes: "32-bit x86 Multiboot1 lane; build C/ASM boot objects with i686 freestanding flags"
+        ),
+        SimpleOsPlatformBuildTarget(
+            name: "aarch64-simpleos",
+            aliases: ["arm64", "aarch64"],
+            arch: Architecture.Arm64,
+            arch_name: "aarch64",
+            bits: 64,
+            native_target: "aarch64-unknown-none",
+            clang_target: "aarch64-unknown-none-elf",
+            qemu_system: "qemu-system-aarch64",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a72",
+            linker_script: "src/os/kernel/arch/arm64/linker.ld",
+            default_entry: "src/os/kernel/arch/arm64/boot.spl",
+            output: "build/os/simpleos_aarch64.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: [],
+            boot_asm_sources: [],
+            c_flags: _aarch64_c_flags(),
+            asm_flags: _common_asm_flags("aarch64-unknown-none-elf"),
+            link_flags: ["-nostdlib", "-static"],
+            notes: "64-bit ARM virt-machine kernel lane"
+        ),
+        SimpleOsPlatformBuildTarget(
+            name: "armv7-simpleos",
+            aliases: ["arm32", "armv7"],
+            arch: Architecture.Arm32,
+            arch_name: "arm",
+            bits: 32,
+            native_target: "armv7-unknown-none-eabihf",
+            clang_target: "armv7-unknown-none-eabihf",
+            qemu_system: "qemu-system-arm",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a15",
+            linker_script: "src/os/kernel/arch/arm32/linker.ld",
+            default_entry: "src/os/kernel/arch/arm32/boot.spl",
+            output: "build/os/simpleos_arm32.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: [],
+            boot_asm_sources: [],
+            c_flags: _arm32_c_flags(),
+            asm_flags: _common_asm_flags("armv7-unknown-none-eabihf"),
+            link_flags: ["-nostdlib", "-static"],
+            notes: "32-bit ARM virt-machine lane"
+        ),
+        SimpleOsPlatformBuildTarget(
+            name: "riscv64gc-simpleos",
+            aliases: ["riscv64", "rv64", "rv64gc"],
+            arch: Architecture.Riscv64,
+            arch_name: "riscv64",
+            bits: 64,
+            native_target: "riscv64-unknown-none",
+            clang_target: "riscv64-unknown-none-elf",
+            qemu_system: "qemu-system-riscv64",
+            qemu_machine: "virt",
+            qemu_cpu: "rv64",
+            linker_script: "src/os/kernel/arch/riscv64/linker.ld",
+            default_entry: "src/os/kernel/arch/riscv64/boot.spl",
+            output: "build/os/simpleos_riscv64.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: [],
+            boot_asm_sources: [],
+            c_flags: _riscv64_c_flags(),
+            asm_flags: _common_asm_flags("riscv64-unknown-none-elf"),
+            link_flags: ["-nostdlib", "-static"],
+            notes: "64-bit RISC-V virt-machine lane"
+        ),
+        SimpleOsPlatformBuildTarget(
+            name: "riscv32imac-simpleos",
+            aliases: ["riscv32", "rv32", "rv32imac"],
+            arch: Architecture.Riscv32,
+            arch_name: "riscv32",
+            bits: 32,
+            native_target: "riscv32-unknown-none",
+            clang_target: "riscv32-unknown-none-elf",
+            qemu_system: "qemu-system-riscv32",
+            qemu_machine: "virt",
+            qemu_cpu: "rv32",
+            linker_script: "src/os/kernel/arch/riscv32/linker.ld",
+            default_entry: "src/os/kernel/arch/riscv32/boot.spl",
+            output: "build/os/simpleos_riscv32.elf",
+            source_roots: ["src", "examples"],
+            boot_c_sources: [],
+            boot_asm_sources: [],
+            c_flags: _riscv32_c_flags(),
+            asm_flags: _common_asm_flags("riscv32-unknown-none-elf"),
+            link_flags: ["-nostdlib", "-static"],
+            notes: "32-bit RISC-V virt-machine lane"
+        )
+    ]
+
+fn simpleos_platform_target_matches(target: SimpleOsPlatformBuildTarget, name: text) -> bool:
+    if target.name == name:
+        return true
+    if target.native_target == name:
+        return true
+    if target.clang_target == name:
+        return true
+    for alias in target.aliases:
+        if alias == name:
+            return true
+    false
+
+fn simpleos_platform_target_by_name(name: text) -> SimpleOsPlatformBuildTarget?:
+    """Resolve a SimpleOS platform target by canonical name, triple, or alias."""
+    for target in simpleos_platform_targets():
+        if simpleos_platform_target_matches(target, name):
+            return target
+    nil
+
+fn simpleos_platform_target_names() -> [text]:
+    """Return canonical SimpleOS platform target names."""
+    var names: [text] = []
+    for target in simpleos_platform_targets():
+        names.push(target.name)
+    names
+
+fn simpleos_platform_c_flags(name: text) -> [text]:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.c_flags
+    _x86_64_c_flags()
+
+fn simpleos_platform_asm_flags(name: text) -> [text]:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.asm_flags
+    _common_asm_flags("x86_64-unknown-none-elf")
+
+fn simpleos_platform_boot_c_sources(name: text) -> [text]:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.boot_c_sources
+    []
+
+fn simpleos_platform_boot_asm_sources(name: text) -> [text]:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.boot_asm_sources
+    []
+
+fn simpleos_platform_linker_script(name: text) -> text:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.linker_script
+    "src/os/kernel/arch/x86_64/linker.ld"
+
+fn simpleos_platform_clang_target(name: text) -> text:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.clang_target
+    "x86_64-unknown-none-elf"
+
+fn simpleos_platform_arch_name(name: text) -> text:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.arch_name
+    "unknown"

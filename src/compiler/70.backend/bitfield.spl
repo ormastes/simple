@@ -19,6 +19,9 @@
 use compiler.hir.hir_types.{HirType, SymbolId, HirModule}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.common.diagnostics.span.{Span}
+use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
+use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
+use compiler.core.types.{custom_primitive_underlying_name_by_name}
 
 
 # Bit representation trait (for custom types in bitfields)
@@ -176,39 +179,36 @@ fn type_bit_width(type_: HirType) -> BitLayout?:
     val name = type_.to_text()
 
     # Check for explicit bit-width types (u4, i12, etc.)
-    if name.starts_with("u") or name.starts_with("i"):
-        val rest = name.substring(1)
-        val width = rest.parse_int()
-        if width.?:
-            val w = width.unwrap()
-            if w > 0 and w <= 64:
-                if name.starts_with("i"):
-                    return Some(BitLayout.signed(w))
-                else:
-                    return Some(BitLayout.unsigned(w))
+    val primitive_width = primitive_integer_bit_width_from_name(name)
+    if primitive_width > 0:
+        if name.starts_with("i"):
+            return Some(BitLayout.signed(primitive_width))
+        return Some(BitLayout.unsigned(primitive_width))
+
+    val custom_width = custom_primitive_integer_bit_width_by_name(name)
+    if custom_width > 0:
+        val inner_name = custom_primitive_underlying_name_by_name(name)
+        if inner_name == "bool":
+            return Some(BitLayout.bool_repr())
+        if inner_name.starts_with("i"):
+            return Some(BitLayout.signed(custom_width))
+        return Some(BitLayout.unsigned(custom_width))
 
     # Standard types
     match name:
         case "bool": Some(BitLayout.bool_repr())
-        case "u8": Some(BitLayout.unsigned(8))
-        case "u16": Some(BitLayout.unsigned(16))
-        case "u32": Some(BitLayout.unsigned(32))
-        case "u64": Some(BitLayout.unsigned(64))
-        case "i8": Some(BitLayout.signed(8))
-        case "i16": Some(BitLayout.signed(16))
-        case "i32": Some(BitLayout.signed(32))
-        case "i64": Some(BitLayout.signed(64))
         case _: nil
 
 # Get backing type bit width
 fn backing_type_bits(type_: HirType) -> i64?:
     val name = type_.to_text()
-    match name:
-        case "u8": Some(8)
-        case "u16": Some(16)
-        case "u32": Some(32)
-        case "u64": Some(64)
-        case _: nil
+    val primitive_bits = primitive_backing_bits_from_name(name)
+    if primitive_bits > 0:
+        return Some(primitive_bits)
+    val custom_bits = custom_primitive_backing_bits_by_name(name)
+    if custom_bits > 0:
+        return Some(custom_bits)
+    nil
 
 # Compile a bitfield definition
 fn compile_bitfield(

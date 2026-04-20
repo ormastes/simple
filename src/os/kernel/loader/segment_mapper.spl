@@ -16,7 +16,12 @@
 # (matching `TaskControlBlock.address_space`). When Phase 1 merges,
 # swap `u64` for `AddressSpace` and update the call site in scheduler.
 
-use os.kernel.types.task_types.{UserLoadSegment, AddressSpace}
+use os.kernel.types.task_types.{
+    UserLoadSegment, AddressSpace,
+    user_load_segment_virt_addr, user_load_segment_mem_size,
+    user_load_segment_file_size, user_load_segment_data,
+    user_load_segment_flags
+}
 use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
 use os.kernel.memory.pmm.{pmm_alloc_page}
 use os.kernel.memory.vmm.{vmm_map_page_in, vmm_write_byte_through_hhdm}
@@ -36,10 +41,14 @@ val PAGE_SIZE: u64 = 4096
 # ============================================================================
 
 extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
 # Helpers
 # ============================================================================
+
+fn _byte_at(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
 
 fn _page_align_down(addr: u64) -> u64:
     """Round a u64 down to the nearest page boundary."""
@@ -82,7 +91,7 @@ fn _copy_and_zero(page_phys: [u64], dest_off: u64, src: [u8], src_off: u64, file
     """Copy `file_size` bytes into mapped frames, then zero BSS bytes."""
     var i: u64 = 0
     while i < file_size:
-        val b = src[(src_off + i) as i64]
+        val b = _byte_at(src, src_off + i)
         _write_mapped_byte(page_phys, dest_off + i, b)
         i = i + 1
     while i < mem_size:
@@ -93,7 +102,7 @@ fn _copy_bytes(page_phys: [u64], dest_off: u64, src: [u8]):
     """Copy a byte blob into mapped frames at `dest_off`."""
     var i: u64 = 0
     while i < (src.len() as u64):
-        _write_mapped_byte(page_phys, dest_off + i, src[i as i64])
+        _write_mapped_byte(page_phys, dest_off + i, _byte_at(src, i))
         i = i + 1
 
 fn _write_u8(addr: u64, value: u8):
@@ -117,15 +126,18 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
     is `as_handle.phys_root` (matches TCB.address_space for legacy code).
     """
     val _root = as_handle.phys_root
-    if seg.file_size > seg.mem_size:
+    val file_size = user_load_segment_file_size(seg)
+    val mem_size = user_load_segment_mem_size(seg)
+    if file_size > mem_size:
         return Err("segment file_size exceeds mem_size")
-    if seg.mem_size == 0:
+    if mem_size == 0:
         return Ok(0)
 
-    val va_start = _page_align_down(seg.virt_addr)
-    val va_end = _page_align_up(seg.virt_addr + seg.mem_size)
-    val in_page_off = seg.virt_addr - va_start
-    val vm_flags = _flags_from_pf(seg.flags)
+    val virt_addr = user_load_segment_virt_addr(seg)
+    val va_start = _page_align_down(virt_addr)
+    val va_end = _page_align_up(virt_addr + mem_size)
+    val in_page_off = virt_addr - va_start
+    val vm_flags = _flags_from_pf(user_load_segment_flags(seg))
 
     # First, map all the pages.
     var page_phys: [u64] = []
@@ -143,7 +155,7 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
             return Err("vmm_map_page_in failed for PT_LOAD page")
         va = va + PAGE_SIZE
 
-    _copy_and_zero(page_phys, in_page_off, file_bytes, seg.file_offset, seg.file_size, seg.mem_size)
+    _copy_and_zero(page_phys, in_page_off, user_load_segment_data(seg), 0, file_size, mem_size)
 
     Ok(1)
 
@@ -209,7 +221,7 @@ fn highest_loaded_address(segments: [UserLoadSegment]) -> u64:
     var i: i64 = 0
     while i < segments.len():
         val seg = segments[i]
-        val end = seg.virt_addr + seg.mem_size
+        val end = user_load_segment_virt_addr(seg) + user_load_segment_mem_size(seg)
         if end > hi:
             hi = end
         i = i + 1

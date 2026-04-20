@@ -46,6 +46,7 @@ extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -
 extern fn simpleos_fat32_read_known_app(app_id: u64) -> i64
 extern fn simpleos_fat32_read_buffer_addr() -> u64
 extern fn simpleos_fat32_read_known_app_size(app_id: u64) -> i64
+extern fn simpleos_fat32_read_known_app_array(app_id: u64) -> [u8]
 
 val KNOWN_APP_ELF_BUFFER_MAX: u64 = 32768
 
@@ -255,11 +256,18 @@ fn vfs_boot_init() -> bool:
     # separate processes, while only storage driver code remains baremetal-aware.
     serial_println("[vfs-init] FAT32 executable VFS path ready")
 
-    val exec_probe = g_vfs_read_file_bytes("/sys/apps/browser_demo")
-    if exec_probe.len() <= 4:
-        serial_println("[vfs-init] executable load probe failed path=/sys/apps/browser_demo")
+    val exec_probe_size = simpleos_fat32_read_known_app_size(1)
+    if exec_probe_size <= 4:
+        serial_println("[vfs-init] executable load probe failed path=/sys/apps/browser_demo size={exec_probe_size}")
         return false
-    serial_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe.len()}")
+    val exec_probe_read = simpleos_fat32_read_known_app(1)
+    if exec_probe_read != 0:
+        serial_println("[vfs-init] executable load probe failed path=/sys/apps/browser_demo rc={exec_probe_read}")
+        return false
+    if not _known_app_has_elf_magic(simpleos_fat32_read_buffer_addr()):
+        serial_println("[vfs-init] executable load probe failed path=/sys/apps/browser_demo invalid_elf")
+        return false
+    serial_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
 
     serial_println("[vfs-init] VFS ready (C-backed)")
     return true
@@ -401,15 +409,13 @@ fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     if read_result != 0:
         serial_println("[vfs-root] c_fat32_read_failed path={path} rc={read_result}")
         return []
-    val buf_addr = simpleos_fat32_read_buffer_addr()
-    if not _known_app_has_elf_magic(buf_addr):
+    if not _known_app_has_elf_magic(simpleos_fat32_read_buffer_addr()):
         serial_println("[vfs-root] c_fat32_read_invalid_elf path={path}")
         return []
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < file_size:
-        out = out.push(mmio_read8(buf_addr + i))
-        i = i + 1
+    val out = simpleos_fat32_read_known_app_array(app_id)
+    if (out.len() as u64) != file_size:
+        serial_println("[vfs-root] c_fat32_read_size_mismatch path={path} expected={file_size} actual={out.len()}")
+        return []
     serial_println("[vfs-root] c_fat32_read_ok path={path} bytes={out.len()}")
     out
 
@@ -435,18 +441,18 @@ fn _g_vfs_root_read_file_bytes_once(driver: Fat32Core, path: text) -> [u8]:
     val flags = FileFlags(read: true, write: false, create: false, append: false, truncate: false)
     val stat_r = driver.stat(path)
     if stat_r.is_err():
-        serial_println("[vfs-root] stat_failed path={path} err={stat_r.unwrap_err()}")
+        serial_println("[vfs-root] stat_failed path={path}")
     else:
         serial_println("[vfs-root] stat_ok path={path} size={stat_r.unwrap().size}")
     val open_r = driver.open(path, flags)
     if open_r.is_err():
-        serial_println("[vfs-root] open_failed path={path} err={open_r.unwrap_err()}")
+        serial_println("[vfs-root] open_failed path={path}")
         return []
     val handle = open_r.unwrap()
     val read_r = driver.read(handle, 1048576)
     driver.close(handle)
     if read_r.is_err():
-        serial_println("[vfs-root] read_failed path={path} err={read_r.unwrap_err()}")
+        serial_println("[vfs-root] read_failed path={path}")
         return []
     val data = read_r.unwrap()
     serial_println("[vfs-root] read_ok path={path} bytes={data.len()}")

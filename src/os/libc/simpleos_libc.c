@@ -70,7 +70,15 @@ extern int errno;
  * Uses: rax=id, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4; result in rax.
  */
 extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
-                                 int64_t a2, int64_t a3, int64_t a4);
+                                int64_t a2, int64_t a3, int64_t a4);
+extern int simpleos_epoll_close_if_epoll(int fd);
+extern void simpleos_epoll_on_fd_close(int fd);
+extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
+extern int fcntl(int fd, int cmd, ...);
+
+#ifndef F_SIMPLEOS_GET_OFD
+#define F_SIMPLEOS_GET_OFD 0x534F0001
+#endif
 
 /* ====================================================================
  * 2. Errno
@@ -273,8 +281,16 @@ int open(const char *path, int flags, ...) {
 }
 
 int close(int fd) {
+    if (simpleos_epoll_close_if_epoll(fd) == 0) {
+        simpleos_epoll_on_fd_close(fd);
+        return 0;
+    }
+    int saved_errno = errno;
+    int ofd_token = fcntl(fd, F_SIMPLEOS_GET_OFD, 0);
+    errno = saved_errno;
     int64_t r = simpleos_syscall(33, fd, 0, 0, 0, 0);
     if (r < 0) return set_errno(r);
+    simpleos_epoll_on_fd_close_token(fd, ofd_token < 0 ? 0 : (uint64_t)(uint32_t)ofd_token);
     return 0;
 }
 

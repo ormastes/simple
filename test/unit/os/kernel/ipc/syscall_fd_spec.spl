@@ -11,10 +11,29 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.posix.fd_table.{fd_table_init, fd_set, fd_get_offset, fd_set_offset, fd_is_valid, fd_get_cloexec, fd_get_status_flags, FD_TYPE_FILE, O_RDONLY, O_RDWR, O_NONBLOCK}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.memory.pmm.{pmm_alloc_page_raw}
+use os.kernel.memory.vmm.{vmm_map_page}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
+use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_get_offset, fd_set_offset, fd_is_valid, fd_get_cloexec, fd_get_status_flags, FD_TYPE_FILE, O_RDONLY, O_RDWR, O_NONBLOCK}
+use os.posix.pipe_compat.{pipe_init, posix_pipe}
+
+extern fn unsafe_addr_of(ref: any) -> u64
 
 fn _dispatch(args: SyscallArgs) -> i64:
     syscall_handler(args, Scheduler.new(), IpcManager.new(), KernelLog.new(16)).value
+
+fn _map_user_page(ptr: u64) -> bool:
+    val phys = pmm_alloc_page_raw()
+    if phys == 0:
+        return false
+    vmm_map_page(
+        VirtAddr(addr: ptr),
+        PhysAddr(addr: phys),
+        VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+    )
 
 describe "POSIX fd syscalls":
     it "provides syscall 64 dup through the dispatcher":
@@ -46,6 +65,43 @@ describe "POSIX fd syscalls":
 
         expect(result).to_equal(-14)
 
+    it "routes syscall 31 and 32 through the native pipe fd backend":
+        fd_table_init()
+        pipe_init()
+        var read_fd: i32 = 0
+        var write_fd: i32 = 0
+        expect(posix_pipe(unsafe_addr_of(read_fd), unsafe_addr_of(write_fd))).to_equal(0)
+
+        val write_ptr = 0x10002000u64
+        val read_ptr = 0x10003000u64
+        expect(_map_user_page(write_ptr)).to_equal(true)
+        expect(_map_user_page(read_ptr)).to_equal(true)
+        mmio_write8(write_ptr, 0x68)
+        mmio_write8(write_ptr + 1, 0x69)
+
+        val written = _dispatch(SyscallArgs(id: 32, arg0: write_fd as u64, arg1: write_ptr, arg2: 2, arg3: 0, arg4: 0, arg5: 0))
+        val read = _dispatch(SyscallArgs(id: 31, arg0: read_fd as u64, arg1: read_ptr, arg2: 2, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(written).to_equal(2)
+        expect(read).to_equal(2)
+        expect(mmio_read8(read_ptr)).to_equal(0x68u8)
+        expect(mmio_read8(read_ptr + 1)).to_equal(0x69u8)
+
+    it "rejects non-empty read and write syscall kernel pointers":
+        fd_table_init()
+
+        expect(_dispatch(SyscallArgs(id: 31, arg0: 3, arg1: 0xC0000000, arg2: 1, arg3: 0, arg4: 0, arg5: 0))).to_equal(-14)
+        expect(_dispatch(SyscallArgs(id: 32, arg0: 3, arg1: 0xC0000000, arg2: 1, arg3: 0, arg4: 0, arg5: 0))).to_equal(-14)
+
+    it "provides syscall 33 close through the fd table":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        val result = _dispatch(SyscallArgs(id: 33, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(result).to_equal(0)
+        expect(fd_is_valid(3)).to_equal(false)
+
     it "provides syscall 69 fcntl descriptor flags":
         fd_table_init()
         fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
@@ -75,6 +131,45 @@ describe "POSIX fd syscalls":
         expect(result).to_equal(8)
         expect(fd_is_valid(8)).to_equal(true)
         expect(fd_get_cloexec(8)).to_equal(true)
+
+    it "provides syscall 69 SimpleOS open-file-description token":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        val token = _dispatch(SyscallArgs(id: 69, arg0: 3, arg1: 1397686273, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        val dup_fd = _dispatch(SyscallArgs(id: 64, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        val dup_token = _dispatch(SyscallArgs(id: 69, arg0: dup_fd as u64, arg1: 1397686273, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+
+        expect(token).to_be_greater_than(0)
+        expect(dup_token).to_equal(token)
+
+    it "activates descriptor context for the current scheduler task":
+        fd_table_init()
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        fd_activate_task(parent.id)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        val parent_dup = syscall_handler(
+            SyscallArgs(id: 64, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        ).value
+        expect(parent_dup).to_equal(4)
+
+        val child = scheduler.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child_dup = syscall_handler(
+            SyscallArgs(id: 64, arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        ).value
+
+        expect(child.id).to_be_greater_than(0)
+        expect(child_dup).to_equal(-9)
 
     it "provides syscall 68 poll and validates the pollfd pointer":
         fd_table_init()

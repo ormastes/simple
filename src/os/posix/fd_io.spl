@@ -6,9 +6,10 @@
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
 use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOSYS, EMFILE, EIO}
-use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_types, fd_flags, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_types, fd_flags, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
 use os.posix.async_io.{sync_read, sync_write}
 use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
+use os.posix.socket_compat.{posix_close_socket}
 use os.userlib.syscall_raw.{syscall}
 use os.userlib.ipc_protocol.{VFS_OPEN, VFS_CLOSE}
 
@@ -106,7 +107,14 @@ fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     val vfs_handle = _read_u64(reply_buf, 4)
 
     # Set up the FD entry
-    fd_set(fd, FD_TYPE_FILE, flags, vfs_handle)
+    val set_result = fd_set(fd, FD_TYPE_FILE, flags, vfs_handle)
+    if set_result < 0:
+        var close_payload: [u8] = []
+        _push_u32(close_payload, VFS_CLOSE)
+        _push_u64(close_payload, vfs_handle)
+        val close_payload_ptr = unsafe_addr_of(close_payload)
+        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, close_payload_ptr, close_payload.len())
+        return set_result
     fd
 
 fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
@@ -182,6 +190,8 @@ fn posix_close(fd: i32) -> i32:
         return pipe_close_read(fd)
     if fd_types[idx] == FD_TYPE_PIPE_WRITE:
         return pipe_close_write(fd)
+    if route == FD_IO_ROUTE_SOCKET:
+        return posix_close_socket(fd) as i32
 
     # Send VFS_CLOSE for file FDs
     if route == FD_IO_ROUTE_FILE:
@@ -194,6 +204,29 @@ fn posix_close(fd: i32) -> i32:
         # Best-effort close: ignore IPC errors
 
     fd_close(fd)
+
+fn posix_close_all_fds_with_backends() -> u32:
+    """Close every live descriptor in the active fd context through posix_close."""
+    var closed: u32 = 0u32
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_is_valid(i as i32):
+            posix_close(i as i32)
+            closed = closed + 1u32
+        i = i + 1
+    closed
+
+fn posix_close_task_fds_with_backends(owner: u64) -> u32:
+    """Close and release a task fd context through backend-aware close hooks."""
+    if not fd_task_context_exists(owner):
+        return 0u32
+    val previous_owner = fd_current_task()
+    fd_activate_task(owner)
+    val closed = posix_close_all_fds_with_backends()
+    fd_release_task(owner)
+    if previous_owner != owner:
+        fd_activate_task(previous_owner)
+    closed
 
 fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
     """Reposition file offset. Returns new offset or -errno."""
@@ -233,7 +266,17 @@ fn posix_dup(fd: i32) -> i32:
     fd_dup(fd)
 
 fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
-    """Duplicate fd to specific number."""
+    """Duplicate fd to a specific number with POSIX replacement semantics."""
+    if not fd_is_valid(old_fd):
+        return 0 - EBADF
+    if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
+        return 0 - EBADF
+    if old_fd == new_fd:
+        return new_fd
+    if fd_is_valid(new_fd):
+        # POSIX dup2 ignores close errors, but backend side effects such as
+        # pipe HUP/EOF and VFS handle release must still run.
+        posix_close(new_fd)
     fd_dup2(old_fd, new_fd)
 
 # ============================================================================

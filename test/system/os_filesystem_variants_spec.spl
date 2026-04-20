@@ -1,0 +1,204 @@
+# @tag:system
+#
+# SSpec system coverage for filesystem variants.
+#
+# FAT32 is exercised through the named QEMU target/scenario machinery because
+# it depends on the SimpleOS NVMe + FAT32 boot path. NVFS is exercised through
+# its FsDriver POSIX shim because it is not yet wired as a boot-time SimpleOS
+# storage service. Both lanes share the same user-visible filesystem contract:
+# mount, capability discovery, create/write/read, positional write, stat,
+# directory listing, rename, unlink, and close.
+
+use std.spec
+
+use os.qemu_runner.{
+    build_scenario,
+    ensure_fs_test_disk_image,
+    fs_test_disk_image_path,
+    scenario_target,
+    scenario_test_timeout_ms,
+    scenario_x64_nvme_fat32,
+    test_scenario}
+use test.qemu.os.common.qemu_os_harness.{can_run_target, file_exists}
+
+use std.fs_driver.capability.{Capability}
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.types.{DirEntry, DirHandle, MountOptions, OpenFlags, Path}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+
+struct FsSystemVariant:
+    name: text
+    runner: text
+    storage: text
+
+fn fs_system_variants() -> [FsSystemVariant]:
+    [
+        FsSystemVariant {
+            name: "fat32",
+            runner: "qemu-scenario",
+            storage: "nvme-fat32-image"
+        },
+        FsSystemVariant {
+            name: "nvfs",
+            runner: "fs-driver-contract",
+            storage: "nvfs-posix-arena"
+        }
+    ]
+
+fn _has_variant(name: text) -> bool:
+    for variant in fs_system_variants():
+        if variant.name == name:
+            return true
+    false
+
+fn _dir_has(entries: [DirEntry], name: text) -> bool:
+    var i = 0
+    while i < entries.len() as i64:
+        val entry = entries[i]
+        if entry.name == name:
+            return true
+        i = i + 1
+    false
+
+fn _contract_fail(reason: text) -> bool:
+    print "[os_filesystem_variants_spec] nvfs contract failed: {reason}"
+    false
+
+fn _run_nvfs_posix_contract() -> bool:
+    var driver = NvfsPosixDriver.new("system-nvfs-posix")
+
+    val mount_result = driver.mount(MountOptions.default())
+    if mount_result.is_err():
+        return _contract_fail("mount")
+
+    val caps = driver.capabilities()
+    if not caps.has(Capability.PosixCompat):
+        return _contract_fail("missing PosixCompat")
+    if not caps.has(Capability.AsyncIo):
+        return _contract_fail("missing AsyncIo")
+    if not caps.has(Capability.CaseSensitive):
+        return _contract_fail("missing CaseSensitive")
+
+    val path = Path { raw: "/contract.txt" }
+    val handle_result = driver.open(path, OpenFlags.read_write().with_create())
+    if handle_result.is_err():
+        return _contract_fail("open")
+    val handle = handle_result.unwrap()
+
+    val seed: [u8] = [0x41, 0x42, 0x43, 0x44]  # ABCD
+    val wrote = match driver.write(handle, 0, seed):
+        case Ok(n): n
+        case Err(_): -1
+    if wrote != 4:
+        return _contract_fail("write")
+
+    var read_buf: [u8] = [0, 0, 0, 0]
+    val read_n = match driver.read(handle, 0, read_buf):
+        case Ok(n): n
+        case Err(_): -1
+    if read_n != 4:
+        return _contract_fail("read")
+
+    val patch: [u8] = [0x78, 0x79]  # xy
+    val patched = match driver.pwrite(handle, 1, patch):
+        case Ok(n): n
+        case Err(_): -1
+    if patched != 2:
+        return _contract_fail("pwrite")
+
+    var patched_buf: [u8] = [0, 0, 0, 0]
+    val patched_read = match driver.pread(handle, 0, patched_buf):
+        case Ok(n): n
+        case Err(_): -1
+    if patched_read != 4:
+        return _contract_fail("pread")
+
+    val stat_result = driver.fstat(handle)
+    if stat_result.is_err():
+        return _contract_fail("fstat")
+    if stat_result.unwrap().size != 4:
+        return _contract_fail("fstat size")
+
+    val mkdir_result = driver.mkdir(Path { raw: "/dir" }, 0o755)
+    if mkdir_result.is_err():
+        return _contract_fail("mkdir")
+    val root_result = driver.root()
+    if root_result.is_err():
+        return _contract_fail("root")
+    val entries_result = driver.readdir(DirHandle { id: root_result.unwrap().id })
+    if entries_result.is_err():
+        return _contract_fail("readdir")
+    val entries = entries_result.unwrap()
+    if not _dir_has(entries, "dir"):
+        print "[os_filesystem_variants_spec] nvfs root entries after mkdir: {entries.len()}"
+        var ei = 0
+        while ei < entries.len() as i64:
+            print "[os_filesystem_variants_spec] entry[{ei}]={entries[ei].name}"
+            ei = ei + 1
+        return _contract_fail("readdir missing dir")
+
+    val renamed = Path { raw: "/renamed.txt" }
+    val rename_result = driver.rename(path, renamed)
+    if rename_result.is_err():
+        return _contract_fail("rename")
+    if driver.stat(path).is_ok():
+        return _contract_fail("old name still visible")
+    if driver.stat(renamed).is_err():
+        return _contract_fail("new name not visible")
+
+    val unlink_result = driver.unlink(renamed)
+    if unlink_result.is_err():
+        return _contract_fail("unlink")
+    if driver.stat(renamed).is_ok():
+        return _contract_fail("unlinked name still visible")
+
+    val close_result = driver.close(handle)
+    close_result.is_ok()
+
+describe "SimpleOS filesystem variant system matrix":
+
+    it "declares FAT32 and NVFS as first-class filesystem variants":
+        expect(_has_variant("fat32")).to_equal(true)
+        expect(_has_variant("nvfs")).to_equal(true)
+        expect(fs_system_variants().len()).to_equal(2)
+
+    describe "fat32 via x64-nvme-fat32 QEMU scenario":
+
+        it "materializes a FAT32 fixture disk image":
+            if not ensure_fs_test_disk_image():
+                print "[os_filesystem_variants_spec] FAT32 fixture image unavailable, skipping artifact assertion"
+                expect(true).to_equal(true)
+                return
+            expect(file_exists(fs_test_disk_image_path())).to_equal(true)
+
+        it "binds x64-nvme-fat32 to the dedicated filesystem test entry":
+            val scenario = scenario_x64_nvme_fat32()
+            val target = scenario_target(scenario)
+            expect(target.entry).to_equal("examples/simple_os/arch/x86_64/fs_test_entry.spl")
+            expect(target.output).to_equal("build/os/simpleos_fs_test_32.elf")
+
+        it "boots the FAT32 contract under QEMU when available":
+            if not ensure_fs_test_disk_image():
+                print "[os_filesystem_variants_spec] FAT32 fixture image unavailable, skipping live QEMU boot"
+                expect(true).to_equal(true)
+                return
+
+            val scenario = scenario_x64_nvme_fat32()
+            val target = scenario_target(scenario)
+            if not can_run_target(target):
+                print "[os_filesystem_variants_spec] qemu-system-x86_64 or target ELF unavailable, attempting build"
+
+            expect(build_scenario(scenario)).to_equal(true)
+            expect(file_exists(target.output)).to_equal(true)
+
+            if not can_run_target(target):
+                print "[os_filesystem_variants_spec] qemu-system-x86_64 unavailable, skipping live FAT32 boot"
+                expect(true).to_equal(true)
+                return
+
+            expect(test_scenario(scenario, scenario_test_timeout_ms(scenario))).to_equal(true)
+
+    describe "nvfs via FsDriver POSIX shim":
+
+        it "satisfies the shared filesystem contract":
+            expect(_run_nvfs_posix_contract()).to_equal(true)

@@ -8,6 +8,8 @@
 
 extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
                                 int64_t a2, int64_t a3, int64_t a4);
+extern void simpleos_epoll_on_fd_close(int fd);
+extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
 
 #define SYS_PIPE 62
 #define SYS_DUP2 63
@@ -50,9 +52,18 @@ int pipe2(int pipefd[2], int flags) {
 }
 
 int dup2(int oldfd, int newfd) {
+    int replaced_ofd = -1;
+    if (oldfd != newfd) {
+        int saved_errno = errno;
+        replaced_ofd = fcntl(newfd, F_SIMPLEOS_GET_OFD, 0);
+        errno = saved_errno;
+    }
     long ret = (long)simpleos_syscall(SYS_DUP2,
                                       (long)oldfd, (long)newfd, 0, 0, 0);
     if (ret < 0) { errno = (int)(-ret); return -1; }
+    if (oldfd != newfd && replaced_ofd >= 0) {
+        simpleos_epoll_on_fd_close_token(newfd, (uint64_t)(uint32_t)replaced_ofd);
+    }
     return (int)ret;
 }
 

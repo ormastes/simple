@@ -28,8 +28,8 @@ fn test_python_def_detection() {
 
 #[test]
 fn test_python_none_detection() {
-    // Test the detection function directly with a context where None should be flagged
-    // (not after '=', 'return', 'case', etc. where it could be a valid enum variant)
+    // `None` is a valid Simple enum/unit variant. The parser does not have type
+    // information here, so it must not warn on ambiguous unqualified `None`.
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let none_token = Token::new(
@@ -40,11 +40,10 @@ fn test_python_none_detection() {
         Span::new(0, 4, 1, 1),
         "None".to_string(),
     );
-    // Use 'if' as previous token - a context where None is likely a Python mistake
     let prev_token = Token::new(TokenKind::If, Span::new(0, 2, 1, 1), "if".to_string());
 
     let mistake = detect_common_mistake(&none_token, &prev_token, None);
-    assert_eq!(mistake, Some(CommonMistake::PythonNone));
+    assert_eq!(mistake, None);
 
     // Test that None after '=' is NOT flagged (could be Option::None variant)
     let none_token2 = Token::new(
@@ -59,6 +58,33 @@ fn test_python_none_detection() {
 
     let mistake2 = detect_common_mistake(&none_token2, &assign_token, None);
     assert_eq!(mistake2, None); // Should NOT flag as mistake after '='
+}
+
+#[test]
+fn test_valid_none_variant_contexts_are_not_python_warnings() {
+    use simple_parser::token::{NamePattern, Span, Token, TokenKind};
+
+    let none_token = Token::new(
+        TokenKind::Identifier {
+            name: "None".to_string(),
+            pattern: NamePattern::TypeName,
+        },
+        Span::new(13, 17, 1, 14),
+        "None".to_string(),
+    );
+
+    let dot_token = Token::new(TokenKind::Dot, Span::new(12, 13, 1, 13), ".".to_string());
+    assert_eq!(detect_common_mistake(&none_token, &dot_token, None), None);
+
+    let double_colon_token =
+        Token::new(TokenKind::DoubleColon, Span::new(11, 13, 1, 12), "::".to_string());
+    assert_eq!(
+        detect_common_mistake(&none_token, &double_colon_token, None),
+        None
+    );
+
+    let colon_token = Token::new(TokenKind::Colon, Span::new(9, 10, 1, 10), ":".to_string());
+    assert_eq!(detect_common_mistake(&none_token, &colon_token, None), None);
 }
 
 #[test]
@@ -176,7 +202,6 @@ fn test_java_public_class_detection() {
 #[test]
 fn test_common_mistake_messages() {
     assert!(CommonMistake::PythonDef.message().contains("fn"));
-    assert!(CommonMistake::PythonNone.message().contains("nil"));
     assert!(CommonMistake::RustLetMut.message().contains("var"));
     assert!(CommonMistake::TsConst.message().contains("val"));
     assert!(CommonMistake::TsFunction.message().contains("fn"));
@@ -185,7 +210,6 @@ fn test_common_mistake_messages() {
 #[test]
 fn test_common_mistake_suggestions() {
     assert!(CommonMistake::PythonDef.suggestion().contains("fn"));
-    assert!(CommonMistake::PythonNone.suggestion().contains("nil"));
     assert!(CommonMistake::RustLetMut.suggestion().contains("var"));
     assert!(CommonMistake::TsConst.suggestion().contains("val"));
 }

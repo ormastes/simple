@@ -342,6 +342,7 @@ bin/simple run src/os/port/rust/build.spl -- validate
 
 Target specs: `src/os/toolchain/rust/`
 - `x86_64-unknown-simpleos.json`
+- `i686-unknown-simpleos.json` (planned; SimpleOS build catalog already exposes `i686-simpleos`)
 - `aarch64-unknown-simpleos.json`
 - `riscv64gc-unknown-simpleos.json`
 - `riscv32imac-unknown-simpleos.json`
@@ -361,7 +362,37 @@ Uses fork: `ormastes/rust` (branch: `simpleos`)
 | `Makefile` | Builds `libsimpleos_c.a` |
 | `include/` | C headers (string.h, math.h, stdio.h, ...) |
 
-### 4.7 Native Build Config
+### 4.7 Multi-Platform Binary Catalog
+
+**Source:** `src/os/port/simpleos_multiplatform_build.spl`
+
+SimpleOS target metadata is centralized in one catalog so C/ASM boot objects, Simple entrypoints, linker scripts, QEMU defaults, and compiler flags stay aligned across build tools.
+
+| Target | Aliases | Bits | C/ASM Notes |
+|--------|---------|------|-------------|
+| `x86_64-simpleos` | `x86_64`, `amd64`, `x64` | 64 | x86_64 freestanding, no red zone |
+| `i686-simpleos` | `x86_32`, `x86`, `i386`, `i686` | 32 | `--target=i686-unknown-none-elf`, `-m32`, Multiboot1 `crt0.s` + `baremetal_stubs.c` |
+| `aarch64-simpleos` | `arm64`, `aarch64` | 64 | ARM64 virt-machine lane |
+| `armv7-simpleos` | `arm32`, `armv7` | 32 | ARM32 virt-machine lane |
+| `riscv64gc-simpleos` | `riscv64`, `rv64`, `rv64gc` | 64 | `rv64gc/lp64d` |
+| `riscv32imac-simpleos` | `riscv32`, `rv32`, `rv32imac` | 32 | `rv32imac/ilp32` |
+
+Build all first-class QEMU targets:
+
+```bash
+bin/simple run examples/simple_os/build.spl
+```
+
+Build the 32-bit x86 lane:
+
+```bash
+bin/simple run examples/simple_os/build.spl -- --arch=x86_32
+bin/simple run examples/simple_os/build.spl -- --arch=i686
+```
+
+The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+
+### 4.8 Native Build Config
 
 **Source:** `src/os/port/simpleos_native_build_config.spl`
 
@@ -369,14 +400,15 @@ Provides configuration for `simple native-build --target simpleos`:
 
 ```simple
 val config = simpleos_build_config("x86_64-simpleos")
+val x86_config = simpleos_build_config("i686-simpleos")
 val flags = simpleos_linker_flags()
 val includes = simpleos_include_paths()
 val valid = simpleos_validate_sysroot("build/os/sysroot")
 ```
 
-Functions: `simpleos_sysroot_path()`, `simpleos_linker_flags()`, `simpleos_include_paths()`, `simpleos_target_arch()`, `simpleos_clang_target()`, `simpleos_c_flags()`, `simpleos_crt_objects()`, `simpleos_library_paths()`, `simpleos_libraries()`, `simpleos_linker_script()`, `simpleos_validate_sysroot()`.
+Functions: `simpleos_sysroot_path()`, `simpleos_linker_flags()`, `simpleos_include_paths()`, `simpleos_target_arch()`, `simpleos_clang_target()`, `simpleos_c_flags()`, `simpleos_asm_flags()`, `simpleos_boot_c_sources()`, `simpleos_boot_asm_sources()`, `simpleos_crt_objects()`, `simpleos_library_paths()`, `simpleos_libraries()`, `simpleos_linker_script()`, `simpleos_validate_sysroot()`.
 
-### 4.8 Building and Running a Native SimpleOS Program
+### 4.9 Building and Running a Native SimpleOS Program
 
 There are two distinct workflows:
 
@@ -421,6 +453,9 @@ bin/simple os run --scenario=x64-desktop-test
 
 bin/simple os build --scenario=x64-desktop-disk
 bin/simple os test --scenario=x64-desktop-disk
+
+bin/simple os build --scenario=x64-nvme-fat32
+bin/simple os test --scenario=x64-nvme-fat32
 ```
 
 `x64-desktop-disk` automatically ensures `build/os/fat32.img` exists by calling:
@@ -429,8 +464,22 @@ bin/simple os test --scenario=x64-desktop-disk
 sh scripts/make_os_disk.shs
 ```
 
-That script now has a host-independent Python fallback seeder, so it can
-populate a formatted FAT32 image even when `mtools` and loop-mount are missing.
+That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
+`mtools` is preferred because it works on macOS and Linux without root, and
+Linux loop mount is the fallback.
+
+`x64-nvme-fat32` is the focused filesystem contract lane. It binds to
+`examples/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
+`build/os/fat32.img` so the guest can assert on `HELLO.TXT`, `NUMBERS.TXT`,
+and `HELLO.SPL`. The SSpec wrapper for filesystem variants is:
+
+```bash
+bin/simple test test/system/os_filesystem_variants_spec.spl
+```
+
+That spec treats FAT32 as a QEMU-backed target variation and NVFS as an
+in-process `FsDriver` POSIX-shim variation until NVFS is wired into boot-time
+SimpleOS storage services.
 
 #### Current x86_64 launch status
 
@@ -438,6 +487,7 @@ SimpleOS now has two intentionally separate launch proofs:
 
 - `x64-desktop-disk` proves the disk-backed resident-manifest compatibility
   lane and the FAT32 artifact path
+- `x64-nvme-fat32` proves the focused NVMe + FAT32 filesystem fixture path
 - `browser_engine_in_qemu_spec.spl` proves arbitrary baremetal ELF execution via
   directly built `native-build` outputs
 
@@ -652,7 +702,7 @@ Shell Tools ──→ VfsManager, ToolRegistry, Terminal, POSIX layer
 Git/JJ      ──→ rt_process_run (host binary delegation)
 Build Tools ──→ std.fs, std.process (file ops + command execution)
 LLVM Build  ──→ cmake, ninja, clang, git (host tools)
-Rust Build  ──→ python3, git, rustup, cargo nightly, rust-src
+Rust Build  ──→ git, rustup, cargo nightly, rust-src
 Bootstrap   ──→ Rust seed, clang/lld (linking), source tree
 Verify All  ──→ std.fs (file checks), std.process (tool checks)
 ```

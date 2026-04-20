@@ -415,6 +415,13 @@ var named_type_names: [text] = []
 var named_type_field_names: [[text]] = []
 var named_type_field_types: [[i64]] = []
 
+# Custom primitive registry.
+# Newtypes are still constructible single-field structs, but ABI-sensitive
+# phases can ask this registry for their transparent primitive representation.
+var custom_primitive_names: [text] = []
+var custom_primitive_underlying_type_tags: [i64] = []
+var custom_primitive_symbol_ids: [i64] = []
+
 fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
     val idx = named_type_names.len()
     named_type_names.push(name)
@@ -440,6 +447,186 @@ fn named_type_fields(type_id: i64) -> [text]:
 
 fn named_type_field_type_tags(type_id: i64) -> [i64]:
     named_type_field_types[type_id]
+
+fn primitive_bit_width_from_name(type_name: text) -> i64:
+    if type_name == "bool":
+        return 1
+    if type_name == "i8" or type_name == "u8":
+        return 8
+    if type_name == "i16" or type_name == "u16":
+        return 16
+    if type_name == "i32" or type_name == "u32":
+        return 32
+    if type_name == "i64" or type_name == "u64":
+        return 64
+    if type_name == "f32":
+        return 32
+    if type_name == "f64":
+        return 64
+    0
+
+fn parse_positive_int_text_digits(value: text) -> i64:
+    var result: i64 = 0
+    if value.len() == 0:
+        return 0
+    for i in 0..value.len():
+        val ch = value[i]
+        if ch < "0" or ch > "9":
+            return 0
+        var digit: i64 = 0
+        if ch == "1": digit = 1
+        if ch == "2": digit = 2
+        if ch == "3": digit = 3
+        if ch == "4": digit = 4
+        if ch == "5": digit = 5
+        if ch == "6": digit = 6
+        if ch == "7": digit = 7
+        if ch == "8": digit = 8
+        if ch == "9": digit = 9
+        result = result * 10 + digit
+    result
+
+fn primitive_integer_bit_width_from_name(type_name: text) -> i64:
+    val has_u_prefix: bool = type_name.starts_with("u")
+    val has_i_prefix: bool = type_name.starts_with("i")
+    if not (has_u_prefix or has_i_prefix):
+        return 0
+    if type_name.len() <= 1:
+        return 0
+    for bi in 1..type_name.len():
+        val ch = type_name[bi]
+        if ch < "0" or ch > "9":
+            return 0
+    val bits = parse_positive_int_text_digits(type_name[1:type_name.len()])
+    if bits <= 0 or bits > 64:
+        return 0
+    bits
+
+fn primitive_backing_bits_from_name(type_name: text) -> i64:
+    if type_name == "u8":
+        return 8
+    if type_name == "u16":
+        return 16
+    if type_name == "u32":
+        return 32
+    if type_name == "u64":
+        return 64
+    0
+
+fn custom_primitive_find(name: text) -> i64:
+    for i in range(0, custom_primitive_names.len()):
+        if custom_primitive_names[i] == name:
+            return i
+    -1
+
+fn custom_primitive_register(name: text, underlying_type_tag: i64) -> i64:
+    val existing = custom_primitive_find(name)
+    if existing >= 0:
+        custom_primitive_underlying_type_tags[existing] = underlying_type_tag
+        return existing
+    val idx = custom_primitive_names.len()
+    custom_primitive_names.push(name)
+    custom_primitive_underlying_type_tags.push(underlying_type_tag)
+    custom_primitive_symbol_ids.push(-1)
+    idx
+
+fn custom_primitive_bind_symbol(name: text, symbol_id: i64):
+    val idx = custom_primitive_find(name)
+    if idx >= 0:
+        custom_primitive_symbol_ids[idx] = symbol_id
+
+fn custom_primitive_is_name(name: text) -> bool:
+    custom_primitive_find(name) >= 0
+
+fn custom_primitive_underlying_type_tag_by_name(name: text) -> i64:
+    val idx = custom_primitive_find(name)
+    if idx < 0:
+        return -1
+    custom_primitive_underlying_type_tags[idx]
+
+fn custom_primitive_underlying_type_tag_by_symbol(symbol_id: i64) -> i64:
+    for i in range(0, custom_primitive_symbol_ids.len()):
+        if custom_primitive_symbol_ids[i] == symbol_id:
+            return custom_primitive_underlying_type_tags[i]
+    -1
+
+fn custom_primitive_underlying_name_by_name(name: text) -> text:
+    val tag = custom_primitive_underlying_type_tag_by_name(name)
+    if tag < 0:
+        return ""
+    type_tag_name(tag)
+
+fn custom_primitive_abi_type_name(type_name: text) -> text:
+    val inner = custom_primitive_underlying_name_by_name(type_name)
+    if inner == "":
+        return type_name
+    inner
+
+fn custom_primitive_bit_width_by_name(name: text) -> i64:
+    val inner = custom_primitive_underlying_name_by_name(name)
+    if inner == "":
+        return 0
+    primitive_bit_width_from_name(inner)
+
+fn custom_primitive_integer_bit_width_by_name(name: text) -> i64:
+    val inner = custom_primitive_underlying_name_by_name(name)
+    if inner == "":
+        return 0
+    if inner == "bool":
+        return 1
+    primitive_integer_bit_width_from_name(inner)
+
+fn custom_primitive_backing_bits_by_name(name: text) -> i64:
+    val inner = custom_primitive_underlying_name_by_name(name)
+    if inner == "":
+        return 0
+    primitive_backing_bits_from_name(inner)
+
+fn custom_primitive_c_type_by_name(name: text) -> text:
+    val inner = custom_primitive_underlying_name_by_name(name)
+    if inner == "":
+        return ""
+    type_tag_to_c(custom_primitive_underlying_type_tag_by_name(name))
+
+fn custom_primitive_c_type_by_symbol(symbol_id: i64) -> text:
+    val tag = custom_primitive_underlying_type_tag_by_symbol(symbol_id)
+    if tag < 0:
+        return ""
+    type_tag_to_c(tag)
+
+fn custom_primitive_llvm_type_from_tag(tag: i64) -> text:
+    if tag == TYPE_BOOL:
+        return "i1"
+    if tag == TYPE_I64:
+        return "i64"
+    if tag == TYPE_F64:
+        return "double"
+    val name = type_tag_name(tag)
+    if name == "i8" or name == "u8":
+        return "i8"
+    if name == "i16" or name == "u16":
+        return "i16"
+    if name == "i32" or name == "u32":
+        return "i32"
+    if name == "i64" or name == "u64":
+        return "i64"
+    if name == "f32":
+        return "float"
+    if name == "f64":
+        return "double"
+    ""
+
+fn custom_primitive_llvm_type_by_name(name: text) -> text:
+    val tag = custom_primitive_underlying_type_tag_by_name(name)
+    if tag < 0:
+        return ""
+    custom_primitive_llvm_type_from_tag(tag)
+
+fn custom_primitive_llvm_type_by_symbol(symbol_id: i64) -> text:
+    val tag = custom_primitive_underlying_type_tag_by_symbol(symbol_id)
+    if tag < 0:
+        return ""
+    custom_primitive_llvm_type_from_tag(tag)
 
 # ===== Function Signature Registry =====
 # Tracks function signatures for cross-file resolution and C forward declarations.
@@ -587,6 +774,9 @@ fn reset_all_pools():
     named_type_names = []
     named_type_field_names = []
     named_type_field_types = []
+    custom_primitive_names = []
+    custom_primitive_underlying_type_tags = []
+    custom_primitive_symbol_ids = []
     fn_sig_names = []
     fn_sig_param_names = []
     fn_sig_param_types = []
@@ -599,4 +789,3 @@ fn reset_all_pools():
     intersection_type_members = []
     refinement_base_types = []
     refinement_predicates = []
-

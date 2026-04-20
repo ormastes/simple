@@ -7,12 +7,32 @@ use compiler.hir.hir_definitions.*
 use parser.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, FunctionAttr, ExportAttr}
-use compiler.types.type_layout.{LayoutAttr, LayoutKind}
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_platform_attrs, FunctionAttr, ExportAttr}
+use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 
 # Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
 # ============================================================================
+
+fn platform_has_diagnostic_level(platform: PlatformParseResult, level: PlatformDiagnosticLevel) -> bool:
+    var i = 0
+    while i < platform.diagnostics.len():
+        if platform.diagnostics[i].level() == level:
+            return true
+        i = i + 1
+    false
+
+fn platform_first_diagnostic_message(platform: PlatformParseResult) -> text:
+    if platform.diagnostics.len() == 0:
+        return ""
+    platform.diagnostics[0].message()
+
+fn platform_first_diagnostic_line(platform: PlatformParseResult) -> i64:
+    if platform.diagnostics.len() == 0:
+        return 0
+    platform.diagnostics[0].span().line
 
 impl HirLowering:
     me resolve_import_symbols(module: Module):
@@ -437,6 +457,8 @@ impl HirLowering:
 
         # Parse export attributes (@export("C"))
         val export = parse_export_attrs(class_.attributes)
+        val platform = parse_platform_attrs(class_.attributes)
+        val has_platform = platform.variants.len() > 0 or platform.diagnostics.len() > 0
 
         HirClass(
             symbol: symbol,
@@ -450,6 +472,11 @@ impl HirLowering:
             span: class_.span,
             layout_attr: layout_opt,
             export_attr: export,
+            has_platform_attr: has_platform,
+            platform_has_error: platform_has_diagnostic_level(platform, PlatformDiagnosticLevel.Error),
+            platform_has_warning: platform_has_diagnostic_level(platform, PlatformDiagnosticLevel.Warning),
+            platform_diagnostic_message: platform_first_diagnostic_message(platform),
+            platform_diagnostic_line: platform_first_diagnostic_line(platform),
             is_generic_template: false,
             specialization_of: nil,
             type_bindings: {}
@@ -458,6 +485,8 @@ impl HirLowering:
     me lower_struct(struct_: Struct) -> HirStruct:
         """Lower struct to HIR."""
         val symbol = self.symbols.lookup(struct_.name).unwrap()
+        if custom_primitive_is_name(struct_.name):
+            custom_primitive_bind_symbol(struct_.name, symbol.id)
 
         var type_params: [HirTypeParam] = []
         for tp in struct_.type_params:
@@ -476,6 +505,8 @@ impl HirLowering:
             Some(layout)
         else:
             nil
+        val platform = parse_platform_attrs(struct_.attributes)
+        val has_platform = platform.variants.len() > 0 or platform.diagnostics.len() > 0
 
         HirStruct(
             symbol: symbol,
@@ -487,6 +518,11 @@ impl HirLowering:
             doc_comment: struct_.doc_comment,
             span: struct_.span,
             layout_attr: layout_opt,
+            has_platform_attr: has_platform,
+            platform_has_error: platform_has_diagnostic_level(platform, PlatformDiagnosticLevel.Error),
+            platform_has_warning: platform_has_diagnostic_level(platform, PlatformDiagnosticLevel.Warning),
+            platform_diagnostic_message: platform_first_diagnostic_message(platform),
+            platform_diagnostic_line: platform_first_diagnostic_line(platform),
             is_generic_template: false,
             specialization_of: nil,
             type_bindings: {}
@@ -634,24 +670,12 @@ impl HirLowering:
         val t = type_.unwrap()
         match t.kind:
             case Named(name, _):
-                match name:
-                    case "bool": 1
-                    case "u1" | "i1": 1
-                    case "u2" | "i2": 2
-                    case "u3" | "i3": 3
-                    case "u4" | "i4": 4
-                    case "u5" | "i5": 5
-                    case "u6" | "i6": 6
-                    case "u7" | "i7": 7
-                    case "u8" | "i8": 8
-                    case "u9" | "i9": 9
-                    case "u10" | "i10": 10
-                    case "u11" | "i11": 11
-                    case "u12" | "i12": 12
-                    case "u16" | "i16": 16
-                    case "u32" | "i32": 32
-                    case "u64" | "i64": 64
-                    case _: 0  # Unknown type, require explicit @bits
+                if name == "bool":
+                    return 1
+                val primitive_bits = primitive_integer_bit_width_from_name(name)
+                if primitive_bits > 0:
+                    return primitive_bits
+                custom_primitive_integer_bit_width_by_name(name)
             case _: 0  # Complex types require explicit @bits
 
     me lower_trait(trait_: Trait) -> HirTrait:

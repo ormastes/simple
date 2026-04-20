@@ -10,7 +10,11 @@ use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
     UserProcessImage, AddressSpace,
     SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
-    default_task_schedule, default_task_isolation
+    default_task_schedule, default_task_isolation,
+    user_process_image_entry, user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_initial_stack_bytes
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
@@ -19,7 +23,9 @@ use os.kernel.memory.vmm.{create_user_address_space, destroy_user_address_space,
 use os.kernel.loader.segment_mapper.{map_all, map_stack}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
-use os.posix.fd_table.{fd_release_task}
+use os.posix.fd_io.{posix_close_task_fds_with_backends}
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.ipc.notification.{notification_clear_waiter}
 
 # Forward declaration: implemented by IpcManager wiring in kernel main.
 # Called after every task creation so the capability subsystem has an
@@ -98,10 +104,15 @@ fn _map_user_process_image(space: AddressSpace, image: UserProcessImage) -> i32:
     """Map PT_LOAD segments and the initial stack for a user process image."""
     if not _address_space_can_map(space):
         return 0
-    val seg_result = map_all(space, image.segments, image.file_bytes)
+    val seg_result = map_all(space, user_process_image_segments(image), user_process_image_file_bytes(image))
     if seg_result.is_err():
         return -12
-    val stack_result = map_stack(space, image.stack_top, image.stack_size, image.initial_stack_bytes)
+    val stack_result = map_stack(
+        space,
+        user_process_image_stack_top(image),
+        user_process_image_stack_size(image),
+        user_process_image_initial_stack_bytes(image)
+    )
     if stack_result.is_err():
         return -12
     0
@@ -393,8 +404,10 @@ impl Scheduler:
         if slot < 0:
             return TaskId(id: 0)
 
-        val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
-        val arch_user_ctx = X86ContextSwitch.create(image.entry, user_sp, true)
+        val entry = user_process_image_entry(image)
+        val stack_top = user_process_image_stack_top(image)
+        val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0
+        val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
         val user_ctx = TaskContext(
             rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
             rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
@@ -423,12 +436,12 @@ impl Scheduler:
             state: TaskState.Ready,
             priority: priority,
             is_user: true,
-            entry_point: image.entry,
+            entry_point: entry,
             context: user_ctx,
             user_context: Some(user_ctx),
             address_space: user_as.phys_root,
             kernel_stack: 0,
-            user_stack: image.stack_top,
+            user_stack: stack_top,
             capabilities: caps,
             parent: Some(self.current),
             schedule: default_task_schedule(priority),
@@ -472,7 +485,7 @@ impl Scheduler:
             return
         var task = tcb
         self._remove_ready(id)
-        fd_release_task(id.id)
+        posix_close_task_fds_with_backends(id.id)
         task.state = TaskState.Zombie
         task.exit_code = code
         self.tasks[slot] = task
@@ -561,6 +574,7 @@ impl Scheduler:
                     case _:
                         false
                 if expired:
+                    notification_clear_waiter(g_notification_table, task.id.id)
                     self.unblock_task(task.id)
                     woken = woken + 1u32
             i = i + 1
@@ -636,6 +650,13 @@ impl Scheduler:
         var task = tcb
         task.context = ctx
         task = _account_task_tick(task)
+
+        val still_running = match task.state:
+            case TaskState.Running: true
+            case _: false
+        if not still_running:
+            self.tasks[current_slot] = task
+            return self.schedule()
 
         # Decrement time slice
         if task.ticks_remaining > 0:
@@ -938,8 +959,10 @@ impl Scheduler:
         if was_ready:
             self._remove_ready(task_id)
 
-        val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
-        val arch_user_ctx = X86ContextSwitch.create(image.entry, user_sp, true)
+        val entry = user_process_image_entry(image)
+        val stack_top = user_process_image_stack_top(image)
+        val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0
+        val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
         val user_ctx = TaskContext(
             rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
             rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
@@ -971,11 +994,11 @@ impl Scheduler:
 
         var task = old_task
         task.is_user = true
-        task.entry_point = image.entry
+        task.entry_point = entry
         task.context = user_ctx
         task.user_context = Some(user_ctx)
         task.address_space = new_as.phys_root
-        task.user_stack = image.stack_top
+        task.user_stack = stack_top
         task.isolation = new_isolation
         task.exit_code = 0
         task.ticks_remaining = TIME_SLICE_TICKS
@@ -1035,7 +1058,7 @@ impl Scheduler:
                             val status = task.exit_code
                             val pid = task.id.id
                             self._remove_ready(task.id)
-                            fd_release_task(task.id.id)
+                            posix_close_task_fds_with_backends(task.id.id)
                             self._release_task_address_space(task)
                             self.tasks[i] = nil
                             return WaitCollectResult(pid: pid, status: status, error: 0)

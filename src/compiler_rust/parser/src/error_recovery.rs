@@ -15,7 +15,6 @@ pub enum CommonMistake {
     // Python-style
     PythonDef,   // def instead of fn
     PythonSelf,  // self. instead of implicit self
-    PythonNone,  // None instead of nil
     PythonTrue,  // True instead of true
     PythonFalse, // False instead of false
     PythonElif,  // elif is correct (not else if)
@@ -75,11 +74,6 @@ impl CommonMistake {
                  \n\
                  Python:  self.x = value\n\
                  Simple:  x = value     # self is implicit in methods"
-                .to_string(),
-            Self::PythonNone => "Use 'nil' instead of 'None' in Simple.\n\
-                 \n\
-                 Python:  return None\n\
-                 Simple:  return nil"
                 .to_string(),
             Self::PythonTrue | Self::PythonFalse => "Use lowercase 'true' and 'false' in Simple.\n\
                  \n\
@@ -252,7 +246,6 @@ impl CommonMistake {
     pub fn suggestion(&self) -> String {
         match self {
             Self::PythonDef => "Replace 'def' with 'fn'".to_string(),
-            Self::PythonNone => "Replace 'None' with 'nil'".to_string(),
             Self::PythonTrue => "Replace 'True' with 'true'".to_string(),
             Self::PythonFalse => "Replace 'False' with 'false'".to_string(),
             Self::PythonElif => "'elif' is correct - use it instead of 'else if'".to_string(),
@@ -289,34 +282,11 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         return Some(CommonMistake::PythonDef);
     }
 
-    // Check for 'None' (Python) - but skip in valid Simple contexts
-    // None is valid as:
-    // 1. Enum variant name (e.g., "enum Option: None")
-    // 2. Pattern matching (e.g., "case None:")
-    // 3. Enum variant constructor (e.g., "return None" for Option<T>)
+    // `None` is a valid Simple enum/unit variant, especially for Option<T>.
+    // Without type information this recovery pass cannot distinguish Python
+    // `None` from valid Simple code, so do not emit a common-mistake warning.
     if current.lexeme == "None" && matches!(current.kind, TokenKind::Identifier { .. }) {
-        // Skip if after 'case' (pattern matching)
-        if matches!(previous.kind, TokenKind::Case) {
-            return None;
-        }
-        // Skip if we're in an enum variant context (after newline/indent in enum body)
-        // This is approximate but covers the common case
-        if matches!(previous.kind, TokenKind::Newline | TokenKind::Indent) {
-            return None;
-        }
-        // Skip if after 'return' - could be returning None enum variant
-        // Without full type information, we can't distinguish between:
-        //   - Python mistake: return None  (should be: return nil)
-        //   - Valid Simple:   return None  (returning Option::None variant)
-        // Err on the side of not flagging valid Simple code
-        if matches!(previous.kind, TokenKind::Return) {
-            return None;
-        }
-        // Skip if after '=' - could be assigning None enum variant
-        if matches!(previous.kind, TokenKind::Assign) {
-            return None;
-        }
-        return Some(CommonMistake::PythonNone);
+        return None;
     }
 
     // Check for 'True' or 'False' (Python/Java)

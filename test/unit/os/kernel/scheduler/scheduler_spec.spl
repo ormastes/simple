@@ -28,6 +28,12 @@ use os.kernel.types.task_types.{
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
 use os.kernel.loader.executable_source.{_set_synthetic_initramfs_for_test, _clear_synthetic_initramfs_for_test}
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.ipc.notification.{notification_create, notification_register_multi_waiter, notification_signal, notification_poll, notification_wait, notification_drain_signaled_waiters, notification_clear_waiter}
+use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set_status_flags, fd_prepare_fork_to_task, O_RDONLY, O_NONBLOCK}
+use os.posix.pipe_compat.{pipe_init, posix_pipe, pipe_close_write, pipe_read}
+
+extern fn unsafe_addr_of(ref: any) -> u64
 
 """
 Scheduler tests cover queue behavior, task state transitions, policy metadata,
@@ -513,6 +519,27 @@ describe "Scheduler":
                 expect(task_after.schedule.vruntime).to_be_greater_than(0)
                 expect(task_after.schedule.virtual_deadline).to_be_greater_than(task_after.schedule.requested_slice_ns.to_i64())
 
+        it "timer tick reschedules when current task was blocked":
+            var sched = Scheduler.new()
+            val blocked_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val next_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            sched.schedule()
+
+            val before = sched.get_task(blocked_id)
+            if before != nil:
+                val task_before = before
+                sched.block_task(blocked_id, BlockReason.Sleep(until_ns: 100000000))
+                sched.timer_tick(task_before.context)
+
+            expect(sched.get_current().id).to_equal(next_id.id)
+            val blocked = sched.get_task(blocked_id)
+            if blocked != nil:
+                val blocked_task = blocked
+                val is_blocked = match blocked_task.state:
+                    TaskState.Blocked(reason): true
+                    _: false
+                expect(is_blocked).to_equal(true)
+
     describe "yield_current":
         it "moves current task back to ready":
             var sched = Scheduler.new()
@@ -609,6 +636,46 @@ describe "Scheduler":
                     _: false
                 expect(is_ready).to_equal(true)
 
+        it "wake_expired_sleepers clears stale notification waiters":
+            var sched = Scheduler.new()
+            val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val notif = notification_create(g_notification_table)
+            val ids = [notif]
+            notification_register_multi_waiter(g_notification_table, ids, 1u64, id.id)
+
+            sched.block_task(id, BlockReason.Sleep(until_ns: 10000000))
+            expect(sched.wake_expired_sleepers(10000000)).to_equal(1u32)
+
+            expect(notification_signal(g_notification_table, notif, 1u64)).to_equal(0u64)
+            expect(notification_poll(g_notification_table, notif)).to_equal(1u64)
+
+        it "notification_signal stages every waiter registered on the same notification":
+            val notif = notification_create(g_notification_table)
+
+            expect(notification_wait(g_notification_table, notif, 101u64)).to_equal(0u64)
+            expect(notification_wait(g_notification_table, notif, 202u64)).to_equal(0u64)
+
+            expect(notification_signal(g_notification_table, notif, 1u64)).to_equal(101u64)
+
+            val staged = notification_drain_signaled_waiters(g_notification_table, notif)
+            expect(staged.len()).to_equal(2)
+            expect(staged[0]).to_equal(101u64)
+            expect(staged[1]).to_equal(202u64)
+            expect(notification_drain_signaled_waiters(g_notification_table, notif).len()).to_equal(0)
+
+        it "notification_clear_waiter removes staged waiters from future drains":
+            val notif = notification_create(g_notification_table)
+
+            expect(notification_wait(g_notification_table, notif, 301u64)).to_equal(0u64)
+            expect(notification_wait(g_notification_table, notif, 302u64)).to_equal(0u64)
+
+            expect(notification_signal(g_notification_table, notif, 1u64)).to_equal(301u64)
+            expect(notification_clear_waiter(g_notification_table, 302u64)).to_equal(1u32)
+
+            val staged = notification_drain_signaled_waiters(g_notification_table, notif)
+            expect(staged.len()).to_equal(1)
+            expect(staged[0]).to_equal(301u64)
+
     describe "exit_task":
         it "sets current task to Zombie state":
             var sched = Scheduler.new()
@@ -647,6 +714,16 @@ describe "Scheduler":
                     val p = task.parent.unwrap()
                     expect(p.id).to_equal(parent.id)
 
+        it "clone_task prepares child fork return register as zero":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val child = sched.clone_task(parent)
+
+            val child_tcb = sched.get_task(child)
+            if child_tcb != nil:
+                val task = child_tcb
+                expect(task.context.rax).to_equal(0)
+
         it "wait_for rejects tasks that are not children":
             var sched = Scheduler.new()
             val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
@@ -672,18 +749,48 @@ describe "Scheduler":
                     _: false
                 expect(is_blocked).to_equal(true)
 
+        it "exit_task_by_id wakes a parent blocked in wait_for":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val child = sched.clone_task(parent)
+
+            expect(sched.wait_for(parent, child)).to_equal(-11)
+            sched.exit_task_by_id(child, 5)
+
+            val parent_tcb = sched.get_task(parent)
+            if parent_tcb != nil:
+                val task = parent_tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
+
         it "wait_for collects zombie child exit status and frees the slot":
             var sched = Scheduler.new()
             val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
-            sched.schedule()
+            fd_table_init()
+            pipe_init()
+            fd_activate_task(parent.id)
+
+            var read_fd: i32 = 0
+            var write_fd: i32 = 0
+            expect(posix_pipe(unsafe_addr_of(read_fd), unsafe_addr_of(write_fd))).to_equal(0)
+            expect(fd_set_status_flags(read_fd, O_RDONLY | O_NONBLOCK)).to_equal(0)
+
             val child = sched.clone_task(parent)
-            sched.schedule()
-            sched.exit_task(7)
+            expect(fd_prepare_fork_to_task(child.id)).to_equal(5u32)
+            expect(pipe_close_write(write_fd)).to_equal(0)
+            sched.exit_task_by_id(child, 7)
 
-            val status = sched.wait_for(parent, child)
+            val result = sched.wait_for_collect(parent, child, true)
 
-            expect(status).to_equal(7)
+            expect(result.error).to_equal(0)
+            expect(result.pid).to_equal(child.id)
+            expect(result.status).to_equal(7)
             expect(sched.get_task(child)).to_be_nil
+
+            var buf: [u8; 1] = [0; 1]
+            expect(pipe_read(read_fd, unsafe_addr_of(buf), 1u64)).to_equal(0)
 
     describe "get_task":
         it "returns nil for non-existent task":

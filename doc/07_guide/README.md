@@ -98,7 +98,7 @@ User-facing guides for the Simple programming language. For specifications see `
 
 | Guide | Description |
 |-------|-------------|
-| [fs_driver.md](fs_driver.md) | How to add a new filesystem driver and consume FsDriver from an app |
+| [fs_driver.md](fs_driver.md) | How to add a filesystem driver, consume `FsDriver`, and extend the FAT32/NVFS system-test matrix |
 
 ## Library
 

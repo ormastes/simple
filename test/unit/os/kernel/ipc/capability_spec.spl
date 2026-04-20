@@ -19,7 +19,7 @@ checking with prefix matching.
 
 use std.spec.{describe, it, expect}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_ADMIN, CAP_RIGHT_MAP, CAP_RIGHT_DATASET_BUILD, CAP_RIGHT_QUEUE_SUBMIT, CAP_RIGHT_QUEUE_RECV}
 use os.kernel.ipc.capability.{CapabilityManager}
 
 
@@ -88,6 +88,38 @@ describe "CapabilityManager check":
         )
         mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
         expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
+
+    it "allows dataset rights by object and generation":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ | CAP_RIGHT_MAP | CAP_RIGHT_ADMIN),
+            generation: 3u64,
+            owner: 1u64
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ))).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_MAP))).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 4u64, rights: CAP_RIGHT_READ))).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 8u64, generation: 3u64, rights: CAP_RIGHT_READ))).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_DATASET_BUILD))).to_equal(false)
+
+    it "allows process queue submit and receive rights by generation":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 2)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT | CAP_RIGHT_QUEUE_RECV),
+            generation: 5u64,
+            owner: 2u64
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT))).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV))).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 6u64, rights: CAP_RIGHT_QUEUE_RECV))).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 12u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV))).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_ADMIN))).to_equal(false)
 
 describe "CapabilityManager grant":
     it "grants capability from source to target":

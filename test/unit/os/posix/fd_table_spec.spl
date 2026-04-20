@@ -8,8 +8,8 @@ per descriptor.
 """
 
 use std.spec
-use os.posix.errno.{EBADF}
-use os.posix.fd_table.{fd_table_init, fd_alloc, fd_set, fd_close, fd_is_valid, fd_dup, fd_dup2, fd_get_cloexec, fd_set_cloexec, fd_close_on_exec, fd_exec_cleanup, fd_prepare_fork, fd_release_on_process_exit, fd_get_status_flags, fd_set_status_flags, fd_get_offset, fd_set_offset, fd_get_type, fd_get_backend_handle, fd_get_refcount, fd_poll_ready, fd_set_poll_notification, fd_poll_notification, fd_update_ready, fd_get_ready_generation, fd_types, fd_ports, fd_refcounts, FD_TYPE_FREE, FD_TYPE_FILE, FD_TYPE_PIPE_READ, FD_TYPE_SERIAL, O_RDONLY, O_WRONLY, O_RDWR, O_NONBLOCK, O_CLOEXEC, POLLIN, POLLOUT, POLLHUP, POLLNVAL}
+use os.posix.errno.{EBADF, EMFILE}
+use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_current_task, fd_alloc, fd_set, fd_close, fd_is_valid, fd_dup, fd_dup2, fd_get_cloexec, fd_set_cloexec, fd_close_on_exec, fd_exec_cleanup, fd_prepare_fork, fd_prepare_fork_to_task, fd_release_on_process_exit, fd_release_task, fd_get_status_flags, fd_set_status_flags, fd_get_offset, fd_set_offset, fd_get_type, fd_get_backend_handle, fd_get_object_id, fd_get_refcount, fd_poll_ready, fd_set_poll_notification, fd_poll_notification, fd_update_ready, fd_get_ready_generation, fd_types, fd_ports, fd_refcounts, FD_TYPE_FREE, FD_TYPE_FILE, FD_TYPE_PIPE_READ, FD_TYPE_SERIAL, O_RDONLY, O_WRONLY, O_RDWR, O_NONBLOCK, O_CLOEXEC, POLLIN, POLLOUT, POLLHUP, POLLNVAL, MAX_FDS}
 
 describe "POSIX fd table":
     it "initializes stdio descriptors and allocates the lowest free descriptor":
@@ -26,11 +26,21 @@ describe "POSIX fd table":
 
     it "keeps O_CLOEXEC as a per-descriptor flag":
         fd_table_init()
-        fd_set(3, FD_TYPE_FILE, O_RDWR | O_NONBLOCK | O_CLOEXEC, 99u64)
+        expect(fd_set(3, FD_TYPE_FILE, O_RDWR | O_NONBLOCK | O_CLOEXEC, 99u64)).to_equal(0)
 
         expect(fd_get_cloexec(3)).to_equal(true)
         expect(fd_get_status_flags(3) & O_CLOEXEC).to_equal(0u32)
         expect(fd_get_status_flags(3) & O_NONBLOCK).to_equal(O_NONBLOCK)
+
+    it "reports open-file-description exhaustion through fd_set":
+        fd_table_init()
+        var fd: i32 = 3
+        while (fd as u64) < MAX_FDS - 1:
+            expect(fd_set(fd, FD_TYPE_FILE, O_RDONLY, fd as u64)).to_equal(0)
+            fd = fd + 1
+
+        expect(fd_set(255, FD_TYPE_FILE, O_RDONLY, 255u64)).to_equal(0 - EMFILE)
+        expect(fd_is_valid(255)).to_equal(false)
 
     it "duplicates descriptors onto a shared open file description":
         fd_table_init()
@@ -52,6 +62,20 @@ describe "POSIX fd table":
 
         expect(fd_set_status_flags(dup_fd, O_RDWR)).to_equal(0)
         expect(fd_get_status_flags(3) & O_NONBLOCK).to_equal(0u32)
+
+    it "exposes a stable token for duplicated open file descriptions":
+        fd_table_init()
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        val original_token = fd_get_object_id(3)
+
+        val dup_fd = fd_dup(3)
+        expect(dup_fd).to_equal(4)
+        expect(fd_get_object_id(dup_fd)).to_equal(original_token)
+
+        fd_set(5, FD_TYPE_FILE, O_RDONLY, 20u64)
+        expect(fd_get_object_id(5) == original_token).to_equal(false)
+        expect(fd_dup2(3, 5)).to_equal(5)
+        expect(fd_get_object_id(5)).to_equal(original_token)
 
     it "implements dup2 replacement semantics":
         fd_table_init()
@@ -131,6 +155,70 @@ describe "POSIX fd table":
         expect(fd_is_valid(0)).to_equal(false)
         expect(fd_is_valid(3)).to_equal(false)
         expect(fd_is_valid(4)).to_equal(false)
+
+    it "keeps descriptor tables isolated between active tasks":
+        fd_table_init()
+        fd_activate_task(10u64)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+        expect(fd_current_task()).to_equal(10u64)
+        expect(fd_is_valid(3)).to_equal(true)
+
+        fd_activate_task(11u64)
+        expect(fd_current_task()).to_equal(11u64)
+        expect(fd_is_valid(3)).to_equal(false)
+        expect(fd_is_valid(0)).to_equal(true)
+
+        fd_activate_task(10u64)
+        expect(fd_is_valid(3)).to_equal(true)
+        expect(fd_get_backend_handle(3)).to_equal(10u64)
+
+    it "does not alias descriptor contexts with modulo-colliding task ids":
+        fd_table_init()
+        fd_activate_task(10u64)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 10u64)
+
+        fd_activate_task(266u64)
+        expect(fd_current_task()).to_equal(266u64)
+        expect(fd_is_valid(3)).to_equal(false)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 266u64)
+
+        fd_activate_task(10u64)
+        expect(fd_is_valid(3)).to_equal(true)
+        expect(fd_get_backend_handle(3)).to_equal(10u64)
+
+        fd_activate_task(266u64)
+        expect(fd_is_valid(3)).to_equal(true)
+        expect(fd_get_backend_handle(3)).to_equal(266u64)
+
+    it "clones active descriptor table into fork child context":
+        fd_table_init()
+        fd_activate_task(20u64)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY | O_CLOEXEC, 30u64)
+        expect(fd_set_offset(3, 44u64)).to_equal(0)
+
+        expect(fd_prepare_fork_to_task(21u64)).to_equal(4u32)
+        expect(fd_get_refcount(3)).to_equal(2u32)
+
+        fd_activate_task(21u64)
+        expect(fd_is_valid(3)).to_equal(true)
+        expect(fd_get_cloexec(3)).to_equal(true)
+        expect(fd_get_offset(3)).to_equal(44u64)
+        expect(fd_set_offset(3, 88u64)).to_equal(0)
+
+        fd_activate_task(20u64)
+        expect(fd_get_offset(3)).to_equal(88u64)
+
+    it "releases inactive task descriptor contexts":
+        fd_table_init()
+        fd_activate_task(30u64)
+        fd_set(3, FD_TYPE_FILE, O_RDONLY, 40u64)
+        expect(fd_prepare_fork_to_task(31u64)).to_equal(4u32)
+        expect(fd_get_refcount(3)).to_equal(2u32)
+
+        expect(fd_release_task(31u64)).to_equal(4u32)
+        expect(fd_get_refcount(3)).to_equal(1u32)
+        fd_activate_task(31u64)
+        expect(fd_is_valid(3)).to_equal(false)
 
     it "keeps duplicated open descriptions alive until the last close":
         fd_table_init()

@@ -63,7 +63,7 @@ impl NvfsPosixDriver:
             i = i + 1
         -1
 
-    fn _remove_name(idx: i64):
+    me fn _remove_name(idx: i64):
         """Swap-remove entry at idx from self.names."""
         val last = self.names.len() as i64 - 1
         if idx != last:
@@ -83,16 +83,16 @@ impl FsDriver for NvfsPosixDriver:
 
     # --- Lifecycle ---
 
-    fn mount(opts: MountOptions) -> Result<(), FsError>:
+    me fn mount(opts: MountOptions) -> Result<(), FsError>:
         self.mounted   = true
         self.read_only = opts.read_only
         Ok(())
 
-    fn unmount() -> Result<(), FsError>:
+    me fn unmount() -> Result<(), FsError>:
         self.mounted = false
         Ok(())
 
-    fn remount(opts: MountOptions) -> Result<(), FsError>:
+    me fn remount(opts: MountOptions) -> Result<(), FsError>:
         self.read_only = opts.read_only
         Ok(())
 
@@ -111,7 +111,7 @@ impl FsDriver for NvfsPosixDriver:
 
     # --- File I/O ---
 
-    fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+    me fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         """Open/create a path; allocate fd slot; return FileHandle."""
         if (not self.mounted):
             return Err(FsError.InvalidArg)
@@ -121,13 +121,13 @@ impl FsDriver for NvfsPosixDriver:
         var arena_id: i64 = -1
         if existing < 0:
             arena_id = arena_create_impl(0, 4096)
-            self.names.push(NameEntry(path: path.raw, arena_id: arena_id))
+            self.names.push(NameEntry { path: path.raw, arena_id: arena_id })
         else:
             arena_id = self.names[existing].arena_id
         val fd = self.fd_table.open(arena_id, flags.bits)
         Ok(FileHandle(id: fd as u64))
 
-    fn close(handle: FileHandle) -> Result<(), FsError>:
+    me fn close(handle: FileHandle) -> Result<(), FsError>:
         """Decrement fd refcount; discard arena if dead and count hit zero."""
         val fd = self._fd_from_handle(handle)
         val before_rc = self.fd_table.refcount(fd)
@@ -150,10 +150,14 @@ impl FsDriver for NvfsPosixDriver:
         match self.fd_table.lookup(fd):
             case Some(e):
                 val data = arena_readv_impl(e.arena_id, offset, buf.len() as i64)
+                var i = 0
+                while i < data.len() and i < buf.len():
+                    buf[i] = data[i]
+                    i = i + 1
                 Ok(data.len() as i64)
             case None: Err(FsError.InvalidArg)
 
-    fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+    me fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         """POSIX write: O_APPEND appends, otherwise CoW-splice at offset."""
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
@@ -182,7 +186,7 @@ impl FsDriver for NvfsPosixDriver:
     fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         self.read(handle, offset, buf)
 
-    fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+    me fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         """Positional write — always CoW-splice at offset (ignore O_APPEND)."""
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
@@ -242,18 +246,18 @@ impl FsDriver for NvfsPosixDriver:
             birth_time_ns: 0
         ))
 
-    fn truncate(path: Path, length: i64) -> Result<(), FsError>:
+    me fn truncate(path: Path, length: i64) -> Result<(), FsError>:
         """Path-based truncate: CoW-reshape the arena to exactly `length`."""
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
         val arena_id = self.names[idx].arena_id
         val new_arena = self._truncate_arena(arena_id, length)?
-        self.names[idx] = NameEntry(path: path.raw, arena_id: new_arena)
+        self.names[idx] = NameEntry { path: path.raw, arena_id: new_arena }
         val _ = arena_discard_impl(arena_id)
         Ok(())
 
-    fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
+    me fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
         """fd-based truncate: CoW-reshape; publish-flip on the fd slot."""
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
@@ -288,30 +292,36 @@ impl FsDriver for NvfsPosixDriver:
                     match n.kind:
                         case NsInodeKind.Dir: true
                         case _: false
-            out.push(DirEntry(
+            out.push(DirEntry {
                 name:   e.name,
-                inode:  Inode(id: e.child_ino),
+                inode:  Inode { id: e.child_ino },
                 is_dir: is_dir
-            ))
+            })
             i = i + 1
         Ok(out)
 
-    fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
+    me fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         """mkdir — create a directory via namespace."""
-        val pair = self.ns.resolve_parent(path.raw)?
+        var ns = self.ns
+        val pair = ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.ns.mkdir(parent_ino, leaf, mode)?
+        val _ = ns.mkdir(parent_ino, leaf, mode)?
+        self.ns = ns
         Ok(())
 
-    fn rmdir(path: Path) -> Result<(), FsError>:
+    me fn rmdir(path: Path) -> Result<(), FsError>:
         """rmdir — remove an empty directory via namespace."""
-        val pair = self.ns.resolve_parent(path.raw)?
+        var ns = self.ns
+        val pair = ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        self.ns.rmdir(parent_ino, leaf)
+        val result = ns.rmdir(parent_ino, leaf)
+        if result.is_ok():
+            self.ns = ns
+        result
 
-    fn unlink(path: Path) -> Result<(), FsError>:
+    me fn unlink(path: Path) -> Result<(), FsError>:
         """Unlink: drop path mapping; mark every open fd for that arena dead.
 
         Decrements the ReflinkTable refcount; discards the arena only when
@@ -336,12 +346,12 @@ impl FsDriver for NvfsPosixDriver:
                 val _ = arena_discard_impl(arena_id)
         Ok(())
 
-    fn rename(old: Path, new: Path) -> Result<(), FsError>:
+    me fn rename(old: Path, new_path: Path) -> Result<(), FsError>:
         """Rename: atomic in-memory swap of the name table entry."""
         val old_idx = self._find_name(old)
         if old_idx < 0:
             return Err(FsError.NotFound)
-        val new_idx = self._find_name(new)
+        val new_idx = self._find_name(new_path)
         if new_idx >= 0:
             val dst_arena = self.names[new_idx].arena_id
             self._remove_name(new_idx)
@@ -351,24 +361,26 @@ impl FsDriver for NvfsPosixDriver:
             return Err(FsError.NotFound)
         val arena_id = self.names[re].arena_id
         self._remove_name(re)
-        self.names.push(NameEntry(path: new.raw, arena_id: arena_id))
+        self.names.push(NameEntry { path: new_path.raw, arena_id: arena_id })
         Ok(())
 
-    fn symlink(target: Path, link: Path) -> Result<(), FsError>:
+    me fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         """symlink — create a symlink at `link` pointing at `target`."""
-        val pair = self.ns.resolve_parent(link.raw)?
+        var ns = self.ns
+        val pair = ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
-        val _ = self.ns.symlink(parent_ino, leaf, target.raw)?
+        val _ = ns.symlink(parent_ino, leaf, target.raw)?
+        self.ns = ns
         Ok(())
 
     fn readlink(path: Path) -> Result<Path, FsError>:
         """readlink — resolve symlink target for path."""
         val ns_inode = self.ns.resolve_path(path.raw)?
         val target = self.ns.readlink(ns_inode.ino)?
-        Ok(Path(raw: target))
+        Ok(Path { raw: target })
 
-    fn link(target: Path, link: Path) -> Result<(), FsError>:
+    me fn link(target: Path, link: Path) -> Result<(), FsError>:
         """Hard link (reflink): alias the name table entry to the same arena_id.
 
         Bumps the ReflinkTable refcount so unlink() knows when to discard.
@@ -380,7 +392,7 @@ impl FsDriver for NvfsPosixDriver:
             return Err(FsError.InvalidArg)
         val arena_id = self.names[idx].arena_id
         val _ = reflink_bump(arena_id)
-        self.names.push(NameEntry(path: link.raw, arena_id: arena_id))
+        self.names.push(NameEntry { path: link.raw, arena_id: arena_id })
         Ok(())
 
     # --- Extension probe ---
@@ -402,32 +414,32 @@ impl FsDriver for NvfsPosixDriver:
 
 impl NvfsPosixDriver:
 
-    fn _publish_flip(fd: u32, old_arena: i64, new_arena: i64):
+    me fn _publish_flip(fd: u32, old_arena: i64, new_arena: i64):
         """Atomically swap fd's arena to new_arena; discard old_arena."""
         val idx = fd as i64
         if idx >= self.fd_table.entries.len() as i64:
             return
         val e = self.fd_table.entries[idx]
-        val updated = FdEntry(
+        val updated = FdEntry {
             arena_id: new_arena,
             refcount: e.refcount,
             dead:     e.dead,
             offset:   e.offset,
             mode:     e.mode
-        )
+        }
         self.fd_table.entries[idx] = updated
         # Update name-table entries that pointed to old_arena.
         var i = 0
         while i < self.names.len() as i64:
             if self.names[i].arena_id == old_arena:
-                self.names[i] = NameEntry(
+                self.names[i] = NameEntry {
                     path:     self.names[i].path,
                     arena_id: new_arena
-                )
+                }
             i = i + 1
         val _ = arena_discard_impl(old_arena)
 
-    fn _truncate_arena(arena_id: i64, length: i64) -> Result<i64, FsError>:
+    me fn _truncate_arena(arena_id: i64, length: i64) -> Result<i64, FsError>:
         """Return a new arena of exactly `length` bytes based on arena_id.
 
         Shrink: copy first `length` bytes. Grow: copy all then zero-pad.

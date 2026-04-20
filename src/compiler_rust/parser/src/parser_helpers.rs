@@ -82,9 +82,7 @@ impl<'a> Parser<'a> {
                     | CommonMistake::MissingColon => ErrorHintLevel::Error,
 
                     // Warnings for verbose but valid syntax
-                    // Note: PythonNone is now warning since None is also Option::None variant
-                    CommonMistake::PythonNone
-                    | CommonMistake::VerboseReturnType
+                    CommonMistake::VerboseReturnType
                     | CommonMistake::ExplicitSelf
                     | CommonMistake::WrongBrackets
                     | CommonMistake::CSemicolon
