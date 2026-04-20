@@ -1,0 +1,86 @@
+"""
+# NVMe Storage Model Specification
+
+**Feature IDs:** #OS-STORAGE-NVME-CAPS
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Draft contract
+
+BDD coverage for the multi-namespace NVMe queue policy constants and data-only
+contracts used by capability-backed storage.
+"""
+
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+
+describe "NVMe storage model":
+    describe "queue role policy":
+        it "reserves queue 0 for admin commands":
+            val role = nvme_queue_role_for_id(SIMPLEOS_NVME_ADMIN_QUEUE_ID)
+            val is_admin = match role:
+                NvmeQueueRole.Admin: true
+                _: false
+            expect(is_admin).to_equal(true)
+
+        it "reserves queue 1 for system I/O":
+            val role = nvme_queue_role_for_id(SIMPLEOS_NVME_SYSTEM_QUEUE_ID)
+            val is_system = match role:
+                NvmeQueueRole.System: true
+                _: false
+            expect(is_system).to_equal(true)
+
+        it "uses queue 2 and above for data traffic":
+            val role = nvme_queue_role_for_id(SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID)
+            val is_data = match role:
+                NvmeQueueRole.Data: true
+                _: false
+            expect(is_data).to_equal(true)
+
+        it "marks admin and system queues as reserved":
+            expect(nvme_queue_is_system_reserved(SIMPLEOS_NVME_ADMIN_QUEUE_ID)).to_equal(true)
+            expect(nvme_queue_is_system_reserved(SIMPLEOS_NVME_SYSTEM_QUEUE_ID)).to_equal(true)
+            expect(nvme_queue_is_system_reserved(SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID)).to_equal(false)
+
+        it "publishes the first data queue id":
+            expect(nvme_first_data_queue_id()).to_equal(2)
+
+    describe "namespace and partition identities":
+        it "stores namespace identity separately from partition identity":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 2,
+                lba_size: 4096,
+                lba_count: 1024,
+                eui64: 0,
+                nguid_lo: 11,
+                nguid_hi: 12,
+                uuid_lo: 21,
+                uuid_hi: 22
+            )
+            val part = NvmePartitionIdentity(
+                controller_id: 0,
+                nsid: 2,
+                part_index: 1,
+                base_lba: 128,
+                lba_count: 256,
+                type_guid_lo: 31,
+                type_guid_hi: 32,
+                unique_guid_lo: 41,
+                unique_guid_hi: 42
+            )
+            expect(ns.nsid).to_equal(part.nsid)
+            expect(part.base_lba).to_equal(128)
+
+        it "stores queue assignment owner, depth, and rights":
+            val assignment = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 1,
+                owner_task: 99,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            expect(assignment.queue_id).to_equal(2)
+            expect(assignment.owner_task).to_equal(99)

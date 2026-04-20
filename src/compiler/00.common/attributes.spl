@@ -256,11 +256,29 @@ struct TaskAttr:
         group: Optional task group name (from @task(group="name"))
         frame: Optional declared frame size in bytes (from @task(frame=N))
         wait_nodes: Number of wait-queue nodes (from @task(wait_nodes=N), default 0)
+        policy: Scheduler policy name (fair/background/rt_fifo/rt_rr/deadline)
     """
     instances: i64
     group: text?
     frame: i64?
     wait_nodes: i64
+    policy: text
+    weight: i64?
+    priority: i64?
+    latency_hint: text?
+    runtime_ns: i64?
+    period_ns: i64?
+    deadline_ns: i64?
+
+struct TaskPolicyDiagnostic:
+    """A diagnostic from @task scheduler policy validation."""
+    level: text
+    message: text
+
+struct TaskPolicyValidation:
+    """Validation result for @task scheduler policy metadata."""
+    diagnostics: [TaskPolicyDiagnostic]
+    has_errors: bool
 
 fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
     """Extract @task attributes from a list of attributes."""
@@ -269,6 +287,13 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
     var group: text? = nil
     var frame: i64? = nil
     var wait_nodes = 0
+    var policy = "fair"
+    var weight: i64? = nil
+    var priority: i64? = nil
+    var latency_hint: text? = nil
+    var runtime_ns: i64? = nil
+    var period_ns: i64? = nil
+    var deadline_ns: i64? = nil
 
     for attr in attrs:
         if attr.name == "task":
@@ -292,6 +317,24 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
                                     val w = extract_int_arg(right)
                                     if w != nil:
                                         wait_nodes = w ?? 0
+                                elif name == "policy":
+                                    val p = extract_string_arg(right)
+                                    if p.len() > 0:
+                                        policy = p
+                                elif name == "weight":
+                                    weight = extract_int_arg(right)
+                                elif name == "priority":
+                                    priority = extract_int_arg(right)
+                                elif name == "latency_hint":
+                                    val h = extract_string_arg(right)
+                                    if h.len() > 0:
+                                        latency_hint = h
+                                elif name == "runtime":
+                                    runtime_ns = extract_int_arg(right)
+                                elif name == "period":
+                                    period_ns = extract_int_arg(right)
+                                elif name == "deadline":
+                                    deadline_ns = extract_int_arg(right)
                             case _: ()
                     case IntLit(value):
                         # Bare integer: @task(4) means instances=4
@@ -305,7 +348,74 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
         instances: instances,
         group: group,
         frame: frame,
-        wait_nodes: wait_nodes
+        wait_nodes: wait_nodes,
+        policy: policy,
+        weight: weight,
+        priority: priority,
+        latency_hint: latency_hint,
+        runtime_ns: runtime_ns,
+        period_ns: period_ns,
+        deadline_ns: deadline_ns
+    )
+
+fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [text]) -> TaskPolicyValidation:
+    """Validate @task scheduler policy against runtime family/effects.
+
+    V1 accepts fair/background everywhere, accepts RT metadata only in
+    noalloc runtime code, and rejects deadline activation until EDF/CBS
+    admission is implemented.
+    """
+    var diagnostics: [TaskPolicyDiagnostic] = []
+    var has_errors = false
+
+    val is_rt = attr.policy == "rt_fifo" or attr.policy == "rt_rr"
+    val is_deadline = attr.policy == "deadline"
+    val is_supported = (
+        attr.policy == "fair" or attr.policy == "background" or
+        attr.policy == "rt_fifo" or attr.policy == "rt_rr" or
+        attr.policy == "deadline"
+    )
+
+    if not is_supported:
+        diagnostics.push(TaskPolicyDiagnostic(
+            level: "error",
+            message: "unknown @task scheduler policy '{attr.policy}'"
+        ))
+        has_errors = true
+
+    if is_rt or is_deadline:
+        if runtime_family != "nogc_async_mut_noalloc":
+            diagnostics.push(TaskPolicyDiagnostic(
+                level: "error",
+                message: "@task(policy='{attr.policy}') requires nogc_async_mut_noalloc runtime family"
+            ))
+            has_errors = true
+
+    if is_deadline:
+        diagnostics.push(TaskPolicyDiagnostic(
+            level: "error",
+            message: "@task(policy='deadline') is metadata-only in scheduler v1; EDF/CBS admission is not enabled"
+        ))
+        has_errors = true
+        if attr.runtime_ns == nil or attr.period_ns == nil or attr.deadline_ns == nil:
+            diagnostics.push(TaskPolicyDiagnostic(
+                level: "error",
+                message: "@task(policy='deadline') requires runtime, period, and deadline parameters"
+            ))
+            has_errors = true
+
+    if is_rt or is_deadline:
+        for effect in effects:
+            if effect == "gc" or effect == "alloc" or effect == "unbounded_block":
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='{attr.policy}') cannot use effect '{effect}'"
+                ))
+                has_errors = true
+
+    TaskPolicyValidation(
+        diagnostics: diagnostics,
+        has_errors: has_errors
     )
 
 # ============================================================================

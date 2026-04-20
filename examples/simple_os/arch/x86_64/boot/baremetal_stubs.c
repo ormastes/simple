@@ -2143,35 +2143,58 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 static uint8_t simpleos_fat32_read_buf[32768];
 static const uint32_t simpleos_fat32_read_buf_size = 32768;
 
+static const char *simpleos_known_app_name(uint64_t app_id)
+{
+    switch (app_id) {
+    case 1: return "/BROWSE~1.ELF";
+    case 2: return "/FILE_M~1.ELF";
+    case 3: return "/HELLO_~1.ELF";
+    case 4: return "/TERMIN~1.ELF";
+    case 5: return "/EDITOR~1.ELF";
+    case 11: return "/BROWSE~1.ELF";
+    case 12: return "/FILE_M~1.ELF";
+    case 13: return "/HELLO_~1.ELF";
+    case 14: return "/TERMIN~1.ELF";
+    case 15: return "/EDITOR~1.ELF";
+    default: return NULL;
+    }
+}
+
 uint64_t simpleos_fat32_read_buffer_addr(void)
 {
     return (uint64_t)(uintptr_t)simpleos_fat32_read_buf;
 }
 
+int64_t simpleos_fat32_read_known_app_size(uint64_t app_id)
+{
+    const char *name = simpleos_known_app_name(app_id);
+    uint32_t cluster = 0;
+    uint32_t file_size = 0;
+
+    if (!name)
+        return 0;
+    if (fat32_find_file(name, &cluster, &file_size) != 0)
+        return 0;
+    return (int64_t)file_size;
+}
+
 int64_t simpleos_fat32_read_known_app(uint64_t app_id)
 {
-    const char *name = NULL;
+    const char *name = simpleos_known_app_name(app_id);
     uint32_t bytes_read = 0;
+    uint64_t file_size = simpleos_fat32_read_known_app_size(app_id);
 
-    switch (app_id) {
-    case 1: name = "/BROWSE~1.ELF"; break;
-    case 2: name = "/FILE_M~1.ELF"; break;
-    case 3: name = "/HELLO_~1.ELF"; break;
-    case 4: name = "/TERMIN~1.ELF"; break;
-    case 5: name = "/EDITOR~1.ELF"; break;
-    case 11: name = "/BROWSE~1.ELF"; break;
-    case 12: name = "/FILE_M~1.ELF"; break;
-    case 13: name = "/HELLO_~1.ELF"; break;
-    case 14: name = "/TERMIN~1.ELF"; break;
-    case 15: name = "/EDITOR~1.ELF"; break;
-    default: return -1;
-    }
+    if (!name || file_size == 0)
+        return -1;
+    if (file_size > simpleos_fat32_read_buf_size)
+        return -2;
 
     __builtin_memset(simpleos_fat32_read_buf, 0, simpleos_fat32_read_buf_size);
     if (fat32_read_file(name, simpleos_fat32_read_buf,
                         simpleos_fat32_read_buf_size, &bytes_read) != 0)
         return -1;
-    (void)bytes_read;
+    if (bytes_read != (uint32_t)file_size)
+        return -3;
     return 0;
 }
 
@@ -2180,19 +2203,12 @@ RuntimeValue simpleos_fat32_read_known_app_array(uint64_t app_id)
     int64_t rc = simpleos_fat32_read_known_app(app_id);
     uint32_t cluster = 0;
     uint32_t file_size = 0;
-    const char *name = NULL;
+    const char *name = simpleos_known_app_name(app_id);
 
     if (rc != 0)
         return rt_array_new((RuntimeValue)0);
-
-    switch (app_id) {
-    case 1: name = "/BROWSE~1.ELF"; break;
-    case 2: name = "/FILE_M~1.ELF"; break;
-    case 3: name = "/HELLO_~1.ELF"; break;
-    case 4: name = "/TERMIN~1.ELF"; break;
-    case 5: name = "/EDITOR~1.ELF"; break;
-    default: return rt_array_new((RuntimeValue)0);
-    }
+    if (!name)
+        return rt_array_new((RuntimeValue)0);
     if (fat32_find_file(name, &cluster, &file_size) != 0 || file_size > simpleos_fat32_read_buf_size)
         return rt_array_new((RuntimeValue)0);
 

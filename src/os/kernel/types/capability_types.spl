@@ -3,6 +3,19 @@
 # Capability-based security types. Inspired by Capsicum + OpenBSD pledge/unveil.
 # Maps to MDSOC visibility (Public/Internal/Private) and bypass grants.
 
+# Common rights bitmask for file, block, storage, mount, and queue caps.
+val CAP_RIGHT_READ: u32 = 1
+val CAP_RIGHT_WRITE: u32 = 2
+val CAP_RIGHT_EXEC: u32 = 4
+val CAP_RIGHT_ADMIN: u32 = 8
+val CAP_RIGHT_MOUNT: u32 = 16
+val CAP_RIGHT_QUEUE_SUBMIT: u32 = 32
+
+# NVMe queue policy constants shared by capability-aware storage services.
+val SIMPLEOS_NVME_ADMIN_QUEUE_ID: u16 = 0
+val SIMPLEOS_NVME_SYSTEM_QUEUE_ID: u16 = 1
+val SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID: u16 = 2
+
 struct CapabilityToken:
     """Typed capability token with generation counter for revocation."""
     kind: CapabilityKind
@@ -31,6 +44,20 @@ enum CapabilityKind:
     PortIO(base: u16, count: u16)   # x86 I/O port range
     Mmio(base: u64, size: u64)      # Memory-mapped I/O region
     Irq(irq_num: u32)              # Handle specific interrupt
+    DeviceEnumerate(class_code: u8, subclass: u8)
+    DeviceGrant(bdf_bus: u8, bdf_device: u8, bdf_func: u8)
+    DeviceBarMap(bdf_bus: u8, bdf_device: u8, bdf_func: u8, bar_index: u8)
+    DeviceDma(bdf_bus: u8, bdf_device: u8, bdf_func: u8, max_bytes: u64)
+    IommuDomain(domain_id: u32)
+
+    # Storage and mount authorities. These are higher-level than raw MMIO/DMA
+    # caps; normal apps should receive these instead of device caps.
+    BlockDevice(path: text, rights: u32)
+    StorageNamespace(controller_id: u32, nsid: u32, rights: u32)
+    StoragePartition(path: text, rights: u32)
+    StorageExtent(object_id: u64, offset_lba: u64, lba_count: u64, rights: u32, generation: u64)
+    Mount(path_prefix: text, rights: u32)
+    IoQueue(queue_id: u16, rights: u32)
 
     # IPC
     IpcConnect(port_name: text)
@@ -61,7 +88,7 @@ impl CapabilitySet:
     fn has(kind: CapabilityKind) -> bool:
         """Check if this set contains a matching capability."""
         for cap in self.caps:
-            if cap.kind == kind:
+            if capability_kind_allows(cap.kind, kind):
                 return true
         false
 
@@ -77,6 +104,93 @@ impl CapabilitySet:
                     new_caps.push(cap)
         self.caps = new_caps
         self.is_pledged = true
+
+fn capability_kind_allows(held: CapabilityKind, required: CapabilityKind) -> bool:
+    """Return true when `held` authorizes `required`.
+
+    This keeps exact-match behavior for most caps and adds containment for the
+    path, rights, queue, and DMA caps needed by storage/device policy.
+    """
+    if held == required:
+        return true
+
+    match held:
+        case CapabilityKind.FileRead(held_prefix):
+            match required:
+                case CapabilityKind.FileRead(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileWrite(held_prefix):
+            match required:
+                case CapabilityKind.FileWrite(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileCreate(held_prefix):
+            match required:
+                case CapabilityKind.FileCreate(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileExec(held_prefix):
+            match required:
+                case CapabilityKind.FileExec(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.DeviceEnumerate(held_class, held_subclass):
+            match required:
+                case CapabilityKind.DeviceEnumerate(req_class, req_subclass):
+                    (held_class == 0 and held_subclass == 0) or
+                    (held_class == req_class and (held_subclass == 0 or held_subclass == req_subclass))
+                case _: false
+        case CapabilityKind.DeviceDma(held_bus, held_device, held_func, held_max):
+            match required:
+                case CapabilityKind.DeviceDma(req_bus, req_device, req_func, req_max):
+                    held_bus == req_bus and held_device == req_device and held_func == req_func and held_max >= req_max
+                case _: false
+        case CapabilityKind.BlockDevice(held_path, held_rights):
+            match required:
+                case CapabilityKind.BlockDevice(req_path, req_rights):
+                    _path_prefix_allows(held_prefix: held_path, required_path: req_path) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StorageNamespace(held_controller, held_nsid, held_rights):
+            match required:
+                case CapabilityKind.StorageNamespace(req_controller, req_nsid, req_rights):
+                    held_controller == req_controller and held_nsid == req_nsid and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StoragePartition(held_path, held_rights):
+            match required:
+                case CapabilityKind.StoragePartition(req_path, req_rights):
+                    _path_prefix_allows(held_prefix: held_path, required_path: req_path) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StorageExtent(held_object, held_offset, held_count, held_rights, held_generation):
+            match required:
+                case CapabilityKind.StorageExtent(req_object, req_offset, req_count, req_rights, req_generation):
+                    held_object == req_object and
+                    held_generation == req_generation and
+                    req_offset >= held_offset and
+                    (req_offset + req_count) <= (held_offset + held_count) and
+                    _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.Mount(held_prefix, held_rights):
+            match required:
+                case CapabilityKind.Mount(req_prefix, req_rights):
+                    _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.IoQueue(held_queue, held_rights):
+            match required:
+                case CapabilityKind.IoQueue(req_queue, req_rights):
+                    held_queue == req_queue and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case _: false
+
+fn _path_prefix_allows(held_prefix: text, required_path: text) -> bool:
+    if held_prefix == "" or held_prefix == "/":
+        return true
+    if required_path == "":
+        return false
+    if required_path.len() < held_prefix.len():
+        return false
+    required_path[0:held_prefix.len()] == held_prefix
+
+fn _rights_allow(held_rights: u32, required_rights: u32) -> bool:
+    if required_rights == 0:
+        return true
+    (held_rights & required_rights) == required_rights
 
 # ============================================================================
 # G11 — Privilege Mask (per-task kernel privilege table)

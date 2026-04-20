@@ -4,10 +4,19 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
 
+"""
+Syscall dispatcher tests for process launch and scheduler control paths.
+"""
+
+"""
+The scheduler-control cases verify reserved sys_schedule/sys_schedctl ABI
+without requiring a full booted kernel.
+"""
 describe "syscall_handler":
     it "launches built-in service binaries through spawn_binary":
         val path = "/sys/services/vfs"
@@ -28,7 +37,8 @@ describe "syscall_handler":
         )
         expect(result.value).to_be_greater_than(0)
         val spawned = scheduler.get_task(TaskId(id: result.value as u64))
-        expect(spawned == nil).to_equal(false)
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
 
     it "launches the canonical rv64 proof binary path through spawn_binary":
         val path = RV64_PROOF_BINARY_PATH
@@ -49,7 +59,8 @@ describe "syscall_handler":
         )
         expect(result.value).to_be_greater_than(0)
         val spawned = scheduler.get_task(TaskId(id: result.value as u64))
-        expect(spawned == nil).to_equal(false)
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
 
     it "falls back to the builtin app entry when no executable bytes exist":
         val path = "/sys/apps/hello_world"
@@ -70,7 +81,8 @@ describe "syscall_handler":
         )
         expect(result.value).to_be_greater_than(0)
         val spawned = scheduler.get_task(TaskId(id: result.value as u64))
-        expect(spawned == nil).to_equal(false)
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
         if spawned != nil:
             val task = spawned
             expect(task.is_user).to_equal(false)
@@ -128,3 +140,41 @@ describe "syscall_handler":
             KernelLog.new(16)
         )
         expect(result.value).to_equal(-22)
+
+    it "queries scheduler policy through schedctl":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 107,
+                arg0: 0,
+                arg1: task.id,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(0)
+
+    it "rejects deadline activation through schedctl v1":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 107,
+                arg0: 1,
+                arg1: task.id,
+                arg2: 4,
+                arg3: 1024,
+                arg4: 1000000,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-95)

@@ -6,7 +6,12 @@
 # Consumes: SchedulerInputPort (interrupts, memory)
 # Produces: SchedulerOutputPort (task lifecycle, blocking)
 
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage, AddressSpace}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    UserProcessImage, AddressSpace,
+    SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
+    default_task_schedule, default_task_isolation
+}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.x86_64.context.{X86ContextSwitch}
 use os.kernel.memory.vmm.{create_user_address_space, vmm_cow_clone_pages}
@@ -48,6 +53,9 @@ struct TaskControlBlock:
     user_stack: u64                 # User stack top
     capabilities: CapabilitySet     # Security capabilities
     parent: TaskId?                 # Parent task (nil for init)
+    schedule: TaskScheduleConfig    # Class metadata + fair/deadline accounting
+    isolation: TaskIsolationProfile # Process isolation metadata
+    assigned_cpu: u32               # CPU whose run queue owns this task
     exit_code: i32
     ticks_remaining: u64            # Time slice countdown
 
@@ -132,6 +140,83 @@ impl ReadyQueue:
     fn len() -> i32:
         self.count
 
+struct CpuRunQueue:
+    """Per-CPU run queues separated by scheduler class.
+
+    Deadline and RT queues are carried as metadata lanes in v1 so schedctl and
+    compiler policy can round-trip those classes without enabling full EDF/CBS
+    admission yet. Fair/background are the default runnable lanes.
+    """
+    cpu_id: u32
+    deadline_queue: ReadyQueue
+    rt_queue: ReadyQueue
+    fair_queue: ReadyQueue
+    background_queue: ReadyQueue
+    idle_queue: ReadyQueue
+    runnable_count: i32
+    weighted_load: i64
+    latency_debt: i64
+    migration_pressure: i64
+    cache_hot_wakeups: u64
+
+impl CpuRunQueue:
+    static fn new(cpu_id: u32) -> CpuRunQueue:
+        CpuRunQueue(
+            cpu_id: cpu_id,
+            deadline_queue: ReadyQueue.new(),
+            rt_queue: ReadyQueue.new(),
+            fair_queue: ReadyQueue.new(),
+            background_queue: ReadyQueue.new(),
+            idle_queue: ReadyQueue.new(),
+            runnable_count: 0,
+            weighted_load: 0,
+            latency_debt: 0,
+            migration_pressure: 0,
+            cache_hot_wakeups: 0
+        )
+
+    me enqueue(task_id: TaskId, config: TaskScheduleConfig):
+        match config.policy:
+            case Deadline:
+                self.deadline_queue.enqueue(task_id)
+            case RtFifo:
+                self.rt_queue.enqueue(task_id)
+            case RtRoundRobin:
+                self.rt_queue.enqueue(task_id)
+            case Background:
+                self.background_queue.enqueue(task_id)
+            case Idle:
+                self.idle_queue.enqueue(task_id)
+            case Internal:
+                self.rt_queue.enqueue(task_id)
+            case Fair:
+                self.fair_queue.enqueue(task_id)
+        self.runnable_count = self.runnable_count + 1
+        self.weighted_load = self.weighted_load + config.weight
+
+    me remove(task_id: TaskId, config: TaskScheduleConfig):
+        val before = (
+            self.deadline_queue.count + self.rt_queue.count +
+            self.fair_queue.count + self.background_queue.count +
+            self.idle_queue.count
+        )
+        self.deadline_queue.remove(task_id)
+        self.rt_queue.remove(task_id)
+        self.fair_queue.remove(task_id)
+        self.background_queue.remove(task_id)
+        self.idle_queue.remove(task_id)
+        val after = (
+            self.deadline_queue.count + self.rt_queue.count +
+            self.fair_queue.count + self.background_queue.count +
+            self.idle_queue.count
+        )
+        if after < before and self.runnable_count > 0:
+            self.runnable_count = self.runnable_count - 1
+            if self.weighted_load >= config.weight:
+                self.weighted_load = self.weighted_load - config.weight
+            else:
+                self.weighted_load = 0
+
 # ============================================================================
 # Scheduler
 # ============================================================================
@@ -149,6 +234,7 @@ class Scheduler:
     tasks: [TaskControlBlock?]          # Fixed-size task table
     current: TaskId                     # Currently running task
     ready_queues: [ReadyQueue]          # One per priority level
+    cpu_runqueues: [CpuRunQueue]        # One run queue per logical CPU
     tick_count: u64                     # Global tick counter
     next_task_id: u64                   # Monotonic task ID allocator
 
@@ -169,10 +255,17 @@ impl Scheduler:
             queues.push(ReadyQueue.new())
             p = p + 1
 
+        var cpu_queues: [CpuRunQueue] = []
+        var cpu = 0u32
+        while cpu < 32u32:
+            cpu_queues.push(CpuRunQueue.new(cpu))
+            cpu = cpu + 1u32
+
         Scheduler(
             tasks: tasks,
             current: TaskId(id: 0),
             ready_queues: queues,
+            cpu_runqueues: cpu_queues,
             tick_count: 0,
             next_task_id: 1         # 0 is reserved for idle/kernel
         )
@@ -223,6 +316,9 @@ impl Scheduler:
             user_stack: 0,
             capabilities: caps,
             parent: Some(self.current),
+            schedule: default_task_schedule(priority),
+            isolation: default_task_isolation(0),
+            assigned_cpu: 0u32,
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
         )
@@ -233,10 +329,7 @@ impl Scheduler:
         # instead of falling through to the (now-removed) default-ALLOW path.
         cap_init_task_record(id, true)
 
-        # Enqueue in the appropriate ready queue
-        # The x86_64 user-mode handoff still needs a real iret/sysret path.
-        # Keep filesystem-backed app images as OS-managed processes, but do
-        # not enqueue them for execution until that handoff is stable.
+        self._enqueue_ready(id)
 
         id
 
@@ -291,6 +384,9 @@ impl Scheduler:
             user_stack: image.stack_top,
             capabilities: caps,
             parent: Some(self.current),
+            schedule: default_task_schedule(priority),
+            isolation: default_task_isolation(user_as.id),
+            assigned_cpu: 0u32,
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
         )
@@ -301,8 +397,7 @@ impl Scheduler:
         # instead of falling through to the (now-removed) default-ALLOW path.
         cap_init_task_record(id, true)
 
-        val queue_idx = _priority_to_index(priority)
-        self.ready_queues[queue_idx].enqueue(id)
+        self._enqueue_ready(id)
 
         id
 
@@ -350,8 +445,7 @@ impl Scheduler:
         task.ticks_remaining = TIME_SLICE_TICKS
         self.tasks[current_slot] = task
 
-        val queue_idx = _priority_to_index(task.priority)
-        self.ready_queues[queue_idx].enqueue(self.current)
+        self._enqueue_ready(self.current)
 
     me block_task(id: TaskId, reason: BlockReason):
         """Block a task, removing it from the ready queue.
@@ -368,9 +462,7 @@ impl Scheduler:
         task.state = TaskState.Blocked(reason: reason)
         self.tasks[slot] = task
 
-        # Remove from ready queue
-        val queue_idx = _priority_to_index(task.priority)
-        self.ready_queues[queue_idx].remove(id)
+        self._remove_ready(id)
 
     me unblock_task(id: TaskId):
         """Unblock a previously blocked task.
@@ -389,8 +481,7 @@ impl Scheduler:
         task.ticks_remaining = TIME_SLICE_TICKS
         self.tasks[slot] = task
 
-        val queue_idx = _priority_to_index(task.priority)
-        self.ready_queues[queue_idx].enqueue(id)
+        self._enqueue_ready(id)
 
     # -- Scheduling ----------------------------------------------------------
 
@@ -406,23 +497,20 @@ impl Scheduler:
 
         If no task is ready, returns the idle task context (task 0).
         """
-        # Find the highest-priority non-empty queue
-        var p = 0
-        while p < PRIORITY_LEVELS:
-            val next_id = self.ready_queues[p].dequeue()
-            if next_id != nil:
-                val task_id = next_id
-                val slot = self._find_slot(task_id)
-                if slot >= 0:
-                    val tcb = self.tasks[slot]
-                    if tcb != nil:
-                        var task = tcb
-                        task.state = TaskState.Running
-                        task.ticks_remaining = TIME_SLICE_TICKS
-                        self.tasks[slot] = task
-                        self.current = task_id
-                        return task.context
-            p = p + 1
+        val next_id = self._pick_next_on_cpu(0u32)
+        if next_id != nil:
+            val task_id = next_id
+            self._remove_ready(task_id)
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    var task = tcb
+                    task.state = TaskState.Running
+                    task.ticks_remaining = TIME_SLICE_TICKS
+                    self.tasks[slot] = task
+                    self.current = task_id
+                    return task.context
 
         # No ready tasks — return idle context (task 0)
         val idle_tcb = self.tasks[0]
@@ -469,8 +557,7 @@ impl Scheduler:
             task.ticks_remaining = TIME_SLICE_TICKS
             self.tasks[current_slot] = task
 
-            val queue_idx = _priority_to_index(task.priority)
-            self.ready_queues[queue_idx].enqueue(self.current)
+            self._enqueue_ready(self.current)
 
             return self.schedule()
 
@@ -494,6 +581,58 @@ impl Scheduler:
     fn get_tick_count() -> u64:
         """Return the global tick counter."""
         self.tick_count
+
+    fn tick_count() -> u64:
+        """Compatibility alias for syscall handlers that predate get_tick_count."""
+        self.tick_count
+
+    me set_priority(id: TaskId, priority: TaskPriority) -> bool:
+        """Change a task's legacy priority and default scheduler config."""
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return false
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+
+        val was_ready = match tcb.state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(id)
+
+        var task = tcb
+        task.priority = priority
+        task.schedule = default_task_schedule(priority)
+        self.tasks[slot] = task
+
+        if was_ready:
+            self._enqueue_ready(id)
+        true
+
+    me set_schedule_config(id: TaskId, config: TaskScheduleConfig) -> bool:
+        """Update scheduler policy metadata for schedctl/compiler integration."""
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return false
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+
+        val was_ready = match tcb.state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(id)
+
+        var task = tcb
+        task.schedule = config
+        task.assigned_cpu = config.home_cpu
+        self.tasks[slot] = task
+
+        if was_ready:
+            self._enqueue_ready(id)
+        true
 
     # -- IF-02 Fork/Exec Contract (wave-3 scaffolds) -------------------------
     # Real COW page-table clone + ELF load arrive in wave 4.
@@ -535,6 +674,9 @@ impl Scheduler:
             user_stack: parent.user_stack,
             capabilities: parent.capabilities,
             parent: Some(parent_id),
+            schedule: parent.schedule,
+            isolation: default_task_isolation(child_as),
+            assigned_cpu: parent.assigned_cpu,
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
         )
@@ -544,8 +686,7 @@ impl Scheduler:
         # Register capability record for the cloned child task.
         cap_init_task_record(child_id, true)
 
-        val queue_idx = _priority_to_index(child.priority)
-        self.ready_queues[queue_idx].enqueue(child_id)
+        self._enqueue_ready(child_id)
 
         child_id
 
@@ -572,6 +713,119 @@ impl Scheduler:
         -10
 
     # -- Internal Helpers ----------------------------------------------------
+
+    me _enqueue_ready(id: TaskId):
+        """Put a ready task into both legacy and per-CPU run queues."""
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        val task = tcb
+        val queue_idx = _priority_to_index(task.priority)
+        self.ready_queues[queue_idx].enqueue(id)
+
+        var cpu = task.assigned_cpu
+        if (cpu as i64) >= self.cpu_runqueues.len():
+            cpu = 0u32
+        var rq = self.cpu_runqueues[cpu as i64]
+        rq.enqueue(id, task.schedule)
+        self.cpu_runqueues[cpu as i64] = rq
+
+    me _remove_ready(id: TaskId):
+        """Remove a task from all ready queues."""
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        val task = tcb
+
+        var p = 0
+        while p < PRIORITY_LEVELS:
+            self.ready_queues[p].remove(id)
+            p = p + 1
+
+        var cpu = task.assigned_cpu
+        if (cpu as i64) >= self.cpu_runqueues.len():
+            cpu = 0u32
+        var rq = self.cpu_runqueues[cpu as i64]
+        rq.remove(id, task.schedule)
+        self.cpu_runqueues[cpu as i64] = rq
+
+    me _pick_fifo_from(queue_name: text, cpu: u32) -> TaskId?:
+        """Pick from fixed-order class queues on a CPU."""
+        var rq = self.cpu_runqueues[cpu as i64]
+        var picked: TaskId? = nil
+        if queue_name == "deadline":
+            picked = rq.deadline_queue.dequeue()
+        elif queue_name == "rt":
+            picked = rq.rt_queue.dequeue()
+        elif queue_name == "idle":
+            picked = rq.idle_queue.dequeue()
+        if picked != nil:
+            if rq.runnable_count > 0:
+                rq.runnable_count = rq.runnable_count - 1
+            self.cpu_runqueues[cpu as i64] = rq
+        picked
+
+    me _pick_fair_from(cpu: u32, background: bool) -> TaskId?:
+        """Pick earliest eligible virtual deadline from fair/background lane."""
+        var rq = self.cpu_runqueues[cpu as i64]
+        var q = if background: rq.background_queue else: rq.fair_queue
+        if q.count == 0:
+            return nil
+
+        var best: TaskId? = nil
+        var best_deadline: i64 = 9223372036854775807
+        var scan = q.head
+        var scanned = 0
+        while scanned < q.count:
+            val idx = scan % q.capacity
+            val candidate = TaskId(id: q.entries[idx])
+            val slot = self._find_slot(candidate)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    val eligible = task.schedule.lag >= 0
+                    if eligible and task.schedule.virtual_deadline < best_deadline:
+                        best = candidate
+                        best_deadline = task.schedule.virtual_deadline
+            scan = scan + 1
+            scanned = scanned + 1
+
+        if best == nil:
+            best = q.dequeue()
+        else:
+            q.remove(best.unwrap())
+
+        if background:
+            rq.background_queue = q
+        else:
+            rq.fair_queue = q
+        if best != nil and rq.runnable_count > 0:
+            rq.runnable_count = rq.runnable_count - 1
+        self.cpu_runqueues[cpu as i64] = rq
+        best
+
+    me _pick_next_on_cpu(cpu: u32) -> TaskId?:
+        """Class-order pick for one CPU run queue."""
+        val dl = self._pick_fifo_from("deadline", cpu)
+        if dl != nil:
+            return dl
+        val rt = self._pick_fifo_from("rt", cpu)
+        if rt != nil:
+            return rt
+        val fair = self._pick_fair_from(cpu, false)
+        if fair != nil:
+            return fair
+        val bg = self._pick_fair_from(cpu, true)
+        if bg != nil:
+            return bg
+        self._pick_fifo_from("idle", cpu)
 
     fn _find_slot(id: TaskId) -> i32:
         """Find the slot index for a given task ID. Returns -1 if not found."""

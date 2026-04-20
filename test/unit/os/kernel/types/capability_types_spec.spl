@@ -18,7 +18,7 @@ and the `full()` static constructor.
 """
 
 use std.spec.{describe, it, expect}
-use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, capability_kind_allows, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_MOUNT, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 
 # ============================================================================
@@ -146,6 +146,89 @@ describe "CapabilityKind":
                 _: false
             expect(is_irq).to_equal(true)
 
+        it "DeviceEnumerate carries PCI class tuple":
+            val kind = CapabilityKind.DeviceEnumerate(class_code: 1, subclass: 8)
+            val is_device_enum = match kind:
+                CapabilityKind.DeviceEnumerate(class_code, subclass): true
+                _: false
+            expect(is_device_enum).to_equal(true)
+
+        it "DeviceGrant carries BDF tuple":
+            val kind = CapabilityKind.DeviceGrant(bdf_bus: 0, bdf_device: 4, bdf_func: 0)
+            val is_device_grant = match kind:
+                CapabilityKind.DeviceGrant(bdf_bus, bdf_device, bdf_func): true
+                _: false
+            expect(is_device_grant).to_equal(true)
+
+        it "DeviceBarMap carries BDF and BAR index":
+            val kind = CapabilityKind.DeviceBarMap(bdf_bus: 0, bdf_device: 4, bdf_func: 0, bar_index: 0)
+            val is_bar = match kind:
+                CapabilityKind.DeviceBarMap(bdf_bus, bdf_device, bdf_func, bar_index): true
+                _: false
+            expect(is_bar).to_equal(true)
+
+        it "DeviceDma carries BDF and maximum byte authority":
+            val kind = CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 65536)
+            val is_dma = match kind:
+                CapabilityKind.DeviceDma(bdf_bus, bdf_device, bdf_func, max_bytes): true
+                _: false
+            expect(is_dma).to_equal(true)
+
+        it "IommuDomain carries domain id":
+            val kind = CapabilityKind.IommuDomain(domain_id: 7)
+            val is_iommu = match kind:
+                CapabilityKind.IommuDomain(domain_id): true
+                _: false
+            expect(is_iommu).to_equal(true)
+
+    describe "Storage capabilities":
+        it "BlockDevice carries path and rights":
+            val kind = CapabilityKind.BlockDevice(path: "/dev/nvme0n1", rights: CAP_RIGHT_READ)
+            val is_block = match kind:
+                CapabilityKind.BlockDevice(path, rights): true
+                _: false
+            expect(is_block).to_equal(true)
+
+        it "StorageNamespace carries controller, nsid, and rights":
+            val kind = CapabilityKind.StorageNamespace(controller_id: 0, nsid: 2, rights: CAP_RIGHT_READ)
+            val is_namespace = match kind:
+                CapabilityKind.StorageNamespace(controller_id, nsid, rights): true
+                _: false
+            expect(is_namespace).to_equal(true)
+
+        it "StoragePartition carries device path and write rights":
+            val kind = CapabilityKind.StoragePartition(path: "/dev/nvme0n1p3", rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE)
+            val is_partition = match kind:
+                CapabilityKind.StoragePartition(path, rights): true
+                _: false
+            expect(is_partition).to_equal(true)
+
+        it "StorageExtent carries bounded LBA authority and generation":
+            val kind = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 128, lba_count: 64, rights: CAP_RIGHT_READ, generation: 9)
+            val is_extent = match kind:
+                CapabilityKind.StorageExtent(object_id, offset_lba, lba_count, rights, generation): true
+                _: false
+            expect(is_extent).to_equal(true)
+
+        it "Mount carries path prefix and mount rights":
+            val kind = CapabilityKind.Mount(path_prefix: "/data/app", rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_MOUNT)
+            val is_mount = match kind:
+                CapabilityKind.Mount(path_prefix, rights): true
+                _: false
+            expect(is_mount).to_equal(true)
+
+        it "IoQueue carries queue id and submit rights":
+            val kind = CapabilityKind.IoQueue(queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, rights: CAP_RIGHT_QUEUE_SUBMIT)
+            val is_queue = match kind:
+                CapabilityKind.IoQueue(queue_id, rights): true
+                _: false
+            expect(is_queue).to_equal(true)
+
+        it "defines reserved NVMe queue ids":
+            expect(SIMPLEOS_NVME_ADMIN_QUEUE_ID).to_equal(0)
+            expect(SIMPLEOS_NVME_SYSTEM_QUEUE_ID).to_equal(1)
+            expect(SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID).to_equal(2)
+
     describe "IPC capabilities":
         it "IpcConnect carries port name":
             val kind = CapabilityKind.IpcConnect(port_name: "vfs")
@@ -223,6 +306,43 @@ describe "CapabilitySet":
             val cs = CapabilitySet(caps: [token], is_pledged: false)
             val result = cs.has(CapabilityKind.SystemReboot)
             expect(result).to_equal(false)
+
+        it "allows file prefixes through containment":
+            val token = CapabilityToken(
+                kind: CapabilityKind.FileRead(path_prefix: "/data/app"),
+                generation: 1,
+                owner: 1
+            )
+            val cs = CapabilitySet(caps: [token], is_pledged: false)
+            expect(cs.has(CapabilityKind.FileRead(path_prefix: "/data/app/db"))).to_equal(true)
+            expect(cs.has(CapabilityKind.FileRead(path_prefix: "/etc/passwd"))).to_equal(false)
+
+        it "allows DMA requests up to the granted byte limit":
+            val token = CapabilityToken(
+                kind: CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 65536),
+                generation: 1,
+                owner: 1
+            )
+            val cs = CapabilitySet(caps: [token], is_pledged: false)
+            expect(cs.has(CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 4096))).to_equal(true)
+            expect(cs.has(CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 131072))).to_equal(false)
+
+        it "allows storage partition subrights only when granted":
+            val token = CapabilityToken(
+                kind: CapabilityKind.StoragePartition(path: "/dev/nvme0n1p3", rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE),
+                generation: 1,
+                owner: 1
+            )
+            val cs = CapabilitySet(caps: [token], is_pledged: false)
+            expect(cs.has(CapabilityKind.StoragePartition(path: "/dev/nvme0n1p3", rights: CAP_RIGHT_READ))).to_equal(true)
+            expect(cs.has(CapabilityKind.StoragePartition(path: "/dev/nvme0n1p3", rights: CAP_RIGHT_MOUNT))).to_equal(false)
+
+        it "allows bounded storage extents with matching generation":
+            val held = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 100, lba_count: 50, rights: CAP_RIGHT_READ, generation: 7)
+            val inside = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 120, lba_count: 8, rights: CAP_RIGHT_READ, generation: 7)
+            val stale = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 120, lba_count: 8, rights: CAP_RIGHT_READ, generation: 8)
+            expect(capability_kind_allows(held, inside)).to_equal(true)
+            expect(capability_kind_allows(held, stale)).to_equal(false)
 
     describe "pledge":
         it "sets is_pledged to true":

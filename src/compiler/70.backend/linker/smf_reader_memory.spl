@@ -31,6 +31,9 @@ struct SmfHeader:
     compression: CompressionType
     section_table_offset: i64
     symbol_table_offset: i64
+    stub_size: i64
+    smf_data_offset: i64
+    header_offset: i64
 
 impl SmfHeader:
     fn is_valid() -> bool:
@@ -73,7 +76,9 @@ impl SmfReaderMemory:
         if data.len() < 128:
             return Err("SMF data too small: {data.len()} bytes")
 
-        # Parse header (first 128 bytes)
+        # v1.1 SMF writes the header as a trailer at EOF-128. Keep offset-0
+        # fallback for legacy files and archive slices that still store a
+        # leading header.
         val header = parse_header_from_bytes(data)?
 
         # Validate magic
@@ -133,7 +138,8 @@ impl SmfReaderMemory:
             return Err("Section entry {sec_idx} out of bounds")
 
         # Read the section's file offset from the entry (bytes 8..16 within entry)
-        val sec_offset = bytes_to_u64(self.data, sec_entry_offset + 8) as i64
+        val sec_offset_raw = bytes_to_u64(self.data, sec_entry_offset + 8) as i64
+        val sec_offset = smf_payload_file_offset(self.header, sec_offset_raw)
 
         # Read the section's size from the entry (bytes 16..24 within entry)
         val sec_size = bytes_to_u64(self.data, sec_entry_offset + 16) as i64
@@ -180,7 +186,8 @@ impl SmfReaderMemory:
                 continue
             val sec_type = self.data[entry_off] as i32
             if sec_type == 1:
-                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset_raw = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset = smf_payload_file_offset(self.header, sec_offset_raw)
                 val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
                 if (sec_size >= 4 and
                     sec_offset + 4 <= self.data.len()):
@@ -206,7 +213,8 @@ impl SmfReaderMemory:
                 continue
             val sec_type = self.data[entry_off] as i32
             if sec_type == 1:
-                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset_raw = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset = smf_payload_file_offset(self.header, sec_offset_raw)
                 val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
                 if sec_size < 4:
                     return Err("Code section too small for ELF object")
@@ -246,7 +254,8 @@ impl SmfReaderMemory:
                 continue
             val sec_type = self.data[entry_off] as i32
             if sec_type == 5:
-                val sec_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset_raw = bytes_to_u64(self.data, entry_off + 8) as i64
+                val sec_offset = smf_payload_file_offset(self.header, sec_offset_raw)
                 val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
                 if sec_offset + sec_size > self.data.len():
                     return Err("Reloc section extends beyond SMF data")
@@ -287,14 +296,16 @@ struct SmfRelocEntry:
 
 """Parse SMF header from byte array."""
 fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
-    if data.len() < 128:
+    if data.len() < SMF_HEADER_SIZE:
         return Err("Not enough data for header")
+
+    val header_offset = find_smf_header_offset(data)?
 
     # Extract header bytes
     var header_bytes: [u8] = []
     var i = 0
-    while i < 128:
-        header_bytes.push(data[i])
+    while i < SMF_HEADER_SIZE:
+        header_bytes.push(data[header_offset + i])
         i = i + 1
 
     # Parse magic
@@ -346,6 +357,18 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
     # Parse entry point (bytes 44-51, little endian u64)
     val entry_point = bytes_to_u64(header_bytes, 44)
 
+    # Parse v1.1 executable stub metadata (bytes 52-59)
+    val stub_size = bytes_to_u32(header_bytes, 52) as i64
+    val smf_data_offset = bytes_to_u32(header_bytes, 56) as i64
+    val section_table_file_offset = smf_payload_offset_value(
+        section_table_offset as i64,
+        smf_data_offset
+    )
+    val symbol_table_file_offset = smf_payload_offset_value(
+        symbol_table_offset as i64,
+        smf_data_offset
+    )
+
     # Create header struct
     val header = SmfHeader(
         version: (version_major, version_minor),
@@ -358,11 +381,47 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
         has_templates: (flags_raw & 0x10) != 0,
         has_note_sdn: (flags_raw & 0x20) != 0,
         compression: compression,
-        section_table_offset: section_table_offset as i64,
-        symbol_table_offset: symbol_table_offset as i64
+        section_table_offset: section_table_file_offset,
+        symbol_table_offset: symbol_table_file_offset,
+        stub_size: stub_size,
+        smf_data_offset: smf_data_offset,
+        header_offset: header_offset
     )
 
     Ok(header)
+
+"""Find the SMF header location.
+
+v1.1 SMF files append the 128-byte header as a trailer. Older in-memory
+fixtures and archive slices may still start with the header, so trailer wins
+when present and offset 0 is retained as compatibility fallback.
+"""
+fn find_smf_header_offset(data: [u8]) -> Result<i64, text>:
+    val trailer_offset = data.len() - SMF_HEADER_SIZE
+    if has_smf_magic_at(data, trailer_offset):
+        return Ok(trailer_offset)
+    if has_smf_magic_at(data, 0):
+        return Ok(0)
+    Err("Invalid SMF magic: expected 'SMF\\0'")
+
+"""Check for SMF magic at an absolute file offset."""
+fn has_smf_magic_at(data: [u8], offset: i64) -> bool:
+    if offset < 0:
+        return false
+    if offset + 4 > data.len():
+        return false
+    data[offset] == 83 and data[offset + 1] == 77 and data[offset + 2] == 70 and data[offset + 3] == 0
+
+"""Convert an SMF-payload-relative offset to an absolute file offset."""
+fn smf_payload_offset_value(offset: i64, smf_data_offset: i64) -> i64:
+    if smf_data_offset > 0:
+        smf_data_offset + offset
+    else:
+        offset
+
+"""Convert an offset using parsed header metadata."""
+fn smf_payload_file_offset(header: SmfHeader, offset: i64) -> i64:
+    smf_payload_offset_value(offset, header.smf_data_offset)
 
 """Extract string table from SMF data."""
 fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
@@ -386,7 +445,8 @@ fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
         # The writer uses numeric section types: 1=Code, 12=TemplateCode, 13=TemplateMeta
         # StrTab would be type 6 if present as a section entry
         if sec_type == 6:
-            val str_offset = bytes_to_u64(data, entry_off + 8) as i64
+            val str_offset_raw = bytes_to_u64(data, entry_off + 8) as i64
+            val str_offset = smf_payload_file_offset(header, str_offset_raw)
             val str_size = bytes_to_u64(data, entry_off + 16) as i64
             val str_end = str_offset + str_size
             if str_end > data.len():
@@ -407,13 +467,11 @@ fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
     val sym_count = header.symbol_count as i64
     val str_start = sym_table_off + sym_count * symbol_entry_size
 
-    # The header trailer is the last 128 bytes of data
-    val header_trailer_off = data.len() - 128
-    # But if header is at offset 0 (v1.0 or archive-stored format), string table
-    # extends to end of data or just before next structure
+    # For v1.1 trailer files, the implicit string table ends at the header.
+    # For legacy offset-0 files, it extends to the end of the in-memory slice.
     var str_end = data.len()
-    if header_trailer_off > str_start:
-        str_end = header_trailer_off
+    if header.header_offset > str_start:
+        str_end = header.header_offset
 
     if str_start > data.len():
         return Err("String table offset beyond data (sym_table={sym_table_off}, sym_count={sym_count})")
@@ -592,4 +650,3 @@ fn parse_sym_type(t: u8) -> SymbolType:
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -9,6 +9,9 @@ syscall, IPC, and scheduler services owned by the OS.
 
 Related plan: `doc/03_plan/agent_tasks/simpleos_process_apps_plan.md`.
 
+Detailed feature requests:
+`doc/02_requirements/feature/simpleos_os_subsystem_feature_requests.md`.
+
 ## Current Status
 
 | Subsystem | Status | Current State | Concrete Blocker |
@@ -47,6 +50,59 @@ Related plan: `doc/03_plan/agent_tasks/simpleos_process_apps_plan.md`.
 5. Re-enable scheduler-backed user task creation, launch, reaping, and launcher PID tracking.
 6. Build the app-facing userlib/runtime around the stable syscall ABI.
 7. Add dynamic library loading only after static filesystem-loaded app execution is reliable.
+
+## Async-First Native API Doctrine TODO
+
+SimpleOS provides POSIX/libc compatibility for ported software, but native
+SimpleOS drivers, services, and apps must use the native SimpleOS API. The
+canonical doctrine is recorded in
+`doc/04_architecture/simpleos_architecture.md`.
+
+The OS architecture target is async-first: native file, pipe, TTY, process,
+timer, socket, device, and window operations define async behavior first, and
+sync APIs block on top of those async completions.
+
+Required follow-up work:
+
+- Audit sync-first paths in POSIX fd I/O, pipe compatibility, shell builtins,
+  terminal/TTY, process wait/spawn, timers, sockets, and libc stdio.
+- Promote native async APIs for fd/VFS, pipe, TTY/PTY, process lifecycle,
+  timers, sockets, and window/event operations before adding or extending sync
+  wrappers.
+- Convert POSIX/libc sync operations into wrappers over native async services
+  rather than independent state owners.
+- Add MDSOC architecture checks or tests that reject POSIX/libc dependencies
+  from `src/os/kernel`, `src/os/drivers`, and native app/service code when a
+  native API exists.
+- Document every temporary sync-first or POSIX-first path with an owner, a
+  native async replacement, and a removal condition.
+
+## Capability-Backed Storage And Device Queue TODO
+
+SimpleOS should expose POSIX-compatible directories and files, but native
+storage authority should be capability-backed. The architecture target is
+recorded in
+`doc/04_architecture/simpleos_exokernel_storage_architecture.md`.
+
+Required follow-up work:
+
+- Replace current single-namespace NVMe assumptions with active namespace
+  enumeration and explicit NSID on every read, write, flush, and identify path.
+- Reserve NVMe queue `0` for admin commands and queue `1` for system I/O.
+  App/service data queues start at queue `2`.
+- Add a queue manager that owns hardware queue allocation, command IDs,
+  completion routing, queue depth, timeout/cancel, and fairness.
+- Add canonical block-device identity and geometry types above NVMe, then add
+  `PartitionBlockDevice` with GPT/MBR scan and LBA remapping.
+- Register `/dev/nvme0nX` namespace devices and `/dev/nvme0nXpY` partition
+  devices in devfs.
+- Enforce `BlockDevice`, `StorageNamespace`, `StoragePartition`, `StorageExtent`,
+  `Mount`, and `IoQueue` capabilities before exposing storage objects to apps.
+- Replace broad `PortIO(0,0)` and `Mmio(0,0)` device syscall gates with
+  object-specific `DeviceEnumerate`, `DeviceGrant`, `DeviceBarMap`,
+  `DeviceDma`, and `IommuDomain` capabilities.
+- Require IOMMU-backed DMA handles or trusted bounce buffers before direct queue
+  fast paths are exposed outside trusted driver/storage capsules.
 
 ## Current QEMU Evidence
 

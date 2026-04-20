@@ -21,10 +21,17 @@ hardware. We test the scheduling logic and state machine.
 """
 
 use std.spec.{describe, it, expect}
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage, UserLoadSegment}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    UserProcessImage, UserLoadSegment, default_task_schedule
+}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
 
+"""
+Scheduler tests cover queue behavior, task state transitions, policy metadata,
+and virtual-deadline ordering for the kernel scheduler.
+"""
 
 # ============================================================================
 # Test Group 1: ReadyQueue
@@ -204,7 +211,8 @@ describe "Scheduler":
                 expect(task.is_user).to_equal(true)
                 expect(task.entry_point).to_equal(0x400000)
                 expect(task.user_stack).to_equal(0x4000000000)
-                expect(task.user_context == nil).to_equal(false)
+                val has_user_context = if task.user_context == nil: 0 else: 1
+                expect(has_user_context).to_equal(1)
                 if val user_ctx = task.user_context:
                     expect(user_ctx.rip).to_equal(0x400000)
                     expect(user_ctx.rsp).to_equal(0x3fffffff80)
@@ -230,6 +238,26 @@ describe "Scheduler":
             expect(lo.id).to_be_greater_than(0)
             expect(id.id).to_be_greater_than(0)
 
+        it "initializes scheduler policy metadata from legacy priority":
+            var sched = Scheduler.new()
+            val normal_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val low_id = sched.create_task(0x2000, TaskPriority.Low, CapabilitySet.full())
+            val normal = sched.get_task(normal_id)
+            val low = sched.get_task(low_id)
+            if normal != nil:
+                val task = normal
+                val code = match task.schedule.policy:
+                    case Fair: 0
+                    case _: 1
+                expect(code).to_equal(0)
+                expect(task.isolation.sandboxed).to_equal(true)
+            if low != nil:
+                val task = low
+                val code = match task.schedule.policy:
+                    case Background: 0
+                    case _: 1
+                expect(code).to_equal(0)
+
     describe "schedule":
         it "picks highest priority task":
             var sched = Scheduler.new()
@@ -250,6 +278,20 @@ describe "Scheduler":
             val ctx = sched.schedule()
             val current = sched.get_current()
             expect(current.id).to_equal(rt_id.id)
+
+        it "picks fair task with earliest virtual deadline":
+            var sched = Scheduler.new()
+            val slow_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val fast_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            var slow_cfg = default_task_schedule(TaskPriority.Normal)
+            slow_cfg.virtual_deadline = 100
+            var fast_cfg = default_task_schedule(TaskPriority.Normal)
+            fast_cfg.virtual_deadline = 10
+            sched.set_schedule_config(slow_id, slow_cfg)
+            sched.set_schedule_config(fast_id, fast_cfg)
+            val ctx = sched.schedule()
+            val current = sched.get_current()
+            expect(current.id).to_equal(fast_id.id)
 
     describe "yield_current":
         it "moves current task back to ready":

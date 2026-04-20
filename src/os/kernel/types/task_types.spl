@@ -46,6 +46,137 @@ enum TaskPriority:
     Low         # Background tasks (package manager, indexer)
     Idle        # Only when nothing else to run
 
+enum SchedulerPolicy:
+    """Kernel scheduler policy attached to a task."""
+    Internal
+    Fair
+    Background
+    RtFifo
+    RtRoundRobin
+    Deadline
+    Idle
+
+struct TaskScheduleConfig:
+    """Scheduler class metadata and fair/deadline accounting.
+
+    RT and deadline policies are metadata-only in the first full-stack
+    milestone. The fields are carried through task creation and schedctl so
+    compiler/runtime policy can validate them before later runtime admission.
+    """
+    policy: SchedulerPolicy
+    weight: i64
+    priority: i64
+    requested_slice_ns: u64
+    vruntime: i64
+    lag: i64
+    virtual_deadline: i64
+    runtime_ns: u64
+    period_ns: u64
+    deadline_ns: u64
+    affinity_mask: u64
+    home_cpu: u32
+
+struct TaskIsolationProfile:
+    """Per-task isolation metadata used by process, capability, and VMM code."""
+    profile_id: u64
+    address_space_id: u64
+    capability_generation: u64
+    sandboxed: bool
+    allow_network: bool
+    max_memory_pages: u64
+    max_threads: u32
+
+fn default_task_schedule(priority: TaskPriority) -> TaskScheduleConfig:
+    """Build a default schedule config from the legacy priority enum."""
+    match priority:
+        case Realtime:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.RtRoundRobin,
+                weight: 4096,
+                priority: 0,
+                requested_slice_ns: 1000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 1000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case High:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Fair,
+                weight: 2048,
+                priority: 1,
+                requested_slice_ns: 3000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 3000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Normal:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Fair,
+                weight: 1024,
+                priority: 2,
+                requested_slice_ns: 5000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 5000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Low:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Background,
+                weight: 256,
+                priority: 3,
+                requested_slice_ns: 10000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 10000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+        case Idle:
+            TaskScheduleConfig(
+                policy: SchedulerPolicy.Idle,
+                weight: 1,
+                priority: 4,
+                requested_slice_ns: 20000000,
+                vruntime: 0,
+                lag: 0,
+                virtual_deadline: 20000000,
+                runtime_ns: 0,
+                period_ns: 0,
+                deadline_ns: 0,
+                affinity_mask: 0xFFFFFFFFFFFFFFFF,
+                home_cpu: 0u32
+            )
+
+fn default_task_isolation(address_space_id: u64) -> TaskIsolationProfile:
+    """Build the default kernel process-isolation metadata for a task."""
+    TaskIsolationProfile(
+        profile_id: 0,
+        address_space_id: address_space_id,
+        capability_generation: 1,
+        sandboxed: true,
+        allow_network: false,
+        max_memory_pages: 0,
+        max_threads: 1u32
+    )
+
 struct UserLoadSegment:
     """Mapped user segment description for transitional process images."""
     virt_addr: u64

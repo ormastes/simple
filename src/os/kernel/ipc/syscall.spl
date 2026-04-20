@@ -6,7 +6,10 @@
 # Routes each syscall ID to the appropriate kernel subsystem.
 
 use os.kernel.types.syscall_types.{SyscallId, SyscallArgs, SyscallResult, SignalKind, TaskInfoBuf, DeviceInfoBuf, KLogEntry, MemInfoBuf, SysInfoKind}
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, BlockReason}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, BlockReason,
+    SchedulerPolicy
+}
 use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.types.notification_types.{Notification}
@@ -384,27 +387,35 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- Device ----------------------------------------------------------
         case 80:    # DevEnumerate
-            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceEnumerate(class_code: 0, subclass: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_dev_enumerate(args)
         case 81:    # DevGetInfo
-            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceEnumerate(class_code: 0, subclass: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_dev_get_info(args)
         case 82:    # DeviceGrant
-            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+            val grant_bdf = args.arg0
+            val grant_bus = ((grant_bdf >> 16) & 0xFF).to_u8()
+            val grant_dev = ((grant_bdf >> 8) & 0xFF).to_u8()
+            val grant_func = (grant_bdf & 0xFF).to_u8()
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceGrant(bdf_bus: grant_bus, bdf_device: grant_dev, bdf_func: grant_func)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_device_grant(args, scheduler, caller)
         case 83:    # MapBar
-            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+            # Transitional until MapBar accepts a BAR capability token. The
+            # syscall is now named by a DeviceBarMap cap instead of raw Mmio.
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceBarMap(bdf_bus: 0, bdf_device: 0, bdf_func: 0, bar_index: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_map_bar(args)
         case 84:    # AllocDma
-            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+            # Transitional until AllocDma accepts a device/IOMMU capability
+            # token. The cap kind records that this is DMA authority.
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 0, bdf_func: 0, max_bytes: args.arg0 as u64)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_alloc_dma(args)
         case 85:    # FreeDma
-            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+            if not _cap_check(ipc, caller, CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 0, bdf_func: 0, max_bytes: args.arg1 as u64)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_free_dma(args)
 
@@ -450,6 +461,14 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_sys_mmap(args)
         case 104:   # sys_munmap
             _handle_sys_munmap(args)
+
+        # -- Scheduler policy (service agent reserved ABI) -------------------
+        case 106:   # sys_schedule: cooperative reschedule point
+            _handle_schedule(args, scheduler)
+        case 107:   # sys_schedctl: set/query scheduler policy metadata
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_schedctl(args, scheduler)
 
         # -- SPM / Privilege (spm-winfs-llm-suite) ----------------------------
         case 110:   # sys_priv_check
@@ -1032,6 +1051,66 @@ fn _handle_set_priority(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
         SyscallResult(value: 0)
     else:
         SyscallResult(value: -1)
+
+fn _handle_schedule(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Scheduler control fast path.
+
+    arg0:
+      0 = yield current task
+      1 = return current task id
+      2 = return scheduler tick count
+    """
+    var sched = scheduler
+    if args.arg0 == 0:
+        sched.yield_current()
+        return SyscallResult(value: 0)
+    if args.arg0 == 1:
+        val current = sched.get_current()
+        return SyscallResult(value: current.id.to_i64())
+    if args.arg0 == 2:
+        return SyscallResult(value: sched.get_tick_count().to_i64())
+    SyscallResult(value: -22)
+
+fn _handle_schedctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Set/query scheduler policy metadata.
+
+    arg0 = op: 0 query policy, 1 set policy metadata
+    arg1 = target task id
+    arg2 = policy code for set
+    arg3 = weight override (0 keeps default)
+    arg4 = requested slice ns override (0 keeps default)
+    arg5 = affinity mask override (0 keeps default)
+    """
+    val op = args.arg0
+    val target = TaskId(id: args.arg1)
+    var sched = scheduler
+    val tcb = sched.get_task(target)
+    if tcb == nil:
+        return SyscallResult(value: -3)
+    val task = tcb
+
+    if op == 0:
+        return SyscallResult(value: _scheduler_policy_to_u64(task.schedule.policy).to_i64())
+
+    if op == 1:
+        var config = task.schedule
+        val policy = _u64_to_scheduler_policy(args.arg2)
+        if policy == SchedulerPolicy.Deadline:
+            return SyscallResult(value: -95)
+        config.policy = policy
+        if args.arg3 > 0:
+            config.weight = args.arg3.to_i64()
+        if args.arg4 > 0:
+            config.requested_slice_ns = args.arg4
+            config.virtual_deadline = (config.vruntime + args.arg4.to_i64())
+        if args.arg5 > 0:
+            config.affinity_mask = args.arg5
+        val ok = sched.set_schedule_config(target, config)
+        if ok:
+            return SyscallResult(value: 0)
+        return SyscallResult(value: -1)
+
+    SyscallResult(value: -22)
 
 fn _handle_get_parent_pid(scheduler: Scheduler) -> SyscallResult:
     """Return the current task's parent PID."""
@@ -2396,6 +2475,29 @@ fn _u64_to_priority(val_: u64) -> TaskPriority:
         case 3: TaskPriority.Low
         case 4: TaskPriority.Idle
         case _: TaskPriority.Normal
+
+fn _u64_to_scheduler_policy(val_: u64) -> SchedulerPolicy:
+    """Convert syscall policy code to SchedulerPolicy."""
+    match val_:
+        case 0: SchedulerPolicy.Fair
+        case 1: SchedulerPolicy.Background
+        case 2: SchedulerPolicy.RtFifo
+        case 3: SchedulerPolicy.RtRoundRobin
+        case 4: SchedulerPolicy.Deadline
+        case 5: SchedulerPolicy.Idle
+        case 6: SchedulerPolicy.Internal
+        case _: SchedulerPolicy.Fair
+
+fn _scheduler_policy_to_u64(policy: SchedulerPolicy) -> u64:
+    """Convert SchedulerPolicy to userspace policy code."""
+    match policy:
+        case Fair: 0
+        case Background: 1
+        case RtFifo: 2
+        case RtRoundRobin: 3
+        case Deadline: 4
+        case Idle: 5
+        case Internal: 6
 
 # ============================================================================
 # G11 — sys_privctl handler
