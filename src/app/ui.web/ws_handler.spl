@@ -23,7 +23,7 @@ val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 fn is_ws_upgrade_request(headers: text) -> bool:
     return headers.contains("Upgrade: websocket")
 
-fn handle_ws_upgrade(stream: ConnStream, headers: text, guard: OriginGuard, secret: text):
+fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: OriginGuard, secret: text):
     """Handle WebSocket upgrade handshake with origin + token gate.
 
     Checks Origin header against the allowlist and verifies the bearer token
@@ -36,7 +36,7 @@ fn handle_ws_upgrade(stream: ConnStream, headers: text, guard: OriginGuard, secr
             return
         Ok(origin):
             # Extract bearer token from Authorization header or ?token= query param
-            val bearer = _extract_bearer(headers)
+            val bearer = _extract_bearer(headers, path)
             if bearer == "":
                 stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 return
@@ -170,7 +170,7 @@ fn escape_json_string(s: text) -> text:
 # Bearer Token Extraction Helper
 # =========================================================================
 
-fn _extract_bearer(headers: text) -> text:
+fn _extract_bearer(headers: text, path: text) -> text:
     """Extract bearer token from Authorization header or ?token= query param."""
     for line in headers.split("\n"):
         val trimmed = line.trim()
@@ -178,15 +178,11 @@ fn _extract_bearer(headers: text) -> text:
             val value = trimmed[14:].trim()
             if value.to_lower().starts_with("bearer "):
                 return value[7:].trim()
-    # Fallback: check for ?token= in the request line (passed via headers text)
-    for line in headers.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.contains("?token="):
-            val idx = trimmed.find("?token=")
-            val after = trimmed[idx + 7:]
-            val end_idx = after.find(" ")
-            if end_idx > 0:
-                return after[0:end_idx]
-            if end_idx < 0:
-                return after
+    val idx = path.find("?token=")
+    if idx >= 0:
+        val after = path.slice(idx + 7, path.len())
+        val amp = after.find("&")
+        if amp >= 0:
+            return after.slice(0, amp)
+        return after
     return ""

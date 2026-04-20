@@ -1,0 +1,64 @@
+## Spec for WebRuntimeAdapter taskbar-model emission.
+##
+## Verifies that taskbar frames are emitted only when host taskbar runtime is
+## enabled, and unchanged taskbar state is not duplicated.
+
+use std.spec
+use common.ui.session.{UISession}
+use common.ui.builder.{column, label, build_tree_with_title}
+use app.ui.web.bounded_channel.{BoundedChannel}
+use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
+use app.ui.web.taskbar_runtime.{host_taskbar_runtime_reset, host_taskbar_runtime_enable}
+
+fn _session() -> UISession:
+    val tree = build_tree_with_title(
+        column("main_root", [label("main_label", "root")]),
+        "Main",
+        "glass_dark"
+    )
+    UISession.new(tree)
+
+describe "WebRuntimeAdapter taskbar frames":
+    it "omits taskbar_model when host taskbar runtime is disabled":
+        host_taskbar_runtime_reset()
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        var adapter = WebRuntimeAdapter.new("sess-adapter", session, "", out)
+
+        adapter.send_snapshot()
+
+        val first = out.try_recv()
+        expect(first != nil).to_equal(true)
+        expect((first as text).contains("\"snapshot\"")).to_equal(true)
+        expect(out.try_recv() == nil).to_equal(true)
+
+    it "emits one taskbar_model with the initial snapshot when enabled":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        var adapter = WebRuntimeAdapter.new("sess-adapter", session, "", out)
+
+        adapter.send_snapshot()
+
+        val snapshot = out.try_recv()
+        val taskbar = out.try_recv()
+        expect(snapshot != nil).to_equal(true)
+        expect(taskbar != nil).to_equal(true)
+        expect((snapshot as text).contains("\"snapshot\"")).to_equal(true)
+        expect((taskbar as text).contains("\"taskbar_model\"")).to_equal(true)
+        expect(out.try_recv() == nil).to_equal(true)
+
+    it "does not duplicate unchanged taskbar_model frames":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("desktop_embedded", false)
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        var adapter = WebRuntimeAdapter.new("sess-adapter", session, "", out)
+
+        adapter.send_snapshot()
+        val _ = out.try_recv()
+        val _ = out.try_recv()
+        adapter._emit_taskbar_model()
+
+        expect(out.try_recv() == nil).to_equal(true)

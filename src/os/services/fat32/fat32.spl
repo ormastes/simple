@@ -265,6 +265,78 @@ impl Fat32Driver:
         else:
             name
 
+    fn _decode_lfn_code_unit(entry_data: [u8], offset: i32) -> text:
+        """Decode one UTF-16LE LFN code unit to a best-effort text char."""
+        val lo = entry_data[offset].to_u16()
+        val hi = entry_data[offset + 1].to_u16()
+        val code_unit = (hi << 8) | lo
+        if code_unit == 0x0000 or code_unit == 0xFFFF:
+            return ""
+        if code_unit <= 0x00FF:
+            return (code_unit & 0x00FF).to_u8().to_char()
+        "?"
+
+    fn parse_lfn_name_part(entry_data: [u8], offset: i32) -> text:
+        """Parse one 32-byte LFN fragment in on-entry character order."""
+        var name = ""
+        val c1 = self._decode_lfn_code_unit(entry_data, offset + 1)
+        if c1 != "":
+            name = name + c1
+        val c2 = self._decode_lfn_code_unit(entry_data, offset + 3)
+        if c2 != "":
+            name = name + c2
+        val c3 = self._decode_lfn_code_unit(entry_data, offset + 5)
+        if c3 != "":
+            name = name + c3
+        val c4 = self._decode_lfn_code_unit(entry_data, offset + 7)
+        if c4 != "":
+            name = name + c4
+        val c5 = self._decode_lfn_code_unit(entry_data, offset + 9)
+        if c5 != "":
+            name = name + c5
+        val c6 = self._decode_lfn_code_unit(entry_data, offset + 14)
+        if c6 != "":
+            name = name + c6
+        val c7 = self._decode_lfn_code_unit(entry_data, offset + 16)
+        if c7 != "":
+            name = name + c7
+        val c8 = self._decode_lfn_code_unit(entry_data, offset + 18)
+        if c8 != "":
+            name = name + c8
+        val c9 = self._decode_lfn_code_unit(entry_data, offset + 20)
+        if c9 != "":
+            name = name + c9
+        val c10 = self._decode_lfn_code_unit(entry_data, offset + 22)
+        if c10 != "":
+            name = name + c10
+        val c11 = self._decode_lfn_code_unit(entry_data, offset + 24)
+        if c11 != "":
+            name = name + c11
+        val c12 = self._decode_lfn_code_unit(entry_data, offset + 28)
+        if c12 != "":
+            name = name + c12
+        val c13 = self._decode_lfn_code_unit(entry_data, offset + 30)
+        if c13 != "":
+            name = name + c13
+        name
+
+    fn _ascii_fold_byte(byte: u8) -> u8:
+        if byte >= 97.to_u8() and byte <= 122.to_u8():
+            return byte - 32.to_u8()
+        byte
+
+    fn _ascii_text_eq_ignore_case(a: text, b: text) -> bool:
+        if a.len() != b.len():
+            return false
+        var i = 0
+        while i < a.len():
+            val a_byte = str_char_at(a, i).to_u8()
+            val b_byte = str_char_at(b, i).to_u8()
+            if self._ascii_fold_byte(a_byte) != self._ascii_fold_byte(b_byte):
+                return false
+            i = i + 1
+        true
+
     me find_entry_in_dir(dir_cluster: u32, name: text) -> Result<Fat32DirEntry?, text>:
         """Search directory cluster chain for entry with given name."""
         val chain_result = me follow_cluster_chain(dir_cluster)
@@ -281,21 +353,25 @@ impl Fat32Driver:
 
             val entries_per_cluster = (self.sectors_per_cluster * self.bytes_per_sector) / 32
             var idx: u32 = 0
+            var pending_lfn = ""
             while idx < entries_per_cluster:
                 val off = (idx * 32).to_i32()
                 val first_byte = data[off]
                 if first_byte == 0x00:
                     return Result.Ok(nil)  # End of directory
                 if first_byte == 0xE5:
+                    pending_lfn = ""
                     idx = idx + 1
                     continue  # Deleted entry
                 val attr = data[off + 11]
                 if attr == FAT32_ATTR_LFN:
+                    pending_lfn = self.parse_lfn_name_part(data, off) + pending_lfn
                     idx = idx + 1
-                    continue  # Long filename entry, skip
+                    continue
 
-                val entry_name = self.parse_8_3_name(data, off)
-                if entry_name.to_upper() == upper_name:
+                val short_name = self.parse_8_3_name(data, off)
+                val entry_name = if pending_lfn.len() > 0: pending_lfn else: short_name
+                if self._ascii_text_eq_ignore_case(entry_name, name) or self._ascii_text_eq_ignore_case(short_name, name):
                     val entry = Fat32DirEntry(
                         name: [data[off], data[off+1], data[off+2], data[off+3],
                                data[off+4], data[off+5], data[off+6], data[off+7],
@@ -313,6 +389,7 @@ impl Fat32Driver:
                         file_size: ((data[off+31].to_u32() << 24) | (data[off+30].to_u32() << 16) | (data[off+29].to_u32() << 8) | data[off+28].to_u32())
                     )
                     return Result.Ok(entry)
+                pending_lfn = ""
                 idx = idx + 1
         Result.Ok(nil)  # Not found
 
@@ -405,9 +482,21 @@ impl Filesystem for Fat32Driver:
         self.num_fats = bpb.num_fats.to_u32()
         self.fat_size = bpb.fat_size_32
         self.root_cluster = bpb.root_cluster
+
+        if self.bytes_per_sector == 0:
+            return Result.Err("invalid BPB: bytes_per_sector=0")
+        if self.sectors_per_cluster == 0:
+            return Result.Err("invalid BPB: sectors_per_cluster=0")
+        if self.num_fats == 0:
+            return Result.Err("invalid BPB: num_fats=0")
+        if self.fat_size == 0:
+            return Result.Err("invalid BPB: fat_size=0")
+
         self.data_start_sector = self.reserved_sectors + (self.num_fats * self.fat_size)
 
         val total_sectors = bpb.total_sectors_32
+        if total_sectors <= self.data_start_sector:
+            return Result.Err("invalid BPB: total_sectors <= data_start_sector")
         val data_sectors = total_sectors - self.data_start_sector
         self.total_clusters = data_sectors / self.sectors_per_cluster
 
@@ -748,19 +837,27 @@ impl Filesystem for Fat32Driver:
 
             val entries_per_cluster = (self.sectors_per_cluster * self.bytes_per_sector) / 32
             var idx: u32 = 0
+            var pending_lfn = ""
             while idx < entries_per_cluster:
                 val off = (idx * 32).to_i32()
                 val first_byte = data[off]
                 if first_byte == 0x00:
                     return Result.Ok(entries)  # End of directory
-                if first_byte == 0xE5 or data[off + 11] == FAT32_ATTR_LFN:
+                if first_byte == 0xE5:
+                    pending_lfn = ""
+                    idx = idx + 1
+                    continue
+                if data[off + 11] == FAT32_ATTR_LFN:
+                    pending_lfn = self.parse_lfn_name_part(data, off) + pending_lfn
                     idx = idx + 1
                     continue
                 # Skip . and .. entries
-                val name = self.parse_8_3_name(data, off)
-                if name == "." or name == "..":
+                val short_name = self.parse_8_3_name(data, off)
+                if short_name == "." or short_name == "..":
+                    pending_lfn = ""
                     idx = idx + 1
                     continue
+                val name = if pending_lfn.len() > 0: pending_lfn else: short_name
 
                 val dir_entry = Fat32DirEntry(
                     name: [data[off], data[off+1], data[off+2], data[off+3],
@@ -776,6 +873,7 @@ impl Filesystem for Fat32Driver:
                 )
                 val node = self.entry_to_fs_node(dir_entry, name)
                 entries.push(DirEntry(name: name, node: node))
+                pending_lfn = ""
                 idx = idx + 1
         Result.Ok(entries)
 

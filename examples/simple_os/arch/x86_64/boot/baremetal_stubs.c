@@ -1559,6 +1559,20 @@ static int64_t _nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t bu
     return (int64_t)_nvme_write_sector_impl(lba, buf);
 }
 
+/* Exported bridge for Simple baremetal code.
+ * Keeps private boot-time NVMe access out of the public syscall table. */
+int64_t simpleos_nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    return _nvme_read_sector(device_idx, lba, buf_addr);
+}
+
+/* Exported bridge for Simple baremetal code.
+ * Keeps private boot-time NVMe access out of the public syscall table. */
+int64_t simpleos_nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    return _nvme_write_sector(device_idx, lba, buf_addr);
+}
+
 /* _nvme_init_and_read_sector0 — callable from Simple code or early boot
  * Initializes NVMe and reads sector 0 (FAT32 BPB).
  * Returns 0 on success, prints diagnostics to serial. */
@@ -1604,6 +1618,13 @@ static int _nvme_init_and_read_sector0(void)
     }
 
     return 0;
+}
+
+/* Exported bridge for Simple baremetal code.
+ * Keeps private boot-time NVMe access out of the public syscall table. */
+int64_t simpleos_nvme_init(void)
+{
+    return (int64_t)_nvme_init_and_read_sector0();
 }
 
 /* ===================================================================
@@ -2117,6 +2138,39 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 
     *bytes_read = offset;
     return 0;
+}
+
+static uint8_t simpleos_fat32_read_buf[131072];
+
+uint64_t simpleos_fat32_read_buffer_addr(void)
+{
+    return (uint64_t)(uintptr_t)simpleos_fat32_read_buf;
+}
+
+int64_t simpleos_fat32_read_known_app(uint64_t app_id)
+{
+    const char *name = NULL;
+    uint32_t bytes_read = 0;
+
+    switch (app_id) {
+    case 1: name = "/SYS/APPS/BROWSE~1"; break;
+    case 2: name = "/SYS/APPS/FILE_M~1"; break;
+    case 3: name = "/SYS/APPS/HELLO_~1"; break;
+    case 4: name = "/SYS/APPS/SHELL"; break;
+    case 5: name = "/SYS/APPS/EDITOR"; break;
+    case 11: name = "/BROWSE~1.ELF"; break;
+    case 12: name = "/FILE_M~1.ELF"; break;
+    case 13: name = "/HELLO_~1.ELF"; break;
+    case 14: name = "/TERMIN~1.ELF"; break;
+    case 15: name = "/EDITOR~1.ELF"; break;
+    default: return -1;
+    }
+
+    __builtin_memset(simpleos_fat32_read_buf, 0, sizeof(simpleos_fat32_read_buf));
+    if (fat32_read_file(name, simpleos_fat32_read_buf,
+                        (uint32_t)sizeof(simpleos_fat32_read_buf), &bytes_read) != 0)
+        return -1;
+    return (int64_t)bytes_read;
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {

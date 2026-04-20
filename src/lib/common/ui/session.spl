@@ -383,6 +383,36 @@ impl UISession:
         self._sync_access_store_snapshot()
         return true
 
+    me set_surface_widget_prop(surface_id: text, widget_id: text, key: text, value: text) -> bool:
+        """Set an arbitrary live prop for a widget on a surface.
+
+        Visibility is special-cased because it lives on WidgetRecord rather than
+        the generic prop store. All successful writes record an `update` access
+        event so ui.web clients can reconcile from the retained event stream.
+        """
+        val tree = self.surfaces.get(surface_id)
+        if tree == nil:
+            return false
+        val node = tree.find_widget(widget_id)
+        if node == nil:
+            return false
+        if key == "visible":
+            node.set_visible(value != "false")
+        else:
+            node.set_prop(key, value)
+        self.access_sequence = self.access_sequence + 1
+        self.access_events = ui_access_record_action(
+            self.access_events,
+            self.access_sequence,
+            surface_id,
+            widget_id,
+            "update",
+            "{key}={value}"
+        )
+        self._persist_latest_access_event()
+        self._sync_access_store_snapshot()
+        return true
+
     me set_active_surface(id: text):
         """Set which surface is active."""
         self.surfaces.set_active(id)
@@ -414,6 +444,27 @@ impl UISession:
         """Bind runtime window metadata to a surface."""
         self.window_surfaces.bind(window_id, surface_id, process_id, app_id, title)
         self._sync_access_store_snapshot()
+
+    me bind_window_surface_with_kind(window_id: text, surface_id: text, process_id: u64, app_id: text, title: text, surface_kind: text):
+        """Bind runtime window metadata to a surface with an explicit kind."""
+        self.window_surfaces.bind_with_kind(window_id, surface_id, process_id, app_id, title, surface_kind)
+        self._sync_access_store_snapshot()
+
+    me update_window_surface_title(surface_id: text, title: text) -> bool:
+        """Update the runtime title metadata for a bound surface."""
+        val binding = self.window_surfaces.for_surface(surface_id)
+        if binding == nil:
+            return false
+        self.window_surfaces.bind_with_kind(
+            binding.window_id,
+            surface_id,
+            binding.process_id,
+            binding.app_id,
+            title,
+            binding.surface_kind
+        )
+        self._sync_access_store_snapshot()
+        return true
 
     me clear_window_surface_binding(surface_id: text):
         """Remove any runtime window binding for a surface."""

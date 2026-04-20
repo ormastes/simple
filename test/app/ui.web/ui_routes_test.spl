@@ -1,0 +1,54 @@
+## Spec for /ui route command dispatch.
+##
+## Verifies that route-level window_cmd handling drains taskbar-only host
+## commands to the websocket output channel without echoing native feedback.
+
+use std.spec
+use common.ui.session.{UISession}
+use common.ui.builder.{column, label, build_tree_with_title}
+use app.ui.web.bounded_channel.{BoundedChannel}
+use app.ui.web.ui_routes.{_handle_window_cmd}
+use app.ui.web.taskbar_runtime.{host_taskbar_runtime_reset, host_taskbar_runtime_enable}
+use examples.hello_taskbar.app_manifest.{APP_ID}
+
+fn _session() -> UISession:
+    val tree = build_tree_with_title(
+        column("main_root", [label("main_label", "root")]),
+        "Main",
+        "glass_dark"
+    )
+    UISession.new(tree)
+
+describe "ui_routes window_cmd dispatch":
+    it "emits a native spawn command for taskbar-only launch":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        val frame = "{\"t\":\"window_cmd\",\"cmd_type\":\"launch\",\"payload\":{\"app_id\":\"{APP_ID}\"}}"
+
+        _handle_window_cmd(frame, session, "sess-route", out)
+
+        val item = out.try_recv()
+        expect(item != nil).to_equal(true)
+        val host_frame = item as text
+        expect(host_frame.contains("\"host_window_command\"")).to_equal(true)
+        expect(host_frame.contains("\"spawn_native_window\"")).to_equal(true)
+        expect(host_frame.contains("\"session_id\":\"sess-route\"")).to_equal(true)
+        expect(host_frame.contains("\"window_id\":\"host-window-1\"")).to_equal(true)
+        expect(host_frame.contains("/wm/native_window")).to_equal(true)
+        expect(out.try_recv() == nil).to_equal(true)
+
+    it "does not echo native feedback back to Electron":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _session()
+        var out: BoundedChannel<text> = BoundedChannel.new(16)
+        val launch_frame = "{\"t\":\"window_cmd\",\"cmd_type\":\"launch\",\"payload\":{\"app_id\":\"{APP_ID}\"}}"
+        _handle_window_cmd(launch_frame, session, "sess-route", out)
+        val _ = out.try_recv()
+
+        val native_frame = "{\"t\":\"window_cmd\",\"cmd_type\":\"minimize\",\"payload\":{\"window_id_hint\":\"host-window-1\",\"source\":\"native_event\"}}"
+        _handle_window_cmd(native_frame, session, "sess-route", out)
+
+        expect(out.try_recv() == nil).to_equal(true)

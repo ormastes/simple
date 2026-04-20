@@ -12,7 +12,6 @@ the kernel via `SYS_SPM_SEND`; the kernel caches `(TaskId -> mirror)` here.
 Feature: spm-winfs-llm-suite AC-3 kernel-gate.
 """
 
-use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.capability_types.{CapabilityKind}
 
 # ---------------------------------------------------------------------------
@@ -87,32 +86,32 @@ fn _bytes_equals(a: [u8], b: [u8]) -> bool:
 var _cached_task_ids: [u64] = []
 var _cached_mirrors: [PrivilegeTokenMirror] = []
 
-fn bridge_set_mirror(task: TaskId, m: PrivilegeTokenMirror):
-    """Update or insert the mirror for `task`. Called by SYS_SPM_SEND."""
+fn bridge_set_mirror(task_id: u64, m: PrivilegeTokenMirror):
+    """Update or insert the mirror for `task_id`. Called by SYS_SPM_SEND."""
     var i = 0
     val n = _cached_task_ids.len()
     while i < n:
-        if _cached_task_ids[i] == task.id:
+        if _cached_task_ids[i] == task_id:
             _cached_mirrors[i] = m
             return
         i = i + 1
-    _cached_task_ids = _cached_task_ids + [task.id]
+    _cached_task_ids = _cached_task_ids + [task_id]
     _cached_mirrors  = _cached_mirrors + [m]
 
-fn bridge_lookup(task: TaskId) -> PrivilegeTokenMirror:
+fn bridge_lookup(task_id: u64) -> PrivilegeTokenMirror:
     var i = 0
     val n = _cached_task_ids.len()
     while i < n:
-        if _cached_task_ids[i] == task.id:
+        if _cached_task_ids[i] == task_id:
             return _cached_mirrors[i]
         i = i + 1
     PrivilegeTokenMirror(id_path_bytes: [], authority: 0 as u8, principal_bytes: [], sig: [])
 
-fn bridge_has_mirror(task: TaskId) -> bool:
+fn bridge_has_mirror(task_id: u64) -> bool:
     var i = 0
     val n = _cached_task_ids.len()
     while i < n:
-        if _cached_task_ids[i] == task.id:
+        if _cached_task_ids[i] == task_id:
             return true
         i = i + 1
     false
@@ -131,18 +130,18 @@ fn two_gate_check(mirror: PrivilegeTokenMirror, required_id_path_bytes: [u8]) ->
         return false
     _bytes_starts_with(required_id_path_bytes, mirror.id_path_bytes)
 
-fn two_gate_for_task(task: TaskId, cap_kind: CapabilityKind) -> bool:
+fn two_gate_for_task(task_id: u64, cap_kind: CapabilityKind) -> bool:
     """Look up the cached mirror and run a two-gate check. If no mirror
     is present (early boot, SPM not up yet) we allow the existing
     capability path to decide — but we emit a TODO-prefix kernel log line
     so the gap is visible. See `capability.spl` for the call site."""
-    if not bridge_has_mirror(task):
+    if not bridge_has_mirror(task_id):
         # TODO(spm-winfs-llm-suite): early-boot fallback — no mirror cached
         # yet. Returning `true` preserves the existing capability-only gate
         # so boot doesn't deadlock on SPM. Remove once the init sequence
         # deposits a root mirror for pid 1.
         return true
-    val mirror = bridge_lookup(task)
+    val mirror = bridge_lookup(task_id)
     val required = _cap_kind_to_id_path_bytes(cap_kind)
     if required.len() == 0 as i64:
         return true

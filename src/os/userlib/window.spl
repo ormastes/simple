@@ -15,6 +15,12 @@
 #   client.destroy_window()
 #   client.disconnect()
 #
+# Multi-window usage:
+#   val inspector = client.create_window("Inspector", 700, 120, 320, 220)
+#   client.set_title_for(inspector, "Inspector — Live")
+#   client.resize_window(inspector, 360, 240)
+#   client.focus_window(inspector)
+#
 # Wire protocol:
 #   Outgoing requests to compositor use the same encoding as wm_service.spl.
 #   Incoming events (input, close, focus) are pushed by the WM service.
@@ -87,6 +93,10 @@ impl WindowClient:
     me set_app_identity(app_id: text):
         """Attach a stable manifest-owned app identity to future create requests."""
         self.app_id = app_id
+
+    me set_primary_window(window_id: u64):
+        """Select which window the single-window convenience helpers target."""
+        self.window_id = window_id
 
     # -- Connection ----------------------------------------------------------
 
@@ -196,17 +206,17 @@ impl WindowClient:
 
         Sends COMP_DESTROY_WINDOW to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.destroy_window_id(self.window_id)
+
+    me destroy_window_id(window_id: u64):
+        """Destroy an explicit window by id."""
+        if not self.connected or window_id == 0:
             return
-
-        var payload: [u8] = []
-        _push_u64(payload, self.window_id)
-        self._send_request(COMP_DESTROY_WINDOW, payload)
-
-        # Wait for acknowledgment
+        self._send_window_id_request(COMP_DESTROY_WINDOW, window_id)
         val reply = self._recv_reply()
-        serial_println("[window-client] Destroyed window {self.window_id}")
-        self.window_id = 0
+        serial_println("[window-client] Destroyed window {window_id}")
+        if self.window_id == window_id:
+            self.window_id = 0
 
     # -- Window Operations ---------------------------------------------------
 
@@ -215,11 +225,15 @@ impl WindowClient:
 
         Sends COMP_SET_TITLE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.set_title_for(self.window_id, title)
+
+    me set_title_for(window_id: u64, title: text):
+        """Change the title of an explicit window."""
+        if not self.connected or window_id == 0:
             return
 
         var payload: [u8] = []
-        _push_u64(payload, self.window_id)
+        _push_u64(payload, window_id)
         val title_len = title.len().to_u32()
         _push_u32(payload, title_len)
         for ch in title:
@@ -234,11 +248,15 @@ impl WindowClient:
 
         Sends COMP_RESIZE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.resize_window(self.window_id, width, height)
+
+    me resize_window(window_id: u64, width: i32, height: i32):
+        """Resize an explicit window."""
+        if not self.connected or window_id == 0:
             return
 
         var payload: [u8] = []
-        _push_u64(payload, self.window_id)
+        _push_u64(payload, window_id)
         _push_i32(payload, width)
         _push_i32(payload, height)
         self._send_request(COMP_RESIZE, payload)
@@ -250,11 +268,15 @@ impl WindowClient:
 
         Sends COMP_MOVE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.move_window(self.window_id, x, y)
+
+    me move_window(window_id: u64, x: i32, y: i32):
+        """Move an explicit window to a new position."""
+        if not self.connected or window_id == 0:
             return
 
         var payload: [u8] = []
-        _push_u64(payload, self.window_id)
+        _push_u64(payload, window_id)
         _push_i32(payload, x)
         _push_i32(payload, y)
         self._send_request(COMP_MOVE, payload)
@@ -266,13 +288,14 @@ impl WindowClient:
 
         Sends COMP_FOCUS to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.focus_window(self.window_id)
+
+    me focus_window(window_id: u64):
+        """Request that the compositor focus an explicit window."""
+        if not self.connected or window_id == 0:
             return
 
-        var payload: [u8] = []
-        _push_u64(payload, self.window_id)
-        self._send_request(COMP_FOCUS, payload)
-
+        self._send_window_id_request(COMP_FOCUS, window_id)
         val reply = self._recv_reply()
 
     me minimize():
@@ -280,13 +303,14 @@ impl WindowClient:
 
         Sends COMP_MINIMIZE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.minimize_window(self.window_id)
+
+    me minimize_window(window_id: u64):
+        """Minimize an explicit window."""
+        if not self.connected or window_id == 0:
             return
 
-        var payload: [u8] = []
-        _push_u64(payload, self.window_id)
-        self._send_request(COMP_MINIMIZE, payload)
-
+        self._send_window_id_request(COMP_MINIMIZE, window_id)
         val reply = self._recv_reply()
 
     me maximize():
@@ -294,13 +318,14 @@ impl WindowClient:
 
         Sends COMP_MAXIMIZE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.maximize_window(self.window_id)
+
+    me maximize_window(window_id: u64):
+        """Maximize an explicit window to fill the screen."""
+        if not self.connected or window_id == 0:
             return
 
-        var payload: [u8] = []
-        _push_u64(payload, self.window_id)
-        self._send_request(COMP_MAXIMIZE, payload)
-
+        self._send_window_id_request(COMP_MAXIMIZE, window_id)
         val reply = self._recv_reply()
 
     me restore():
@@ -308,13 +333,14 @@ impl WindowClient:
 
         Sends COMP_RESTORE to the compositor.
         """
-        if not self.connected or self.window_id == 0:
+        self.restore_window(self.window_id)
+
+    me restore_window(window_id: u64):
+        """Restore an explicit window from minimized/maximized."""
+        if not self.connected or window_id == 0:
             return
 
-        var payload: [u8] = []
-        _push_u64(payload, self.window_id)
-        self._send_request(COMP_RESTORE, payload)
-
+        self._send_window_id_request(COMP_RESTORE, window_id)
         val reply = self._recv_reply()
 
     me update_content(content: text):
@@ -326,11 +352,15 @@ impl WindowClient:
 
         Payload: window_id(u64) | content_len(u32) | content_text(bytes)
         """
-        if not self.connected or self.window_id == 0:
+        self.update_window_content(self.window_id, content)
+
+    me update_window_content(window_id: u64, content: text):
+        """Update an explicit window's content text."""
+        if not self.connected or window_id == 0:
             return
 
         var payload: [u8] = []
-        _push_u64(payload, self.window_id)
+        _push_u64(payload, window_id)
         val content_len = content.len().to_u32()
         _push_u32(payload, content_len)
         for ch in content:
@@ -442,6 +472,12 @@ impl WindowClient:
             msg.push(payload[i])
             i = i + 1
         _ipc_send(self.compositor_port, self.app_port, msg)
+
+    me _send_window_id_request(method: u32, window_id: u64):
+        """Send a compositor request whose payload is only a window id."""
+        var payload: [u8] = []
+        _push_u64(payload, window_id)
+        self._send_request(method, payload)
 
     fn _recv_reply() -> [u8]:
         """Receive a reply from the compositor.

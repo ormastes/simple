@@ -13,6 +13,10 @@ const KIND_MAP = {
   window:    () => { const el = document.createElement('div');    el.className = 'wm-window';  return el; },
   button:    () => { const el = document.createElement('button'); el.className = 'wm-btn';     return el; },
   input:     () => { const el = document.createElement('input');  el.className = 'wm-input';   return el; },
+  textfield: () => { const el = document.createElement('input');  el.className = 'wm-input';   return el; },
+  textarea:  () => { const el = document.createElement('textarea'); el.className = 'wm-input'; return el; },
+  label:     () => { const el = document.createElement('div');    el.className = 'wm-label';   return el; },
+  panel:     () => { const el = document.createElement('div');    el.className = 'wm-panel';   return el; },
 };
 
 function _makeElement(kind) {
@@ -28,6 +32,27 @@ function _canonicalId(surface_id, widget_id) {
 }
 
 function _applyProp(el, key, value) {
+  if (key === 'x') {
+    el.style.left = value + 'px';
+    return;
+  }
+  if (key === 'y') {
+    el.style.top = value + 'px';
+    return;
+  }
+  if (key === 'w' || key === 'width') {
+    el.style.width = value + 'px';
+    return;
+  }
+  if (key === 'h' || key === 'height') {
+    el.style.height = value + 'px';
+    return;
+  }
+  if (key === 'visible') {
+    const vis = value === true || value === 'true';
+    el.style.display = vis ? '' : 'none';
+    return;
+  }
   if (DIRECT_PROPS.has(key)) {
     if (key === 'text') {
       el.textContent = value;
@@ -46,6 +71,8 @@ export class RetainedRenderer {
     this.root = rootEl;
     this.nodes = new Map();              // canonical_id -> HTMLElement
     this.surfaces = new Map();           // surface_id -> root HTMLElement
+    this.surfaceRoots = new Map();       // surface_id -> root canonical id
+    this.surfaceBodies = new Map();      // surface_id -> body HTMLElement
     this.activeSurface = null;
     this.protocolVersion = 1;
     this.snapshotRevision = 0;
@@ -58,8 +85,13 @@ export class RetainedRenderer {
 
   // Apply a full snapshot. Clears existing DOM for surfaces not in payload.
   applySnapshot(payload) {
-    this.snapshotRevision = payload.revision ?? 0;
+    this.snapshotRevision = payload.snapshot_revision ?? payload.revision ?? 0;
     this.lastSequence = payload.sequence ?? -1;
+
+    if (Array.isArray(payload.surfaces) && Array.isArray(payload.nodes)) {
+      this._applyAccessSnapshot(payload);
+      return;
+    }
 
     // Collect surface ids present in this snapshot.
     const incomingSurfaces = new Set();
@@ -91,7 +123,33 @@ export class RetainedRenderer {
           if (cid.startsWith(surfId + '#')) this.nodes.delete(cid);
         }
         this.surfaces.delete(surfId);
+        this.surfaceRoots.delete(surfId);
+        this.surfaceBodies.delete(surfId);
       }
+    }
+  }
+
+  _applyAccessSnapshot(payload) {
+    const incomingSurfaces = new Set();
+    const nodeMap = new Map((payload.nodes || []).map((node) => [node.canonical_id, node]));
+
+    for (const surface of (payload.surfaces || [])) {
+      const surfaceId = surface.surface_id;
+      incomingSurfaces.add(surfaceId);
+      this._removeSurface(surfaceId);
+      const winEl = this._materializeSurface(surface, nodeMap);
+      this.surfaces.set(surfaceId, winEl);
+      this.surfaceRoots.set(surfaceId, surface.root_canonical_id);
+      this.root.appendChild(winEl);
+    }
+
+    for (const surfId of Array.from(this.surfaces.keys())) {
+      if (!incomingSurfaces.has(surfId)) {
+        this._removeSurface(surfId);
+      }
+    }
+    if (payload.active_surface) {
+      this.setFocus(payload.active_surface, '');
     }
   }
 
@@ -166,6 +224,16 @@ export class RetainedRenderer {
   _opUpdateProp(p) {
     const el = this.nodes.get(p.id);
     if (!el) return;
+    const surfaceWindow = this._surfaceWindowForCanonical(p.id);
+    if (surfaceWindow && this._isRootCanonical(p.id)) {
+      if (p.key === 'title') {
+        const titleEl = surfaceWindow.querySelector('.wm-title');
+        if (titleEl) titleEl.textContent = p.value;
+      }
+      if (p.key === 'x' || p.key === 'y' || p.key === 'w' || p.key === 'width' || p.key === 'h' || p.key === 'height' || p.key === 'visible') {
+        _applyProp(surfaceWindow, p.key, p.value);
+      }
+    }
     _applyProp(el, p.key, p.value);
   }
 
@@ -202,6 +270,10 @@ export class RetainedRenderer {
       el.classList.remove('minimized');
     } else {
       el.classList.add('minimized');
+    }
+    const surfaceWindow = this._surfaceWindowForCanonical(p.id);
+    if (surfaceWindow && this._isRootCanonical(p.id)) {
+      surfaceWindow.style.display = vis ? '' : 'none';
     }
   }
 
@@ -301,5 +373,111 @@ export class RetainedRenderer {
     }
 
     return el;
+  }
+
+  _materializeSurface(surface, nodeMap) {
+    const winEl = document.createElement('div');
+    winEl.className = 'wm-window';
+    winEl.dataset.surfaceId = surface.surface_id;
+    winEl.dataset.canonicalId = surface.root_canonical_id;
+
+    const titlebar = document.createElement('div');
+    titlebar.className = 'wm-titlebar';
+    const lights = document.createElement('div');
+    lights.className = 'wm-traffic-lights';
+    for (const [action, label] of [['close', 'x'], ['minimize', '-'], ['maximize', '+']]) {
+      const btn = document.createElement('button');
+      btn.dataset.action = action;
+      btn.textContent = label;
+      lights.appendChild(btn);
+    }
+    const title = document.createElement('div');
+    title.className = 'wm-title';
+    title.textContent = surface.title || surface.surface_id;
+    titlebar.appendChild(lights);
+    titlebar.appendChild(title);
+    winEl.appendChild(titlebar);
+
+    const body = document.createElement('div');
+    body.className = 'wm-body';
+    body.dataset.surfaceId = surface.surface_id;
+    const rootNode = nodeMap.get(surface.root_canonical_id);
+    if (rootNode) {
+      const rootEl = this._materializeNodeFromAccess(rootNode, nodeMap);
+      body.appendChild(rootEl);
+      const props = rootNode.props || {};
+      if (props.x != null) winEl.style.left = props.x + 'px';
+      if (props.y != null) winEl.style.top = props.y + 'px';
+      if (props.width != null) winEl.style.width = props.width + 'px';
+      if (props.height != null) winEl.style.height = props.height + 'px';
+      if (props.visible === false || props.visible === 'false') winEl.style.display = 'none';
+    }
+    winEl.appendChild(body);
+    this.surfaceBodies.set(surface.surface_id, body);
+
+    for (const direction of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+      const handle = document.createElement('div');
+      handle.className = 'wm-resize-handle';
+      handle.dataset.direction = direction;
+      winEl.appendChild(handle);
+    }
+
+    return winEl;
+  }
+
+  _materializeNodeFromAccess(nodeSpec, nodeMap) {
+    const kind = nodeSpec.kind || 'panel';
+    const el = _makeElement(kind);
+    el.dataset.canonicalId = nodeSpec.canonical_id;
+    el.dataset.surfaceId = nodeSpec.surface_id || '';
+    el.dataset.widgetId = nodeSpec.widget_id || '';
+    const props = nodeSpec.props || {};
+    for (const [key, value] of Object.entries(props)) {
+      _applyProp(el, key, value);
+    }
+    if (nodeSpec.text) {
+      _applyProp(el, 'text', nodeSpec.text);
+    }
+    if (nodeSpec.visible === false) {
+      _applyProp(el, 'visible', false);
+    }
+    if (nodeSpec.enabled === false) {
+      _applyProp(el, 'disabled', true);
+    }
+    if (nodeSpec.focused === true) {
+      el.classList.add('focused');
+    }
+    this.nodes.set(nodeSpec.canonical_id, el);
+    for (const childId of (nodeSpec.child_ids || [])) {
+      const child = nodeMap.get(childId);
+      if (child) {
+        el.appendChild(this._materializeNodeFromAccess(child, nodeMap));
+      }
+    }
+    return el;
+  }
+
+  _removeSurface(surfaceId) {
+    const existing = this.surfaces.get(surfaceId);
+    if (existing) existing.remove();
+    for (const [cid] of this.nodes) {
+      if (cid.startsWith(surfaceId + '#')) this.nodes.delete(cid);
+    }
+    this.surfaces.delete(surfaceId);
+    this.surfaceRoots.delete(surfaceId);
+    this.surfaceBodies.delete(surfaceId);
+  }
+
+  _surfaceWindowForCanonical(canonicalId) {
+    const hash = canonicalId.indexOf('#');
+    if (hash < 0) return null;
+    return this.surfaces.get(canonicalId.slice(0, hash)) || null;
+  }
+
+  _isRootCanonical(canonicalId) {
+    const hash = canonicalId.indexOf('#');
+    if (hash < 0) return false;
+    const surfaceId = canonicalId.slice(0, hash);
+    return this.surfaceRoots.get(surfaceId) === canonicalId;
   }
 }

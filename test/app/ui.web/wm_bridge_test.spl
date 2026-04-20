@@ -1,0 +1,205 @@
+## Spec for ui.web WM bridge state updates.
+##
+## Verifies:
+##   * create opens and binds a new host surface
+##   * move/resize update authoritative surface root props
+##   * window_id_hint resolves native-host events back to the bound surface
+##   * set_title updates both the surface tree and runtime window metadata
+##   * text_input writes through to the live surface widget value
+
+use std.spec
+use common.ui.session.{UISession}
+use common.ui.builder.{column, label, text_input, button, build_tree_with_title}
+use common.window_protocol.window_protocol.{WmInputEvent}
+use common.window_protocol.geometry.{WindowId, KeyCode, Modifiers, Point, WmEventType}
+use app.ui.web.wm_bridge.{WmBridge}
+use app.ui.web.taskbar_runtime.{
+    host_taskbar_runtime_reset,
+    host_taskbar_runtime_enable,
+    host_taskbar_runtime_take_client_frames,
+    host_taskbar_runtime_taskbar_frame
+}
+
+fn _session() -> UISession:
+    val main_tree = build_tree_with_title(
+        column("main_root", [label("main_label", "root")]),
+        "Main",
+        "glass_dark"
+    )
+    val session = UISession.new(main_tree)
+    val surf_tree = build_tree_with_title(
+        column("surf1_root", [
+            text_input("surf1_input", "Type"),
+            button("surf1_button", "Save", "save")
+        ]),
+        "Window",
+        "glass_dark"
+    )
+    val _ = session.open_surface("surf1", surf_tree)
+    session.bind_window_surface_with_kind("win1", "surf1", 1u64, "demo.app", "Window", "SimpleWeb")
+    session
+
+fn _electron_session() -> UISession:
+    val session = _session()
+    session.bind_window_surface_with_kind("win1", "surf1", 1u64, "demo.app", "Window", "Electron")
+    session
+
+fn _wm_event(kind: u32) -> WmInputEvent:
+    WmInputEvent(
+        window_id: WindowId(value: 0u64),
+        event_type: WmEventType(value: kind),
+        key_code: KeyCode(value: 0u32),
+        mouse_pos: Point.xy(0, 0),
+        modifiers: Modifiers(value: 0u32)
+    )
+
+describe "wm_bridge.handle_window_cmd":
+    it "creates and binds a new host surface":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd(
+            "create",
+            "{\"surface_id\":\"surf2\",\"title\":\"Hosted\",\"x\":20,\"y\":30,\"width\":640,\"height\":480}"
+        )
+        expect(result.is_ok()).to_equal(true)
+        expect(session.has_surface("surf2")).to_equal(true)
+        val tree = session.get_surface("surf2")
+        expect(tree.root_node().get_prop("x")).to_equal("20")
+        expect(tree.root_node().get_prop("y")).to_equal("30")
+        val binding = session.window_surfaces.for_surface("surf2")
+        expect(binding == nil).to_equal(false)
+        expect(binding.surface_kind).to_equal("SimpleWeb")
+        expect(binding.title).to_equal("Hosted")
+
+    it "updates surface move props":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("move", "{\"surface_id\":\"surf1\",\"x\":12,\"y\":34}")
+        expect(result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        expect(tree.root_node().get_prop("x")).to_equal("12")
+        expect(tree.root_node().get_prop("y")).to_equal("34")
+
+    it "updates surface resize props":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("resize", "{\"surface_id\":\"surf1\",\"w\":800,\"h\":600}")
+        expect(result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        expect(tree.root_node().get_prop("width")).to_equal("800")
+        expect(tree.root_node().get_prop("height")).to_equal("600")
+
+    it "updates title in tree and registry":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("set_title", "{\"surface_id\":\"surf1\",\"title\":\"Renamed\"}")
+        expect(result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        expect(tree.root_node().get_prop("title")).to_equal("Renamed")
+        val binding = session.window_surfaces.for_surface("surf1")
+        expect(binding.title).to_equal("Renamed")
+
+    it "resolves window_id_hint for focus and close":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val focus_result = bridge.handle_window_cmd("focus", "{\"window_id_hint\":\"win1\"}")
+        expect(focus_result.is_ok()).to_equal(true)
+        expect(session.active_surface()).to_equal("surf1")
+        val close_result = bridge.handle_window_cmd("close", "{\"window_id_hint\":\"win1\"}")
+        expect(close_result.is_ok()).to_equal(true)
+        expect(session.has_surface("surf1")).to_equal(false)
+        val binding = session.window_surfaces.for_window("win1")
+        expect(binding == nil).to_equal(true)
+
+    it "resolves window_id_hint for move":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("move", "{\"window_id_hint\":\"win1\",\"x\":44,\"y\":55}")
+        expect(result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        expect(tree.root_node().get_prop("x")).to_equal("44")
+        expect(tree.root_node().get_prop("y")).to_equal("55")
+
+describe "wm_bridge.handle_input":
+    it "writes text_input through to the target widget":
+        val session = _session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_input(
+            "surf1",
+            "surf1_input",
+            "{\"kind\":\"text_input\",\"text\":\"hello\"}",
+            _wm_event(1u32)
+        )
+        expect(result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        val node = tree.find_widget("surf1_input")
+        expect(node.get_prop("value")).to_equal("hello")
+
+describe "wm_bridge native_event feedback":
+    it "syncs native focus without re-queueing a host command":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _electron_session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("focus", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\"}")
+        expect(result.is_ok()).to_equal(true)
+        expect(session.active_surface()).to_equal("surf1")
+        val frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(frames.len()).to_equal(0)
+
+    it "syncs native minimize into taskbar state without re-queueing":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _electron_session()
+        val bridge = WmBridge.new(session)
+        val result = bridge.handle_window_cmd("minimize", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\"}")
+        expect(result.is_ok()).to_equal(true)
+        val frame = host_taskbar_runtime_taskbar_frame("sess-native", session)
+        expect(frame.contains("\"minimized\":true")).to_equal(true)
+        val frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(frames.len()).to_equal(0)
+
+    it "syncs native title and close without re-queueing":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _electron_session()
+        val bridge = WmBridge.new(session)
+        val title_result = bridge.handle_window_cmd("set_title", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\",\"title\":\"Native Renamed\"}")
+        expect(title_result.is_ok()).to_equal(true)
+        val binding = session.window_surfaces.for_surface("surf1")
+        expect(binding.title).to_equal("Native Renamed")
+        val title_frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(title_frames.len()).to_equal(0)
+
+        val close_result = bridge.handle_window_cmd("close", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\"}")
+        expect(close_result.is_ok()).to_equal(true)
+        expect(session.has_surface("surf1")).to_equal(false)
+        val close_frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(close_frames.len()).to_equal(0)
+
+    it "syncs native move resize and maximize without re-queueing":
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("taskbar_only", true)
+        val session = _electron_session()
+        val bridge = WmBridge.new(session)
+
+        val move_result = bridge.handle_window_cmd("move", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\",\"x\":91,\"y\":109}")
+        expect(move_result.is_ok()).to_equal(true)
+        val tree = session.get_surface("surf1")
+        expect(tree.root_node().get_prop("x")).to_equal("91")
+        expect(tree.root_node().get_prop("y")).to_equal("109")
+        val move_frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(move_frames.len()).to_equal(0)
+
+        val resize_result = bridge.handle_window_cmd("resize", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\",\"w\":777,\"h\":555}")
+        expect(resize_result.is_ok()).to_equal(true)
+        expect(tree.root_node().get_prop("width")).to_equal("777")
+        expect(tree.root_node().get_prop("height")).to_equal("555")
+        val resize_frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(resize_frames.len()).to_equal(0)
+
+        val maximize_result = bridge.handle_window_cmd("maximize", "{\"window_id_hint\":\"win1\",\"source\":\"native_event\"}")
+        expect(maximize_result.is_ok()).to_equal(true)
+        expect(tree.root_node().get_prop("maximized")).to_equal("true")
+        val maximize_frames = host_taskbar_runtime_take_client_frames("sess-native")
+        expect(maximize_frames.len()).to_equal(0)

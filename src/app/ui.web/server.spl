@@ -22,9 +22,11 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
+use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_native_window_html}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_env_get(key: text) -> text
 
@@ -147,12 +149,22 @@ class WebServer:
                         Err(_):
                             break
 
-                if is_ws:
-                    handle_ws_upgrade(ConnStream.from_tcp(stream), headers, self.origin_guard, self.token_secret)
-                    return
-
                 if path == "/ui/login" and method == "POST":
                     self.handle_login(stream, headers)
+                    return
+
+                if is_ws:
+                    handle_ws_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
+                    return
+
+                if path.starts_with("/wm/native_window"):
+                    val body = _native_window_html(path)
+                    val response = _simple_response(200, "text/html", body)
+                    match stream.write_text(response):
+                        Err(e):
+                            print "HTTP write error: {e}"
+                        Ok(()):
+                            pass_dn
                     return
 
                 match path:
@@ -376,6 +388,11 @@ fn run_shared_wm_web(title: text) -> i64:
 
     val guard = OriginGuard.from_env()
     val secret = load_secret(false)
+    val mode_name = rt_env_get("SIMPLE_UI_WEB_SHELL_MODE") ?? "desktop_embedded"
+    val backend_name = rt_env_get("SIMPLE_UI_BACKEND") ?? ""
+    val electron_env = rt_env_get("SIMPLE_HOST_ELECTRON_AVAILABLE") ?? ""
+    val electron_available = backend_name == "electron" or electron_env == "1"
+    host_taskbar_runtime_enable(mode_name, electron_available)
 
     # Build a minimal UISession without a file on disk
     val session_result = _make_wm_session()
@@ -430,7 +447,13 @@ fn _make_wm_session() -> Result<UISession, text>:
 fn _write_temp_ui(path: text):
     """Write a minimal .sdn UI file to disk for the fallback session."""
     # Use the same minimal .sdn content that parse_ui_to_tree can handle
-    pass_do_nothing
+    val content = "ui {\n" +
+        "  title: \"SimpleOS WM\"\n" +
+        "  panel main {\n" +
+        "    text banner \"Shared host taskbar runtime\"\n" +
+        "  }\n" +
+        "}\n"
+    val _ = rt_file_write_text(path, content)
 
 fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard, secret: text):
     """Accept and dispatch connections for the shared WM server."""
@@ -464,6 +487,26 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
 
             if path == "/ui/login" and method == "POST":
                 _wm_handle_login(stream, headers, guard, secret)
+                return
+
+            if path == "/" or path == "/index.html":
+                val payload = _decorate_host_shell_html(
+                    generate_wm_html_page("glass_dark", "SimpleOS WM", 0)
+                )
+                val response = _simple_response(200, "text/html", payload)
+                stream.write_text(response)
+                return
+
+            if path == "/wm.js":
+                val wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+                val response = _simple_response(200, "application/javascript", wm_js)
+                stream.write_text(response)
+                return
+
+            if path.starts_with("/wm/native_window"):
+                val body = _native_window_html(path)
+                val response = _simple_response(200, "text/html", body)
+                stream.write_text(response)
                 return
 
             if path.starts_with("/ui/"):
@@ -501,6 +544,51 @@ fn _wm_read_body(stream: TcpStream, headers: text) -> text:
     match stream.read_exact(content_length):
         Ok(b): return b
         Err(_): return ""
+
+fn _native_window_html(path: text) -> text:
+    val app_id = _query_value(path, "app_id")
+    val html = host_taskbar_runtime_native_window_html(app_id)
+    if html != nil:
+        return html
+    return "<!doctype html><html><body style='font-family:monospace;padding:24px'>" +
+        "<h1>Unsupported app</h1><p>" + escape_json_str(app_id) + "</p></body></html>"
+
+fn _decorate_host_shell_html(html: text) -> text:
+    val mode_name = host_taskbar_runtime_mode_name()
+    var body_class = "wm-shell-{mode_name}"
+    var extra_style = ""
+    if mode_name == "taskbar_only" or mode_name == "headless":
+        extra_style = "#wm-desktop { display: none !important; }\n" +
+            "body.wm-shell-{mode_name} { overflow: hidden; }\n" +
+            "body.wm-shell-{mode_name} #wm-taskbar { left: 12px; right: 12px; transform: none; justify-content: center; }\n"
+    var updated = html.replace("<body>", "<body class=\"{body_class}\">")
+    if extra_style != "":
+        updated = updated.replace("</style>", "{extra_style}</style>")
+    updated
+
+fn _query_value(path: text, key: text) -> text:
+    val q_idx = path.find("?")
+    if q_idx < 0:
+        return ""
+    val query = path.slice(q_idx + 1, path.len())
+    for part in query.split("&"):
+        val kv = part.split("=")
+        if kv.len() >= 2 and kv[0] == key:
+            return _url_decode(kv[1])
+    return ""
+
+fn _url_decode(s: text) -> text:
+    var out = s
+    out = out.replace("%2F", "/")
+    out = out.replace("%2f", "/")
+    out = out.replace("%20", " ")
+    out = out.replace("+", " ")
+    out = out.replace("%26", "&")
+    out = out.replace("%3D", "=")
+    out = out.replace("%3d", "=")
+    out = out.replace("%3F", "?")
+    out = out.replace("%3f", "?")
+    out
 
 # =========================================================================
 # Entry Point

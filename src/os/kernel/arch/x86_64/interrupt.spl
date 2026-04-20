@@ -51,6 +51,9 @@ struct X86Interrupt:
 
 var g_trap_runtime_installed: bool = false
 var g_trap_runtime: X86TrapRuntime? = nil
+var g_trap_scheduler: Scheduler = Scheduler.new()
+var g_trap_ipc: IpcManager = IpcManager.new()
+var g_trap_klog: KernelLog = KernelLog.new(256)
 
 impl X86Interrupt:
     fn init():
@@ -181,35 +184,45 @@ fn _default_unhandled(ctx: TaskContext):
 
 fn _log_bridge_failure(message: text):
     """Record x86 bridge/runtime failures in the installed kernel log."""
-    if g_trap_runtime != nil:
-        var runtime = g_trap_runtime.unwrap()
-        runtime.klog.write(3, 0, 0, message)
-        g_trap_runtime = Some(runtime)
+    if g_trap_runtime_installed:
+        g_trap_klog.write(3, 0, 0, message)
 
 fn x86_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
     """Install the kernel runtime objects used by the x86_64 trap bridge."""
+    g_trap_scheduler = scheduler
+    g_trap_ipc = ipc
+    g_trap_klog = klog
     g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
     g_trap_runtime_installed = true
 
 fn x86_install_runtime_bundle(runtime: X86TrapRuntime):
     """Install a precomposed runtime bundle for x86_64 trap dispatch."""
+    g_trap_scheduler = runtime.scheduler
+    g_trap_ipc = runtime.ipc
+    g_trap_klog = runtime.klog
     g_trap_runtime = Some(runtime)
     g_trap_runtime_installed = true
 
 fn x86_install_bootstrap_runtime(log_capacity: u64):
     """Install the minimal early-boot runtime bundle."""
-    g_trap_runtime = Some(X86TrapRuntime.bootstrap(log_capacity))
+    val scheduler = Scheduler.new()
+    val ipc = IpcManager.new()
+    val klog = KernelLog.new(log_capacity)
+    g_trap_scheduler = scheduler
+    g_trap_ipc = ipc
+    g_trap_klog = klog
+    g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
     g_trap_runtime_installed = true
 
 fn x86_runtime_installed() -> bool:
     """Report whether the x86_64 trap bridge has runtime objects installed."""
-    g_trap_runtime_installed and g_trap_runtime != nil
+    g_trap_runtime_installed
 
 fn x86_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
     """Read entries from the installed x86_64 trap runtime log buffer."""
-    if g_trap_runtime == nil:
+    if not g_trap_runtime_installed:
         return []
-    g_trap_runtime.unwrap().klog.read(min_level, offset, max_count)
+    g_trap_klog.read(min_level, offset, max_count)
 
 fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, text>:
     """Dispatch syscall arguments through the installed x86_64 runtime."""
@@ -218,16 +231,14 @@ fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, te
         _log_bridge_failure(message)
         return Err(message)
 
-    val runtime = g_trap_runtime.unwrap()
-    Ok(syscall_handler(args, runtime.scheduler, runtime.ipc, runtime.klog))
+    Ok(syscall_handler(args, g_trap_scheduler, g_trap_ipc, g_trap_klog))
 
 fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
     """C-callable primitive ABI for the installed x86_64 syscall bridge."""
     if id == 13:
         if not x86_runtime_installed():
             return -38
-        val runtime = g_trap_runtime.unwrap()
-        return dispatch_spawn_binary_direct(arg0, arg1, arg2, runtime.scheduler, runtime.klog)
+        return dispatch_spawn_binary_direct(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
 
     val result = x86_dispatch_installed_syscall(SyscallArgs(
         id: id,

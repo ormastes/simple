@@ -17,6 +17,7 @@ use app.ui.web.async_ws.{extract_field}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.bounded_channel.{BoundedChannel}
+use app.ui.web.taskbar_runtime.{host_taskbar_runtime_is_enabled, host_taskbar_runtime_take_client_frames}
 
 extern fn rt_time_ms() -> u64
 
@@ -27,14 +28,15 @@ extern fn rt_time_ms() -> u64
 fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream: ConnStream, session: UISession, guard: OriginGuard, secret: text) -> bool:
     """Returns true if request was handled; false if path is not /ui/*.
     /ui/login is intentionally excluded — handled by server.spl."""
-    if not path.starts_with("/ui/"):
+    val route = _strip_query(path)
+    if not route.starts_with("/ui/"):
         return false
 
-    if path == "/ui/ws":
-        _handle_ws_route(stream, headers, session, guard, secret)
+    if route == "/ui/ws":
+        _handle_ws_route(stream, path, headers, session, guard, secret)
         return true
 
-    if path == "/ui/resume" and method == "POST":
+    if route == "/ui/resume" and method == "POST":
         _handle_resume_route(stream, body, session)
         return true
 
@@ -47,7 +49,7 @@ fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream
 # /ui/ws — WebSocket upgrade + adapter loop
 # =========================================================================
 
-fn _handle_ws_route(stream: ConnStream, headers: text, session: UISession, guard: OriginGuard, secret: text):
+fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISession, guard: OriginGuard, secret: text):
     """Gate origin + bearer, complete WS handshake, then run adapter read loop."""
     # Security gate: origin check
     val origin_result = guard.check(headers)
@@ -58,7 +60,7 @@ fn _handle_ws_route(stream: ConnStream, headers: text, session: UISession, guard
         Ok(o): o
 
     # Security gate: bearer token
-    val bearer = _extract_bearer(headers)
+    val bearer = _extract_bearer(headers, path)
     if bearer == "":
         stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         return
@@ -153,7 +155,7 @@ fn _handle_input_event(frame: text, session: UISession, session_id: text, out: B
     # Build a minimal WmInputEvent from the JSON event sub-object
     val event_json = _extract_object(frame, "event")
     val wm_event = _parse_wm_input_event(event_json)
-    val result = bridge.handle_input(surface_id, widget_id, wm_event)
+    val result = bridge.handle_input(surface_id, widget_id, event_json, wm_event)
     match result:
         Err(_):
             _send_error(out, session_id, "CAP_DENIED", "InputInject capability denied")
@@ -161,7 +163,9 @@ fn _handle_input_event(frame: text, session: UISession, session_id: text, out: B
             pass_do_nothing
 
 fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out: BoundedChannel<text>):
-    val cmd_kind = extract_field(frame, "cmd_type")
+    var cmd_kind = extract_field(frame, "cmd_type")
+    if cmd_kind == "":
+        cmd_kind = extract_field(frame, "kind")
     if cmd_kind == "":
         _send_error(out, session_id, "BAD_REQUEST", "cmd_type required")
         return
@@ -172,7 +176,9 @@ fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out: Bo
         Err(_):
             _send_error(out, session_id, "CAP_DENIED", "window command capability denied")
         Ok(_):
-            pass_do_nothing
+            if host_taskbar_runtime_is_enabled():
+                for client_frame in host_taskbar_runtime_take_client_frames(session_id):
+                    out.send(client_frame)
 
 # =========================================================================
 # /ui/resume — HTTP POST resume
@@ -287,13 +293,37 @@ fn _send_error(out: BoundedChannel<text>, session_id: text, code: text, message:
     val frame = _make_frame("error", session_id, "null", payload)
     out.send(frame)
 
-fn _extract_bearer(headers: text) -> text:
+fn _extract_bearer(headers: text, path: text) -> text:
     for line in headers.split("\n"):
         val trimmed = line.trim()
         if trimmed.to_lower().starts_with("authorization:"):
             val value = trimmed[14:].trim()
             if value.to_lower().starts_with("bearer "):
                 return value[7:].trim()
+    val query_token = _query_param(path, "token")
+    if query_token != "":
+        return query_token
+    return ""
+
+fn _strip_query(path: text) -> text:
+    val idx = path.find("?")
+    if idx < 0:
+        return path
+    return path.slice(0, idx)
+
+fn _query_param(path: text, key: text) -> text:
+    val idx = path.find("?")
+    if idx < 0:
+        return ""
+    val query = path.slice(idx + 1, path.len())
+    for part in query.split("&"):
+        val eq = part.find("=")
+        if eq < 0:
+            pass_do_nothing
+        else:
+            val k = part.slice(0, eq)
+            if k == key:
+                return part.slice(eq + 1, part.len())
     return ""
 
 fn _json_field(json: text, field: text) -> text:
@@ -350,18 +380,25 @@ use common.window_protocol.geometry.{WindowId, KeyCode, Modifiers, Point, WmEven
 fn _parse_wm_input_event(event_json: text) -> WmInputEvent:
     val kind = _json_field(event_json, "kind")
     val key_code_str = _json_field(event_json, "key_code")
+    val x_str = _json_field(event_json, "x")
+    val y_str = _json_field(event_json, "y")
+    val mods_str = _json_field(event_json, "modifiers")
     val key_code_val: i32 = if key_code_str == "": 0 else: key_code_str.parse_i32()
+    val x_val: i32 = if x_str == "": 0 else: x_str.parse_i32()
+    val y_val: i32 = if y_str == "": 0 else: y_str.parse_i32()
+    val mods_val: i32 = if mods_str == "": 0 else: mods_str.parse_i32()
     val event_type = match kind:
-        "KeyDown": WmEventType(value: 1)
-        "KeyUp":   WmEventType(value: 2)
-        "MouseMove": WmEventType(value: 3)
-        "MouseDown": WmEventType(value: 4)
-        "MouseUp":   WmEventType(value: 5)
+        "KeyDown" | "key_down": WmEventType(value: 1)
+        "KeyUp" | "key_up": WmEventType(value: 2)
+        "MouseMove" | "pointer_move": WmEventType(value: 3)
+        "MouseDown" | "pointer_down": WmEventType(value: 4)
+        "MouseUp" | "pointer_up": WmEventType(value: 5)
+        "wheel": WmEventType(value: 3)
         _: WmEventType(value: 1)
     return WmInputEvent(
         window_id: WindowId(value: 0u64),
         event_type: event_type,
         key_code: KeyCode(value: key_code_val),
-        mouse_pos: Point(x: 0, y: 0),
-        modifiers: Modifiers(value: 0)
+        mouse_pos: Point.xy(x_val, y_val),
+        modifiers: Modifiers(value: mods_val as u32)
     )

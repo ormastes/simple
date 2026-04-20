@@ -9,6 +9,7 @@ use common.ui.snapshot_wire.{encode_snapshot}
 use common.ui.patch_wire.{encode_envelope, PatchEnvelope}
 use common.ui.patch_stream.{PatchSinceResult}
 use app.ui.web.bounded_channel.{BoundedChannel}
+use app.ui.web.taskbar_runtime.{host_taskbar_runtime_is_enabled, host_taskbar_runtime_taskbar_frame}
 
 # =========================================================================
 # WebRuntimeAdapter
@@ -20,6 +21,7 @@ class WebRuntimeAdapter:
     grant_id: text
     last_ack_sequence: i64
     last_snapshot_revision: u64
+    last_taskbar_frame: text
     out: BoundedChannel<text>
 
     static fn new(session_id: text, session: UISession, grant_id: text, out: BoundedChannel<text>) -> WebRuntimeAdapter:
@@ -29,6 +31,7 @@ class WebRuntimeAdapter:
             grant_id: grant_id,
             last_ack_sequence: 0,
             last_snapshot_revision: 0,
+            last_taskbar_frame: "",
             out: out
         )
 
@@ -42,6 +45,7 @@ impl WebRuntimeAdapter:
         val frame = _make_frame("snapshot", self.session_id, "null", payload)
         self.last_snapshot_revision = rev
         self.out.send(frame)
+        self._emit_taskbar_model()
 
     me emit_patches(self):
         """Encode queued patches and send as patch_batch frame.
@@ -57,6 +61,7 @@ impl WebRuntimeAdapter:
             self.send_snapshot()
             return
         if result.patches.len() == 0:
+            self._emit_taskbar_model()
             return
         val from_seq = self.last_ack_sequence + 1
         var to_seq = from_seq
@@ -74,6 +79,7 @@ impl WebRuntimeAdapter:
         val seq_str = "{from_seq}"
         val frame = _make_frame("patch_batch", self.session_id, seq_str, env_json)
         self.out.send(frame)
+        self._emit_taskbar_model()
 
     me on_ack(self, last_applied: i64):
         """Update last_ack_sequence from a client ack message."""
@@ -94,6 +100,7 @@ impl WebRuntimeAdapter:
             self.send_snapshot()
             return
         if result.patches.len() == 0:
+            self._emit_taskbar_model()
             return
         val from_seq = last_sequence + 1
         var to_seq = from_seq
@@ -112,12 +119,22 @@ impl WebRuntimeAdapter:
         val frame = _make_frame("patch_batch", self.session_id, seq_str, env_json)
         self.out.send(frame)
         self.last_ack_sequence = last_sequence
+        self._emit_taskbar_model()
 
     me close(self, reason: text):
         """Send final error frame and mark closed."""
         val esc = _esc(reason)
         val payload = "{\"code\": \"CLOSED\", \"message\": \"{esc}\", \"retry_after_ms\": 0}"
         val frame = _make_frame("error", self.session_id, "null", payload)
+        self.out.send(frame)
+
+    me _emit_taskbar_model(self):
+        if not host_taskbar_runtime_is_enabled():
+            return
+        val frame = host_taskbar_runtime_taskbar_frame(self.session_id, self.session)
+        if frame == self.last_taskbar_frame:
+            return
+        self.last_taskbar_frame = frame
         self.out.send(frame)
 
 # =========================================================================

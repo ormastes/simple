@@ -6,12 +6,35 @@
 # Every path re-validates the relevant Capability before dispatching.
 
 use common.ui.session.{UISession}
+use common.ui.widget.{UITree, UIEvent}
 use common.ui.capability.{Capability}
 use common.ui.capability_policy.{require_for_window}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
+use common.ui.access.{ui_access_canonical_id, ui_access_resolve_action_name}
+use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height}
 use app.ui.web.origin_guard.{AuthError}
 use common.window_protocol.window_protocol.{WmInputEvent, WmCreateRequest, WmCloseRequest, WmResizeRequest, WmMoveRequest}
 use common.window_protocol.geometry.{WindowId, Point, Size}
+use app.ui.web.taskbar_runtime.{
+    host_taskbar_runtime_is_enabled,
+    host_taskbar_runtime_launch,
+    host_taskbar_runtime_focus,
+    host_taskbar_runtime_sync_focus,
+    host_taskbar_runtime_minimize,
+    host_taskbar_runtime_sync_minimize,
+    host_taskbar_runtime_restore,
+    host_taskbar_runtime_sync_restore,
+    host_taskbar_runtime_close,
+    host_taskbar_runtime_sync_close,
+    host_taskbar_runtime_move,
+    host_taskbar_runtime_sync_move,
+    host_taskbar_runtime_resize,
+    host_taskbar_runtime_sync_resize,
+    host_taskbar_runtime_maximize,
+    host_taskbar_runtime_sync_maximize,
+    host_taskbar_runtime_set_title,
+    host_taskbar_runtime_sync_set_title
+}
 
 # =========================================================================
 # WmBridge
@@ -25,7 +48,7 @@ class WmBridge:
 
 impl WmBridge:
 
-    fn handle_input(self, surface_id: text, widget_id: text, event: WmInputEvent) -> Result<Unit, AuthError>:
+    fn handle_input(self, surface_id: text, widget_id: text, event_json: text, event: WmInputEvent) -> Result<Unit, AuthError>:
         """Inbound input_event: resolve window, re-validate capability, dispatch."""
         val binding = self.session.window_surfaces.for_surface(surface_id)
         if binding == nil:
@@ -39,14 +62,41 @@ impl WmBridge:
                     return Err(AuthError.Forbidden)
                 Ok(_):
                     pass_do_nothing
-        # Deliver as UISession focus event to the resolved surface
         self.session.set_active_surface(surface_id)
+        val kind = _extract_text_field(event_json, "kind")
+        if kind == "text_input":
+            val value = _extract_text_field(event_json, "text")
+            if widget_id != "" and value != nil:
+                val _ = self.session.set_surface_widget_value(surface_id, widget_id, value)
+            return Ok(())
+        if kind == "pointer_down" and widget_id != "":
+            self.session.dispatch(_focus_event(widget_id))
+            return Ok(())
+        if kind == "pointer_up" and widget_id != "":
+            val canonical_id = ui_access_canonical_id(surface_id, widget_id)
+            val action_name = ui_access_resolve_action_name(self.session.access_snapshot(), canonical_id, "click")
+            if action_name != "":
+                self.session.dispatch(UIEvent.Action(name: action_name))
+            return Ok(())
+        if kind == "key_down":
+            val key_name = _event_key_name(event_json, event)
+            if key_name != "":
+                self.session.dispatch(UIEvent.KeyPress(key: key_name))
+            return Ok(())
+        if kind == "wheel":
+            val delta_y = _extract_i32_field(event_json, "delta_y")
+            if delta_y > 0:
+                self.session.dispatch(UIEvent.FocusNext)
+            elif delta_y < 0:
+                self.session.dispatch(UIEvent.FocusPrev)
+            return Ok(())
         return Ok(())
 
     fn handle_window_cmd(self, cmd_kind: text, payload_json: text) -> Result<Unit, AuthError>:
         """Inbound window_cmd: dispatch by kind.
         cmd_kind ∈ {create,close,resize,move,focus,minimize,maximize,restore,set_title}"""
         val policy = self.session.capability_policy
+        val native_feedback = _extract_text_field(payload_json, "source") == "native_event"
         match cmd_kind:
             "create":
                 if policy != nil:
@@ -56,14 +106,24 @@ impl WmBridge:
                         Ok(_): pass_do_nothing
                 val title = _extract_text_field(payload_json, "title")
                 val surface_id = _extract_text_field(payload_json, "surface_id")
-                val tree = self.session.get_surface("main")
-                if tree != nil:
-                    val eff_id = if surface_id != nil and surface_id != "": surface_id else: "web-surface"
-                    val _ = self.session.open_surface(eff_id, tree)
+                val eff_id = if surface_id != nil and surface_id != "": surface_id else: _next_surface_id(self.session)
+                if not self.session.has_surface(eff_id):
+                    val width = _extract_i32_field(payload_json, "width")
+                    val height = _extract_i32_field(payload_json, "height")
+                    val x = _extract_i32_field(payload_json, "x")
+                    val y = _extract_i32_field(payload_json, "y")
+                    val eff_title = if title == nil or title == "": "Window" else: title
+                    val tree = _build_window_tree(eff_id, eff_title, _default_if_zero(width, 640), _default_if_zero(height, 420))
+                    val handle = self.session.open_surface(eff_id, tree)
+                    val root_id = tree.root_node().id
+                    val _ = self.session.set_surface_widget_prop(eff_id, root_id, "x", "{x}")
+                    val _ = self.session.set_surface_widget_prop(eff_id, root_id, "y", "{y}")
+                    self.session.bind_window_surface_with_kind(eff_id, eff_id, 0u64, "host.window", eff_title, "SimpleWeb")
+                    self.session.set_active_surface(eff_id)
                 return Ok(())
             "close":
-                val surface_id = _extract_text_field(payload_json, "surface_id")
-                if surface_id == nil or surface_id == "":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
                     return Err(AuthError.Forbidden)
                 val binding = self.session.window_surfaces.for_surface(surface_id)
                 if binding == nil:
@@ -74,21 +134,38 @@ impl WmBridge:
                     match cap_result:
                         Err(_): return Err(AuthError.Forbidden)
                         Ok(_): pass_do_nothing
+                if host_taskbar_runtime_is_enabled():
+                    if native_feedback:
+                        match host_taskbar_runtime_sync_close(self.session, surface_id):
+                            Err(_): return Err(AuthError.Forbidden)
+                            Ok(_): return Ok(())
+                    match host_taskbar_runtime_close(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
                 val handle = self.session.surface_handle(surface_id)
                 if handle != nil:
                     val _ = self.session.close_surface(handle)
                 return Ok(())
             "focus":
-                val surface_id = _extract_text_field(payload_json, "surface_id")
-                if surface_id != nil and surface_id != "":
-                    val binding = self.session.window_surfaces.for_surface(surface_id)
-                    if binding == nil:
-                        return Err(AuthError.Forbidden)
-                    self.session.set_active_surface(surface_id)
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                if host_taskbar_runtime_is_enabled():
+                    if native_feedback:
+                        match host_taskbar_runtime_sync_focus(self.session, surface_id):
+                            Err(_): return Err(AuthError.Forbidden)
+                            Ok(_): return Ok(())
+                    match host_taskbar_runtime_focus(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                self.session.set_active_surface(surface_id)
                 return Ok(())
             "resize":
-                val surface_id = _extract_text_field(payload_json, "surface_id")
-                if surface_id == nil or surface_id == "":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
                     return Err(AuthError.Forbidden)
                 val binding = self.session.window_surfaces.for_surface(surface_id)
                 if binding == nil:
@@ -99,28 +176,118 @@ impl WmBridge:
                     match cap_result:
                         Err(_): return Err(AuthError.Forbidden)
                         Ok(_): pass_do_nothing
+                val width = _extract_i32_field_any(payload_json, ["w", "width"])
+                val height = _extract_i32_field_any(payload_json, ["h", "height"])
+                if host_taskbar_runtime_is_enabled() and binding.surface_kind == "Electron":
+                    if native_feedback:
+                        match host_taskbar_runtime_sync_resize(self.session, surface_id, width, height):
+                            Err(_): return Err(AuthError.Forbidden)
+                            Ok(_): return Ok(())
+                    match host_taskbar_runtime_resize(self.session, surface_id, width, height):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                val root_id = _surface_root_id(self.session, surface_id)
+                if root_id == "":
+                    return Err(AuthError.Forbidden)
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "width", "{width}")
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "height", "{height}")
                 return Ok(())
             "move":
-                val surface_id = _extract_text_field(payload_json, "surface_id")
-                if surface_id == nil or surface_id == "":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
                     return Err(AuthError.Forbidden)
                 val binding = self.session.window_surfaces.for_surface(surface_id)
                 if binding == nil:
                     return Err(AuthError.Forbidden)
+                val x = _extract_i32_field(payload_json, "x")
+                val y = _extract_i32_field(payload_json, "y")
+                if host_taskbar_runtime_is_enabled() and binding.surface_kind == "Electron":
+                    if native_feedback:
+                        match host_taskbar_runtime_sync_move(self.session, surface_id, x, y):
+                            Err(_): return Err(AuthError.Forbidden)
+                            Ok(_): return Ok(())
+                    match host_taskbar_runtime_move(self.session, surface_id, x, y):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                val root_id = _surface_root_id(self.session, surface_id)
+                if root_id == "":
+                    return Err(AuthError.Forbidden)
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "x", "{x}")
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "y", "{y}")
                 return Ok(())
             "minimize":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
+                    return Err(AuthError.Forbidden)
+                if host_taskbar_runtime_is_enabled() and native_feedback:
+                    match host_taskbar_runtime_sync_minimize(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                if host_taskbar_runtime_is_enabled():
+                    match host_taskbar_runtime_minimize(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
                 return Ok(())
             "maximize":
-                return Ok(())
-            "restore":
-                return Ok(())
-            "set_title":
-                val surface_id = _extract_text_field(payload_json, "surface_id")
-                if surface_id == nil or surface_id == "":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
                     return Err(AuthError.Forbidden)
                 val binding = self.session.window_surfaces.for_surface(surface_id)
                 if binding == nil:
                     return Err(AuthError.Forbidden)
+                if host_taskbar_runtime_is_enabled() and binding.surface_kind == "Electron":
+                    if native_feedback:
+                        match host_taskbar_runtime_sync_maximize(self.session, surface_id):
+                            Err(_): return Err(AuthError.Forbidden)
+                            Ok(_): return Ok(())
+                    match host_taskbar_runtime_maximize(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                val root_id = _surface_root_id(self.session, surface_id)
+                if root_id == "":
+                    return Err(AuthError.Forbidden)
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "maximized", "true")
+                return Ok(())
+            "restore":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
+                    return Err(AuthError.Forbidden)
+                if host_taskbar_runtime_is_enabled() and native_feedback:
+                    match host_taskbar_runtime_sync_restore(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                if host_taskbar_runtime_is_enabled():
+                    match host_taskbar_runtime_restore(self.session, surface_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                val root_id = _surface_root_id(self.session, surface_id)
+                if root_id != "":
+                    val _ = self.session.set_surface_widget_prop(surface_id, root_id, "maximized", "false")
+                    val _ = self.session.set_surface_widget_prop(surface_id, root_id, "visible", "true")
+                return Ok(())
+            "set_title":
+                val surface_id = _resolve_surface_id(self.session, payload_json)
+                if surface_id == "":
+                    return Err(AuthError.Forbidden)
+                val binding = self.session.window_surfaces.for_surface(surface_id)
+                if binding == nil:
+                    return Err(AuthError.Forbidden)
+                val title = _extract_text_field(payload_json, "title")
+                if title == nil or title == "":
+                    return Err(AuthError.Forbidden)
+                if host_taskbar_runtime_is_enabled() and native_feedback:
+                    match host_taskbar_runtime_sync_set_title(self.session, surface_id, title):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                if host_taskbar_runtime_is_enabled() and binding.surface_kind == "Electron":
+                    match host_taskbar_runtime_set_title(self.session, surface_id, title):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
+                val root_id = _surface_root_id(self.session, surface_id)
+                if root_id == "":
+                    return Err(AuthError.Forbidden)
+                val _ = self.session.set_surface_widget_prop(surface_id, root_id, "title", title)
+                val _ = self.session.update_window_surface_title(surface_id, title)
                 return Ok(())
             "launch":
                 # Launch a pinned app — ACL-gated via WindowCreate so taskbar
@@ -136,6 +303,10 @@ impl WmBridge:
                     match cap_result:
                         Err(_): return Err(AuthError.Forbidden)
                         Ok(_): pass_do_nothing
+                if host_taskbar_runtime_is_enabled():
+                    match host_taskbar_runtime_launch(self.session, app_id):
+                        Err(_): return Err(AuthError.Forbidden)
+                        Ok(_): return Ok(())
                 return Ok(())
             _:
                 return Err(AuthError.Forbidden)
@@ -170,3 +341,104 @@ fn _extract_text_field(json: text, field: text) -> text?:
             end = end + 1
         end = end + 1
     return json.slice(inner_start, end)
+
+fn _extract_i32_field(json: text, field: text) -> i32:
+    val raw = _extract_scalar_field(json, field)
+    if raw == nil or raw == "":
+        return 0
+    return raw.parse_i32()
+
+fn _extract_i32_field_any(json: text, fields: [text]) -> i32:
+    for field in fields:
+        val raw = _extract_scalar_field(json, field)
+        if raw != nil and raw != "":
+            return raw.parse_i32()
+    return 0
+
+fn _extract_scalar_field(json: text, field: text) -> text?:
+    val key = "\"{field}\":"
+    val pos = json.find(key)
+    if pos < 0:
+        return nil
+    val start = pos + key.len()
+    if start >= json.len():
+        return nil
+    if json[start] == "\"":
+        return _extract_text_field(json, field)
+    var end = start
+    while end < json.len():
+        val ch = json[end]
+        if ch == "," or ch == "}" or ch == "]":
+            return json.slice(start, end).trim()
+        end = end + 1
+    return json.slice(start, json.len()).trim()
+
+fn _resolve_surface_id(session: UISession, payload_json: text) -> text:
+    val direct = _extract_text_field(payload_json, "surface_id")
+    if direct != nil and direct != "":
+        return direct
+    val hinted = _extract_text_field(payload_json, "window_id_hint")
+    if hinted == nil or hinted == "":
+        return ""
+    val by_surface = session.window_surfaces.for_surface(hinted)
+    if by_surface != nil:
+        return hinted
+    val by_window = session.window_surfaces.for_window(hinted)
+    if by_window == nil:
+        return ""
+    by_window.surface_id
+
+fn _surface_root_id(session: UISession, surface_id: text) -> text:
+    val tree = session.get_surface(surface_id)
+    if tree == nil:
+        return ""
+    return tree.root_node().id
+
+fn _focus_event(widget_id: text) -> UIEvent:
+    UIEvent.Action(name: "focus_{widget_id}")
+
+fn _event_key_name(event_json: text, event: WmInputEvent) -> text:
+    val key_text = _extract_text_field(event_json, "key")
+    if key_text != nil and key_text != "":
+        return key_text.to_lower()
+    val code = event.key_code.to_u32() as i32
+    if code == 13:
+        return "enter"
+    if code == 27:
+        return "escape"
+    if code == 9:
+        return "tab"
+    if code == 8:
+        return "backspace"
+    if code >= 48 and code <= 57:
+        val digits = "0123456789"
+        return digits.slice(code - 48, code - 47)
+    if code >= 65 and code <= 90:
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        return letters.slice(code - 65, code - 64)
+    if code >= 97 and code <= 122:
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        return letters.slice(code - 97, code - 96)
+    return ""
+
+fn _default_if_zero(value: i32, fallback: i32) -> i32:
+    if value <= 0:
+        return fallback
+    return value
+
+fn _next_surface_id(session: UISession) -> text:
+    "web-surface-{session.surface_count() + 1}"
+
+fn _build_window_tree(surface_id: text, title: text, width: i32, height: i32) -> UITree:
+    val root = with_height(
+        with_width(
+            column("{surface_id}_root", [
+                label("{surface_id}_title", title),
+                label("{surface_id}_body", "Simple host surface"),
+                button("{surface_id}_close", "Close", "close")
+            ]),
+            width
+        ),
+        height
+    )
+    build_tree_with_title(root, title, "glass_dark")

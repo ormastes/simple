@@ -1,0 +1,658 @@
+# Host Taskbar Runtime — authoritative taskbar + launch/runtime state
+#
+# Supports three host shell modes:
+#   * desktop_embedded: taskbar + in-shell SimpleWeb surfaces
+#   * taskbar_only:     taskbar shell + native Electron BrowserWindows
+#   * headless:         no local shell window; remote UI still gets taskbar state
+
+use common.ui.session.{UISession}
+use common.ui.taskbar_model.{AppRef, TrayItem}
+use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height, with_visible}
+use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json}
+use examples.hello_taskbar.main.{hello_html, hello_title, hello_size_width, hello_size_height}
+use examples.hello_taskbar.app_manifest.{APP_ID, DISPLAY_NAME, ICON, resolve_for_local_host}
+use os.desktop.app_manifest.{AppManifest, UiBackendKind, default_manifests, host_caps_host, resolve_backend}
+
+struct HostTaskbarApp:
+    app_id: text
+    display_name: text
+    icon: text
+    description: text
+    title: text
+    width: i32
+    height: i32
+    native_html: text
+
+enum HostShellMode:
+    DesktopEmbedded
+    TaskbarOnly
+    Headless
+
+struct HostWindowCommand:
+    action: text
+    window_id: text
+    surface_id: text
+    app_id: text
+    title: text
+    url: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class HostTaskbarRuntime:
+    enabled: bool
+    mode: HostShellMode
+    electron_available: bool
+    next_window_ordinal: i64
+    next_process_id: u64
+    pinned: [AppRef]
+    tray: [TrayItem]
+    minimized_surface_ids: [text]
+    pending_commands: [HostWindowCommand]
+
+    static fn new() -> HostTaskbarRuntime:
+        HostTaskbarRuntime(
+            enabled: false,
+            mode: HostShellMode.DesktopEmbedded,
+            electron_available: false,
+            next_window_ordinal: 0,
+            next_process_id: 1000u64,
+            pinned: _default_pinned(),
+            tray: _default_tray(),
+            minimized_surface_ids: [],
+            pending_commands: []
+        )
+
+var _host_taskbar_runtime: HostTaskbarRuntime? = nil
+
+fn host_taskbar_runtime_reset():
+    _host_taskbar_runtime = Some(HostTaskbarRuntime.new())
+
+fn host_taskbar_runtime_enable(mode_name: text, electron_available: bool):
+    val rt = _get_host_taskbar_runtime()
+    rt.enabled = true
+    rt.mode = _parse_mode(mode_name)
+    rt.electron_available = electron_available
+    rt.next_window_ordinal = 0
+    rt.next_process_id = 1000u64
+    rt.minimized_surface_ids = []
+    rt.pending_commands = []
+
+fn host_taskbar_runtime_is_enabled() -> bool:
+    val rt = _get_host_taskbar_runtime()
+    rt.enabled
+
+fn host_taskbar_runtime_mode_name() -> text:
+    val rt = _get_host_taskbar_runtime()
+    _mode_name(rt.mode)
+
+fn host_taskbar_runtime_taskbar_frame(session_id: text, session: UISession) -> text:
+    val rt = _get_host_taskbar_runtime()
+    val model = build_taskbar_model_with_minimized(
+        session.window_surfaces,
+        rt.pinned,
+        rt.tray,
+        rt.minimized_surface_ids
+    )
+    val payload = taskbar_model_to_json(model)
+    _make_frame("taskbar_model", session_id, "null", payload)
+
+fn host_taskbar_runtime_take_client_frames(session_id: text) -> [text]:
+    val rt = _get_host_taskbar_runtime()
+    var frames: [text] = []
+    for cmd in rt.pending_commands:
+        val payload = _command_to_json(cmd)
+        frames = frames.push(_make_frame("host_window_command", session_id, "null", payload))
+    rt.pending_commands = []
+    frames
+
+fn host_taskbar_runtime_native_window_html(app_id: text) -> text?:
+    val app = _find_app(app_id)
+    if app != nil:
+        return app.native_html
+    return nil
+
+fn host_taskbar_runtime_catalog() -> [HostTaskbarApp]:
+    var apps: [HostTaskbarApp] = [_hello_catalog_app()]
+    for manifest in default_manifests():
+        if _find_app_in(apps, manifest.binary) == nil:
+            apps = apps.push(_manifest_catalog_app(manifest))
+    apps
+
+fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    if not rt.enabled:
+        return Err("host taskbar runtime not enabled")
+    val app = _find_app(app_id)
+    if app == nil:
+        return Err("unknown pinned app: {app_id}")
+    val title = app.title
+    val width = app.width
+    val height = app.height
+
+    rt.next_window_ordinal = rt.next_window_ordinal + 1
+    rt.next_process_id = rt.next_process_id + 1u64
+    val ordinal = rt.next_window_ordinal
+    val process_id = rt.next_process_id
+    val surface_id = "host-surface-{ordinal}"
+    val window_id = "host-window-{ordinal}"
+
+    if _mode_is_headless(rt.mode):
+        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "Headless")
+        return Ok(())
+
+    val resolved_backend = _resolve_app_backend(app_id, rt.electron_available)
+    val backend = match resolved_backend:
+        Err(e):
+            return Err(e)
+        Ok(kind):
+            kind
+
+    if _mode_is_taskbar_only(rt.mode) and backend != UiBackendKind.Electron:
+        return Err("taskbar-only mode requires an Electron-resolved backend")
+
+    if _mode_is_taskbar_only(rt.mode) and backend == UiBackendKind.Electron:
+        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "Electron")
+        session.set_active_surface(surface_id)
+        rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+            action: "spawn_native_window",
+            window_id: window_id,
+            surface_id: surface_id,
+            app_id: app_id,
+            title: title,
+            url: _native_window_url(app_id, surface_id, window_id),
+            x: 0,
+            y: 0,
+            width: width,
+            height: height
+        ))
+        return Ok(())
+
+    val _ = session.open_surface(surface_id, _build_app_tree(surface_id, title, width, height, true))
+    session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "SimpleWeb")
+    session.set_active_surface(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_focus(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    if binding.surface_kind == "Electron":
+        rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+            action: "focus_native_window",
+            window_id: binding.window_id,
+            surface_id: surface_id,
+            app_id: binding.app_id,
+            title: binding.title,
+            url: "",
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        ))
+    else:
+        _set_surface_visible(session, surface_id, true)
+        session.set_active_surface(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_sync_focus(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    session.set_active_surface(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_minimize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if not _contains_text(rt.minimized_surface_ids, surface_id):
+        rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)
+    if binding.surface_kind == "Electron":
+        rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+            action: "minimize_native_window",
+            window_id: binding.window_id,
+            surface_id: surface_id,
+            app_id: binding.app_id,
+            title: binding.title,
+            url: "",
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        ))
+    else:
+        _set_surface_visible(session, surface_id, false)
+    return Ok(())
+
+fn host_taskbar_runtime_sync_minimize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if not _contains_text(rt.minimized_surface_ids, surface_id):
+        rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_restore(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    if binding.surface_kind == "Electron":
+        rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+            action: "restore_native_window",
+            window_id: binding.window_id,
+            surface_id: surface_id,
+            app_id: binding.app_id,
+            title: binding.title,
+            url: "",
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        ))
+    else:
+        _set_surface_visible(session, surface_id, true)
+        session.set_active_surface(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_sync_restore(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    session.set_active_surface(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_close(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    if binding.surface_kind == "Electron":
+        rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+            action: "close_native_window",
+            window_id: binding.window_id,
+            surface_id: surface_id,
+            app_id: binding.app_id,
+            title: binding.title,
+            url: "",
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        ))
+        session.clear_window_surface_binding(surface_id)
+        return Ok(())
+    val handle = session.surface_handle(surface_id)
+    if handle != nil:
+        val _ = session.close_surface(handle)
+    else:
+        session.clear_window_surface_binding(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_sync_close(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    val handle = session.surface_handle(surface_id)
+    if handle != nil:
+        val _ = session.close_surface(handle)
+    else:
+        session.clear_window_surface_binding(surface_id)
+    return Ok(())
+
+fn host_taskbar_runtime_move(session: UISession, surface_id: text, x: i32, y: i32) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if binding.surface_kind != "Electron":
+        return Err("surface is not native")
+    rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+        action: "move_native_window",
+        window_id: binding.window_id,
+        surface_id: surface_id,
+        app_id: binding.app_id,
+        title: binding.title,
+        url: "",
+        x: x,
+        y: y,
+        width: 0,
+        height: 0
+    ))
+    return Ok(())
+
+fn host_taskbar_runtime_sync_move(session: UISession, surface_id: text, x: i32, y: i32) -> Result<Unit, text>:
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    val tree = session.get_surface(surface_id)
+    if tree != nil:
+        val root_id = tree.root_node().id
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "x", "{x}")
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "y", "{y}")
+    return Ok(())
+
+fn host_taskbar_runtime_resize(session: UISession, surface_id: text, width: i32, height: i32) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if binding.surface_kind != "Electron":
+        return Err("surface is not native")
+    rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+        action: "resize_native_window",
+        window_id: binding.window_id,
+        surface_id: surface_id,
+        app_id: binding.app_id,
+        title: binding.title,
+        url: "",
+        x: 0,
+        y: 0,
+        width: width,
+        height: height
+    ))
+    return Ok(())
+
+fn host_taskbar_runtime_sync_resize(session: UISession, surface_id: text, width: i32, height: i32) -> Result<Unit, text>:
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    val tree = session.get_surface(surface_id)
+    if tree != nil:
+        val root_id = tree.root_node().id
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "width", "{width}")
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "height", "{height}")
+    return Ok(())
+
+fn host_taskbar_runtime_maximize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if binding.surface_kind != "Electron":
+        return Err("surface is not native")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+        action: "maximize_native_window",
+        window_id: binding.window_id,
+        surface_id: surface_id,
+        app_id: binding.app_id,
+        title: binding.title,
+        url: "",
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+    ))
+    return Ok(())
+
+fn host_taskbar_runtime_sync_maximize(session: UISession, surface_id: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
+    val tree = session.get_surface(surface_id)
+    if tree != nil:
+        val root_id = tree.root_node().id
+        val _ = session.set_surface_widget_prop(surface_id, root_id, "maximized", "true")
+    return Ok(())
+
+fn host_taskbar_runtime_set_title(session: UISession, surface_id: text, title: text) -> Result<Unit, text>:
+    val rt = _get_host_taskbar_runtime()
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    if binding.surface_kind != "Electron":
+        return Err("surface is not native")
+    val _ = session.update_window_surface_title(surface_id, title)
+    rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
+        action: "set_native_window_title",
+        window_id: binding.window_id,
+        surface_id: surface_id,
+        app_id: binding.app_id,
+        title: title,
+        url: "",
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+    ))
+    return Ok(())
+
+fn host_taskbar_runtime_sync_set_title(session: UISession, surface_id: text, title: text) -> Result<Unit, text>:
+    val binding = session.window_surfaces.for_surface(surface_id)
+    if binding == nil:
+        return Err("unknown surface")
+    val _ = session.update_window_surface_title(surface_id, title)
+    return Ok(())
+
+fn _get_host_taskbar_runtime() -> HostTaskbarRuntime:
+    if not _host_taskbar_runtime.?:
+        _host_taskbar_runtime = Some(HostTaskbarRuntime.new())
+    _host_taskbar_runtime.unwrap()
+
+fn _default_pinned() -> [AppRef]:
+    var pinned: [AppRef] = []
+    for app in host_taskbar_runtime_catalog():
+        pinned = pinned.push(AppRef(
+            app_id: app.app_id,
+            display_name: app.display_name,
+            icon: app.icon
+        ))
+    pinned
+
+fn _find_app(app_id: text) -> HostTaskbarApp?:
+    _find_app_in(host_taskbar_runtime_catalog(), app_id)
+
+fn _find_app_in(apps: [HostTaskbarApp], app_id: text) -> HostTaskbarApp?:
+    for app in apps:
+        if app.app_id == app_id:
+            return app
+    return nil
+
+fn _hello_catalog_app() -> HostTaskbarApp:
+    HostTaskbarApp(
+        app_id: APP_ID,
+        display_name: DISPLAY_NAME,
+        icon: ICON,
+        description: "Host taskbar runtime demo",
+        title: hello_title(),
+        width: hello_size_width(),
+        height: hello_size_height(),
+        native_html: hello_html()
+    )
+
+fn _manifest_catalog_app(manifest: AppManifest) -> HostTaskbarApp:
+    val title = manifest.name
+    HostTaskbarApp(
+        app_id: manifest.binary,
+        display_name: manifest.name,
+        icon: manifest.icon,
+        description: manifest.description,
+        title: title,
+        width: 640,
+        height: 420,
+        native_html: _generic_manifest_html(manifest)
+    )
+
+fn _resolve_app_backend(app_id: text, electron_available: bool) -> Result<UiBackendKind, text>:
+    if app_id == APP_ID:
+        return resolve_for_local_host(electron_available)
+    val resolved = resolve_backend(UiBackendKind.Auto, host_caps_host(electron_available))
+    match resolved:
+        Ok(kind): Ok(kind)
+        Err(_): Err("Electron not available on this host")
+
+fn _generic_manifest_html(manifest: AppManifest) -> text:
+    val title = _html_escape(manifest.name)
+    val desc = _html_escape(manifest.description)
+    val category = _html_escape(manifest.category)
+    val binary = _html_escape(manifest.binary)
+    "<!doctype html>" +
+    "<html><head><meta charset='utf-8'>" +
+    "<title>{title}</title>" +
+    "<style>" +
+    "body { margin: 0; min-height: 100vh; padding: 28px; background: linear-gradient(135deg, #10201b, #101724); color: #f3f0dc; font-family: Georgia, serif; }" +
+    "h1 { margin: 0 0 10px 0; font-size: 28px; }" +
+    "p { margin: 8px 0; font-size: 15px; line-height: 1.45; }" +
+    ".tag { display: inline-block; margin-top: 14px; padding: 6px 10px; border: 1px solid rgba(243,240,220,.35); border-radius: 999px; }" +
+    "</style></head><body>" +
+    "<h1>{title}</h1>" +
+    "<p>{desc}</p>" +
+    "<p class='tag'>{category} - {binary}</p>" +
+    "</body></html>"
+
+fn _html_escape(s: text) -> text:
+    var r = s.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r = r.replace("'", "&#39;")
+    r
+
+fn _default_tray() -> [TrayItem]:
+    [TrayItem(item_id: "host-runtime", label: "host", icon: "host")]
+
+fn _parse_mode(mode_name: text) -> HostShellMode:
+    val m = mode_name.to_lower()
+    if m == "taskbar_only" or m == "taskbar-only":
+        return HostShellMode.TaskbarOnly
+    if m == "headless":
+        return HostShellMode.Headless
+    return HostShellMode.DesktopEmbedded
+
+fn _mode_name(mode: HostShellMode) -> text:
+    match mode:
+        HostShellMode.DesktopEmbedded: "desktop_embedded"
+        HostShellMode.TaskbarOnly: "taskbar_only"
+        HostShellMode.Headless: "headless"
+
+fn _mode_is_taskbar_only(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.TaskbarOnly: true
+        _: false
+
+fn _mode_is_headless(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.Headless: true
+        _: false
+
+fn _build_app_tree(surface_id: text, title: text, width: i32, height: i32, visible: bool):
+    val root = with_visible(
+        with_height(
+            with_width(
+                column("{surface_id}_root", [
+                    label("{surface_id}_title", title),
+                    label("{surface_id}_body", "Host taskbar runtime demo surface"),
+                    button("{surface_id}_dismiss", "Close", "close")
+                ]),
+                width
+            ),
+            height
+        ),
+        visible
+    )
+    build_tree_with_title(root, title, "glass_dark")
+
+fn _set_surface_visible(session: UISession, surface_id: text, visible: bool):
+    val tree = session.get_surface(surface_id)
+    if tree == nil:
+        return
+    val updated = build_tree_with_title(
+        with_visible(tree.root_node(), visible),
+        tree.title_text(),
+        tree.theme_name()
+    )
+    val handle = session.surface_handle(surface_id)
+    if handle != nil:
+        session.update_surface_tree(handle, updated)
+
+fn _native_window_url(app_id: text, surface_id: text, window_id: text) -> text:
+    "/wm/native_window?app_id={_url_encode(app_id)}&surface_id={_url_encode(surface_id)}&window_id={_url_encode(window_id)}"
+
+fn _url_encode(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "/":
+            out = "{out}%2F"
+        elif ch == " ":
+            out = "{out}%20"
+        elif ch == "&":
+            out = "{out}%26"
+        elif ch == "=":
+            out = "{out}%3D"
+        elif ch == "?":
+            out = "{out}%3F"
+        else:
+            out = "{out}{ch}"
+        i = i + 1
+    out
+
+fn _contains_text(items: [text], target: text) -> bool:
+    for item in items:
+        if item == target:
+            return true
+    false
+
+fn _remove_text(items: [text], target: text) -> [text]:
+    var filtered: [text] = []
+    for item in items:
+        if item == target:
+            pass_do_nothing
+        else:
+            filtered = filtered.push(item)
+    filtered
+
+fn _command_to_json(cmd: HostWindowCommand) -> text:
+    "{" +
+    "\"action\":\"{_json_escape(cmd.action)}\"," +
+    "\"window_id\":\"{_json_escape(cmd.window_id)}\"," +
+    "\"surface_id\":\"{_json_escape(cmd.surface_id)}\"," +
+    "\"app_id\":\"{_json_escape(cmd.app_id)}\"," +
+    "\"title\":\"{_json_escape(cmd.title)}\"," +
+    "\"url\":\"{_json_escape(cmd.url)}\"," +
+    "\"x\":{cmd.x}," +
+    "\"y\":{cmd.y}," +
+    "\"width\":{cmd.width}," +
+    "\"height\":{cmd.height}" +
+    "}"
+
+fn _make_frame(msg_type: text, session_id: text, seq: text, payload: text) -> text:
+    "{\"t\": \"{msg_type}\", \"v\": 1, \"s\": \"{session_id}\", \"seq\": {seq}, \"payload\": {payload}}"
+
+fn _json_escape(s: text) -> text:
+    var r = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\"":
+            r = "{r}\\\""
+        elif ch == "\\":
+            r = "{r}\\\\"
+        elif ch == "\n":
+            r = "{r}\\n"
+        elif ch == "\r":
+            r = "{r}\\r"
+        elif ch == "\t":
+            r = "{r}\\t"
+        else:
+            r = "{r}{ch}"
+        i = i + 1
+    r

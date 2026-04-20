@@ -46,6 +46,8 @@ SERIAL_STDIO=0
 CLEAN_FLAG=""
 TABLET_FLAG=""
 OBJCOPY="/opt/homebrew/opt/llvm/bin/llvm-objcopy"
+SIMPLE_BIN=""
+BUILD_ENV_PREFIX=""
 
 # ─── Argument parsing ────────────────────────────────────────────────────────
 
@@ -90,10 +92,45 @@ if [ ! -f "$OBJCOPY" ]; then
     fi
 fi
 
-if [ ! -f bin/simple ]; then
-    echo "ERROR: bin/simple not found. Run scripts/setup.sh first."
+simple_binary_is_valid() {
+    [ -f "$1" ] || return 1
+    "$1" --version >/dev/null 2>&1
+}
+
+find_simple_binary() {
+    if [ -n "${SIMPLE_BINARY:-}" ]; then
+        echo "$SIMPLE_BINARY"
+        return 0
+    fi
+
+    for cand in \
+        src/compiler_rust/target/bootstrap/simple \
+        src/compiler_rust/target/debug/simple \
+        src/compiler_rust/target/release/simple \
+        bin/simple \
+        bin/release/aarch64-apple-darwin-macho/simple \
+        bin/release/macos-arm64/simple \
+        bin/release/darwin-aarch64/simple \
+        bin/release/macos-x86_64/simple \
+        bin/release/linux-x86_64/simple
+    do
+        if simple_binary_is_valid "$cand"; then
+            echo "$cand"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+SIMPLE_BIN="$(find_simple_binary)"
+if [ -z "$SIMPLE_BIN" ]; then
+    echo "ERROR: no working simple compiler found."
     exit 1
 fi
+
+OBJCOPY_DIR="$(dirname "$OBJCOPY")"
+BUILD_ENV_PREFIX="env SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$REPO_ROOT/src RUST_LOG=${RUST_LOG:-warn} PATH=$OBJCOPY_DIR:$PATH"
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
@@ -104,13 +141,19 @@ if [ "$RUN_ONLY" -eq 0 ]; then
 
     mkdir -p build/os
 
-    bin/simple native-build \
+    # Match the working bare-metal wrapper profile used by qemu_runner:
+    # use a validated local compiler, include examples/simple_os sources,
+    # and enable entry-closure to avoid freestanding stubbed boot images.
+    $BUILD_ENV_PREFIX "$SIMPLE_BIN" native-build \
+        --backend cranelift \
+        --entry-closure \
         --entry "$ENTRY" \
         --target x86_64-unknown-none \
         -o "$OUTPUT" \
         --linker-script "$LINKER" \
         --source src/os \
         --source src/lib \
+        --source examples/simple_os \
         --strip \
         $CLEAN_FLAG
 

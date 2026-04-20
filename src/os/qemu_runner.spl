@@ -1124,8 +1124,9 @@ fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     """Best-effort host-side validation that the disk image is populated.
 
     The desktop disk lane currently packages plain-text resident manifests
-    for the remote-capable desktop apps. Grepping for each entry symbol is
-    lightweight and avoids false-positive success on an empty FAT32 image.
+    for the remote-capable desktop apps plus at least one real filesystem-
+    backed user ELF marker. Grepping for each marker is lightweight and
+    avoids false-positive success on an empty FAT32 image.
     """
     val markers = [
         "browser_demo_remote_main",
@@ -1142,6 +1143,12 @@ fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
         if exit_code != 0:
             return false
         i = i + 1
+    val payload_cmd = "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/hello_world 2>/dev/null | strings | grep -q 'SIMPLEOS_DISK_HELLO_ELF'; " +
+        "else grep -a -q 'SIMPLEOS_DISK_HELLO_ELF' \"{img_path}\"; fi"
+    val (_payload_stdout, _payload_stderr, payload_exit) = rt_process_run_timeout("/bin/sh", ["-c", payload_cmd], 5000)
+    if payload_exit != 0:
+        return false
     true
 
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:

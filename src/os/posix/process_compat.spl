@@ -12,6 +12,7 @@
 
 use os.posix.errno.{EINVAL, ECHILD, ENOENT, ENOMEM}
 use os.userlib.syscall_raw.{syscall}
+extern fn spl_str_ptr(s: text) -> i64
 
 # Kernel syscall numbers
 val _SYS_EXIT: u64 = 0
@@ -22,17 +23,6 @@ val _SYS_SIGNAL: u64 = 7
 val _SYS_SPAWN_BINARY: u64 = 13
 
 val WNOHANG: u32 = 1
-
-extern fn unsafe_addr_of(ref: any) -> u64
-
-val _HEAP_TAG_MASK: u64 = 0x7
-val _RUNTIME_STRING_DATA_OFFSET: u64 = 12
-
-fn _text_data_ptr(s: text) -> u64:
-    """Return the raw RuntimeString.data pointer for a baremetal text value."""
-    val rv_bits = unsafe_addr_of(s)
-    val heap_base = rv_bits & (0xFFFFFFFFFFFFFFFF - _HEAP_TAG_MASK)
-    heap_base + _RUNTIME_STRING_DATA_OFFSET
 
 fn posix_spawn(path: text, priority: u8) -> i64:
     """Spawn a new process from an ELF binary path.
@@ -49,9 +39,8 @@ fn posix_spawn(path: text, priority: u8) -> i64:
     if path.len() == 0:
         return 0 - EINVAL as i64
 
-    # SpawnBinary expects a raw byte span for the underlying text storage.
-    val path_ptr = _text_data_ptr(path)
-    val path_len = path.len()
+    val path_ptr = spl_str_ptr(path) as u64
+    val path_len = path.len().to_u64()
     val result = syscall(_SYS_SPAWN_BINARY, path_ptr, path_len, priority as u64, 0, 0)
 
     # Kernel returns PID on success (>= 0), -errno on failure
@@ -72,8 +61,8 @@ fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
         return 0 - EINVAL as i64
 
     val _ignored_args = args
-    val payload_ptr = _text_data_ptr(path)
-    val payload_len = path.len()
+    val payload_ptr = spl_str_ptr(path) as u64
+    val payload_len = path.len().to_u64()
     val result = syscall(_SYS_SPAWN_BINARY, payload_ptr, payload_len, priority as u64, 0, 0)
     result
 

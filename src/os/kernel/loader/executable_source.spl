@@ -10,6 +10,9 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
+
+extern fn serial_println(msg: text)
 
 val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
 val RV32_PROOF_BINARY_PATH: text = "/sys/apps/rv32_user_proof"
@@ -36,6 +39,7 @@ struct SyntheticEntry:
     bytes: [u8]
 
 var g_synthetic_entries: [SyntheticEntry] = []
+var g_synthetic_vfs_entries: [SyntheticEntry] = []
 
 # Real initramfs blob, set by the boot chain via set_initramfs_blob().
 var g_initramfs_blob: [u8]? = nil
@@ -44,6 +48,63 @@ var g_initramfs_blob: [u8]? = nil
 var g_cpio_entries: [CpioEntry] = []
 var g_cpio_decoded: bool = false
 
+fn _desktop_app_short_alias(path: text) -> text?:
+    """Return the FAT32 short-name alias for seeded desktop app binaries."""
+    match path:
+        case "/sys/apps/browser_demo":
+            Some("/SYS/APPS/BROWSE~1")
+        case "/sys/apps/hello_world":
+            Some("/SYS/APPS/HELLO_~1")
+        case "/sys/apps/file_manager":
+            Some("/SYS/APPS/FILE_M~1")
+        case _:
+            nil
+
+fn _desktop_app_root_elf_alias(path: text) -> text?:
+    """Return the root-level 8.3 ELF alias currently present on seeded images.
+
+    `make_os_disk.shs` copies the temporary staging tree recursively into the
+    FAT32 image, so the built ELF artifacts are currently present at the image
+    root as well as under the canonical app paths. Keep this as a filesystem
+    fallback only; the launcher and app model still use `/sys/apps/...`.
+    """
+    match path:
+        case "/sys/apps/browser_demo":
+            Some("/BROWSE~1.ELF")
+        case "/sys/apps/hello_world":
+            Some("/HELLO_~1.ELF")
+        case "/sys/apps/file_manager":
+            Some("/FILE_M~1.ELF")
+        case "/sys/apps/shell":
+            Some("/TERMIN~1.ELF")
+        case "/sys/apps/editor":
+            Some("/EDITOR~1.ELF")
+        case _:
+            nil
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _canonical_seeded_path_from_bytes(path_bytes: [u8]) -> text?:
+    if _bytes_equal(path_bytes, "/sys/apps/browser_demo".bytes()):
+        return Some("/sys/apps/browser_demo")
+    if _bytes_equal(path_bytes, "/sys/apps/hello_world".bytes()):
+        return Some("/sys/apps/hello_world")
+    if _bytes_equal(path_bytes, "/sys/apps/file_manager".bytes()):
+        return Some("/sys/apps/file_manager")
+    if _bytes_equal(path_bytes, "/sys/apps/shell".bytes()):
+        return Some("/sys/apps/shell")
+    if _bytes_equal(path_bytes, "/sys/apps/editor".bytes()):
+        return Some("/sys/apps/editor")
+    nil
+
 fn _set_synthetic_initramfs_for_test(path: text, bytes: [u8]):
     """Test hook: register a synthetic initramfs entry resolvable by path."""
     g_synthetic_entries.push(SyntheticEntry(path: path, bytes: bytes))
@@ -51,6 +112,14 @@ fn _set_synthetic_initramfs_for_test(path: text, bytes: [u8]):
 fn _clear_synthetic_initramfs_for_test():
     """Test hook: drop all synthetic entries installed during the test."""
     g_synthetic_entries = []
+
+fn _set_synthetic_vfs_file_for_test(path: text, bytes: [u8]):
+    """Test hook: register a synthetic VFS entry resolvable by absolute path."""
+    g_synthetic_vfs_entries.push(SyntheticEntry(path: path, bytes: bytes))
+
+fn _clear_synthetic_vfs_for_test():
+    """Test hook: drop all synthetic VFS entries installed during the test."""
+    g_synthetic_vfs_entries = []
 
 fn set_initramfs_blob(blob: [u8]):
     """Set the raw initramfs image (zstd-compressed cpio) from the boot chain."""
@@ -65,6 +134,18 @@ fn _lookup_synthetic(path: text) -> Result<[u8], text>:
             return Ok(entry.bytes)
     Err(ERR_ENOENT)
 
+fn _lookup_synthetic_vfs(path: text) -> Result<[u8], text>:
+    for entry in g_synthetic_vfs_entries:
+        if entry.path == path:
+            return Ok(entry.bytes)
+    Err(ERR_ENOENT)
+
+fn _path_bytes_to_text(bytes: [u8]) -> text:
+    var chars: [text] = []
+    for b in bytes:
+        chars.push((b.to_i64()).to_char())
+    chars.join("")
+
 # ----------------------------------------------------------------------------
 # In-kernel initramfs reader.
 #
@@ -75,27 +156,34 @@ fn _lookup_synthetic(path: text) -> Result<[u8], text>:
 # ----------------------------------------------------------------------------
 
 fn _initramfs_read_file(path: text) -> Result<[u8], text>:
+    serial_println("[exec-source] initramfs enter path={path}")
     # First consult the synthetic test map — this is the injection point used
     # by specs and is a no-op in production.
     val synthetic = _lookup_synthetic(path)
     if synthetic.is_ok():
+        serial_println("[exec-source] initramfs synthetic-hit path={path}")
         return synthetic
 
     # Real initramfs path: decompress + parse on first access, then cache.
     val blob = g_initramfs_blob
     if blob == nil:
+        serial_println("[exec-source] initramfs no-blob path={path}")
         return Err(ERR_ENOENT)
 
     if not g_cpio_decoded:
+        serial_println("[exec-source] initramfs decompress path={path}")
         val decomp = zstd_decompress(blob.unwrap())
         if decomp.is_err():
+            serial_println("[exec-source] initramfs decompress-fail path={path}")
             return Err(decomp.err().unwrap())
         g_cpio_entries = cpio_parse(decomp.unwrap())
         g_cpio_decoded = true
 
     val found = cpio_lookup(g_cpio_entries, path)
     if found == nil:
+        serial_println("[exec-source] initramfs miss path={path}")
         return Err(ERR_ENOENT)
+    serial_println("[exec-source] initramfs hit path={path}")
     Ok(found.unwrap())
 
 fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
@@ -266,6 +354,33 @@ fn _legacy_stub_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
         case _:
             Err("unsupported architecture for executable source")
 
+fn _vfs_read_file(path: text) -> Result<[u8], text>:
+    val synthetic = _lookup_synthetic_vfs(path)
+    if synthetic.is_ok():
+        return synthetic
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() > 0:
+        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
+        return Ok(bytes)
+    val alias = _desktop_app_short_alias(path)
+    if alias != nil:
+        val alias_path = alias.unwrap()
+        val alias_bytes = g_vfs_read_file_bytes(alias_path)
+        if alias_bytes.len() > 0:
+            serial_println("[exec-source] vfs_alias_hit path={path} alias={alias_path} bytes={alias_bytes.len()}")
+            return Ok(alias_bytes)
+        serial_println("[exec-source] vfs_alias_miss path={path} alias={alias_path}")
+    val root_alias = _desktop_app_root_elf_alias(path)
+    if root_alias != nil:
+        val root_alias_path = root_alias.unwrap()
+        val root_alias_bytes = g_vfs_read_file_bytes(root_alias_path)
+        if root_alias_bytes.len() > 0:
+            serial_println("[exec-source] vfs_root_alias_hit path={path} alias={root_alias_path} bytes={root_alias_bytes.len()}")
+            return Ok(root_alias_bytes)
+        serial_println("[exec-source] vfs_root_alias_miss path={path} alias={root_alias_path}")
+    serial_println("[exec-source] vfs_miss path={path}")
+    Err(ERR_ENOENT)
+
 fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
     """Resolve a binary path to executable bytes.
 
@@ -275,16 +390,36 @@ fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text
        proof-of-concept stubs used for early boot smoke tests.
     3. Otherwise return ENOENT.
     """
+    serial_println("[exec-source] resolve enter path={path}")
     if path.len() == 0:
         return Err(ERR_EINVAL)
 
     if path.starts_with("/"):
+        serial_println("[exec-source] resolve absolute path={path}")
         val initramfs_result = _initramfs_read_file(path)
+        serial_println("[exec-source] resolve initramfs returned path={path}")
         if initramfs_result.is_ok():
             return initramfs_result
+        val vfs_result = _vfs_read_file(path)
+        serial_println("[exec-source] resolve vfs returned path={path}")
+        if vfs_result.is_ok():
+            return vfs_result
 
     # Reader said ENOENT — try the boot-test fallback.
+    serial_println("[exec-source] resolve legacy-fallback path={path}")
     _legacy_stub_bytes(path, arch)
+
+fn resolve_executable_bytes_from_path_bytes(path_bytes: [u8], arch: Architecture) -> Result<[u8], text>:
+    """Resolve executable bytes from raw path bytes.
+
+    The x86 desktop syscall lane uses this to avoid passing `text` across the
+    syscall->loader boundary on baremetal, where the current backend can lose
+    the string payload even though the copied user bytes are correct.
+    """
+    val canonical = _canonical_seeded_path_from_bytes(path_bytes)
+    if canonical != nil:
+        return resolve_executable_bytes(canonical.unwrap(), arch)
+    resolve_executable_bytes(_path_bytes_to_text(path_bytes), arch)
 
 fn resolve_executable_size(path: text, arch: Architecture) -> Result<u64, text>:
     """Return the size in bytes of the executable at `path`.

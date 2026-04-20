@@ -29,6 +29,12 @@ contextBridge.exposeInMainWorld('simpleUI', {
         });
     },
 
+    onNativeWindowEvent(callback) {
+        ipcRenderer.on('native-window-event', (event, msg) => {
+            callback(msg);
+        });
+    },
+
     // Send a keypress event to the Simple process
     sendKeypress(key) {
         ipcRenderer.send('keypress', key);
@@ -42,6 +48,46 @@ contextBridge.exposeInMainWorld('simpleUI', {
     // Send quit signal to the Simple process
     sendQuit() {
         ipcRenderer.send('quit');
+    },
+
+    spawnNativeWindow(windowId, url, width, height, title) {
+        return ipcRenderer.invoke('spawn-native-window', { windowId, url, width, height, title });
+    },
+
+    closeNativeWindow(windowId) {
+        return ipcRenderer.invoke('close-native-window', { windowId });
+    },
+
+    focusNativeWindow(windowId) {
+        return ipcRenderer.invoke('focus-native-window', { windowId });
+    },
+
+    minimizeNativeWindow(windowId) {
+        return ipcRenderer.invoke('minimize-native-window', { windowId });
+    },
+
+    restoreNativeWindow(windowId) {
+        return ipcRenderer.invoke('restore-native-window', { windowId });
+    },
+
+    moveNativeWindow(windowId, x, y) {
+        return ipcRenderer.invoke('move-native-window', { windowId, x, y });
+    },
+
+    resizeNativeWindow(windowId, width, height) {
+        return ipcRenderer.invoke('resize-native-window', { windowId, width, height });
+    },
+
+    maximizeNativeWindow(windowId) {
+        return ipcRenderer.invoke('maximize-native-window', { windowId });
+    },
+
+    unmaximizeNativeWindow(windowId) {
+        return ipcRenderer.invoke('unmaximize-native-window', { windowId });
+    },
+
+    setNativeWindowTitle(windowId, title) {
+        return ipcRenderer.invoke('set-native-window-title', { windowId, title });
     },
 
     // ============================================================================

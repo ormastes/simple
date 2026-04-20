@@ -26,16 +26,65 @@ use os.services.fat32.fat32.{
 # Mock Block Device
 # ============================================================================
 
+struct SectorImage:
+    lba: u64
+    bytes: [u8]
+
 class MockBlockDevice:
     """Mock block device returning a synthetic BPB sector."""
     sector_data: [u8]
+    extra_sectors: [SectorImage]
 
 impl MockBlockDevice:
     static fn new() -> MockBlockDevice:
-        MockBlockDevice(sector_data: [])
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        MockBlockDevice(sector_data: bytes, extra_sectors: [])
+
+    me fn with_valid_fat32_boot_sector() -> MockBlockDevice:
+        # Minimal FAT32 boot sector matching the mkfs.fat image used by the
+        # desktop-disk lane: 512-byte sectors, 1 sector/cluster, 32 reserved
+        # sectors, 2 FATs, FAT size 1008 sectors, root cluster 2.
+        self.sector_data[11] = 0x00
+        self.sector_data[12] = 0x02
+        self.sector_data[13] = 0x01
+        self.sector_data[14] = 0x20
+        self.sector_data[15] = 0x00
+        self.sector_data[16] = 0x02
+        self.sector_data[32] = 0x00
+        self.sector_data[33] = 0x00
+        self.sector_data[34] = 0x02
+        self.sector_data[35] = 0x00
+        self.sector_data[36] = 0xF0
+        self.sector_data[37] = 0x03
+        self.sector_data[38] = 0x00
+        self.sector_data[39] = 0x00
+        self.sector_data[44] = 0x02
+        self.sector_data[45] = 0x00
+        self.sector_data[46] = 0x00
+        self.sector_data[47] = 0x00
+        self
+
+    me fn with_sector(lba: u64, bytes: [u8]) -> MockBlockDevice:
+        self.extra_sectors.push(SectorImage(lba: lba, bytes: bytes))
+        self
 
 impl BlockDevice for MockBlockDevice:
     fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        for image in self.extra_sectors:
+            if image.lba == lba:
+                var j = 0
+                while j < image.bytes.len() and j < buffer.len():
+                    buffer[j] = image.bytes[j]
+                    j = j + 1
+                return Result.Ok(true)
+        var i = 0
+        while i < self.sector_data.len() and i < buffer.len():
+            buffer[i] = self.sector_data[i]
+            i = i + 1
         Result.Ok(true)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
@@ -160,6 +209,239 @@ describe "Fat32Bpb":
 # ============================================================================
 
 describe "Fat32Driver":
+    describe "mount":
+        it "parses BPB fields directly from sector 0":
+            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
+            var driver = Fat32Driver.new(dev)
+            val mounted = driver.mount("", "")
+
+            expect(mounted.is_ok()).to_equal(true)
+            expect(driver.bytes_per_sector).to_equal(512)
+            expect(driver.sectors_per_cluster).to_equal(1)
+            expect(driver.reserved_sectors).to_equal(32)
+            expect(driver.num_fats).to_equal(2)
+            expect(driver.fat_size).to_equal(1008)
+            expect(driver.root_cluster).to_equal(2)
+            expect(driver.data_start_sector).to_equal(2048)
+            expect(driver.total_clusters).to_equal(129024)
+
+        it "rejects a BPB with zero sectors_per_cluster":
+            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
+            dev.sector_data[13] = 0
+            var driver = Fat32Driver.new(dev)
+            val mounted = driver.mount("", "")
+
+            expect(mounted.is_err()).to_equal(true)
+            expect(mounted.unwrap_err()).to_equal("invalid BPB: sectors_per_cluster=0")
+
+        it "resolves long filenames from LFN entries":
+            var fat_sector: [u8] = []
+            var i = 0
+            while i < 512:
+                fat_sector.push(0)
+                i = i + 1
+            fat_sector[8] = 0xF8
+            fat_sector[9] = 0xFF
+            fat_sector[10] = 0xFF
+            fat_sector[11] = 0x0F
+
+            var root_sector: [u8] = []
+            i = 0
+            while i < 512:
+                root_sector.push(0)
+                i = i + 1
+
+            root_sector[0] = 0x41
+            root_sector[1] = 'b' as u8
+            root_sector[3] = 'r' as u8
+            root_sector[5] = 'o' as u8
+            root_sector[7] = 'w' as u8
+            root_sector[9] = 's' as u8
+            root_sector[11] = FAT32_ATTR_LFN
+            root_sector[14] = 'e' as u8
+            root_sector[16] = 'r' as u8
+            root_sector[18] = '_' as u8
+            root_sector[20] = 'd' as u8
+            root_sector[22] = 'e' as u8
+            root_sector[24] = 'm' as u8
+            root_sector[28] = 'o' as u8
+            root_sector[30] = 0x00
+            root_sector[31] = 0x00
+
+            root_sector[32] = 'B' as u8
+            root_sector[33] = 'R' as u8
+            root_sector[34] = 'O' as u8
+            root_sector[35] = 'W' as u8
+            root_sector[36] = 'S' as u8
+            root_sector[37] = 'E' as u8
+            root_sector[38] = '~' as u8
+            root_sector[39] = '1' as u8
+            root_sector[43] = FAT32_ATTR_ARCHIVE
+            root_sector[58] = 0x05
+            root_sector[60] = 0x39
+            root_sector[61] = 0x30
+
+            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
+            dev = dev.with_sector(32, fat_sector)
+            dev = dev.with_sector(2048, root_sector)
+            var driver = Fat32Driver.new(dev)
+            val mounted = driver.mount("", "")
+
+            expect(mounted.is_ok()).to_equal(true)
+            val resolved = driver.resolve_path("/browser_demo")
+            expect(resolved.is_ok()).to_equal(true)
+            expect(resolved.unwrap().?).to_equal(true)
+            val entry = resolved.unwrap().unwrap()
+            expect(driver.entry_first_cluster(entry)).to_equal(5)
+            expect(entry.file_size).to_equal(12345)
+
+        it "resolves nested SYS/APPS 8.3 paths":
+            var fat_sector: [u8] = []
+            var i = 0
+            while i < 512:
+                fat_sector.push(0)
+                i = i + 1
+
+            fat_sector[8] = 0xF8
+            fat_sector[9] = 0xFF
+            fat_sector[10] = 0xFF
+            fat_sector[11] = 0x0F
+
+            fat_sector[12] = 0xFF
+            fat_sector[13] = 0xFF
+            fat_sector[14] = 0xFF
+            fat_sector[15] = 0x0F
+
+            fat_sector[16] = 0xFF
+            fat_sector[17] = 0xFF
+            fat_sector[18] = 0xFF
+            fat_sector[19] = 0x0F
+
+            fat_sector[20] = 0xFF
+            fat_sector[21] = 0xFF
+            fat_sector[22] = 0xFF
+            fat_sector[23] = 0x0F
+
+            var root_sector: [u8] = []
+            i = 0
+            while i < 512:
+                root_sector.push(0)
+                i = i + 1
+            root_sector[0] = 'S' as u8
+            root_sector[1] = 'Y' as u8
+            root_sector[2] = 'S' as u8
+            root_sector[11] = FAT32_ATTR_DIRECTORY
+            root_sector[26] = 0x03
+            root_sector[27] = 0x00
+
+            var sys_sector: [u8] = []
+            i = 0
+            while i < 512:
+                sys_sector.push(0)
+                i = i + 1
+            sys_sector[0] = 'A' as u8
+            sys_sector[1] = 'P' as u8
+            sys_sector[2] = 'P' as u8
+            sys_sector[3] = 'S' as u8
+            sys_sector[11] = FAT32_ATTR_DIRECTORY
+            sys_sector[26] = 0x04
+            sys_sector[27] = 0x00
+
+            var apps_sector: [u8] = []
+            i = 0
+            while i < 512:
+                apps_sector.push(0)
+                i = i + 1
+            apps_sector[0] = 'B' as u8
+            apps_sector[1] = 'R' as u8
+            apps_sector[2] = 'O' as u8
+            apps_sector[3] = 'W' as u8
+            apps_sector[4] = 'S' as u8
+            apps_sector[5] = 'E' as u8
+            apps_sector[6] = '~' as u8
+            apps_sector[7] = '1' as u8
+            apps_sector[11] = FAT32_ATTR_ARCHIVE
+            apps_sector[26] = 0x05
+            apps_sector[27] = 0x00
+            apps_sector[28] = 0x70
+            apps_sector[29] = 0x17
+            apps_sector[30] = 0x00
+            apps_sector[31] = 0x00
+
+            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
+            dev = dev.with_sector(32, fat_sector)
+            dev = dev.with_sector(2048, root_sector)
+            dev = dev.with_sector(2049, sys_sector)
+            dev = dev.with_sector(2050, apps_sector)
+            var driver = Fat32Driver.new(dev)
+            val mounted = driver.mount("", "")
+
+            expect(mounted.is_ok()).to_equal(true)
+            val resolved = driver.resolve_path("/SYS/APPS/BROWSE~1")
+            expect(resolved.is_ok()).to_equal(true)
+            expect(resolved.unwrap().?).to_equal(true)
+            val entry = resolved.unwrap().unwrap()
+            expect(driver.entry_first_cluster(entry)).to_equal(5)
+            expect(entry.file_size).to_equal(6000)
+
+        it "lists long filename entries using their LFN text":
+            var fat_sector: [u8] = []
+            var i = 0
+            while i < 512:
+                fat_sector.push(0)
+                i = i + 1
+            fat_sector[8] = 0xF8
+            fat_sector[9] = 0xFF
+            fat_sector[10] = 0xFF
+            fat_sector[11] = 0x0F
+
+            var root_sector: [u8] = []
+            i = 0
+            while i < 512:
+                root_sector.push(0)
+                i = i + 1
+
+            root_sector[0] = 0x41
+            root_sector[1] = 'b' as u8
+            root_sector[3] = 'r' as u8
+            root_sector[5] = 'o' as u8
+            root_sector[7] = 'w' as u8
+            root_sector[9] = 's' as u8
+            root_sector[11] = FAT32_ATTR_LFN
+            root_sector[14] = 'e' as u8
+            root_sector[16] = 'r' as u8
+            root_sector[18] = '_' as u8
+            root_sector[20] = 'd' as u8
+            root_sector[22] = 'e' as u8
+            root_sector[24] = 'm' as u8
+            root_sector[28] = 'o' as u8
+            root_sector[30] = 0x00
+            root_sector[31] = 0x00
+
+            root_sector[32] = 'B' as u8
+            root_sector[33] = 'R' as u8
+            root_sector[34] = 'O' as u8
+            root_sector[35] = 'W' as u8
+            root_sector[36] = 'S' as u8
+            root_sector[37] = 'E' as u8
+            root_sector[38] = '~' as u8
+            root_sector[39] = '1' as u8
+            root_sector[43] = FAT32_ATTR_ARCHIVE
+            root_sector[58] = 0x05
+
+            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
+            dev = dev.with_sector(32, fat_sector)
+            dev = dev.with_sector(2048, root_sector)
+            var driver = Fat32Driver.new(dev)
+            val mounted = driver.mount("", "")
+
+            expect(mounted.is_ok()).to_equal(true)
+            val entries = driver.readdir("/")
+            expect(entries.is_ok()).to_equal(true)
+            val listed = entries.unwrap()
+            expect(listed.len()).to_equal(1)
+            expect(listed[0].name).to_equal("browser_demo")
+
     describe "cluster_to_sector":
         it "converts cluster 2 to data_start_sector":
             val dev = MockBlockDevice.new()

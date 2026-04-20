@@ -19,7 +19,8 @@ use std.spec
 use common.ui.window_surface_registry.{new_ui_window_surface_registry}
 use common.ui.taskbar_model.{AppRef, TrayItem}
 use app.ui.web.taskbar_shell.{
-    WindowSnapshot, snapshot_windows, build_taskbar_model
+    WindowSnapshot, snapshot_windows, build_taskbar_model,
+    build_taskbar_model_with_minimized, taskbar_model_to_json
 }
 
 fn _registry_with_two():
@@ -78,6 +79,11 @@ describe "taskbar_shell.build_taskbar_model":
         val reg = _registry_with_two()
         val m = build_taskbar_model(reg, [], [])
         expect(m.running.len()).to_equal(2)
+        var saw_window_id = false
+        for w in m.running:
+            if w.window_id == "s1" or w.window_id == "s2":
+                saw_window_id = true
+        expect(saw_window_id).to_equal(true)
 
     it "passes pinned apps through verbatim":
         val reg = new_ui_window_surface_registry()
@@ -93,3 +99,33 @@ describe "taskbar_shell.build_taskbar_model":
         val tray = [TrayItem(item_id: "clk", label: "12:00", icon: "clk")]
         val m = build_taskbar_model(reg, [], tray)
         expect(m.tray.len()).to_equal(1)
+
+    it "marks minimized entries from surface ids":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model_with_minimized(reg, [], [], ["s2"])
+        var saw_minimized = false
+        for w in m.running:
+            if w.window_id == "s2" and w.minimized:
+                saw_minimized = true
+        expect(saw_minimized).to_equal(true)
+
+    it "serializes the model as JSON":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model_with_minimized(reg, [], [], ["s2"])
+        val json = taskbar_model_to_json(m)
+        expect(json.contains("\"running\"")).to_equal(true)
+        expect(json.contains("\"window_id\":\"s2\"")).to_equal(true)
+        expect(json.contains("\"minimized\":true")).to_equal(true)
+
+    it "escapes JSON string fields":
+        val reg = new_ui_window_surface_registry()
+        reg.bind_with_kind("w\"1", "surface\\1", 100 as u64, "app\nid", "Title \"One\"", "SimpleWeb")
+        val pinned = [AppRef(app_id: "pin\\app", display_name: "Pinned \"App\"", icon: "p")]
+        val tray = [TrayItem(item_id: "tray\n1", label: "Line\nBreak", icon: "i")]
+        val m = build_taskbar_model(reg, pinned, tray)
+        val json = taskbar_model_to_json(m)
+        expect(json.contains("w\\\"1")).to_equal(true)
+        expect(json.contains("app\\nid")).to_equal(true)
+        expect(json.contains("Title \\\"One\\\"")).to_equal(true)
+        expect(json.contains("Pinned \\\"App\\\"")).to_equal(true)
+        expect(json.contains("Line\\nBreak")).to_equal(true)

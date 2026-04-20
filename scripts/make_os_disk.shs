@@ -18,6 +18,7 @@ SIZE_MB="${1:-64}"
 OUTPUT="${2:-build/os/fat32.img}"
 SEED_DIR="${3:-}"
 POPULATED=0
+ELFSEEDED=0
 
 # Ensure output directory exists
 mkdir -p "$(dirname "$OUTPUT")"
@@ -159,6 +160,10 @@ cat > "$TMPDIR/usr/bin/hello-world" << 'EOFHELLO'
 # hello-world app placeholder
 EOFHELLO
 
+cat > "$TMPDIR/SYS/APPS/hello_world" << 'EOFHELLOAPP'
+# hello_world app placeholder
+EOFHELLOAPP
+
 cat > "$TMPDIR/var/db/pkg/installed/simpleos-shell.sdn" << 'EOFPKGDB'
 [package]
 name = "simpleos-shell"
@@ -173,6 +178,120 @@ EOFMANIFEST
 if [ -n "$SEED_DIR" ] && [ -d "$SEED_DIR" ]; then
     cp -R "$SEED_DIR"/. "$TMPDIR"/
 fi
+
+HOST_CLANG="clang"
+HOST_LLD="ld.lld"
+if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+    HOST_CLANG="/opt/homebrew/opt/llvm/bin/clang"
+elif [ -x /usr/local/opt/llvm/bin/clang ]; then
+    HOST_CLANG="/usr/local/opt/llvm/bin/clang"
+fi
+if [ -x /opt/homebrew/opt/llvm/bin/ld.lld ]; then
+    HOST_LLD="/opt/homebrew/opt/llvm/bin/ld.lld"
+elif [ -x /usr/local/opt/llvm/bin/ld.lld ]; then
+    HOST_LLD="/usr/local/opt/llvm/bin/ld.lld"
+elif [ -x /opt/homebrew/bin/ld.lld ]; then
+    HOST_LLD="/opt/homebrew/bin/ld.lld"
+elif [ -x /usr/local/bin/ld.lld ]; then
+    HOST_LLD="/usr/local/bin/ld.lld"
+fi
+
+build_disk_hello_elf() {
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: clang not found -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: ld.lld not found -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! /bin/sh src/os/port/llvm/sysroot.shs >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: sysroot build failed -- keeping hello-world placeholder"
+        return 1
+    fi
+
+    HELLO_OBJ="$TMPDIR/disk_hello.o"
+    HELLO_ELF="$TMPDIR/disk_hello.elf"
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -I build/os/sysroot/include \
+        -c examples/simpleos_hello_c/disk_hello.c -o "$HELLO_OBJ"; then
+        echo "[make_os_disk] WARNING: clang build failed -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! "$HOST_LLD" -T build/os/sysroot/share/simpleos/simpleos.ld \
+        "$HELLO_OBJ" build/os/sysroot/lib/crt0.o \
+        -L build/os/sysroot/lib -lsimpleos_c \
+        -o "$HELLO_ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed -- keeping hello-world placeholder"
+        return 1
+    fi
+
+    cp "$HELLO_ELF" "$TMPDIR/usr/bin/hello-world"
+    cp "$HELLO_ELF" "$TMPDIR/SYS/APPS/hello_world"
+    echo "[make_os_disk] Seeded real hello-world ELF into /usr/bin and /sys/apps"
+    return 0
+}
+
+if build_disk_hello_elf; then
+    ELFSEEDED=1
+fi
+
+build_remote_window_elf() {
+    SRC="$1"
+    DEST_PRIMARY="$2"
+    DEST_SECONDARY="$3"
+    OBJ="$TMPDIR/$(basename "$SRC" .c).o"
+    ELF="$TMPDIR/$(basename "$SRC" .c).elf"
+
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -I build/os/sysroot/include \
+        -c "$SRC" -o "$OBJ"; then
+        echo "[make_os_disk] WARNING: clang build failed for $SRC"
+        return 1
+    fi
+    if ! "$HOST_LLD" -T build/os/sysroot/share/simpleos/simpleos.ld \
+        "$OBJ" build/os/sysroot/lib/crt0.o \
+        -L build/os/sysroot/lib -lsimpleos_c \
+        -o "$ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed for $SRC"
+        return 1
+    fi
+
+    cp "$ELF" "$DEST_PRIMARY"
+    if [ -n "$DEST_SECONDARY" ]; then
+        cp "$ELF" "$DEST_SECONDARY"
+    fi
+    echo "[make_os_disk] Seeded $(basename "$SRC" .c) ELF"
+    return 0
+}
+
+build_remote_window_elf \
+    "examples/simpleos_remote_gui/hello_world_gui.c" \
+    "$TMPDIR/SYS/APPS/hello_world" \
+    "$TMPDIR/usr/bin/hello-world" || true
+build_remote_window_elf \
+    "examples/simpleos_remote_gui/browser_demo_gui.c" \
+    "$TMPDIR/SYS/APPS/browser_demo" \
+    "$TMPDIR/usr/local/bin/browser-demo" || true
+build_remote_window_elf \
+    "examples/simpleos_remote_gui/file_manager_gui.c" \
+    "$TMPDIR/SYS/APPS/file_manager" \
+    "$TMPDIR/usr/bin/file-manager" || true
+build_remote_window_elf \
+    "examples/simpleos_remote_gui/terminal_gui.c" \
+    "$TMPDIR/SYS/APPS/shell" \
+    "$TMPDIR/bin/shell" || true
+build_remote_window_elf \
+    "examples/simpleos_remote_gui/editor_gui.c" \
+    "$TMPDIR/SYS/APPS/editor" \
+    "$TMPDIR/usr/bin/editor" || true
 
 # Method 1: mtools (works on macOS and Linux without root)
 if command -v mcopy >/dev/null 2>&1; then
@@ -216,6 +335,12 @@ fi
 if [ "$POPULATED" -ne 1 ]; then
     echo "[make_os_disk] ERROR: FAT32 image was formatted but not populated"
     exit 1
+fi
+
+if [ "$ELFSEEDED" -eq 1 ]; then
+    echo "[make_os_disk] hello-world payload: real ELF"
+else
+    echo "[make_os_disk] hello-world payload: placeholder"
 fi
 
 echo "[make_os_disk] Done: $OUTPUT"

@@ -44,6 +44,7 @@ class SimpleWindowManager {
 
     // Periodic ack timer.
     this._ackTimer = null;
+    this._nativeWindowEventSuppressions = new Map();
 
     // Load renderer then begin auth.
     this._init();
@@ -57,6 +58,9 @@ class SimpleWindowManager {
     const mod = await import('./retained_renderer.js');
     this.renderer = new mod.RetainedRenderer(this.desktop);
     this._bindGlobalEvents();
+    if (window.simpleUI && window.simpleUI.onNativeWindowEvent) {
+      window.simpleUI.onNativeWindowEvent((msg) => this._handleNativeWindowEvent(msg || {}));
+    }
     await this._authenticate();
   }
 
@@ -197,14 +201,20 @@ class SimpleWindowManager {
         this.sessionId = frame.s ?? this.sessionId;
         this.renderer.applySnapshot(frame.payload);
         this._cancelGhost();
-        this._updateTaskbar(frame.payload);
         break;
 
       case 'patch_batch':
         if (!this.renderer) break;
         this.renderer.applyPatchBatch(frame.payload);
         this._cancelGhost();
-        this._updateTaskbarFromRenderer();
+        break;
+
+      case 'taskbar_model':
+        this.renderTaskbarModel(frame.payload || {});
+        break;
+
+      case 'host_window_command':
+        this._handleHostWindowCommand(frame.payload || {});
         break;
 
       case 'focus_changed':
@@ -213,7 +223,6 @@ class SimpleWindowManager {
           frame.payload.surface_id,
           frame.payload.widget_id
         );
-        this._updateTaskbarFromRenderer();
         break;
 
       case 'ping':
@@ -255,7 +264,7 @@ class SimpleWindowManager {
   _sendWindowCmd(kind, extra) {
     this._send({
       t: 'window_cmd', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
-      payload: { kind, ...extra }
+      payload: { cmd_type: kind, kind, ...extra }
     });
   }
 
@@ -275,8 +284,8 @@ class SimpleWindowManager {
       const action = el.dataset.action;
       if (action === 'launch' && el.dataset.appId) {
         this._sendLaunch(el.dataset.appId);
-      } else if (action === 'focus' && el.dataset.surfaceId) {
-        this._sendWindowCmd('focus', { surface_id: el.dataset.surfaceId });
+      } else if (action === 'focus' && el.dataset.windowIdHint) {
+        this._sendWindowCmd('focus', { window_id_hint: el.dataset.windowIdHint });
       }
     });
   }
@@ -309,7 +318,7 @@ class SimpleWindowManager {
         + (w.minimized ? ' minimized' : '');
       item.textContent = (w.minimized ? '[-] ' : '') + (w.title || w.window_id);
       item.dataset.action = 'focus';
-      item.dataset.surfaceId = w.window_id;
+      item.dataset.windowIdHint = w.window_id;
       running.appendChild(item);
     }
     this.taskbar.appendChild(running);
@@ -323,6 +332,110 @@ class SimpleWindowManager {
       tray.appendChild(item);
     }
     this.taskbar.appendChild(tray);
+  }
+
+  async _handleHostWindowCommand(payload) {
+    const api = window.simpleUI;
+    if (!api) return;
+    const action = payload.action || '';
+    const windowId = payload.window_id || '';
+    try {
+      if (action === 'spawn_native_window' && api.spawnNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'focus');
+        await api.spawnNativeWindow(
+          windowId,
+          payload.url || '',
+          payload.width || 800,
+          payload.height || 600,
+          payload.title || ''
+        );
+      } else if (action === 'close_native_window' && api.closeNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'close');
+        await api.closeNativeWindow(windowId);
+      } else if (action === 'focus_native_window' && api.focusNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'focus');
+        await api.focusNativeWindow(windowId);
+      } else if (action === 'minimize_native_window' && api.minimizeNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'minimize');
+        await api.minimizeNativeWindow(windowId);
+      } else if (action === 'restore_native_window' && api.restoreNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'restore');
+        await api.restoreNativeWindow(windowId);
+      } else if (action === 'move_native_window' && api.moveNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'move');
+        await api.moveNativeWindow(windowId, payload.x || 0, payload.y || 0);
+      } else if (action === 'resize_native_window' && api.resizeNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'resize');
+        await api.resizeNativeWindow(windowId, payload.width || 800, payload.height || 600);
+      } else if (action === 'maximize_native_window' && api.maximizeNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'maximize');
+        await api.maximizeNativeWindow(windowId);
+      } else if (action === 'unmaximize_native_window' && api.unmaximizeNativeWindow) {
+        this._suppressNativeWindowEvent(windowId, 'unmaximize');
+        await api.unmaximizeNativeWindow(windowId);
+      } else if (action === 'set_native_window_title' && api.setNativeWindowTitle) {
+        this._suppressNativeWindowEvent(windowId, 'title');
+        await api.setNativeWindowTitle(windowId, payload.title || '');
+      }
+    } catch (err) {
+      console.error('[WM] host window command failed:', action, err);
+    }
+  }
+
+  _handleNativeWindowEvent(msg) {
+    const type = msg.type || '';
+    const windowId = msg.windowId || '';
+    if (!type || !windowId) return;
+    if (this._consumeNativeWindowEventSuppression(windowId, type)) return;
+    if (type === 'focus') {
+      this._sendWindowCmd('focus', { window_id_hint: windowId, source: 'native_event' });
+    } else if (type === 'minimize') {
+      this._sendWindowCmd('minimize', { window_id_hint: windowId, source: 'native_event' });
+    } else if (type === 'restore') {
+      this._sendWindowCmd('restore', { window_id_hint: windowId, source: 'native_event' });
+    } else if (type === 'maximize') {
+      this._sendWindowCmd('maximize', { window_id_hint: windowId, source: 'native_event' });
+    } else if (type === 'unmaximize') {
+      this._sendWindowCmd('restore', { window_id_hint: windowId, source: 'native_event' });
+    } else if (type === 'move') {
+      this._sendWindowCmd('move', {
+        window_id_hint: windowId,
+        source: 'native_event',
+        x: Math.round(msg.x ?? msg.bounds?.x ?? 0),
+        y: Math.round(msg.y ?? msg.bounds?.y ?? 0)
+      });
+    } else if (type === 'resize') {
+      this._sendWindowCmd('resize', {
+        window_id_hint: windowId,
+        source: 'native_event',
+        w: Math.round(msg.width ?? msg.bounds?.width ?? 0),
+        h: Math.round(msg.height ?? msg.bounds?.height ?? 0)
+      });
+    } else if (type === 'title') {
+      this._sendWindowCmd('set_title', {
+        window_id_hint: windowId,
+        source: 'native_event',
+        title: msg.title || ''
+      });
+    } else if (type === 'close') {
+      this._sendWindowCmd('close', { window_id_hint: windowId, source: 'native_event' });
+    }
+  }
+
+  _suppressNativeWindowEvent(windowId, type) {
+    if (!windowId || !type) return;
+    const key = `${windowId}:${type}`;
+    const count = this._nativeWindowEventSuppressions.get(key) || 0;
+    this._nativeWindowEventSuppressions.set(key, count + 1);
+  }
+
+  _consumeNativeWindowEventSuppression(windowId, type) {
+    const key = `${windowId}:${type}`;
+    const count = this._nativeWindowEventSuppressions.get(key) || 0;
+    if (count <= 0) return false;
+    if (count === 1) this._nativeWindowEventSuppressions.delete(key);
+    else this._nativeWindowEventSuppressions.set(key, count - 1);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -345,49 +458,6 @@ class SimpleWindowManager {
 
   _stopAckTimer() {
     if (this._ackTimer) { clearInterval(this._ackTimer); this._ackTimer = null; }
-  }
-
-  // -------------------------------------------------------------------------
-  // Taskbar (populated from server-authoritative renderer state)
-  // -------------------------------------------------------------------------
-
-  _updateTaskbar(snapshotPayload) {
-    if (!this.taskbar) return;
-    this.taskbar.innerHTML = '';
-    const roots = Array.isArray(snapshotPayload.roots)
-      ? snapshotPayload.roots : (snapshotPayload.root ? [snapshotPayload.root] : []);
-    for (const node of roots) {
-      const title = (node.props && node.props.title) ? node.props.title : node.surface_id;
-      const active = this.renderer && this.renderer.activeSurface === node.surface_id;
-      const item = document.createElement('div');
-      item.className = 'wm-taskbar-item' + (active ? ' active' : '');
-      item.textContent = title;
-      item.dataset.surfaceId = node.surface_id;
-      item.addEventListener('click', () => {
-        this._sendWindowCmd('focus', { window_id_hint: node.surface_id });
-      });
-      this.taskbar.appendChild(item);
-    }
-  }
-
-  _updateTaskbarFromRenderer() {
-    if (!this.taskbar || !this.renderer) return;
-    this.taskbar.innerHTML = '';
-    for (const [surfaceId, el] of this.renderer.surfaces) {
-      const title = el.dataset.title || el.title || surfaceId;
-      const active = this.renderer.activeSurface === surfaceId;
-      const minimized = el.classList.contains('minimized');
-      const item = document.createElement('div');
-      item.className = 'wm-taskbar-item'
-        + (active    ? ' active'    : '')
-        + (minimized ? ' minimized' : '');
-      item.textContent = title;
-      item.dataset.surfaceId = surfaceId;
-      item.addEventListener('click', () => {
-        this._sendWindowCmd('focus', { window_id_hint: surfaceId });
-      });
-      this.taskbar.appendChild(item);
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -643,6 +713,7 @@ class SimpleWindowManager {
       const surfId = this.renderer.activeSurface;
       this._sendInputEvent(surfId, '', {
         kind: 'key_down',
+        key: e.key,
         key_code: e.keyCode,
         modifiers: _modifiers(e),
         repeat: e.repeat
@@ -654,6 +725,7 @@ class SimpleWindowManager {
       const surfId = this.renderer.activeSurface;
       this._sendInputEvent(surfId, '', {
         kind: 'key_up',
+        key: e.key,
         key_code: e.keyCode,
         modifiers: _modifiers(e)
       });

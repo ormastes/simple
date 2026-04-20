@@ -44,6 +44,195 @@ function dumpRenderedHtml(html) {
     }
 }
 
+function browserWindowMap() {
+    if (!global.simpleBrowserWindows) global.simpleBrowserWindows = new Map();
+    return global.simpleBrowserWindows;
+}
+
+function normalizeWindowId(windowId) {
+    if (windowId === null || windowId === undefined) return '';
+    return String(windowId);
+}
+
+function getNativeWindow(windowId) {
+    return browserWindowMap().get(normalizeWindowId(windowId));
+}
+
+function readNativeWindowBounds(bw) {
+    if (!bw || bw.isDestroyed()) return null;
+    try {
+        const [x, y] = bw.getPosition();
+        const [width, height] = bw.getSize();
+        return { x, y, width, height };
+    } catch (err) {
+        debugLog(`readNativeWindowBounds failed: ${err.message}`);
+        return null;
+    }
+}
+
+function buildNativeWindowEvent(type, windowId, bw, extra = {}) {
+    const normalizedWindowId = normalizeWindowId(windowId);
+    const payload = {
+        type,
+        windowId: normalizedWindowId
+    };
+    if (bw && !bw.isDestroyed()) {
+        payload.bounds = readNativeWindowBounds(bw);
+        payload.title = bw.getTitle();
+        payload.minimized = bw.isMinimized();
+        payload.maximized = bw.isMaximized();
+        payload.visible = bw.isVisible();
+    }
+    return { ...payload, ...extra };
+}
+
+function emitNativeWindowEvent(type, windowId, bw, extra = {}) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+            'native-window-event',
+            buildNativeWindowEvent(type, windowId, bw, extra)
+        );
+    }
+}
+
+function resolveNativeWindowUrl(rawUrl) {
+    const url = String(rawUrl || '');
+    if (/^[a-zA-Z]+:\/\//.test(url)) return url;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        try {
+            return new URL(url, mainWindow.webContents.getURL()).toString();
+        } catch (err) {
+            debugLog(`resolveNativeWindowUrl failed for ${url}: ${err.message}`);
+        }
+    }
+    return url || 'about:blank';
+}
+
+function registerNativeWindowEvents(windowId, bw) {
+    const normalizedWindowId = normalizeWindowId(windowId);
+    bw.on('focus', () => emitNativeWindowEvent('focus', normalizedWindowId, bw));
+    bw.on('minimize', () => emitNativeWindowEvent('minimize', normalizedWindowId, bw));
+    bw.on('restore', () => emitNativeWindowEvent('restore', normalizedWindowId, bw));
+    bw.on('maximize', () => emitNativeWindowEvent('maximize', normalizedWindowId, bw));
+    bw.on('unmaximize', () => emitNativeWindowEvent('unmaximize', normalizedWindowId, bw));
+    bw.on('move', () => emitNativeWindowEvent('move', normalizedWindowId, bw));
+    bw.on('resize', () => emitNativeWindowEvent('resize', normalizedWindowId, bw));
+    bw.on('page-title-updated', (event, title) => {
+        emitNativeWindowEvent('title', normalizedWindowId, bw, { title });
+    });
+    bw.on('closed', () => {
+        browserWindowMap().delete(normalizedWindowId);
+        emitNativeWindowEvent('close', normalizedWindowId);
+    });
+}
+
+function spawnNativeWindow({ windowId, url, width, height, title }) {
+    const map = browserWindowMap();
+    const normalizedWindowId = normalizeWindowId(windowId);
+    const existing = map.get(normalizedWindowId);
+    if (existing && !existing.isDestroyed()) {
+        existing.focus();
+        return true;
+    }
+    const bw = new BrowserWindow({
+        width: width || 800,
+        height: height || 600,
+        title: title || 'Simple App',
+        show: true,
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true
+        }
+    });
+    bw.loadURL(resolveNativeWindowUrl(url));
+    registerNativeWindowEvents(normalizedWindowId, bw);
+    map.set(normalizedWindowId, bw);
+    debugLog(`spawned BrowserWindow windowId=${normalizedWindowId} url=${url}`);
+    return true;
+}
+
+function closeNativeWindow(windowId) {
+    const map = browserWindowMap();
+    const normalizedWindowId = normalizeWindowId(windowId);
+    const bw = map.get(normalizedWindowId);
+    if (!bw || bw.isDestroyed()) {
+        map.delete(normalizedWindowId);
+        return false;
+    }
+    bw.close();
+    map.delete(normalizedWindowId);
+    debugLog(`closed BrowserWindow windowId=${normalizedWindowId}`);
+    return true;
+}
+
+function focusNativeWindow(windowId) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    bw.show();
+    bw.focus();
+    return true;
+}
+
+function minimizeNativeWindow(windowId) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    bw.minimize();
+    return true;
+}
+
+function restoreNativeWindow(windowId) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    if (bw.isMinimized()) bw.restore();
+    bw.show();
+    bw.focus();
+    return true;
+}
+
+function moveNativeWindow(windowId, x, y) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    const [currentX, currentY] = bw.getPosition();
+    const nextX = Number.isFinite(Number(x)) ? Number(x) : currentX;
+    const nextY = Number.isFinite(Number(y)) ? Number(y) : currentY;
+    bw.setPosition(nextX, nextY);
+    return true;
+}
+
+function resizeNativeWindow(windowId, width, height) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    const [currentWidth, currentHeight] = bw.getSize();
+    const nextWidth = Number.isFinite(Number(width)) ? Number(width) : currentWidth;
+    const nextHeight = Number.isFinite(Number(height)) ? Number(height) : currentHeight;
+    bw.setSize(nextWidth, nextHeight);
+    return true;
+}
+
+function maximizeNativeWindow(windowId) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    if (bw.isMinimized()) bw.restore();
+    bw.maximize();
+    return true;
+}
+
+function unmaximizeNativeWindow(windowId) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    if (!bw.isMaximized()) return true;
+    bw.unmaximize();
+    return true;
+}
+
+function setNativeWindowTitle(windowId, title) {
+    const bw = getNativeWindow(windowId);
+    if (!bw || bw.isDestroyed()) return false;
+    bw.setTitle(String(title || ''));
+    emitNativeWindowEvent('title', windowId, bw, { title: bw.getTitle() });
+    return true;
+}
+
 // Resolve Simple binary path: CLI arg --bin, env SIMPLE_BIN, or default.
 // The deployed self-hosted bin/simple currently has a dispatch fallthrough
 // bug (#3 in doc/08_tracking/bug/wm_cocoa_session_findings_2026-04-15.md)
@@ -282,34 +471,25 @@ function handleSimpleMessage(line) {
 
             // Wave 5: spawn a real top-level BrowserWindow and load a URL.
             // Contract paired with src/app/ui.electron/backend.spl:
-            //   new_browser_window(window_id, url, w, h).
+            //   new_browser_window(window_id, url, w, h, title).
             // Windows are tracked in `simpleBrowserWindows` keyed by windowId
             // so close_browser_window can later destroy them.
             case 'new_browser_window':
                 try {
-                    if (!global.simpleBrowserWindows) global.simpleBrowserWindows = new Map();
-                    const bw = new BrowserWindow({
-                        width:  msg.width  || 800,
-                        height: msg.height || 600,
-                        show: true,
-                        webPreferences: { nodeIntegration: false, contextIsolation: true }
+                    spawnNativeWindow({
+                        windowId: msg.windowId,
+                        url: msg.url,
+                        width: msg.width,
+                        height: msg.height,
+                        title: msg.title
                     });
-                    bw.loadURL(msg.url || 'about:blank');
-                    global.simpleBrowserWindows.set(msg.windowId, bw);
-                    debugLog(`spawned BrowserWindow windowId=${msg.windowId} url=${msg.url}`);
                 } catch (err) {
                     debugLog(`new_browser_window failed: ${err.message}`);
                 }
                 break;
             case 'close_browser_window':
                 try {
-                    const map = global.simpleBrowserWindows;
-                    if (map && map.has(msg.windowId)) {
-                        const bw = map.get(msg.windowId);
-                        if (bw && !bw.isDestroyed()) bw.close();
-                        map.delete(msg.windowId);
-                        debugLog(`closed BrowserWindow windowId=${msg.windowId}`);
-                    }
+                    closeNativeWindow(msg.windowId);
                 } catch (err) {
                     debugLog(`close_browser_window failed: ${err.message}`);
                 }
@@ -568,6 +748,57 @@ ipcMain.on('inputChange', (event, payload) => {
         targetId: (payload && payload.targetId) || '',
         value: (payload && payload.value) || ''
     });
+});
+
+ipcMain.handle('spawn-native-window', async (event, payload) => {
+    return spawnNativeWindow(payload || {});
+});
+
+ipcMain.handle('close-native-window', async (event, payload) => {
+    return closeNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('focus-native-window', async (event, payload) => {
+    return focusNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('minimize-native-window', async (event, payload) => {
+    return minimizeNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('restore-native-window', async (event, payload) => {
+    return restoreNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('move-native-window', async (event, payload) => {
+    return moveNativeWindow(
+        payload && payload.windowId,
+        payload && payload.x,
+        payload && payload.y
+    );
+});
+
+ipcMain.handle('resize-native-window', async (event, payload) => {
+    return resizeNativeWindow(
+        payload && payload.windowId,
+        payload && payload.width,
+        payload && payload.height
+    );
+});
+
+ipcMain.handle('maximize-native-window', async (event, payload) => {
+    return maximizeNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('unmaximize-native-window', async (event, payload) => {
+    return unmaximizeNativeWindow(payload && payload.windowId);
+});
+
+ipcMain.handle('set-native-window-title', async (event, payload) => {
+    return setNativeWindowTitle(
+        payload && payload.windowId,
+        payload && payload.title
+    );
 });
 
 app.on('window-all-closed', () => {

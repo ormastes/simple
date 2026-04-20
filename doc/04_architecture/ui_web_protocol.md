@@ -2,7 +2,7 @@
 
 ## 1. Purpose & Scope
 
-This document specifies the wire-level protocol spoken between the Simple `ui.web` server and any thin adapter (browser or native). The server is the sole authority over window state; the adapter renders patches and forwards raw input. The protocol transports three existing Simple types — `UiAccessSnapshot` (full retained-mode tree), `UIPatch` (incremental tree mutation), and `WmInputEvent`/`WmCreateRequest`/`WmCloseRequest`/`WmResizeRequest`/`WmMoveRequest` (window-manager commands) — over a single WebSocket connection per session. It is entirely unrelated to the 18 routes under `/api/test/*`, which remain on `src/app/ui.test_api/handler.spl` and are bit-identical to their current form; nothing in this protocol modifies or duplicates that path.
+This document specifies the wire-level protocol spoken between the Simple `ui.web` server and any thin adapter (browser, SimpleWeb, or Electron shell). The server is the sole authority over session, taskbar, and window-surface state; the adapter renders patches, forwards raw input, and executes host-native window commands when asked. The protocol transports `UiAccessSnapshot` (full retained-mode tree), `UIPatch` (incremental tree mutation), `WmInputEvent`, taskbar state, and host window lifecycle commands over a single WebSocket connection per session. It is entirely unrelated to the 18 routes under `/api/test/*`, which remain on `src/app/ui.test_api/handler.spl` and are bit-identical to their current form; nothing in this protocol modifies or duplicates that path.
 
 ---
 
@@ -32,7 +32,7 @@ This document specifies the wire-level protocol spoken between the Simple `ui.we
 | Endpoint       | Method / Upgrade | Handler (existing or forthcoming)                          | Notes |
 |----------------|------------------|------------------------------------------------------------|-------|
 | `/ui/login`    | POST             | `src/app/ui.web/server.spl` (`POST /ui/login` handler)    | Issues a signed 32-byte bearer token. Body: `{ "capability_grant": "<grant-id>" }` (v1 dev stub — full auth UX deferred). |
-| `/ui/ws`       | WebSocket upgrade | `src/app/ui.web/ui_routes.spl`                            | Bearer-gated. Must carry `Authorization: Bearer <token>` header. |
+| `/ui/ws`       | WebSocket upgrade | `src/app/ui.web/ui_routes.spl`                            | Bearer-gated. Carries `Authorization: Bearer <token>` or `?token=<token>` for browser WebSocket clients that cannot set headers. |
 | `/ui/resume`   | POST             | `src/app/ui.web/ui_routes.spl`                             | Resume semantics equivalent to `resume_session` message; returns `{ "session_id": "..." }`. |
 | `/api/test/*`  | (unchanged)      | `src/app/ui.test_api/handler.spl`, `PROTOCOL_VERSION=1`   | **DO NOT TOUCH.** All 18 routes remain bit-identical. |
 
@@ -48,8 +48,8 @@ Client                                     Server
   |  200 OK  { "token": "<bearer>" }          |
   |<------------------------------------------|
   |                                           |
-  |  GET /ui/ws                               |
-  |  Authorization: Bearer <token>            |
+  |  GET /ui/ws?token=<token>                 |
+  |  OR Authorization: Bearer <token>         |
   |  Origin: https://allowed.example.com      |
   |  Upgrade: websocket                       |
   |------------------------------------------>|
@@ -81,7 +81,7 @@ Client                                     Server
 
 1. Client POSTs credentials to `/ui/login`. The server issues a 32-byte random token HMAC-signed over `(grant_id, origin, expiry_ms)` using the `CapabilityPolicy` grant id from `src/lib/common/security/enforcement/capability.spl`. The token is produced and verified by `src/app/ui.web/session_token.spl` (Phase 2 — new file): `issue(grant) -> Token` / `verify(token, origin) -> Result<Grant, AuthError>`.
 
-2. Client opens WSS at `/ui/ws` carrying the bearer token in the `Authorization` header and a valid `Origin`.
+2. Client opens WSS at `/ui/ws` carrying the bearer token either in the `Authorization` header or in the `token` query parameter and a valid `Origin`. The query parameter exists for browser `WebSocket` clients; if both are present, the `Authorization` header takes precedence.
 
 3. Server calls `origin_guard.check(headers)` (from `src/app/ui.web/origin_guard.spl`, Phase 2 — new file) against the `SIMPLE_UI_WEB_ALLOWED_ORIGINS` environment variable. If the origin is not allowlisted, the server returns HTTP 403 and closes — the RFC-6455 handshake (`compute_ws_accept`) is never reached.
 
@@ -107,7 +107,9 @@ All message payloads are carried inside the top-level envelope defined in Sectio
 | `snapshot`       | S→C       | Full `UiAccessSnapshot` tree + `revision: u64`                                           | `UiAccessSnapshot` in `src/lib/common/ui/access.spl`; encoded by `encode_snapshot` in `src/lib/common/ui/snapshot_wire.spl` (Phase 1)                         |
 | `patch_batch`    | S→C       | `PatchEnvelope { session_id, snapshot_revision: u64, from_sequence: i64, to_sequence: i64, patches: List<UIPatch> }` | `PatchEnvelope` defined in `src/lib/common/ui/patch_wire.spl` (Phase 1); each patch is a `UIPatch` variant from `src/lib/common/ui/patch.spl`                 |
 | `input_event`    | C→S       | `surface_id: text`, `widget_id: text`, `event: WmInputEvent`                            | `WmInputEvent` in `src/os/services/wm/window_protocol.spl`                                                                                                    |
-| `window_cmd`     | C→S       | `cmd_type: text` (one of `"create"/"close"/"resize"/"move"`), `payload: object`         | Tagged union over `WmCreateRequest`, `WmCloseRequest`, `WmResizeRequest`, `WmMoveRequest` in `src/os/services/wm/window_protocol.spl`                          |
+| `window_cmd`     | C→S       | `cmd_type: text` (one of `"create"/"close"/"focus"/"resize"/"move"/"minimize"/"maximize"/"restore"/"set_title"/"launch"`), `payload: object` | Handled by `src/app/ui.web/wm_bridge.spl`; resolves authoritative surfaces through `UISession.window_surfaces` before mutating state or routing to host runtime. |
+| `taskbar_model`  | S→C       | `running`, `pinned`, `tray` taskbar state                                               | Encoded from `common.ui.taskbar_model` by `src/app/ui.web/taskbar_shell.spl` and emitted by `WebRuntimeAdapter` when host taskbar runtime is enabled. |
+| `host_window_command` | S→C | `action`, `window_id`, `surface_id`, `app_id`, `title`, `url`, `x`, `y`, `width`, `height` | Queued by `src/app/ui.web/taskbar_runtime.spl`; consumed by Electron-capable clients such as `src/app/ui.web/wm.js` + `tools/electron-shell/preload.js`. |
 | `focus_changed`  | S→C       | `surface_id: text`, `widget_id: text`, `event: WmFocusEvent`                            | `WmFocusEvent` in `src/os/services/wm/window_protocol.spl`                                                                                                    |
 | `resource_ref`   | S→C       | `surface_id: text`, `resource_id: text`, `url: text`, `etag: text`                      | No existing struct — fields will be defined as an ad-hoc record in `src/app/ui.web/web_runtime_adapter.spl` (Phase 3); `surface_id` resolves via `UiWindowSurfaceRegistry` in `src/lib/common/ui/window_surface_registry.spl` |
 | `clipboard`      | both      | `op: "read"/"write"`, `mime: text`, `data: text`                                        | Gated by `ClipboardRead` / `ClipboardWrite` caps in `src/lib/common/ui/capability.spl`                                                                        |
@@ -232,6 +234,47 @@ Each patch is encoded with an `"op"` discriminator (snake_case) and a canonical 
 ```
 
 `event.kind` and its sub-fields are the variant names from `WmInputEvent` in `src/os/services/wm/window_protocol.spl`.
+
+### Example 4 — `host_window_command` frame
+
+```json
+{
+  "t": "host_window_command",
+  "v": 1,
+  "s": "550e8400-e29b-41d4-a716-446655440000",
+  "seq": null,
+  "payload": {
+    "action": "spawn_native_window",
+    "window_id": "host-window-1",
+    "surface_id": "host-surface-1",
+    "app_id": "examples/hello_taskbar",
+    "title": "Hello Taskbar",
+    "url": "/wm/native_window?app_id=examples%2Fhello_taskbar&surface_id=host-surface-1&window_id=host-window-1",
+    "x": 0,
+    "y": 0,
+    "width": 420,
+    "height": 240
+  }
+}
+```
+
+The currently defined host actions are `spawn_native_window`, `close_native_window`, `focus_native_window`, `minimize_native_window`, `restore_native_window`, `move_native_window`, `resize_native_window`, `maximize_native_window`, `unmaximize_native_window`, and `set_native_window_title`.
+
+### Host shell modes
+
+`src/app/ui.web/taskbar_runtime.spl` supports three host shell modes:
+
+| Mode | Local surface behavior | Host-native behavior |
+|------|------------------------|----------------------|
+| `desktop_embedded` | Launch opens an embedded SimpleWeb surface in the shell. | No Electron BrowserWindow is spawned. |
+| `taskbar_only` | Launch records authoritative Simple session/taskbar state but does not open an embedded surface. | Launch queues `spawn_native_window`; later lifecycle commands queue host-native actions. |
+| `headless` | Launch records authoritative session/taskbar state only. | No local surface and no host-native command are created. |
+
+Native Electron feedback is sent back as `window_cmd` with `payload.source = "native_event"` and `payload.window_id_hint = "<host-window-id>"`. The server treats these frames as authoritative feedback for focus, minimize, restore, close, title, move, resize, and maximize state, and must not echo them back as new `host_window_command` frames.
+
+### Host taskbar app catalog
+
+The host taskbar runtime resolves launches through a small catalog, not through server-route hardcoding. The catalog contains the cross-platform `examples/hello_taskbar` app and the built-in desktop manifests from `src/os/desktop/app_manifest.spl`. Manifest-backed apps use their manifest binary path as `app_id`, e.g. `/sys/apps/terminal`, are exposed as pinned taskbar items by default, and receive generic SimpleWeb/Electron HTML until the app provides richer host content.
 
 ---
 
