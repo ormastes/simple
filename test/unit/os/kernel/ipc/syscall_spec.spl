@@ -4,7 +4,7 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
@@ -140,6 +140,100 @@ describe "syscall_handler":
             KernelLog.new(16)
         )
         expect(result.value).to_equal(-22)
+
+    it "fork syscall clones the current scheduler task":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 57,
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_be_greater_than(0)
+        val child = scheduler.get_task(TaskId(id: result.value as u64))
+        if child != nil:
+            val task = child
+            if task.parent != nil:
+                val p = task.parent.unwrap()
+                expect(p.id).to_equal(parent.id)
+
+    it "wait syscall blocks current parent while child is live":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child = scheduler.clone_task(parent)
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 3,
+                arg0: child.id,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(0)
+        val parent_tcb = scheduler.get_task(parent)
+        if parent_tcb != nil:
+            val task = parent_tcb
+            val is_blocked = match task.state:
+                TaskState.Blocked(reason): true
+                _: false
+            expect(is_blocked).to_equal(true)
+
+    it "waitpid syscall rejects missing children instead of returning ENOSYS":
+        var scheduler = Scheduler.new()
+        scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 61,
+                arg0: 999,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-10)
+
+    it "exec syscall remains explicit ENOSYS until image replacement lands":
+        var scheduler = Scheduler.new()
+        scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-38)
 
     it "queries scheduler policy through schedctl":
         var scheduler = Scheduler.new()

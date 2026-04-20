@@ -444,11 +444,11 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         # existing time/debug/sysinfo ranges; full handlers land with process
         # isolation and FD-table work. Until then, return ENOSYS.
         case 57:    # Fork
-            SyscallResult(value: -38)
+            _handle_fork(args, scheduler)
         case 59:    # Exec
-            SyscallResult(value: -38)
+            _handle_exec(args, scheduler)
         case 61:    # WaitPid
-            SyscallResult(value: -38)
+            _handle_waitpid(args, scheduler)
         case 62:    # Pipe
             SyscallResult(value: -38)
         case 63:    # Dup2
@@ -559,27 +559,80 @@ fn _handle_wait(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     Args:
       arg0: child task ID (0 = any child)
+      arg1: options (bit 0 = WNOHANG)
 
     Blocks the caller until the child exits, then returns the exit code.
     """
-    val child_id = TaskId(id: args.arg0)
     var sched = scheduler
+    val current = sched.get_current()
+    val result = sched.wait_for(current, TaskId(id: args.arg0))
+    if result == -11:
+        return SyscallResult(value: 0)
+    SyscallResult(value: result.to_i64())
 
-    # Check if child is already a zombie
-    val child_tcb = sched.get_task(child_id)
-    if child_tcb == nil:
-        return SyscallResult(value: -1)     # No such task
+fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Fork the current scheduler task.
 
-    val child = child_tcb
-    match child.state:
-        case Zombie:
-            # Child already exited — collect exit code
-            return SyscallResult(value: child.exit_code.to_i64())
-        case _:
-            # Child still running — block the caller
-            val current = sched.get_current()
-            sched.block_task(current, BlockReason.Exit)
-            SyscallResult(value: 0)
+    Args are reserved for future clone flags. Returns the child task ID in the
+    parent. Child-side register fixup to return 0 lands with context resume.
+    """
+    val _a = args
+    var sched = scheduler
+    val parent = sched.get_current()
+    val child = sched.clone_task(parent)
+    if child.id == 0:
+        return SyscallResult(value: -12)
+    SyscallResult(value: child.id.to_i64())
+
+fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Execve process-image replacement placeholder.
+
+    Full argv/envp copy-in and address-space replacement are still handled by
+    the process-image work; fail explicitly instead of pretending success.
+    """
+    val _a = args
+    val _s = scheduler
+    SyscallResult(value: -38)
+
+fn _encode_wait_status(exit_code: i32) -> u32:
+    """Encode a normal-exit status compatible with WEXITSTATUS."""
+    (((exit_code as u32) & 0xFF) << 8)
+
+fn _write_wait_status(ptr: u64, exit_code: i32) -> i64:
+    """Copy an encoded wait status to userspace when the pointer is present."""
+    if ptr == 0:
+        return 0
+    if not _is_userspace_ptr(ptr):
+        return -14
+    if not vmm_verify_user_write(ptr, 4):
+        return -14
+    mmio_write32(ptr, _encode_wait_status(exit_code))
+    0
+
+fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Waitpid-compatible wrapper around Scheduler.wait_for.
+
+    Args:
+      arg0: pid, or u64::MAX for any child
+      arg1: status pointer, optional
+      arg2: options (bit 0 = WNOHANG)
+    """
+    val any_child = args.arg0 == 0xFFFFFFFFFFFFFFFF
+    val selector = if any_child: TaskId(id: 0) else: TaskId(id: args.arg0)
+    var sched = scheduler
+    val current = sched.get_current()
+    val result = sched.wait_for(current, selector)
+    if result == -11:
+        return SyscallResult(value: 0)
+    if result < 0:
+        return SyscallResult(value: result.to_i64())
+
+    val status_write = _write_wait_status(args.arg1, result)
+    if status_write < 0:
+        return SyscallResult(value: status_write)
+    if any_child:
+        return SyscallResult(value: result.to_i64())
+    SyscallResult(value: args.arg0.to_i64())
 
 fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
     """Return the current task's ID."""

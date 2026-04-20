@@ -834,14 +834,48 @@ impl Scheduler:
         val _e = envp
         -38
 
-    fn wait_for(parent_id: TaskId, child_id: TaskId) -> i32:
+    me wait_for(parent_id: TaskId, child_id: TaskId) -> i32:
         """Block parent until child exits, return exit status (IF-02).
 
-        Wave-3 scaffold returns -10 (ECHILD). Wave-4 will suspend the
-        parent on a wait-queue and wake it from the child's exit path.
+        A child selector of 0 or u64::MAX means "any child". If a matching
+        child is already a zombie, collect its exit status and free the slot.
+        If a matching child is still running, block the parent on Exit and
+        report EAGAIN until the exit path wakes waiters.
         """
-        val _p = parent_id
-        val _c = child_id
+        val parent_slot = self._find_slot(parent_id)
+        if parent_slot < 0:
+            return -10
+
+        val any_child = child_id.id == 0 or child_id.id == 0xFFFFFFFFFFFFFFFF
+        var found_child = false
+        var found_live_child = false
+        var i = 0
+        while i < MAX_TASKS:
+            val tcb = self.tasks[i]
+            if tcb != nil:
+                val task = tcb
+                var parent_matches = false
+                if task.parent != nil:
+                    val parent = task.parent.unwrap()
+                    parent_matches = parent.id == parent_id.id
+                val child_matches = any_child or task.id.id == child_id.id
+                if parent_matches and child_matches:
+                    found_child = true
+                    match task.state:
+                        case TaskState.Zombie:
+                            val status = task.exit_code
+                            self._remove_ready(task.id)
+                            self.tasks[i] = nil
+                            return status
+                        case _:
+                            found_live_child = true
+            i = i + 1
+
+        if found_live_child:
+            self.block_task(parent_id, BlockReason.Exit)
+            return -11
+        if found_child:
+            return -11
         -10
 
     # -- Internal Helpers ----------------------------------------------------

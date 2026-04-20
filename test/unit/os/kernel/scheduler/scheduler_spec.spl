@@ -484,6 +484,62 @@ describe "Scheduler":
                 expect(is_zombie).to_equal(true)
                 expect(task.exit_code).to_equal(42)
 
+    describe "fork and wait":
+        it "clone_task creates a ready child with parent linkage":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val child = sched.clone_task(parent)
+
+            expect(child.id).to_be_greater_than(0)
+            val child_tcb = sched.get_task(child)
+            if child_tcb != nil:
+                val task = child_tcb
+                val is_ready = match task.state:
+                    TaskState.Ready: true
+                    _: false
+                expect(is_ready).to_equal(true)
+                if task.parent != nil:
+                    val p = task.parent.unwrap()
+                    expect(p.id).to_equal(parent.id)
+
+        it "wait_for rejects tasks that are not children":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val unrelated = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+
+            val status = sched.wait_for(parent, unrelated)
+
+            expect(status).to_equal(-10)
+
+        it "wait_for blocks parent while child is still live":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val child = sched.clone_task(parent)
+
+            val status = sched.wait_for(parent, child)
+
+            expect(status).to_equal(-11)
+            val parent_tcb = sched.get_task(parent)
+            if parent_tcb != nil:
+                val task = parent_tcb
+                val is_blocked = match task.state:
+                    TaskState.Blocked(reason): true
+                    _: false
+                expect(is_blocked).to_equal(true)
+
+        it "wait_for collects zombie child exit status and frees the slot":
+            var sched = Scheduler.new()
+            val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            sched.schedule()
+            val child = sched.clone_task(parent)
+            sched.schedule()
+            sched.exit_task(7)
+
+            val status = sched.wait_for(parent, child)
+
+            expect(status).to_equal(7)
+            expect(sched.get_task(child)).to_be_nil
+
     describe "get_task":
         it "returns nil for non-existent task":
             val sched = Scheduler.new()
