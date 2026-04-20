@@ -50,11 +50,18 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         CPUID topology leaves instead of synthetic boot data.
   - [x] MADT parsing enumerates usable Local APIC/x2APIC IDs and exposes an
         x86_64 topology registry helper for Limine/ACPI boot adapters.
-  - [ ] A real Limine/ACPI boot adapter should call the MADT topology helper
-        after RSDP/HHDM validation; direct `qemu -kernel` early init stays on
-        the CPUID fallback to avoid probing absent Limine response pointers.
-  - [ ] AP bring-up should mark all firmware-enumerated APs online; until
-        then only online CPUs actually run tasks.
+  - [x] x86_64 early init calls the MADT topology helper after RSDP/HHDM
+        validation and falls back to CPUID topology when firmware tables are
+        absent.
+  - [x] Firmware APIC IDs are registered into per-CPU metadata as present CPUs,
+        AP startup intent is tracked separately, and an AP-side online hook
+        marks a CPU online only after the AP reaches kernel code.
+  - [x] A linked x86_64 AP trampoline template is copied to low memory,
+        patched with the boot GDT/PML4, entered via INIT/SIPI, and calls the
+        AP-side online hook from its 64-bit entry.
+  - [ ] Wire automatic AP startup into the boot lane after APIC/IDT ordering is
+        validated; `x86_start_registered_aps()` is available for the explicit
+        bring-up step.
   - [x] Domain kinds distinguish `Smt`, `Cache`, and `Numa` where available.
   - [x] Rebalance and wake-affine placement prefer local domains before wider
         domains.
@@ -64,9 +71,10 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** Synthetic topology construction, scheduler install hooks, x86_64
-  CPUID shape probing, and ACPI MADT APIC-ID enumeration helpers are
-  implemented. Limine/ACPI adapter wiring and AP startup/online marking remain
-  the next SMP bring-up tasks.
+  CPUID shape probing, ACPI MADT APIC-ID enumeration, per-CPU APIC metadata,
+  AP startup/online state hooks, and the low-memory x86_64 AP trampoline are
+  implemented. Automatic AP startup from the boot lane remains gated on APIC/IDT
+  ordering validation.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
@@ -195,3 +203,28 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   success, out-of-range, and cleanup paths through the syscall using a
   deterministic file-byte provider; live VFS backend coverage remains an
   integration/system concern.
+
+### FR-SOS-023 — Reduce native-build timeout on x86_64 WM entry
+
+- **Filed-on:** 2026-04-20
+- **Filed-by:** Codex scheduler/process follow-up
+- **Target:** simpleos-os build/compiler throughput
+- **Priority:** P1
+- **Status:** Requested
+- **Requested-semantics:**
+  The x86_64 full OS native-build path should not fail because the unrelated
+  `examples/simple_os/arch/x86_64/wm_entry.spl` module exceeds the current
+  per-file 60 second compilation timeout.
+- **Acceptance-criteria:**
+  - [ ] Identify whether the timeout is caused by compiler performance,
+        source inclusion breadth, or `wm_entry.spl` complexity.
+  - [ ] Native-building `examples/simple_os/arch/x86_64/os_entry.spl` either
+        excludes unrelated entry modules or compiles `wm_entry.spl` within the
+        configured timeout.
+  - [ ] Add a focused regression check for the selected fix.
+- **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
+- **Related-design-doc:** none
+- **Related-issue:** none
+- **Notes:** During AP trampoline verification, full native-build progressed
+  past C/assembly boot-object checks and parser cleanup, then failed only on
+  `wm_entry.spl: timeout (60s)`.

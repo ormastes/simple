@@ -254,6 +254,89 @@ typedef struct {
 #define HEAP_MODULE  6
 #define HEAP_ENUM    7
 
+/* ===================================================================
+ * 3a. x86_64 AP startup trampoline support
+ * =================================================================== */
+
+#if defined(__x86_64__) || defined(__i386__)
+#define SIMPLEOS_AP_TRAMPOLINE_PHYS   0x8000ULL
+#define SIMPLEOS_AP_TRAMPOLINE_VECTOR 0x08U
+#define SIMPLEOS_AP_TRAMPOLINE_MAX    4096U
+#define SIMPLEOS_AP_MAX_CPUS          32U
+#define SIMPLEOS_AP_STACK_SIZE        8192U
+
+extern uint8_t simpleos_ap_trampoline_template_start[];
+extern uint8_t simpleos_ap_trampoline_template_end[];
+extern uint8_t simpleos_ap_trampoline_gdt_desc[];
+extern uint8_t simpleos_ap_trampoline_pml4_phys_slot[];
+extern uint8_t gdt64_ptr[];
+extern uint8_t boot_pml4[];
+extern int64_t spl_x86_mark_current_ap_online(void) __attribute__((weak));
+
+__attribute__((aligned(16))) static uint8_t simpleos_ap_boot_stacks[SIMPLEOS_AP_MAX_CPUS][SIMPLEOS_AP_STACK_SIZE];
+uint64_t simpleos_ap_boot_stack_top = 0;
+static volatile uint32_t simpleos_ap_entry_count = 0;
+
+static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
+{
+    return IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint64_t)v;
+}
+
+RuntimeValue rt_x86_ap_trampoline_vector(void)
+{
+    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_VECTOR;
+}
+
+RuntimeValue rt_x86_ap_trampoline_phys(void)
+{
+    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_PHYS;
+}
+
+RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vector_rv)
+{
+    uint32_t cpu_id = (uint32_t)simpleos_raw_or_encoded_int(cpu_id_rv);
+    uint32_t vector = (uint32_t)simpleos_raw_or_encoded_int(vector_rv);
+    uint8_t *dst = (uint8_t *)(uintptr_t)SIMPLEOS_AP_TRAMPOLINE_PHYS;
+    uint64_t size = (uint64_t)(simpleos_ap_trampoline_template_end - simpleos_ap_trampoline_template_start);
+
+    if (cpu_id == 0 || cpu_id >= SIMPLEOS_AP_MAX_CPUS) return ENCODE_INT(0);
+    if (vector != SIMPLEOS_AP_TRAMPOLINE_VECTOR) return ENCODE_INT(0);
+    if (size == 0 || size > SIMPLEOS_AP_TRAMPOLINE_MAX) return ENCODE_INT(0);
+
+    __builtin_memcpy(dst, simpleos_ap_trampoline_template_start, (size_t)size);
+
+    uint64_t gdt_off = (uint64_t)(simpleos_ap_trampoline_gdt_desc - simpleos_ap_trampoline_template_start);
+    uint64_t pml4_off = (uint64_t)(simpleos_ap_trampoline_pml4_phys_slot - simpleos_ap_trampoline_template_start);
+    __builtin_memcpy(dst + gdt_off, gdt64_ptr, 6);
+    *(volatile uint32_t *)(void *)(dst + pml4_off) = (uint32_t)(uintptr_t)boot_pml4;
+
+    simpleos_ap_boot_stack_top = (uint64_t)(uintptr_t)&simpleos_ap_boot_stacks[cpu_id][SIMPLEOS_AP_STACK_SIZE];
+    __asm__ volatile("mfence" ::: "memory");
+
+    serial_puts("[smp] AP trampoline prepared cpu=");
+    serial_put_dec((int64_t)cpu_id);
+    serial_puts(" vector=0x08\r\n");
+    return ENCODE_INT(1);
+}
+
+RuntimeValue rt_x86_ap_entry_count(void)
+{
+    return ENCODE_INT((int64_t)simpleos_ap_entry_count);
+}
+
+void simpleos_ap_entry64(void)
+{
+    simpleos_ap_entry_count++;
+    serial_puts("[smp] AP reached 64-bit entry\r\n");
+    if (spl_x86_mark_current_ap_online) {
+        (void)spl_x86_mark_current_ap_online();
+    }
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+#endif
+
 /* Enum/Optional/Result representation — matches Rust runtime RuntimeEnum.
  * Used by rt_enum_new / rt_enum_discriminant / rt_enum_payload.
  * Total size: 24 bytes (header 8 + enum_id 4 + discriminant 4 + payload 8). */

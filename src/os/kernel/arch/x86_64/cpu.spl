@@ -1,4 +1,6 @@
 # x86_64 CPU Primitives — Low-Level CPU Operations
+#![allow(unknown_decorator)]
+#![allow(unknown_attribute)]
 #
 # Wraps C runtime functions for privileged x86_64 CPU operations:
 # port I/O, control registers, MSRs, interrupt control, descriptor
@@ -10,7 +12,7 @@
 
 use os.kernel.interrupts.apic.{apic_send_init, apic_send_sipi, apic_get_id}
 use os.kernel.smp.percpu.{percpu_apic_id, percpu_is_online}
-use os.kernel.smp.smp.{smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id}
+use os.kernel.smp.smp.{smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id, smp_num_cpus}
 
 # ============================================================================
 # Port I/O
@@ -169,6 +171,9 @@ extern fn serial_println(msg: text)
 # runtime address of `kernel_syscall_entry_asm`, which is what MSR_LSTAR
 # must be set to once the SYSCALL install is actually enabled.
 extern fn get_kernel_syscall_entry_addr() -> u64
+extern fn rt_x86_prepare_ap_startup(cpu_id: u32, sipi_vector: u8) -> bool
+extern fn rt_x86_ap_trampoline_vector() -> u8
+extern fn rt_x86_ap_trampoline_phys() -> u64
 
 var _syscall_entry_installed: bool = false
 
@@ -260,14 +265,43 @@ fn x86_send_startup_to_cpu(cpu_id: u32, sipi_vector: u8) -> bool:
     val apic_id = percpu_apic_id(cpu_id)
     if apic_id == nil:
         return false
+    if not rt_x86_prepare_ap_startup(cpu_id, sipi_vector):
+        return false
     val target_apic_id = apic_id.unwrap()
     apic_send_init(target_apic_id)
     apic_send_sipi(target_apic_id, sipi_vector)
     smp_mark_ap_startup_sent(cpu_id)
 
+fn x86_ap_trampoline_vector() -> u8:
+    """Return the SIPI vector for the installed AP trampoline."""
+    rt_x86_ap_trampoline_vector()
+
+fn x86_ap_trampoline_phys() -> u64:
+    """Return the physical install address for the AP trampoline."""
+    rt_x86_ap_trampoline_phys()
+
+fn x86_start_registered_aps() -> u32:
+    """Send INIT/SIPI to all firmware-registered APs using the installed trampoline."""
+    val vector = x86_ap_trampoline_vector()
+    var started: u32 = 0u32
+    var cpu_id: u32 = 1u32
+    val count = smp_num_cpus()
+    while cpu_id < count:
+        if x86_send_startup_to_cpu(cpu_id, vector):
+            started = started + 1u32
+        cpu_id = cpu_id + 1u32
+    started
+
 fn x86_mark_current_ap_online() -> bool:
     """Called by the AP trampoline once the current CPU reaches kernel code."""
     smp_mark_ap_started_by_apic_id(apic_get_id())
+
+@export("C", name: "spl_x86_mark_current_ap_online")
+fn spl_x86_mark_current_ap_online() -> i64:
+    """C-callable AP entry hook used by the low-memory AP trampoline."""
+    if x86_mark_current_ap_online():
+        return 1
+    0
 
 # ============================================================================
 # Descriptor Table Loading

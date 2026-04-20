@@ -23,7 +23,7 @@
 #   [20:12] PT index     (9 bits, 512 entries)
 #   [11:0]  Page offset  (12 bits, 4KB)
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
 use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
@@ -311,8 +311,8 @@ fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     Returns true on success, false on failure (e.g., out of memory).
     """
-    val vaddr = virt.addr
-    val paddr = phys.addr
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
 
     # W^X enforcement: never map a page as both writable and executable
     var safe_flags = flags
@@ -360,7 +360,7 @@ fn vmm_unmap_page(virt: VirtAddr) -> bool:
 
     Returns true if the page was mapped, false if it was not.
     """
-    val vaddr = virt.addr
+    val vaddr = virt_addr_value(virt)
     val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 
     # Walk to the PT level — do NOT create tables (just check presence)
@@ -679,7 +679,7 @@ fn vmm_read_pte(virt: VirtAddr) -> u64:
     Returns the raw PTE value (physical address + flags), or 0 if not mapped.
     Handles both 4KB pages (PT level) and 2MB huge pages (PD level).
     """
-    val vaddr = virt.addr
+    val vaddr = virt_addr_value(virt)
     val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
@@ -850,12 +850,12 @@ fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
     var i: u64 = 0
     while i < page_count:
         val offset = i * PAGE_SIZE
-        val virt = VirtAddr(addr: fb_virt.addr + offset)
-        val phys = PhysAddr(addr: fb_phys.addr + offset)
+        val virt = VirtAddr(addr: virt_addr_value(fb_virt) + offset)
+        val phys = PhysAddr(addr: phys_addr_value(fb_phys) + offset)
         vmm_map_page(virt, phys, flags)
         i = i + 1
 
-    serial_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{fb_virt.addr}")
+    serial_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{virt_addr_value(fb_virt)}")
 
 # ============================================================================
 # VMM Query Interface
@@ -870,7 +870,7 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 
     Returns nil if the address is not mapped.
     """
-    val vaddr = virt.addr
+    val vaddr = virt_addr_value(virt)
     val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
@@ -927,8 +927,8 @@ fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: V
     if space.phys_root == 0 or space.phys_root == 1:
         return false
 
-    val vaddr = virt.addr
-    val paddr = phys.addr
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
     # W^X enforcement
     var safe_flags = flags
     if flags.writable and not flags.no_execute:

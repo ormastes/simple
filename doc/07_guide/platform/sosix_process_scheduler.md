@@ -117,8 +117,11 @@ SOSIX process isolation tests:
 
 - Scheduler topology has typed CPU entries plus flat fallback, synthetic
   SMT/cache/NUMA domain construction for tests, x86_64 CPUID topology shape
-  probing during direct early arch init, and an ACPI MADT APIC-ID parser for
-  Limine/ACPI boot adapters.
+  probing during direct early arch init, an ACPI MADT APIC-ID parser for
+  Limine/ACPI boot adapters, and per-CPU APIC metadata so AP startup and
+  online state are tracked separately. The x86_64 AP trampoline is linked as a
+  low-memory SIPI template; explicit bring-up uses `x86_start_registered_aps()`
+  and marks APs online only from the trampoline's 64-bit entry hook.
 - Rebalancing includes explicit rebalance, idle-pull balancing, wake-affine
   placement, per-CPU current mirrors, and wakeup preemption metadata.
 - Fair scheduling keeps virtual-deadline ordering and tick accounting.

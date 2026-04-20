@@ -451,6 +451,7 @@ gdt64:
 
 gdt64_end:
 
+.global gdt64_ptr
 gdt64_ptr:
     .word gdt64_end - gdt64 - 1  /* limit */
     .long gdt64                   /* base (32-bit address, fine for < 4 GiB) */
@@ -478,6 +479,7 @@ _idt_ptr:
  * ================================================================== */
 .section .bss
 .align 4096
+.global boot_pml4
 boot_pml4:
     .space 4096
 boot_pdpt:

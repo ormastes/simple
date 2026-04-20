@@ -143,13 +143,22 @@ launcher intentionally falls back to resident-manifest materialization:
 - `[vfs-root] c_fat32_read_ok path=/sys/apps/<app> bytes=<n>`
 - `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
 - `[syscall13] build_user_process_image ok`
-- `[syscall13] user image handoff gated; using validated resident handoff`
+- `[syscall13] user image handoff gated; scheduler enqueue pending`
 - no `[c-syscall13] fat32 app image validated` marker
-- no `EXCEPTION`, `cr2=...`, `cr3=...`, `heap exhausted`, or `PANIC` marker
+- no `EXCEPTION`, `cr2=...`, `cr3=...`, `heap exhausted`, `unresolved fn`, or
+  `PANIC` marker
 - `build_user_process_image` takes an owned copy of resolved VFS/FAT32 bytes
   before ELF parsing and stores owned segment/file-byte copies in the image
 - `stack_builder` uses literal stack-size constants so the native baremetal
   build no longer folds the default stack size to zero
+- the direct desktop lane initializes scalar identity PMM/VMM before VFS and
+  syscall 13:
+  - `[PMM] scalar init complete`
+  - `[VMM] VMM initialization complete`
+  - `[desktop-e2e] memory-bootstrap:ok`
+- user segment mapping now avoids cross-module raw address fallback calls and
+  maps only the initial stack-frame pages; the remaining stack range is reserved
+  for future demand growth once user page-fault handling is active
 - launcher process rows expose `launcher_process_is_process_backed(pid)` so
   QEMU/system specs can distinguish scheduler-owned app PIDs from resident
   manifest fallbacks without scraping log text
@@ -158,25 +167,20 @@ launcher intentionally falls back to resident-manifest materialization:
 - resident manifest fallback markers such as `mode=resident-manifest`
 
 Those fallback markers must disappear before the process-backed app requirement
-is closed. The current blocker is `Scheduler.create_user_task` under QEMU. A
-direct-handoff diagnostic run showed that the desktop `-kernel` lane has no
-authoritative PMM/VMM boot initialization before syscall 13. Without an explicit
-VMM initialization guard, default/global VMM state can be mistaken for a valid
-page-table root and `_alloc_table_page`/`vmm_map_page_in` fault-storms in the
-MMIO page-table path (`cr2=0xffffffffffffff86`, `cr3=0x610000`). The VMM now
-tracks `g_vmm_initialized` and refuses real address-space allocation until
-`vmm_init` succeeds, so uninitialized direct handoff stays safely gated instead
-of dereferencing bogus page tables.
+is closed. The current blocker is no longer filesystem loading, ELF/SMF image
+construction, PMM initialization, VMM initialization, or user image mapping. A
+direct-handoff diagnostic run reached:
 
-An attempted synthetic `BootOutputPort` bootstrap in the desktop lane was not
-kept: PMM interpreted the constructed memory map incorrectly under the current
-native/baremetal ABI and reported `total pages: 0`. The remaining direct-handoff
-work is therefore to add a real Multiboot/QEMU boot-info to `BootOutputPort`
-adapter or an equivalent trusted C-to-Simple memory-map bridge, initialize PMM
-and VMM from that adapter, then re-enable `create_user_task` mapping. The plain
-resident `create_task` path can also stall in ready-queue enqueue when called
-from the direct trap bridge, so scheduler enqueue from syscall context remains a
-second blocker after VMM bootstrap.
+- `[scheduler] create_user_task: address space ok`
+- `[scheduler] create_user_task: map returned`
+- `[scheduler] create_user_task: tcb built`
+- `[scheduler] create_user_task: task stored`
+- `[scheduler] create_user_task: caps registered`
+
+The run then stalled before `_enqueue_ready` could enter. Until the scheduler
+runqueue handoff works from syscall/trap context and the x86_64 return path can
+actually switch into the new user context, syscall 13 remains gated and returns
+`-12` so the launcher uses the validated resident-manifest compatibility path.
 
 The x86_64 desktop lane now uses a minimal `Scheduler.new_bootstrap()` for
 early syscall/trap globals and clamps impossible early CPUID/SMP topology
