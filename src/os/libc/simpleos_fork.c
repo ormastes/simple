@@ -31,6 +31,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         (long)(uintptr_t)argv,
         (long)(uintptr_t)envp, 0, 0);
     if (ret < 0) errno = (int)(-ret);
+    else errno = EIO;
     return -1;
 }
 
