@@ -114,9 +114,9 @@ Required follow-up work:
 
 Latest checked artifact:
 
-- Kernel: `build/os/simpleos_desktop_e2e_65.elf`
+- Kernel: `build/os/simpleos_desktop_e2e_66.elf`
 - Disk image: `build/os/fat32_hello_check_47.img`
-- Serial log: `build/os/simpleos_desktop_hello_check_65_serial.log`
+- Serial log: `build/os/simpleos_desktop_hello_check_66_serial.log`
 - Result: QEMU exited through the debug-exit path and the serial log reached
   `TEST PASSED`.
 
