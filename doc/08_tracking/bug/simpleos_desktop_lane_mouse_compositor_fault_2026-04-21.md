@@ -144,6 +144,37 @@ and whatever per-CPU or APIC state the 2026-04-20 commits introduced):
    syscall-13 direct handoff cannot be tested end-to-end while the
    boot lane cannot reach `TEST PASSED`.
 
+## Resolution (2026-04-21)
+
+Localized and worked around in commit `857f9f42`. Adding
+`serial_println` markers inside `CompositorEngine2D.new` pinpointed
+the very first call — `engine.width()` — as the fault site. Direct
+field access `engine.w` / `engine.h` returns correctly; the method
+call `engine.width()` (declared as `fn width() -> i32: self.w` in
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl:287`) jumps through an
+indirect dispatch slot that now contains garbage, so `rip` lands past
+the kernel text in the `__heap_end` region.
+
+Both call sites in `src/os/compositor/compositor_engine2d.spl`
+(`CompositorEngine2D.new` and `Engine2dCompositorBackend.create`)
+only needed the cached width/height values, so the commit replaces
+`engine.width()` / `engine.height()` with `engine.w` / `engine.h`.
+The desktop disk lane now reaches `TEST PASSED` with 0 `[fault]`
+markers in the serial trace (`/tmp/ce2d_final_serial.log`, 112
+lines, verified 2026-04-21).
+
+This is a workaround, not a root-cause fix: method dispatch on
+`Engine2D`'s concrete (non-trait) `fn width()` should work. The
+compiler-side bug most likely lives in how baremetal freestanding
+linking stubs out or mangles `Engine2D__width`-style symbols, or in
+how `--entry-closure` prunes cross-crate methods for class-type
+receivers. Follow-up: restore `engine.width()` / `engine.height()`
+after that investigation lands. The broader hypothesis — that every
+concrete class method reachable only through a live instance (not
+from the entry-closure graph) is getting stubbed — should be
+verified, because there will likely be more instances lurking
+(symptoms: silent hang, `[fault] rip=0x11f1e...`, recovery loop).
+
 ## References
 
 - Sibling bug:
