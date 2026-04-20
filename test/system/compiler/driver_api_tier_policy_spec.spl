@@ -12,19 +12,51 @@
 
 use std.spec
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> Result<text, text>
 extern fn rt_file_exists(path: text) -> bool
 
 fn read_file(path: text) -> text:
-    rt_file_read_text(path)
+    val result = rt_file_read_text(path)
+    if result.is_ok():
+        result.unwrap()
+    else:
+        ""
 
-fn contains_any(content: text, patterns: [text]) -> bool:
+fn contains_import_line(content: text, pattern: text) -> bool:
+    val lines = content.split("\n")
     var i = 0
-    while i < patterns.len():
-        if content.contains(patterns[i]):
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and not line.starts_with("#"):
+            if (line.starts_with("use ") or line.starts_with("use lazy ") or line.starts_with("export use ")) and line.contains(pattern):
+                return true
+        i = i + 1
+    false
+
+fn contains_line(content: text, pattern: text) -> bool:
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and not line.starts_with("#") and line.contains(pattern):
             return true
         i = i + 1
     false
+
+fn count_exact_lines(content: text, expected_lines: [text]) -> i64:
+    val lines = content.split("\n")
+    var count = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        var j = 0
+        while j < expected_lines.len():
+            if line == expected_lines[j]:
+                count = count + 1
+                break
+            j = j + 1
+        i = i + 1
+    count
 
 describe "Driver API Tier Policy Guardrails":
 
@@ -40,86 +72,117 @@ describe "Driver API Tier Policy Guardrails":
             "compiler.borrow", "compiler.semantics", "compiler.tools",
             "compiler.mir_opt", "CompilerDriver"
         ]
-        expect(contains_any(content, heavy_imports)).to_equal(false)
+        var i = 0
+        while i < heavy_imports.len():
+            expect(contains_import_line(content, heavy_imports[i])).to_equal(false)
+            i = i + 1
 
     it "tier 0 driver_api_types exports find_runtime_lib_dir":
-        val content = read_file("src/compiler/80.driver/driver_api_types.spl")
-        expect(content).to_contain("export find_runtime_lib_dir")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_types.spl") ?? ""
+        expect(contains_line(content, "export find_runtime_lib_dir")).to_equal(true)
 
     # ---------------------------------------------------------------
     # Facade: driver_api must not import driver_api_core
     # ---------------------------------------------------------------
 
     it "facade driver_api does not import from driver_api_core":
-        val content = read_file("src/compiler/80.driver/driver_api.spl")
-        expect(content.contains("driver_api_core")).to_equal(false)
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api.spl") ?? ""
+        expect(contains_import_line(content, "driver_api_core")).to_equal(false)
 
     it "facade driver_api delegates to lightweight public modules":
-        val content = read_file("src/compiler/80.driver/driver_api.spl")
-        expect(content).to_contain("driver_public_compile")
-        expect(content).to_contain("driver_public_api")
-        expect(content).to_contain("driver_public_shared")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api.spl") ?? ""
+        expect(contains_line(content, "driver_public_compile")).to_equal(true)
+        expect(contains_line(content, "driver_public_api")).to_equal(true)
+        expect(contains_line(content, "driver_public_shared")).to_equal(true)
 
     # ---------------------------------------------------------------
     # __init__.spl uses explicit export use (no bare exports)
     # ---------------------------------------------------------------
 
     it "driver __init__.spl uses explicit export use statements":
-        val content = read_file("src/compiler/80.driver/__init__.spl")
+        val content = rt_file_read_text("src/compiler/80.driver/__init__.spl") ?? ""
         val lines = content.split("\n")
-        var bare_export_count = 0
+        val allowed_shared_exports = [
+            "export compiler_shared.backend.*",
+            "export compiler_shared.blocks.*",
+            "export compiler_shared.type_system.*",
+            "export compiler_shared.hir.*",
+            "export compiler_shared.mir.*",
+            "export compiler_shared.error_explanations.*",
+            "export compiler_shared.pattern_analysis.*",
+            "export compiler_shared.semantics.*"
+        ]
+        var unexpected_bare_export_count = 0
         var i = 0
         while i < lines.len():
             val line = lines[i].trim()
-            if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("export compiler_shared") and not line.starts_with("#"):
-                bare_export_count = bare_export_count + 1
+            if line != "" and not line.starts_with("#") and line.starts_with("export "):
+                var matched_allowed = false
+                var j = 0
+                while j < allowed_shared_exports.len():
+                    if line == allowed_shared_exports[j]:
+                        matched_allowed = true
+                        break
+                    j = j + 1
+                if not matched_allowed and not line.starts_with("export use "):
+                    unexpected_bare_export_count = unexpected_bare_export_count + 1
             i = i + 1
-        expect(bare_export_count).to_equal(0)
+        expect(unexpected_bare_export_count).to_equal(0)
+        expect(count_exact_lines(content, allowed_shared_exports)).to_equal(allowed_shared_exports.len())
 
     # ---------------------------------------------------------------
     # No upward tier dependencies
     # ---------------------------------------------------------------
 
     it "tier 1 driver_api_interpret does not import from tier 2+":
-        val content = read_file("src/compiler/80.driver/driver_api_interpret.spl")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_interpret.spl") ?? ""
         val forbidden = [
             "driver_api_compile_single", "driver_api_codegen_backends",
             "driver_api_native_single", "driver_api_project_build"
         ]
-        expect(contains_any(content, forbidden)).to_equal(false)
+        var i = 0
+        while i < forbidden.len():
+            expect(contains_import_line(content, forbidden[i])).to_equal(false)
+            i = i + 1
 
     it "tier 2 driver_api_compile_single does not import from tier 3+":
-        val content = read_file("src/compiler/80.driver/driver_api_compile_single.spl")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_compile_single.spl") ?? ""
         val forbidden = [
             "driver_api_codegen_backends", "driver_api_native_single",
             "driver_api_project_build"
         ]
-        expect(contains_any(content, forbidden)).to_equal(false)
+        var i = 0
+        while i < forbidden.len():
+            expect(contains_import_line(content, forbidden[i])).to_equal(false)
+            i = i + 1
 
     it "tier 3 driver_api_codegen_backends does not import from tier 4+":
-        val content = read_file("src/compiler/80.driver/driver_api_codegen_backends.spl")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_codegen_backends.spl") ?? ""
         val forbidden = ["driver_api_native_single", "driver_api_project_build"]
-        expect(contains_any(content, forbidden)).to_equal(false)
+        var i = 0
+        while i < forbidden.len():
+            expect(contains_import_line(content, forbidden[i])).to_equal(false)
+            i = i + 1
 
     it "tier 4 driver_api_native_single does not import from tier 5":
-        val content = read_file("src/compiler/80.driver/driver_api_native_single.spl")
-        expect(content.contains("driver_api_project_build")).to_equal(false)
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_native_single.spl") ?? ""
+        expect(contains_import_line(content, "driver_api_project_build")).to_equal(false)
 
     # ---------------------------------------------------------------
     # Backward compat: driver_api_core re-exports all tiers
     # ---------------------------------------------------------------
 
     it "driver_api_core re-exports from all 6 tiers":
-        val content = read_file("src/compiler/80.driver/driver_api_core.spl")
-        expect(content).to_contain("driver_api_types")
-        expect(content).to_contain("driver_api_interpret")
-        expect(content).to_contain("driver_api_compile_single")
-        expect(content).to_contain("driver_api_codegen_backends")
-        expect(content).to_contain("driver_api_native_single")
-        expect(content).to_contain("driver_api_project_build")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_core.spl") ?? ""
+        expect(contains_import_line(content, "driver_api_types")).to_equal(true)
+        expect(contains_import_line(content, "driver_api_interpret")).to_equal(true)
+        expect(contains_import_line(content, "driver_api_compile_single")).to_equal(true)
+        expect(contains_import_line(content, "driver_api_codegen_backends")).to_equal(true)
+        expect(contains_import_line(content, "driver_api_native_single")).to_equal(true)
+        expect(contains_import_line(content, "driver_api_project_build")).to_equal(true)
 
     it "driver_api_core is a thin re-export file under 25 lines":
-        val content = read_file("src/compiler/80.driver/driver_api_core.spl")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_api_core.spl") ?? ""
         val lines = content.split("\n")
         expect(lines.len() < 25).to_equal(true)
 
@@ -128,7 +191,7 @@ describe "Driver API Tier Policy Guardrails":
     # ---------------------------------------------------------------
 
     it "50.mir __init__.spl has no bare exports":
-        val content = read_file("src/compiler/50.mir/__init__.spl")
+        val content = rt_file_read_text("src/compiler/50.mir/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -140,7 +203,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "20.hir __init__.spl has no bare exports":
-        val content = read_file("src/compiler/20.hir/__init__.spl")
+        val content = rt_file_read_text("src/compiler/20.hir/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -152,7 +215,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "25.traits __init__.spl has no bare exports":
-        val content = read_file("src/compiler/25.traits/__init__.spl")
+        val content = rt_file_read_text("src/compiler/25.traits/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -164,7 +227,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "35.semantics __init__.spl has no bare exports":
-        val content = read_file("src/compiler/35.semantics/__init__.spl")
+        val content = rt_file_read_text("src/compiler/35.semantics/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -176,7 +239,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "40.mono __init__.spl has no bare exports":
-        val content = read_file("src/compiler/40.mono/__init__.spl")
+        val content = rt_file_read_text("src/compiler/40.mono/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -188,7 +251,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "60.mir_opt __init__.spl has no bare exports":
-        val content = read_file("src/compiler/60.mir_opt/__init__.spl")
+        val content = rt_file_read_text("src/compiler/60.mir_opt/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -200,7 +263,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "85.mdsoc __init__.spl has no bare exports":
-        val content = read_file("src/compiler/85.mdsoc/__init__.spl")
+        val content = rt_file_read_text("src/compiler/85.mdsoc/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -212,7 +275,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "90.tools __init__.spl has no bare exports":
-        val content = read_file("src/compiler/90.tools/__init__.spl")
+        val content = rt_file_read_text("src/compiler/90.tools/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -224,7 +287,7 @@ describe "Driver API Tier Policy Guardrails":
         expect(bare_count).to_equal(0)
 
     it "99.loader __init__.spl has no bare exports":
-        val content = read_file("src/compiler/99.loader/__init__.spl")
+        val content = rt_file_read_text("src/compiler/99.loader/__init__.spl") ?? ""
         val lines = content.split("\n")
         var bare_count = 0
         var i = 0
@@ -240,11 +303,11 @@ describe "Driver API Tier Policy Guardrails":
     # ---------------------------------------------------------------
 
     it "driver_core_types canonical source is in compiler.common":
-        val content = read_file("src/compiler/00.common/driver_core_types.spl")
-        expect(content).to_contain("enum CompileMode")
-        expect(content).to_contain("enum CompileResult")
-        expect(content).to_contain("struct CompileOptions")
+        val content = rt_file_read_text("src/compiler/00.common/driver_core_types.spl") ?? ""
+        expect(contains_line(content, "enum CompileMode")).to_equal(true)
+        expect(contains_line(content, "enum CompileResult")).to_equal(true)
+        expect(contains_line(content, "struct CompileOptions")).to_equal(true)
 
     it "driver_core_types shim in 80.driver re-exports from compiler.common":
-        val content = read_file("src/compiler/80.driver/driver_core_types.spl")
-        expect(content).to_contain("compiler.common.driver_core_types")
+        val content = rt_file_read_text("src/compiler/80.driver/driver_core_types.spl") ?? ""
+        expect(contains_import_line(content, "compiler.common.driver_core_types")).to_equal(true)

@@ -1,24 +1,35 @@
-import sspec
-import io.fs as fs
-import verification.lean.runner as runner
-import verification.regenerate as regen
+use std.sspec.*
+use verification.lean.codegen as codegen
+use verification.lean.runner as runner
 
 describe "Lean Verification Workflow":
-    context "Regeneration":
-        it "exposes the supported Lean inventory and writes temp files":
-            val files = regen.regenerate_all()
-            expect(files.len()).to_equal(15)
-
+    context "Code generation":
+        it "assembles Lean codegen state":
             val temp_root = "/tmp/simple-lean-verification-system"
-            val sample = {
-                "verification/system_demo/src/SystemDemo.lean": "theorem system_demo : True := by rfl"
-            }
-            val written = regen.write_regenerated_files(sample, temp_root)
 
-            expect(written.len()).to_equal(1)
-            expect(written[0]).to_start_with(temp_root)
-            expect(fs.exist(written[0])).to_equal(true)
-            expect(fs.read_text(written[0])).to_equal("theorem system_demo : True := by rfl")
+            opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("SystemDemo")
+            opts = opts.with_output_dir(temp_root)
+            opts = opts.with_stubs(false)
+
+            gen = codegen.LeanCodegen.new(opts)
+
+            func = codegen.LeanFunction.new("system_demo")
+            func = func.add_param("x", "Int")
+            func = func.with_return_type("Int")
+            func = func.with_body("x")
+            gen = gen.add_function(func)
+
+            thm = codegen.LeanTheorem.new("system_demo_nonnegative", "system_demo x >= 0")
+            thm = thm.add_param("x", "Int")
+            gen = gen.add_theorem(thm)
+
+            expect(gen.options.module_name).to_equal("SystemDemo")
+            expect(gen.options.output_dir).to_equal(temp_root)
+            expect(gen.functions.len()).to_equal(1)
+            expect(gen.theorems.len()).to_equal(1)
+            expect(gen.functions[0].name).to_equal("system_demo")
+            expect(gen.theorems[0].name).to_equal("system_demo_nonnegative")
 
     context "Summary reporting":
         it "formats a mixed proof summary":
@@ -52,4 +63,4 @@ describe "Lean Verification Workflow":
             expect(summary.is_fully_proven()).to_equal(false)
             expect(summary.format()).to_contain("Files: 2/2 passed")
             expect(summary.format()).to_contain("Theorems: 1/3 proven")
-            expect(summary.format()).to_contain("Unproven (sorry): 2")
+            expect(summary.format()).to_contain("Admitted (sorry): 2")

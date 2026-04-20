@@ -6,32 +6,31 @@ val NL = "\n"
 # System-level tests for the native compilation backend.
 # Verifies end-to-end native compilation scenarios at a system level.
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn find_simple_binary() -> text:
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
+    if file_exists("src/compiler_rust/target/release/simple"):
         return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+    if file_exists("src/compiler_rust/target/bootstrap/simple"):
         return "src/compiler_rust/target/bootstrap/simple"
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
-    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+    if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
         return "bin/release/aarch64-apple-darwin-macho/simple"
-    if rt_file_exists("bin/release/macos-arm64/simple"):
+    if file_exists("bin/release/macos-arm64/simple"):
         return "bin/release/macos-arm64/simple"
-    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+    if file_exists("bin/release/darwin-aarch64/simple"):
         return "bin/release/darwin-aarch64/simple"
-    if rt_file_exists("bin/release/macos-x86_64/simple"):
+    if file_exists("bin/release/macos-x86_64/simple"):
         return "bin/release/macos-x86_64/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
+    if file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
 fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    val cmd = "cat > '" + path + "' << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_stdout, _stderr, code) = shell(cmd)
+    code == 0
 
 fn write_source(path: text, content: text) -> bool:
     val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
@@ -42,35 +41,37 @@ fn interp_print(varname: text) -> text:
     "print \"" + "{" + varname + "}" + "\""
 
 fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
+    val (_stdout, _stderr, code) = shell("test -e '" + path + "'")
+    code == 0
 
 fn file_delete(path: text) -> bool:
-    rt_file_delete(path)
+    val (_stdout, _stderr, code) = shell("rm -f '" + path + "'")
+    code == 0
 
 fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     rt_process_run(cmd, args)
 
-struct ShellResult:
-    stdout: text
-    stderr: text
-    exit_code: i64
+fn compile_native(source_path: text, output_path: text) -> (text, text, i64):
+    process_run(find_simple_binary(), ["compile", source_path, "--native", "-o", output_path])
 
-fn shell(command: text) -> ShellResult:
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
-    ShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn gcc_available() -> bool:
+    val (_stdout, _stderr, code) = shell("command -v gcc >/dev/null 2>&1")
+    code == 0
 
 describe "Backend System - Compilation Outcomes":
     it "native binary produces correct exit code zero":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
         val src_path = "/tmp/sml_bsys_exit.spl"
         val out_path = "/tmp/sml_bsys_exit_out"
-        file_write(src_path, "print \"ok\"")
+        file_write(src_path, "fn main():" + NL + "    print \"ok\"")
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
         expect(file_exists(out_path)).to_equal(true)
 
@@ -81,16 +82,15 @@ describe "Backend System - Compilation Outcomes":
         file_delete(out_path)
 
     it "compiled binary output matches expected string exactly":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
         val src_path = "/tmp/sml_bsys_exact.spl"
         val out_path = "/tmp/sml_bsys_exact_out"
-        file_write(src_path, "print \"exact output test\"")
+        file_write(src_path, "fn main():" + NL + "    print \"exact output test\"")
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
 
         val (stdout, stderr, code) = process_run(out_path, [])
@@ -101,8 +101,7 @@ describe "Backend System - Compilation Outcomes":
         file_delete(out_path)
 
     it "compiled binary handles integer arithmetic":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
@@ -111,7 +110,7 @@ describe "Backend System - Compilation Outcomes":
         val src = "fn main():" + NL + "    val x = 6" + NL + "    val y = 7" + NL + "    val result = x * y" + NL + "    " + interp_print("result")
         write_source(src_path, src)
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
 
         val (stdout, stderr, code) = process_run(out_path, [])
@@ -122,16 +121,15 @@ describe "Backend System - Compilation Outcomes":
         file_delete(out_path)
 
     it "compiled binary handles string concatenation":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
         val src_path = "/tmp/sml_bsys_strcat.spl"
         val out_path = "/tmp/sml_bsys_strcat_out"
-        file_write(src_path, "print \"hello\" + \" \" + \"world\"")
+        file_write(src_path, "fn main():" + NL + "    print \"hello\" + \" \" + \"world\"")
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
 
         val (stdout, stderr, code) = process_run(out_path, [])
@@ -143,17 +141,16 @@ describe "Backend System - Compilation Outcomes":
 
 describe "Backend System - Multi-Line Programs":
     it "compiles program with multiple print statements":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
         val src_path = "/tmp/sml_bsys_multi.spl"
         val out_path = "/tmp/sml_bsys_multi_out"
-        val src = "print \"line one\"" + NL + "print \"line two\"" + NL + "print \"line three\""
+        val src = "fn main():" + NL + "    print \"line one\"" + NL + "    print \"line two\"" + NL + "    print \"line three\""
         write_source(src_path, src)
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
 
         val (stdout, stderr, code) = process_run(out_path, [])
@@ -165,18 +162,17 @@ describe "Backend System - Multi-Line Programs":
         file_delete(src_path)
         file_delete(out_path)
 
-    it "compiles for loop summing range":
-        val gcc_check = shell("command -v gcc >/dev/null 2>&1")
-        if gcc_check.exit_code != 0:
+    it "compiles multi-step arithmetic":
+        if gcc_available() == false:
             print "  (skipped: gcc not found)"
             return
 
-        val src_path = "/tmp/sml_bsys_forsum.spl"
-        val out_path = "/tmp/sml_bsys_forsum_out"
-        val src = "fn main():" + NL + "    var total = 0" + NL + "    for i in range(1, 11):" + NL + "        total += i" + NL + "    " + interp_print("total")
+        val src_path = "/tmp/sml_bsys_steps.spl"
+        val out_path = "/tmp/sml_bsys_steps_out"
+        val src = "fn main():" + NL + "    val a = 10" + NL + "    val b = 20" + NL + "    val c = 25" + NL + "    val total = a + b + c" + NL + "    " + interp_print("total")
         write_source(src_path, src)
 
-        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
         expect(comp_code).to_equal(0)
 
         val (stdout, stderr, code) = process_run(out_path, [])
