@@ -114,9 +114,9 @@ Required follow-up work:
 
 Latest checked artifact:
 
-- Kernel: `build/os/simpleos_desktop_e2e_62.elf`
+- Kernel: `build/os/simpleos_desktop_e2e_65.elf`
 - Disk image: `build/os/fat32_hello_check_47.img`
-- Serial log: `build/os/simpleos_desktop_hello_check_62_serial.log`
+- Serial log: `build/os/simpleos_desktop_hello_check_65_serial.log`
 - Result: QEMU exited through the debug-exit path and the serial log reached
   `TEST PASSED`.
 
@@ -133,13 +133,15 @@ attached and reaches:
 This proves boot, framebuffer initialization, launcher shortcut routing, WM
 window registration, and resident app window materialization. It does not yet
 prove that apps are normal filesystem-loaded, process-isolated, scheduler-owned
-programs. The active app path now proves the filesystem bytes are found before
-fallback:
+programs. The active app path now proves the filesystem bytes are found and the
+known-app launch result is produced by the Simple syscall dispatcher before the
+C syscall shim fallback:
 
 - `[syscall13] dispatch_direct enter`
 - `[vfs-root] c_fat32_read_ok path=/sys/apps/<app> bytes=<n>`
 - `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
-- `[c-syscall13] fat32 app image validated; resident pid allocated`
+- `[syscall13] direct resident handoff path=/sys/apps/<app> pid=<n>`
+- no `[c-syscall13] fat32 app image validated` marker
 - resident manifest fallback markers such as `mode=resident-manifest`
 
 Those fallback markers must disappear before the process-backed app requirement
@@ -148,7 +150,7 @@ sentinel GUI app path because the filesystem-backed direct process path still
 faults under baremetal after image bytes and initial stack bytes are prepared.
 The next blocker is making `build_user_process_image` plus
 `Scheduler.create_user_task` safe for real FAT32 app ELFs and then removing the
-C resident compatibility allocation.
+direct resident compatibility PID path.
 
 ## Completion Criteria
 

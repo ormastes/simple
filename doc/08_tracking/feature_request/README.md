@@ -40,6 +40,7 @@ adding information.
 | `README.md` | This file. |
 | `TEMPLATE.md` | Single-entry template. Copy into a target's file. |
 | `nvfs_requests.md` | NVFS-targeted requests (secondary channel for NVFS). |
+| `simpleos_os_requests.md` | SimpleOS scheduler, process lifecycle, and SOSIX sharing requests. |
 
 Additional target files (e.g. `storage_requests.md`) follow the same layout:
 header → schema → `## Upfront Contributions` (cross-ref) → `## Open Requests`.
