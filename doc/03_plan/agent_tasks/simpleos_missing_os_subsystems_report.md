@@ -69,6 +69,9 @@ Required follow-up work:
 - POSIX pipe fd read/write/close now route to the native pipe backend instead
   of the generic VFS async compatibility path; keep extending this pattern to
   TTY, socket, timer, and stdio descriptors.
+- POSIX regular file read/write now block on `async_io` as the native owner for
+  VFS-backed descriptor completion instead of duplicating VFS IPC completion
+  logic in the POSIX layer.
 - Promote native async APIs for fd/VFS, pipe, TTY/PTY, process lifecycle,
   timers, sockets, and window/event operations before adding or extending sync
   wrappers.

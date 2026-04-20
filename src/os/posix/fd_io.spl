@@ -10,7 +10,7 @@ use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2,
 use os.posix.async_io.{sync_read, sync_write}
 use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.userlib.syscall_raw.{syscall}
-use os.userlib.ipc_protocol.{VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE}
+use os.userlib.ipc_protocol.{VFS_OPEN, VFS_CLOSE}
 
 # Well-known VFS service IPC port
 val _VFS_PORT: u64 = 1
@@ -112,8 +112,8 @@ fn posix_open(path: text, flags: u32, mode: u32) -> i32:
 fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
     """Read from a file descriptor. Returns bytes read or -errno.
 
-    For serial FDs (0-2), uses the sync_read path.
-    For file FDs, sends VFS_READ IPC with the VFS handle from the FD table.
+    For serial and file FDs, blocks on the native async_io owner.
+    For pipe FDs, blocks on the native pipe backend.
     """
     if not fd_is_valid(fd):
         return 0 - EBADF as i64
@@ -135,50 +135,14 @@ fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
     if route != FD_IO_ROUTE_FILE:
         return 0 - EBADF as i64
 
-    # File: send VFS_READ IPC
-    val vfs_handle = fd_ports[idx]
-    val offset = fd_offsets[idx]
-
-    var payload: [u8] = []
-    _push_u32(payload, VFS_READ)
-    _push_u64(payload, vfs_handle)
-    _push_u64(payload, offset)
-    _push_u64(payload, count)
-
-    val payload_ptr = unsafe_addr_of(payload)
-    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
-    if send_result < 0:
-        return 0 - EIO as i64
-
-    # Receive reply: status(i32) | bytes_read(u64) | data(bytes)
-    var reply_buf: [u8; 4096] = [0; 4096]
-    val reply_ptr = unsafe_addr_of(reply_buf)
-    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 4096, 0, 0)
-    if recv_result < 0:
-        return 0 - EIO as i64
-
-    val status = _read_i32(reply_buf, 0)
-    if status < 0:
-        return status as i64
-
-    val bytes_read = _read_u64(reply_buf, 4)
-
-    # Copy data to user buffer
-    extern fn mmio_write8(addr: u64, val_: u8)
-    var ci: u64 = 0
-    while ci < bytes_read and ci < count:
-        mmio_write8(buf + ci, reply_buf[12 + ci])
-        ci = ci + 1
-
-    # Advance file offset
-    fd_offsets[idx] = fd_offsets[idx] + bytes_read
-    bytes_read as i64
+    # File reads are owned by async_io; POSIX blocks on its completion.
+    sync_read(fd, buf, count)
 
 fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     """Write to a file descriptor. Returns bytes written or -errno.
 
-    For serial FDs (0-2), uses the sync_write path.
-    For file FDs, sends VFS_WRITE IPC with the VFS handle from the FD table.
+    For serial and file FDs, blocks on the native async_io owner.
+    For pipe FDs, blocks on the native pipe backend.
     """
     if not fd_is_valid(fd):
         return 0 - EBADF as i64
@@ -200,43 +164,8 @@ fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     if route != FD_IO_ROUTE_FILE:
         return 0 - EBADF as i64
 
-    # File: send VFS_WRITE IPC
-    val vfs_handle = fd_ports[idx]
-    val offset = fd_offsets[idx]
-
-    # Read data from user buffer
-    extern fn mmio_read8(addr: u64) -> u8
-    var payload: [u8] = []
-    _push_u32(payload, VFS_WRITE)
-    _push_u64(payload, vfs_handle)
-    _push_u64(payload, offset)
-    _push_u64(payload, count)
-    var ci: u64 = 0
-    while ci < count:
-        payload.push(mmio_read8(buf + ci))
-        ci = ci + 1
-
-    val payload_ptr = unsafe_addr_of(payload)
-    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
-    if send_result < 0:
-        return 0 - EIO as i64
-
-    # Receive reply: status(i32) | bytes_written(u64)
-    var reply_buf: [u8; 16] = [0; 16]
-    val reply_ptr = unsafe_addr_of(reply_buf)
-    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
-    if recv_result < 0:
-        return 0 - EIO as i64
-
-    val status = _read_i32(reply_buf, 0)
-    if status < 0:
-        return status as i64
-
-    val bytes_written = _read_u64(reply_buf, 4)
-
-    # Advance file offset
-    fd_offsets[idx] = fd_offsets[idx] + bytes_written
-    bytes_written as i64
+    # File writes are owned by async_io; POSIX blocks on its completion.
+    sync_write(fd, buf, count)
 
 fn posix_close(fd: i32) -> i32:
     """Close a file descriptor.
