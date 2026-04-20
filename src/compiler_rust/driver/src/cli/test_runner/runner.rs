@@ -189,7 +189,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Initialize for test execution
     initialize_diagrams(&options, quiet);
     initialize_profiling(&options, quiet);
-    initialize_coverage(quiet);
+    initialize_coverage(&options, quiet);
 
     // Runner is now created fresh per test in run_test_file() to prevent memory leaks.
     // No shared runner needed.
@@ -433,8 +433,11 @@ fn initialize_profiling(options: &TestOptions, quiet: bool) {
 }
 
 /// Initialize coverage tracking if enabled
-fn initialize_coverage(quiet: bool) {
-    if is_coverage_enabled() {
+fn initialize_coverage(options: &TestOptions, quiet: bool) {
+    if options.coverage {
+        std::env::set_var("SIMPLE_COVERAGE", "1");
+    }
+    if options.coverage || is_coverage_enabled() {
         init_coverage();
         if !quiet {
             println!("Coverage tracking enabled");
@@ -651,7 +654,7 @@ fn execute_test_files(
 
     // Load result cache for incremental test runs (skip unchanged files)
     let mut result_cache = super::result_cache::ResultCache::load();
-    let use_cache = !options.force_rebuild;
+    let use_cache = !options.force_rebuild && !options.coverage;
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
@@ -761,7 +764,7 @@ fn execute_test_files(
                 // the real interpreter path instead.
                 let is_system_spec = path.components().any(|c| c.as_os_str() == "system")
                     && path.components().any(|c| c.as_os_str() == "test");
-                if !options.safe_mode && !is_system_spec {
+                if !options.coverage && !options.safe_mode && !is_system_spec {
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {
                         Ok(_) => {

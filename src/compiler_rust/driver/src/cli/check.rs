@@ -433,7 +433,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x = 42\n    print(x)").unwrap();
 
-        let result = check_file(file.path());
+        let result = check_file(file.path(), &[]);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -443,7 +443,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x =").unwrap();
 
-        let result = check_file(file.path());
+        let result = check_file(file.path(), &[]);
         assert_eq!(result.status, CheckStatus::Error);
         assert!(!result.errors.is_empty());
     }
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn test_check_nonexistent_file() {
         let path = PathBuf::from("/nonexistent/file.spl");
-        let result = check_file(&path);
+        let result = check_file(&path, &[]);
         assert_eq!(result.status, CheckStatus::Error);
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].message.contains("cannot read file"));

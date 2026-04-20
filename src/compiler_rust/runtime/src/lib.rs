@@ -52,6 +52,13 @@ pub mod parallel;
 pub mod sandbox;
 pub mod value;
 
+#[used]
+static SIMPLE_KEEP_RT_DECISION_PROBE: extern "C" fn(u64, bool) = value::rt_decision_probe;
+#[used]
+static SIMPLE_KEEP_RT_CONDITION_PROBE: extern "C" fn(u64, u32, bool) = value::rt_condition_probe;
+#[used]
+static SIMPLE_KEEP_RT_PATH_PROBE: extern "C" fn(u64, u32) = value::rt_path_probe;
+
 // Re-export executor types and functions
 pub use executor::{
     configure_async_mode,

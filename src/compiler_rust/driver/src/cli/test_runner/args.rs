@@ -273,6 +273,9 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 options.profile = true;
                 options.profile_mode = Some(arg.trim_start_matches("--profile-mode=").to_string());
             }
+            "--coverage" => {
+                options.coverage = true;
+            }
             // Rust test tracking
             "--rust-tests" => options.rust_tests = true,
             "--no-rust-tests" => options.rust_tests = false,
@@ -478,6 +481,13 @@ mod tests {
         assert_eq!(opts.doctest_md_dir, Some(PathBuf::from("guides")));
         assert!(opts.doctest_doc);
         assert!(opts.doctest_md);
+    }
+
+    #[test]
+    fn test_parse_coverage() {
+        let args = vec!["--coverage".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.coverage);
     }
 
     #[test]

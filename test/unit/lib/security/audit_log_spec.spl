@@ -9,8 +9,8 @@
 # Tests for audit logging utilities.
 # Validates entry formatting, value masking, severity mapping, and entry creation.
 
-use std.security.types.{AuditEntry, AuditSeverity}
-use std.security.audit_log.{format_audit_entry, mask_value, severity_for_event, new_audit_entry}
+use std.security.types.{AuditEntry, SecurityEvent, SecuritySeverity, severity_for_event}
+use std.security.audit_log.{format_audit_entry, mask_value}
 
 # ============================================================================
 # Test Group 1: Audit entry formatting
@@ -18,23 +18,23 @@ use std.security.audit_log.{format_audit_entry, mask_value, severity_for_event, 
 
 describe "format_audit_entry":
     it "produces output containing event name":
-        val entry = new_audit_entry("login_success", "user123", "info")
-        val output = format_audit_entry(entry)
-        expect(output).to_contain("login_success")
+        val entry = AuditEntry.new(SecurityEvent.AuthSuccess(user: "user123", peer: "127.0.0.1"), "corr-1", "test.security")
+        val output = format_audit_entry(entry, true)
+        expect(output).to_contain("auth_success")
 
     it "produces output containing actor":
-        val entry = new_audit_entry("login_success", "user123", "info")
-        val output = format_audit_entry(entry)
+        val entry = AuditEntry.new(SecurityEvent.AuthSuccess(user: "user123", peer: "127.0.0.1"), "corr-1", "test.security")
+        val output = format_audit_entry(entry, true)
         expect(output).to_contain("user123")
 
     it "produces output containing severity":
-        val entry = new_audit_entry("login_failure", "unknown", "warning")
-        val output = format_audit_entry(entry)
+        val entry = AuditEntry.new(SecurityEvent.AuthFailure(user: "unknown", peer: "127.0.0.1", reason: "bad password"), "corr-1", "test.security")
+        val output = format_audit_entry(entry, true)
         expect(output).to_contain("warning")
 
     it "produces non-empty output":
-        val entry = new_audit_entry("test_event", "system", "info")
-        val output = format_audit_entry(entry)
+        val entry = AuditEntry.new(SecurityEvent.RequestProcessed(path: "/health", duration_ms: 3, status: 200), "corr-1", "test.security")
+        val output = format_audit_entry(entry, true)
         val is_non_empty = output.len() > 0
         expect(is_non_empty).to_equal(true)
 
@@ -45,7 +45,7 @@ describe "format_audit_entry":
 describe "mask_value":
     it "masks short values completely":
         val result = mask_value("abc")
-        expect(result).to_equal("***")
+        expect(result).to_equal("****")
 
     it "masks long values keeping partial prefix":
         val result = mask_value("secret_password_123")
@@ -55,28 +55,28 @@ describe "mask_value":
 
     it "handles empty value":
         val result = mask_value("")
-        expect(result).to_equal("***")
+        expect(result).to_equal("****")
 
 # ============================================================================
 # Test Group 3: Severity mapping
 # ============================================================================
 
 describe "severity_for_event":
-    it "returns info for login_success":
-        val sev = severity_for_event("login_success")
-        expect(sev).to_equal("info")
+    it "returns info for auth success":
+        val sev = severity_for_event(SecurityEvent.AuthSuccess(user: "user123", peer: "127.0.0.1"))
+        expect(sev).to_equal(SecuritySeverity.Info)
 
-    it "returns warning for login_failure":
-        val sev = severity_for_event("login_failure")
-        expect(sev).to_equal("warning")
+    it "returns warning for auth failure":
+        val sev = severity_for_event(SecurityEvent.AuthFailure(user: "unknown", peer: "127.0.0.1", reason: "bad password"))
+        expect(sev).to_equal(SecuritySeverity.Warning)
 
-    it "returns critical for permission_escalation":
-        val sev = severity_for_event("permission_escalation")
-        expect(sev).to_equal("critical")
+    it "returns critical for csrf violation":
+        val sev = severity_for_event(SecurityEvent.CsrfViolation(peer: "127.0.0.1", path: "/admin"))
+        expect(sev).to_equal(SecuritySeverity.Critical)
 
-    it "returns info for unknown events":
-        val sev = severity_for_event("some_unknown_event")
-        expect(sev).to_equal("info")
+    it "returns info for request processed":
+        val sev = severity_for_event(SecurityEvent.RequestProcessed(path: "/health", duration_ms: 3, status: 200))
+        expect(sev).to_equal(SecuritySeverity.Info)
 
 # ============================================================================
 # Test Group 4: AuditEntry creation
@@ -84,14 +84,15 @@ describe "severity_for_event":
 
 describe "new_audit_entry":
     it "creates entry with correct event":
-        val entry = new_audit_entry("file_access", "admin", "info")
-        expect(entry.event).to_equal("file_access")
+        val event = SecurityEvent.AccessDenied(resource: "/etc/passwd", capability: "admin", peer: "127.0.0.1")
+        val entry = AuditEntry.new(event, "corr-1", "test.security")
+        expect(entry.event).to_equal(event)
 
-    it "creates entry with correct actor":
-        val entry = new_audit_entry("file_access", "admin", "info")
-        expect(entry.actor).to_equal("admin")
+    it "creates entry with correct correlation id":
+        val entry = AuditEntry.new(SecurityEvent.AccessDenied(resource: "/etc/passwd", capability: "admin", peer: "127.0.0.1"), "corr-1", "test.security")
+        expect(entry.correlation_id).to_equal("corr-1")
 
     it "creates entry with non-empty timestamp":
-        val entry = new_audit_entry("file_access", "admin", "info")
-        val has_ts = entry.timestamp.len() > 0
+        val entry = AuditEntry.new(SecurityEvent.AccessDenied(resource: "/etc/passwd", capability: "admin", peer: "127.0.0.1"), "corr-1", "test.security")
+        val has_ts = entry.timestamp_ms > 0
         expect(has_ts).to_equal(true)

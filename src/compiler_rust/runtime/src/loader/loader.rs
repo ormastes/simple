@@ -82,6 +82,8 @@ impl ModuleLoader {
         R: Read + Seek,
         F: Fn(&str) -> Option<usize>,
     {
+        let combined_resolver = |name: &str| resolve_builtin_runtime_symbol(name).or_else(|| resolver(name));
+
         // ⭐ v1.1: Read header from trailer (EOF-128) with v1.0 fallback
         debug!("Reading SMF header (trying v1.1 trailer, fallback to v1.0)");
         let header = SmfHeader::read_trailer(reader).map_err(|e| {
@@ -386,7 +388,7 @@ impl ModuleLoader {
             &relocs,
             &symbols,
             code_mem.as_ptr() as usize,
-            &resolver,
+            &combined_resolver,
             &mut got_slot_resolver,
         )
         .map_err(|e| {
@@ -620,6 +622,19 @@ impl ModuleLoader {
 
         trace!(total_relocations = relocs.len(), "Finished reading relocations");
         Ok(relocs)
+    }
+}
+
+fn resolve_builtin_runtime_symbol(name: &str) -> Option<usize> {
+    match name.strip_prefix('_').unwrap_or(name) {
+        "rt_decision_probe" => Some(crate::value::rt_decision_probe as usize),
+        "rt_condition_probe" => Some(crate::value::rt_condition_probe as usize),
+        "rt_path_probe" => Some(crate::value::rt_path_probe as usize),
+        "rt_coverage_decision_probe" => Some(crate::coverage::rt_coverage_decision_probe as usize),
+        "rt_coverage_condition_probe" => Some(crate::coverage::rt_coverage_condition_probe as usize),
+        "rt_coverage_path_probe" => Some(crate::coverage::rt_coverage_path_probe as usize),
+        "rt_coverage_path_finalize" => Some(crate::coverage::rt_coverage_path_finalize as usize),
+        _ => None,
     }
 }
 

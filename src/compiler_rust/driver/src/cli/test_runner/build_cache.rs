@@ -183,8 +183,9 @@ mod tests {
     fn test_source_hash_deterministic() {
         // Two calls with same path should produce same hash
         let path = Path::new("test/fixtures/sample.spl");
-        let h1 = BuildCache::source_hash(path);
-        let h2 = BuildCache::source_hash(path);
+        let cache = BuildCache::new(false);
+        let h1 = cache.source_hash(path);
+        let h2 = cache.source_hash(path);
         // Both None if file doesn't exist, but they should match
         assert_eq!(h1, h2);
     }

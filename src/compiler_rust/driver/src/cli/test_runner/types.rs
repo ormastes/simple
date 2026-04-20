@@ -225,6 +225,8 @@ pub struct TestOptions {
     pub profile: bool,
     /// Profile mode (statistics, sequence, combined)
     pub profile_mode: Option<String>,
+    /// Enable coverage collection for the test run.
+    pub coverage: bool,
     /// Include Rust test results in database
     pub rust_tests: bool,
     /// Only track ignored Rust tests (skip running all)
@@ -293,6 +295,7 @@ impl Default for TestOptions {
             slow_threshold_ms: None,
             profile: false,
             profile_mode: None,
+            coverage: false,
             rust_tests: false,
             rust_ignored_only: false,
 

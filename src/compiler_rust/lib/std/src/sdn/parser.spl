@@ -51,13 +51,12 @@ class Parser:
                 break
 
             # Parse top-level statement
-            match self.parse_statement():
-                case Ok(Some((key, value))):
-                    root[key] = value
-                case Ok(nil):
+            val stmt = self.parse_statement()?
+            match stmt:
+                case Some((key, value)):
+                    root = self.dict_with(root, key, value)
+                case nil:
                     break
-                case Err(e):
-                    return Err(e)
 
         return Ok(SdnValue.Dict(root))
 
@@ -172,36 +171,33 @@ class Parser:
                 case _ if self.is_identifier_at(0):
                     val key = self.expect_identifier()?
 
-                    match self.peek_kind():
-                        case Some(TokenKind.Colon):
-                            self.advance()
-                            match self.parse_colon_stmt(key):
-                                case Ok(Some((_, value))):
-                                    dict[key] = value
-                                case Ok(nil):
-                                    pass
-                                case Err(e):
-                                    return Err(e)
+                    if self.peek_kind_matches_colon():
+                        self.advance()
+                        val stmt = self.parse_colon_stmt(key)?
+                        match stmt:
+                            case Some((_, value)):
+                                dict = self.dict_with(dict, key, value)
+                            case nil:
+                                pass
 
-                        case Some(TokenKind.Equals):
-                            self.advance()
-                            val value = self.parse_inline_value()?
-                            dict[key] = value
-                            self.skip_newlines()
+                    elif self.peek_kind_matches_equals():
+                        self.advance()
+                        val value = self.parse_inline_value()?
+                        dict = self.dict_with(dict, key, value)
+                        self.skip_newlines()
 
-                        case Some(TokenKind.Pipe):
-                            match self.parse_named_table(key):
-                                case Ok(Some((_, value))):
-                                    dict[key] = value
-                                case Ok(nil):
-                                    pass
-                                case Err(e):
-                                    return Err(e)
+                    elif self.peek_kind_matches_pipe():
+                        val table = self.parse_named_table(key)?
+                        match table:
+                            case Some((_, value)):
+                                dict = self.dict_with(dict, key, value)
+                            case nil:
+                                pass
 
-                        case _:
-                            # Bare identifier as value
-                            dict[key] = SdnValue.text(key)
-                            self.skip_newlines()
+                    else:
+                        # Bare identifier as value
+                        dict = self.dict_with(dict, key, SdnValue.text(key))
+                        self.skip_newlines()
 
                 case _:
                     # Unexpected token in dict block
@@ -515,15 +511,15 @@ class Parser:
                 self.advance()
                 return Ok(SdnValue.i32(i))
 
-            case Some(TokenKind.f32(f)):
+            case Some(TokenKind.Float(f)):
                 self.advance()
                 return Ok(SdnValue.f32(f))
 
-            case Some(TokenKind.text(s)):
+            case Some(TokenKind.String(s)):
                 self.advance()
                 return Ok(SdnValue.text(s))
 
-            case Some(TokenKind.bool(b)):
+            case Some(TokenKind.Bool(b)):
                 self.advance()
                 return Ok(SdnValue.bool(b))
 
@@ -551,6 +547,34 @@ class Parser:
                 return Err(syntax_error_with_span("Expected value", span))
 
     # === Helper methods ===
+
+    fn dict_with(dict: Dict<text, SdnValue>, key: text, value: SdnValue) -> Dict<text, SdnValue>:
+        var updated = {}
+        for (existing_key, existing_value) in dict.items():
+            updated = updated.set(existing_key, existing_value)
+        updated = updated.set(key, value)
+        return updated
+
+    fn peek_kind_matches_colon() -> bool:
+        match self.peek_kind():
+            case Some(TokenKind.Colon):
+                return true
+            case _:
+                return false
+
+    fn peek_kind_matches_equals() -> bool:
+        match self.peek_kind():
+            case Some(TokenKind.Equals):
+                return true
+            case _:
+                return false
+
+    fn peek_kind_matches_pipe() -> bool:
+        match self.peek_kind():
+            case Some(TokenKind.Pipe):
+                return true
+            case _:
+                return false
 
     fn peek() -> Option<Token>:
         """Look at current token without consuming"""
@@ -651,11 +675,11 @@ class Parser:
         match (a, b):
             case (TokenKind.Integer(_), TokenKind.Integer(_)):
                 return true
-            case (TokenKind.f32(_), TokenKind.f32(_)):
+            case (TokenKind.Float(_), TokenKind.Float(_)):
                 return true
-            case (TokenKind.text(_), TokenKind.text(_)):
+            case (TokenKind.String(_), TokenKind.String(_)):
                 return true
-            case (TokenKind.bool(_), TokenKind.bool(_)):
+            case (TokenKind.Bool(_), TokenKind.Bool(_)):
                 return true
             case (TokenKind.Identifier(_), TokenKind.Identifier(_)):
                 return true

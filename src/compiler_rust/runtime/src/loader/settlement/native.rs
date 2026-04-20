@@ -447,6 +447,9 @@ impl NativeLibManager {
 
     /// Look up a symbol across all libraries.
     pub fn resolve_symbol(&mut self, name: &str) -> Option<usize> {
+        if let Some(addr) = resolve_builtin_runtime_symbol(name) {
+            return Some(addr);
+        }
         for lib in &mut self.libraries {
             if let Some(addr) = lib.get_symbol(name) {
                 return Some(addr);
@@ -476,6 +479,19 @@ impl NativeLibManager {
             .iter()
             .enumerate()
             .map(|(i, lib)| (NativeHandle(i as u32), lib))
+    }
+}
+
+fn resolve_builtin_runtime_symbol(name: &str) -> Option<usize> {
+    match name.strip_prefix('_').unwrap_or(name) {
+        "rt_decision_probe" => Some(crate::value::rt_decision_probe as usize),
+        "rt_condition_probe" => Some(crate::value::rt_condition_probe as usize),
+        "rt_path_probe" => Some(crate::value::rt_path_probe as usize),
+        "rt_coverage_decision_probe" => Some(crate::coverage::rt_coverage_decision_probe as usize),
+        "rt_coverage_condition_probe" => Some(crate::coverage::rt_coverage_condition_probe as usize),
+        "rt_coverage_path_probe" => Some(crate::coverage::rt_coverage_path_probe as usize),
+        "rt_coverage_path_finalize" => Some(crate::coverage::rt_coverage_path_finalize as usize),
+        _ => None,
     }
 }
 

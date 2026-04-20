@@ -262,14 +262,14 @@ class Lexer:
         """Look at the current character without consuming it"""
         if self.pos < self.source.len():
             return Some(self.source[self.pos])
-        return None
+        return nil
 
     fn peek_at(offset: i32) -> Option<text>:
         """Look ahead by offset characters"""
         val idx = self.pos + offset
         if idx < self.source.len():
             return Some(self.source[idx])
-        return None
+        return nil
 
     me advance() -> Option<text>:
         """Consume and return the current character"""
@@ -429,65 +429,49 @@ class Lexer:
         var has_dot = false
         var has_exp = false
 
-        loop:
-            match self.peek():
-                case Some(ch):
-                    if is_digit(ch):
-                        # Digit
-                        self.advance()
-                        value += ch
-
-                    elif ch == "_":
-                        # Underscore separator - skip
-                        self.advance()
-
-                    elif ch == ".":
-                        if not has_dot and not has_exp:
-                            # Decimal point - check next char is digit
-                            match self.peek_at(1):
-                                case Some(next_ch):
-                                    if is_digit(next_ch):
-                                        self.advance()
-                                        value += "."
-                                        has_dot = true
-                                    else:
-                                        break
-                                case nil:
-                                    break
-                        else:
-                            # Semantic versions and dotted identifiers are bare strings.
-                            while self.pos < self.source.len():
-                                val part = self.source[self.pos]
-                                if part == "\n" or part == " " or part == "\t" or part == ":" or part == "," or part == "]" or part == "}" or part == ")":
-                                    break
-                                if is_alphanumeric(part) or part == "." or part == "_" or part == "-":
-                                    self.pos += 1
-                                    self.column += 1
-                                    value += part
-                                else:
-                                    break
-                            return TokenKind.Identifier(value)
-
-                    elif (ch == "e" or ch == "E") and not has_exp:
-                        # Scientific notation
-                        self.advance()
-                        value += ch
-                        has_exp = true
-
-                        # Handle optional sign after exponent
-                        match self.peek():
-                            case Some(sign):
-                                if sign == "+" or sign == "-":
-                                    self.advance()
-                                    value += sign
-                            case nil:
-                                pass
-
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if is_digit(ch):
+                self.pos += 1
+                self.column += 1
+                value += ch
+            elif ch == "_":
+                self.pos += 1
+                self.column += 1
+            elif ch == ".":
+                if not has_dot and not has_exp:
+                    if self.pos + 1 < self.source.len() and is_digit(self.source[self.pos + 1]):
+                        self.pos += 1
+                        self.column += 1
+                        value += "."
+                        has_dot = true
                     else:
                         break
-
-                case nil:
-                    break
+                else:
+                    while self.pos < self.source.len():
+                        val part = self.source[self.pos]
+                        if part == "\n" or part == " " or part == "\t" or part == ":" or part == "," or part == "]" or part == "}" or part == ")":
+                            break
+                        if is_alphanumeric(part) or part == "." or part == "_" or part == "-":
+                            self.pos += 1
+                            self.column += 1
+                            value += part
+                        else:
+                            break
+                    return TokenKind.Identifier(value)
+            elif (ch == "e" or ch == "E") and not has_exp:
+                self.pos += 1
+                self.column += 1
+                value += ch
+                has_exp = true
+                if self.pos < self.source.len():
+                    val sign = self.source[self.pos]
+                    if sign == "+" or sign == "-":
+                        self.pos += 1
+                        self.column += 1
+                        value += sign
+            else:
+                break
 
         # Parse the value
         if has_dot or has_exp:
@@ -499,11 +483,7 @@ class Lexer:
                     return TokenKind.Float(0.0)
         else:
             # Integer
-            match value.to_int():
-                case Some(i):
-                    return TokenKind.Integer(i)
-                case nil:
-                    return TokenKind.Integer(0)
+            return TokenKind.Integer(value.to_int())
 
     me scan_identifier(first: text) -> TokenKind:
         """Scan an identifier or keyword (including bare strings)"""
