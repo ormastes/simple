@@ -4209,6 +4209,14 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 93: /* NetStats: print network statistics to serial */
             _virtio_net_get_stats();
             return 0;
+        case 106: /* Schedule */
+        case 107: /* SchedCtl */
+            if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
+                return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+                    id, a0, a1, a2, a3, a4, 0
+                );
+            }
+            return -38; /* ENOSYS */
         default:
             return -38; /* ENOSYS */
     }
@@ -12326,7 +12334,8 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
  *  80  = dev_enumerate 81 = dev_get_info  82 = device_grant
  *  83  = map_bar       84 = alloc_dma     85 = free_dma
  *  90  = log_write     91 = log_read      95 = sysinfo
- *  96  = get_hostname  97 = set_hostname
+ *  96  = get_hostname  97 = set_hostname  106 = schedule
+ *  107 = schedctl
  * ============================================================================
  */
 
@@ -12396,6 +12405,8 @@ __attribute__((weak)) int64_t spl_handle_log_read(uint64_t, uint64_t, uint64_t, 
 __attribute__((weak)) int64_t spl_handle_sysinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_get_hostname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_set_hostname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_schedule(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_schedctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 /* ----------------------------------------------------------------------------
  * rt_syscall_dispatch — called from syscall_entry.s trampoline
@@ -12471,6 +12482,8 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 95: return spl_handle_sysinfo(a0, a1, a2, a3, a4, a5);
         case 96: return spl_handle_get_hostname(a0, a1, a2, a3, a4, a5);
         case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
+        case 106: return spl_handle_schedule(a0, a1, a2, a3, a4, a5);
+        case 107: return spl_handle_schedctl(a0, a1, a2, a3, a4, a5);
         default: return -38; /* ENOSYS */
     }
 }
@@ -12872,6 +12885,18 @@ __attribute__((weak)) int64_t spl_handle_set_hostname(uint64_t a0, uint64_t a1, 
     return -38;
 }
 
+__attribute__((weak)) int64_t spl_handle_schedule(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_schedctl(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
 /* End of Wave 10B: spl_handle_* weak shims and rt_syscall_dispatch */
 
 /* ===================================================================
@@ -12965,6 +12990,8 @@ _SHIM_STUB(log_read)
 _SHIM_STUB(sysinfo)
 _SHIM_STUB(get_hostname)
 _SHIM_STUB(set_hostname)
+_SHIM_STUB(schedule)
+_SHIM_STUB(schedctl)
 
 #undef _SHIM_STUB
 

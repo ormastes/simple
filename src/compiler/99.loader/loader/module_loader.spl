@@ -187,8 +187,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             if not self.config.hot_reload:
                 return loadresult_AlreadyLoaded(module: self.modules[path])
             else:
-                # Unload for reload
-                moduleloader_unload(self, path)
+                return moduleloader_replace_live(self, path)
 
         if self.config.verbose:
             print "[loader] Loading: {path}"
@@ -343,8 +342,96 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
 
 fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
         """Reload a module (hot reload)."""
-        moduleloader_unload(self, path)
+        if self.modules.contains_key(path):
+            return moduleloader_replace_live(self, path)
         moduleloader_load(self, path)
+
+
+fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
+        """Replace a loaded module without removing public symbols first.
+
+        Candidate code is mapped under generation-scoped internal symbol names.
+        Public global symbols are swapped only after the candidate has been
+        mapped and relocations have succeeded. This avoids the old unload/load
+        window where symbols are absent during a hot reload.
+        """
+        if not self.modules.contains_key(path):
+            return moduleloader_load(self, path)
+
+        val old_module = self.modules[path]
+        val next_version = old_module.version + 1
+        val candidate_prefix = "{path}#gen{next_version}:"
+
+        var reader_result = self.provider.get_reader(path)
+        if reader_result_is_err(reader_result):
+            reader_result = SmfReaderImpl.open(path)
+            if reader_result_is_err(reader_result):
+                return loadresult_Error(message: reader_result.unwrap_err())
+
+        val reader = reader_result_value
+        var candidate_symbols: Dict<text, LoadedSymbol> = {}
+        var internal_symbols: [text] = []
+
+        for smf_sym in reader.exported_symbols():
+            val code_result = reader.read_code(smf_sym)
+            if code_result_is_err(code_result):
+                return loadresult_Error(message: code_result.unwrap_err())
+
+            val code = code_result_value
+            val internal_name = candidate_prefix + smf_sym.name
+            val exec_addr = moduleloader_allocate_exec_module(self, path, internal_name, code, false)
+            if exec_addr == 0:
+                moduleloader_unmap_internal_symbols(self, internal_symbols)
+                return loadresult_Error(message: "Failed to allocate replacement memory for {smf_sym.name}")
+
+            internal_symbols = internal_symbols.push(internal_name)
+            candidate_symbols[smf_sym.name] = LoadedSymbol(
+                name: smf_sym.name,
+                address: exec_addr,
+                size: smf_sym.size,
+                ty: smf_sym.ty,
+                is_jit: false,
+                file_offset: smf_sym.offset
+            )
+
+        val candidate = LoadedModule(
+            path: path,
+            reader: reader,
+            symbols: candidate_symbols,
+            load_time: current_time(),
+            version: next_version
+        )
+
+        self.modules[path] = candidate
+
+        var smf_data_result = self.provider.get_module_bytes(path)
+        if smf_data_result.is_err():
+            self.modules[path] = old_module
+            moduleloader_unmap_internal_symbols(self, internal_symbols)
+            return loadresult_Error(message: smf_data_result.unwrap_err())
+
+        val reloc_result = moduleloader_apply_relocations(self, path, smf_data_result.unwrap())
+        if reloc_result.is_err():
+            self.modules[path] = old_module
+            moduleloader_unmap_internal_symbols(self, internal_symbols)
+            return loadresult_Error(message: reloc_result.unwrap_err())
+
+        # Publish candidate symbols before retiring old executable records so
+        # lookups never observe a missing symbol during successful replacement.
+        for sym_name in candidate_symbols.keys():
+            val loaded_sym = candidate_symbols[sym_name]
+            self.global_symbols[sym_name] = (path, loaded_sym)
+            lifecycle_on_symbol_mapped(self.lifecycle, path, sym_name)
+
+        for old_sym in old_module.symbols.keys():
+            if not candidate_symbols.contains_key(old_sym):
+                self.global_symbols = self.global_symbols.remove(old_sym)
+            _ = self.jit.exec_mapper.unmap_symbol(old_sym)
+
+        if self.config.verbose:
+            print "[loader] Replaced {path} with generation {next_version}"
+
+        loadresult_Success(module: candidate)
 
 
 fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
@@ -551,6 +638,11 @@ fn moduleloader_allocate_exec_jit(self: ModuleLoader, owner_id: text, symbol: te
             print "[loader] jit map failed for {symbol}: {mapped.unwrap_err()}"
         return 0
     mapped.unwrap()
+
+fn moduleloader_unmap_internal_symbols(self: ModuleLoader, symbols: [text]):
+    """Best-effort cleanup for staged replacement symbols."""
+    for symbol in symbols:
+        _ = self.jit.exec_mapper.unmap_symbol(symbol)
 
 # ============================================================================
 # Validated Loading (checks backend/options match)

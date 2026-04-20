@@ -9,6 +9,7 @@ Make SMF the shared runtime envelope across hosted loader, interpreter, local JI
 
 - Compiler memory reader recognizes v1.1 trailer headers and legacy offset-0 headers.
 - Compiler memory reader normalizes payload offsets through `smf_data_offset`.
+- Hosted module loader has `moduleloader_replace_live` for staged generation replacement and hot-reload routing.
 - SimpleOS kernel SMF parser recognizes trailer headers.
 - SimpleOS loader dispatch accepts SMF trailer packages.
 - Focused specs cover compiler reader, kernel SMF parser, and kernel loader dispatch.

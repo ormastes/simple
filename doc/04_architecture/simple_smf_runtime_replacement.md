@@ -126,13 +126,14 @@ Failure rule: if candidate validation or relocation fails, `loaded:N` remains ac
 ## First Implementation Slice
 
 - `src/compiler/70.backend/linker/smf_reader_memory.spl` now parses v1.1 trailer headers and legacy offset-0 headers.
+- `src/compiler/99.loader/loader/module_loader.spl` now exposes `moduleloader_replace_live` and routes hot reload through staged generation replacement.
 - `src/os/kernel/loader/smf.spl` now parses trailer headers, exposes `smf_has_header`, and reads v1.1 entry/stub metadata from the correct offsets.
 - `src/os/kernel/loader/loader_api.spl` now dispatches SMF trailer packages to the SMF loader instead of rejecting them as unknown data.
 
 ## Remaining Work
 
 - Add shared common SMF parse helpers to remove compiler/kernel duplication.
-- Add hosted atomic replacement API to `ModuleLoader`.
+- Add reference-drain tracking so old hosted generations can be retired after active calls complete instead of immediately unmapping old public records.
 - Add library-role metadata beyond `PIC` so PIE executables and shared libraries are not confused.
 - Implement SimpleOS executable-SMF extraction to ELF process image.
 - Define remote-JIT SMF note sections for target ABI, upload address, and debug-control policy.
