@@ -8,10 +8,11 @@ Use a class-based SMP scheduler core with per-CPU run queues and fair/background
 ## Kernel Mechanism
 
 - `TaskControlBlock` owns `TaskScheduleConfig` and `TaskIsolationProfile`.
-- `SchedulerTopology` owns explicit scheduler domains. The default topology is
-  a single flat domain over the configured logical CPU catalog, with typed
-  domain kind and placement thresholds so hardware-discovered SMT/cache/NUMA
-  domains can replace the flat fallback later without changing scheduler APIs.
+- `SchedulerTopology` owns explicit scheduler domains. `Scheduler.new()`
+  consumes boot-registered topology data when the architecture layer provides
+  it, and otherwise falls back to a single flat domain over the configured
+  logical CPU catalog. Domain kind and placement thresholds remain typed so
+  SMT/cache/NUMA domains do not change scheduler APIs.
 - `CpuRunQueue` owns class lanes: admitted deadline, RT metadata, fair, background, idle.
 - Scheduler pick order is admitted deadline, fixed-priority RT, fair, background, idle. Direct metadata-only deadline activation remains rejected; admission uses the dedicated schedctl operation.
 - Deadline admission rejects invalid budget tuples and per-CPU overload, then picks by earliest absolute virtual deadline.
@@ -50,9 +51,10 @@ Implemented source paths:
 
 The first production slice is intentionally bounded. Remaining scheduler/process logic is:
 
-- Build a real topology domain tree for SMT, LLC/package, and NUMA balancing instead of the current flat 32-run-queue catalog.
-- Add idle-path balancing and replace the current flat topology with discovered
-  SMT, LLC/package, and NUMA domains.
+- Extend x86_64 topology discovery from the current CPUID BSP shape plus online
+  CPU count to full MADT/AP bring-up APIC ID enumeration.
+- Add non-x86 topology providers for ARM/RISC-V package or NUMA data where the
+  platform exposes it.
 - Extend fair scheduling from EEVDF-like virtual-deadline selection to full lag/sleeper decay and wakeup-preemption behavior.
 - Add RT bandwidth throttling and priority-inheritance mutex integration before exposing unrestricted RT policy to user workloads.
 - Extend deadline scheduling with CBS replenishment, deadline-miss accounting, and tracing.

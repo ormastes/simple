@@ -44,7 +44,13 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   scheduler domains for SMT siblings, shared-cache/package groups, and NUMA
   nodes. The flat topology must remain the fallback for tests and early boot.
 - **Acceptance-criteria:**
-  - [ ] Boot-time topology discovery populates `SchedulerTopology.domains`.
+  - [x] Boot-registered topology data populates `SchedulerTopology.domains`
+        during `Scheduler.new()`.
+  - [x] x86_64 architecture probes populate the boot topology registry from
+        CPUID topology leaves instead of synthetic boot data.
+  - [ ] MADT/AP bring-up should populate per-CPU APIC IDs for all online APs;
+        until then the x86_64 CPUID probe uses the BSP shape plus online CPU
+        count.
   - [x] Domain kinds distinguish `Smt`, `Cache`, and `Numa` where available.
   - [x] Rebalance and wake-affine placement prefer local domains before wider
         domains.
@@ -53,9 +59,9 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
 - **Related-issue:** none
-- **Notes:** Synthetic topology construction and scheduler install hooks are
-  implemented. Hardware probing still feeds the flat fallback until arch code
-  exposes real SMT/cache/NUMA identifiers.
+- **Notes:** Synthetic topology construction, scheduler install hooks, and the
+  x86_64 CPUID topology probe are implemented. Full AP enumeration remains
+  blocked on MADT/AP bring-up plumbing.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
@@ -180,6 +186,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** `posix_pread_exact_bytes` provides the synchronous fd/offset/len
-  snapshot helper used by syscall 121. Unit coverage exercises validation and
-  cleanup paths; live VFS byte success remains covered by integration/system
-  environments with a running VFS backend.
+  snapshot helper used by syscall 121. Unit coverage exercises validation,
+  success, out-of-range, and cleanup paths through the syscall using a
+  deterministic file-byte provider; live VFS backend coverage remains an
+  integration/system concern.

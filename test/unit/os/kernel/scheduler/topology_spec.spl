@@ -7,8 +7,10 @@ Tests for pure scheduler topology construction helpers.
 use std.spec.{describe, it, expect}
 use os.kernel.types.task_types.{
     CpuTopologyInfo, SchedulerDomainKind,
-    default_scheduler_topology, scheduler_flat_topology, scheduler_topology_from_cpu_info
+    default_scheduler_topology, scheduler_flat_topology, scheduler_topology_from_cpu_info,
+    scheduler_register_platform_cpu_topology, scheduler_clear_platform_cpu_topology_for_test
 }
+use os.kernel.scheduler.scheduler.{Scheduler}
 
 fn _cpu(cpu_id: u32, smt_id: u32, cache_id: u32, numa_id: u32) -> CpuTopologyInfo:
     CpuTopologyInfo(
@@ -122,3 +124,22 @@ describe "Scheduler topology helpers":
             expect(topology.domains.len()).to_equal(1)
             expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
             expect(topology.domains[0].cpu_count).to_equal(2u32)
+
+        it "uses boot-registered platform topology when constructing the scheduler":
+            scheduler_clear_platform_cpu_topology_for_test()
+            scheduler_register_platform_cpu_topology([
+                _cpu(0u32, 0u32, 0u32, 0u32),
+                _cpu(1u32, 0u32, 0u32, 0u32),
+                _cpu(2u32, 1u32, 1u32, 0u32),
+                _cpu(3u32, 1u32, 1u32, 0u32)
+            ])
+
+            val scheduler = Scheduler.new()
+
+            expect(scheduler.topology_cpu_count()).to_equal(4u32)
+            expect(scheduler.topology_domain_count()).to_equal(5)
+            expect(scheduler.topology_domain(0).unwrap().kind).to_equal(SchedulerDomainKind.Flat)
+            expect(scheduler.topology_domain(1).unwrap().kind).to_equal(SchedulerDomainKind.Cache)
+            expect(scheduler.topology_domain(3).unwrap().kind).to_equal(SchedulerDomainKind.Smt)
+
+            scheduler_clear_platform_cpu_topology_for_test()

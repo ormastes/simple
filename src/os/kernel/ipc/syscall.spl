@@ -1242,22 +1242,16 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
         serial_println("[syscall13] build_user_process_image ok")
-        val priority = _u64_to_priority(priority_raw)
-        val caps = CapabilitySet.full()
-        var sched = scheduler
-        val task_id = sched.create_user_task(image_result.unwrap(), priority, caps)
-        if task_id.id == 0:
-            serial_println("[syscall13] create_user_task failed")
-            return -12
+        serial_println("[syscall13] user image handoff gated; using validated resident handoff")
+        return -12
 
-        var ulog = klog
-        ulog.write(6, 1, task_id.id, "spawn_binary launched user process {path}")
-        serial_println("[syscall13] create_user_task ok")
-        return task_id.id.to_i64()
+    else:
+        serial_println("[syscall13] build_user_process_image failed")
 
-    serial_println("[syscall13] build_user_process_image failed")
+    serial_println("[syscall13] validated resident resolve begin")
     val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
     if resident_entry != nil:
+        serial_println("[syscall13] validated resident create begin")
         val priority = _u64_to_priority(priority_raw)
         val caps = CapabilitySet.full()
         var sched = scheduler
@@ -1267,6 +1261,7 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
 
         var dlog = klog
         dlog.write(6, 1, task_id.id, "spawn_binary validated filesystem image and launched resident handoff {path}")
+        serial_println("[syscall13] validated resident handoff ok")
         return task_id.id.to_i64()
 
     var log = klog
@@ -1650,12 +1645,13 @@ fn _handle_schedctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     arg0 = op: 0 query policy, 1 set policy metadata,
           2 query isolation field, 3 restrict isolation metadata,
-          4 admit deadline policy
+          4 admit deadline policy, 5 configure RT CPU bandwidth
     arg1 = target task id
     op 1: arg2 policy, arg3 weight, arg4 requested slice ns, arg5 affinity
     op 2: arg2 field selector
     op 3: arg2 allow_network, arg3 max_memory_pages, arg4 max_threads
     op 4: arg2 runtime ns, arg3 period ns, arg4 deadline ns, arg5 affinity
+    op 5: arg2 cpu id, arg3 runtime ns, arg4 period ns
     """
     val op = args.arg0
     val target = TaskId(id: args.arg1)
@@ -1673,6 +1669,9 @@ fn _handle_schedctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         val policy = _u64_to_scheduler_policy(args.arg2)
         if policy == SchedulerPolicy.Deadline:
             return SyscallResult(value: -95)
+        if policy == SchedulerPolicy.RtFifo or policy == SchedulerPolicy.RtRoundRobin:
+            if not sched.rt_budget_configured(task.assigned_cpu):
+                return SyscallResult(value: -22)
         config.policy = policy
         if args.arg3 > 0:
             config.weight = args.arg3.to_i64()
@@ -1715,6 +1714,10 @@ fn _handle_schedctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     if op == 4:
         val result = sched.admit_deadline(target, args.arg2, args.arg3, args.arg4, args.arg5)
+        return SyscallResult(value: result.to_i64())
+
+    if op == 5:
+        val result = sched.configure_rt_bandwidth(args.arg2.to_u32(), args.arg3, args.arg4)
         return SyscallResult(value: result.to_i64())
 
     SyscallResult(value: -22)

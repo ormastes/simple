@@ -1,0 +1,129 @@
+# x86_64 scheduler topology probe.
+#
+# The scheduler core consumes architecture-neutral CpuTopologyInfo entries.
+# This module owns x86 CPUID decoding and registers the best topology available
+# during early arch init.
+
+use os.kernel.types.task_types.{CpuTopologyInfo, scheduler_register_platform_cpu_topology}
+use os.kernel.smp.smp.{smp_online_count}
+
+val X86_CPUID_TOPOLOGY_V2: u32 = 0x1F
+val X86_CPUID_TOPOLOGY_V1: u32 = 0x0B
+val X86_CPUID_LEVEL_TYPE_SMT: u32 = 1u32
+val X86_CPUID_LEVEL_TYPE_CORE: u32 = 2u32
+
+struct X86CpuidRegs:
+    eax: u32
+    ebx: u32
+    ecx: u32
+    edx: u32
+
+struct X86TopologyShape:
+    smt_shift: u32
+    core_shift: u32
+    x2apic_id: u32
+
+fn x86_cpuid_regs(leaf: u32, subleaf: u32) -> X86CpuidRegs:
+    """Return raw CPUID registers for one leaf/subleaf."""
+    var eax: u32 = 0u32
+    var ebx: u32 = 0u32
+    var ecx: u32 = 0u32
+    var edx: u32 = 0u32
+    asm """
+        push rbx
+        mov eax, {leaf}
+        mov ecx, {subleaf}
+        cpuid
+        mov {eax}, eax
+        mov {ebx}, ebx
+        mov {ecx}, ecx
+        mov {edx}, edx
+        pop rbx
+    """
+    X86CpuidRegs(eax: eax, ebx: ebx, ecx: ecx, edx: edx)
+
+fn x86_select_topology_leaf(max_basic_leaf: u32) -> u32:
+    """Select the best x86 topology CPUID leaf supported by this CPU."""
+    if max_basic_leaf >= X86_CPUID_TOPOLOGY_V2:
+        return X86_CPUID_TOPOLOGY_V2
+    if max_basic_leaf >= X86_CPUID_TOPOLOGY_V1:
+        return X86_CPUID_TOPOLOGY_V1
+    0u32
+
+fn x86_make_topology_entry(logical_cpu: u32, smt_shift: u32, core_shift: u32, base_apic_id: u32) -> CpuTopologyInfo:
+    """Build one scheduler CPU topology entry from x2APIC-style ids."""
+    val apic_id = base_apic_id + logical_cpu
+    val smt_id = if smt_shift > 0u32: apic_id >> smt_shift else: apic_id
+    val cache_id = if core_shift > 0u32: apic_id >> core_shift else: smt_id
+    CpuTopologyInfo(
+        cpu_id: logical_cpu,
+        smt_id: smt_id,
+        cache_id: cache_id,
+        numa_id: 0u32
+    )
+
+fn x86_scheduler_topology_from_shape(cpu_count: u32, smt_shift: u32, core_shift: u32, base_apic_id: u32) -> [CpuTopologyInfo]:
+    """Build contiguous scheduler topology entries from decoded x86 shape."""
+    val normalized_count = if cpu_count == 0u32: 1u32 else: cpu_count
+    var out: [CpuTopologyInfo] = []
+    var cpu = 0u32
+    while cpu < normalized_count:
+        out.push(x86_make_topology_entry(
+            logical_cpu: cpu,
+            smt_shift: smt_shift,
+            core_shift: core_shift,
+            base_apic_id: base_apic_id
+        ))
+        cpu = cpu + 1u32
+    out
+
+fn x86_decode_topology_shape(leaf: u32) -> X86TopologyShape:
+    """Decode SMT/core shifts from CPUID leaf 0x1F/0x0B."""
+    var smt_shift = 0u32
+    var core_shift = 0u32
+    var x2apic_id = 0u32
+    var subleaf = 0u32
+    while subleaf < 8u32:
+        val regs = x86_cpuid_regs(leaf: leaf, subleaf: subleaf)
+        val level_type = (regs.ecx >> 8) & 0xFF
+        val logicals_at_level = regs.ebx & 0xFFFF
+        if level_type == 0u32 or logicals_at_level == 0u32:
+            break
+        val shift = regs.eax & 0x1F
+        x2apic_id = regs.edx
+        if level_type == X86_CPUID_LEVEL_TYPE_SMT:
+            smt_shift = shift
+        elif level_type == X86_CPUID_LEVEL_TYPE_CORE:
+            core_shift = shift
+        subleaf = subleaf + 1u32
+
+    if core_shift == 0u32:
+        core_shift = smt_shift
+    X86TopologyShape(smt_shift: smt_shift, core_shift: core_shift, x2apic_id: x2apic_id)
+
+fn x86_install_scheduler_topology_from_cpuid():
+    """Register x86 CPUID-derived scheduler topology for later Scheduler.new()."""
+    val max_leaf = x86_cpuid_regs(leaf: 0u32, subleaf: 0u32).eax
+    val topology_leaf = x86_select_topology_leaf(max_leaf)
+    var cpu_count = smp_online_count()
+    if cpu_count == 0u32:
+        cpu_count = 1u32
+
+    if topology_leaf == 0u32:
+        scheduler_register_platform_cpu_topology(x86_scheduler_topology_from_shape(
+            cpu_count: cpu_count,
+            smt_shift: 0u32,
+            core_shift: 0u32,
+            base_apic_id: 0u32
+        ))
+        return
+
+    val shape = x86_decode_topology_shape(topology_leaf)
+    scheduler_register_platform_cpu_topology(
+        x86_scheduler_topology_from_shape(
+            cpu_count: cpu_count,
+            smt_shift: shape.smt_shift,
+            core_shift: shape.core_shift,
+            base_apic_id: shape.x2apic_id
+        )
+    )

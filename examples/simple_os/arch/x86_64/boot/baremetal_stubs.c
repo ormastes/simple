@@ -4185,7 +4185,7 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 int64_t rc = kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
                     id, path_ptr, path_len, a2, a3, a4, 0
                 );
-                if (rc >= 0)
+                if (rc != -38)
                     return rc;
             }
             if (app_id != 0 && simpleos_fat32_read_known_app(app_id) == 0) {

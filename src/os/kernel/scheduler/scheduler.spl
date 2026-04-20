@@ -11,7 +11,7 @@ use os.kernel.types.task_types.{
     UserProcessImage, AddressSpace,
     SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
     SchedulerTopology,
-    default_scheduler_topology, default_task_schedule, default_task_isolation,
+    scheduler_detect_platform_topology, default_task_schedule, default_task_isolation,
     user_process_image_entry, user_process_image_stack_top,
     user_process_image_stack_size, user_process_image_segments,
     user_process_image_file_bytes, user_process_image_initial_sp,
@@ -373,6 +373,7 @@ class Scheduler:
 impl Scheduler:
     static fn new() -> Scheduler:
         """Create a scheduler with empty task table and ready queues."""
+        val detected_topology = scheduler_detect_platform_topology(DEFAULT_SCHED_CPUS)
         # Initialize task slots to nil
         var tasks: [TaskControlBlock?] = []
         var i = 0
@@ -396,7 +397,7 @@ impl Scheduler:
         var rt_replenish_ns_by_cpu: [u64] = []
         var rt_throttled_by_cpu: [bool] = []
         var cpu = 0u32
-        while cpu < DEFAULT_SCHED_CPUS:
+        while cpu < detected_topology.cpu_count:
             cpu_queues.push(CpuRunQueue.new(cpu))
             current_by_cpu.push(TaskId(id: 0))
             preempt_pending_by_cpu.push(nil)
@@ -428,7 +429,7 @@ impl Scheduler:
             preempt_pending_by_cpu: preempt_pending_by_cpu,
             ready_queues: queues,
             cpu_runqueues: cpu_queues,
-            topology: default_scheduler_topology(DEFAULT_SCHED_CPUS),
+            topology: detected_topology,
             rt_runtime_ns_by_cpu: rt_runtime_ns_by_cpu,
             rt_period_ns_by_cpu: rt_period_ns_by_cpu,
             rt_consumed_ns_by_cpu: rt_consumed_ns_by_cpu,
@@ -1077,6 +1078,11 @@ impl Scheduler:
         """Return whether RT is throttled on one CPU."""
         val cpu = self._normalize_cpu(cpu_id)
         self.rt_throttled_by_cpu[cpu as i64]
+
+    fn rt_budget_configured(cpu_id: u32) -> bool:
+        """Return true when a CPU has an explicit RT bandwidth budget."""
+        val cpu = self._normalize_cpu(cpu_id)
+        self.rt_runtime_ns_by_cpu[cpu as i64] > 0 and self.rt_period_ns_by_cpu[cpu as i64] > 0
 
     fn deadline_miss_count(id: TaskId) -> u64:
         """Return recorded deadline misses for a task."""

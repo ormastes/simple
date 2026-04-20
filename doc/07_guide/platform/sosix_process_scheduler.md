@@ -115,9 +115,9 @@ Kernel syscall IDs 120-131 mirror the same model:
 The implemented slice now covers the scheduler/process behavior needed by
 SOSIX process isolation tests:
 
-- Scheduler topology has typed CPU entries plus flat fallback and synthetic
-  SMT/cache/NUMA domain construction. Hardware discovery still enters through
-  the topology provider boundary.
+- Scheduler topology has typed CPU entries plus flat fallback, synthetic
+  SMT/cache/NUMA domain construction for tests, and x86_64 CPUID topology
+  probing during early arch init.
 - Rebalancing includes explicit rebalance, idle-pull balancing, wake-affine
   placement, per-CPU current mirrors, and wakeup preemption metadata.
 - Fair scheduling keeps virtual-deadline ordering and tick accounting.

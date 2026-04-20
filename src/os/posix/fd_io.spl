@@ -34,6 +34,47 @@ struct PosixPreadExactBytes:
     len: u64
     data: [u8]
 
+struct SyntheticFdBytes:
+    handle: u64
+    bytes: [u8]
+
+var g_synthetic_fd_bytes_for_test: [SyntheticFdBytes] = []
+
+fn _set_synthetic_fd_bytes_for_test(handle: u64, bytes: [u8]):
+    """Test hook: register bytes returned by exact file-descriptor reads."""
+    g_synthetic_fd_bytes_for_test.push(SyntheticFdBytes(handle: handle, bytes: bytes))
+
+fn _clear_synthetic_fd_bytes_for_test():
+    """Test hook: drop synthetic exact-read entries."""
+    g_synthetic_fd_bytes_for_test = []
+
+fn _synthetic_fd_bytes_for_handle(handle: u64) -> SyntheticFdBytes?:
+    var idx = 0
+    while idx < g_synthetic_fd_bytes_for_test.len():
+        if g_synthetic_fd_bytes_for_test[idx].handle == handle:
+            return Some(g_synthetic_fd_bytes_for_test[idx])
+        idx = idx + 1
+    nil
+
+fn _posix_pread_exact_synthetic(handle: u64, offset: u64, len: u64) -> PosixPreadExactBytes?:
+    val entry = _synthetic_fd_bytes_for_handle(handle)
+    if entry == nil:
+        return nil
+    val synthetic = entry.unwrap()
+    if len == 0:
+        return Some(PosixPreadExactBytes(status: 0, len: 0, data: []))
+    if offset > synthetic.bytes.len() as u64:
+        return Some(_posix_pread_exact_error(0 - EIO as i64))
+    if len > synthetic.bytes.len() as u64 - offset:
+        return Some(_posix_pread_exact_error(0 - EIO as i64))
+
+    var data: [u8] = []
+    var idx: u64 = 0
+    while idx < len:
+        data.push(synthetic.bytes[offset + idx])
+        idx = idx + 1
+    Some(PosixPreadExactBytes(status: len as i64, len: len, data: data))
+
 fn fd_io_read_route(fd_type: u8) -> u8:
     """Return the native backend route used by posix_read for an FD type."""
     if fd_type == FD_TYPE_FILE:
@@ -171,6 +212,10 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
         return _posix_pread_exact_error(0 - EBADF as i64)
     if _fd_io_is_write_only(fd_flags[idx]):
         return _posix_pread_exact_error(0 - EBADF as i64)
+
+    val synthetic = _posix_pread_exact_synthetic(handle: fd_ports[idx], offset: offset, len: len)
+    if synthetic != nil:
+        return synthetic.unwrap()
 
     val original_offset = fd_get_offset(fd)
     fd_set_offset(fd, offset)

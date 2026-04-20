@@ -114,11 +114,12 @@ Required follow-up work:
 
 Latest checked artifact:
 
-- Kernel: `build/os/simpleos_desktop_e2e_66.elf`
-- Disk image: `build/os/fat32_hello_check_47.img`
-- Serial log: `build/os/simpleos_desktop_hello_check_66_serial.log`
-- Result: QEMU exited through the debug-exit path and the serial log reached
-  `TEST PASSED`.
+- Kernel: `build/os/simpleos_desktop_e2e_32.elf`
+- Disk image: `build/os/fat32.img`
+- Serial log: `build/os/simpleos_desktop_direct_serial.log`
+- Result: QEMU timed out after the guest emitted `TEST PASSED`; this is the
+  expected harness shape for this direct serial run because the ISA debug-exit
+  path is not consumed by the wrapper command.
 
 The current x86_64 desktop E2E binary boots in QEMU with the FAT32 NVMe image
 attached and reaches:
@@ -133,34 +134,46 @@ attached and reaches:
 This proves boot, framebuffer initialization, launcher shortcut routing, WM
 window registration, and resident app window materialization. It does not yet
 prove that apps are normal filesystem-loaded, process-isolated, scheduler-owned
-programs. The active app path now proves the filesystem bytes are found and the
-known-app launch result is produced by the Simple syscall dispatcher before the
-C syscall shim fallback:
+programs. The active app path now proves the filesystem bytes are found, copied
+into owned loader storage, and parsed into a `UserProcessImage` before the
+launcher intentionally falls back to resident-manifest materialization:
 
 - `[syscall13] dispatch_direct enter`
 - `[vfs-root] c_fat32_read_ok path=/sys/apps/<app> bytes=<n>`
 - `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
-- valid filesystem ELF bytes now enter the normal `create_user_task` path before
-  any resident fallback is considered
+- `[syscall13] build_user_process_image ok`
+- `[syscall13] user image handoff gated; using validated resident handoff`
 - `build_user_process_image` takes an owned copy of resolved VFS/FAT32 bytes
   before ELF parsing and stores owned segment/file-byte copies in the image
+- `stack_builder` uses literal stack-size constants so the native baremetal
+  build no longer folds the default stack size to zero
 - launcher process rows expose `launcher_process_is_process_backed(pid)` so
   QEMU/system specs can distinguish scheduler-owned app PIDs from resident
   manifest fallbacks without scraping log text
-- no `[c-syscall13] fat32 app image validated` marker
+- the C syscall shim now only uses its legacy fallback for `-ENOSYS`, so this
+  lane no longer emits `[c-syscall13] fat32 app image validated`
 - resident manifest fallback markers such as `mode=resident-manifest`
 
 Those fallback markers must disappear before the process-backed app requirement
-is closed. The next blocker is making `build_user_process_image` plus
-`Scheduler.create_user_task` safe for real FAT32 app ELFs under the full QEMU
-desktop smoke and then removing the shared resident compatibility fallback.
+is closed. The current blocker is `Scheduler.create_user_task` under QEMU. A
+direct-handoff diagnostic run showed that the desktop `-kernel` lane has no
+authoritative PMM/VMM boot initialization before syscall 13. Without an explicit
+VMM initialization guard, default/global VMM state can be mistaken for a valid
+page-table root and `_alloc_table_page`/`vmm_map_page_in` fault-storms in the
+MMIO page-table path (`cr2=0xffffffffffffff86`, `cr3=0x610000`). The VMM now
+tracks `g_vmm_initialized` and refuses real address-space allocation until
+`vmm_init` succeeds, so uninitialized direct handoff stays safely gated instead
+of dereferencing bogus page tables.
 
-2026-04-20 follow-up: the live `simpleos_desktop_disk_boot_spec.spl` FAT32
-desktop lane is green again with the compatibility fallback guarded away from
-process-backed PIDs. The remaining QEMU blocker is still the C-side syscall-13
-fallback in `baremetal_stubs.c`, which can emit
-`[c-syscall13] fat32 app image validated; resident pid allocated` after the
-SPL trap bridge declines a direct process spawn.
+An attempted synthetic `BootOutputPort` bootstrap in the desktop lane was not
+kept: PMM interpreted the constructed memory map incorrectly under the current
+native/baremetal ABI and reported `total pages: 0`. The remaining direct-handoff
+work is therefore to add a real Multiboot/QEMU boot-info to `BootOutputPort`
+adapter or an equivalent trusted C-to-Simple memory-map bridge, initialize PMM
+and VMM from that adapter, then re-enable `create_user_task` mapping. The plain
+resident `create_task` path can also stall in ready-queue enqueue when called
+from the direct trap bridge, so scheduler enqueue from syscall context remains a
+second blocker after VMM bootstrap.
 
 ## Completion Criteria
 
