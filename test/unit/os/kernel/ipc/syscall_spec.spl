@@ -7,6 +7,7 @@ use os.kernel.log.klog.{KernelLog}
 use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
+use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
 
 """
@@ -269,6 +270,59 @@ describe "syscall_handler":
             KernelLog.new(16)
         )
         expect(result.value).to_equal(-10)
+
+    it "dynamic loading syscalls are wired instead of returning ENOSYS":
+        dylib_registry_reset_for_test()
+        val missing_path = "/lib/missing.smf"
+        val missing_sym = "main"
+
+        val open_result = syscall_handler(
+            SyscallArgs(
+                id: 65,
+                arg0: &missing_path as u64,
+                arg1: missing_path.len() as u64,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(open_result.value).to_equal(-2)
+
+        val sym_result = syscall_handler(
+            SyscallArgs(
+                id: 66,
+                arg0: 999,
+                arg1: &missing_sym as u64,
+                arg2: missing_sym.len() as u64,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(sym_result.value).to_equal(-9)
+
+        val close_result = syscall_handler(
+            SyscallArgs(
+                id: 67,
+                arg0: 999,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            Scheduler.new(),
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(close_result.value).to_equal(-9)
 
     it "exec syscall replaces current task image and preserves pid":
         val path = "/sys/services/vfs"

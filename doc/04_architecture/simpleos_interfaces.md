@@ -286,15 +286,17 @@ trampoline. Reserved IDs are:
 | `dlclose` | 67 |
 
 These IDs intentionally avoid existing time (`50`/`51`) and debug-write
-(`60`) syscalls. Until the scheduler/FD-table implementation lands, the
-kernel dispatcher returns `-ENOSYS`; libc converts that to `errno=ENOSYS`.
+(`60`) syscalls. Process and FD syscalls are backed by scheduler/FD-table
+handlers; dynamic-library syscalls are backed by the kernel dylib registry.
 
 Dynamic library loading follows the same async-first rule as file I/O:
 native SimpleOS code uses `os.posix.dylib_async`, while libc `dlopen`,
 `dlsym`, and `dlclose` are synchronous compatibility wrappers. The libc
 self-handle (`dlopen(NULL, ...)`) resolves core libc symbols immediately;
-path-backed SMF/ELF library loads are reserved through syscalls `65`-`67`
-and return `ENOSYS` until the kernel shared-object mapper lands.
+path-backed SMF/ELF library loads use syscalls `65`-`67` to validate bytes,
+create kernel handles, resolve `_start`/`main`, and refcount close. Full PIC
+relocation, import binding, and unload-safe link namespaces remain future
+shared-object mapper work.
 
 **Consumers:** `src/compiler_rust/`, LLVM cross-toolchain, any userspace ELF
 compiled for `x86_64-unknown-simpleos`.
