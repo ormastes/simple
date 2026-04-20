@@ -276,6 +276,8 @@ Native Electron feedback is sent back as `window_cmd` with `payload.source = "na
 
 The host taskbar runtime resolves launches through a small catalog, not through server-route hardcoding. The catalog contains the cross-platform `examples/hello_taskbar` app and the built-in desktop manifests from `src/os/desktop/app_manifest.spl`. Manifest-backed apps use their manifest binary path as `app_id`, e.g. `/sys/apps/terminal`, are exposed as pinned taskbar items by default, and receive generic SimpleWeb/Electron HTML until the app provides richer host content.
 
+Remaining work for the host WM shell backends is tracked in [`doc/03_plan/agent_tasks/host_wm_shell_backends_remaining.md`](../03_plan/agent_tasks/host_wm_shell_backends_remaining.md).
+
 ---
 
 ## 7. Versioning
