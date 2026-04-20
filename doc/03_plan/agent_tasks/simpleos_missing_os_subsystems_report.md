@@ -112,6 +112,14 @@ Required follow-up work:
 
 ## Current QEMU Evidence
 
+Latest checked artifact:
+
+- Kernel: `build/os/simpleos_desktop_e2e_62.elf`
+- Disk image: `build/os/fat32_hello_check_47.img`
+- Serial log: `build/os/simpleos_desktop_hello_check_62_serial.log`
+- Result: QEMU exited through the debug-exit path and the serial log reached
+  `TEST PASSED`.
+
 The current x86_64 desktop E2E binary boots in QEMU with the FAT32 NVMe image
 attached and reaches:
 
@@ -125,13 +133,22 @@ attached and reaches:
 This proves boot, framebuffer initialization, launcher shortcut routing, WM
 window registration, and resident app window materialization. It does not yet
 prove that apps are normal filesystem-loaded, process-isolated, scheduler-owned
-programs. The active app path still emits:
+programs. The active app path now proves the filesystem bytes are found before
+fallback:
 
-- `[syscall13] installed direct bridge deferred`
-- resident manifest fallback markers
+- `[syscall13] dispatch_direct enter`
+- `[vfs-root] c_fat32_read_ok path=/sys/apps/<app> bytes=<n>`
+- `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
+- `[c-syscall13] fat32 app image validated; resident pid allocated`
+- resident manifest fallback markers such as `mode=resident-manifest`
 
-Those markers must disappear before the process-backed app requirement is
-closed.
+Those fallback markers must disappear before the process-backed app requirement
+is closed. The direct `UserProcessImage` handoff is intentionally gated for the
+sentinel GUI app path because the filesystem-backed direct process path still
+faults under baremetal after image bytes and initial stack bytes are prepared.
+The next blocker is making `build_user_process_image` plus
+`Scheduler.create_user_task` safe for real FAT32 app ELFs and then removing the
+C resident compatibility allocation.
 
 ## Completion Criteria
 
