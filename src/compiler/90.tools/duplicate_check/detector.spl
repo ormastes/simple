@@ -10,7 +10,6 @@ use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, 
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
-# StringInterner for efficient token code computation
 struct TokenInterner:
     strings: {text: i64}
     reverse: {i64: text}
@@ -58,6 +57,19 @@ struct DuplicateGroup:
 struct HashScanSummary:
     repeated_hashes: {text: bool}
     candidate_files: {text: bool}
+
+struct TokenWindowCandidate:
+    index: i64
+    end_index: i64
+    line_start: i64
+    line_end: i64
+    hash_value: i64
+
+struct SimilarityPrep:
+    blocks: [DuplicateBlock]
+    features: [FeatureVec]
+    low_signal_flags: [bool]
+    file_count: i64
 
 fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
     """Compute rolling hash for token window with inlined character hashing."""
@@ -285,11 +297,9 @@ fn build_token_codes(tokens: [SimpleToken], interner: TokenInterner) -> [i64]:
         idx = idx + 1
     token_codes
 
-fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> {text: bool}:
-    val tokens = load_tokens_for_file(file_path, config, cache_manager)
+fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationConfig, interner: TokenInterner) -> [TokenWindowCandidate]:
     if tokens.len() < config.min_tokens:
-        return {}
-    var file_hashes = {}
+        return []
 
     val token_codes = build_token_codes(tokens, interner)
     val base = 31
@@ -303,6 +313,7 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
         hash = (hash * base + token_codes[j]) % mod_val
         j = j + 1
 
+    var candidates = []
     var i = 0
     while i + config.min_tokens <= tokens.len():
         if i > 0:
@@ -319,12 +330,28 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
         val end_idx = (i + config.min_tokens).min(tokens.len())
         val end_line = tokens[end_idx - 1].line
         if end_line - start_line + 1 >= config.min_lines:
-            val hash_key = "{hash}"
-            val existing = hash_counts[hash_key] ?? 0
-            hash_counts[hash_key] = existing + 1
-            file_hashes[hash_key] = true
+            candidates.push(TokenWindowCandidate(
+                index: i,
+                end_index: end_idx,
+                line_start: start_line,
+                line_end: end_line,
+                hash_value: hash
+            ))
 
         i = i + 1
+    candidates
+
+fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> {text: bool}:
+    val tokens = load_tokens_for_file(file_path, config, cache_manager)
+    var file_hashes = {}
+
+    val candidates = collect_token_window_candidates(tokens, config, interner)
+    for candidate in candidates:
+        val hash_key = "{candidate.hash_value}"
+        val existing = hash_counts[hash_key] ?? 0
+        hash_counts[hash_key] = existing + 1
+        file_hashes[hash_key] = true
+
     file_hashes
 
 fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> HashScanSummary:
@@ -356,71 +383,35 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
     val filter_enabled = repeated_hashes.keys().len() > 0
     val content = if filter_enabled: "" else: file_read(file_path)
 
-    if tokens.len() < config.min_tokens:
-        return []
-
-    val token_codes = build_token_codes(tokens, interner)
-    val base = 31
-    val mod_val = 1000000007
-    val window_size = config.min_tokens
-    val base_power = power_mod(base, window_size - 1, mod_val)
-
-    var hash = 0
-    var j = 0
-    while j < window_size:
-        hash = (hash * base + token_codes[j]) % mod_val
-        j = j + 1
-
     var batches = []
     var current_batch = []
     val batch_size = 100
-    var i = 0
 
-    while i + config.min_tokens <= tokens.len():
-        if i > 0:
-            val old_code = token_codes[i - 1]
-            val new_code = token_codes[i + window_size - 1]
-
-            hash = (hash - (old_code * base_power) % mod_val + mod_val) % mod_val
-            hash = (hash * base + new_code) % mod_val
-
-        if not is_line_start_window(tokens, i):
-            i = i + 1
+    val candidates = collect_token_window_candidates(tokens, config, interner)
+    for candidate in candidates:
+        val hash_key = "{candidate.hash_value}"
+        if filter_enabled and not repeated_hashes.contains_key(hash_key):
             continue
+        val code = if filter_enabled:
+            ""
+        else:
+            extract_code_snippet(content, tokens, candidate.index, candidate.end_index)
+        val new_block = DuplicateBlock(
+            file: file_path,
+            line_start: candidate.line_start,
+            line_end: candidate.line_end,
+            token_count: config.min_tokens,
+            hash_value: candidate.hash_value,
+            snippet_start_offset: tokens[candidate.index].start_offset,
+            snippet_end_offset: tokens[candidate.end_index - 1].end_offset,
+            code: code
+        )
 
-        val start_line = tokens[i].line
-        val end_idx = (i + config.min_tokens).min(tokens.len())
-        val end_line = tokens[end_idx - 1].line
+        current_batch.push(new_block)
 
-        val line_count = end_line - start_line + 1
-
-        if line_count >= config.min_lines:
-            val hash_key = "{hash}"
-            if filter_enabled and not repeated_hashes.contains_key(hash_key):
-                i = i + 1
-                continue
-            val code = if filter_enabled:
-                ""
-            else:
-                extract_code_snippet(content, tokens, i, end_idx)
-            val new_block = DuplicateBlock(
-                file: file_path,
-                line_start: start_line,
-                line_end: end_line,
-                token_count: config.min_tokens,
-                hash_value: hash,
-                snippet_start_offset: tokens[i].start_offset,
-                snippet_end_offset: tokens[end_idx - 1].end_offset,
-                code: code
-            )
-
-            current_batch.push(new_block)
-
-            if current_batch.len() >= batch_size:
-                batches.push(current_batch)
-                current_batch = []
-
-        i = i + 1
+        if current_batch.len() >= batch_size:
+            batches.push(current_batch)
+            current_batch = []
 
     if current_batch.len() > 0:
         batches.push(current_batch)
@@ -432,10 +423,8 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
 
     blocks
 
-fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+fn bucket_blocks_by_hash(all_blocks: [DuplicateBlock]) -> {text: [DuplicateBlock]}:
     var hash_map = {}
-    var source_cache = {}
-
     for block in all_blocks:
         val hash_key = "{block.hash_value}"
 
@@ -445,41 +434,52 @@ fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [Du
             hash_map[hash_key] = existing
         else:
             hash_map[hash_key] = [block]
+    hash_map
 
-    var groups = []
+fn bucket_exact_blocks(blocks: [DuplicateBlock], source_cache: {text: text}) -> {text: [DuplicateBlock]}:
+    var exact_map = {}
+    for block in blocks:
+        val materialized = materialize_block_code(block, source_cache)
+        val exact_key = duplicate_block_signature(materialized)
+        if exact_map.contains_key(exact_key):
+            var existing = exact_map[exact_key]
+            existing.push(materialized)
+            exact_map[exact_key] = existing
+        else:
+            exact_map[exact_key] = [materialized]
+    exact_map
+
+fn contains_high_signal_block(blocks: [DuplicateBlock]) -> bool:
+    for block in blocks:
+        if not is_low_signal_block(block):
+            return true
+    false
+
+fn add_exact_groups(exact_map: {text: [DuplicateBlock]}, config: DuplicationConfig, groups: [DuplicateGroup]):
+    for exact_key in exact_map.keys():
+        val exact_blocks = exact_map[exact_key]
+        if exact_blocks.len() < 2:
+            continue
+
+        if not contains_high_signal_block(exact_blocks):
+            continue
+
+        val group = build_duplicate_group(exact_blocks)
+        if group.impact_score >= config.min_impact:
+            groups.push(group)
+
+fn group_by_hash(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+    val hash_map = bucket_blocks_by_hash(all_blocks)
+    var source_cache = {}
+
+    val groups = []
 
     for hash_key in hash_map.keys():
         val blocks = hash_map[hash_key]
 
         if blocks.len() >= 2:
-            var exact_map = {}
-            for block in blocks:
-                val materialized = materialize_block_code(block, source_cache)
-                val exact_key = duplicate_block_signature(materialized)
-                if exact_map.contains_key(exact_key):
-                    var existing = exact_map[exact_key]
-                    existing.push(materialized)
-                    exact_map[exact_key] = existing
-                else:
-                    exact_map[exact_key] = [materialized]
-
-            for exact_key in exact_map.keys():
-                val exact_blocks = exact_map[exact_key]
-                if exact_blocks.len() < 2:
-                    continue
-
-                var low_signal_only = true
-                for block in exact_blocks:
-                    if not is_low_signal_block(block):
-                        low_signal_only = false
-                        break
-
-                if low_signal_only:
-                    continue
-
-                val group = build_duplicate_group(exact_blocks)
-                if group.impact_score >= config.min_impact:
-                    groups.push(group)
+            val exact_map = bucket_exact_blocks(blocks, source_cache)
+            add_exact_groups(exact_map, config, groups)
 
     groups
 
@@ -504,8 +504,7 @@ fn sort_by_impact(groups: [DuplicateGroup]) -> [DuplicateGroup]:
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
 
-fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
-    """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
+fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
     val max_blocks_to_analyze = 320
     var blocks_to_analyze = all_blocks
     if all_blocks.len() > max_blocks_to_analyze:
@@ -540,9 +539,10 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
             round = round + 1
         blocks_to_analyze = limited
         log_verbose(config, "  Sampled from {file_keys.len()} files")
+    blocks_to_analyze
 
+fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
-    # Pre-compute all feature vectors upfront (avoids closure capture bug with inner fns)
     var file_token_cache = {}
     var file_line_index_cache = {}
     var feature_vectors = []
@@ -608,14 +608,16 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         block_idx = block_idx + 1
 
     log_progress(config, "Extracted {feature_vectors.len()} feature vectors from {file_token_cache.keys().len()} files")
+    SimilarityPrep(
+        blocks: blocks_to_analyze,
+        features: feature_vectors,
+        low_signal_flags: low_signal_flags,
+        file_count: file_token_cache.keys().len()
+    )
 
-    var refined_groups = []
-
-    for group in exact_groups:
-        refined_groups.push(group)
-
-    log_progress(config, "Starting pairwise comparison of {blocks_to_analyze.len()} blocks...")
-    val total_possible = (blocks_to_analyze.len() * (blocks_to_analyze.len() - 1)) / 2
+fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -> {text: [i64]}:
+    log_progress(config, "Starting pairwise comparison of {prep.blocks.len()} blocks...")
+    val total_possible = (prep.blocks.len() * (prep.blocks.len() - 1)) / 2
     log_verbose(config, "  Max comparisons: {total_possible} (optimizations will reduce this)")
 
     var comparison_count = 0
@@ -626,20 +628,20 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     var adjacency = {}
 
     var i = 0
-    while i < blocks_to_analyze.len() and comparison_count < max_total_comparisons:
+    while i < prep.blocks.len() and comparison_count < max_total_comparisons:
         if i % 50 == 0:
-            log_verbose(config, "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches")
+            log_verbose(config, "  Block {i}/{prep.blocks.len()}: {comparison_count} comparisons, {match_count} matches")
 
         if comparison_count >= max_total_comparisons:
             log_progress(config, "  Reached comparison limit ({max_total_comparisons}), stopping early")
             break
 
-        val block1 = blocks_to_analyze[i]
+        val block1 = prep.blocks[i]
         var comparisons_this_block = 0
         var j = i + 1
 
-        while j < blocks_to_analyze.len() and comparisons_this_block < max_comparisons_per_block:
-            val block2 = blocks_to_analyze[j]
+        while j < prep.blocks.len() and comparisons_this_block < max_comparisons_per_block:
+            val block2 = prep.blocks[j]
 
             val same_file = block1.file == block2.file
             if same_file:
@@ -647,15 +649,15 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 j = j + 1
                 continue
 
-            if low_signal_flags[i] and low_signal_flags[j]:
+            if prep.low_signal_flags[i] and prep.low_signal_flags[j]:
                 j = j + 1
                 continue
 
             comparison_count = comparison_count + 1
             comparisons_this_block = comparisons_this_block + 1
 
-            val feature_vec1 = feature_vectors[i]
-            val feature_vec2 = feature_vectors[j]
+            val feature_vec1 = prep.features[i]
+            val feature_vec2 = prep.features[j]
             val similarity = cosine_similarity(feature_vec1, feature_vec2)
 
             val above_threshold = similarity >= config.similarity_threshold
@@ -681,7 +683,10 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         i = i + 1
 
     log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
+    adjacency
 
+fn build_similarity_groups(adjacency: {text: [i64]}, blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+    var groups = []
     var visited = {}
     for node_key in adjacency.keys():
         if visited.contains_key(node_key):
@@ -717,8 +722,22 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
 
         val new_group = build_duplicate_group(component_blocks)
         if new_group.impact_score >= config.min_impact:
-            refined_groups.push(new_group)
+            groups.push(new_group)
 
+    groups
+
+fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
+    """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
+    val blocks_to_analyze = sample_blocks_for_similarity(all_blocks, config)
+    val prep = load_tokens_with_line_indexes(blocks_to_analyze, config, cache_manager)
+    val adjacency = build_similarity_adjacency(prep, config)
+    val similarity_groups = build_similarity_groups(adjacency, blocks_to_analyze, config)
+
+    var refined_groups = []
+    for group in exact_groups:
+        refined_groups.push(group)
+    for group in similarity_groups:
+        refined_groups.push(group)
     refined_groups
 
 fn parse_idx(value: text) -> i64:

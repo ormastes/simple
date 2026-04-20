@@ -6918,9 +6918,6 @@ void _start(void)
      * long-mode handoff -> basic IRQ masking -> direct spl_start().
      * Skip the heavyweight C boot diagnostics/probing until the boot lane is stable.
      */
-    if (__simple_call_module_inits) {
-        __simple_call_module_inits();
-    }
     if (spl_start) {
         __asm__ volatile(
             "movw $0x3F8, %%dx\n"

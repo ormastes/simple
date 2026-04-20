@@ -1,7 +1,7 @@
-# Parallel file processing for duplicate detection
+# File dispatch for duplicate detection.
 #
-# Processes multiple files concurrently while respecting shared state (cache, interner).
-# Simplified from BuildGraph pattern since files have no inter-dependencies.
+# Keeps scan scheduling, batching, and worker selection separate from the
+# matching logic so the detector can reuse the same shared cache and interner.
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager}
@@ -9,16 +9,15 @@ use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates_in_
 use compiler.tools.duplicate_check.incremental.{normalize_block_hashes}
 use std.nogc_sync_mut.io.process_ops.{shell_output, eprint}
 
-# Parallel processing configuration
 struct ParallelConfig:
-    num_workers: i64        # Number of parallel workers (0 = auto-detect)
-    batch_size: i64         # Files per batch
-    enabled: bool           # Enable parallel processing
+    num_workers: i64        # Advisory worker count; 0 triggers CPU auto-detect
+    batch_size: i64         # Number of files assigned per dispatch batch
+    enabled: bool           # Enables the parallel scheduling path
 
 fn default_parallel_config() -> ParallelConfig:
     ParallelConfig(
-        num_workers: 0,      # Auto-detect CPU count
-        batch_size: 10,       # Process 10 files per batch
+        num_workers: 0,      # Let the runner probe CPU count at startup
+        batch_size: 10,      # Use a moderate file batch size by default
         enabled: true
     )
 
@@ -29,7 +28,6 @@ fn single_threaded_config() -> ParallelConfig:
         enabled: false
     )
 
-# Detect CPU count
 fn detect_cpu_count() -> i64:
     val output = shell_output("nproc 2>/dev/null || echo 4", "").trim()
     val count = int(output)

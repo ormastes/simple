@@ -51,12 +51,27 @@ duplicate-check:
 ### Command-Line Options
 
 ```bash
-simple duplicate-check src/ --min-tokens=20 --min-lines=3
-simple duplicate-check src/ --min-impact=50
-simple duplicate-check src/ --format=json
-simple duplicate-check src/ --exclude="vendor/"
-simple duplicate-check src/ --max-allowed=5
+simple duplicate-check src/ --min-tokens 20 --min-lines 5
+simple duplicate-check src/ --min-impact 50
+simple duplicate-check src/ --format json
+simple duplicate-check src/ --exclude "vendor/"
+simple duplicate-check src/ --max-allowed 5
 ```
+
+### Duplication Modes
+
+```bash
+# Exact token-window duplication, using the default five-line minimum
+simple duplicate-check src/ --min-lines 5
+
+# Cosine similarity over token-frequency vectors
+simple duplicate-check src/ --cosine --min-lines 5
+
+# Semantic documentation similarity
+simple duplicate-check src/ --semantic
+```
+
+Cosine mode preserves identifier and literal detail so unrelated helpers are not collapsed by normalization. Semantic mode uses Ollama embeddings only when `SIMPLE_DUPCHECK_USE_OLLAMA_HTTP=1` is set; otherwise it prints a text-based fallback notice and uses local text similarity.
 
 ---
 
