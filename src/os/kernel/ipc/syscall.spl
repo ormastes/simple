@@ -44,7 +44,6 @@ use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 extern fn serial_println(msg: text)
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 val MAX_EXEC_ARG_COUNT: u64 = 64
@@ -1207,55 +1206,6 @@ fn _resolve_validated_resident_entry(path: text, path_bytes: [u8]) -> u64?:
         return nil
     resolve_builtin_binary(canonical_path)
 
-fn _direct_spawn_app_id_from_path(path: text) -> u64:
-    match path:
-        case "/sys/apps/browser_demo":
-            1
-        case "/sys/apps/file_manager":
-            2
-        case "/sys/apps/hello_world":
-            3
-        case "/sys/apps/shell":
-            4
-        case "/sys/apps/editor":
-            5
-        case _:
-            0
-
-fn _has_elf_magic(bytes: [u8]) -> bool:
-    """Return true when resolved executable bytes start with the ELF magic."""
-    if bytes.len() < 4:
-        return false
-    rt_bytes_u8_at(bytes, 0) == 0x7F and
-        rt_bytes_u8_at(bytes, 1) == 0x45 and
-        rt_bytes_u8_at(bytes, 2) == 0x4C and
-        rt_bytes_u8_at(bytes, 3) == 0x46
-
-fn _spawn_validated_resident_handoff(path: text, path_bytes: [u8], bytes: [u8], klog: KernelLog) -> i64:
-    """Return the transitional resident pid after filesystem ELF validation.
-
-    This is the x86 desktop compatibility bridge used until full user-image
-    execution is safe for real FAT32 app ELFs. It keeps the handoff inside the
-    Simple syscall dispatcher, so the C syscall shim no longer allocates the
-    app pid or owns launch success.
-    """
-    if not _has_elf_magic(bytes):
-        serial_println("[syscall13] direct resident bad magic")
-        return -8
-    val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
-    if resident_entry == nil:
-        serial_println("[syscall13] direct resident no entry")
-        return -2
-    val app_id = _direct_spawn_app_id_from_path(path)
-    if app_id == 0:
-        return -2
-    val pid = 4100 + app_id
-
-    var log = klog
-    log.write(6, 1, pid, "spawn_binary direct resident handoff {path}")
-    serial_println("[syscall13] direct resident handoff path={path} pid={pid}")
-    pid.to_i64()
-
 fn _direct_spawn_app_id_path(app_id: u64) -> text?:
     match app_id:
         case 1:
@@ -1314,7 +1264,7 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
             val path = sentinel_path.unwrap()
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
-                return _spawn_validated_resident_handoff(path, [], bytes_result.unwrap(), klog)
+                return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
         return -14
 
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)

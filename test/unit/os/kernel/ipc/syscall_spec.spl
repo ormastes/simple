@@ -48,6 +48,63 @@ fn _write_user_cstr(ptr: u64, bytes: [u8]):
         i = i + 1
     mmio_write8(ptr + i, 0)
 
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 62)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 64)
+    bytes = _push_u64_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u64_le(bytes, 0x1000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes
+
 describe "syscall_handler":
     it "launches built-in service binaries through spawn_binary":
         val path = "/sys/services/vfs"
@@ -389,12 +446,35 @@ describe "syscall_handler":
             expect(task.is_user).to_equal(false)
             expect(task.entry_point).to_equal(hello_world_remote_main as u64)
 
-    it "direct sentinel spawn validates filesystem bytes and returns resident pid":
+    it "direct sentinel spawn creates process-backed user task for valid filesystem ELF":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", _make_x86_64_exec())
+        var scheduler = Scheduler.new()
+        val pid = dispatch_spawn_binary_direct(3, 0, 2, scheduler, KernelLog.new(16))
+        expect(pid).to_be_greater_than(0)
+        expect(pid).not_to_equal(4103)
+        val spawned = scheduler.get_task(TaskId(id: pid as u64))
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(true)
+            expect(task.entry_point).to_equal(0x400000)
+        _clear_synthetic_vfs_for_test()
+
+    it "direct sentinel spawn keeps resident fallback for malformed filesystem bytes":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
         var scheduler = Scheduler.new()
         val pid = dispatch_spawn_binary_direct(3, 0, 2, scheduler, KernelLog.new(16))
-        expect(pid).to_equal(4103)
+        expect(pid).to_be_greater_than(0)
+        val spawned = scheduler.get_task(TaskId(id: pid as u64))
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(false)
+            expect(task.entry_point).to_equal(hello_world_remote_main as u64)
         _clear_synthetic_vfs_for_test()
 
     it "rejects unknown spawn_binary paths":
