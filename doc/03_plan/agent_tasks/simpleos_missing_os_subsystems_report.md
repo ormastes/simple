@@ -152,10 +152,9 @@ launcher intentionally falls back to resident-manifest materialization:
 - `stack_builder` uses literal stack-size constants so the native baremetal
   build no longer folds the default stack size to zero
 - the direct desktop lane initializes scalar identity PMM/VMM before VFS and
-  syscall 13:
-  - `[PMM] scalar init complete`
-  - `[VMM] VMM initialization complete`
-  - `[desktop-e2e] memory-bootstrap:ok`
+  syscall 13; expected markers are `[PMM] scalar init complete`,
+  `[VMM] VMM initialization complete`, and
+  `[desktop-e2e] memory-bootstrap:ok`
 - user segment mapping now avoids cross-module raw address fallback calls and
   maps only the initial stack-frame pages; the remaining stack range is reserved
   for future demand growth once user page-fault handling is active
@@ -182,7 +181,7 @@ runqueue handoff works from syscall/trap context and the x86_64 return path can
 actually switch into the new user context, syscall 13 remains gated and returns
 `-12` so the launcher uses the validated resident-manifest compatibility path.
 
-The x86_64 desktop lane now uses a minimal `Scheduler.new_bootstrap()` for
+The x86_64 desktop lane now uses single-CPU `Scheduler.new_bootstrap()` for
 early syscall/trap globals and clamps impossible early CPUID/SMP topology
 counts. This avoids allocating the full 32-CPU scheduler state during direct
 `-kernel` boot and prevents the pre-desktop heap exhaustion seen while tracing
