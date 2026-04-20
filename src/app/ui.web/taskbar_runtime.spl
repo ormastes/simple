@@ -6,6 +6,7 @@
 #   * headless:         no local shell window; remote UI still gets taskbar state
 
 use common.ui.session.{UISession}
+use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS}
 use common.ui.taskbar_model.{AppRef, TrayItem}
 use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height, with_visible}
 use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json}
@@ -128,7 +129,7 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
     val window_id = "host-window-{ordinal}"
 
     if _mode_is_headless(rt.mode):
-        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "Headless")
+        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_HEADLESS)
         return Ok(())
 
     val resolved_backend = _resolve_app_backend(app_id, rt.electron_available)
@@ -142,7 +143,7 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
         return Err("taskbar-only mode requires an Electron-resolved backend")
 
     if _mode_is_taskbar_only(rt.mode) and backend == UiBackendKind.Electron:
-        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "Electron")
+        session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_ELECTRON)
         session.set_active_surface(surface_id)
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "spawn_native_window",
@@ -159,7 +160,7 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
         return Ok(())
 
     val _ = session.open_surface(surface_id, _build_app_tree(surface_id, title, width, height, true))
-    session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, "SimpleWeb")
+    session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_SIMPLE_WEB)
     session.set_active_surface(surface_id)
     return Ok(())
 
@@ -169,7 +170,7 @@ fn host_taskbar_runtime_focus(session: UISession, surface_id: text) -> Result<Un
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == "Electron":
+    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "focus_native_window",
             window_id: binding.window_id,
@@ -203,7 +204,7 @@ fn host_taskbar_runtime_minimize(session: UISession, surface_id: text) -> Result
         return Err("unknown surface")
     if not _contains_text(rt.minimized_surface_ids, surface_id):
         rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)
-    if binding.surface_kind == "Electron":
+    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "minimize_native_window",
             window_id: binding.window_id,
@@ -235,7 +236,7 @@ fn host_taskbar_runtime_restore(session: UISession, surface_id: text) -> Result<
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == "Electron":
+    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "restore_native_window",
             window_id: binding.window_id,
@@ -268,7 +269,7 @@ fn host_taskbar_runtime_close(session: UISession, surface_id: text) -> Result<Un
     if binding == nil:
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
-    if binding.surface_kind == "Electron":
+    if binding.surface_kind == UI_SURFACE_KIND_ELECTRON:
         rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
             action: "close_native_window",
             window_id: binding.window_id,
@@ -308,7 +309,7 @@ fn host_taskbar_runtime_move(session: UISession, surface_id: text, x: i32, y: i3
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != "Electron":
+    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
         return Err("surface is not native")
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
         action: "move_native_window",
@@ -340,7 +341,7 @@ fn host_taskbar_runtime_resize(session: UISession, surface_id: text, width: i32,
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != "Electron":
+    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
         return Err("surface is not native")
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
         action: "resize_native_window",
@@ -372,7 +373,7 @@ fn host_taskbar_runtime_maximize(session: UISession, surface_id: text) -> Result
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != "Electron":
+    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
         return Err("surface is not native")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
@@ -406,7 +407,7 @@ fn host_taskbar_runtime_set_title(session: UISession, surface_id: text, title: t
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
         return Err("unknown surface")
-    if binding.surface_kind != "Electron":
+    if binding.surface_kind != UI_SURFACE_KIND_ELECTRON:
         return Err("surface is not native")
     val _ = session.update_window_surface_title(surface_id, title)
     rt.pending_commands = rt.pending_commands.push(HostWindowCommand(
