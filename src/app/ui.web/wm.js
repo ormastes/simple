@@ -21,6 +21,7 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS  = 16000;
 const ACK_INTERVAL_MS   = 500;
 const GHOST_TTL_MS      = 60;  // optimistic ghost lifetime
+const HOST_NATIVE_EVENT_SOURCE = 'native_event';
 
 class SimpleWindowManager {
   constructor() {
@@ -388,37 +389,37 @@ class SimpleWindowManager {
     if (!type || !windowId) return;
     if (this._consumeNativeWindowEventSuppression(windowId, type)) return;
     if (type === 'focus') {
-      this._sendWindowCmd('focus', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('focus', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'minimize') {
-      this._sendWindowCmd('minimize', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('minimize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'restore') {
-      this._sendWindowCmd('restore', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('restore', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'maximize') {
-      this._sendWindowCmd('maximize', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('maximize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'unmaximize') {
-      this._sendWindowCmd('restore', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('restore', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     } else if (type === 'move') {
       this._sendWindowCmd('move', {
         window_id_hint: windowId,
-        source: 'native_event',
+        source: HOST_NATIVE_EVENT_SOURCE,
         x: Math.round(msg.x ?? msg.bounds?.x ?? 0),
         y: Math.round(msg.y ?? msg.bounds?.y ?? 0)
       });
     } else if (type === 'resize') {
       this._sendWindowCmd('resize', {
         window_id_hint: windowId,
-        source: 'native_event',
+        source: HOST_NATIVE_EVENT_SOURCE,
         w: Math.round(msg.width ?? msg.bounds?.width ?? 0),
         h: Math.round(msg.height ?? msg.bounds?.height ?? 0)
       });
     } else if (type === 'title') {
       this._sendWindowCmd('set_title', {
         window_id_hint: windowId,
-        source: 'native_event',
+        source: HOST_NATIVE_EVENT_SOURCE,
         title: msg.title || ''
       });
     } else if (type === 'close') {
-      this._sendWindowCmd('close', { window_id_hint: windowId, source: 'native_event' });
+      this._sendWindowCmd('close', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
     }
   }
 
