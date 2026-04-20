@@ -38,8 +38,13 @@ class Parser:
     me parse() -> Result<SdnValue, SdnError>:
         """Parse the document into an SdnValue (typically a Dict)"""
         var root = {}
+        var steps = 0
+        val max_steps = self.tokens.len * 4 + 8
 
         loop:
+            steps += 1
+            if steps > max_steps:
+                return Err(syntax_error_with_span("Parser made no progress at top level", self.current_span()))
             self.skip_newlines()
 
             if self.is_at_end():
@@ -134,21 +139,25 @@ class Parser:
         This is the LL(2) lookahead!
         Look for pattern: identifier followed by colon
         """
-        match self.peek_kind():
-            case Some(TokenKind.Identifier(_)):
-                match self.peek_kind_at(1):
-                    case Some(TokenKind.Colon):
-                        return true
-                    case _:
-                        return false
-            case _:
-                return false
+        if self.is_identifier_at(0):
+            match self.peek_kind_at(1):
+                case Some(TokenKind.Colon):
+                    return true
+                case _:
+                    return false
+
+        return false
 
     me parse_dict_block() -> Result<SdnValue, SdnError>:
         """Parse a dict block"""
         var dict = {}
+        var steps = 0
+        val max_steps = self.tokens.len * 4 + 8
 
         loop:
+            steps += 1
+            if steps > max_steps:
+                return Err(syntax_error_with_span("Parser made no progress in dict block", self.current_span()))
             self.skip_newlines()
 
             match self.peek_kind():
@@ -160,13 +169,13 @@ class Parser:
                 case nil:
                     break
 
-                case Some(TokenKind.Identifier(_)):
+                case _ if self.is_identifier_at(0):
                     val key = self.expect_identifier()?
 
                     match self.peek_kind():
                         case Some(TokenKind.Colon):
                             self.advance()
-                            match self.parse_colon_stmt(key.clone()):
+                            match self.parse_colon_stmt(key):
                                 case Ok(Some((_, value))):
                                     dict[key] = value
                                 case Ok(nil):
@@ -181,7 +190,7 @@ class Parser:
                             self.skip_newlines()
 
                         case Some(TokenKind.Pipe):
-                            match self.parse_named_table(key.clone()):
+                            match self.parse_named_table(key):
                                 case Ok(Some((_, value))):
                                     dict[key] = value
                                 case Ok(nil):
@@ -191,7 +200,7 @@ class Parser:
 
                         case _:
                             # Bare identifier as value
-                            dict[key.clone()] = SdnValue.text(key)
+                            dict[key] = SdnValue.text(key)
                             self.skip_newlines()
 
                 case _:
@@ -203,8 +212,13 @@ class Parser:
     me parse_array_block() -> Result<SdnValue, SdnError>:
         """Parse an array block"""
         var arr = []
+        var steps = 0
+        val max_steps = self.tokens.len * 4 + 8
 
         loop:
+            steps += 1
+            if steps > max_steps:
+                return Err(syntax_error_with_span("Parser made no progress in array block", self.current_span()))
             self.skip_newlines()
 
             match self.peek_kind():
@@ -517,10 +531,14 @@ class Parser:
                 self.advance()
                 return Ok(SdnValue.Null)
 
-            case Some(TokenKind.Identifier(s)):
+            case _ if self.is_identifier_at(0):
                 # Bare string
-                self.advance()
-                return Ok(SdnValue.text(s))
+                match self.advance():
+                    case Some(token):
+                        return Ok(SdnValue.text(token.lexeme))
+                    case nil:
+                        val span = self.current_span()
+                        return Err(SdnError.UnexpectedEof(span: Some(span)))
 
             case Some(TokenKind.LBrace):
                 return self.parse_inline_dict()
@@ -554,6 +572,25 @@ class Parser:
         if idx < self.tokens.len:
             return Some(self.tokens[idx].kind)
         return nil
+
+    fn lexeme_at(offset: i32) -> text:
+        val idx = self.pos + offset
+        if idx < self.tokens.len:
+            return self.tokens[idx].lexeme
+        return ""
+
+    fn is_identifier_lexeme(value: text) -> bool:
+        if value.len() == 0:
+            return false
+
+        if value == "table" or value == "true" or value == "false" or value == "null":
+            return false
+
+        val first = value[0]
+        return (first >= "a" and first <= "z") or (first >= "A" and first <= "Z") or first == "_"
+
+    fn is_identifier_at(offset: i32) -> bool:
+        return self.is_identifier_lexeme(self.lexeme_at(offset))
 
     me advance() -> Option<Token>:
         """Consume and return current token"""
@@ -659,10 +696,15 @@ class Parser:
 
     me expect_identifier() -> Result<text, SdnError>:
         """Expect an identifier token and return its value"""
+        if self.is_identifier_at(0):
+            match self.advance():
+                case Some(token):
+                    return Ok(token.lexeme)
+                case nil:
+                    val span = self.current_span()
+                    return Err(SdnError.UnexpectedEof(span: Some(span)))
+
         match self.peek_kind():
-            case Some(TokenKind.Identifier(s)):
-                self.advance()
-                return Ok(s)
             case Some(other):
                 val span = self.current_span()
                 return Err(unexpected_token("identifier", other.name(), span))

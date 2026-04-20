@@ -18,7 +18,7 @@ Usage:
 ///
 
 use error.{SdnError, Span}
-use parser.parse
+use parser.Parser
 use value.SdnValue
 use serializer.{to_sdn, to_json}
 
@@ -29,6 +29,10 @@ extern fn rt_file_exists(path: text) -> bool
 
 # Public exports
 
+fn parse_document_root(source: text) -> Result<SdnValue, SdnError>:
+    var parser = Parser.new(source)
+    parser.parse()
+
 /// Editable SDN document that preserves formatting where possible
 class SdnDocument:
     source: text           # Original source text
@@ -37,7 +41,7 @@ class SdnDocument:
 
     static fn parse(source: text) -> Result<SdnDocument, SdnError>:
         """Parse source into an editable document"""
-        match parse(source):
+        match parse_document_root(source):
             case Ok(root):
                 return Ok(SdnDocument(
                     source: source,
@@ -71,10 +75,14 @@ class SdnDocument:
         """Get value at path (e.g., \"server.port\")"""
         return self.root.get_path(path)
 
+    fn get_path(path: text) -> Option<SdnValue>:
+        """Get value at a dotted path."""
+        return self.get(path)
+
     me get_mut(path: text) -> Option<SdnValue>:
         """Get mutable value at path"""
         self.modified = true
-        return self.root.get_path_mut(path)
+        return self.root.get_path(path)
 
     me set(path: text, value: SdnValue) -> Result<Nil, SdnError>:
         """Set value at path"""
@@ -90,24 +98,39 @@ class SdnDocument:
             match self.root:
                 case SdnValue.Dict(mut dict):
                     dict[parts[0]] = value
+                    self.root = SdnValue.Dict(dict)
                     return Ok(nil)
                 case _:
                     return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
 
-        # Navigate to parent
-        val parent_path = parts[0..parts.len-1].join(".")
-        val key = parts[parts.len - 1]
+        if parts.len == 2:
+            val parent_key = parts[0]
+            val key = parts[1]
+            match self.root:
+                case SdnValue.Dict(dict):
+                    var updated = {}
+                    for (existing_key, existing_value) in dict.items():
+                        updated[existing_key] = existing_value
 
-        match self.root.get_path_mut(parent_path):
-            case Some(parent):
-                match parent:
-                    case SdnValue.Dict(mut dict):
-                        dict[key] = value
-                        return Ok(nil)
-                    case _:
-                        return Err(SdnError.TypeMismatch("dict", parent.type_name()))
-            case nil:
-                return Err(SdnError.PathNotFound(path))
+                    var child = {}
+                    match dict.get(parent_key):
+                        case Some(parent):
+                            match parent:
+                                case SdnValue.Dict(existing_child):
+                                    for (child_key, child_value) in existing_child.items():
+                                        child[child_key] = child_value
+                                case _:
+                                    return Err(SdnError.TypeMismatch("dict", parent.type_name()))
+                        case nil:
+                            pass
+                    child[key] = value
+                    updated[parent_key] = SdnValue.Dict(child)
+                    self.root = SdnValue.Dict(updated)
+                    return Ok(nil)
+                case _:
+                    return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
+
+        return Err(SdnError.PathNotFound(path))
 
     me delete(path: text) -> Result<Nil, SdnError>:
         """Delete value at path"""
@@ -177,7 +200,7 @@ class SdnDocument:
         """Write document to file"""
         val content = self.to_sdn()
         val result = rt_file_write_text(path, content)
-        if result == 0:
+        if result:
             Ok(nil)
         else:
             Err(SdnError.IoError("Failed to write file: {path}"))

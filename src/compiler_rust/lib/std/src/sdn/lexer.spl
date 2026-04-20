@@ -57,11 +57,42 @@ class Lexer:
             bracket_depth: 0
         )
 
+    me pop_pending() -> Token:
+        val idx = self.pending_tokens.len - 1
+        val token = self.pending_tokens[idx]
+        var remaining: List<Token> = []
+        var i = 0
+        while i < idx:
+            remaining.push(self.pending_tokens[i])
+            i += 1
+        self.pending_tokens = remaining
+        return token
+
+    me pop_indent():
+        val idx = self.indent_stack.len - 1
+        var remaining: List<i32> = []
+        var i = 0
+        while i < idx:
+            remaining.push(self.indent_stack[i])
+            i += 1
+        self.indent_stack = remaining
+
     me tokenize() -> List<Token>:
         """Tokenize the entire source into a vector of tokens"""
         var tokens = []
+        var steps = 0
+        val max_steps = self.source.len() * 4 + 32
 
         loop:
+            steps += 1
+            if steps > max_steps:
+                tokens.push(Token.new(
+                    kind: TokenKind.Eof,
+                    span: Span.new(self.pos, self.pos, self.line, self.column),
+                    lexeme: ""
+                ))
+                break
+
             val token = self.next_token()
             val is_eof = match token.kind:
                 case TokenKind.Eof:
@@ -80,18 +111,21 @@ class Lexer:
         """Get the next token from the source"""
         # Return pending tokens first (for INDENT/DEDENT)
         if self.pending_tokens.len > 0:
-            return self.pending_tokens.pop()
+            return self.pop_pending()
 
         # Handle indentation at line start (but not inside brackets)
         if self.at_line_start:
             self.at_line_start = false
 
             if self.bracket_depth == 0:
-                match self.handle_indentation():
-                    case Some(token):
-                        return token
-                    case nil:
-                        pass
+                if self.pos < self.source.len():
+                    val line_ch = self.source[self.pos]
+                    if line_ch == " " or line_ch == "\t" or line_ch == "\n" or line_ch == "#":
+                        match self.handle_indentation():
+                            case Some(token):
+                                return token
+                            case nil:
+                                pass
             else:
                 # Skip whitespace at line start when inside brackets
                 loop:
@@ -118,7 +152,7 @@ class Lexer:
             case nil:
                 # Generate remaining DEDENTs at EOF
                 while self.indent_stack.len > 1:
-                    self.indent_stack.pop()
+                    self.pop_indent()
                     val dedent_token = Token.new(
                         kind: TokenKind.Dedent,
                         span: Span.new(start_pos, start_pos, start_line, start_column),
@@ -127,7 +161,7 @@ class Lexer:
                     self.pending_tokens.push(dedent_token)
 
                 if self.pending_tokens.len > 0:
-                    return self.pending_tokens.pop()
+                    return self.pop_pending()
 
                 return Token.new(
                     kind: TokenKind.Eof,
@@ -248,25 +282,21 @@ class Lexer:
 
     me skip_whitespace():
         """Skip spaces and tabs (but not newlines)"""
-        loop:
-            match self.peek():
-                case Some(" "):
-                    self.advance()
-                case Some("\t"):
-                    self.advance()
-                case _:
-                    break
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch == " " or ch == "\t":
+                self.pos += 1
+                self.column += 1
+            else:
+                break
 
     me skip_comment():
         """Skip a # comment to end of line"""
-        loop:
-            match self.peek():
-                case Some("\n"):
-                    break
-                case Some(_):
-                    self.advance()
-                case nil:
-                    break
+        while self.pos < self.source.len():
+            if self.source[self.pos] == "\n":
+                break
+            self.pos += 1
+            self.column += 1
 
     me handle_indentation() -> Option<Token>:
         """
@@ -281,38 +311,32 @@ class Lexer:
         # Count spaces at start of line
         var indent = 0
 
-        loop:
-            match self.peek():
-                case Some(" "):
-                    indent += 1
-                    self.advance()
-
-                case Some("\t"):
-                    indent += 4  # Tab = 4 spaces
-                    self.advance()
-
-                case Some("\n"):
-                    # Empty line - skip and check again
-                    self.advance()
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch == " ":
+                indent += 1
+                self.pos += 1
+                self.column += 1
+            elif ch == "\t":
+                indent += 4
+                self.pos += 1
+                self.column += 1
+            elif ch == "\n":
+                self.pos += 1
+                self.line += 1
+                self.column = 1
+                indent = 0
+            elif ch == "#":
+                self.skip_comment()
+                if self.pos < self.source.len() and self.source[self.pos] == "\n":
+                    self.pos += 1
                     self.line += 1
                     self.column = 1
                     indent = 0
-
-                case Some("#"):
-                    # Comment line - skip entire line
-                    self.skip_comment()
-                    match self.peek():
-                        case Some("\n"):
-                            self.advance()
-                            self.line += 1
-                            self.column = 1
-                            indent = 0
-                        case _:
-                            # EOF after comment
-                            break
-
-                case _:
+                else:
                     break
+            else:
+                break
 
         val current_indent = self.indent_stack.last()
 
@@ -330,7 +354,7 @@ class Lexer:
             loop:
                 val top = self.indent_stack.last()
                 if top > indent:
-                    self.indent_stack.pop()
+                    self.pop_indent()
                     val dedent_token = Token.new(
                         kind: TokenKind.Dedent,
                         span: Span.new(start_pos, self.pos, start_line, 1),
@@ -342,7 +366,7 @@ class Lexer:
 
             # Return first DEDENT
             if self.pending_tokens.len > 0:
-                return Some(self.pending_tokens.pop())
+                return Some(self.pop_pending())
             else:
                 return None
         else:
@@ -417,18 +441,32 @@ class Lexer:
                         # Underscore separator - skip
                         self.advance()
 
-                    elif ch == "." and not has_dot and not has_exp:
-                        # Decimal point - check next char is digit
-                        match self.peek_at(1):
-                            case Some(next_ch):
-                                if is_digit(next_ch):
-                                    self.advance()
-                                    value += "."
-                                    has_dot = true
+                    elif ch == ".":
+                        if not has_dot and not has_exp:
+                            # Decimal point - check next char is digit
+                            match self.peek_at(1):
+                                case Some(next_ch):
+                                    if is_digit(next_ch):
+                                        self.advance()
+                                        value += "."
+                                        has_dot = true
+                                    else:
+                                        break
+                                case nil:
+                                    break
+                        else:
+                            # Semantic versions and dotted identifiers are bare strings.
+                            while self.pos < self.source.len():
+                                val part = self.source[self.pos]
+                                if part == "\n" or part == " " or part == "\t" or part == ":" or part == "," or part == "]" or part == "}" or part == ")":
+                                    break
+                                if is_alphanumeric(part) or part == "." or part == "_" or part == "-":
+                                    self.pos += 1
+                                    self.column += 1
+                                    value += part
                                 else:
                                     break
-                            case nil:
-                                break
+                            return TokenKind.Identifier(value)
 
                     elif (ch == "e" or ch == "E") and not has_exp:
                         # Scientific notation
@@ -472,16 +510,14 @@ class Lexer:
         var value = ""
         value += first
 
-        loop:
-            match self.peek():
-                case Some(ch):
-                    if is_alphanumeric(ch) or ch == "_" or ch == "/" or ch == "." or ch == "-":
-                        self.advance()
-                        value += ch
-                    else:
-                        break
-                case nil:
-                    break
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if is_alphanumeric(ch) or ch == "_" or ch == "/" or ch == "." or ch == "-":
+                self.pos += 1
+                self.column += 1
+                value += ch
+            else:
+                break
 
         # Check for keywords
         match value:

@@ -54,7 +54,12 @@ impl SdnParser:
     # Parse document into SdnValue (typically a Dict)
     me parse() -> Result<SdnValue, SdnError>:
         var root = {}
+        var steps = 0
+        val max_steps = self.tokens.len() * 4 + 8
         while not self.is_at_end():
+            steps = steps + 1
+            if steps > max_steps:
+                return Err(SdnError.SyntaxError(message: "Parser made no progress at top level", span: self.current_span()))
             self.skip_newlines()
             if self.is_at_end():
                 break
@@ -63,7 +68,7 @@ impl SdnParser:
                 case Ok(Some((key, value))):
                     root[key] = value
                 case Ok(nil):
-                    pass
+                    break
                 case Err(e):
                     return Err(e)
         Ok(SdnValue.Dict(root))
@@ -74,9 +79,7 @@ impl SdnParser:
         if self.is_at_end():
             return Ok(nil)
 
-        val start = self.current_span()
         val name = self.expect_identifier()?
-        self.current_path.push(name)
 
         # Use var + match (not val = match) to avoid interpreter mutation bug
         var result: Result<(text, SdnValue)?, SdnError> = Err(SdnError.SyntaxError(
@@ -97,8 +100,6 @@ impl SdnParser:
             case _:
                 pass
 
-        self.record_span(start, self.current_span())
-        self.current_path.pop()
         result
 
     # Parse after ':'
@@ -129,26 +130,30 @@ impl SdnParser:
 
     # Check if block is dict-like (ident: value)
     fn is_dict_block() -> bool:
-        match self.peek_kind():
-            case Some(TokenKind.Identifier(_)):
-                match self.peek_kind_at(1):
-                    case Some(TokenKind.Colon): true
-                    case _: false
-            case _: false
+        if self.is_identifier_at(0):
+            match self.peek_kind_at(1):
+                case Some(TokenKind.Colon): true
+                case _: false
+        else:
+            false
 
     # Parse dict block
     me parse_dict_block() -> Result<SdnValue, SdnError>:
         var dict = {}
+        var steps = 0
+        val max_steps = self.tokens.len() * 4 + 8
         while true:
+            steps = steps + 1
+            if steps > max_steps:
+                return Err(SdnError.SyntaxError(message: "Parser made no progress in dict block", span: self.current_span()))
             self.skip_newlines()
             match self.peek_kind():
                 case Some(TokenKind.Dedent) | Some(TokenKind.Eof) | nil:
                     if self.peek_kind_matches_dedent():
                         self.advance()
                     break
-                case Some(TokenKind.Identifier(_)):
+                case _ if self.is_identifier_at(0):
                     val key = self.expect_identifier()?
-                    self.current_path.push(key)
                     match self.peek_kind():
                         case Some(TokenKind.Colon):
                             self.advance()
@@ -170,7 +175,6 @@ impl SdnParser:
                             # Bare identifier as value
                             dict[key] = SdnValue.String(key)
                             self.skip_newlines()
-                    self.current_path.pop()
                 case _:
                     self.advance()
         Ok(SdnValue.Dict(dict))
@@ -178,7 +182,12 @@ impl SdnParser:
     # Parse array block
     me parse_array_block() -> Result<SdnValue, SdnError>:
         var arr = []
+        var steps = 0
+        val max_steps = self.tokens.len() * 4 + 8
         while true:
+            steps = steps + 1
+            if steps > max_steps:
+                return Err(SdnError.SyntaxError(message: "Parser made no progress in array block", span: self.current_span()))
             self.skip_newlines()
             match self.peek_kind():
                 case Some(TokenKind.Dedent) | Some(TokenKind.Eof) | nil:
@@ -411,9 +420,13 @@ impl SdnParser:
             case Some(TokenKind.Null):
                 self.advance()
                 Ok(SdnValue.Null)
-            case Some(TokenKind.Identifier(s)):
-                self.advance()
-                Ok(SdnValue.String(s))
+            case _ if self.is_identifier_at(0):
+                val token = self.advance()
+                match token:
+                    case Some(tok):
+                        Ok(SdnValue.String(tok.lexeme))
+                    case nil:
+                        Err(SdnError.UnexpectedEof(span: nil))
             case Some(TokenKind.LBrace):
                 self.parse_inline_dict()
             case Some(TokenKind.LBracket):
@@ -440,6 +453,27 @@ impl SdnParser:
             Some(tok.kind)
         else:
             nil
+
+    fn lexeme_at(offset: i64) -> text:
+        val idx = self.pos + offset
+        if idx < self.tokens.len():
+            val tok = self.tokens[idx]
+            tok.lexeme
+        else:
+            ""
+
+    fn is_identifier_lexeme(value: text) -> bool:
+        if value.len() == 0:
+            return false
+
+        if value == "table" or value == "true" or value == "false" or value == "null" or value == "nil":
+            return false
+
+        val first = value[0]
+        (first >= "a" and first <= "z") or (first >= "A" and first <= "Z") or first == "_"
+
+    fn is_identifier_at(offset: i64) -> bool:
+        self.is_identifier_lexeme(self.lexeme_at(offset))
 
     me advance() -> Token?:
         if self.pos < self.tokens.len():
@@ -513,17 +547,22 @@ impl SdnParser:
 
     # Expect specific tokens
     me expect_identifier() -> Result<text, SdnError>:
-        match self.peek_kind():
-            case Some(TokenKind.Identifier(s)):
-                self.advance()
-                Ok(s)
-            case Some(kind):
-                Err(SdnError.SyntaxError(
-                    message: "Expected identifier, got {kind.name()}",
-                    span: self.current_span()
-                ))
-            case nil:
-                Err(SdnError.UnexpectedEof(span: nil))
+        if self.is_identifier_at(0):
+            val token = self.advance()
+            match token:
+                case Some(tok):
+                    Ok(tok.lexeme)
+                case nil:
+                    Err(SdnError.UnexpectedEof(span: nil))
+        else:
+            match self.peek_kind():
+                case Some(kind):
+                    Err(SdnError.SyntaxError(
+                        message: "Expected identifier, got {kind.name()}",
+                        span: self.current_span()
+                    ))
+                case nil:
+                    Err(SdnError.UnexpectedEof(span: nil))
 
     me expect_pipe() -> Result<(), SdnError>:
         if self.peek_kind_matches_pipe():
