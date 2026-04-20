@@ -187,6 +187,18 @@ fn _log_bridge_failure(message: text):
     if g_trap_runtime_installed:
         g_trap_klog.write(3, 0, 0, message)
 
+fn _sync_trap_runtime_state():
+    """Mirror the live bridge globals back into the installed runtime bundle."""
+    if not g_trap_runtime_installed:
+        return
+    if g_trap_runtime == nil:
+        return
+    var runtime = g_trap_runtime.unwrap()
+    runtime.scheduler = g_trap_scheduler
+    runtime.ipc = g_trap_ipc
+    runtime.klog = g_trap_klog
+    g_trap_runtime = Some(runtime)
+
 fn x86_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
     """Install the kernel runtime objects used by the x86_64 trap bridge."""
     g_trap_scheduler = scheduler
@@ -231,12 +243,16 @@ fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, te
         _log_bridge_failure(message)
         return Err(message)
 
-    Ok(syscall_handler(args, g_trap_scheduler, g_trap_ipc, g_trap_klog))
+    val result = syscall_handler(args, g_trap_scheduler, g_trap_ipc, g_trap_klog)
+    _sync_trap_runtime_state()
+    Ok(result)
 
 fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
     """C-callable primitive ABI for the installed x86_64 syscall bridge."""
     if id == 13:
-        return dispatch_spawn_binary_direct(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
+        val pid = dispatch_spawn_binary_direct(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
+        _sync_trap_runtime_state()
+        return pid
 
     val result = x86_dispatch_installed_syscall(SyscallArgs(
         id: id,
@@ -249,4 +265,6 @@ fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, 
     ))
     if result.is_err():
         return -38
-    result.unwrap().value
+    val value = result.unwrap().value
+    _sync_trap_runtime_state()
+    value

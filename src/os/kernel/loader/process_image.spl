@@ -48,6 +48,10 @@ fn _slice_bytes(data: [u8], offset: u64, size: u64) -> [u8]:
         i = i + 1
     out
 
+fn _owned_bytes(data: [u8]) -> [u8]:
+    """Return a fresh owned copy of `data`."""
+    _slice_bytes(data, 0, data.len() as u64)
+
 fn _default_stack_top(arch: Architecture) -> Result<u64, text>:
     match arch:
         case Architecture.X86_64:
@@ -80,7 +84,10 @@ fn build_user_process_image(
     explicit argv (legacy path), it passes `[]` and we seed argv with the
     binary path so libc `_start` still observes argv[0].
     """
-    val native_data = _normalise_executable_bytes(data)?
+    # Copy the caller buffer first so any FAT32/VFS-backed bytes become owned
+    # Simple storage before we parse ELF headers or retain the image.
+    val owned_input = _owned_bytes(data)
+    val native_data = _normalise_executable_bytes(owned_input)?
     val elf = load_user_executable(native_data, arch)?
     val entry = elf_image_entry(elf)
     val stack_top = _default_stack_top(arch)?
@@ -107,7 +114,6 @@ fn build_user_process_image(
     val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
     val initial_sp = stack_build_result_sp(stack_frame)
     val initial_stack_bytes = stack_build_result_bytes(stack_frame)
-    val image_file_bytes = _slice_bytes(native_data, 0, native_data.len() as u64)
 
     Ok(UserProcessImage(
         binary_path: path,
@@ -117,7 +123,7 @@ fn build_user_process_image(
         argv: effective_argv,
         envp: envp,
         segments: segments,
-        file_bytes: image_file_bytes,
+        file_bytes: native_data,
         initial_sp: initial_sp,
         initial_stack_bytes: initial_stack_bytes
     ))

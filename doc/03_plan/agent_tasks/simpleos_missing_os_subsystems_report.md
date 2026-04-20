@@ -142,14 +142,16 @@ C syscall shim fallback:
 - `[exec-source] vfs_hit path=/sys/apps/<app> bytes=<n>`
 - valid filesystem ELF bytes now enter the normal `create_user_task` path before
   any resident fallback is considered
+- `build_user_process_image` takes an owned copy of resolved VFS/FAT32 bytes
+  before ELF parsing and stores owned segment/file-byte copies in the image
+- launcher process rows expose `launcher_process_is_process_backed(pid)` so
+  QEMU/system specs can distinguish scheduler-owned app PIDs from resident
+  manifest fallbacks without scraping log text
 - no `[c-syscall13] fat32 app image validated` marker
 - resident manifest fallback markers such as `mode=resident-manifest`
 
 Those fallback markers must disappear before the process-backed app requirement
-is closed. The direct `UserProcessImage` handoff is intentionally gated for the
-sentinel GUI app path because the filesystem-backed direct process path still
-faults under baremetal after image bytes and initial stack bytes are prepared.
-The next blocker is making `build_user_process_image` plus
+is closed. The next blocker is making `build_user_process_image` plus
 `Scheduler.create_user_task` safe for real FAT32 app ELFs under the full QEMU
 desktop smoke and then removing the shared resident compatibility fallback.
 
