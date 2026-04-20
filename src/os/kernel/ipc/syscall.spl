@@ -38,8 +38,8 @@ use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vm
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
-use os.kernel.ipc.shared_dataset.{shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read}
-use os.kernel.ipc.process_queue.{process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
+use os.kernel.ipc.shared_dataset.{shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
+use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
 use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
@@ -736,6 +736,16 @@ fn _write_wait_status(ptr: u64, exit_code: i32) -> i64:
     mmio_write32(ptr, _encode_wait_status(exit_code))
     0
 
+fn _validate_wait_status_ptr(ptr: u64) -> i64:
+    """Validate waitpid status copyout before consuming a zombie child."""
+    if ptr == 0:
+        return 0
+    if not _is_userspace_ptr(ptr):
+        return -14
+    if not vmm_verify_user_write(ptr, 4):
+        return -14
+    0
+
 fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Waitpid-compatible wrapper around Scheduler.wait_for.
 
@@ -749,6 +759,9 @@ fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val nohang = (args.arg2 & 1) != 0
     var sched = scheduler
     val current = sched.get_current()
+    val status_ptr_check = _validate_wait_status_ptr(args.arg1)
+    if status_ptr_check < 0:
+        return SyscallResult(value: status_ptr_check)
     val result = sched.wait_for_collect(current, selector, not nohang)
     if result.error == -11:
         return SyscallResult(value: 0)
@@ -3229,6 +3242,9 @@ fn _handle_queue_send(args: SyscallArgs) -> SyscallResult:
     val bytes = _copy_in_bytes(args.arg1, args.arg2)
     if args.arg2 != 0 and bytes.len() == 0:
         return SyscallResult(value: -22)
+    if args.arg3 != PROCESS_QUEUE_NO_HANDLE:
+        if not shared_dataset_is_sealed(args.arg3):
+            return SyscallResult(value: -22)
     SyscallResult(value: process_queue_send(args.arg0, bytes, args.arg3))
 
 fn _handle_queue_recv(args: SyscallArgs) -> SyscallResult:

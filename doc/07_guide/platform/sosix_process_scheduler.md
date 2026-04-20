@@ -81,8 +81,17 @@ is the explicit blocking boundary.
 - Share the sealed handle through a queue message.
 - Receive the queue message and read sealed bytes.
 
-Unsealed dataset attachments are rejected. Queue capacity and message size are
-bounded so the first kernel implementation can remain deterministic.
+Handles encode `generation << 16 | slot`. The first slot in generation 0 is
+still handle `0`, but a full close followed by slot reuse returns a new
+generation and stale handles fail validation. Slot and generation metadata are
+available through the SOSIX and kernel queue/dataset helpers for diagnostics
+and tests.
+
+Unsealed, stale, and invalid dataset attachments are rejected. Queue capacity
+and message size are bounded so the first kernel implementation can remain
+deterministic. Queue poll reports read, write, and hangup readiness; blocking
+wakeups are not wired here because scheduler wait queues are outside the
+sharing manager.
 
 Kernel syscall IDs 120-131 mirror the same model:
 
@@ -118,7 +127,9 @@ but these parts remain deliberate follow-ups:
 - `execve` currently accepts the path ABI and builds argv from the executable
   path when argv/envp vectors are not copied from user space.
 - `dataset_create_from_file` creates a sealed ABI-compatible object, but VFS
-  byte snapshot population is still pending.
+  byte snapshot population is still pending. The blocker is a missing clean
+  syscall-local API to read `(fd, offset, len)` into kernel-owned bytes without
+  coupling this hot syscall path to the async VFS service or scheduler internals.
 
 ## Verification
 

@@ -8,13 +8,23 @@ Use a class-based SMP scheduler core with per-CPU run queues and fair/background
 ## Kernel Mechanism
 
 - `TaskControlBlock` owns `TaskScheduleConfig` and `TaskIsolationProfile`.
+- `SchedulerTopology` owns explicit scheduler domains. The default topology is
+  a single flat domain over the configured logical CPU catalog, with typed
+  domain kind and placement thresholds so hardware-discovered SMT/cache/NUMA
+  domains can replace the flat fallback later without changing scheduler APIs.
 - `CpuRunQueue` owns class lanes: admitted deadline, RT metadata, fair, background, idle.
 - Scheduler pick order is admitted deadline, fixed-priority RT, fair, background, idle. Direct metadata-only deadline activation remains rejected; admission uses the dedicated schedctl operation.
 - Deadline admission rejects invalid budget tuples and per-CPU overload, then picks by earliest absolute virtual deadline.
 - RT selection uses static priority within the RT lane and preserves queue order for equal priorities.
 - Fair/background selection uses eligible virtual-deadline ordering and weighted virtual-runtime accounting on timer ticks.
 - Per-CPU scheduling is exposed through `schedule_on_cpu`; the compatibility `schedule` path dispatches on CPU 0.
-- `rebalance_once` provides the first topology-balancing hook by moving a fair/background task from the busiest run queue to an affinity-compatible idle/low-load CPU.
+- Wake placement uses a wake-affine helper: a just-unblocked task prefers the
+  current CPU when affinity allows it and the current CPU is within the
+  topology wake threshold of the task's home CPU; otherwise it stays on its
+  home CPU or the least-loaded affinity-compatible CPU.
+- `rebalance_once` provides the topology-balancing primitive by moving a fair/background task from the busiest run queue to an affinity-compatible idle/low-load CPU.
+- Timer/preemption and unblock paths call a conservative rebalance hook only
+  when runnable-count spread reaches the topology rebalance threshold.
 
 ## Process Isolation
 
@@ -41,9 +51,10 @@ Implemented source paths:
 The first production slice is intentionally bounded. Remaining scheduler/process logic is:
 
 - Build a real topology domain tree for SMT, LLC/package, and NUMA balancing instead of the current flat 32-run-queue catalog.
-- Invoke rebalancing from timer/idle paths and add wake-affine placement; `rebalance_once()` is currently an explicit one-task hook.
+- Add idle-path balancing and replace the current flat topology with discovered
+  SMT, LLC/package, and NUMA domains.
 - Extend fair scheduling from EEVDF-like virtual-deadline selection to full lag/sleeper decay and wakeup-preemption behavior.
 - Add RT bandwidth throttling and priority-inheritance mutex integration before exposing unrestricted RT policy to user workloads.
 - Extend deadline scheduling with CBS replenishment, deadline-miss accounting, and tracing.
-- Complete `execve` argv/envp user-copy; the kernel path currently seeds argv from the executable path when user vectors are absent.
+- Complete `execve` argv/envp user-copy; the kernel path currently seeds argv from the executable path when user vectors are absent. The blocker is precise: `syscall.spl` has bounded byte-copy helpers for one buffer and user write verification for copyout, but no shared `copyin_u64`/NUL-terminated string-vector helper that validates each argv/envp pointer, detects vector termination, enforces argument count/byte caps, and safely reads across user mappings before calling `build_user_process_image`.
 - Add process-group/session/stopped/continued semantics if full POSIX job-control compatibility is required.

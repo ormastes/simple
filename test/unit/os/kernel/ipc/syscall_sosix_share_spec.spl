@@ -11,7 +11,7 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.ipc.shared_dataset.{shared_dataset_init, shared_dataset_read_byte}
+use os.kernel.ipc.shared_dataset.{shared_dataset_init, shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_read_byte}
 use os.kernel.ipc.process_queue.{process_queue_init, PROCESS_QUEUE_NO_HANDLE, PROCESS_QUEUE_POLL_READ}
 
 fn _dispatch(args: SyscallArgs) -> i64:
@@ -43,19 +43,32 @@ describe "SOSIX dataset syscalls":
 describe "SOSIX process queue syscalls":
     it "creates sends polls and receives queue messages":
         process_queue_init()
+        shared_dataset_init()
         var payload: [u8] = [9u8, 8u8]
         var out: [u8] = [0u8, 0u8]
         var attached: u64 = PROCESS_QUEUE_NO_HANDLE
+        val dataset = shared_dataset_create(1, 0)
+        expect(shared_dataset_write(dataset as u64, 0, [7u8])).to_equal(1)
+        expect(shared_dataset_seal(dataset as u64)).to_equal(0)
 
         val queue = _dispatch(SyscallArgs(id: 127, arg0: 2, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
         expect(queue).to_equal(0)
-        expect(_dispatch(SyscallArgs(id: 128, arg0: queue as u64, arg1: &payload as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0))).to_equal(2)
+        expect(_dispatch(SyscallArgs(id: 128, arg0: queue as u64, arg1: &payload as u64, arg2: 2, arg3: dataset as u64, arg4: 0, arg5: 0))).to_equal(2)
         expect(_dispatch(SyscallArgs(id: 130, arg0: queue as u64, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)) & PROCESS_QUEUE_POLL_READ as i64).to_equal(PROCESS_QUEUE_POLL_READ as i64)
 
         expect(_dispatch(SyscallArgs(id: 129, arg0: queue as u64, arg1: &out as u64, arg2: 2, arg3: &attached as u64, arg4: 0, arg5: 0))).to_equal(2)
         expect(out[0]).to_equal(9u8)
         expect(out[1]).to_equal(8u8)
-        expect(attached).to_equal(0u64)
+        expect(attached).to_equal(dataset as u64)
+
+    it "rejects invalid dataset attachments":
+        process_queue_init()
+        shared_dataset_init()
+        var payload: [u8] = [1u8]
+
+        val queue = _dispatch(SyscallArgs(id: 127, arg0: 1, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0))
+        expect(_dispatch(SyscallArgs(id: 128, arg0: queue as u64, arg1: &payload as u64, arg2: 1, arg3: 65536, arg4: 0, arg5: 0))).to_equal(-22)
+        expect(_dispatch(SyscallArgs(id: 128, arg0: queue as u64, arg1: &payload as u64, arg2: 1, arg3: PROCESS_QUEUE_NO_HANDLE, arg4: 0, arg5: 0))).to_equal(1)
 
     it "closes queue sides through the ABI":
         process_queue_init()

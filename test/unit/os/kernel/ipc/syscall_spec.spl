@@ -15,7 +15,7 @@ use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.apps.hello_world.hello_world.{hello_world_remote_main}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
-use os.kernel.boot.mmio.{mmio_write16, mmio_write32}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write16, mmio_write32}
 
 """
 Syscall dispatcher tests for process launch and scheduler control paths.
@@ -544,6 +544,66 @@ describe "syscall_handler":
         expect(result.value).to_equal(child.id.to_i64())
         expect(scheduler.get_task(child)).to_be_nil
 
+    it "waitpid writes encoded exit status before reaping child":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child = scheduler.clone_task(parent)
+        scheduler.exit_task_by_id(child, 7)
+        val status_ptr: u64 = 0x70000000
+        expect(_map_user_pollfd_page(status_ptr)).to_equal(true)
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 61,
+                arg0: child.id,
+                arg1: status_ptr,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(child.id.to_i64())
+        expect(mmio_read32(status_ptr)).to_equal(7u32 << 8)
+        expect(scheduler.get_task(child)).to_be_nil
+
+    it "waitpid rejects invalid status pointer without reaping zombie child":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val child = scheduler.clone_task(parent)
+        scheduler.exit_task_by_id(child, 5)
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 61,
+                arg0: child.id,
+                arg1: 1,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(-14)
+        val child_tcb = scheduler.get_task(child)
+        expect(child_tcb).to_be_nil.to_equal(false)
+        if child_tcb != nil:
+            val task = child_tcb
+            val is_zombie = match task.state:
+                TaskState.Zombie: true
+                _: false
+            expect(is_zombie).to_equal(true)
+
     it "waitpid syscall rejects missing children instead of returning ENOSYS":
         var scheduler = Scheduler.new()
         scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
@@ -563,6 +623,35 @@ describe "syscall_handler":
             KernelLog.new(16)
         )
         expect(result.value).to_equal(-10)
+
+    it "exec failure leaves current task image intact":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1234, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val path = "/does/not/exist"
+
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(result.value).to_equal(-2)
+        val tcb = scheduler.get_task(task)
+        if tcb != nil:
+            val current = tcb
+            expect(current.is_user).to_equal(false)
+            expect(current.entry_point).to_equal(0x1234)
+            expect(current.address_space).to_equal(0)
 
     it "signal kill marks the target as a waitable zombie":
         var scheduler = Scheduler.new()

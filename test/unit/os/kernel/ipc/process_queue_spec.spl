@@ -21,7 +21,9 @@ use os.kernel.ipc.process_queue.{
     process_queue_recv,
     process_queue_poll,
     process_queue_close,
-    process_queue_len
+    process_queue_len,
+    process_queue_handle_slot,
+    process_queue_handle_generation
 }
 
 describe "kernel process queue manager":
@@ -32,6 +34,8 @@ describe "kernel process queue manager":
 
         expect(queue).to_equal(0)
         expect(process_queue_len(queue as u64)).to_equal(0)
+        expect(process_queue_handle_slot(queue as u64)).to_equal(0)
+        expect(process_queue_handle_generation(queue as u64)).to_equal(0)
         expect(process_queue_poll(queue as u64) & PROCESS_QUEUE_POLL_WRITE).to_equal(PROCESS_QUEUE_POLL_WRITE)
 
     it "preserves FIFO message ordering":
@@ -105,3 +109,18 @@ describe "kernel process queue manager":
         expect(process_queue_recv(99u64).status).to_equal(0 - EBADF as i64)
         expect(process_queue_close(99u64, 0)).to_equal(0 - EBADF as i64)
         expect(process_queue_poll(99u64) & PROCESS_QUEUE_POLL_ERR).to_equal(PROCESS_QUEUE_POLL_ERR)
+
+    it "rejects stale generation handles after full close and slot reuse":
+        process_queue_init()
+
+        val first = process_queue_create(1u64, 4u64, 0)
+        expect(first).to_equal(0)
+        expect(process_queue_close(first as u64, 0)).to_equal(0)
+        expect(process_queue_send(first as u64, [1u8], PROCESS_QUEUE_NO_HANDLE)).to_equal(0 - EBADF as i64)
+        expect(process_queue_handle_generation(first as u64)).to_equal(0 - EBADF as i64)
+
+        val second = process_queue_create(1u64, 4u64, 0)
+        expect(process_queue_handle_slot(second as u64)).to_equal(0)
+        expect(process_queue_handle_generation(second as u64)).to_equal(1)
+        expect(second).to_equal(65536)
+        expect(process_queue_recv(first as u64).status).to_equal(0 - EBADF as i64)

@@ -21,11 +21,15 @@ use os.sosix.share.{
     sosix_dataset_size,
     sosix_dataset_read_byte,
     sosix_dataset_close,
+    sosix_dataset_handle_slot,
+    sosix_dataset_handle_generation,
     sosix_queue_create,
     sosix_queue_send,
     sosix_queue_recv,
     sosix_queue_poll,
-    sosix_queue_close
+    sosix_queue_close,
+    sosix_queue_handle_slot,
+    sosix_queue_handle_generation
 }
 
 describe "SOSIX immutable datasets":
@@ -38,6 +42,8 @@ describe "SOSIX immutable datasets":
         expect(sosix_dataset_seal(handle as u64)).to_equal(0)
         expect(sosix_dataset_is_sealed(handle as u64)).to_equal(true)
         expect(sosix_dataset_size(handle as u64)).to_equal(4u64)
+        expect(sosix_dataset_handle_slot(handle as u64)).to_equal(0)
+        expect(sosix_dataset_handle_generation(handle as u64)).to_equal(0)
         expect(sosix_dataset_read_byte(handle as u64, 2u64)).to_equal(3)
 
     it "rejects writes after seal":
@@ -113,3 +119,24 @@ describe "SOSIX process queues":
 
         expect(sosix_dataset_close(dataset as u64)).to_equal(0)
         expect(sosix_dataset_seal(dataset as u64)).to_equal(0 - EBADF as i64)
+
+        val second = sosix_dataset_create(1u64, 0)
+        expect(sosix_dataset_handle_slot(second as u64)).to_equal(0)
+        expect(sosix_dataset_handle_generation(second as u64)).to_equal(1)
+        expect(second).to_equal(65536)
+        expect(sosix_dataset_read_byte(dataset as u64, 0u64)).to_equal(0 - EBADF as i64)
+
+    it "rejects stale queue handles after full close":
+        sosix_share_init()
+        val queue = sosix_queue_create(1u64, 4u64, 0)
+
+        expect(sosix_queue_handle_slot(queue as u64)).to_equal(0)
+        expect(sosix_queue_handle_generation(queue as u64)).to_equal(0)
+        expect(sosix_queue_close(queue as u64, 0)).to_equal(0)
+        expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(0 - EBADF as i64)
+
+        val second = sosix_queue_create(1u64, 4u64, 0)
+        expect(sosix_queue_handle_slot(second as u64)).to_equal(0)
+        expect(sosix_queue_handle_generation(second as u64)).to_equal(1)
+        expect(second).to_equal(65536)
+        expect(sosix_queue_recv(queue as u64).status).to_equal(0 - EBADF as i64)

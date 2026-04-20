@@ -23,7 +23,8 @@ hardware. We test the scheduling logic and state machine.
 use std.spec.{describe, it, expect}
 use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
-    UserProcessImage, UserLoadSegment, SchedulerPolicy, default_task_schedule
+    UserProcessImage, UserLoadSegment, SchedulerPolicy, SchedulerDomainKind,
+    default_scheduler_topology, default_task_schedule
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
@@ -196,6 +197,14 @@ describe "Scheduler":
         it "starts with tick count 0":
             val sched = Scheduler.new()
             expect(sched.get_tick_count()).to_equal(0)
+
+        it "starts with an explicit flat topology domain":
+            val sched = Scheduler.new()
+            val topology = default_scheduler_topology(32u32)
+            expect(sched.topology_cpu_count()).to_equal(32u32)
+            expect(sched.topology_domain_count()).to_equal(1)
+            expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
+            expect(topology.domains[0].rebalance_threshold).to_equal(2)
 
     describe "create_task":
         it "returns a valid TaskId":
@@ -491,6 +500,73 @@ describe "Scheduler":
             expect(sched.cpu_runnable_count(0u32)).to_equal(2)
             expect(sched.cpu_runnable_count(1u32)).to_equal(1)
 
+        it "does not rebalance below the topology threshold":
+            var sched = Scheduler.new()
+            val id1 = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val moved = sched.rebalance_once()
+            expect(moved).to_equal(false)
+            expect(sched.cpu_runnable_count(0u32)).to_equal(1)
+            expect(sched.cpu_runnable_count(1u32)).to_equal(0)
+
+        it "unblock path triggers one rebalance after threshold imbalance":
+            var sched = Scheduler.new()
+            val sleeper = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val load1 = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val load2 = sched.create_task(0x3000, TaskPriority.Normal, CapabilitySet.full())
+
+            sched.block_task(sleeper, BlockReason.Sleep(until_ns: 10000000))
+            sched.unblock_task(sleeper)
+
+            expect(sched.cpu_runnable_count(0u32)).to_equal(2)
+            expect(sched.cpu_runnable_count(1u32)).to_equal(1)
+
+        it "wake-affine placement follows the current CPU when load is close":
+            var sched = Scheduler.new()
+            val sleeper = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val waker = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+
+            var waker_cfg = default_task_schedule(TaskPriority.Normal)
+            waker_cfg.home_cpu = 1u32
+            waker_cfg.virtual_deadline = 1
+            sched.set_schedule_config(waker, waker_cfg)
+            sched.block_task(sleeper, BlockReason.Sleep(until_ns: 10000000))
+            sched.schedule_on_cpu(1u32)
+
+            sched.unblock_task(sleeper)
+
+            val tcb = sched.get_task(sleeper)
+            if tcb != nil:
+                val task = tcb
+                expect(task.assigned_cpu).to_equal(1u32)
+
+        it "wake-affine placement keeps home CPU when the waker CPU is overloaded":
+            var sched = Scheduler.new()
+            val sleeper = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val waker = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val load1 = sched.create_task(0x3000, TaskPriority.Normal, CapabilitySet.full())
+            val load2 = sched.create_task(0x4000, TaskPriority.Normal, CapabilitySet.full())
+            val load3 = sched.create_task(0x5000, TaskPriority.Normal, CapabilitySet.full())
+
+            var waker_cfg = default_task_schedule(TaskPriority.Normal)
+            waker_cfg.home_cpu = 1u32
+            waker_cfg.virtual_deadline = 1
+            sched.set_schedule_config(waker, waker_cfg)
+
+            var load_cfg = default_task_schedule(TaskPriority.Normal)
+            load_cfg.home_cpu = 1u32
+            sched.set_schedule_config(load1, load_cfg)
+            sched.set_schedule_config(load2, load_cfg)
+            sched.set_schedule_config(load3, load_cfg)
+
+            sched.block_task(sleeper, BlockReason.Sleep(until_ns: 10000000))
+            sched.schedule_on_cpu(1u32)
+            sched.unblock_task(sleeper)
+
+            val tcb = sched.get_task(sleeper)
+            if tcb != nil:
+                val task = tcb
+                expect(task.assigned_cpu).to_equal(0u32)
+
     describe "process isolation":
         it "monotonically restricts isolation metadata":
             var sched = Scheduler.new()
@@ -717,6 +793,19 @@ describe "Scheduler":
         it "clone_task prepares child fork return register as zero":
             var sched = Scheduler.new()
             val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            sched.schedule()
+            val parent_ctx = TaskContext(
+                rax: 123, rbx: 0, rcx: 0, rdx: 0,
+                rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+                r8: 0, r9: 0, r10: 0, r11: 0,
+                r12: 0, r13: 0, r14: 0, r15: 0,
+                rip: 0x1000,
+                rflags: 0x202,
+                cs: 0x23,
+                ss: 0x1B,
+                fpu_state: 0
+            )
+            sched.timer_tick(parent_ctx)
             val child = sched.clone_task(parent)
 
             val child_tcb = sched.get_task(child)

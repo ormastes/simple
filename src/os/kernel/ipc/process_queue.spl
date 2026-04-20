@@ -1,8 +1,7 @@
 # Kernel process queue manager.
 #
-# Bounded FIFO message queues used by process-level IPC. Handles are table slot
-# indexes, so handle 0 is valid when slot 0 is active. Attachments use an
-# explicit sentinel instead of overloading handle 0.
+# Bounded FIFO message queues used by process-level IPC. Handles encode the
+# queue generation in the high bits and table slot in the low bits.
 
 use os.posix.errno.{EAGAIN, EBADF, EINVAL, ENOMEM, EPIPE}
 
@@ -11,6 +10,8 @@ val PROCESS_QUEUE_MAX_CAPACITY: u64 = 64
 val PROCESS_QUEUE_MAX_MSG_BYTES: u64 = 256
 val PROCESS_QUEUE_SLOT_COUNT: u64 = 4096
 val PROCESS_QUEUE_STORAGE_BYTES: u64 = 1048576
+val PROCESS_QUEUE_HANDLE_SLOT_BITS: u64 = 16
+val PROCESS_QUEUE_HANDLE_SLOT_MASK: u64 = 0xFFFF
 
 val PROCESS_QUEUE_NO_HANDLE: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -55,7 +56,7 @@ fn process_queue_init():
         process_queue_head[q] = 0
         process_queue_tail[q] = 0
         process_queue_count[q] = 0
-        process_queue_generation[q] = process_queue_generation[q] + 1
+        process_queue_generation[q] = 0
         process_queue_flags[q] = 0
         q = q + 1
 
@@ -70,10 +71,35 @@ fn process_queue_init():
         process_queue_bytes[i] = 0
         i = i + 1
 
+fn _process_queue_make_handle(slot: u64) -> u64:
+    (process_queue_generation[slot] << PROCESS_QUEUE_HANDLE_SLOT_BITS) | slot
+
+fn _process_queue_slot_from_handle(queue: u64) -> u64:
+    queue & PROCESS_QUEUE_HANDLE_SLOT_MASK
+
+fn _process_queue_generation_from_handle(queue: u64) -> u64:
+    queue >> PROCESS_QUEUE_HANDLE_SLOT_BITS
+
 fn _process_queue_valid(queue: u64) -> bool:
-    if queue >= PROCESS_QUEUE_MAX_QUEUES:
+    if queue == PROCESS_QUEUE_NO_HANDLE:
         return false
-    process_queue_active[queue]
+    val slot = _process_queue_slot_from_handle(queue)
+    if slot >= PROCESS_QUEUE_MAX_QUEUES:
+        return false
+    if not process_queue_active[slot]:
+        return false
+    process_queue_generation[slot] == _process_queue_generation_from_handle(queue)
+
+fn _process_queue_active_slot(queue: u64) -> u64:
+    _process_queue_slot_from_handle(queue)
+
+fn _process_queue_reset_slots(queue: u64):
+    var logical: u64 = 0
+    while logical < process_queue_capacity[queue]:
+        val slot = _process_queue_slot(queue, logical)
+        process_queue_slot_len[slot] = 0
+        process_queue_slot_attached[slot] = PROCESS_QUEUE_NO_HANDLE
+        logical = logical + 1
 
 fn _process_queue_slot(queue: u64, logical_slot: u64) -> u64:
     queue * PROCESS_QUEUE_MAX_CAPACITY + logical_slot
@@ -99,7 +125,6 @@ fn process_queue_create(capacity: u64, max_msg_bytes: u64, flags: u32) -> i64:
             process_queue_head[q] = 0
             process_queue_tail[q] = 0
             process_queue_count[q] = 0
-            process_queue_generation[q] = process_queue_generation[q] + 1
             process_queue_flags[q] = flags
 
             var logical: u64 = 0
@@ -109,7 +134,7 @@ fn process_queue_create(capacity: u64, max_msg_bytes: u64, flags: u32) -> i64:
                 process_queue_slot_attached[slot] = PROCESS_QUEUE_NO_HANDLE
                 logical = logical + 1
 
-            return q as i64
+            return _process_queue_make_handle(q) as i64
         q = q + 1
 
     0 - ENOMEM as i64
@@ -118,15 +143,16 @@ fn process_queue_send(queue: u64, bytes: [u8], attached_handle: u64) -> i64:
     """Enqueue one FIFO message."""
     if not _process_queue_valid(queue):
         return 0 - EBADF as i64
-    if process_queue_closed_send[queue] or process_queue_closed_recv[queue]:
+    val slot_queue = _process_queue_active_slot(queue)
+    if process_queue_closed_send[slot_queue] or process_queue_closed_recv[slot_queue]:
         return 0 - EPIPE as i64
-    if bytes.len() > process_queue_max_msg_bytes[queue]:
+    if bytes.len() > process_queue_max_msg_bytes[slot_queue]:
         return 0 - EINVAL as i64
-    if process_queue_count[queue] >= process_queue_capacity[queue]:
+    if process_queue_count[slot_queue] >= process_queue_capacity[slot_queue]:
         return 0 - EAGAIN as i64
 
-    val tail = process_queue_tail[queue]
-    val slot = _process_queue_slot(queue, tail)
+    val tail = process_queue_tail[slot_queue]
+    val slot = _process_queue_slot(slot_queue, tail)
     val base = _process_queue_slot_base(slot)
 
     var i: u64 = 0
@@ -136,23 +162,24 @@ fn process_queue_send(queue: u64, bytes: [u8], attached_handle: u64) -> i64:
 
     process_queue_slot_len[slot] = bytes.len()
     process_queue_slot_attached[slot] = attached_handle
-    process_queue_tail[queue] = (tail + 1) % process_queue_capacity[queue]
-    process_queue_count[queue] = process_queue_count[queue] + 1
+    process_queue_tail[slot_queue] = (tail + 1) % process_queue_capacity[slot_queue]
+    process_queue_count[slot_queue] = process_queue_count[slot_queue] + 1
     bytes.len() as i64
 
 fn process_queue_recv(queue: u64) -> ProcessQueueRecv:
     """Dequeue one FIFO message, or report EAGAIN/EOF."""
     if not _process_queue_valid(queue):
         return ProcessQueueRecv(status: 0 - EBADF as i64, len: 0, attached_handle: PROCESS_QUEUE_NO_HANDLE, data: [])
-    if process_queue_closed_recv[queue]:
+    val slot_queue = _process_queue_active_slot(queue)
+    if process_queue_closed_recv[slot_queue]:
         return ProcessQueueRecv(status: 0 - EBADF as i64, len: 0, attached_handle: PROCESS_QUEUE_NO_HANDLE, data: [])
-    if process_queue_count[queue] == 0:
-        if process_queue_closed_send[queue]:
+    if process_queue_count[slot_queue] == 0:
+        if process_queue_closed_send[slot_queue]:
             return ProcessQueueRecv(status: 0, len: 0, attached_handle: PROCESS_QUEUE_NO_HANDLE, data: [])
         return ProcessQueueRecv(status: 0 - EAGAIN as i64, len: 0, attached_handle: PROCESS_QUEUE_NO_HANDLE, data: [])
 
-    val head = process_queue_head[queue]
-    val slot = _process_queue_slot(queue, head)
+    val head = process_queue_head[slot_queue]
+    val slot = _process_queue_slot(slot_queue, head)
     val base = _process_queue_slot_base(slot)
     val msg_len = process_queue_slot_len[slot]
     var out: [u8] = []
@@ -166,8 +193,8 @@ fn process_queue_recv(queue: u64) -> ProcessQueueRecv:
     val attached = process_queue_slot_attached[slot]
     process_queue_slot_len[slot] = 0
     process_queue_slot_attached[slot] = PROCESS_QUEUE_NO_HANDLE
-    process_queue_head[queue] = (head + 1) % process_queue_capacity[queue]
-    process_queue_count[queue] = process_queue_count[queue] - 1
+    process_queue_head[slot_queue] = (head + 1) % process_queue_capacity[slot_queue]
+    process_queue_count[slot_queue] = process_queue_count[slot_queue] - 1
 
     ProcessQueueRecv(status: msg_len as i64, len: msg_len, attached_handle: attached, data: out)
 
@@ -175,13 +202,14 @@ fn process_queue_poll(queue: u64) -> u32:
     """Return readiness bits for a process queue."""
     if not _process_queue_valid(queue):
         return PROCESS_QUEUE_POLL_ERR | PROCESS_QUEUE_POLL_HUP
+    val slot_queue = _process_queue_active_slot(queue)
 
     var bits: u32 = 0
-    if process_queue_count[queue] > 0:
+    if process_queue_count[slot_queue] > 0:
         bits = bits | PROCESS_QUEUE_POLL_READ
-    if not process_queue_closed_send[queue] and process_queue_count[queue] < process_queue_capacity[queue]:
+    if not process_queue_closed_send[slot_queue] and process_queue_count[slot_queue] < process_queue_capacity[slot_queue]:
         bits = bits | PROCESS_QUEUE_POLL_WRITE
-    if process_queue_closed_send[queue] or process_queue_closed_recv[queue]:
+    if process_queue_closed_send[slot_queue] or process_queue_closed_recv[slot_queue]:
         bits = bits | PROCESS_QUEUE_POLL_HUP
     bits
 
@@ -189,18 +217,41 @@ fn process_queue_close(queue: u64, mode: u32) -> i64:
     """Close send side, receive side, or both sides when mode is zero."""
     if not _process_queue_valid(queue):
         return 0 - EBADF as i64
+    val slot_queue = _process_queue_active_slot(queue)
     if mode == 0:
-        process_queue_closed_send[queue] = true
-        process_queue_closed_recv[queue] = true
+        _process_queue_reset_slots(slot_queue)
+        process_queue_active[slot_queue] = false
+        process_queue_closed_send[slot_queue] = true
+        process_queue_closed_recv[slot_queue] = true
+        process_queue_capacity[slot_queue] = 0
+        process_queue_max_msg_bytes[slot_queue] = 0
+        process_queue_head[slot_queue] = 0
+        process_queue_tail[slot_queue] = 0
+        process_queue_count[slot_queue] = 0
+        process_queue_flags[slot_queue] = 0
+        process_queue_generation[slot_queue] = process_queue_generation[slot_queue] + 1
         return 0
     if (mode & PROCESS_QUEUE_CLOSE_SEND) != 0:
-        process_queue_closed_send[queue] = true
+        process_queue_closed_send[slot_queue] = true
     if (mode & PROCESS_QUEUE_CLOSE_RECV) != 0:
-        process_queue_closed_recv[queue] = true
+        process_queue_closed_recv[slot_queue] = true
     0
 
 fn process_queue_len(queue: u64) -> i64:
     """Return the current queued message count."""
     if not _process_queue_valid(queue):
         return 0 - EBADF as i64
-    process_queue_count[queue] as i64
+    val slot_queue = _process_queue_active_slot(queue)
+    process_queue_count[slot_queue] as i64
+
+fn process_queue_handle_slot(queue: u64) -> i64:
+    """Return the table slot for an active queue handle or -errno."""
+    if not _process_queue_valid(queue):
+        return 0 - EBADF as i64
+    _process_queue_slot_from_handle(queue) as i64
+
+fn process_queue_handle_generation(queue: u64) -> i64:
+    """Return the generation for an active queue handle or -errno."""
+    if not _process_queue_valid(queue):
+        return 0 - EBADF as i64
+    _process_queue_generation_from_handle(queue) as i64

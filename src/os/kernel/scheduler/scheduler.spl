@@ -10,7 +10,8 @@ use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
     UserProcessImage, AddressSpace,
     SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
-    default_task_schedule, default_task_isolation,
+    SchedulerTopology,
+    default_scheduler_topology, default_task_schedule, default_task_isolation,
     user_process_image_entry, user_process_image_stack_top,
     user_process_image_stack_size, user_process_image_segments,
     user_process_image_file_bytes, user_process_image_initial_sp,
@@ -42,6 +43,7 @@ val TIME_SLICE_TICKS: u64 = 10    # Ticks per time slice before preemption
 val SCHED_TICK_NS: u64 = 10000000 # Accounting tick used by fair scheduling
 val DEADLINE_BANDWIDTH_SCALE: u64 = 1000000
 val DEADLINE_CPU_BANDWIDTH_CAP: u64 = 800000
+val DEFAULT_SCHED_CPUS: u32 = 32u32
 
 @cfg(riscv64)
 val SCHED_EXEC_ARCH: Architecture = Architecture.Riscv64
@@ -293,6 +295,7 @@ class Scheduler:
     current: TaskId                     # Currently running task
     ready_queues: [ReadyQueue]          # One per priority level
     cpu_runqueues: [CpuRunQueue]        # One run queue per logical CPU
+    topology: SchedulerTopology         # Scheduler-visible topology domains
     tick_count: u64                     # Global tick counter
     next_task_id: u64                   # Monotonic task ID allocator
 
@@ -315,7 +318,7 @@ impl Scheduler:
 
         var cpu_queues: [CpuRunQueue] = []
         var cpu = 0u32
-        while cpu < 32u32:
+        while cpu < DEFAULT_SCHED_CPUS:
             cpu_queues.push(CpuRunQueue.new(cpu))
             cpu = cpu + 1u32
 
@@ -324,6 +327,7 @@ impl Scheduler:
             current: TaskId(id: 0),
             ready_queues: queues,
             cpu_runqueues: cpu_queues,
+            topology: default_scheduler_topology(DEFAULT_SCHED_CPUS),
             tick_count: 0,
             next_task_id: 1         # 0 is reserved for idle/kernel
         )
@@ -549,7 +553,9 @@ impl Scheduler:
         task.ticks_remaining = TIME_SLICE_TICKS
         self.tasks[slot] = task
 
-        self._enqueue_ready(id)
+        val wake_cpu = self._current_cpu_hint()
+        self._enqueue_woken_ready(id, wake_cpu)
+        self._maybe_rebalance_after_wake(wake_cpu)
 
     me wake_expired_sleepers(now_ns: u64) -> u32:
         """Move tasks with expired Sleep deadlines back to Ready.
@@ -669,6 +675,7 @@ impl Scheduler:
             self.tasks[current_slot] = task
 
             self._enqueue_ready(self.current)
+            self._maybe_rebalance_after_wake(task.assigned_cpu)
 
             return self.schedule()
 
@@ -800,6 +807,14 @@ impl Scheduler:
         """Return runnable task count for one CPU run queue."""
         val cpu = self._normalize_cpu(cpu_id)
         self.cpu_runqueues[cpu as i64].runnable_count
+
+    fn topology_cpu_count() -> u32:
+        """Return the scheduler topology CPU count."""
+        self.topology.cpu_count
+
+    fn topology_domain_count() -> i32:
+        """Return the number of scheduler topology domains."""
+        self.topology.domains.len()
 
     me restrict_isolation(id: TaskId, allow_network: bool, max_memory_pages: u64, max_threads: u32) -> bool:
         """Monotonically restrict task isolation metadata."""
@@ -1098,6 +1113,23 @@ impl Scheduler:
         rq.enqueue(id, task.schedule)
         self.cpu_runqueues[cpu as i64] = rq
 
+    me _enqueue_woken_ready(id: TaskId, waker_cpu: u32):
+        """Place a woken task near its waker when affinity and load allow it."""
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        var task = tcb
+        val selected_cpu = self._select_wake_cpu(task, waker_cpu)
+        var config = task.schedule
+        config.home_cpu = selected_cpu
+        task.schedule = config
+        task.assigned_cpu = selected_cpu
+        self.tasks[slot] = task
+        self._enqueue_ready(id)
+
     me _remove_ready(id: TaskId):
         """Remove a task from all ready queues."""
         val slot = self._find_slot(id)
@@ -1117,6 +1149,78 @@ impl Scheduler:
         var rq = self.cpu_runqueues[cpu as i64]
         rq.remove(id, task.schedule)
         self.cpu_runqueues[cpu as i64] = rq
+
+    fn _current_cpu_hint() -> u32:
+        """Return the current task's assigned CPU, or CPU 0 when no task is current."""
+        val slot = self._find_slot(self.current)
+        if slot < 0:
+            return 0u32
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return 0u32
+        self._normalize_cpu(tcb.assigned_cpu)
+
+    fn _wake_affine_threshold() -> i32:
+        """Return the topology wake-affine threshold for the flat domain."""
+        if self.topology.domains.len() == 0:
+            return 1
+        self.topology.domains[0].wake_affine_threshold
+
+    fn _rebalance_threshold() -> i32:
+        """Return the topology rebalance threshold for the flat domain."""
+        if self.topology.domains.len() == 0:
+            return 2
+        self.topology.domains[0].rebalance_threshold
+
+    fn _select_wake_cpu(task: TaskControlBlock, waker_cpu: u32) -> u32:
+        """Choose a wake CPU using affinity first, then conservative load spread."""
+        val wake_cpu = self._normalize_cpu(waker_cpu)
+        val home_cpu = self._normalize_cpu(task.schedule.home_cpu)
+        val threshold = self._wake_affine_threshold()
+        if _affinity_allows_cpu(task.schedule.affinity_mask, wake_cpu):
+            val wake_load = self.cpu_runqueues[wake_cpu as i64].runnable_count
+            val home_load = self.cpu_runqueues[home_cpu as i64].runnable_count
+            if wake_load <= home_load + threshold:
+                return wake_cpu
+        if _affinity_allows_cpu(task.schedule.affinity_mask, home_cpu):
+            return home_cpu
+        self._least_loaded_allowed_cpu(task.schedule.affinity_mask)
+
+    fn _least_loaded_allowed_cpu(affinity_mask: u64) -> u32:
+        """Choose the least-loaded CPU allowed by an affinity mask."""
+        var best = 0u32
+        var best_load = 2147483647
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            if _affinity_allows_cpu(affinity_mask, cpu):
+                val load = self.cpu_runqueues[cpu as i64].runnable_count
+                if load < best_load:
+                    best = cpu
+                    best_load = load
+            cpu = cpu + 1u32
+        best
+
+    me _maybe_rebalance_after_wake(wake_cpu: u32):
+        """Run one conservative balance step only when topology spread is clear."""
+        val cpu = self._normalize_cpu(wake_cpu)
+        if self.cpu_runqueues[cpu as i64].runnable_count == 0:
+            return
+        if self._load_spread() >= self._rebalance_threshold():
+            self.rebalance_once()
+
+    fn _load_spread() -> i32:
+        """Return max runnable-count spread across CPU run queues."""
+        var max_load = -1
+        var min_load = 2147483647
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            val load = self.cpu_runqueues[cpu as i64].runnable_count
+            if load > max_load:
+                max_load = load
+            if load < min_load:
+                min_load = load
+            cpu = cpu + 1u32
+        max_load - min_load
 
     me _release_task_address_space(task: TaskControlBlock):
         """Release the user address space held by a task being reaped/replaced."""

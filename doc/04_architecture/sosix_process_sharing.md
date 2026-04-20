@@ -42,12 +42,13 @@ queue operations. It avoids POSIX shared-memory aliasing as the default model.
 
 ## Invariants
 
-- Dataset handles are stable indexes plus generation-ready metadata in later
-  kernel capability wiring.
+- Dataset and queue handles encode `generation << 16 | slot`; slot 0 with
+  generation 0 is still valid handle 0, while reused slots reject stale handles.
 - Dataset writes are allowed only before `seal`.
 - Dataset reads and queue attachments require sealed datasets.
 - Queue send preserves FIFO order per queue.
 - Queue receive consumes exactly one message.
+- Queue poll exposes read/write/hangup readiness without scheduler wake queues.
 - POSIX wrappers call SOSIX request APIs and block at the compatibility edge.
 
 ## Migration Plan
@@ -76,12 +77,13 @@ Implemented source paths:
 
 Remaining SOSIX logic is intentionally explicit:
 
-- `dataset_create_from_file` has the ABI and sealed-handle behavior, but still
-  needs VFS byte snapshot population.
-- Dataset and queue handles are fixed table indexes; generation/capability
-  tokens should be made externally visible before untrusted cross-process
-  handle passing.
-- Queue send/receive is bounded and deterministic, but does not yet integrate
-  scheduler wakeups for blocked readers/writers.
+- `dataset_create_from_file` has the ABI and sealed-handle behavior, but
+  syscall dispatch still lacks a clean synchronous VFS byte snapshot API that
+  can read from an fd at `(offset, len)` into kernel-owned bytes without adding
+  scheduler or VFS service coupling.
+- Queue send/receive is bounded and deterministic. Read/write/HUP readiness is
+  externally checkable through poll, but scheduler wakeups for blocked
+  readers/writers remain a follow-up because that requires scheduler wait-queue
+  integration outside this sharing layer.
 - POSIX remains a wrapper surface. New driver, service, and Simple application
   logic should call SOSIX modules directly.
