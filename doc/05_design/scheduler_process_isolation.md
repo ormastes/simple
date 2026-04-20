@@ -18,7 +18,9 @@
 - Timer ticks advance fair/background `vruntime`, recompute virtual deadline, and pay down positive lag.
 - `rebalance_once()` moves one fair/background task from the busiest CPU to the idlest affinity-compatible CPU.
 - `set_priority` and `set_schedule_config` remove/reinsert ready tasks so queue placement stays consistent.
-- `sys_schedctl` queries policy and updates policy metadata; deadline activation returns `-95`.
+- `sys_schedctl` queries policy, updates policy metadata, queries isolation fields, and applies monotonic isolation restrictions.
+- Deadline activation returns `-95`.
+- Isolation restrictions can only tighten network, memory-page, thread, and capability-generation metadata.
 
 ## Compiler Checks
 

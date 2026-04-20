@@ -20,6 +20,8 @@ Use a class-based SMP scheduler core with per-CPU run queues and fair/background
 - User tasks initialize isolation metadata from their address-space id.
 - Kernel tasks and cloned tasks initialize explicit isolation profiles instead of relying on implicit defaults.
 - Capability records continue to be initialized on every task creation path.
+- `sys_schedctl` exposes privileged isolation queries and monotonic restriction updates for per-task capability generation, sandbox state, network allowance, memory-page cap, thread cap, and address-space id.
+- `pledge` and `unveil` continue to self-restrict the current task and advance the same isolation generation counter.
 
 ## Language Integration
 

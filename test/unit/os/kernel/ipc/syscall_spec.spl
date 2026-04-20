@@ -203,6 +203,50 @@ describe "syscall_handler":
             expect(tcb.assigned_cpu).to_equal(1u32)
             expect(tcb.schedule.affinity_mask).to_equal(2)
 
+    it "queries isolation generation through schedctl":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 107,
+                arg0: 2,
+                arg1: task.id,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(1)
+
+    it "restricts isolation resource caps through schedctl":
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 107,
+                arg0: 3,
+                arg1: task.id,
+                arg2: 0,
+                arg3: 64,
+                arg4: 1,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(0)
+        val updated = scheduler.get_task(task)
+        if updated != nil:
+            val tcb = updated
+            expect(tcb.isolation.capability_generation).to_equal(2)
+            expect(tcb.isolation.max_memory_pages).to_equal(64)
+            expect(tcb.isolation.max_threads).to_equal(1u32)
+
     it "updates isolation generation when pledge restricts current task":
         var scheduler = Scheduler.new()
         val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
