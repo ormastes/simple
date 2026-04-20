@@ -17,11 +17,11 @@
 ## Overview
 
 Self-test for test/system/crypto_ref_harness.spl cross-vendor dispatch.
-Verifies that OPENSSL, PYTHON, and NODE all return the same bytes for the
+Verifies that OPENSSL and NODE return the same bytes for the
 RFC-6234 SHA-256 fixtures and for the RFC-7748 X25519 test vector.
 
-Requires the host to have at least openssl, python3 (with `cryptography`),
-and node ≥20 installed and recorded in tools/ref_crypto/manifest.json.
+Requires the host to have at least openssl and node >=20 installed and
+recorded in tools/ref_crypto/manifest.json.
 """
 
 use std.sspec.*
@@ -56,22 +56,13 @@ fn _unwrap_ok(r: Result<[u8], RefErr>) -> [u8]:
 
 describe "crypto_ref_harness: ref_sha256_via RFC-6234":
     # Openssl individual-call tests are covered by the cross-vendor matrix
-    # below, which proves byte-parity across all three vendors for every
+    # below, which proves byte-parity across the wired vendors for every
     # entry in the 8-input matrix (including empty and "abc").
-
-    it "python SHA-256(\"\") matches the known digest":
-        val empty: [u8] = []
-        val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, empty))
-        expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
 
     it "node SHA-256(\"\") matches the known digest":
         val empty: [u8] = []
         val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, empty))
         expect(bytes_to_hex(got)).to_equal(SHA256_EMPTY_HEX)
-
-    it "python SHA-256(\"abc\") matches the known digest":
-        val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, [0x61u8, 0x62u8, 0x63u8]))
-        expect(bytes_to_hex(got)).to_equal(SHA256_ABC_HEX)
 
     it "node SHA-256(\"abc\") matches the known digest":
         val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, [0x61u8, 0x62u8, 0x63u8]))
@@ -79,41 +70,26 @@ describe "crypto_ref_harness: ref_sha256_via RFC-6234":
 
 
 describe "crypto_ref_harness: cross-vendor SHA-256 matrix":
-    it "openssl, python, node all agree on every matrix entry":
+    it "openssl and node agree on every matrix entry":
         val matrix = crypto_input_matrix(block_size: 64u64)
         var i: u64 = 0
         while i < matrix.len():
             val input = matrix[i]
             val a = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.OPENSSL, input)))
-            val b = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.PYTHON,  input)))
-            val c = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.NODE,    input)))
-            expect(a).to_equal(b)
+            val c = bytes_to_hex(_unwrap_ok(ref_sha256_via(Vendor.NODE, input)))
             expect(a).to_equal(c)
             i = i + 1
 
 
-describe "crypto_ref_harness: HMAC-SHA256 cross-vendor":
-    it "python HMAC-SHA256(key=\"key\", msg=fox) matches RFC-style vector":
+describe "crypto_ref_harness: HMAC-SHA256 external reference":
+    it "node HMAC-SHA256(key=\"key\", msg=fox) matches RFC-style vector":
         val key = [0x6bu8, 0x65u8, 0x79u8]
         val msg = hex_to_bytes("54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67")
-        val got = _unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg))
+        val got = _unwrap_ok(ref_hmac_sha256_via(Vendor.NODE, key, msg))
         expect(bytes_to_hex(got)).to_equal(HMAC_SHA256_KEY_FOX_HEX)
-
-    it "node agrees with python on the fox vector":
-        val key = [0x6bu8, 0x65u8, 0x79u8]
-        val msg = hex_to_bytes("54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67")
-        val py = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.PYTHON, key, msg)))
-        val nd = bytes_to_hex(_unwrap_ok(ref_hmac_sha256_via(Vendor.NODE,   key, msg)))
-        expect(py).to_equal(nd)
 
 
 describe "crypto_ref_harness: X25519 RFC 7748 §5.2 vector 1":
-    it "python matches the expected shared secret":
-        val scalar = hex_to_bytes(X25519_SCALAR_HEX)
-        val peer   = hex_to_bytes(X25519_PEER_HEX)
-        val got    = _unwrap_ok(ref_x25519_via(Vendor.PYTHON, scalar, peer))
-        expect(bytes_to_hex(got)).to_equal(X25519_SHARED_HEX)
-
     it "node matches the expected shared secret":
         val scalar = hex_to_bytes(X25519_SCALAR_HEX)
         val peer   = hex_to_bytes(X25519_PEER_HEX)
@@ -122,23 +98,20 @@ describe "crypto_ref_harness: X25519 RFC 7748 §5.2 vector 1":
 
 
 describe "crypto_ref_harness: supported vendors do real work":
-    it "python SHA-256(\"a\") matches the known digest":
+    it "node SHA-256(\"a\") matches the known digest":
         val input: [u8] = [0x61u8]
-        val got = _unwrap_ok(ref_sha256_via(Vendor.PYTHON, input))
+        val got = _unwrap_ok(ref_sha256_via(Vendor.NODE, input))
         expect(bytes_to_hex(got)).to_equal("ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb")
 
-    it "python and node X25519 agree on the RFC vector":
+    it "node X25519 agrees with the RFC vector":
         val scalar = hex_to_bytes(X25519_SCALAR_HEX)
         val peer   = hex_to_bytes(X25519_PEER_HEX)
-        val py     = _unwrap_ok(ref_x25519_via(Vendor.PYTHON, scalar, peer))
         val node   = _unwrap_ok(ref_x25519_via(Vendor.NODE, scalar, peer))
-        expect(bytes_to_hex(py)).to_equal(X25519_SHARED_HEX)
-        expect(bytes_to_hex(node)).to_equal(bytes_to_hex(py))
+        expect(bytes_to_hex(node)).to_equal(X25519_SHARED_HEX)
 
 
 describe "crypto_ref_harness: vendor_name returns canonical tag":
     it "returns lowercase names for known vendors":
         expect(vendor_name(Vendor.OPENSSL)).to_equal("openssl")
-        expect(vendor_name(Vendor.PYTHON)).to_equal("python")
         expect(vendor_name(Vendor.NODE)).to_equal("node")
         expect(vendor_name(Vendor.RING)).to_equal("ring")

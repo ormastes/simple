@@ -22,7 +22,6 @@ use os.kernel.loader.stack_builder.{
 }
 use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
 
-extern fn serial_println(msg: text)
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
@@ -81,17 +80,11 @@ fn build_user_process_image(
     explicit argv (legacy path), it passes `[]` and we seed argv with the
     binary path so libc `_start` still observes argv[0].
     """
-    serial_println("[process-image] build enter")
     val native_data = _normalise_executable_bytes(data)?
-    serial_println("[process-image] normalised")
     val elf = load_user_executable(native_data, arch)?
-    serial_println("[process-image] elf parsed")
     val entry = elf_image_entry(elf)
-    serial_println("[process-image] entry ready")
     val stack_top = _default_stack_top(arch)?
-    serial_println("[process-image] stack top ready")
     val stack_size = compute_stack_size(data.len() as u64)
-    serial_println("[process-image] stack size ready")
 
     var effective_argv: [text] = argv
     if effective_argv.len() == 0:
@@ -99,10 +92,8 @@ fn build_user_process_image(
 
     var segments: [UserLoadSegment] = []
     for seg in elf_image_segments(elf):
-        serial_println("[process-image] segment begin")
         val file_offset = elf_segment_file_offset(seg)
         val file_size = elf_segment_file_size(seg)
-        serial_println("[process-image] segment metadata")
         segments.push(UserLoadSegment(
             virt_addr: elf_segment_virt_addr(seg),
             mem_size: elf_segment_mem_size(seg),
@@ -111,16 +102,12 @@ fn build_user_process_image(
             align: elf_segment_align(seg),
             data: _slice_bytes(native_data, file_offset, file_size)
         ))
-        serial_println("[process-image] segment pushed")
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: entry)]  # AT_ENTRY
-    serial_println("[process-image] aux ready")
     val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
-    serial_println("[process-image] stack frame ready")
     val initial_sp = stack_build_result_sp(stack_frame)
-    serial_println("[process-image] initial sp ready")
     val initial_stack_bytes = stack_build_result_bytes(stack_frame)
-    serial_println("[process-image] initial stack bytes ready")
+    val image_file_bytes = _slice_bytes(native_data, 0, native_data.len() as u64)
 
     Ok(UserProcessImage(
         binary_path: path,
@@ -130,7 +117,7 @@ fn build_user_process_image(
         argv: effective_argv,
         envp: envp,
         segments: segments,
-        file_bytes: native_data,
+        file_bytes: image_file_bytes,
         initial_sp: initial_sp,
         initial_stack_bytes: initial_stack_bytes
     ))

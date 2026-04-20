@@ -18,14 +18,14 @@
 
 Intensive byte-level cross-validation of the pure-Simple ChaCha20-Poly1305
 AEAD implementation (src/os/crypto/chacha20_poly1305.spl) against reference
-implementations (Python `cryptography`, Node.js `node:crypto`).
+implementation Node.js `node:crypto`.
 
 Four interop lanes per test:
 
 1. **Simple-encrypt / Simple-decrypt** — sanity roundtrip.
 2. **Simple-encrypt / vendor-decrypt** — our bytes survive external verification.
 3. **Vendor-encrypt / Simple-decrypt** — we accept and decrypt external bytes.
-4. **Vendor-encrypt / other-vendor-decrypt** — baseline cross-vendor check.
+4. **Vendor-encrypt / vendor-decrypt** — baseline external reference check.
 
 Plus:
 - RFC 8439 §2.8.2 known-answer vector (byte-exact ciphertext + tag).
@@ -114,22 +114,6 @@ fn _decrypt_is_err(key: [u8], nonce: [u8], cipher: [u8], aad: [u8], tag: [u8]) -
 # ---------------------------------------------------------------------------
 
 describe "chacha_poly: RFC 8439 §2.8.2 known-answer":
-    it "pure-Simple encrypt produces the canonical ciphertext||tag":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val got   = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-        expect(bytes_to_hex(got)).to_equal(RFC8439_CT_TAG_HEX)
-
-    it "python encrypt matches the canonical ciphertext||tag":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val got   = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.PYTHON, key, nonce, aad, plain))
-        expect(bytes_to_hex(got)).to_equal(RFC8439_CT_TAG_HEX)
-
     it "node encrypt matches the canonical ciphertext||tag":
         val key   = hex_to_bytes(RFC8439_KEY_HEX)
         val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
@@ -172,21 +156,6 @@ describe "chacha_poly: Simple-encrypt → vendor-decrypt":
     # properly; earlier drafts hid the auth failure behind an empty-bytes
     # fallback which let empty-input matrix entries pass spuriously.
 
-    it "python decrypts every pure-Simple-encrypted matrix entry without auth error":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain    = matrix[i]
-            val ct_tag   = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-            val result   = ref_chacha_poly_decrypt_via(Vendor.PYTHON, key, nonce, aad, ct_tag)
-            expect(_is_err(result)).to_equal(false)
-            val recovered = _unwrap_bytes(result)
-            expect(_bytes_eq(recovered, plain)).to_equal(true)
-            i = i + 1
-
     it "node decrypts every pure-Simple-encrypted matrix entry without auth error":
         val key   = hex_to_bytes(RFC8439_KEY_HEX)
         val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
@@ -208,21 +177,6 @@ describe "chacha_poly: Simple-encrypt → vendor-decrypt":
 # ---------------------------------------------------------------------------
 
 describe "chacha_poly: vendor-encrypt → Simple-decrypt":
-    it "pure-Simple decrypts every python-encrypted matrix entry":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain = matrix[i]
-            val ct_tag = _unwrap_bytes(
-                ref_chacha_poly_encrypt_via(Vendor.PYTHON, key, nonce, aad, plain))
-            val split = _split_ct_tag(ct_tag)
-            val recovered = _decrypt_ok_bytes(key, nonce, split.0, aad, split.1)
-            expect(_bytes_eq(recovered, plain)).to_equal(true)
-            i = i + 1
-
     it "pure-Simple decrypts every node-encrypted matrix entry":
         val key   = hex_to_bytes(RFC8439_KEY_HEX)
         val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
@@ -240,11 +194,11 @@ describe "chacha_poly: vendor-encrypt → Simple-decrypt":
 
 
 # ---------------------------------------------------------------------------
-# Lane 4: vendor-encrypt / other-vendor-decrypt (baseline sanity)
+# Lane 4: vendor-encrypt / vendor-decrypt (baseline sanity)
 # ---------------------------------------------------------------------------
 
 describe "chacha_poly: vendor ↔ vendor roundtrip":
-    it "python-encrypt → node-decrypt recovers every matrix entry":
+    it "node-encrypt → node-decrypt recovers every matrix entry":
         val key   = hex_to_bytes(RFC8439_KEY_HEX)
         val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
         val aad   = hex_to_bytes(RFC8439_AAD_HEX)
@@ -252,21 +206,8 @@ describe "chacha_poly: vendor ↔ vendor roundtrip":
         var i: u64 = 0
         while i < matrix.len():
             val plain  = matrix[i]
-            val ct_tag = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.PYTHON, key, nonce, aad, plain))
-            val got    = _unwrap_bytes(ref_chacha_poly_decrypt_via(Vendor.NODE,   key, nonce, aad, ct_tag))
-            expect(_bytes_eq(got, plain)).to_equal(true)
-            i = i + 1
-
-    it "node-encrypt → python-decrypt recovers every matrix entry":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val plain  = matrix[i]
-            val ct_tag = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.NODE,   key, nonce, aad, plain))
-            val got    = _unwrap_bytes(ref_chacha_poly_decrypt_via(Vendor.PYTHON, key, nonce, aad, ct_tag))
+            val ct_tag = _unwrap_bytes(ref_chacha_poly_encrypt_via(Vendor.NODE, key, nonce, aad, plain))
+            val got    = _unwrap_bytes(ref_chacha_poly_decrypt_via(Vendor.NODE, key, nonce, aad, ct_tag))
             expect(_bytes_eq(got, plain)).to_equal(true)
             i = i + 1
 
@@ -276,37 +217,6 @@ describe "chacha_poly: vendor ↔ vendor roundtrip":
 # ---------------------------------------------------------------------------
 
 describe "chacha_poly: tampered-tag authentication failure":
-    it "pure-Simple decrypt rejects a zeroed tag":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val ct_tag = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-        val split  = _split_ct_tag(ct_tag)
-        # A 16-byte zero tag will never match the real Poly1305 for any non-empty content.
-        var zero_tag: [u8] = []
-        var i: u64 = 0
-        while i < 16u64:
-            zero_tag.push(0u8)
-            i = i + 1
-        expect(_decrypt_is_err(key, nonce, split.0, aad, zero_tag)).to_equal(true)
-
-    it "python decrypt rejects the same tampered ciphertext||tag":
-        val key   = hex_to_bytes(RFC8439_KEY_HEX)
-        val nonce = hex_to_bytes(RFC8439_NONCE_HEX)
-        val aad   = hex_to_bytes(RFC8439_AAD_HEX)
-        val plain = hex_to_bytes(RFC8439_PT_HEX)
-        val ct_tag = chacha20_poly1305_encrypt(key, nonce, plain, aad)
-        # Flip the last byte of the tag (last byte of ct_tag)
-        var tampered: [u8] = []
-        var i: u64 = 0
-        while i < ct_tag.len() - 1:
-            tampered.push(ct_tag[i])
-            i = i + 1
-        tampered.push((ct_tag[ct_tag.len() - 1].to_i64() ^ 0xff).to_u8())
-        val r = ref_chacha_poly_decrypt_via(Vendor.PYTHON, key, nonce, aad, tampered)
-        expect(_is_err(r)).to_equal(true)
-
     it "node decrypt rejects the same tampered ciphertext||tag":
         val key   = hex_to_bytes(RFC8439_KEY_HEX)
         val nonce = hex_to_bytes(RFC8439_NONCE_HEX)

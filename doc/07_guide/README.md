@@ -84,6 +84,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [platform/platforms.md](platform/platforms.md) | Platform support, FreeBSD, cross-compilation |
 | [platform/packaging.md](platform/packaging.md) | Packages, deployment, GitHub |
 | [platform/simpleos_dev_guide.md](platform/simpleos_dev_guide.md) | SimpleOS tooling, bootstrap, native build and run workflow |
+| [platform/sosix_process_scheduler.md](platform/sosix_process_scheduler.md) | SOSIX process APIs, immutable sharing, scheduler classes, and current kernel limits |
 | [platform/simpleos_web_wm.md](platform/simpleos_web_wm.md) | Browser-hosted SimpleOS Web WM runtime |
 
 ## Architecture

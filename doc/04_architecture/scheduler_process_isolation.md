@@ -28,3 +28,22 @@ Use a class-based SMP scheduler core with per-CPU run queues and fair/background
 
 - `@task` parses policy, weight, priority, latency hints, and budget fields.
 - Validation requires RT/deadline policies to use `nogc_async_mut_noalloc` and rejects GC/allocation/unbounded blocking effects.
+
+## Current Coverage And Remaining Work
+
+Implemented source paths:
+
+- `src/os/kernel/scheduler/scheduler.spl`: per-CPU class run queues, deadline admission, RT/fair/background/idle class pick order, fork/exec/wait collection, isolation metadata, and address-space release on exec/reap.
+- `src/os/kernel/ipc/syscall.spl`: syscall dispatch for `fork`, `execve`, `waitpid`, `fcntl`, `poll`, scheduler policy control, and SOSIX sharing.
+- `src/os/posix/fd_table.spl`: fork descriptor inheritance and close-on-exec state.
+- `src/os/sosix/process.spl`: Simple-native async process facade used by POSIX process wrappers.
+
+The first production slice is intentionally bounded. Remaining scheduler/process logic is:
+
+- Build a real topology domain tree for SMT, LLC/package, and NUMA balancing instead of the current flat 32-run-queue catalog.
+- Invoke rebalancing from timer/idle paths and add wake-affine placement; `rebalance_once()` is currently an explicit one-task hook.
+- Extend fair scheduling from EEVDF-like virtual-deadline selection to full lag/sleeper decay and wakeup-preemption behavior.
+- Add RT bandwidth throttling and priority-inheritance mutex integration before exposing unrestricted RT policy to user workloads.
+- Extend deadline scheduling with CBS replenishment, deadline-miss accounting, and tracing.
+- Complete `execve` argv/envp user-copy; the kernel path currently seeds argv from the executable path when user vectors are absent.
+- Add process-group/session/stopped/continued semantics if full POSIX job-control compatibility is required.

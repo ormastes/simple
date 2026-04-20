@@ -2,7 +2,7 @@
 # install_ref_crypto.shs — install/verify reference crypto vendors under tools/ref_crypto/.
 #
 # Idempotent. Per-vendor .installed-<version> sentinels prevent redundant work.
-# Updates tools/ref_crypto/manifest.json vendor.installed and vendor.exec fields.
+# Updates tools/ref_crypto/manifest.json vendor.installed fields.
 #
 # Usage:
 #   scripts/install_ref_crypto.shs                 # install all required vendors
@@ -10,7 +10,7 @@
 #   scripts/install_ref_crypto.shs --vendor a,b,c  # subset
 #   scripts/install_ref_crypto.shs --heavy         # include source-build vendors (bssl/mbedtls/wolfssl/libressl)
 #
-# Host-only vendors (no build):    openssl, python, node, go, ring
+# Host-only vendors (no build):    openssl, node, go, ring
 # Source-build vendors (heavy):    boringssl, mbedtls, wolfssl, libressl
 
 set -eu
@@ -56,20 +56,25 @@ stamped() { [ -n "$(ls -1 "${rc_root}/$1/".installed-* 2>/dev/null || true)" ]; 
 
 set_installed() {
   # set_installed <vendor> <true|false> [exec_path]
-  python3 - "$1" "$2" "${3:-}" <<'PY'
-import json, sys, pathlib
-vendor, val = sys.argv[1], sys.argv[2].lower() == "true"
-exec_path = sys.argv[3] if len(sys.argv) > 3 else ""
-p = pathlib.Path("tools/ref_crypto/manifest.json")
-m = json.loads(p.read_text())
-for v in m["vendors"]:
-    if v["name"] == vendor:
-        v["installed"] = val
-        if exec_path:
-            v["exec"] = exec_path
-        break
-p.write_text(json.dumps(m, indent=2) + "\n")
-PY
+  # Keep this shell-only; the third argument is retained for call-site
+  # compatibility but the manifest's stable path field remains canonical.
+  vendor="$1"
+  val="$2"
+  manifest="${repo_root}/tools/ref_crypto/manifest.json"
+  tmp="${manifest}.tmp.$$"
+  awk -v vendor="$vendor" -v val="$val" '
+    /"name"[[:space:]]*:/ {
+      in_vendor = ($0 ~ "\"" vendor "\"")
+    }
+    in_vendor && /"installed"[[:space:]]*:/ {
+      sub(/"installed"[[:space:]]*:[[:space:]]*(true|false)/, "\"installed\": " val)
+    }
+    { print }
+    in_vendor && /^[[:space:]]*}[,]?[[:space:]]*$/ {
+      in_vendor = 0
+    }
+  ' "$manifest" > "$tmp"
+  mv "$tmp" "$manifest"
 }
 
 cd "$repo_root"
@@ -89,54 +94,6 @@ if wants openssl; then
   else
     warn "openssl not on PATH"
     set_installed openssl false ""
-  fi
-fi
-
-# ---------- python ----------
-if wants python; then
-  step "python: venv (or host fallback) + cryptography"
-  if command -v python3 >/dev/null 2>&1; then
-    if [ "$CHECK_ONLY" = "0" ]; then
-      python_exec=""
-      if python3 -m venv --help >/dev/null 2>&1; then
-        if [ ! -x "${rc_root}/python/venv/bin/python" ]; then
-          python3 -m venv "${rc_root}/python/venv" 2>/dev/null || true
-        fi
-        if [ -x "${rc_root}/python/venv/bin/python" ]; then
-          if "${rc_root}/python/venv/bin/python" -m pip --version >/dev/null 2>&1; then
-            python_exec="${rc_root}/python/venv/bin/python"
-            "$python_exec" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-            "$python_exec" -m pip install --quiet 'cryptography==41.0.7' >/dev/null 2>&1 \
-              || "$python_exec" -m pip install --quiet cryptography >/dev/null 2>&1 || true
-          else
-            warn "venv has no pip (python3-venv missing ensurepip); removing and falling back to host python3"
-            rm -rf "${rc_root}/python/venv"
-          fi
-        fi
-      fi
-      if [ -z "$python_exec" ]; then
-        python_exec="$(command -v python3)"
-      fi
-      ver=$("$python_exec" -c 'import cryptography; print(cryptography.__version__)' 2>/dev/null || echo "missing")
-      if [ "$ver" = "missing" ]; then
-        warn "host python3 lacks cryptography module"
-        set_installed python false ""
-      else
-        stamp python "${ver}"
-        set_installed python true "$python_exec"
-        step "python: OK (cryptography ${ver} via ${python_exec})"
-      fi
-    else
-      if [ -x "${rc_root}/python/venv/bin/python" ]; then
-        ver=$("${rc_root}/python/venv/bin/python" -c 'import cryptography; print(cryptography.__version__)' 2>/dev/null || echo "?")
-        step "python: already installed (cryptography ${ver})"
-      else
-        step "python: NOT installed"
-      fi
-    fi
-  else
-    warn "python3 not on PATH"
-    set_installed python false ""
   fi
 fi
 

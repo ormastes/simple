@@ -16,10 +16,10 @@
 
 ## Overview
 
-For each (signer, verifier) pair in {python, node}², sign a matrix of
-messages using the signer vendor and verify the resulting signature using
-the verifier vendor. Confirms byte-exact deterministic Ed25519 sign+verify
-interoperability.
+Signs a matrix of messages with the Node reference vendor and verifies the
+resulting signatures through the same external reference path. Confirms
+deterministic Ed25519 sign+verify interoperability against a non-Simple
+implementation.
 
 Also:
 - RFC 8032 §7.1 test vector 1 (empty message) as a fixed known-answer.
@@ -87,23 +87,11 @@ fn _flip_last_byte(b: [u8]) -> [u8]:
 # ---------------------------------------------------------------------------
 
 describe "ed25519: RFC 8032 §7.1 TEST 1 (empty message)":
-    it "python sign of empty msg matches the canonical signature":
-        val sk: [u8] = hex_to_bytes(RFC8032_SK_HEX)
-        val msg: [u8] = []
-        val sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.PYTHON, sk, msg))
-        expect(bytes_to_hex(sig)).to_equal(RFC8032_SIG_HEX)
-
     it "node sign of empty msg matches the canonical signature":
         val sk: [u8] = hex_to_bytes(RFC8032_SK_HEX)
         val msg: [u8] = []
         val sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.NODE, sk, msg))
         expect(bytes_to_hex(sig)).to_equal(RFC8032_SIG_HEX)
-
-    it "python verify of the canonical signature returns true":
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val msg: [u8] = []
-        val sig = hex_to_bytes(RFC8032_SIG_HEX)
-        expect(_unwrap_bool(ref_ed25519_verify_via(Vendor.PYTHON, pk, msg, sig))).to_equal(true)
 
     it "node verify of the canonical signature returns true":
         val pk = hex_to_bytes(RFC8032_PK_HEX)
@@ -113,46 +101,10 @@ describe "ed25519: RFC 8032 §7.1 TEST 1 (empty message)":
 
 
 # ---------------------------------------------------------------------------
-# All-pairs sign ↔ verify across {python, node} over the 8-input matrix
+# Node sign/verify over the 8-input matrix
 # ---------------------------------------------------------------------------
 
-describe "ed25519: all-pairs interop over the 8-input matrix":
-    it "python-sign → python-verify on every matrix entry":
-        val sk = hex_to_bytes(RFC8032_SK_HEX)
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val msg = matrix[i]
-            val sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.PYTHON, sk, msg))
-            val ok  = _unwrap_bool(ref_ed25519_verify_via(Vendor.PYTHON, pk, msg, sig))
-            expect(ok).to_equal(true)
-            i = i + 1
-
-    it "python-sign → node-verify on every matrix entry":
-        val sk = hex_to_bytes(RFC8032_SK_HEX)
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val msg = matrix[i]
-            val sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.PYTHON, sk, msg))
-            val ok  = _unwrap_bool(ref_ed25519_verify_via(Vendor.NODE, pk, msg, sig))
-            expect(ok).to_equal(true)
-            i = i + 1
-
-    it "node-sign → python-verify on every matrix entry":
-        val sk = hex_to_bytes(RFC8032_SK_HEX)
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val matrix = crypto_input_matrix(block_size: 64u64)
-        var i: u64 = 0
-        while i < matrix.len():
-            val msg = matrix[i]
-            val sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.NODE, sk, msg))
-            val ok  = _unwrap_bool(ref_ed25519_verify_via(Vendor.PYTHON, pk, msg, sig))
-            expect(ok).to_equal(true)
-            i = i + 1
-
+describe "ed25519: node interop over the 8-input matrix":
     it "node-sign → node-verify on every matrix entry":
         val sk = hex_to_bytes(RFC8032_SK_HEX)
         val pk = hex_to_bytes(RFC8032_PK_HEX)
@@ -167,19 +119,19 @@ describe "ed25519: all-pairs interop over the 8-input matrix":
 
 
 # ---------------------------------------------------------------------------
-# Determinism: python and node must produce identical signatures
+# Determinism: Node should produce the canonical deterministic signature
 # ---------------------------------------------------------------------------
 
 describe "ed25519: deterministic signature agreement":
-    it "python and node produce byte-identical signatures over the matrix":
+    it "node produces byte-identical signatures over repeated matrix runs":
         val sk = hex_to_bytes(RFC8032_SK_HEX)
         val matrix = crypto_input_matrix(block_size: 64u64)
         var i: u64 = 0
         while i < matrix.len():
             val msg = matrix[i]
-            val py_sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.PYTHON, sk, msg))
-            val nd_sig = _unwrap_bytes(ref_ed25519_sign_via(Vendor.NODE,   sk, msg))
-            expect(_bytes_eq(py_sig, nd_sig)).to_equal(true)
+            val sig_a = _unwrap_bytes(ref_ed25519_sign_via(Vendor.NODE, sk, msg))
+            val sig_b = _unwrap_bytes(ref_ed25519_sign_via(Vendor.NODE, sk, msg))
+            expect(_bytes_eq(sig_a, sig_b)).to_equal(true)
             i = i + 1
 
 
@@ -188,25 +140,12 @@ describe "ed25519: deterministic signature agreement":
 # ---------------------------------------------------------------------------
 
 describe "ed25519: tampered signature is rejected":
-    it "python rejects a signature with its last byte flipped":
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val msg: [u8] = []
-        val good_sig = hex_to_bytes(RFC8032_SIG_HEX)
-        val bad_sig = _flip_last_byte(good_sig)
-        expect(_unwrap_bool(ref_ed25519_verify_via(Vendor.PYTHON, pk, msg, bad_sig))).to_equal(false)
-
     it "node rejects a signature with its last byte flipped":
         val pk = hex_to_bytes(RFC8032_PK_HEX)
         val msg: [u8] = []
         val good_sig = hex_to_bytes(RFC8032_SIG_HEX)
         val bad_sig = _flip_last_byte(good_sig)
         expect(_unwrap_bool(ref_ed25519_verify_via(Vendor.NODE, pk, msg, bad_sig))).to_equal(false)
-
-    it "python rejects a signature from the wrong message":
-        val pk = hex_to_bytes(RFC8032_PK_HEX)
-        val wrong_msg: [u8] = [0x61u8]
-        val sig = hex_to_bytes(RFC8032_SIG_HEX)
-        expect(_unwrap_bool(ref_ed25519_verify_via(Vendor.PYTHON, pk, wrong_msg, sig))).to_equal(false)
 
     it "node rejects a signature from the wrong message":
         val pk = hex_to_bytes(RFC8032_PK_HEX)

@@ -61,3 +61,27 @@ queue operations. It avoids POSIX shared-memory aliasing as the default model.
    Done for fixed-table kernel managers and syscall IDs 120-131.
 6. Follow-up: migrate socket and dylib async ownership into SOSIX, then add
    VFS-backed dataset byte population for `dataset_create_from_file`.
+
+## Current Coverage And Remaining Work
+
+Implemented source paths:
+
+- `src/os/sosix/process.spl`: async-first process request slots for fork,
+  execve, spawn, waitpid, getpid, signal, and exit.
+- `src/os/sosix/share.spl`: immutable dataset builders and bounded queue IPC.
+- `src/os/sosix/io.spl`: native async I/O requests, with POSIX forwarding wrappers.
+- `src/os/kernel/ipc/shared_dataset.spl` and
+  `src/os/kernel/ipc/process_queue.spl`: kernel fixed-table managers backing
+  syscall IDs 120-131.
+
+Remaining SOSIX logic is intentionally explicit:
+
+- `dataset_create_from_file` has the ABI and sealed-handle behavior, but still
+  needs VFS byte snapshot population.
+- Dataset and queue handles are fixed table indexes; generation/capability
+  tokens should be made externally visible before untrusted cross-process
+  handle passing.
+- Queue send/receive is bounded and deterministic, but does not yet integrate
+  scheduler wakeups for blocked readers/writers.
+- POSIX remains a wrapper surface. New driver, service, and Simple application
+  logic should call SOSIX modules directly.
