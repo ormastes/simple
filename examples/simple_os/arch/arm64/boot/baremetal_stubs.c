@@ -2132,6 +2132,17 @@ RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
     return (RuntimeValue)(uint8_t)(uint64_t)v;
 }
 
+RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)
+{
+    uint64_t id = IS_INT(id_val) ? (uint64_t)DECODE_INT(id_val) : (uint64_t)id_val;
+    serial_puts("[arm-fs-trace] ");
+    serial_put_dec((int64_t)id);
+    serial_puts(" ");
+    serial_put_hex((uint32_t)id);
+    serial_puts("\r\n");
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */

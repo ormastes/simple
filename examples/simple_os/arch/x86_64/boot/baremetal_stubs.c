@@ -4475,6 +4475,10 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 id, path_ptr, path_len, a2, a3, a4, 0
             );
         }
+        case 14: /* EnterUserBlocking — pid_hint in a0, noreturn on success */
+            return os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+                14, a0, a1, a2, a3, a4, 0
+            );
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;
@@ -12644,7 +12648,8 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
  *   3  = wait          4  = getpid        5  = list_tasks
  *   6  = get_task_info 7  = signal        8  = set_priority
  *   9  = get_parent_pid 10 = mmap         11 = munmap
- *  12  = mprotect      13 = spawn_binary  20 = ipc_send
+ *  12  = mprotect      13 = spawn_binary  14 = enter_user_blocking
+ *  20  = ipc_send
  *  21  = ipc_recv      22 = ipc_create_port 23 = ipc_connect
  *  24  = notification_create  25 = notification_signal
  *  26  = notification_wait    27 = notification_poll
@@ -12685,6 +12690,7 @@ __attribute__((weak)) int64_t spl_handle_mmap(uint64_t, uint64_t, uint64_t, uint
 __attribute__((weak)) int64_t spl_handle_munmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_enter_user_blocking(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_send(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_create_port(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -12770,6 +12776,7 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 11: return spl_handle_munmap(a0, a1, a2, a3, a4, a5);
         case 12: return spl_handle_mprotect(a0, a1, a2, a3, a4, a5);
         case 13: return spl_handle_spawn_binary(a0, a1, a2, a3, a4, a5);
+        case 14: return spl_handle_enter_user_blocking(a0, a1, a2, a3, a4, a5);
         case 20: return spl_handle_ipc_send(a0, a1, a2, a3, a4, a5);
         case 21: return spl_handle_ipc_recv(a0, a1, a2, a3, a4, a5);
         case 22: return spl_handle_ipc_create_port(a0, a1, a2, a3, a4, a5);
@@ -12922,6 +12929,13 @@ __attribute__((weak)) int64_t spl_handle_mprotect(uint64_t a0, uint64_t a1, uint
 
 __attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t a0, uint64_t a1, uint64_t a2,
                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_enter_user_blocking(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    /* Weak fallback: EnterUserBlocking not yet installed — return ENOSYS */
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }

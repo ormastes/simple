@@ -51,12 +51,13 @@ val DEFAULT_SCHED_CPUS: u32 = 32u32
 val SCHED_TRACE_CAPACITY: i32 = 128
 val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
 
-# Module-level user-task id counter. The per-instance `Scheduler.next_task_id`
+# Module-level task-id counter. The per-instance `Scheduler.next_task_id`
 # field access is compiled as `Scheduler.next_task_id(self)` method call in the
 # baremetal Cranelift build and resolves to a weak stub that returns 0 (emits
 # `[WARN] unresolved fn: Scheduler.next_task_id`). Using an explicit module
-# global gives deterministic unique PIDs for user tasks across spawns.
-var g_user_task_next_pid: u64 = 1
+# global gives deterministic unique PIDs across all task-creation paths
+# (create_task, create_user_task_pid, fork) without PID collisions.
+var g_scheduler_next_task_id: u64 = 1
 
 @cfg(riscv64)
 val SCHED_EXEC_ARCH: Architecture = Architecture.Riscv64
@@ -539,12 +540,12 @@ impl Scheduler:
 
         Returns the new task's ID.
         """
-        var next_id = self.next_task_id
+        var next_id = g_scheduler_next_task_id
         if next_id == 0 or next_id >= 0x40000000:
-            serial_println("[scheduler] create_user_task: normalized next_task_id")
+            serial_println("[scheduler] create_task: normalized next_task_id")
             next_id = 1
         val id = TaskId(id: next_id)
-        self.next_task_id = next_id + 1
+        g_scheduler_next_task_id = next_id + 1
 
         # Find an empty slot
         val slot = self._find_empty_slot()
@@ -641,8 +642,8 @@ impl Scheduler:
         # Dodge the `Scheduler.next_task_id` field-read stub by using a
         # module-level counter. The `self.next_task_id` read in the baremetal
         # build resolves to a weak stub that returns 0 and logs a WARN.
-        val user_next_id = g_user_task_next_pid
-        g_user_task_next_pid = g_user_task_next_pid + 1
+        val user_next_id = g_scheduler_next_task_id
+        g_scheduler_next_task_id = g_scheduler_next_task_id + 1
         val id = TaskId(id: user_next_id)
 
         val tcb = TaskControlBlock(
@@ -1370,8 +1371,8 @@ impl Scheduler:
             return TaskId(id: 0)
         val parent = parent_tcb
 
-        val child_id = TaskId(id: self.next_task_id)
-        self.next_task_id = self.next_task_id + 1
+        val child_id = TaskId(id: g_scheduler_next_task_id)
+        g_scheduler_next_task_id = g_scheduler_next_task_id + 1
 
         val child_slot = self._find_empty_slot()
         if child_slot < 0:

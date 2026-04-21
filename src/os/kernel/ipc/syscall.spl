@@ -15,7 +15,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.notification_types.{Notification}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_SHARED}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
-use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
 use os.kernel.ipc.notif_global.{g_notification_table}
@@ -44,6 +44,7 @@ use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
+use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
 extern fn serial_println(msg: text)
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
@@ -287,6 +288,10 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_spawn_binary(args, scheduler, klog)
+        case 14:    # EnterUserBlocking — handled fast-path in interrupt.spl; fallback here
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return SyscallResult(value: SYSCALL_EPERM)
+            SyscallResult(value: dispatch_enter_user_blocking(args.arg0, scheduler))
 
         # -- Memory ----------------------------------------------------------
         case 10:    # Mmap
@@ -1171,10 +1176,10 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val priority = _u64_to_priority(args.arg2)
         val caps = CapabilitySet.full()
         var sched = scheduler
-        val before_next_task_id = sched.next_task_id
+        val before_next_task_id = g_scheduler_next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        val pid = if sched.next_task_id > before_next_task_id:
-            sched.next_task_id - 1
+        val pid = if g_scheduler_next_task_id > before_next_task_id:
+            g_scheduler_next_task_id - 1
         elif raw_pid > 0 and raw_pid < 0x40000000:
             raw_pid
         else:
@@ -1254,10 +1259,10 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
         val caps = CapabilitySet.full()
         var sched = scheduler
         serial_println("[syscall13] create_user_task begin")
-        val before_next_task_id = sched.next_task_id
+        val before_next_task_id = g_scheduler_next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        val pid = if sched.next_task_id > before_next_task_id:
-            sched.next_task_id - 1
+        val pid = if g_scheduler_next_task_id > before_next_task_id:
+            g_scheduler_next_task_id - 1
         elif raw_pid > 0 and raw_pid < 0x40000000:
             raw_pid
         else:
@@ -1336,6 +1341,62 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
 
     serial_println("[syscall13] vfs bytes ok; exec handoff active")
     _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+
+# ============================================================================
+# EnterUserBlocking (syscall 14) — direct ring-3 handoff
+# ============================================================================
+
+fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
+    """Syscall 14: EnterUserBlocking — look up the TCB for pid_hint and jump
+    to ring-3 via arch_x86_64_enter_user_task. Never returns on success.
+
+    If pid_hint == 0, selects the most-recently-created user task (highest
+    TCB id among entries where is_user == true and user_context != nil).
+
+    Returns -22 (EINVAL) if no matching user task is found.
+    """
+    serial_println("[syscall14] dispatch_enter_user_blocking enter")
+    var sched = scheduler
+
+    var target_pid: u64 = pid_hint
+    if target_pid == 0:
+        # Find the most-recently-created user task (highest id).
+        var best_pid: u64 = 0
+        var slot: i64 = 0
+        while slot < 256:
+            val tcb = sched.get_task(TaskId(id: (slot + 1).to_u64()))
+            if tcb != nil:
+                val task = tcb
+                if task.is_user and task.user_context != nil:
+                    if task.id.id > best_pid:
+                        best_pid = task.id.id
+            slot = slot + 1
+        if best_pid == 0:
+            serial_println("[syscall14] no user task found for pid_hint=0")
+            return -22
+        target_pid = best_pid
+
+    val tcb = sched.get_task(TaskId(id: target_pid))
+    if tcb == nil:
+        serial_println("[syscall14] task not found pid={target_pid}")
+        return -22
+
+    val task = tcb
+    if not task.is_user:
+        serial_println("[syscall14] task is not a user task pid={target_pid}")
+        return -22
+
+    val uctx = task.user_context
+    if uctx == nil:
+        serial_println("[syscall14] task has no user_context pid={target_pid}")
+        return -22
+
+    val ctx = uctx.unwrap()
+    val cr3 = task.address_space
+    serial_println("[syscall14] entering ring-3 pid={target_pid} rip={ctx.rip} cr3={cr3}")
+    arch_x86_64_enter_user_task(ctx, cr3)
+    # unreachable — arch_x86_64_enter_user_task is noreturn
+    -22
 
 # ============================================================================
 # IPC Syscall Handlers

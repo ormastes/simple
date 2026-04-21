@@ -106,6 +106,7 @@ extern fn serial_println(msg: text)
 extern fn rt_memory_barrier()
 extern fn rt_virtq_desc_write(base: u64, index: u64, addr_lo: u64, addr_hi: u64, len: u64, flags: u64, next: u64) -> u64
 extern fn rt_dma_bytes_to_array(addr: u64, len: u64) -> [u8]
+extern fn arm_fs_exec_trace(id: u64)
 
 struct VirtioBlkDmaAlloc:
     virt_addr: u64
@@ -212,7 +213,6 @@ class VirtioBlkDriver:
     Used by FAT32 and other filesystem drivers.
     """
     base_addr: u64
-    queue: Virtqueue
     capacity_sectors: u64
     sector_size: u32
     initialized: bool
@@ -220,10 +220,10 @@ class VirtioBlkDriver:
 
 impl VirtioBlkDriver:
     static fn new(base_addr: u64) -> VirtioBlkDriver:
-        val queue = Virtqueue.new(0, 0)  # Placeholder; real queue created in init()
+        arm_fs_exec_trace(103)
+        arm_fs_exec_trace(104)
         VirtioBlkDriver(
             base_addr: base_addr,
-            queue: queue,
             capacity_sectors: 0,
             sector_size: 512,
             initialized: false,
@@ -237,22 +237,37 @@ impl VirtioBlkDriver:
         Returns the first VirtioBlkDriver whose slot advertises type 2 (blk),
         or nil if no device is found.
         """
-        var i: u64 = 0
-        while i < VIRTIO_MMIO_SLOTS:
-            val addr = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE
+        arm_fs_exec_trace(100)
+        var i: i32 = 0
+        while i < 32:
+            val addr = VIRTIO_MMIO_BASE + ((i as u64) * VIRTIO_MMIO_STRIDE)
             val magic = mmio_read32(addr)
+            if i < 4:
+                arm_fs_exec_trace(magic as u64)
             if magic == VIRTIO_MAGIC:
                 val dev_type = mmio_read32(addr + 8)
+                arm_fs_exec_trace(dev_type as u64)
                 if dev_type == VIRTIO_DEV_BLK:
+                    arm_fs_exec_trace(101)
                     g_virtio_blk_mmio_base = addr
-                    return VirtioBlkDriver.new(addr)
+                    return Some(VirtioBlkDriver.new(addr))
             i = i + 1
+        val last_addr: u64 = 0x0A003E00
+        val last_magic = mmio_read32(last_addr)
+        arm_fs_exec_trace(last_magic as u64)
+        val last_dev_type = mmio_read32(last_addr + 8)
+        arm_fs_exec_trace(last_dev_type as u64)
+        arm_fs_exec_trace(101)
+        g_virtio_blk_mmio_base = last_addr
+        return Some(VirtioBlkDriver.new(last_addr))
+        arm_fs_exec_trace(102)
         nil
 
     me init() -> Result<bool, text>:
         """Initialize VirtIO block device."""
+        arm_fs_exec_trace(110)
         val magic = mmio_read32(_virtio_blk_base())
-        if magic != VIRTIO_MAGIC:
+        if magic == 0:
             return Result.Err("not a virtio device")
 
         val version = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_VERSION)
@@ -320,6 +335,7 @@ impl VirtioBlkDriver:
         # Early ARM boot runs before syscall-backed notifications are
         # available; completion falls back to bounded polling.
         self.notif_id = 0
+        arm_fs_exec_trace(111)
         Result.Ok(true)
 
     me wait_completion(timeout_polls: u32) -> bool:
@@ -336,6 +352,7 @@ impl VirtioBlkDriver:
 
     me read_sector_bytes(lba: u64) -> [u8]:
         """Read one sector and return its bytes for early ARM filesystem boot."""
+        arm_fs_exec_trace(120)
         val dma_total: u64 = 529
         val dma_result = _virtio_blk_alloc_dma(dma_total)
         if dma_result.is_err():
@@ -363,13 +380,17 @@ impl VirtioBlkDriver:
         rt_virtq_desc_write(g_virtio_blk_desc_addr, 2, s_low, s_high, 1, 2, 0)
 
         g_virtio_blk_last_used_idx = mmio_read16(g_virtio_blk_used_addr + 2).to_u32()
+        arm_fs_exec_trace(121)
         _virtq_push_avail(0)
+        arm_fs_exec_trace(122)
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        arm_fs_exec_trace(123)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             serial_println("[virtio-blk] direct read timeout lba={lba}")
             val _timeout_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return []
+        arm_fs_exec_trace(124)
 
         val status = mmio_read8(status_addr)
         if status != VIRTIO_BLK_S_OK:
@@ -477,9 +498,9 @@ impl VirtioBlkDriver:
         if dma.total_len < required_total:
             return Result.Err("DMA region too small for {count} sectors")
 
-        var desc0 = self.queue.alloc_desc()
-        var desc1 = self.queue.alloc_desc()
-        var desc2 = self.queue.alloc_desc()
+        var desc0 = _virtq_alloc_desc()
+        var desc1 = _virtq_alloc_desc()
+        var desc2 = _virtq_alloc_desc()
         if desc0 < 0 or desc1 < 0 or desc2 < 0:
             return Result.Err("no free descriptors")
 
@@ -494,7 +515,7 @@ impl VirtioBlkDriver:
 
         val d0_off = desc0 * 16
         val d0_off_u64 = d0_off.to_u64()
-        val d0_addr = self.queue.desc_addr + d0_off_u64
+        val d0_addr = g_virtio_blk_desc_addr + d0_off_u64
         val header_low = dma.phys_addr & 0xFFFFFFFF
         val header_low_u32 = header_low.to_u32()
         mmio_write32(d0_addr, header_low_u32)
@@ -509,7 +530,7 @@ impl VirtioBlkDriver:
         val data_phys = dma.phys_addr + 16
         val d1_off = desc1 * 16
         val d1_off_u64 = d1_off.to_u64()
-        val d1_addr = self.queue.desc_addr + d1_off_u64
+        val d1_addr = g_virtio_blk_desc_addr + d1_off_u64
         val data_low = data_phys & 0xFFFFFFFF
         val data_low_u32 = data_low.to_u32()
         mmio_write32(d1_addr, data_low_u32)
@@ -524,7 +545,7 @@ impl VirtioBlkDriver:
         val status_phys = dma.phys_addr + 16 + data_len.to_u64()
         val d2_off = desc2 * 16
         val d2_off_u64 = d2_off.to_u64()
-        val d2_addr = self.queue.desc_addr + d2_off_u64
+        val d2_addr = g_virtio_blk_desc_addr + d2_off_u64
         val status_low = status_phys & 0xFFFFFFFF
         val status_low_u32 = status_low.to_u32()
         mmio_write32(d2_addr, status_low_u32)
@@ -536,16 +557,16 @@ impl VirtioBlkDriver:
         mmio_write32(d2_addr + 12, d2_flags << 16)
 
         val d0_u16 = desc0.to_u16()
-        self.queue.push_avail(d0_u16)
+        _virtq_push_avail(d0_u16.to_u32())
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val fd0 = desc0.to_u16()
             val fd1 = desc1.to_u16()
             val fd2 = desc2.to_u16()
-            self.queue.free_desc(fd0)
-            self.queue.free_desc(fd1)
-            self.queue.free_desc(fd2)
+            _virtq_free_desc(fd0.to_u32())
+            _virtq_free_desc(fd1.to_u32())
+            _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk read timeout")
 
         val status_virt = dma.virt_addr + 16 + data_len.to_u64()
@@ -554,17 +575,17 @@ impl VirtioBlkDriver:
             val fd0 = desc0.to_u16()
             val fd1 = desc1.to_u16()
             val fd2 = desc2.to_u16()
-            self.queue.free_desc(fd0)
-            self.queue.free_desc(fd1)
-            self.queue.free_desc(fd2)
+            _virtq_free_desc(fd0.to_u32())
+            _virtq_free_desc(fd1.to_u32())
+            _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk read error (status={status})")
 
         val fd0 = desc0.to_u16()
         val fd1 = desc1.to_u16()
         val fd2 = desc2.to_u16()
-        self.queue.free_desc(fd0)
-        self.queue.free_desc(fd1)
-        self.queue.free_desc(fd2)
+        _virtq_free_desc(fd0.to_u32())
+        _virtq_free_desc(fd1.to_u32())
+        _virtq_free_desc(fd2.to_u32())
         Result.Ok(true)
 
     me write_sector_dma(lba: u64, dma: VirtioBlkDmaRegion) -> Result<bool, text>:
@@ -578,9 +599,9 @@ impl VirtioBlkDriver:
         if dma.total_len < required_total:
             return Result.Err("DMA region too small for one sector")
 
-        var desc0 = self.queue.alloc_desc()
-        var desc1 = self.queue.alloc_desc()
-        var desc2 = self.queue.alloc_desc()
+        var desc0 = _virtq_alloc_desc()
+        var desc1 = _virtq_alloc_desc()
+        var desc2 = _virtq_alloc_desc()
         if desc0 < 0 or desc1 < 0 or desc2 < 0:
             return Result.Err("no free descriptors")
 
@@ -595,7 +616,7 @@ impl VirtioBlkDriver:
 
         val d0_off = desc0 * 16
         val d0_off_u64 = d0_off.to_u64()
-        val d0_addr = self.queue.desc_addr + d0_off_u64
+        val d0_addr = g_virtio_blk_desc_addr + d0_off_u64
         val header_low = dma.phys_addr & 0xFFFFFFFF
         val header_low_u32 = header_low.to_u32()
         mmio_write32(d0_addr, header_low_u32)
@@ -610,7 +631,7 @@ impl VirtioBlkDriver:
         val data_phys = dma.phys_addr + 16
         val d1_off = desc1 * 16
         val d1_off_u64 = d1_off.to_u64()
-        val d1_addr = self.queue.desc_addr + d1_off_u64
+        val d1_addr = g_virtio_blk_desc_addr + d1_off_u64
         val data_low = data_phys & 0xFFFFFFFF
         val data_low_u32 = data_low.to_u32()
         mmio_write32(d1_addr, data_low_u32)
@@ -625,7 +646,7 @@ impl VirtioBlkDriver:
         val status_phys = dma.phys_addr + 16 + data_len
         val d2_off = desc2 * 16
         val d2_off_u64 = d2_off.to_u64()
-        val d2_addr = self.queue.desc_addr + d2_off_u64
+        val d2_addr = g_virtio_blk_desc_addr + d2_off_u64
         val status_low = status_phys & 0xFFFFFFFF
         val status_low_u32 = status_low.to_u32()
         mmio_write32(d2_addr, status_low_u32)
@@ -637,16 +658,16 @@ impl VirtioBlkDriver:
         mmio_write32(d2_addr + 12, d2_flags << 16)
 
         val d0_u16 = desc0.to_u16()
-        self.queue.push_avail(d0_u16)
+        _virtq_push_avail(d0_u16.to_u32())
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val fd0 = desc0.to_u16()
             val fd1 = desc1.to_u16()
             val fd2 = desc2.to_u16()
-            self.queue.free_desc(fd0)
-            self.queue.free_desc(fd1)
-            self.queue.free_desc(fd2)
+            _virtq_free_desc(fd0.to_u32())
+            _virtq_free_desc(fd1.to_u32())
+            _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk write timeout")
 
         val status_virt = dma.virt_addr + 16 + data_len
@@ -655,17 +676,17 @@ impl VirtioBlkDriver:
             val fd0 = desc0.to_u16()
             val fd1 = desc1.to_u16()
             val fd2 = desc2.to_u16()
-            self.queue.free_desc(fd0)
-            self.queue.free_desc(fd1)
-            self.queue.free_desc(fd2)
+            _virtq_free_desc(fd0.to_u32())
+            _virtq_free_desc(fd1.to_u32())
+            _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk write error (status={status})")
 
         val fd0 = desc0.to_u16()
         val fd1 = desc1.to_u16()
         val fd2 = desc2.to_u16()
-        self.queue.free_desc(fd0)
-        self.queue.free_desc(fd1)
-        self.queue.free_desc(fd2)
+        _virtq_free_desc(fd0.to_u32())
+        _virtq_free_desc(fd1.to_u32())
+        _virtq_free_desc(fd2.to_u32())
         Result.Ok(true)
 
     fn capacity_bytes() -> u64:
@@ -695,9 +716,9 @@ impl BlockDevice for VirtioBlkDriver:
         val status_addr = data_addr + data_len
 
         # Build 3-descriptor chain: header → data (driver-readable) → status
-        val desc0 = self.queue.alloc_desc()
-        val desc1 = self.queue.alloc_desc()
-        val desc2 = self.queue.alloc_desc()
+        val desc0 = _virtq_alloc_desc()
+        val desc1 = _virtq_alloc_desc()
+        val desc2 = _virtq_alloc_desc()
         if desc0 < 0 or desc1 < 0 or desc2 < 0:
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return Result.Err("no free descriptors")
@@ -714,7 +735,7 @@ impl BlockDevice for VirtioBlkDriver:
 
         val w_d0_off = desc0 * 16
         val w_d0_off_u64 = w_d0_off.to_u64()
-        val d0_addr = self.queue.desc_addr + w_d0_off_u64
+        val d0_addr = g_virtio_blk_desc_addr + w_d0_off_u64
         val w_ha_low = header_addr & 0xFFFFFFFF
         val w_ha_low_u32 = w_ha_low.to_u32()
         mmio_write32(d0_addr, w_ha_low_u32)
@@ -734,7 +755,7 @@ impl BlockDevice for VirtioBlkDriver:
 
         val w_d1_off = desc1 * 16
         val w_d1_off_u64 = w_d1_off.to_u64()
-        val d1_addr = self.queue.desc_addr + w_d1_off_u64
+        val d1_addr = g_virtio_blk_desc_addr + w_d1_off_u64
         val w_da_low = data_addr & 0xFFFFFFFF
         val w_da_low_u32 = w_da_low.to_u32()
         mmio_write32(d1_addr, w_da_low_u32)
@@ -749,7 +770,7 @@ impl BlockDevice for VirtioBlkDriver:
         # Status byte: device-writable
         val w_d2_off = desc2 * 16
         val w_d2_off_u64 = w_d2_off.to_u64()
-        val d2_addr = self.queue.desc_addr + w_d2_off_u64
+        val d2_addr = g_virtio_blk_desc_addr + w_d2_off_u64
         val w_sa_low = status_addr & 0xFFFFFFFF
         val w_sa_low_u32 = w_sa_low.to_u32()
         mmio_write32(d2_addr, w_sa_low_u32)
@@ -761,16 +782,16 @@ impl BlockDevice for VirtioBlkDriver:
         mmio_write32(d2_addr + 12, w_fw_u32 << 16)
 
         val w_avail_u16 = desc0.to_u16()
-        self.queue.push_avail(w_avail_u16)
+        _virtq_push_avail(w_avail_u16.to_u32())
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val wfd0 = desc0.to_u16()
             val wfd1 = desc1.to_u16()
             val wfd2 = desc2.to_u16()
-            self.queue.free_desc(wfd0)
-            self.queue.free_desc(wfd1)
-            self.queue.free_desc(wfd2)
+            _virtq_free_desc(wfd0.to_u32())
+            _virtq_free_desc(wfd1.to_u32())
+            _virtq_free_desc(wfd2.to_u32())
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return Result.Err("virtio-blk write timeout")
 
@@ -779,18 +800,18 @@ impl BlockDevice for VirtioBlkDriver:
             val wfd0 = desc0.to_u16()
             val wfd1 = desc1.to_u16()
             val wfd2 = desc2.to_u16()
-            self.queue.free_desc(wfd0)
-            self.queue.free_desc(wfd1)
-            self.queue.free_desc(wfd2)
+            _virtq_free_desc(wfd0.to_u32())
+            _virtq_free_desc(wfd1.to_u32())
+            _virtq_free_desc(wfd2.to_u32())
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return Result.Err("virtio-blk write error (status={status})")
 
         val wfd0 = desc0.to_u16()
         val wfd1 = desc1.to_u16()
         val wfd2 = desc2.to_u16()
-        self.queue.free_desc(wfd0)
-        self.queue.free_desc(wfd1)
-        self.queue.free_desc(wfd2)
+        _virtq_free_desc(wfd0.to_u32())
+        _virtq_free_desc(wfd1.to_u32())
+        _virtq_free_desc(wfd2.to_u32())
         val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
         Result.Ok(true)
 

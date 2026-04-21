@@ -527,6 +527,32 @@ fn _wait_for_harness_marker_brief():
                 return
         iter = iter + 1
 
+fn _ring3_smoke_spawn_and_enter():
+    """FR-SOS-024 Phase 3 — optional ring-3 smoke test.
+
+    Spawns /sys/apps/ring3_smoke.smf (a tiny freestanding ELF whose entry
+    does xor %rdi,%rdi / mov $0,%rax / syscall) and then calls syscall 14
+    (EnterUserBlocking) to hand off to ring-3 via iretq.
+
+    Gated so that it only runs when the spawn returns a real TCB pid (not a
+    resident-manifest fallback).  If the smoke ELF is absent from the disk
+    image this silently skips and the test suite still reports TEST PASSED.
+    """
+    extern fn unsafe_addr_of(ref: any) -> u64
+    val smoke_path: text = "/sys/apps/ring3_smoke.smf"
+    val path_ptr = unsafe_addr_of(smoke_path)
+    val path_len = smoke_path.len().to_u64()
+    val smoke_pid_raw = syscall(13, path_ptr, path_len, 2, 0, 0)
+    val smoke_pid = smoke_pid_raw.to_u64()
+    if smoke_pid_raw > 0 and not _is_manifest_fallback_pid(smoke_pid):
+        serial_println("[ring3-smoke] pid={smoke_pid} — entering ring 3")
+        # syscall 14 = EnterUserBlocking; noreturn on success
+        syscall(14, smoke_pid, 0, 0, 0, 0)
+        # If we return here the TCB lookup failed — not fatal for the test.
+        serial_println("[ring3-smoke] syscall-14 returned (no live TCB) — continuing")
+    else:
+        serial_println("[ring3-smoke] skip (no real user task pid={smoke_pid_raw})")
+
 fn spl_start():
     serial_init()
     serial_writeln("SimpleOS x86_64 desktop E2E boot")
@@ -536,6 +562,9 @@ fn spl_start():
 
     if desktop_e2e_main():
         serial_println("TEST PASSED")
+        # FR-SOS-024 Phase 3: optional ring-3 smoke (strictly additive — runs
+        # after TEST PASSED so a ring-3 failure cannot mask the passing result).
+        _ring3_smoke_spawn_and_enter()
     else:
         serial_println("TEST FAILED")
 
