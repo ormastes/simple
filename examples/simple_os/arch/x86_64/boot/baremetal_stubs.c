@@ -114,6 +114,10 @@ static inline void io_wait(void)
  *     holds the caller's saved RIP post-SYSCALL)
  *   rax = int64_t return value
  */
+/* Forward declaration — rt_string_new is defined ~line 650 with the other
+ * runtime string helpers. */
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+
 /* rt_text_from_u8_array — build a Simple text from a [u8] fat-pointer.
  *
  * The Simple-side `_path_bytes_to_text` loop in src/os/kernel/ipc/syscall.spl
@@ -128,6 +132,72 @@ RuntimeValue rt_text_from_u8_array(uint64_t fat_ptr_addr) {
     uint64_t data_ptr = hdr[0];
     uint64_t len = hdr[1];
     return rt_string_new((RuntimeValue)data_ptr, (RuntimeValue)len);
+}
+
+/* rt_canonical_spawn_path_from_bytes — map seeded-app byte paths to canonical
+ * Simple text literals. Bypasses _path_bytes_to_text and text matching in
+ * Simple entirely — both paths miscompile in the baremetal freestanding
+ * build. Returns NIL_VALUE for unknown paths; caller checks for nil before
+ * using the returned text. */
+static void rt_dbg_outs(const char *s) {
+    while (*s) outb(0x3F8, (uint8_t)*s++);
+}
+static void rt_dbg_hex64(uint64_t v) {
+    char buf[19] = "0x";
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) buf[2 + i] = hex[(v >> (60 - 4*i)) & 0xF];
+    buf[18] = 0;
+    rt_dbg_outs(buf);
+}
+
+RuntimeValue rt_canonical_spawn_path_from_bytes(uint64_t fat_ptr_addr) {
+    /* Probe multiple interpretations of what `unsafe_addr_of(bytes)` returns.
+     * Previously assumed {data_ptr, len}. If that's zeros, try interpreting
+     * fat_ptr_addr as a tagged pointer to an SplArray, or as the raw data
+     * pointer, or as a pointer to a box with a tagged header. */
+    rt_dbg_outs("[rt-canon] v="); rt_dbg_hex64(fat_ptr_addr); rt_dbg_outs("\n");
+    /* Try untagging (Simple heap tag = 0x1) */
+    uint64_t untagged = fat_ptr_addr & ~0x7ULL;
+    const uint64_t *u = (const uint64_t *)(uintptr_t)untagged;
+    rt_dbg_outs("[rt-canon] u[0]="); rt_dbg_hex64(u[0]);
+    rt_dbg_outs(" u[1]="); rt_dbg_hex64(u[1]);
+    rt_dbg_outs(" u[2]="); rt_dbg_hex64(u[2]);
+    rt_dbg_outs(" u[3]="); rt_dbg_hex64(u[3]); rt_dbg_outs("\n");
+    /* Also print first few bytes at fat_ptr_addr itself interpreted as text */
+    const unsigned char *rawb = (const unsigned char *)(uintptr_t)fat_ptr_addr;
+    rt_dbg_outs("[rt-canon] raw bytes: ");
+    for (int i = 0; i < 24; i++) {
+        uint8_t b = rawb[i];
+        char c[3];
+        static const char hex[] = "0123456789abcdef";
+        c[0] = hex[(b>>4)&0xF]; c[1] = hex[b&0xF]; c[2] = ' ';
+        outb(0x3F8, c[0]); outb(0x3F8, c[1]); outb(0x3F8, c[2]);
+    }
+    rt_dbg_outs("\n");
+    const uint64_t *hdr = (const uint64_t *)(uintptr_t)fat_ptr_addr;
+    const char *data = (const char *)(uintptr_t)hdr[0];
+    uint64_t len = hdr[1];
+    if (!data || len == 0) return 0x3ULL; /* NIL_VALUE */
+    static const struct {
+        const char *path;
+        unsigned int len;
+    } paths[] = {
+        {"/sys/apps/browser_demo", 22},
+        {"/sys/apps/hello_world",  21},
+        {"/sys/apps/file_manager", 22},
+        {"/sys/apps/shell",        15},
+        {"/sys/apps/editor",       16},
+    };
+    for (unsigned i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {
+        if (paths[i].len != (unsigned)len) continue;
+        unsigned j = 0;
+        while (j < len && paths[i].path[j] == data[j]) j++;
+        if (j == len) {
+            return rt_string_new((RuntimeValue)(uintptr_t)paths[i].path,
+                                 (RuntimeValue)paths[i].len);
+        }
+    }
+    return 0x3ULL; /* NIL_VALUE */
 }
 
 /* rt_copy_user_byte — single-byte copy from a user-mode virtual address.
