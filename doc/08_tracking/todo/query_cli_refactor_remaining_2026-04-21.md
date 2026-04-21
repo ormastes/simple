@@ -1,7 +1,7 @@
 # Query CLI Refactor Remaining
 
 **Date:** 2026-04-21
-**Status:** Partial
+**Status:** Complete
 **Scope:** `src/app/cli`
 
 Recent duplicate cleanup reduced `src/app/cli` from 28 duplicate groups / 518 duplicated lines to 24 groups / 446 duplicated lines. The remaining high-impact items should be handled as explicit refactor tasks, not opportunistic cleanup.
