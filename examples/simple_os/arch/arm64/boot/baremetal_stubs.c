@@ -2081,6 +2081,24 @@ RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeV
     return NIL_VALUE;
 }
 
+RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
+{
+    uint8_t *src = (uint8_t *)(uintptr_t)(uint64_t)addr;
+    uint64_t len = (uint64_t)len_val;
+    if (len == 0 || len > 0x100000) return rt_array_new(64);
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = (uint32_t)len;
+    a->cap = (uint32_t)len;
+    for (uint64_t i = 0; i < len; i++) {
+        a->items[i] = ENCODE_INT(src[i]);
+    }
+    return ENCODE_PTR(a);
+}
+
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */
