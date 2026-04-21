@@ -66,40 +66,31 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_asm_braced(&mut self, start_span: Span, is_volatile: bool) -> Result<Node, ParseError> {
+        let open_span = self.current.span;
         self.expect(&TokenKind::LBrace)?;
-        let mut instructions = Vec::new();
-        self.skip_asm_ws();
 
-        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
-            self.skip_asm_ws();
-            if self.check(&TokenKind::RBrace) {
-                break;
-            }
+        let content_start = open_span.end;
+        let content_end = self.find_raw_asm_block_end(content_start)?;
+        let close_end = self
+            .source
+            .get(content_end..)
+            .and_then(|tail| tail.chars().next())
+            .map(|ch| content_end + ch.len_utf8())
+            .unwrap_or(content_end);
+        let raw = self
+            .source
+            .get(content_start..content_end)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let instructions = Self::normalize_raw_asm_instructions(&raw);
 
-            if self.is_asm_string_token() {
-                instructions.push(self.expect_string_value()?);
-            } else {
-                return Err(ParseError::syntax_error_with_span(
-                    format!("expected string literal in asm block, got {:?}", self.current.kind),
-                    self.current.span,
-                ));
-            }
-
-            self.skip_asm_ws();
-            if self.check(&TokenKind::Comma) || self.check(&TokenKind::Semicolon) {
-                self.advance();
-            }
-            self.skip_asm_ws();
+        while !self.check(&TokenKind::Eof) && self.current.span.start < close_end {
+            self.advance();
         }
 
-        self.expect(&TokenKind::RBrace)?;
         Ok(Node::InlineAsm(InlineAsmStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: Span::new(start_span.start, close_end, start_span.line, start_span.column),
             volatile: is_volatile,
             instructions,
             target_match: vec![],
@@ -151,6 +142,65 @@ impl<'a> Parser<'a> {
             clobbers: vec![],
             constraints,
         }))
+    }
+
+    fn find_raw_asm_block_end(&self, content_start: usize) -> Result<usize, ParseError> {
+        let mut depth = 1usize;
+        let mut in_string: Option<char> = None;
+        let mut escaped = false;
+
+        for (offset, ch) in self.source[content_start..].char_indices() {
+            let pos = content_start + offset;
+            if let Some(quote) = in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    in_string = None;
+                }
+                continue;
+            }
+
+            if ch == '"' || ch == '\'' {
+                in_string = Some(ch);
+                continue;
+            }
+
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(pos);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(ParseError::syntax_error_with_span(
+            "unterminated asm { ... } block".to_string(),
+            Span::new(content_start, self.source.len(), self.current.span.line, self.current.span.column),
+        ))
+    }
+
+    fn normalize_raw_asm_instructions(raw: &str) -> Vec<String> {
+        raw.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let line = line.trim_end_matches(|ch| ch == ';' || ch == ',').trim();
+                if line.len() >= 2
+                    && ((line.starts_with('"') && line.ends_with('"'))
+                        || (line.starts_with('\'') && line.ends_with('\'')))
+                {
+                    line[1..line.len() - 1].to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect()
     }
 
     fn try_parse_asm_constraint(&mut self) -> Result<Option<AsmConstraint>, ParseError> {
@@ -464,12 +514,26 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast::Node;
+
     fn parse_succeeds(source: &str) {
         let mut parser = crate::Parser::new(source);
         match parser.parse() {
             Ok(_) => {}
             Err(e) => panic!("parse failed: {:?}", e),
         }
+    }
+
+    fn parse_first_asm(source: &str) -> crate::ast::InlineAsmStmt {
+        let mut parser = crate::Parser::new(source);
+        let module = parser.parse().expect("parse");
+        let Node::Function(function) = &module.items[0] else {
+            panic!("expected function");
+        };
+        let Node::InlineAsm(asm_stmt) = &function.body.statements[0] else {
+            panic!("expected inline asm");
+        };
+        asm_stmt.clone()
     }
 
     #[test]
@@ -484,17 +548,34 @@ mod tests {
 
     #[test]
     fn test_asm_volatile_braced_block() {
-        parse_succeeds("fn test():\n    asm volatile {\n        \"mov r0, r1\"\n        \"add r0, r2\"\n    }\n");
+        let asm = parse_first_asm("fn test():\n    asm volatile {\n        mov r0, r1\n        add r0, r2\n    }\n");
+        assert_eq!(asm.instructions, vec!["mov r0, r1", "add r0, r2"]);
+        assert!(asm.volatile);
     }
 
     #[test]
     fn test_asm_braced_block_allows_commas_and_semicolons() {
-        parse_succeeds("fn test():\n    asm {\n        \"nop\",\n        \"wfi\";\n    }\n");
+        let asm = parse_first_asm("fn test():\n    asm {\n        \"nop\",\n        \"wfi\";\n    }\n");
+        assert_eq!(asm.instructions, vec!["nop", "wfi"]);
+    }
+
+    #[test]
+    fn test_asm_braced_raw_preserves_arm_immediate() {
+        let asm = parse_first_asm("fn test():\n    asm volatile { bkpt #0 }\n");
+        assert_eq!(asm.instructions, vec!["bkpt #0"]);
+        assert!(asm.volatile);
     }
 
     #[test]
     fn test_asm_volatile_paren_simple() {
         parse_succeeds("fn test():\n    asm volatile(\n        \"mov r0, r1\",\n        \"bkpt #0xAB\"\n    )\n");
+    }
+
+    #[test]
+    fn test_asm_parenthesized_parses_without_warning() {
+        let mut parser = crate::Parser::new("fn test():\n    asm(\"nop\")\n");
+        parser.parse().expect("parse");
+        assert!(parser.error_hints().is_empty());
     }
 
     #[test]

@@ -1,0 +1,68 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SOSIX async I/O request state and backend routing.
+
+use os.posix.errno.{EIO}
+use os.posix.fd_table.{FD_TYPE_FILE, FD_TYPE_SERIAL}
+
+val SOSIX_ASYNC_FREE: u8 = 0
+val SOSIX_ASYNC_PENDING: u8 = 1
+val SOSIX_ASYNC_COMPLETE: u8 = 2
+val SOSIX_ASYNC_ERROR: u8 = 3
+
+val SOSIX_IO_BACKEND_INVALID: u8 = 0
+val SOSIX_IO_BACKEND_SERIAL: u8 = 1
+val SOSIX_IO_BACKEND_VFS: u8 = 2
+
+val SOSIX_MAX_ASYNC_REQUESTS: u64 = 128
+
+var sosix_req_states: [u8; 128]
+var sosix_req_fds: [i32; 128]
+var sosix_req_methods: [u32; 128]
+var sosix_req_results: [i64; 128]
+var sosix_req_notifications: [u64; 128]
+
+fn sosix_io_backend_for_fd_type(fd_type: u8) -> u8:
+    """Return the native SOSIX async backend for an FD type."""
+    if fd_type == FD_TYPE_SERIAL:
+        return SOSIX_IO_BACKEND_SERIAL
+    if fd_type == FD_TYPE_FILE:
+        return SOSIX_IO_BACKEND_VFS
+    SOSIX_IO_BACKEND_INVALID
+
+fn sosix_io_init():
+    """Initialize SOSIX async I/O request state."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_states[i] = SOSIX_ASYNC_FREE
+        sosix_req_fds[i] = -1
+        sosix_req_methods[i] = 0
+        sosix_req_results[i] = 0
+        sosix_req_notifications[i] = 0
+        i = i + 1
+
+fn sosix_async_alloc_request() -> u64:
+    """Allocate a SOSIX async request slot."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_ASYNC_REQUESTS:
+        if sosix_req_states[i] == SOSIX_ASYNC_FREE:
+            sosix_req_states[i] = SOSIX_ASYNC_PENDING
+            return i
+        i = i + 1
+    SOSIX_MAX_ASYNC_REQUESTS
+
+fn sosix_async_free_request(req_id: u64):
+    """Free a SOSIX async request slot."""
+    if req_id < SOSIX_MAX_ASYNC_REQUESTS:
+        sosix_req_states[req_id] = SOSIX_ASYNC_FREE
+
+fn sosix_async_is_complete(req_id: u64) -> bool:
+    """Check whether a SOSIX async request is complete."""
+    if req_id >= SOSIX_MAX_ASYNC_REQUESTS:
+        return true
+    sosix_req_states[req_id] == SOSIX_ASYNC_COMPLETE or sosix_req_states[req_id] == SOSIX_ASYNC_ERROR
+
+fn sosix_async_get_result(req_id: u64) -> i64:
+    """Return a completed SOSIX async request result."""
+    if req_id >= SOSIX_MAX_ASYNC_REQUESTS:
+        return 0 - EIO as i64
+    sosix_req_results[req_id]

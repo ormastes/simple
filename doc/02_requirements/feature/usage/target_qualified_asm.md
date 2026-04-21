@@ -312,11 +312,11 @@ Target-qualified asm **extends** the existing `asm` block; it does not replace i
 
 | Form | Target-aware | Use case |
 |------|-------------|----------|
-| `asm { "nop" }` | No | Canonical raw embedded asm block for new code |
-| `asm volatile { "wfi" }` | No | Canonical raw embedded asm block with side effects |
+| `asm { nop }` | No | Canonical raw embedded asm block for new code |
+| `asm volatile { wfi }` | No | Canonical raw embedded asm block with side effects |
 | `asm: "nop"` | No | Compatibility form, platform set by `@platform` or build target |
 | `asm "nop"` | No | Legacy single-line pure-parser form |
-| `asm(...)` | No | Legacy operand/constraint form until operand-bearing `asm {}` lowering exists |
+| `asm(...)` | No | Legacy operand/constraint form; remains valid for compatibility |
 | `asm match: case [spec]: ...` | **Yes** | Multi-platform dispatch |
 | `asm assert [spec]` | **Yes** | Compile-time target guard |
 

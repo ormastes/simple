@@ -3,14 +3,9 @@
 
 ## Search Scope
 
-Searched asm-related docs, specs, compiler frontends, Rust lowering/codegen, Simple OS sources, and boot/runtime files for:
-
-- `asm(...)`
-- `asm:`
-- `asm "..."`
-- `asm { ... }`
-- `InlineAsm`
-- `inline_asm`
+Searched asm docs, specs, compiler frontends, Rust lowering/codegen, Simple OS
+sources, and boot/runtime files for `asm(...)`, `asm:`, `asm "..."`,
+`asm { ... }`, `InlineAsm`, and `inline_asm`.
 
 ## Existing Test Surface
 
@@ -49,16 +44,18 @@ Still-supported compatibility forms:
 - `asm volatile: "nop"`
 - `asm: ...indented string block...`
 - `asm volatile: ...indented string block...`
-- `asm(...)` for operand-bound legacy/constraint syntax
+- `asm(...)` for legacy operand/constraint syntax
 
-The parenthesized form should not be used for new raw embedded asm examples.
+Old `asm(...)` remains valid but should warn in the Rust parser. It is not an
+error because operand constraints still depend on it.
 
 ## Execution-Mode Findings
 
 Interpreter mode:
 
 - Rust interpreter sees `Node::InlineAsm` and intentionally skips it.
-- This is acceptable only for no-op smoke fixtures; hardware-effect asm must be marked compiler/loader-only.
+- Pure interpreter returns `0` for `EXPR_ASM` and `EXPR_ASM_MATCH`.
+- This is acceptable only for no-op smoke fixtures; hardware-effect asm must be compiler/loader-only.
 
 Loader mode:
 
@@ -70,6 +67,7 @@ Compiler mode:
 - HIR lowering preserves raw no-operand asm as `HirStmt::InlineAsm`.
 - Operand-bound or target-matched asm is currently skipped in Rust HIR lowering.
 - Native codegen registers raw asm blocks and emits them through generated C `__asm__ volatile`.
+- LLVM-lib still rejects `InlineAsm`.
 
 ## Platform Matrix Needed
 
@@ -90,20 +88,17 @@ Modes:
 - `loader`
 - `compiler`
 
-Each target should have at least one safe raw instruction fixture:
+Each target has a safe raw `nop` fixture in
+`test/unit/compiler/native/inline_asm_matrix_spec.spl`.
 
-- x86_32: `nop`
-- x86_64: `nop`
-- arm32: `nop`
-- arm64: `nop`
-- riscv32: `nop`
-- riscv64: `nop`
-
-Privileged instructions such as `hlt`, `wfi`, `mret`, `iretq`, control-register access, and port I/O belong in compiler/loader syntax-preservation tests unless a QEMU/hardware harness executes them safely.
+Privileged instructions such as `hlt`, `wfi`, `mret`, `iretq`, control-register
+access, and port I/O belong in compiler/loader syntax-preservation tests unless
+a QEMU/hardware harness executes them safely.
 
 ## Simple OS Conversion Notes
 
-Simple OS still contains many `.c`, `.h`, `.s`, and `.S` files. The safest conversion order is:
+Simple OS still contains many `.c`, `.h`, `.s`, and `.S` files. The safest
+conversion order is:
 
 1. Convert small runtime stubs that are ordinary functions.
 2. Convert instruction wrappers to `.spl` with `asm {}` when no operands are needed.
@@ -112,7 +107,7 @@ Simple OS still contains many `.c`, `.h`, `.s`, and `.S` files. The safest conve
 
 ## Open Blockers
 
-- Rust parser lacked `asm {}` support before this pass.
-- Operand-bearing asm in Rust HIR lowering is currently skipped.
-- Pure parser accepts `asm {}` but only string literals, not operand declarations.
-- Existing SSpec tests mostly check strings, so they can mask parser/lowering/codegen gaps.
+- Operand-bearing `asm {}` is not implemented.
+- Operand-bound asm in Rust HIR lowering is currently skipped.
+- Pure parser accepts raw braced asm strings but not structured operands.
+- Existing broad SSpec tests mostly check strings, so they can mask parser/lowering/codegen gaps.

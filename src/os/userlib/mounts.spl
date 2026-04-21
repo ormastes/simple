@@ -1,0 +1,56 @@
+# Filesystem mount operations via raw syscalls and VFS IPC.
+
+use os.userlib.syscall_raw
+use os.userlib.ipc_protocol(VFS_MOUNT_LIST)
+
+val _VFS_PORT: u64 = 1
+
+fn _vfs_mount_request(method: u32, payload: text) -> Result<text, text>:
+    val port_result = syscall(50, _VFS_PORT, 0, 0, 0, 0)
+    if port_result < 0:
+        return Err("failed to connect to VFS service")
+    val conn = port_result as u64
+
+    val msg = "{method}:{payload}"
+    val send_result = syscall(51, conn, &msg as u64, msg.len() as u64, 0, 0)
+    if send_result < 0:
+        return Err("VFS send failed with code {send_result}")
+
+    var response_buf: [u8] = [0; 4096]
+    val recv_result = syscall(52, conn, &response_buf as u64, 4096, 0, 0)
+    if recv_result < 0:
+        return Err("VFS recv failed with code {recv_result}")
+
+    syscall(53, conn, 0, 0, 0, 0)
+
+    val response = text.from_bytes(response_buf, recv_result as u64)
+    if response.starts_with("ERR:"):
+        return Err(response.slice(4, response.len()))
+    Ok(response)
+
+fn mount(device: text, mount_path: text, fs_type: text) -> Result<bool, text>:
+    val payload = "{device}\0{mount_path}\0{fs_type}"
+    val result = syscall(37, &payload as u64, payload.len() as u64, 0, 0, 0)
+    if result < 0:
+        return Err("mount failed with code {result}")
+    Ok(true)
+
+fn unmount(path: text) -> Result<bool, text>:
+    val result = syscall(38, &path as u64, path.len() as u64, 0, 0, 0)
+    if result < 0:
+        return Err("unmount failed with code {result}")
+    Ok(true)
+
+fn mount_list() -> Result<[text], text>:
+    val resp = _vfs_mount_request(VFS_MOUNT_LIST, "")?
+    if resp.len() == 0:
+        return Ok([])
+    val entries = resp.split("\n")
+    var result: [text] = []
+    var i: u64 = 0
+    while i < entries.len() as u64:
+        val entry = entries[i as i64]
+        if entry.len() > 0:
+            result.push(entry)
+        i = i + 1
+    Ok(result)

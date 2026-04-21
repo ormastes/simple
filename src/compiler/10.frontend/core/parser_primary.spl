@@ -109,7 +109,7 @@ fn parse_primary_expr() -> i64:
         val mixin_callee = expr_ident("__mixin", 0)
         return expr_call(mixin_callee, mixin_args_list, 0)
 
-    # asm "..." | asm: "..." | asm { "..." } | asm volatile { "..." } | asm match: | asm assert [...]
+    # asm "..." | asm: "..." | asm { ... } | asm volatile { ... } | asm match: | asm assert [...]
     if par_kind_get() == TOK_KW_ASM:
         parser_advance()
 
@@ -164,21 +164,48 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == TOK_LBRACE:
             parser_advance()
             var asm_parts: [text] = []
+            var asm_line = ""
+            var brace_depth = 1
             for ai in 0..100000:
                 if par_kind_get() == TOK_RBRACE:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        if asm_line != "" and not asm_line.ends_with(" "):
+                            asm_line = asm_line + " "
+                        asm_line = asm_line + "}"
+                        parser_advance()
+                        continue
+                    if asm_line.trim() != "":
+                        asm_parts.push(asm_line.trim())
                     parser_advance()
                     break
                 if par_kind_get() == TOK_EOF:
                     parser_error("unterminated asm { ... } block")
                     break
-                if par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_COMMA or par_kind_get() == TOK_SEMICOLON:
+                if par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON:
+                    if asm_line.trim() != "":
+                        asm_parts.push(asm_line.trim())
+                        asm_line = ""
                     parser_advance()
                     continue
                 if par_kind_get() == TOK_STRING_LIT:
+                    if asm_line.trim() != "":
+                        asm_parts.push(asm_line.trim())
+                        asm_line = ""
                     asm_parts.push(par_text_get())
                     parser_advance()
                     continue
-                parser_error("expected string literal in asm { ... } block")
+                if par_kind_get() == TOK_COMMA:
+                    asm_line = asm_line + ","
+                    parser_advance()
+                    continue
+                if par_kind_get() == TOK_LBRACE:
+                    brace_depth = brace_depth + 1
+                val token_text = par_text_get()
+                if token_text != "":
+                    if asm_line != "" and not asm_line.ends_with(" ") and not asm_line.ends_with(","):
+                        asm_line = asm_line + " "
+                    asm_line = asm_line + token_text
                 parser_advance()
             return expr_asm(asm_parts.join("\n"), 0)
 

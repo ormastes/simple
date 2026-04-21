@@ -93,6 +93,7 @@ pub mod dynamic_ffi;
 pub mod winit_ffi;
 pub mod rapier2d_ffi;
 pub mod qmp_socket;
+pub mod host_wm_bridge;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -448,6 +449,14 @@ pub(crate) fn call_extern_function(
         "rt_process_wait" => system::rt_process_wait(&evaluated),
         "rt_process_is_running" => system::rt_process_is_running(&evaluated),
         "rt_process_kill" => system::rt_process_kill(&evaluated),
+        "rt_host_wm_server_start" => host_wm_bridge::rt_host_wm_server_start(&evaluated),
+        "rt_host_wm_server_poll" => host_wm_bridge::rt_host_wm_server_poll(&evaluated),
+        "rt_host_wm_server_reply_create" => host_wm_bridge::rt_host_wm_server_reply_create(&evaluated),
+        "rt_host_wm_server_reply_status" => host_wm_bridge::rt_host_wm_server_reply_status(&evaluated),
+        "rt_host_wm_server_send_event" => host_wm_bridge::rt_host_wm_server_send_event(&evaluated),
+        "rt_host_wm_client_connect" => host_wm_bridge::rt_host_wm_client_connect(&evaluated),
+        "rt_host_wm_client_request" => host_wm_bridge::rt_host_wm_client_request(&evaluated),
+        "rt_host_wm_client_poll_event" => host_wm_bridge::rt_host_wm_client_poll_event(&evaluated),
 
         // ====================================================================
         // Filesystem Operations (18 fs_* + 6 file_* = 24 functions)

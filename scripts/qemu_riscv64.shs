@@ -2,7 +2,8 @@
 # SimpleOS QEMU Runner — RISC-V 64 (OpenSBI S-mode virt machine)
 #
 # Usage:
-#   sh scripts/qemu_riscv64.shs              # boot and validate serial output
+#   sh scripts/qemu_riscv64.shs              # full boot and validate serial output
+#   sh scripts/qemu_riscv64.shs --smoke      # minimal boot smoke
 #   sh scripts/qemu_riscv64.shs --skip-build # use prebuilt kernel
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,19 +11,39 @@ KERNEL="$REPO_ROOT/build/os/simpleos_riscv64.elf"
 SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv64.log"
 BUILD_LOG="$REPO_ROOT/build/os/build_riscv64.log"
 SIMPLE_BIN="${SIMPLE_BINARY:-$REPO_ROOT/bin/simple}"
-ENTRY_FILE="${RISCV64_ENTRY:-examples/simple_os/arch/riscv64/smoke_entry.spl}"
-SOURCE_DIR="${RISCV64_SOURCE:-examples/simple_os/arch/riscv64}"
+ENTRY_FILE="${RISCV64_ENTRY:-}"
+SOURCE_ARGS="${RISCV64_SOURCE_ARGS:-}"
 TIMEOUT_SEC=30
 BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-180}"
 SKIP_BUILD=0
+SMOKE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-build) SKIP_BUILD=1 ;;
+        --smoke)      SMOKE=1 ;;
         *)            echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
 done
+
+if [ -z "$ENTRY_FILE" ]; then
+    if [ "$SMOKE" -eq 1 ]; then
+        ENTRY_FILE="examples/simple_os/arch/riscv64/smoke_entry.spl"
+    else
+        ENTRY_FILE="examples/simple_os/arch/riscv64/os_entry.spl"
+    fi
+fi
+
+if [ -z "$SOURCE_ARGS" ]; then
+    if [ -n "$RISCV64_SOURCE" ]; then
+        SOURCE_ARGS="--source $RISCV64_SOURCE"
+    elif [ "$SMOKE" -eq 1 ]; then
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv64"
+    else
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv64 --source src"
+    fi
+fi
 
 TIMEOUT_CMD=""
 if command -v timeout >/dev/null 2>&1; then
@@ -42,7 +63,7 @@ if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
     SIMPLE_BOOT_MINIMAL=1 "$SIMPLE_BIN" native-build \
         --backend llvm \
         --timeout "$BUILD_TIMEOUT_SEC" \
-        --source "$SOURCE_DIR" \
+        $SOURCE_ARGS \
         --entry "$ENTRY_FILE" \
         --entry-closure \
         --target riscv64-unknown-none \
@@ -59,7 +80,7 @@ fi
 
 if [ ! -f "$KERNEL" ]; then
     echo "SKIP: Kernel not found at $KERNEL"
-    echo "  Build with: bin/simple native-build --source $SOURCE_DIR --entry $ENTRY_FILE --entry-closure \\"
+    echo "  Build with: bin/simple native-build $SOURCE_ARGS --entry $ENTRY_FILE --entry-closure \\"
     echo "    --target riscv64-unknown-none -o $KERNEL \\"
     echo "    --linker-script examples/simple_os/arch/riscv64/linker.ld"
     exit 0
@@ -115,7 +136,7 @@ check_marker() {
 
 check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
 check_marker "UART / SBI console" "UART|SBI|serial"
-check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
+check_marker "Boot complete"      "boot complete|SimpleOS ready|POSIX|services|shell|TEST PASSED"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -13,8 +13,9 @@ check(code.contains("out dx, al"))
 ## 2026-04-21 Syntax Update
 
 Raw embedded assembly examples use canonical `asm { ... }` or
-`asm volatile { ... }` blocks. Parenthesized `asm(...)` remains in legacy
-constraint examples only, because operand-bearing braced asm is not lowered yet.
+`asm volatile { ... }` blocks. Parenthesized `asm(...)` remains valid and should
+warn; it is retained for legacy constraint examples because operand-bearing
+braced asm is not lowered yet.
 
 The new matrix coverage lives in
 `test/unit/compiler/native/inline_asm_matrix_spec.spl` and covers six targets
@@ -55,7 +56,7 @@ describe "x86 CPU Control":
         val code = """
         fn disable_interrupts():
             unsafe:
-                asm volatile("cli")
+                asm volatile { cli }
 
 check(code.contains("sti"))
 
@@ -63,7 +64,7 @@ check(code.contains("sti"))
         val code = """
         fn halt():
             unsafe:
-                asm volatile("hlt")
+                asm volatile { hlt }
 
 check(code.contains("lgdt"))
 
@@ -95,7 +96,7 @@ check(code.contains("bkpt #0xAB"))
         val code = """
         fn wait_for_interrupt():
             unsafe:
-                asm volatile("wfi")
+                asm volatile { wfi }
 
 check(code.contains("dmb"))
 
@@ -103,7 +104,7 @@ check(code.contains("dmb"))
         val code = """
         fn instruction_sync_barrier():
             unsafe:
-                asm volatile("isb")
+                asm volatile { isb }
 
 check(code.contains("ebreak"))
 
@@ -111,7 +112,7 @@ check(code.contains("ebreak"))
         val code = """
         fn wait_for_interrupt():
             unsafe:
-                asm volatile("wfi")
+                asm volatile { wfi }
 
 check(code.contains("fence"))
 
@@ -161,7 +162,7 @@ check(code.contains("clflush"))
         val code = """
         fn cache_wbinvd():
             unsafe:
-                asm volatile("wbinvd")
+                asm volatile { wbinvd }
 
 check(code.contains("lock cmpxchg"))
 

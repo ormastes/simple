@@ -12,11 +12,11 @@
 
 ```simple
 asm {
-    "nop"
+    nop
 }
 
 asm volatile {
-    "wfi"
+    wfi
 }
 ```
 
@@ -26,9 +26,10 @@ Compatibility forms remain accepted while the compiler catches up:
 - `asm volatile: "nop"` and indented `asm volatile:` blocks
 - `asm(...)` only for legacy operand/constraint syntax
 
-The current Rust compiler path preserves only raw no-operand asm blocks during
-HIR lowering. Operand-bound `asm(...)` is parsed but currently skipped by Rust
-HIR lowering, so new Simple OS code should prefer raw `asm {}` wrappers for
+Old `asm(...)` is accepted without warning because operand constraints still
+depend on it. The current Rust compiler path preserves raw no-operand asm during
+HIR lowering; operand-bound `asm(...)` is parsed but currently skipped by Rust
+HIR lowering. New Simple OS code should prefer raw `asm {}` wrappers for
 instruction-only helpers and keep ABI-sensitive boot entry assembly in `.s/.S`
 until Simple supports naked functions, section placement, global labels, and
 early stack setup.
@@ -45,7 +46,6 @@ Target coverage must include `x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`,
 and `riscv64` across interpreter, loader, and compiler mode tests.
 
 ---
-
 ## 1. Executive Summary
 
 This document designs the `asm {}` block syntax for Simple, enabling inline assembly with proper platform specification. Key innovations:
@@ -158,13 +158,13 @@ fn fast_multiply(a: i64, b: i64) -> i64:
 fn example():
     # Uses file-level platform
     asm {
-        "nop"
+        nop
     }
 
     # Override for specific block
     @platform("arm")
     asm {
-        "nop"
+        nop
     }
 ```
 
@@ -207,14 +207,15 @@ fn example():
 
 ```simple
 asm {
-    "instruction template"
-    "second instruction"
+    instruction template
+    second instruction
 }
 ```
 
-The current implemented braced form accepts string literals only. Operand
-declarations remain in the legacy parenthesized form until operand-bearing
-`asm {}` lowering is implemented.
+The braced form captures raw assembly payload; instruction lines do not need
+string quotes. Quoted lines are accepted only for compatibility. Operand
+declarations remain in the parenthesized form until operand-bearing `asm {}`
+lowering is implemented.
 
 ### Operand Types
 
@@ -360,19 +361,16 @@ All `asm` blocks require `unsafe` context:
 ```simple
 fn safe_function():
     # ERROR: asm requires unsafe
-    asm:
-        "nop"
+    asm { nop }
 
 unsafe fn unsafe_function():
     # OK: in unsafe function
-    asm:
-        "nop"
+    asm { nop }
 
 fn mixed_function():
     # OK: explicit unsafe block
     unsafe:
-        asm:
-            "nop"
+        asm { nop }
 ```
 
 ### Memory Safety

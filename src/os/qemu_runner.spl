@@ -462,6 +462,9 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         args.push(source)
     args.push("--backend")
     args.push(backend_name)
+    if _is_arm_fs_exec_target(target):
+        args.push("--timeout")
+        args.push("180")
     args.push("--entry-closure")
     args.push("--entry")
     args.push(target.entry)
@@ -1062,6 +1065,46 @@ fn scenario_x64_desktop_test() -> QemuScenario:
         description: "x86_64 SimpleOS desktop integration with NVMe/FAT32 serial lane"
     )
 
+fn arm_fs_exec_disk_image_path(arch: Architecture) -> text:
+    match arch:
+        Architecture.Arm64: "build/os/fat32-arm64.img"
+        Architecture.Arm32: "build/os/fat32-arm32.img"
+        _: "build/os/fat32-arm.img"
+
+fn arm_fs_exec_kernel_bin_path(arch: Architecture) -> text:
+    match arch:
+        Architecture.Arm64: "build/os/simpleos_arm64_fs_exec.bin"
+        Architecture.Arm32: "build/os/simpleos_arm32_fs_exec.bin"
+        _: "build/os/simpleos_arm_fs_exec.bin"
+
+fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
+    val img = arm_fs_exec_disk_image_path(arch)
+    ["-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
+
+fn scenario_arm64_virtio_fat32_smf() -> QemuScenario:
+    QemuScenario(
+        name: "arm64-virtio-fat32-smf",
+        arch: Architecture.Arm64,
+        machine: "virt",
+        cpu: "cortex-a72",
+        memory: "384M",
+        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm64) + ["-semihosting-config", "enable=on,target=native"],
+        gui_mode: false,
+        description: "ARM64 virtio-blk FAT32 SMF filesystem execution"
+    )
+
+fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
+    QemuScenario(
+        name: "arm32-virtio-fat32-smf",
+        arch: Architecture.Arm32,
+        machine: "virt",
+        cpu: "cortex-a15",
+        memory: "384M",
+        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
+        gui_mode: false,
+        description: "ARM32 virtio-blk FAT32 SMF filesystem execution"
+    )
+
 fn get_all_scenarios() -> [QemuScenario]:
     """Returns all defined QEMU scenarios."""
     [
@@ -1079,6 +1122,8 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_arm32_virtio_fat32_smf(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
+        scenario_arm64_virtio_fat32_smf(),
+        scenario_arm32_virtio_fat32_smf(),
         scenario_x64_desktop_disk()
     ]
 
@@ -1136,7 +1181,6 @@ fn get_arm32_fs_exec_target() -> OsTarget:
         qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
         gui_mode: false
     )
-
 fn _desktop_release_version() -> text:
     os_version().to_text()
 
@@ -1336,6 +1380,23 @@ fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
+fn ensure_arm_fs_exec_disk_image(arch: Architecture) -> bool:
+    val img_path = arm_fs_exec_disk_image_path(arch)
+    if rt_file_exists(img_path) and _arm_fs_exec_disk_image_has_required_smf(img_path, arch):
+        return true
+    val arch_name = if arch == Architecture.Arm64: "arm64" else: "arm32"
+    print "[ensure_arm_fs_exec_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_name], 60000)
+    if stdout != "":
+        print "[ensure_arm_fs_exec_disk_image] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_arm_fs_exec_disk_image] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_arm_fs_exec_disk_image] make_os_disk.shs exited {exit_code}"
+        return false
+    rt_file_exists(img_path) and _arm_fs_exec_disk_image_has_required_smf(img_path, arch)
+
 fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
     val marker = if arch == Architecture.Arm64: "SIMPLEOS_ARM64_HELLO_ELF" else: "SIMPLEOS_ARM32_HELLO_ELF"
     val cmd =
@@ -1348,6 +1409,35 @@ fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) 
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
+fn ensure_arm_fs_exec_kernel_binary(scenario: QemuScenario, target: OsTarget) -> bool:
+    if scenario.name != "arm64-virtio-fat32-smf" and scenario.name != "arm32-virtio-fat32-smf":
+        return true
+    val bin_path = arm_fs_exec_kernel_bin_path(scenario.arch)
+    val cmd =
+        "if command -v llvm-objcopy >/dev/null 2>&1; then OBJCOPY=llvm-objcopy; " +
+        "elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ]; then OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy; " +
+        "else echo llvm-objcopy not found >&2; exit 127; fi; " +
+        "$OBJCOPY -O binary \"{target.output}\" \"{bin_path}\""
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 30000)
+    if stdout != "":
+        print "[ensure_arm_fs_exec_kernel_binary] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_arm_fs_exec_kernel_binary] stderr:\n{stderr}"
+    exit_code == 0 and rt_file_exists(bin_path)
+
+fn scenario_kernel_path(scenario: QemuScenario, target: OsTarget) -> text:
+    if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
+        return arm_fs_exec_kernel_bin_path(scenario.arch)
+    target.output
+
+fn ensure_scenario_media(scenario: QemuScenario) -> bool:
+    if scenario.name == "x64-nvme-fat32":
+        return ensure_fs_test_disk_image()
+    if scenario.name == "x64-desktop-test" or scenario.name == "x64-desktop-disk":
+        return ensure_desktop_disk_image()
+    if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
+        return ensure_arm_fs_exec_disk_image(scenario.arch)
+    true
 fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     """Best-effort host-side validation that the disk image is populated.
 
@@ -1404,7 +1494,9 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     args.push("-no-reboot")
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
         args.push("-device")
-        args.push("loader,file={kernel_path},cpu-num=0")
+        args.push("loader,file={kernel_path},addr=0x40200000,force-raw=on")
+        args.push("-device")
+        args.push("loader,addr=0x40200000,cpu-num=0")
     else:
         args.push("-kernel")
         args.push(kernel_path)
@@ -1417,14 +1509,18 @@ fn build_scenario(scenario: QemuScenario) -> bool:
     if not ensure_scenario_media(scenario):
         return false
     val target = scenario_target(scenario)
-    build_os(target)
+    if not build_os(target):
+        return false
+    ensure_arm_fs_exec_kernel_binary(scenario, target)
 
 fn run_scenario(scenario: QemuScenario) -> bool:
     """Build and run a named QEMU scenario."""
     if not ensure_scenario_media(scenario):
         return false
     val target = scenario_target(scenario)
-    val cmd_parts = build_scenario_command(scenario, target.output)
+    if not ensure_arm_fs_exec_kernel_binary(scenario, target):
+        return false
+    val cmd_parts = build_scenario_command(scenario, scenario_kernel_path(scenario, target))
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[run] {scenario.name}: {cmd_parts.join(" ")}"
@@ -1444,7 +1540,9 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     if not ensure_scenario_media(scenario):
         return false
     val target = scenario_target(scenario)
-    val cmd_parts = build_scenario_command(scenario, target.output)
+    if not ensure_arm_fs_exec_kernel_binary(scenario, target):
+        return false
+    val cmd_parts = build_scenario_command(scenario, scenario_kernel_path(scenario, target))
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"

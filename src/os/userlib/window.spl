@@ -33,6 +33,9 @@ use os.userlib.process.{getpid}
 
 extern fn serial_println(msg: text)
 extern fn rt_get_args() -> [text]
+extern fn rt_host_wm_client_connect(app_id: text, process_id: i64) -> i64
+extern fn rt_host_wm_client_request(client_id: i64, method: i64, window_id: i64, title: text, x: i64, y: i64, w: i64, h: i64, content: text, process_id: i64, app_id: text, timeout_ms: i64) -> (i64, i64)
+extern fn rt_host_wm_client_poll_event(client_id: i64, blocking: bool) -> (i64, i64, i64, i64, i64, i64)
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
@@ -75,6 +78,7 @@ class WindowClient:
     app_port: u64           # This app's IPC reply port
     window_id: u64          # Current primary window ID (0 if none)
     app_id: text            # Stable launcher/manifest identity when known
+    host_client_id: i64     # Nonzero when running under hosted WM bridge
     connected: bool
     event_queue: [WmInputEvent]  # Buffered incoming events
 
@@ -86,6 +90,7 @@ impl WindowClient:
             app_port: 0,
             window_id: 0,
             app_id: "",
+            host_client_id: 0,
             connected: false,
             event_queue: []
         )
@@ -106,6 +111,16 @@ impl WindowClient:
         Creates this app's reply port and resolves the compositor
         port by name. Returns true on success.
         """
+        if self.app_id == "":
+            self.app_id = _runtime_window_app_identity()
+        val host_client = rt_host_wm_client_connect(self.app_id, 0)
+        if host_client > 0:
+            self.host_client_id = host_client
+            self.app_port = host_client.to_u64()
+            self.connected = true
+            serial_println("[window-client] Connected to hosted WM bridge (client {host_client})")
+            return true
+
         # Create our own reply port
         val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
         if port < 0:
@@ -126,8 +141,6 @@ impl WindowClient:
 
         self.compositor_port = comp_port.to_u64()
         self.connected = true
-        if self.app_id == "":
-            self.app_id = _runtime_window_app_identity()
         serial_println("[window-client] Connected to compositor (port {self.compositor_port}), reply port {self.app_port}")
         true
 
@@ -141,12 +154,15 @@ impl WindowClient:
         self.connected = false
         self.compositor_port = 0
         self.app_port = 0
+        self.host_client_id = 0
         serial_println("[window-client] Disconnected")
 
     # -- Window Creation & Destruction ---------------------------------------
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> u64:
         """Create a window using the current process identity."""
+        if self.host_client_id > 0:
+            return self.create_window_with_process_id(title, x, y, width, height, 0)
         self.create_window_with_process_id(title, x, y, width, height, getpid())
 
     me create_window_with_process_id(title: text, x: i32, y: i32, width: i32, height: i32, process_id: u64) -> u64:
@@ -159,6 +175,30 @@ impl WindowClient:
         """
         if not self.connected:
             serial_println("[window-client] Not connected")
+            return 0
+
+        if self.host_client_id > 0:
+            if self.app_id == "":
+                self.app_id = _runtime_window_app_identity()
+            val (status, wid_i64) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_CREATE_WINDOW.to_i64(),
+                0,
+                title,
+                x.to_i64(),
+                y.to_i64(),
+                width.to_i64(),
+                height.to_i64(),
+                "",
+                process_id.to_i64(),
+                self.app_id,
+                5000
+            )
+            if status == WM_STATUS_OK.value.to_i64() and wid_i64 > 0:
+                self.window_id = wid_i64.to_u64()
+                serial_println("[window-client] Created hosted window {wid_i64}: '{title}'")
+                return self.window_id
+            serial_println("[window-client] Hosted create window failed with status {status}")
             return 0
 
         # Build request payload:
@@ -212,6 +252,24 @@ impl WindowClient:
         """Destroy an explicit window by id."""
         if not self.connected or window_id == 0:
             return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_DESTROY_WINDOW.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
+            if self.window_id == window_id:
+                self.window_id = 0
+            return
         self._send_window_id_request(COMP_DESTROY_WINDOW, window_id)
         val reply = self._recv_reply()
         serial_println("[window-client] Destroyed window {window_id}")
@@ -230,6 +288,22 @@ impl WindowClient:
     me set_title_for(window_id: u64, title: text):
         """Change the title of an explicit window."""
         if not self.connected or window_id == 0:
+            return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_SET_TITLE.to_i64(),
+                window_id.to_i64(),
+                title,
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
             return
 
         var payload: [u8] = []
@@ -254,6 +328,22 @@ impl WindowClient:
         """Resize an explicit window."""
         if not self.connected or window_id == 0:
             return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_RESIZE.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                width.to_i64(),
+                height.to_i64(),
+                "",
+                0,
+                self.app_id,
+                2000
+            )
+            return
 
         var payload: [u8] = []
         _push_u64(payload, window_id)
@@ -273,6 +363,22 @@ impl WindowClient:
     me move_window(window_id: u64, x: i32, y: i32):
         """Move an explicit window to a new position."""
         if not self.connected or window_id == 0:
+            return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_MOVE.to_i64(),
+                window_id.to_i64(),
+                "",
+                x.to_i64(),
+                y.to_i64(),
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
             return
 
         var payload: [u8] = []
@@ -294,6 +400,22 @@ impl WindowClient:
         """Request that the compositor focus an explicit window."""
         if not self.connected or window_id == 0:
             return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_FOCUS.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
+            return
 
         self._send_window_id_request(COMP_FOCUS, window_id)
         val reply = self._recv_reply()
@@ -308,6 +430,22 @@ impl WindowClient:
     me minimize_window(window_id: u64):
         """Minimize an explicit window."""
         if not self.connected or window_id == 0:
+            return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_MINIMIZE.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
             return
 
         self._send_window_id_request(COMP_MINIMIZE, window_id)
@@ -324,6 +462,22 @@ impl WindowClient:
         """Maximize an explicit window to fill the screen."""
         if not self.connected or window_id == 0:
             return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_MAXIMIZE.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
+            return
 
         self._send_window_id_request(COMP_MAXIMIZE, window_id)
         val reply = self._recv_reply()
@@ -338,6 +492,22 @@ impl WindowClient:
     me restore_window(window_id: u64):
         """Restore an explicit window from minimized/maximized."""
         if not self.connected or window_id == 0:
+            return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_RESTORE.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                self.app_id,
+                2000
+            )
             return
 
         self._send_window_id_request(COMP_RESTORE, window_id)
@@ -357,6 +527,22 @@ impl WindowClient:
     me update_window_content(window_id: u64, content: text):
         """Update an explicit window's content text."""
         if not self.connected or window_id == 0:
+            return
+        if self.host_client_id > 0:
+            val (status, ignored) = rt_host_wm_client_request(
+                self.host_client_id,
+                COMP_UPDATE_TREE.to_i64(),
+                window_id.to_i64(),
+                "",
+                0,
+                0,
+                0,
+                0,
+                content,
+                0,
+                self.app_id,
+                2000
+            )
             return
 
         var payload: [u8] = []
@@ -395,6 +581,18 @@ impl WindowClient:
         if not self.connected:
             return nil
 
+        if self.host_client_id > 0:
+            val (wid, event_type, key, x, y, mods) = rt_host_wm_client_poll_event(self.host_client_id, false)
+            if event_type == 0:
+                return nil
+            return WmInputEvent(
+                window_id: WindowId(value: wid.to_u64()),
+                event_type: WmEventType(value: event_type.to_u32()),
+                key_code: KeyCode(value: key.to_u32()),
+                mouse_pos: Point.xy(x.to_i32(), y.to_i32()),
+                modifiers: Modifiers(value: mods.to_u32())
+            )
+
         val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0, 1, 0, 0)
         if msg_raw <= 0:
             return nil
@@ -419,6 +617,23 @@ impl WindowClient:
                 i = i + 1
             self.event_queue = remaining
             return event
+
+        if self.host_client_id > 0:
+            val (wid, event_type, key, x, y, mods) = rt_host_wm_client_poll_event(self.host_client_id, true)
+            if event_type > 0:
+                return WmInputEvent(
+                    window_id: WindowId(value: wid.to_u64()),
+                    event_type: WmEventType(value: event_type.to_u32()),
+                    key_code: KeyCode(value: key.to_u32()),
+                    mouse_pos: Point.xy(x.to_i32(), y.to_i32()),
+                    modifiers: Modifiers(value: mods.to_u32())
+                )
+            return wm_input_event(
+                WindowId(value: self.window_id),
+                WM_EVENT_CLOSE,
+                KeyCode(value: 0),
+                Point.xy(0, 0)
+            )
 
         # Blocking IPC recv
         val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0xFFFFFFFF, 0, 0, 0)

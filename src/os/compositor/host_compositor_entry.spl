@@ -9,8 +9,10 @@
 # wrappers that select the right hosted backend at runtime.
 
 use common.window_protocol.geometry.{Size}
+use common.window_protocol.window_protocol.{WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
 use os.compositor.display_backend.{CompositorBackend}
 use os.compositor.hosted_backend.{select_hosted_backend, rt_hosted_set_surface_override}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_event_loop_free(el: i64)
@@ -18,11 +20,28 @@ extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_sleep_ms(ms: i64)
+extern fn rt_host_wm_server_start() -> text
+extern fn rt_host_wm_server_poll(dir: text, max: i64) -> [(i64, i64, i64, i64, text, i64, i64, i64, i64, text, i64, text)]
+extern fn rt_host_wm_server_reply_create(dir: text, request_id: i64, status: i64, window_id: i64) -> bool
+extern fn rt_host_wm_server_reply_status(dir: text, request_id: i64, status: i64) -> bool
+extern fn rt_host_wm_server_send_event(dir: text, client_id: i64, window_id: i64, event_type: i64, key: i64, x: i64, y: i64, mods: i64) -> bool
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
 val HOST_WM_EVENT_CLOSE: i64 = 3
+val HOST_WM_EVENT_MOUSE_BUTTON: i64 = 20
+val HOST_WM_EVENT_MOUSE_MOVED: i64 = 21
 val HOST_WM_IDLE_SLEEP_MS: i64 = 16
+val HOST_WM_TITLE_H: i32 = 36
+val HOST_WM_TASKBAR_H: i32 = 62
+val HOST_WM_LEFT_BUTTON_A: i64 = 0
+val HOST_WM_LEFT_BUTTON_B: i64 = 1
 
 # =========================================================================
 # Public types
@@ -45,6 +64,25 @@ struct HostSurface:
     event_loop_id: i64
     window_id: i64
 
+class HostWmWindow:
+    id: i64
+    client_id: i64
+    process_id: i64
+    app_id: text
+    title: text
+    content: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    minimized: bool
+    focused: bool
+
+class HostWmAppProcess:
+    title: text
+    source_path: text
+    pid: i64
+
 # WmService — thin lifecycle wrapper around the host event loop
 class WmService:
     running: bool
@@ -63,23 +101,404 @@ class HostCompositor:
     backend: CompositorBackend
     width: i32
     height: i32
+    bridge_dir: text
+    windows: [HostWmWindow]
+    app_processes: [HostWmAppProcess]
+    next_window_id: i64
+    launched_default_apps: bool
+    mouse_x: i32
+    mouse_y: i32
+    dragging: bool
+    drag_window_id: i64
+    drag_offset_x: i32
+    drag_offset_y: i32
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
             backend: backend,
             width: size.width.to_i32(),
-            height: size.height.to_i32()
+            height: size.height.to_i32(),
+            bridge_dir: "",
+            windows: [],
+            app_processes: [],
+            next_window_id: 1,
+            launched_default_apps: true,
+            mouse_x: 0,
+            mouse_y: 0,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0
+        )
+
+    static fn new_hosted(backend: CompositorBackend, size: Size) -> HostCompositor:
+        val bridge = rt_host_wm_server_start()
+        HostCompositor(
+            backend: backend,
+            width: size.width.to_i32(),
+            height: size.height.to_i32(),
+            bridge_dir: bridge,
+            windows: [],
+            app_processes: [],
+            next_window_id: 1,
+            launched_default_apps: false,
+            mouse_x: 0,
+            mouse_y: 0,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0
         )
 
     me tick():
         """Process one compositor frame through the hosted backend."""
-        _draw_shared_host_wm_frame(self.backend, self.width, self.height)
+        self.launch_default_apps_if_needed()
+        self.poll_bridge_requests()
+        self.draw()
         self.backend.present()
 
     me resize(w: i32, h: i32):
         """Record the current host surface size after an external resize."""
         self.width = w
         self.height = h
+
+    me launch_default_apps_if_needed():
+        if self.launched_default_apps or self.bridge_dir == "":
+            return
+        self.launched_default_apps = true
+        val simple_bin = _host_wm_simple_binary()
+        rt_env_set("SIMPLE_HOST_WM_DIR", self.bridge_dir)
+        self.spawn_app(simple_bin, "Hello", "src/app/hosted_apps/hello_world_client.spl")
+        self.spawn_app(simple_bin, "Terminal", "src/app/hosted_apps/shell_client.spl")
+        self.spawn_app(simple_bin, "Files", "src/app/hosted_apps/file_manager_client.spl")
+        self.spawn_app(simple_bin, "Browser", "src/app/hosted_apps/browser_demo_client.spl")
+
+    me spawn_app(simple_bin: text, title: text, source_path: text):
+        val pid = rt_process_spawn_async(simple_bin, ["run", source_path])
+        self.app_processes.push(HostWmAppProcess(title: title, source_path: source_path, pid: pid))
+
+    me poll_bridge_requests():
+        if self.bridge_dir == "":
+            return
+        val requests = rt_host_wm_server_poll(self.bridge_dir, 64)
+        var i = 0
+        while i < requests.len():
+            val (request_id, client_id, method, window_id, title, x, y, w, h, content, process_id, app_id) = requests[i]
+            self.apply_bridge_request(request_id, client_id, method, window_id, title, x, y, w, h, content, process_id, app_id)
+            i = i + 1
+
+    me apply_bridge_request(request_id: i64, client_id: i64, method: i64, window_id: i64, title: text, x: i64, y: i64, w: i64, h: i64, content: text, process_id: i64, app_id: text):
+        if method == COMP_CREATE_WINDOW.to_i64():
+            val wid = self.next_window_id
+            self.next_window_id = self.next_window_id + 1
+            val px = if x > 0: x.to_i32() else: 90 + ((wid.to_i32() * 34) % 180)
+            val py = if y > 0: y.to_i32() else: 116 + ((wid.to_i32() * 28) % 160)
+            val pw = if w > 0: w.to_i32() else: 440
+            val ph = if h > 0: h.to_i32() else: 260
+            self.clear_focus()
+            self.windows.push(HostWmWindow(
+                id: wid,
+                client_id: client_id,
+                process_id: process_id,
+                app_id: app_id,
+                title: title,
+                content: "",
+                x: px,
+                y: py,
+                w: pw,
+                h: ph,
+                minimized: false,
+                focused: true
+            ))
+            rt_host_wm_server_reply_create(self.bridge_dir, request_id, WM_STATUS_OK.value.to_i64(), wid)
+            return
+
+        val idx = self.find_window_index(window_id)
+        if idx < 0:
+            rt_host_wm_server_reply_status(self.bridge_dir, request_id, WM_STATUS_ERROR.value.to_i64())
+            return
+
+        if method == COMP_DESTROY_WINDOW.to_i64():
+            self.remove_window_at(idx)
+        elif method == COMP_UPDATE_TREE.to_i64():
+            self.windows[idx].content = content
+        elif method == COMP_FOCUS.to_i64():
+            self.focus_window(window_id)
+        elif method == COMP_RESIZE.to_i64():
+            self.windows[idx].w = w.to_i32()
+            self.windows[idx].h = h.to_i32()
+        elif method == COMP_MOVE.to_i64():
+            self.windows[idx].x = x.to_i32()
+            self.windows[idx].y = y.to_i32()
+        elif method == COMP_SET_TITLE.to_i64():
+            self.windows[idx].title = title
+        elif method == COMP_MINIMIZE.to_i64():
+            self.windows[idx].minimized = true
+            self.windows[idx].focused = false
+        elif method == COMP_MAXIMIZE.to_i64():
+            self.windows[idx].x = 24
+            self.windows[idx].y = 70
+            self.windows[idx].w = self.width - 48
+            self.windows[idx].h = self.height - HOST_WM_TASKBAR_H - 94
+            self.windows[idx].minimized = false
+            self.focus_window(window_id)
+        elif method == COMP_RESTORE.to_i64():
+            self.windows[idx].minimized = false
+            self.focus_window(window_id)
+        rt_host_wm_server_reply_status(self.bridge_dir, request_id, WM_STATUS_OK.value.to_i64())
+
+    me clear_focus():
+        var i = 0
+        while i < self.windows.len():
+            self.windows[i].focused = false
+            i = i + 1
+
+    me find_window_index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == window_id:
+                return i.to_i32()
+            i = i + 1
+        -1
+
+    me remove_window_at(idx: i32):
+        var kept: [HostWmWindow] = []
+        var i = 0
+        while i < self.windows.len():
+            if i != idx:
+                kept.push(self.windows[i])
+            i = i + 1
+        self.windows = kept
+        if self.drag_window_id > 0 and self.find_window_index(self.drag_window_id) < 0:
+            self.dragging = false
+            self.drag_window_id = 0
+        self.focus_top_visible_window()
+
+    me focus_top_visible_window():
+        if self.windows.len() == 0:
+            return
+        self.clear_focus()
+        var i = self.windows.len() - 1
+        while i >= 0:
+            if not self.windows[i].minimized:
+                self.windows[i].focused = true
+                return
+            i = i - 1
+
+    me focus_window(window_id: i64):
+        val idx = self.find_window_index(window_id)
+        if idx < 0:
+            return
+        var ordered: [HostWmWindow] = []
+        val chosen = self.windows[idx]
+        var i = 0
+        while i < self.windows.len():
+            if i != idx:
+                self.windows[i].focused = false
+                ordered.push(self.windows[i])
+            i = i + 1
+        chosen.minimized = false
+        chosen.focused = true
+        ordered.push(chosen)
+        self.windows = ordered
+        if self.bridge_dir != "":
+            rt_host_wm_server_send_event(
+                self.bridge_dir,
+                chosen.client_id,
+                chosen.id,
+                WM_EVENT_FOCUS.value.to_i64(),
+                1,
+                0,
+                0,
+                0
+            )
+
+    me handle_host_event(ev: i64, ev_type: i64):
+        if ev_type == HOST_WM_EVENT_MOUSE_MOVED:
+            val (fx, fy) = rt_winit_event_mouse_moved(ev)
+            self.handle_mouse_move(fx.to_i32(), fy.to_i32())
+            return
+        if ev_type == HOST_WM_EVENT_MOUSE_BUTTON:
+            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            if button == HOST_WM_LEFT_BUTTON_A or button == HOST_WM_LEFT_BUTTON_B:
+                self.handle_left_button(pressed)
+
+    me handle_mouse_move(x: i32, y: i32):
+        self.mouse_x = x
+        self.mouse_y = y
+        if self.dragging and self.drag_window_id > 0:
+            val idx = self.find_window_index(self.drag_window_id)
+            if idx >= 0:
+                self.windows[idx].x = x - self.drag_offset_x
+                self.windows[idx].y = y - self.drag_offset_y
+                self.keep_window_on_screen(idx)
+                self.send_mouse_event(self.windows[idx], WM_EVENT_MOUSE_MOVE.value.to_i64(), 0, x - self.windows[idx].x, y - self.windows[idx].y)
+
+    me handle_left_button(pressed: bool):
+        if not pressed:
+            if self.dragging:
+                val idx = self.find_window_index(self.drag_window_id)
+                if idx >= 0:
+                    self.send_mouse_event(self.windows[idx], WM_EVENT_MOUSE_RELEASE.value.to_i64(), 0, self.mouse_x - self.windows[idx].x, self.mouse_y - self.windows[idx].y)
+            self.dragging = false
+            self.drag_window_id = 0
+            return
+
+        val taskbar_hit = self.hit_taskbar(self.mouse_x, self.mouse_y)
+        if taskbar_hit > 0:
+            self.focus_window(taskbar_hit)
+            return
+
+        val hit = self.hit_visible_window(self.mouse_x, self.mouse_y)
+        if hit <= 0:
+            self.clear_focus()
+            return
+        self.focus_window(hit)
+        val idx = self.find_window_index(hit)
+        if idx < 0:
+            return
+        val win = self.windows[idx]
+        val local_x = self.mouse_x - win.x
+        val local_y = self.mouse_y - win.y
+        if local_y >= 0 and local_y < HOST_WM_TITLE_H:
+            if local_x >= 13 and local_x <= 25:
+                self.send_mouse_event(win, WM_EVENT_CLOSE.value.to_i64(), 0, 0, 0)
+                self.remove_window_at(idx)
+                return
+            if local_x >= 31 and local_x <= 45:
+                self.windows[idx].minimized = true
+                self.windows[idx].focused = false
+                self.focus_top_visible_window()
+                return
+            self.dragging = true
+            self.drag_window_id = hit
+            self.drag_offset_x = local_x
+            self.drag_offset_y = local_y
+            return
+        self.send_mouse_event(win, WM_EVENT_MOUSE_CLICK.value.to_i64(), 0, local_x, local_y)
+
+    me keep_window_on_screen(idx: i32):
+        if self.windows[idx].x < 0:
+            self.windows[idx].x = 0
+        if self.windows[idx].y < 48:
+            self.windows[idx].y = 48
+        if self.windows[idx].x + self.windows[idx].w > self.width:
+            self.windows[idx].x = self.width - self.windows[idx].w
+        if self.windows[idx].y + self.windows[idx].h > self.height - HOST_WM_TASKBAR_H:
+            self.windows[idx].y = self.height - HOST_WM_TASKBAR_H - self.windows[idx].h
+
+    me send_mouse_event(win: HostWmWindow, event_type: i64, key: i64, x: i32, y: i32):
+        if self.bridge_dir == "":
+            return
+        rt_host_wm_server_send_event(self.bridge_dir, win.client_id, win.id, event_type, key, x.to_i64(), y.to_i64(), 0)
+
+    me hit_visible_window(x: i32, y: i32) -> i64:
+        if self.windows.len() == 0:
+            return 0
+        var i = self.windows.len() - 1
+        while i >= 0:
+            val win = self.windows[i]
+            if not win.minimized and x >= win.x and x < win.x + win.w and y >= win.y and y < win.y + win.h:
+                return win.id
+            i = i - 1
+        0
+
+    me hit_taskbar(x: i32, y: i32) -> i64:
+        val dock_y = if self.height > 74: self.height - 62 else: self.height - 46
+        if y < dock_y or y > dock_y + 46:
+            return 0
+        val dock_x = if self.width > 580: (self.width - 520) / 2 else: 18
+        var item_x = dock_x + 14
+        var i = 0
+        while i < self.windows.len():
+            if x >= item_x and x < item_x + 108:
+                return self.windows[i].id
+            item_x = item_x + 122
+            i = i + 1
+        0
+
+    me draw():
+        self.backend.clear(0xFF060612)
+        self.backend.fill_rect(0, 0, self.width, self.height, 0xFF0E0820)
+        self.backend.fill_rect(0, self.height / 2, self.width, self.height / 2, 0xFF1A0830)
+        self.backend.fill_rect(0, 0, self.width, 96, 0x33000000)
+        self.backend.fill_rect(42, 42, self.width - 84, 1, 0x33FFFFFF)
+        self.backend.draw_text(52, 18, "Simple Browser WM", 0xFFE3E0F3, 0xFF0E0820)
+        self.backend.draw_text(52, 36, "real hosted app processes", 0xFF8DB7FF, 0xFF0E0820)
+        if self.windows.len() == 0:
+            self.backend.draw_text(72, 116, "launching hosted apps...", 0xFFE1E6F7, 0xFF0E0820)
+        var i = 0
+        while i < self.windows.len():
+            if not self.windows[i].minimized:
+                _draw_hosted_app_window(self.backend, self.windows[i])
+            i = i + 1
+        self.draw_taskbar()
+
+    me draw_taskbar():
+        val dock_y = if self.height > 74: self.height - 62 else: self.height - 46
+        val dock_x = if self.width > 580: (self.width - 520) / 2 else: 18
+        self.backend.fill_rect(dock_x + 8, dock_y + 8, 504, 46, 0x77000000)
+        self.backend.fill_rect(dock_x, dock_y, 520, 46, 0xCC141827)
+        self.backend.fill_rect(dock_x, dock_y, 520, 1, 0x44FFFFFF)
+        self.backend.fill_rect(dock_x, dock_y + 45, 520, 1, 0x66000000)
+        var item_x = dock_x + 14
+        var i = 0
+        while i < self.windows.len() and i < 4:
+            _draw_taskbar_item(self.backend, item_x, dock_y + 8, _short_title(self.windows[i].title), self.windows[i].focused)
+            item_x = item_x + 122
+            i = i + 1
+
+    me shutdown_apps():
+        var i = 0
+        while i < self.app_processes.len():
+            if self.app_processes[i].pid > 0:
+                rt_process_kill(self.app_processes[i].pid)
+            i = i + 1
+
+fn _host_wm_simple_binary() -> text:
+    val configured = rt_env_get("SIMPLE_BINARY") ?? ""
+    if configured != "":
+        return configured
+    "bin/simple"
+
+fn _short_title(title: text) -> text:
+    if title.len() <= 11:
+        return title
+    title.substring(0, 11)
+
+fn _draw_hosted_app_window(backend: CompositorBackend, win: HostWmWindow):
+    val title_color: u32 = if win.focused: 0xFF2B3762 else: 0xFF1B1F33
+    val border_color: u32 = if win.focused: 0xFF7184C5 else: 0xFF3A3E54
+    backend.fill_rect(win.x + 9, win.y + 12, win.w, win.h, 0x99000000)
+    backend.fill_rect(win.x, win.y, win.w, win.h, border_color)
+    backend.fill_rect(win.x + 1, win.y + 1, win.w - 2, win.h - 2, 0xFF101321)
+    backend.fill_rect(win.x + 1, win.y + 1, win.w - 2, 36, title_color)
+    backend.fill_rect(win.x + 1, win.y + 37, win.w - 2, 1, 0x334A5163)
+    backend.fill_rect(win.x + 13, win.y + 13, 10, 10, 0xFFFF5F57)
+    backend.fill_rect(win.x + 31, win.y + 13, 10, 10, 0xFFFFBD2E)
+    backend.fill_rect(win.x + 49, win.y + 13, 10, 10, 0xFF28C840)
+    backend.draw_text(win.x + 74, win.y + 10, win.title, 0xFFECEAF7, title_color)
+    backend.fill_rect(win.x + 18, win.y + 58, win.w - 36, 1, 0x224A5163)
+    val label = if win.app_id != "": win.app_id else: "hosted app"
+    backend.draw_text(win.x + 22, win.y + 76, label, 0xFFA9C7FF, 0xFF101321)
+    _draw_multiline_text(backend, win.x + 22, win.y + 112, win.content, win.w - 44, win.h - 128)
+
+fn _draw_multiline_text(backend: CompositorBackend, x: i32, y: i32, content: text, max_w: i32, max_h: i32):
+    var line = ""
+    var row: i32 = 0
+    var i = 0
+    val max_chars = if max_w > 0: max_w / 8 else: 0
+    while i < content.len() and row * 18 < max_h:
+        val ch = content.substring(i, i + 1)
+        if ch == "\n" or line.len() >= max_chars:
+            backend.draw_text(x, y + row * 18, line, 0xFFE1E6F7, 0xFF101321)
+            line = ""
+            row = row + 1
+        else:
+            line = line + ch
+        i = i + 1
+    if line != "" and row * 18 < max_h:
+        backend.draw_text(x, y + row * 18, line, 0xFFE1E6F7, 0xFF101321)
 
 fn _draw_shared_host_wm_frame(backend: CompositorBackend, width: i32, height: i32):
     """Render the Browser-hosted WM with the same visual model as Electron."""
@@ -178,15 +597,18 @@ class HostWmHandle:
                 return count
             count = count + 1
             val ev_type = rt_winit_event_get_type(ev)
-            rt_winit_event_free(ev)
             if ev_type == HOST_WM_EVENT_CLOSE:
+                rt_winit_event_free(ev)
                 self.wm.stop()
                 return count
+            self.compositor.handle_host_event(ev, ev_type)
+            rt_winit_event_free(ev)
         count
 
     me shutdown():
         """Stop the WM and release host handles owned by this bootstrap."""
         self.wm.stop()
+        self.compositor.shutdown_apps()
         if self.window_id != 0:
             rt_winit_window_free(self.window_id)
             self.window_id = 0
@@ -279,7 +701,7 @@ fn init_host_wm(config: HostWmConfig) -> HostWmHandle?:
         return nil
 
     if val b = backend:
-        val comp = HostCompositor.new(b, config.initial_size)
+        val comp = HostCompositor.new_hosted(b, config.initial_size)
         val wm = WmService.new()
         return HostWmHandle(compositor: comp, wm: wm, event_loop_id: event_loop_id, window_id: window_id)
     nil

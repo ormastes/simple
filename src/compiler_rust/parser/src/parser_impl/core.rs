@@ -44,7 +44,7 @@ pub struct Parser<'a> {
     pub(crate) current: Token,
     pub(crate) previous: Token,
     #[allow(dead_code)]
-    source: &'a str,
+    pub(crate) source: &'a str,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
@@ -522,7 +522,10 @@ impl<'a> Parser<'a> {
                 // asm volatile { ... }, asm volatile: ..., or asm volatile(...) -> volatile inline assembly
                 // asm = ... or asm.method() -> expression (variable named 'asm')
                 let next = self.peek_next();
-                if matches!(next.kind, TokenKind::Colon | TokenKind::LBrace | TokenKind::Match)
+                if matches!(
+                    next.kind,
+                    TokenKind::Colon | TokenKind::LBrace | TokenKind::LParen | TokenKind::Match
+                )
                     || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
                 {
                     self.parse_asm()
