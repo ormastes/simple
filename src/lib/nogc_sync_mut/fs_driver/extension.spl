@@ -9,6 +9,8 @@
 #
 # Source: doc/05_design/fs_driver_interface.md §4.
 
+use std.fs_driver.error.{FsError}
+
 # --- Extension handle structs (stubs; agents B/C/D fill in) ---
 
 struct SnapshotExt:
@@ -97,6 +99,63 @@ struct PosixCompatExt:
     flags: u32
     mode:  u32
 
+struct DirectIoBuffer:
+    """Caller-owned DMA descriptor accepted by DirectIoExt."""
+    cpu_virt_addr: u64
+    device_addr: u64
+    byte_len: u64
+    allocation_id: u64
+
+struct DirectIoExt:
+    """Handle for opt-in DMA-backed direct file/block I/O.
+
+    Direct I/O is never the default. Callers must probe DirectIo, pass a
+    caller-owned DMA descriptor, and satisfy sector/file alignment. Backends
+    that cannot safely issue direct requests return Unsupported rather than
+    silently copying through buffered I/O.
+    """
+    sector_alignment: u32
+    file_alignment: u32
+    max_io_bytes: u64
+    backend_tag: text
+    bounce_allowed: bool
+
+impl DirectIoExt:
+    fn validate_buffer(offset: i64, buf: DirectIoBuffer) -> Result<bool, FsError>:
+        if offset < 0:
+            return Err(FsError.InvalidArg)
+        if buf.cpu_virt_addr == 0 or buf.device_addr == 0 or buf.byte_len == 0:
+            return Err(FsError.InvalidArg)
+        if self.max_io_bytes > 0 and buf.byte_len > self.max_io_bytes:
+            return Err(FsError.TooLarge)
+        val sector = self.sector_alignment.to_u64()
+        val file = self.file_alignment.to_u64()
+        if sector == 0 or file == 0:
+            return Err(FsError.InvalidArg)
+        if (buf.byte_len % sector) != 0:
+            return Err(FsError.InvalidArg)
+        if ((offset as u64) % file) != 0:
+            return Err(FsError.InvalidArg)
+        if (buf.device_addr % sector) != 0:
+            return Err(FsError.InvalidArg)
+        Ok(true)
+
+    fn read_dma(handle_id: u64, offset: i64, buf: DirectIoBuffer) -> Result<i64, FsError>:
+        val valid = self.validate_buffer(offset, buf)
+        if val Err(e) = valid:
+            return Err(e)
+        if handle_id == 0:
+            return Err(FsError.InvalidArg)
+        Err(FsError.Unsupported)
+
+    fn write_dma(handle_id: u64, offset: i64, buf: DirectIoBuffer) -> Result<i64, FsError>:
+        val valid = self.validate_buffer(offset, buf)
+        if val Err(e) = valid:
+            return Err(e)
+        if handle_id == 0:
+            return Err(FsError.InvalidArg)
+        Err(FsError.Unsupported)
+
 # --- Extension enum ---
 
 enum Extension:
@@ -120,3 +179,4 @@ enum Extension:
     Quota(ext: QuotaExt)
     Reflink(ext: ReflinkExt)
     PosixCompat(ext: PosixCompatExt)
+    DirectIo(ext: DirectIoExt)

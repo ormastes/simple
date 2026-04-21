@@ -1,6 +1,8 @@
 use std.io.dma.{DmaBuffer, DmaDir, dma_alloc, dma_free,
                 dma_sync_for_device, dma_sync_for_cpu,
-                dma_cache_line_size}
+                dma_cache_line_size, DmaOwner, DmaCachePolicy,
+                SharedDmaBuffer, dma_buffer_to_shared,
+                dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use std.driver.error.{DriverError}
 
 fn test():
@@ -68,3 +70,38 @@ fn test():
             # so drivers can align hot structures. Fallback returns 64.
             val line: i64 = dma_cache_line_size()
             expect(line).to_equal(64)
+
+        it "canonical descriptor preserves owner, BDF, addresses, and policy":
+            val owner = DmaOwner(task_id: 42, bdf_bus: 0, bdf_device: 3, bdf_function: 0)
+            val legacy = DmaBuffer(virt: 0x1000, phys: 0x2000, size: 4096, handle: 7, dir: DmaDir.Bidirectional)
+            val shared = dma_buffer_to_shared(legacy, owner, DmaCachePolicy.FlushRequired, 99)
+            expect(shared.cpu_addr()).to_equal(0x1000)
+            expect(shared.phys_addr()).to_equal(0x2000)
+            expect(shared.device_visible_addr()).to_equal(0x2000)
+            expect(shared.len()).to_equal(4096)
+            expect(shared.is_owned_by(42)).to_equal(true)
+            expect(shared.matches_bdf(0, 3, 0)).to_equal(true)
+            expect(shared.allocation_id).to_equal(99)
+
+        it "shared sync helpers accept coherent and write-combining descriptors":
+            val owner = DmaOwner(task_id: 1, bdf_bus: 0, bdf_device: 1, bdf_function: 0)
+            val coherent = SharedDmaBuffer(
+                cpu_virt_addr: 0x3000,
+                host_phys_addr: 0x4000,
+                device_addr: 0x4000,
+                byte_len: 512,
+                cache_policy: DmaCachePolicy.Coherent,
+                owner: owner,
+                allocation_id: 1)
+            val wc = SharedDmaBuffer(
+                cpu_virt_addr: 0x5000,
+                host_phys_addr: 0x6000,
+                device_addr: 0x6000,
+                byte_len: 512,
+                cache_policy: DmaCachePolicy.WriteCombining,
+                owner: owner,
+                allocation_id: 2)
+            dma_shared_sync_cpu_to_device(coherent)
+            dma_shared_sync_device_to_cpu(wc)
+            expect(coherent.is_valid()).to_equal(true)
+            expect(wc.is_valid()).to_equal(true)

@@ -28,12 +28,12 @@ use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
 use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
-use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_NOTIFICATION, RES_IRQ_ROUTE}
+use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
 use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable}
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
@@ -58,6 +58,17 @@ val MAX_EXEC_TOTAL_STRING_BYTES: u64 = 32768
 val SYSCALL_EPERM: i64 = -1
 
 # Notification table is now shared via notif_global.spl (g_notification_table)
+
+val MAX_DMA_ALLOCS: u64 = 1024
+var dma_alloc_owner: [u64; 1024]
+var dma_alloc_virt: [u64; 1024]
+var dma_alloc_phys: [u64; 1024]
+var dma_alloc_size: [u64; 1024]
+var dma_alloc_device: [u64; 1024]
+var dma_alloc_cache_policy: [u8; 1024]
+var dma_alloc_id: [u64; 1024]
+var dma_alloc_active: [u8; 1024]
+var dma_alloc_next_id: u64 = 1
 
 fn _close_all_live_fds_with_backends() -> u32:
     """Close every live descriptor through the backend-aware POSIX path."""
@@ -489,11 +500,11 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             # token. The cap kind records that this is DMA authority.
             if not _cap_check(ipc, caller, CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 0, bdf_func: 0, max_bytes: args.arg0 as u64)):
                 return SyscallResult(value: SYSCALL_EPERM)
-            _handle_alloc_dma(args)
+            _handle_alloc_dma(args, caller)
         case 85:    # FreeDma
             if not _cap_check(ipc, caller, CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 0, bdf_func: 0, max_bytes: args.arg1 as u64)):
                 return SyscallResult(value: SYSCALL_EPERM)
-            _handle_free_dma(args)
+            _handle_free_dma(args, caller)
 
         # -- Logging ---------------------------------------------------------
         case 90:    # LogWrite
@@ -631,14 +642,18 @@ fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> Sys
     var sched = scheduler
     val exiting_task = sched.get_current()
 
-    # Step 1: Clean up kernel resources tracked by task_cleanup
+    # Step 1: Release DMA records first so the ownership table cannot retain
+    # stale live entries after task_cleanup unmaps resources.
+    _dma_release_task_allocs(exiting_task)
+
+    # Step 2: Clean up remaining kernel resources tracked by task_cleanup
     task_cleanup(exiting_task.id)
 
-    # Step 2: Revoke all capabilities held by this task
+    # Step 3: Revoke all capabilities held by this task
     var ipc_mgr = ipc
     ipc_mgr.cap_manager.revoke_all_for_task(exiting_task)
 
-    # Step 3: Close process descriptors for the current process lifecycle.
+    # Step 4: Close process descriptors for the current process lifecycle.
     _close_all_live_fds_with_backends()
 
     # Step 4: Mark as zombie in scheduler
@@ -2190,12 +2205,83 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
 
     SyscallResult(value: base_virt as i64)
 
-fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
+fn _dma_find_slot(virt_addr: u64) -> i64:
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] != 0 and dma_alloc_virt[i] == virt_addr:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _dma_register_alloc(owner: TaskId, virt_addr: u64, phys_addr: u64, size: u64, owner_device: u64, cache_policy: u8, allocation_id: u64) -> bool:
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] == 0:
+            dma_alloc_active[i] = 1
+            dma_alloc_owner[i] = owner.id
+            dma_alloc_virt[i] = virt_addr
+            dma_alloc_phys[i] = phys_addr
+            dma_alloc_size[i] = size
+            dma_alloc_device[i] = owner_device
+            dma_alloc_cache_policy[i] = cache_policy
+            dma_alloc_id[i] = allocation_id
+            return true
+        i = i + 1
+    false
+
+fn _dma_unregister_alloc(virt_addr: u64):
+    val idx = _dma_find_slot(virt_addr)
+    if idx < 0:
+        return
+    val i = idx.to_u64()
+    dma_alloc_active[i] = 0
+    dma_alloc_owner[i] = 0
+    dma_alloc_virt[i] = 0
+    dma_alloc_phys[i] = 0
+    dma_alloc_size[i] = 0
+    dma_alloc_device[i] = 0
+    dma_alloc_cache_policy[i] = 0
+    dma_alloc_id[i] = 0
+
+fn _dma_free_pages(virt_addr: u64, size: u64):
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: virt_addr + offset * PAGE_SIZE)
+        val pte = vmm_read_pte(virt)
+        if pte != 0:
+            val phys_addr = pte & PTE_ADDR_MASK
+            vmm_unmap_page(virt)
+            pmm_free_page(PageFrame.from_phys_addr(PhysAddr(addr: phys_addr)))
+        offset = offset + 1
+
+fn _dma_release_task_allocs(owner: TaskId):
+    """Release all live DMA records owned by a task before final cleanup."""
+    var i: u64 = 0
+    while i < MAX_DMA_ALLOCS:
+        if dma_alloc_active[i] != 0 and dma_alloc_owner[i] == owner.id:
+            val virt_addr = dma_alloc_virt[i]
+            val size = dma_alloc_size[i]
+            _dma_free_pages(virt_addr, size)
+            task_unregister_resource(owner.id, RES_DMA_BUFFER, virt_addr)
+            dma_alloc_active[i] = 0
+            dma_alloc_owner[i] = 0
+            dma_alloc_virt[i] = 0
+            dma_alloc_phys[i] = 0
+            dma_alloc_size[i] = 0
+            dma_alloc_device[i] = 0
+            dma_alloc_cache_policy[i] = 0
+            dma_alloc_id[i] = 0
+        i = i + 1
+
+fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     """Allocate a contiguous DMA buffer and map it into caller's address space.
 
     Protocol:
       arg0: size (bytes, should be page-aligned)
-      arg1: pointer to write result pair (phys_addr: u64, virt_addr: u64)
+      arg1: pointer to write result pair (phys_addr: u64, allocation_id: u64)
+      arg2: packed owner BDF (bus<<16 | dev<<8 | func), 0 for legacy callers
+      arg3: cache policy (0=coherent, 1=flush-required, 2=uncached, 3=WC)
     For no-IOMMU case: device_addr == host_phys_addr (identity).
     Returns the virtual address on success, -12 (ENOMEM) on allocation failure.
 
@@ -2203,6 +2289,10 @@ fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
     """
     val size = args.arg0 as u64
     val result_ptr = args.arg1 as u64
+    val owner_device = args.arg2 as u64
+    var cache_policy = args.arg3.to_u8()
+    if cache_policy > 3:
+        cache_policy = 0
 
     if size == 0 or size > 0x10000000:
         return SyscallResult(value: -22)  # EINVAL: empty or >256MB
@@ -2242,14 +2332,27 @@ fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
     # Advance bump allocator
     _next_mmap_addr = base_virt + page_count * PAGE_SIZE
 
-    # Write the (phys_addr, virt_addr) pair to caller memory
+    val allocation_id = dma_alloc_next_id
+    dma_alloc_next_id = dma_alloc_next_id + 1
+
+    # Write the (phys_addr, allocation_id) pair to caller memory
     # No-IOMMU: device_addr == host_phys_addr
     mmio_write64(result_ptr + 0, first_phys)
-    mmio_write64(result_ptr + 8, base_virt)
+    mmio_write64(result_ptr + 8, allocation_id)
+
+    val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
+    if not registered:
+        _dma_free_pages(base_virt, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)  # ENOMEM: tracking table full
+    val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
+    if not cleanup_tracked:
+        _dma_unregister_alloc(base_virt)
+        _dma_free_pages(base_virt, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)  # ENOMEM: task cleanup table full
 
     SyscallResult(value: base_virt as i64)
 
-fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
+fn _handle_free_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     """Free a DMA buffer by unmapping its pages.
 
     Protocol:
@@ -2262,6 +2365,7 @@ fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
     """
     val virt_addr = args.arg0 as u64
     val size = args.arg1 as u64
+    val owner_device = args.arg2 as u64
 
     if size == 0:
         return SyscallResult(value: -22)  # EINVAL
@@ -2270,13 +2374,20 @@ fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
     if not _is_userspace_ptr(virt_addr):
         return SyscallResult(value: -1)  # EPERM
 
-    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    val idx = _dma_find_slot(virt_addr)
+    if idx < 0:
+        return SyscallResult(value: -22)  # EINVAL: unknown allocation
+    val slot = idx.to_u64()
+    if dma_alloc_owner[slot] != caller.id:
+        return SyscallResult(value: -1)  # EPERM: wrong owner
+    if owner_device != 0 and dma_alloc_device[slot] != owner_device:
+        return SyscallResult(value: -1)  # EPERM: wrong device association
+    if dma_alloc_size[slot] != ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE:
+        return SyscallResult(value: -22)  # EINVAL: size mismatch
 
-    var offset: u64 = 0
-    while offset < page_count:
-        val virt = VirtAddr(addr: virt_addr + offset * PAGE_SIZE)
-        vmm_unmap_page(virt)
-        offset = offset + 1
+    _dma_free_pages(virt_addr, dma_alloc_size[slot])
+    _dma_unregister_alloc(virt_addr)
+    task_unregister_resource(caller.id, RES_DMA_BUFFER, virt_addr)
 
     SyscallResult(value: 0)
 

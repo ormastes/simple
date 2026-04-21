@@ -1,0 +1,98 @@
+#!/bin/sh
+# Verify npm MCP packages point at existing GitHub bootstrap assets.
+
+set -eu
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="${SIMPLE_RELEASE_REPO:-ormastes/simple}"
+
+node - "$PROJECT_ROOT" "$REPO" "$@" <<'NODE'
+const fs = require('fs');
+const https = require('https');
+const os = require('os');
+const path = require('path');
+
+const root = process.argv[2];
+const repo = process.argv[3];
+const requestedDirs = process.argv.slice(4);
+
+function platformName() {
+  const platform = os.platform();
+  const arch = os.arch();
+  if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
+  if (platform === 'linux' && arch === 'arm64') return 'linux-aarch64';
+  if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
+  if (platform === 'darwin' && arch === 'arm64') return 'darwin-arm64';
+  if (platform === 'win32' && arch === 'x64') return 'windows-x86_64';
+  if (platform === 'win32' && arch === 'arm64') return 'windows-aarch64';
+  if (platform === 'freebsd' && arch === 'x64') return 'freebsd-x86_64';
+  throw new Error(`unsupported platform: ${platform}-${arch}`);
+}
+
+function readPackage(rel) {
+  return JSON.parse(fs.readFileSync(path.join(root, rel, 'package.json'), 'utf8'));
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'simple-mcp-release-asset-check' } }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => body += chunk);
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`HTTP ${response.statusCode}: ${url}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function main() {
+  const platform = platformName();
+  const knownPackages = [
+    ['tools/mcp-registry', '@simple-lang/mcp-server'],
+    ['tools/lsp-mcp-registry', '@simple-lang/lsp-mcp-server'],
+  ];
+  const requested = requestedDirs.length > 0
+    ? knownPackages.filter(([rel]) => requestedDirs.includes(rel))
+    : knownPackages;
+  if (requested.length === 0) {
+    throw new Error(`no supported MCP package dirs requested: ${requestedDirs.join(', ')}`);
+  }
+  let failed = false;
+
+  for (const [rel, label] of requested) {
+    const pkg = readPackage(rel);
+    const version = pkg.runtimeVersion || pkg.version;
+    const asset = `simple-bootstrap-${version}-${platform}.spk`;
+    const url = `https://api.github.com/repos/${repo}/releases/tags/v${version}`;
+    try {
+      const release = await fetchJson(url);
+      const found = Array.isArray(release.assets) && release.assets.some(a => a.name === asset);
+      if (found) {
+        console.log(`[OK] ${label} runtime asset exists: v${version}/${asset}`);
+      } else {
+        console.error(`[FAIL] ${label} missing runtime asset: v${version}/${asset}`);
+        failed = true;
+      }
+    } catch (err) {
+      console.error(`[FAIL] ${label} release lookup failed for v${version}: ${err.message}`);
+      failed = true;
+    }
+  }
+
+  if (failed) process.exit(1);
+}
+
+main().catch((err) => {
+  console.error(`[FAIL] ${err.message}`);
+  process.exit(1);
+});
+NODE

@@ -22,12 +22,16 @@ describe "netstack TCP socket lifecycle":
         val connecting = table.get_socket(fd).unwrap()
         expect(socket_state_name(connecting.state)).to_equal("CONNECTING")
         expect(connecting.conn_id).to_equal(42u64)
+        expect(table.connect_status(fd)).to_equal("in-progress")
+        expect(table.is_write_ready(fd)).to_equal(false)
 
         expect(table.mark_connected_by_conn(42u64)).to_equal(true)
 
         val connected = table.get_socket(fd).unwrap()
         expect(socket_state_name(connected.state)).to_equal("CONNECTED")
         expect(connected.conn_id).to_equal(42u64)
+        expect(table.connect_status(fd)).to_equal("established")
+        expect(table.is_write_ready(fd)).to_equal(true)
 
         match table.send(fd, [1u8, 2u8]):
             Ok(n): expect(n).to_equal(0u64)
@@ -65,3 +69,22 @@ describe "netstack TCP socket lifecycle":
         expect(tcp_state_name(conn.state)).to_equal("ESTABLISHED")
         expect(replies.len()).to_equal(1u64)
         expect(replies[0].header.flags & TCP_FLAG_ACK).to_equal(TCP_FLAG_ACK)
+
+    it "records refused and timeout connect completion separately":
+        var table = SocketTable.new()
+        val fd_refused = table.create(SocketProtocol.Tcp)
+        val fd_timeout = table.create(SocketProtocol.Tcp)
+        val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
+        val local = SockAddr(ip: Ipv4Address.from_u32(0x0A00020Fu32), port: 49152u16)
+
+        check_ok(table.connect(fd_refused, remote))
+        table.attach_connecting(fd_refused, local, 43u64)
+        expect(table.mark_connect_failed_by_conn(43u64, "refused")).to_equal(true)
+        expect(table.connect_status(fd_refused)).to_equal("refused")
+        expect(table.is_write_ready(fd_refused)).to_equal(false)
+
+        check_ok(table.connect(fd_timeout, remote))
+        table.attach_connecting(fd_timeout, local, 44u64)
+        expect(table.mark_connect_failed_by_conn(44u64, "timeout")).to_equal(true)
+        expect(table.connect_status(fd_timeout)).to_equal("timeout")
+        expect(table.is_write_ready(fd_timeout)).to_equal(false)

@@ -39,6 +39,15 @@ enum DmaDir:
     FromDevice      # device writes, CPU reads (invalidate required)
     Bidirectional   # both (clean + invalidate)
 
+# Cache policy advertised for a DMA mapping. Coherent platforms may map all
+# three sync helpers to barriers/no-ops, but callers still carry the policy so
+# non-coherent backends do not silently assume write-back memory.
+enum DmaCachePolicy:
+    Coherent
+    FlushRequired
+    Uncached
+    WriteCombining
+
 # Buffer descriptor. Held by the driver for the lifetime of the DMA.
 struct DmaBuffer:
     virt:   i64     # CPU-visible address
@@ -46,6 +55,45 @@ struct DmaBuffer:
     size:   i64     # bytes
     handle: i64     # opaque runtime handle, passed back to rt_dma_free
     dir:    DmaDir
+
+struct DmaOwner:
+    """Ownership identity attached to a DMA descriptor."""
+    task_id: u64
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_function: u8
+
+struct SharedDmaBuffer:
+    """Canonical DMA descriptor shared by drivers and direct-I/O callers."""
+    cpu_virt_addr: u64
+    host_phys_addr: u64
+    device_addr: u64
+    byte_len: u64
+    cache_policy: DmaCachePolicy
+    owner: DmaOwner
+    allocation_id: u64
+
+impl SharedDmaBuffer:
+    fn cpu_addr() -> u64:
+        self.cpu_virt_addr
+
+    fn phys_addr() -> u64:
+        self.host_phys_addr
+
+    fn device_visible_addr() -> u64:
+        self.device_addr
+
+    fn len() -> u64:
+        self.byte_len
+
+    fn is_valid() -> bool:
+        self.cpu_virt_addr != 0 and self.host_phys_addr != 0 and self.device_addr != 0 and self.byte_len > 0
+
+    fn is_owned_by(task_id: u64) -> bool:
+        self.owner.task_id == task_id
+
+    fn matches_bdf(bus: u8, device: u8, function: u8) -> bool:
+        self.owner.bdf_bus == bus and self.owner.bdf_device == device and self.owner.bdf_function == function
 
 # --- Runtime hooks (per-arch impls live in src/runtime/baremetal) ---
 
@@ -81,6 +129,18 @@ fn dma_alloc(size: i64, dir: DmaDir) -> Result<DmaBuffer, DriverError>:
     val p: i64 = rt_dma_phys_of(h)
     return Result.Ok(DmaBuffer(virt: v, phys: p, size: size, handle: h, dir: dir))
 
+fn dma_buffer_to_shared(buf: DmaBuffer, owner: DmaOwner, policy: DmaCachePolicy, allocation_id: u64) -> SharedDmaBuffer:
+    """Promote the legacy DmaBuffer shape into the canonical descriptor."""
+    SharedDmaBuffer(
+        cpu_virt_addr: buf.virt as u64,
+        host_phys_addr: buf.phys as u64,
+        device_addr: buf.phys as u64,
+        byte_len: buf.size as u64,
+        cache_policy: policy,
+        owner: owner,
+        allocation_id: allocation_id
+    )
+
 fn dma_free(buf: DmaBuffer):
     rt_dma_free(buf.handle)
 
@@ -92,6 +152,20 @@ fn dma_sync_for_device(buf: DmaBuffer):
 fn dma_sync_for_cpu(buf: DmaBuffer):
     val dir_raw: i32 = dir_to_raw(buf.dir)
     rt_dma_sync_for_cpu(buf.handle, dir_raw)
+    load_barrier()
+
+fn dma_shared_sync_cpu_to_device(buf: SharedDmaBuffer):
+    store_barrier()
+    if buf.cache_policy == DmaCachePolicy.Coherent:
+        memory_barrier()
+    else:
+        memory_barrier()
+
+fn dma_shared_sync_device_to_cpu(buf: SharedDmaBuffer):
+    if buf.cache_policy == DmaCachePolicy.Coherent:
+        memory_barrier()
+    else:
+        memory_barrier()
     load_barrier()
 
 fn dir_to_raw(d: DmaDir) -> i32:

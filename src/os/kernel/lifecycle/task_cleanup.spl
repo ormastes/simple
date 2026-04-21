@@ -11,9 +11,9 @@
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.notification.{notification_destroy}
 use os.kernel.interrupts.irq_routing.{irq_route_unregister}
-use os.kernel.memory.vmm.{vmm_unmap_page, PAGE_SIZE}
+use os.kernel.memory.vmm.{vmm_unmap_page, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_free_page}
-use os.kernel.types.memory_types.{PageFrame, VirtAddr}
+use os.kernel.types.memory_types.{PageFrame, PhysAddr, VirtAddr}
 use os.kernel.types.task_types.{TaskId}
 
 extern fn serial_println(msg: text)
@@ -73,6 +73,27 @@ fn task_register_resource(task_id: u64, res_type: u8, res_id: u64, aux: u64) -> 
     task_res_aux[idx] = aux
     task_res_count[task_id] = count + 1
     true
+
+fn task_unregister_resource(task_id: u64, res_type: u8, res_id: u64) -> bool:
+    """Remove one tracked resource after an explicit close/free."""
+    if task_id >= MAX_TASKS:
+        return false
+    val count = task_res_count[task_id]
+    var i: u64 = 0
+    while i < count:
+        val idx = task_id * MAX_RESOURCES_PER_TASK + i
+        if task_res_type[idx] == res_type and task_res_id[idx] == res_id:
+            val last_idx = task_id * MAX_RESOURCES_PER_TASK + count - 1
+            task_res_type[idx] = task_res_type[last_idx]
+            task_res_id[idx] = task_res_id[last_idx]
+            task_res_aux[idx] = task_res_aux[last_idx]
+            task_res_type[last_idx] = RES_NONE
+            task_res_id[last_idx] = 0
+            task_res_aux[last_idx] = 0
+            task_res_count[task_id] = count - 1
+            return true
+        i = i + 1
+    false
 
 # ============================================================================
 # Task Cleanup
@@ -150,14 +171,11 @@ fn _unmap_and_free_pages(virt_base: u64, size: u64):
     var offset: u64 = 0
     while offset < size:
         val vaddr = VirtAddr(addr: virt_base + offset)
-        # Unmap returns the physical frame info via the page table entry.
-        # For simplicity, we unmap first; the PMM tracks free frames separately.
-        vmm_unmap_page(vaddr)
-        # Free the physical page frame. The frame address is virt_base + offset
-        # only for identity-mapped DMA regions; for non-identity mappings the
-        # kernel would need to walk the page table. Phase 1 assumes identity map.
-        val frame = PageFrame(addr: virt_base + offset)
-        pmm_free_page(frame)
+        val pte = vmm_read_pte(vaddr)
+        if pte != 0:
+            val phys_addr = pte & PTE_ADDR_MASK
+            vmm_unmap_page(vaddr)
+            pmm_free_page(PageFrame.from_phys_addr(PhysAddr(addr: phys_addr)))
         offset = offset + PAGE_SIZE
 
 fn task_resource_count(task_id: u64) -> u64:

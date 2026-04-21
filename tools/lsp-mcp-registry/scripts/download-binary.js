@@ -13,6 +13,7 @@ const { execSync } = require('child_process');
 const pkg = require('../package.json');
 const VERSION = pkg.runtimeVersion || pkg.version;
 const REPO = 'ormastes/simple';
+const REQUIRED_DOWNLOAD = process.env.SIMPLE_MCP_DOWNLOAD_REQUIRED === '1';
 
 function getPlatform() {
   const platform = os.platform();
@@ -130,9 +131,11 @@ async function main() {
     console.log(`Installed Simple runtime to ${nativeDir}`);
   } catch (err) {
     console.warn(`Warning: Could not download runtime: ${err.message}`);
-    console.warn('The MCP server will look for "simple" in PATH.');
     console.warn('Build from source: https://github.com/ormastes/simple');
-    // Don't fail the install
+    console.warn('The MCP server will look for "simple" in PATH.');
+    if (REQUIRED_DOWNLOAD) {
+      process.exitCode = 1;
+    }
   }
 }
 

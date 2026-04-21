@@ -65,6 +65,7 @@ struct OsSocket:
     remote_addr: SockAddr?
     state: SocketState
     conn_id: u64           # TCP connection ID (index into netstack connections)
+    connect_status: text   # idle|in-progress|established|refused|timeout|unreachable
     active: bool           # Whether this socket slot is in use
 
     # TCP listener state
@@ -96,7 +97,7 @@ impl SocketTable:
             fd: fd, protocol: protocol,
             local_addr: nil, remote_addr: nil,
             state: SocketState.Unbound,
-            conn_id: 0, active: true,
+            conn_id: 0, connect_status: "idle", active: true,
             backlog: 0, accept_queue: []
         ))
 
@@ -122,6 +123,7 @@ impl SocketTable:
             remote_addr: self.sockets[i].remote_addr,
             state: SocketState.Bound,
             conn_id: self.sockets[i].conn_id,
+            connect_status: self.sockets[i].connect_status,
             active: true,
             backlog: self.sockets[i].backlog,
             accept_queue: self.sockets[i].accept_queue
@@ -147,6 +149,7 @@ impl SocketTable:
             remote_addr: self.sockets[i].remote_addr,
             state: SocketState.Listening,
             conn_id: self.sockets[i].conn_id,
+            connect_status: self.sockets[i].connect_status,
             active: true,
             backlog: backlog,
             accept_queue: []
@@ -174,7 +177,7 @@ impl SocketTable:
                 fd: sock.fd, protocol: sock.protocol,
                 local_addr: sock.local_addr, remote_addr: addr,
                 state: SocketState.Connecting,
-                conn_id: sock.conn_id, active: true,
+                conn_id: sock.conn_id, connect_status: "in-progress", active: true,
                 backlog: sock.backlog, accept_queue: sock.accept_queue
             )
         else:
@@ -183,7 +186,7 @@ impl SocketTable:
                 fd: sock.fd, protocol: sock.protocol,
                 local_addr: sock.local_addr, remote_addr: addr,
                 state: SocketState.Connected,
-                conn_id: sock.conn_id, active: true,
+                conn_id: sock.conn_id, connect_status: "established", active: true,
                 backlog: sock.backlog, accept_queue: sock.accept_queue
             )
 
@@ -204,7 +207,7 @@ impl SocketTable:
             fd: sock.fd, protocol: sock.protocol,
             local_addr: sock.local_addr, remote_addr: sock.remote_addr,
             state: SocketState.Connected,
-            conn_id: conn_id, active: true,
+            conn_id: conn_id, connect_status: "established", active: true,
             backlog: sock.backlog, accept_queue: sock.accept_queue
         )
 
@@ -220,7 +223,7 @@ impl SocketTable:
             fd: sock.fd, protocol: sock.protocol,
             local_addr: local, remote_addr: sock.remote_addr,
             state: SocketState.Connecting,
-            conn_id: conn_id, active: true,
+            conn_id: conn_id, connect_status: "in-progress", active: true,
             backlog: sock.backlog, accept_queue: sock.accept_queue
         )
 
@@ -234,7 +237,24 @@ impl SocketTable:
                     fd: sock.fd, protocol: sock.protocol,
                     local_addr: sock.local_addr, remote_addr: sock.remote_addr,
                     state: SocketState.Connected,
-                    conn_id: conn_id, active: true,
+                    conn_id: conn_id, connect_status: "established", active: true,
+                    backlog: sock.backlog, accept_queue: sock.accept_queue
+                )
+                return true
+            i = i + 1
+        false
+
+    me mark_connect_failed_by_conn(conn_id: u64, status: text) -> bool:
+        """Mark the connecting socket for conn_id as failed."""
+        var i: u64 = 0
+        while i < self.sockets.len():
+            val sock = self.sockets[i]
+            if sock.active and sock.conn_id == conn_id and _is_socket_state(sock.state, SocketState.Connecting):
+                self.sockets[i] = OsSocket(
+                    fd: sock.fd, protocol: sock.protocol,
+                    local_addr: sock.local_addr, remote_addr: sock.remote_addr,
+                    state: SocketState.Closed,
+                    conn_id: conn_id, connect_status: status, active: false,
                     backlog: sock.backlog, accept_queue: sock.accept_queue
                 )
                 return true
@@ -278,6 +298,7 @@ impl SocketTable:
             fd: sock.fd, protocol: sock.protocol,
             local_addr: sock.local_addr, remote_addr: sock.remote_addr,
             state: sock.state, conn_id: sock.conn_id,
+            connect_status: sock.connect_status,
             active: true, backlog: sock.backlog,
             accept_queue: new_queue
         )
@@ -289,7 +310,7 @@ impl SocketTable:
             fd: new_fd, protocol: SocketProtocol.Tcp,
             local_addr: sock.local_addr, remote_addr: nil,
             state: SocketState.Connected,
-            conn_id: conn_id, active: true,
+            conn_id: conn_id, connect_status: "established", active: true,
             backlog: 0, accept_queue: []
         ))
 
@@ -339,7 +360,7 @@ impl SocketTable:
             fd: sock.fd, protocol: sock.protocol,
             local_addr: sock.local_addr, remote_addr: sock.remote_addr,
             state: SocketState.Closed,
-            conn_id: sock.conn_id, active: false,
+            conn_id: sock.conn_id, connect_status: sock.connect_status, active: false,
             backlog: 0, accept_queue: []
         )
         Ok(true)
@@ -361,6 +382,33 @@ impl SocketTable:
                 return self.sockets[i].conn_id
             i = i + 1
         0
+
+    fn connect_status(fd: i32) -> text:
+        """Return TCP connect completion status for tests and POSIX wrappers."""
+        var i: u64 = 0
+        while i < self.sockets.len():
+            if self.sockets[i].fd == fd:
+                return self.sockets[i].connect_status
+            i = i + 1
+        "invalid"
+
+    fn connect_status_by_conn(conn_id: u64) -> text:
+        """Return connect completion status by TCP connection id."""
+        var i: u64 = 0
+        while i < self.sockets.len():
+            if self.sockets[i].conn_id == conn_id:
+                return self.sockets[i].connect_status
+            i = i + 1
+        "invalid"
+
+    fn is_write_ready(fd: i32) -> bool:
+        """Write readiness for sockets is true only after establishment."""
+        var i: u64 = 0
+        while i < self.sockets.len():
+            if self.sockets[i].active and self.sockets[i].fd == fd:
+                return _is_socket_state(self.sockets[i].state, SocketState.Connected)
+            i = i + 1
+        false
 
     fn find_listener(port: u16) -> OsSocket?:
         """Find a listening socket bound to the given port."""

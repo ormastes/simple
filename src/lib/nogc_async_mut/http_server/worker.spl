@@ -31,6 +31,7 @@ while not shutdown:
 """
 
 use std.io.driver.{IoDriver}
+use std.io.net_backend.{NetBackendCapabilities, net_backend_summary}
 use std.io.event_loop.{EventLoop, Waker}
 use std.net.ffi.{
     rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_local_addr,
@@ -57,11 +58,14 @@ use std.http_server.error.{HttpServerError}
 
 # Time FFI
 extern fn rt_time_now_ms() -> i64
+extern fn rt_file_read_text(path: text) -> text
 
 # Completion type constants
 val OP_RECV = 1
 val OP_SEND = 2
 val OP_SENDFILE = 3
+val OP_OPEN_SENDFILE = 4
+val OP_CLOSE_SENDFILE = 5
 
 # ============================================================================
 # Worker
@@ -76,11 +80,14 @@ class Worker:
     """
     worker_id: i64
     driver: IoDriver
+    net_capabilities: NetBackendCapabilities
+    net_backend_summary: text
     listener_fd: i64
     connections: Dict<i64, Connection>
     op_to_fd: Dict<i64, i64>
     op_type: Dict<i64, i64>
     sendfile_pending: Dict<i64, (text, i64, i64)>
+    sendfile_open_files: Dict<i64, i64>
     router: AsyncRouter
     pipeline: MiddlewarePipeline
     handler_registry: HandlerRegistry
@@ -89,6 +96,8 @@ class Worker:
     active_count: i64
     shutdown_requested: bool
     accept_op_id: i64
+    static_file_sendfile_count: i64
+    static_file_fallback_count: i64
 
     static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
@@ -108,6 +117,8 @@ class Worker:
             Initialized Worker or BindFailed error
         """
         val driver = IoDriver.new()
+        val caps = driver.net_capabilities()
+        val backend_summary = net_backend_summary(caps)
 
         val listen_fd = rt_io_tcp_bind(config.listen_addr)
         if listen_fd < 0:
@@ -122,11 +133,14 @@ class Worker:
         Ok(Worker(
             worker_id: worker_id,
             driver: driver,
+            net_capabilities: caps,
+            net_backend_summary: backend_summary,
             listener_fd: listen_fd,
             connections: {},
             op_to_fd: {},
             op_type: {},
             sendfile_pending: {},
+            sendfile_open_files: {},
             router: router,
             pipeline: pipeline,
             handler_registry: handler_registry,
@@ -134,7 +148,9 @@ class Worker:
             control: control,
             active_count: 0,
             shutdown_requested: false,
-            accept_op_id: 0
+            accept_op_id: 0,
+            static_file_sendfile_count: 0,
+            static_file_fallback_count: 0
         ))
 
     me run():
@@ -223,6 +239,11 @@ class Worker:
         self.op_type.remove(op_id)
 
         if result < 0:
+            if typ == OP_SENDFILE:
+                val open_file = self.sendfile_open_files.get(fd)
+                if open_file.?:
+                    self.driver.submit_close(open_file)
+                    self.sendfile_open_files.remove(fd)
             self.close_connection(fd)
             return
 
@@ -242,13 +263,36 @@ class Worker:
                 val offset = pending.1
                 val length = pending.2
                 self.sendfile_pending.remove(fd)
-                val sf_op = self.driver.submit_open(file_path, 0, 0)
-                self.op_to_fd[sf_op] = fd
-                self.op_type[sf_op] = OP_SENDFILE
+                val open_op = self.driver.submit_open(file_path, 0, 0)
+                self.op_to_fd[open_op] = fd
+                self.op_type[open_op] = OP_OPEN_SENDFILE
             else:
                 self.handle_send_complete(fd, now)
 
+        elif typ == OP_OPEN_SENDFILE:
+            val pending = self.sendfile_pending.get(fd)
+            if not pending.?:
+                self.driver.submit_close(result)
+                self.close_connection(fd)
+                return
+            val offset = pending.1
+            val length = pending.2
+            self.sendfile_open_files[fd] = result
+            val sf_op = self.driver.submit_sendfile(fd, result, offset, length)
+            self.op_to_fd[sf_op] = fd
+            self.op_type[sf_op] = OP_SENDFILE
+
         elif typ == OP_SENDFILE:
+            val open_file = self.sendfile_open_files.get(fd)
+            if open_file.?:
+                self.sendfile_open_files.remove(fd)
+                val close_op = self.driver.submit_close(open_file)
+                self.op_to_fd[close_op] = fd
+                self.op_type[close_op] = OP_CLOSE_SENDFILE
+            else:
+                self.handle_send_complete(fd, now)
+
+        elif typ == OP_CLOSE_SENDFILE:
             self.handle_send_complete(fd, now)
 
     me handle_recv(fd: i64, data: text, now: i64):
@@ -375,16 +419,23 @@ class Worker:
         if not conn.?:
             return
 
+        var response = resp
+        if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
+            response = worker_static_file_fallback_response(resp)
+            self.static_file_fallback_count = self.static_file_fallback_count + 1
+        elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
+            self.static_file_sendfile_count = self.static_file_sendfile_count + 1
+
         var c = conn
         val keepalive_s = self.config.keepalive_timeout_ms / 1000
-        c.set_response(resp, keepalive_s)
+        c.set_response(response, keepalive_s)
         self.connections[fd] = c
 
         val bytes = c.get_response_bytes()
 
-        if resp.body_file.len() > 0:
+        if worker_static_file_route(self.net_capabilities, response) == "sendfile":
             # Send headers first, then chain sendfile on completion
-            self.sendfile_pending[fd] = (resp.body_file, resp.body_offset, resp.body_length)
+            self.sendfile_pending[fd] = (response.body_file, response.body_offset, response.body_length)
             val op = self.driver.submit_send(fd, bytes)
             self.op_to_fd[op] = fd
             self.op_type[op] = OP_SEND
@@ -429,3 +480,25 @@ class Worker:
 
         for fd in to_close:
             self.close_connection(fd)
+
+fn worker_static_file_route(caps: NetBackendCapabilities, resp: HttpResponseData) -> text:
+    """Return the worker route for a response body."""
+    if resp.body_file.len() == 0:
+        return "body"
+    if caps.supports_sendfile:
+        return "sendfile"
+    "portable-read"
+
+fn worker_static_file_fallback_response(resp: HttpResponseData) -> HttpResponseData:
+    """Convert a body_file hint into a portable in-memory response."""
+    val body = rt_file_read_text(resp.body_file)
+    HttpResponseData(
+        status: resp.status,
+        reason: resp.reason,
+        headers: resp.headers,
+        body: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: resp.chunked
+    )

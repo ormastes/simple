@@ -681,6 +681,43 @@ jobs:
             echo "ℹ Creating source-only package (no binary available for ${PLATFORM})"
           fi
 
+          # Build and package native MCP entrypoints for host-native jobs.
+          # npm launchers prefer these binaries so installed packages do not
+          # depend on parsing bundled MCP source with a drifted bootstrap.
+          MCP_STAGE_DIR="build/bootstrap/mcp-package"
+          mkdir -p "${MCP_STAGE_DIR}"
+          if [ "${HAVE_BOOTSTRAP:-false}" = "true" ] && [ -n "${BINARY_TO_PACKAGE}" ] && [ -x "${BINARY_TO_PACKAGE}" ] && [ "${{ matrix.cross_compile || false }}" != "true" ]; then
+            for mcp_entry in "simple_mcp_server:src/app/mcp/main.spl" "simple_lsp_mcp_server:src/app/simple_lsp_mcp/main.spl"; do
+              mcp_name="${mcp_entry%%:*}"
+              mcp_spl="${mcp_entry#*:}"
+              if [[ "$PLATFORM" == windows-* ]]; then
+                mcp_out="${MCP_STAGE_DIR}/${mcp_name}.exe"
+                mcp_bin="${mcp_name}.exe"
+              else
+                mcp_out="${MCP_STAGE_DIR}/${mcp_name}"
+                mcp_bin="${mcp_name}"
+              fi
+              echo "Building native ${mcp_name} for bootstrap package"
+              if RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+                "$BINARY_TO_PACKAGE" native-build \
+                --source src/compiler \
+                --source src/app \
+                --source src/lib \
+                --entry-closure \
+                --entry "${mcp_spl}" \
+                --output "${mcp_out}" \
+                2>&1; then
+                chmod +x "${mcp_out}"
+                cp "${mcp_out}" "${PKG_DIR}/bin/${mcp_bin}"
+                echo "✓ Copied ${mcp_name} → bin/${mcp_bin}"
+              else
+                echo "⚠ ${mcp_name} native build failed; source fallback remains available"
+              fi
+            done
+          else
+            echo "ℹ Skipping native MCP package binaries for ${PLATFORM}"
+          fi
+
           # Copy Simple source code (100% visible to users)
           echo "✓ Copying Simple source code"
           cp -r lib "${PKG_DIR}/" 2>/dev/null || true

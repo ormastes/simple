@@ -20,7 +20,8 @@ use std.sspec.*
 use std.fs_driver.extension.{
     Extension,
     SnapshotExt, DedupExt, ChecksumExt, SendRecvExt, ScrubExt,
-    CompressExt, EncryptExt, QuotaExt, ReflinkExt, PosixCompatExt
+    CompressExt, EncryptExt, QuotaExt, ReflinkExt, PosixCompatExt,
+    DirectIoExt, DirectIoBuffer
 }
 
 
@@ -144,3 +145,49 @@ describe "Extension — PosixCompat variant":
                 expect(e.flags).to_equal(0)
                 expect(e.mode).to_equal(420)
             case _: expect(false).to_equal(true)
+
+
+describe "Extension — DirectIo variant":
+    """
+    ## Direct I/O handle
+
+    Extension.DirectIo wraps DirectIoExt with explicit alignment and backend
+    capability metadata. The default methods validate DMA descriptor alignment
+    and fail closed with Unsupported unless a backend provides a real path.
+    """
+
+    it "DirectIo variant stores alignment metadata":
+        val ext = Extension.DirectIo(ext: DirectIoExt(
+            sector_alignment: 512,
+            file_alignment: 512,
+            max_io_bytes: 4096,
+            backend_tag: "nvme",
+            bounce_allowed: false))
+        match ext:
+            case DirectIo(e):
+                expect(e.sector_alignment).to_equal(512)
+                expect(e.backend_tag).to_equal("nvme")
+                expect(e.bounce_allowed).to_equal(false)
+            case _: expect(false).to_equal(true)
+
+    it "DirectIo validates aligned caller-owned DMA buffers":
+        val ext = DirectIoExt(
+            sector_alignment: 512,
+            file_alignment: 512,
+            max_io_bytes: 4096,
+            backend_tag: "virtio-blk",
+            bounce_allowed: false)
+        val buf = DirectIoBuffer(cpu_virt_addr: 0x1000, device_addr: 0x2000, byte_len: 1024, allocation_id: 5)
+        val result = ext.validate_buffer(1024, buf)
+        expect(result.is_ok()).to_equal(true)
+
+    it "DirectIo rejects unaligned offsets instead of silently copying":
+        val ext = DirectIoExt(
+            sector_alignment: 512,
+            file_alignment: 512,
+            max_io_bytes: 4096,
+            backend_tag: "virtio-blk",
+            bounce_allowed: false)
+        val buf = DirectIoBuffer(cpu_virt_addr: 0x1000, device_addr: 0x2000, byte_len: 1024, allocation_id: 5)
+        val result = ext.validate_buffer(7, buf)
+        expect(result.is_err()).to_equal(true)

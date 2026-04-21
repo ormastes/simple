@@ -37,6 +37,34 @@ impl Color:
     static fn dark_gray() -> Color: Color.rgb(64, 64, 64)
     static fn light_gray() -> Color: Color.rgb(192, 192, 192)
 
+struct DamageRect:
+    """Exclusive-end framebuffer damage rectangle."""
+    x1: u32
+    y1: u32
+    x2: u32
+    y2: u32
+    valid: bool
+
+impl DamageRect:
+    fn width() -> u32:
+        if not self.valid or self.x2 <= self.x1:
+            return 0
+        self.x2 - self.x1
+
+    fn height() -> u32:
+        if not self.valid or self.y2 <= self.y1:
+            return 0
+        self.y2 - self.y1
+
+struct FramebufferCapabilities:
+    """Display backend capability summary for compositor selection."""
+    backend_kind: text
+    width: u32
+    height: u32
+    bpp: u32
+    flush_mode: text
+    cache_policy: text
+
 # ============================================================================
 # Framebuffer Driver
 # ============================================================================
@@ -62,6 +90,10 @@ class FramebufferDriver:
     pitch: u32              # Bytes per scanline
     bpp: u32                # Bits per pixel
     dirty: bool             # Buffer has changes
+    dirty_x1: u32
+    dirty_y1: u32
+    dirty_x2: u32
+    dirty_y2: u32
 
 impl FramebufferDriver:
 
@@ -75,7 +107,11 @@ impl FramebufferDriver:
             height: 0,
             pitch: 0,
             bpp: 0,
-            dirty: false
+            dirty: false,
+            dirty_x1: 0,
+            dirty_y1: 0,
+            dirty_x2: 0,
+            dirty_y2: 0
         )
 
     static fn from_boot_info(fb: FramebufferInfo) -> FramebufferDriver:
@@ -92,7 +128,11 @@ impl FramebufferDriver:
             height: fb.height,
             pitch: fb.pitch,
             bpp: fb.bpp,
-            dirty: false
+            dirty: false,
+            dirty_x1: 0,
+            dirty_y1: 0,
+            dirty_x2: 0,
+            dirty_y2: 0
         )
 
     static fn from_buffer(width: u32, height: u32) -> FramebufferDriver:
@@ -119,7 +159,11 @@ impl FramebufferDriver:
             height: height,
             pitch: width * 4,
             bpp: 32,
-            dirty: false
+            dirty: false,
+            dirty_x1: 0,
+            dirty_y1: 0,
+            dirty_x2: 0,
+            dirty_y2: 0
         )
 
     fn is_host_backed() -> bool:
@@ -135,6 +179,65 @@ impl FramebufferDriver:
         """
         self.host_buffer
 
+    me mark_dirty_rect(x: u32, y: u32, w: u32, h: u32):
+        """Record framebuffer damage using exclusive-end coordinates."""
+        if w == 0 or h == 0 or self.width == 0 or self.height == 0:
+            return
+        if x >= self.width or y >= self.height:
+            return
+        var x2_u = x.to_u64() + w.to_u64()
+        var y2_u = y.to_u64() + h.to_u64()
+        if x2_u > self.width.to_u64():
+            x2_u = self.width.to_u64()
+        if y2_u > self.height.to_u64():
+            y2_u = self.height.to_u64()
+        val x2 = x2_u.to_u32()
+        val y2 = y2_u.to_u32()
+        if x2 <= x or y2 <= y:
+            return
+        if not self.dirty:
+            self.dirty_x1 = x
+            self.dirty_y1 = y
+            self.dirty_x2 = x2
+            self.dirty_y2 = y2
+        else:
+            if x < self.dirty_x1:
+                self.dirty_x1 = x
+            if y < self.dirty_y1:
+                self.dirty_y1 = y
+            if x2 > self.dirty_x2:
+                self.dirty_x2 = x2
+            if y2 > self.dirty_y2:
+                self.dirty_y2 = y2
+        self.dirty = true
+
+    fn dirty_rect() -> DamageRect:
+        DamageRect(
+            x1: self.dirty_x1,
+            y1: self.dirty_y1,
+            x2: self.dirty_x2,
+            y2: self.dirty_y2,
+            valid: self.dirty
+        )
+
+    me clear_dirty():
+        self.dirty = false
+        self.dirty_x1 = 0
+        self.dirty_y1 = 0
+        self.dirty_x2 = 0
+        self.dirty_y2 = 0
+
+    fn capabilities() -> FramebufferCapabilities:
+        val backend = if self.front_addr == 0: "host-buffer" else: "framebuffer-mmio"
+        FramebufferCapabilities(
+            backend_kind: backend,
+            width: self.width,
+            height: self.height,
+            bpp: self.bpp,
+            flush_mode: "dirty-rect",
+            cache_policy: if self.front_addr == 0: "coherent" else: "uncached"
+        )
+
     me put_pixel(x: u32, y: u32, color: Color):
         """Set a single pixel on the active surface (MMIO or host buffer)."""
         if x >= self.width or y >= self.height:
@@ -147,7 +250,7 @@ impl FramebufferDriver:
             val idx = (y * self.width + x).to_i64()
             if idx < self.host_buffer.length().to_i64():
                 self.host_buffer[idx] = pixel
-        self.dirty = true
+        self.mark_dirty_rect(x, y, 1, 1)
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: Color):
         """Fill a rectangle on the active surface (MMIO or host buffer)."""
@@ -171,7 +274,7 @@ impl FramebufferDriver:
                         mmio_write32(self.front_addr + offset.to_u64(), pixel)
                 col = col + 1
             row = row + 1
-        self.dirty = true
+        self.mark_dirty_rect(x, y, w, h)
 
     me draw_char_8x16(x: u32, y: u32, ch: u8, fg: Color, bg: Color):
         """Draw a single character using built-in 8x16 bitmap font.
@@ -203,7 +306,21 @@ impl FramebufferDriver:
 
     me swap_buffers():
         """No-op in direct-write mode (already writing to hardware FB)."""
-        self.dirty = false
+        self.clear_dirty()
+
+    me present_rect(x: u32, y: u32, w: u32, h: u32):
+        """Present a bounded region when the backend supports partial flush."""
+        self.mark_dirty_rect(x, y, w, h)
+        self.clear_dirty()
+
+    me flush_dirty_rects():
+        """Flush tracked damage and clear the damage state.
+
+        Direct-MMIO and host-backed framebuffer modes write pixels eagerly, so
+        this currently clears bookkeeping. GPU backends consume the same
+        DamageRect contract before issuing transfer/flush commands.
+        """
+        self.clear_dirty()
 
     me clear(color: Color):
         """Clear entire framebuffer (MMIO or host buffer)."""
@@ -222,7 +339,7 @@ impl FramebufferDriver:
             while j < tot_i and j < cap:
                 self.host_buffer[j] = pixel
                 j = j + 1
-        self.dirty = true
+        self.mark_dirty_rect(0, 0, self.width, self.height)
 
     fn pixel_count() -> u32:
         self.width * self.height
@@ -257,7 +374,7 @@ impl FramebufferDriver:
         else:
             val idx2 = (y * self.width + x).to_i64()
             self.host_buffer[idx2] = out
-        self.dirty = true
+        self.mark_dirty_rect(x, y, 1, 1)
 
     me blend_rect(x: u32, y: u32, w: u32, h: u32, color: Color, alpha: u8):
         """Alpha-blend a filled rectangle directly on the hardware framebuffer."""

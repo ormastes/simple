@@ -2,9 +2,17 @@ use std.spec.*
 use std.io.net_backend.{
     portable_net_backend_capabilities,
     accelerated_net_backend_capabilities,
+    packet_io_net_backend_capabilities,
     net_backend_acceleration_tier,
     net_backend_can_accelerate_static_files,
     net_backend_summary
+}
+use std.io.packet_io.{
+    packet_io_disabled_capabilities,
+    packet_io_opt_in_capabilities,
+    packet_rx_lease,
+    packet_tx_lease,
+    packet_complete
 }
 
 describe "async net backend capabilities":
@@ -23,3 +31,32 @@ describe "async net backend capabilities":
         expect(net_backend_acceleration_tier(caps)).to_equal("rdma")
         expect(net_backend_can_accelerate_static_files(caps)).to_equal(true)
         expect(net_backend_summary(caps)).to_equal("rdma-test:rdma")
+
+    it "keeps packet I/O disabled unless explicitly configured":
+        val portable = portable_net_backend_capabilities()
+        val accelerated = accelerated_net_backend_capabilities("uring", false, false, false)
+        val packet = packet_io_net_backend_capabilities("xdp-test", false, false)
+
+        expect(portable.supports_packet_io).to_equal(false)
+        expect(accelerated.supports_packet_io).to_equal(false)
+        expect(packet.supports_packet_io).to_equal(true)
+        expect(net_backend_acceleration_tier(packet)).to_equal("zero-copy")
+
+    it "models packet ring ownership and completion":
+        val disabled = packet_io_disabled_capabilities()
+        expect(disabled.supports_packet_io).to_equal(false)
+
+        val enabled = packet_io_opt_in_capabilities(1024u32, 1024u32, true)
+        expect(enabled.supports_packet_io).to_equal(true)
+        expect(enabled.zero_copy).to_equal(true)
+
+        val rx = packet_rx_lease(1u64, 7u64, 1500u64)
+        expect(rx.direction).to_equal("rx")
+        expect(rx.owner).to_equal("application")
+        expect(rx.completed).to_equal(false)
+
+        val tx = packet_tx_lease(1u64, 8u64, 64u64)
+        val done = packet_complete(tx)
+        expect(done.direction).to_equal("tx")
+        expect(done.owner).to_equal("driver")
+        expect(done.completed).to_equal(true)

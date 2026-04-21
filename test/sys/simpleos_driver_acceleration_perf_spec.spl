@@ -1,0 +1,53 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: sys, simpleos, dma, direct-io, display, performance
+# @cover src/os/drivers/perf_report.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.drivers.perf_report.{
+    build_driver_acceleration_report,
+    buffered_file_copy_bytes,
+    direct_dma_copy_bytes,
+    full_frame_flush_bytes,
+    dirty_rect_flush_bytes
+}
+
+describe "SimpleOS driver acceleration performance report":
+
+    it "compares buffered copy with aligned direct DMA on the same payload":
+        val payload = 4096u64
+        expect(buffered_file_copy_bytes(payload)).to_equal(4096)
+        expect(direct_dma_copy_bytes(payload, true, true)).to_equal(0)
+        expect(direct_dma_copy_bytes(payload, false, true)).to_equal(4096)
+
+    it "compares full-frame and dirty-rectangle display flush cost":
+        val full = full_frame_flush_bytes(1024, 768, 4)
+        val dirty = dirty_rect_flush_bytes(1024, 768, 16, 32, 64, 32, 4)
+        expect(full).to_equal(3145728)
+        expect(dirty).to_equal(8192)
+        expect(full).to_be_greater_than(dirty)
+
+    it "records backend capability, isolation mode, and RSS fields":
+        val report = build_driver_acceleration_report(
+            "virtio-gpu-dma",
+            "trusted-driver/no-iommu",
+            true,
+            4096,
+            true,
+            true,
+            1024,
+            768,
+            16,
+            32,
+            64,
+            32,
+            240,
+            104857600,
+            65536
+        )
+        expect(report.backend_kind).to_equal("virtio-gpu-dma")
+        expect(report.isolation_mode).to_equal("trusted-driver/no-iommu")
+        expect(report.network_descriptor_compatible).to_equal(true)
+        expect(report.buffered_copy_bytes).to_equal(4096)
+        expect(report.direct_dma_copy_bytes).to_equal(0)
+        expect(report.dirty_rect_flush_bytes).to_equal(8192)
+        expect(report.max_rss_kib).to_equal(65536)

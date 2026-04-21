@@ -28,6 +28,11 @@ var g_fb_addr: u64 = 0          # Real MMIO framebuffer address
 var g_width: u64 = 0            # Framebuffer width in pixels
 var g_height: u64 = 0           # Framebuffer height in pixels
 var g_ready: u64 = 0            # 1 when shadow buffer is allocated
+var g_dirty_valid: u64 = 0
+var g_dirty_x1: u64 = 0
+var g_dirty_y1: u64 = 0
+var g_dirty_x2: u64 = 0
+var g_dirty_y2: u64 = 0
 
 # ============================================================================
 # Frame Lifecycle
@@ -51,12 +56,23 @@ fn render_init(fb_addr: u64, width: u64, height: u64):
         while i < total:
             rt_mmio_write_u32(g_shadow_buf + i * 4, 0xFF000000)
             i = i + 1
+        render_mark_dirty_rect(0, 0, width, height)
 
 fn render_present():
-    """Copy entire shadow buffer to real MMIO framebuffer.
+    """Copy tracked damage from the shadow buffer to the MMIO framebuffer.
 
     Call after all drawing for the current frame is complete.
     """
+    if g_ready == 0:
+        return
+    if g_dirty_valid != 0:
+        render_present_rect(g_dirty_x1, g_dirty_y1, g_dirty_x2 - g_dirty_x1, g_dirty_y2 - g_dirty_y1)
+        render_clear_dirty()
+        return
+    render_present_full()
+
+fn render_present_full():
+    """Copy entire shadow buffer to real MMIO framebuffer."""
     if g_ready == 0:
         return
     var i: u64 = 0
@@ -66,6 +82,7 @@ fn render_present():
         val pixel = rt_mmio_read_u32(g_shadow_buf + offset)
         rt_mmio_write_u32(g_fb_addr + offset, pixel)
         i = i + 1
+    render_clear_dirty()
 
 fn render_present_rect(rx: u64, ry: u64, rw: u64, rh: u64):
     """Copy a rectangular region from shadow buffer to MMIO framebuffer.
@@ -88,6 +105,58 @@ fn render_present_rect(rx: u64, ry: u64, rw: u64, rh: u64):
                 rt_mmio_write_u32(g_fb_addr + offset, pixel)
             col = col + 1
         row = row + 1
+
+fn render_mark_dirty_rect(x: u64, y: u64, w: u64, h: u64):
+    """Record shadow-buffer damage using exclusive-end coordinates."""
+    if w == 0 or h == 0 or g_width == 0 or g_height == 0:
+        return
+    if x >= g_width or y >= g_height:
+        return
+    var x2 = x + w
+    var y2 = y + h
+    if x2 > g_width:
+        x2 = g_width
+    if y2 > g_height:
+        y2 = g_height
+    if x2 <= x or y2 <= y:
+        return
+    if g_dirty_valid == 0:
+        g_dirty_x1 = x
+        g_dirty_y1 = y
+        g_dirty_x2 = x2
+        g_dirty_y2 = y2
+        g_dirty_valid = 1
+        return
+    if x < g_dirty_x1:
+        g_dirty_x1 = x
+    if y < g_dirty_y1:
+        g_dirty_y1 = y
+    if x2 > g_dirty_x2:
+        g_dirty_x2 = x2
+    if y2 > g_dirty_y2:
+        g_dirty_y2 = y2
+
+fn render_clear_dirty():
+    g_dirty_valid = 0
+    g_dirty_x1 = 0
+    g_dirty_y1 = 0
+    g_dirty_x2 = 0
+    g_dirty_y2 = 0
+
+fn render_dirty_valid() -> u64:
+    g_dirty_valid
+
+fn render_dirty_x1() -> u64:
+    g_dirty_x1
+
+fn render_dirty_y1() -> u64:
+    g_dirty_y1
+
+fn render_dirty_x2() -> u64:
+    g_dirty_x2
+
+fn render_dirty_y2() -> u64:
+    g_dirty_y2
 
 fn render_width() -> u64:
     """Return framebuffer width."""
@@ -122,6 +191,7 @@ fn px_write(x: u64, y: u64, color: u64):
         return
     val offset = (y * g_width + x) * 4
     rt_mmio_write_u32(g_shadow_buf + offset, (color & 0xFFFFFFFF).to_u32())
+    render_mark_dirty_rect(x, y, 1, 1)
 
 # ============================================================================
 # Color Math

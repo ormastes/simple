@@ -61,6 +61,12 @@ val SYS_IPC_CREATE_PORT: u64 = 22
 # IPC response status
 val STATUS_OK: i32 = 0
 val STATUS_ERR: i32 = -1
+val ERR_EINPROGRESS: i32 = 115
+val ERR_ETIMEDOUT: i32 = 110
+val ERR_ECONNREFUSED: i32 = 111
+val ERR_ENETUNREACH: i32 = 101
+val NET_CONNECT_FLAG_NONBLOCK: u32 = 1
+val NET_CONNECT_WAIT_TICKS: u64 = 2000
 
 # Stack defaults
 val DEFAULT_IP_A: u8 = 10
@@ -405,6 +411,11 @@ impl NetstackService:
                     val reply_segments = self.tcp_connections[conn_idx.to_u64()].process_segment(segment, src_ip)
                     if not was_established and self.tcp_connections[conn_idx.to_u64()].is_established():
                         self._tcp_connection_established(conn_idx.to_u64())
+                    elif not was_established and self.tcp_connections[conn_idx.to_u64()].is_closed():
+                        self.sockets.mark_connect_failed_by_conn(
+                            self.tcp_connections[conn_idx.to_u64()].conn_id,
+                            "refused"
+                        )
                     self._send_tcp_segments(conn_idx.to_u64(), reply_segments)
                 else:
                     # No existing connection: check for SYN to a listener
@@ -647,6 +658,7 @@ impl NetstackService:
         val fd = mmio_read32(payload_addr).to_i32()
         val ip_val = mmio_read32(payload_addr + 4)
         val port = mmio_read16(payload_addr + 8)
+        val flags = if payload_len >= 14u32: mmio_read32(payload_addr + 10) else: 0u32
         val remote = SockAddr(ip: Ipv4Address.from_u32(ip_val), port: port)
 
         match self.sockets.connect(fd, remote):
@@ -672,9 +684,36 @@ impl NetstackService:
 
                         self._send_tcp_segments(conn_idx, syn_segments)
 
+                        if (flags & NET_CONNECT_FLAG_NONBLOCK) != 0:
+                            self._send_ipc_status(src_port, 0 - ERR_EINPROGRESS)
+                        else:
+                            val status = self._wait_for_connect_completion(conn.conn_id)
+                            self._send_ipc_status(src_port, status)
+                        return
+
                 self._send_ipc_i32(src_port, 0)
             Err(msg):
                 self._send_ipc_error(src_port, msg)
+
+    me _wait_for_connect_completion(conn_id: u64) -> i32:
+        """Bounded blocking connect wait for POSIX compatibility."""
+        var waited: u64 = 0
+        while waited < NET_CONNECT_WAIT_TICKS:
+            val status = self.sockets.connect_status_by_conn(conn_id)
+            if status == "established":
+                return 0
+            if status == "refused":
+                return 0 - ERR_ECONNREFUSED
+            if status == "unreachable":
+                return 0 - ERR_ENETUNREACH
+
+            self.tick_count = self.tick_count + 1
+            self.process_incoming_frames()
+            self.check_tcp_timers()
+            waited = waited + 1
+
+        self.sockets.mark_connect_failed_by_conn(conn_id, "timeout")
+        0 - ERR_ETIMEDOUT
 
     me _ipc_accept(src_port: u64, payload_addr: u64, payload_len: u32):
         """Accept connection. Payload: fd(i32)."""
@@ -828,6 +867,13 @@ impl NetstackService:
         var buf: [u8] = []
         _push_i32(buf, STATUS_OK)
         _push_i32(buf, value)
+        _ipc_send_raw(dst_port, self.port_id, buf)
+
+    fn _send_ipc_status(dst_port: u64, status: i32):
+        """Send an IPC reply with an errno-style status and no value."""
+        var buf: [u8] = []
+        _push_i32(buf, status)
+        _push_i32(buf, 0)
         _ipc_send_raw(dst_port, self.port_id, buf)
 
     fn _send_ipc_bytes(dst_port: u64, data: [u8]):

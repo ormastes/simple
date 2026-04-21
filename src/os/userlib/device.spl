@@ -104,6 +104,53 @@ struct DmaAllocResult:
     virt_addr: u64    # Virtual address for CPU access
     phys_addr: u64    # Physical address for device DMA
 
+val DMA_CACHE_COHERENT: u8 = 0
+val DMA_CACHE_FLUSH_REQUIRED: u8 = 1
+val DMA_CACHE_UNCACHED: u8 = 2
+val DMA_CACHE_WRITE_COMBINING: u8 = 3
+
+struct DeviceDmaDescriptor:
+    """Canonical DMA descriptor shared by storage, network, and display drivers."""
+    virt_addr: u64
+    phys_addr: u64
+    device_addr: u64
+    size_bytes: u64
+    cache_policy: u8
+    owner_task: u64
+    owner_device: u64
+    allocation_id: u64
+
+impl DeviceDmaDescriptor:
+    fn cpu_addr() -> u64:
+        self.virt_addr
+
+    fn host_phys_addr() -> u64:
+        self.phys_addr
+
+    fn dma_addr() -> u64:
+        self.device_addr
+
+    fn len() -> u64:
+        self.size_bytes
+
+    fn is_valid() -> bool:
+        self.virt_addr != 0 and self.phys_addr != 0 and self.device_addr != 0 and self.size_bytes > 0
+
+    fn into_dma_result() -> DmaAllocResult:
+        DmaAllocResult(
+            virt_addr: self.virt_addr,
+            phys_addr: self.phys_addr
+        )
+
+    fn owner_bus() -> u8:
+        ((self.owner_device >> 16) & 0xFF).to_u8()
+
+    fn owner_bdf_device() -> u8:
+        ((self.owner_device >> 8) & 0xFF).to_u8()
+
+    fn owner_function() -> u8:
+        (self.owner_device & 0xFF).to_u8()
+
 struct SharedDmaBuffer:
     """Caller-owned DMA buffer with explicit CPU/device address accessors.
 
@@ -113,25 +160,42 @@ struct SharedDmaBuffer:
     """
     virt_addr: u64
     phys_addr: u64
+    device_addr: u64
     size_bytes: u64
+    cache_policy: u8
+    owner_task: u64
+    owner_device: u64
+    allocation_id: u64
 
 impl SharedDmaBuffer:
     fn cpu_addr() -> u64:
         self.virt_addr
 
     fn device_addr() -> u64:
-        self.phys_addr
+        self.device_addr
 
     fn len() -> u64:
         self.size_bytes
 
     fn is_valid() -> bool:
-        self.virt_addr != 0 and self.phys_addr != 0 and self.size_bytes > 0
+        self.virt_addr != 0 and self.phys_addr != 0 and self.device_addr != 0 and self.size_bytes > 0
 
     fn into_dma_result() -> DmaAllocResult:
         DmaAllocResult(
             virt_addr: self.virt_addr,
             phys_addr: self.phys_addr
+        )
+
+    fn into_descriptor() -> DeviceDmaDescriptor:
+        DeviceDmaDescriptor(
+            virt_addr: self.virt_addr,
+            phys_addr: self.phys_addr,
+            device_addr: self.device_addr,
+            size_bytes: self.size_bytes,
+            cache_policy: self.cache_policy,
+            owner_task: self.owner_task,
+            owner_device: self.owner_device,
+            allocation_id: self.allocation_id
         )
 
 fn request_device_grant(bus: u8, dev: u8, func: u8) -> Result<DeviceGrant, text>:
@@ -194,8 +258,43 @@ fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
     Ok(SharedDmaBuffer(
         virt_addr: dma.virt_addr,
         phys_addr: dma.phys_addr,
-        size_bytes: size
+        device_addr: dma.phys_addr,
+        size_bytes: size,
+        cache_policy: DMA_CACHE_COHERENT,
+        owner_task: 0,
+        owner_device: 0,
+        allocation_id: 0
     ))
+
+fn alloc_device_dma(size: u64, cache_policy: u8, owner_device: u64) -> Result<DeviceDmaDescriptor, text>:
+    """Allocate a canonical DMA descriptor for drivers that need metadata."""
+    var result_buf: [u64; 2] = [0, 0]
+    val result = syscall(84, size, &result_buf as u64, owner_device, cache_policy as u64, 0)
+    if result <= 0:
+        return Err("AllocDeviceDma failed: error {result}")
+    Ok(DeviceDmaDescriptor(
+        virt_addr: result as u64,
+        phys_addr: result_buf[0],
+        device_addr: result_buf[0],
+        size_bytes: size,
+        cache_policy: cache_policy,
+        owner_task: 0,
+        owner_device: owner_device,
+        allocation_id: result_buf[1]
+    ))
+
+fn dma_sync_cpu_to_device(_desc: DeviceDmaDescriptor) -> Result<bool, text>:
+    """Synchronize CPU writes before device DMA reads.
+
+    Current no-IOMMU/coherent lanes do not require explicit cache maintenance,
+    but keeping this helper in the API prevents drivers from baking in that
+    assumption.
+    """
+    Ok(true)
+
+fn dma_sync_device_to_cpu(_desc: DeviceDmaDescriptor) -> Result<bool, text>:
+    """Synchronize device DMA writes before CPU reads."""
+    Ok(true)
 
 fn free_dma(virt_addr: u64, size: u64) -> Result<bool, text>:
     """Free a previously allocated DMA buffer."""
@@ -209,3 +308,9 @@ fn free_shared_dma(buf: SharedDmaBuffer) -> Result<bool, text>:
     if not buf.is_valid():
         return Err("FreeSharedDma failed: invalid buffer")
     free_dma(buf.virt_addr, buf.size_bytes)
+
+fn free_device_dma(desc: DeviceDmaDescriptor) -> Result<bool, text>:
+    """Free a DMA descriptor allocated by `alloc_device_dma()`."""
+    if not desc.is_valid():
+        return Err("FreeDeviceDma failed: invalid descriptor")
+    free_dma(desc.virt_addr, desc.size_bytes)

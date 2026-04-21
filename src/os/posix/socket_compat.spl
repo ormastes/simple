@@ -11,8 +11,8 @@
 # Each socket operation sends a request to port 2 and blocks waiting
 # for the reply. The netstack service manages the actual TCP/UDP state.
 
-use os.posix.errno.{EBADF, EINVAL, ENOSYS, ECONNREFUSED, ENOTCONN, ENOTSOCK, EIO, EAGAIN, EMFILE, EADDRINUSE}
-use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_types, fd_ports, FD_TYPE_SOCKET, MAX_FDS, O_RDWR}
+use os.posix.errno.{EBADF, EINVAL, ENOSYS, ECONNREFUSED, ENOTCONN, ENOTSOCK, EIO, EAGAIN, EMFILE, EADDRINUSE, EINPROGRESS}
+use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_update_ready, fd_types, fd_ports, FD_TYPE_SOCKET, MAX_FDS, O_RDWR, O_NONBLOCK, POLLOUT, POLLERR}
 use os.userlib.ipc_protocol.{NET_SOCKET, NET_BIND, NET_LISTEN, NET_CONNECT, NET_ACCEPT, NET_SEND, NET_RECV, NET_CLOSE}
 
 # Well-known netstack service IPC port
@@ -121,16 +121,28 @@ fn posix_listen(fd: i32, backlog: i32) -> i64:
     reply.status as i64
 
 fn posix_connect(fd: i32, addr: SockaddrIn) -> i64:
-    """Connect to remote address. Returns 0 or -errno."""
+    """Connect to remote address. Returns 0 or -errno.
+
+    Non-blocking TCP sockets return -EINPROGRESS while the SYN handshake is
+    active; write readiness is not set until a later successful completion.
+    """
     val net_fd = _get_net_fd(fd)
     if net_fd < 0:
         return net_fd as i64
 
+    val nonblocking = (fd_get_status_flags(fd) & O_NONBLOCK) != 0
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
     _sock_push_u32(payload, addr.addr)
     _sock_push_u16(payload, addr.port)
+    _sock_push_u32(payload, if nonblocking: 1u32 else: 0u32)
     val reply = _net_ipc_request(NET_CONNECT, payload)
+    if reply.status == 0:
+        fd_update_ready(fd, POLLOUT, POLLERR)
+    elif reply.status == (0 - EINPROGRESS):
+        fd_update_ready(fd, 0 as i16, POLLOUT | POLLERR)
+    else:
+        fd_update_ready(fd, POLLERR, POLLOUT)
     reply.status as i64
 
 fn posix_accept(fd: i32) -> i64:

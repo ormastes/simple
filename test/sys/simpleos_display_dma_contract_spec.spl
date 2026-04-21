@@ -1,0 +1,76 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: sys, simpleos, display, dma
+# @cover src/os/userlib/device.spl 0%
+# @cover src/os/drivers/framebuffer/fb_driver.spl 0%
+# @cover src/os/gui/render.spl 0%
+
+use std.spec.{describe, context, it, expect}
+use os.userlib.device.{DeviceDmaDescriptor, SharedDmaBuffer, DMA_CACHE_WRITE_COMBINING, DMA_CACHE_FLUSH_REQUIRED}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+
+describe "SimpleOS display DMA and damage contracts":
+
+    context "canonical DMA descriptors":
+
+        it "keeps CPU, host physical, and device addresses explicit":
+            val desc = DeviceDmaDescriptor(
+                virt_addr: 0x1000,
+                phys_addr: 0x2000,
+                device_addr: 0x3000,
+                size_bytes: 4096,
+                cache_policy: DMA_CACHE_FLUSH_REQUIRED,
+                owner_task: 7,
+                owner_device: 0x1050,
+                allocation_id: 44
+            )
+            expect(desc.is_valid()).to_equal(true)
+            expect(desc.cpu_addr()).to_equal(0x1000)
+            expect(desc.host_phys_addr()).to_equal(0x2000)
+            expect(desc.dma_addr()).to_equal(0x3000)
+            expect(desc.len()).to_equal(4096)
+
+        it "converts legacy SharedDmaBuffer to the canonical shape":
+            val buf = SharedDmaBuffer(
+                virt_addr: 0x4000,
+                phys_addr: 0x5000,
+                device_addr: 0x6000,
+                size_bytes: 8192,
+                cache_policy: DMA_CACHE_WRITE_COMBINING,
+                owner_task: 7,
+                owner_device: 0x1050,
+                allocation_id: 45
+            )
+            val desc = buf.into_descriptor()
+            expect(desc.cpu_addr()).to_equal(0x4000)
+            expect(desc.host_phys_addr()).to_equal(0x5000)
+            expect(desc.dma_addr()).to_equal(0x6000)
+            expect(desc.len()).to_equal(8192)
+
+    context "framebuffer dirty rectangles":
+
+        it "records bounded damage for rectangle drawing":
+            var fb = FramebufferDriver.from_buffer(32, 16)
+            fb.fill_rect(4, 3, 8, 5, Color.red())
+            val dirty = fb.dirty_rect()
+            expect(dirty.valid).to_equal(true)
+            expect(dirty.x1).to_equal(4)
+            expect(dirty.y1).to_equal(3)
+            expect(dirty.x2).to_equal(12)
+            expect(dirty.y2).to_equal(8)
+
+        it "merges and clamps damage to framebuffer bounds":
+            var fb = FramebufferDriver.from_buffer(32, 16)
+            fb.fill_rect(30, 14, 8, 8, Color.green())
+            fb.put_pixel(2, 1, Color.blue())
+            val dirty = fb.dirty_rect()
+            expect(dirty.x1).to_equal(2)
+            expect(dirty.y1).to_equal(1)
+            expect(dirty.x2).to_equal(32)
+            expect(dirty.y2).to_equal(16)
+
+        it "clears damage on present":
+            var fb = FramebufferDriver.from_buffer(32, 16)
+            fb.put_pixel(1, 1, Color.white())
+            expect(fb.dirty_rect().valid).to_equal(true)
+            fb.swap_buffers()
+            expect(fb.dirty_rect().valid).to_equal(false)

@@ -34,6 +34,7 @@ use os.drivers.virtio.virtio_gpu_types.{
     DETACH_BACKING_SIZE, RESOURCE_UNREF_SIZE
 }
 use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
+use os.userlib.device.{DeviceDmaDescriptor, DMA_CACHE_COHERENT}
 
 extern fn serial_println(msg: text)
 extern fn rt_alloc(size: u64) -> u64
@@ -174,6 +175,9 @@ struct GpuDmaAllocResult:
     """Result of a DMA buffer allocation."""
     virt: u64
     phys: u64
+    device: u64
+    size: u64
+    cache_policy: u8
     ok: bool
 
 impl GpuDmaAllocResult:
@@ -185,6 +189,27 @@ impl GpuDmaAllocResult:
 
     fn unwrap_phys() -> u64:
         self.phys
+
+    fn unwrap_device() -> u64:
+        self.device
+
+    fn into_descriptor() -> DeviceDmaDescriptor:
+        DeviceDmaDescriptor(
+            virt_addr: self.virt,
+            phys_addr: self.phys,
+            device_addr: self.device,
+            size_bytes: self.size,
+            cache_policy: self.cache_policy,
+            owner_task: 0,
+            owner_device: 0x1050,
+            allocation_id: 0
+        )
+
+struct VirtioGpuCapabilities:
+    backend_kind: text
+    flush_mode: text
+    cache_policy: text
+    dma_accelerated: bool
 
 # ============================================================================
 # VirtIO-GPU 2D Driver
@@ -310,13 +335,13 @@ impl VirtioGpuDriver:
             if cmd_dma.is_err():
                 return Err("Command buffer DMA alloc failed")
             self.cmd_buf_virt = cmd_dma.unwrap_virt()
-            self.cmd_buf_phys = cmd_dma.unwrap_phys()
+            self.cmd_buf_phys = cmd_dma.unwrap_device()
 
             val resp_dma = self.alloc_dma(4096)
             if resp_dma.is_err():
                 return Err("Response buffer DMA alloc failed")
             self.resp_buf_virt = resp_dma.unwrap_virt()
-            self.resp_buf_phys = resp_dma.unwrap_phys()
+            self.resp_buf_phys = resp_dma.unwrap_device()
             serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
 
             val display_result = self.cmd_get_display_info()
@@ -336,7 +361,7 @@ impl VirtioGpuDriver:
             if fb_dma.is_err():
                 return Err("Framebuffer DMA alloc failed")
             self.fb_virt = fb_dma.unwrap_virt()
-            self.fb_phys = fb_dma.unwrap_phys()
+            self.fb_phys = fb_dma.unwrap_device()
             serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
 
             self.clear(0x00000000)
@@ -399,13 +424,13 @@ impl VirtioGpuDriver:
         if cmd_dma.is_err():
             return Err("Command buffer DMA alloc failed")
         self.cmd_buf_virt = cmd_dma.unwrap_virt()
-        self.cmd_buf_phys = cmd_dma.unwrap_phys()
+        self.cmd_buf_phys = cmd_dma.unwrap_device()
 
         val resp_dma = self.alloc_dma(4096)
         if resp_dma.is_err():
             return Err("Response buffer DMA alloc failed")
         self.resp_buf_virt = resp_dma.unwrap_virt()
-        self.resp_buf_phys = resp_dma.unwrap_phys()
+        self.resp_buf_phys = resp_dma.unwrap_device()
         serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
 
         # -- Step 6: GET_DISPLAY_INFO --
@@ -428,7 +453,7 @@ impl VirtioGpuDriver:
         if fb_dma.is_err():
             return Err("Framebuffer DMA alloc failed")
         self.fb_virt = fb_dma.unwrap_virt()
-        self.fb_phys = fb_dma.unwrap_phys()
+        self.fb_phys = fb_dma.unwrap_device()
         serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
 
         # Zero the framebuffer
@@ -522,11 +547,11 @@ impl VirtioGpuDriver:
             return Err("DMA alloc for controlq used failed")
 
         self.ctrl_desc_virt = desc_dma.unwrap_virt()
-        self.ctrl_desc_phys = desc_dma.unwrap_phys()
+        self.ctrl_desc_phys = desc_dma.unwrap_device()
         self.ctrl_avail_virt = avail_dma.unwrap_virt()
-        self.ctrl_avail_phys = avail_dma.unwrap_phys()
+        self.ctrl_avail_phys = avail_dma.unwrap_device()
         self.ctrl_used_virt = used_dma.unwrap_virt()
-        self.ctrl_used_phys = used_dma.unwrap_phys()
+        self.ctrl_used_phys = used_dma.unwrap_device()
 
         var i: u16 = 0
         while i < qsize - 1:
@@ -632,7 +657,7 @@ impl VirtioGpuDriver:
         if ring_dma.is_err():
             return Err("DMA alloc for controlq failed")
         val ring_virt = ring_dma.unwrap_virt()
-        val ring_phys = ring_dma.unwrap_phys()
+        val ring_phys = ring_dma.unwrap_device()
 
         # Compute sub-region offsets
         self.ctrl_desc_virt = ring_virt
@@ -682,8 +707,8 @@ impl VirtioGpuDriver:
         """
         val aligned = rt_alloc_page_aligned(size)
         if aligned == 0:
-            return GpuDmaAllocResult(virt: 0, phys: 0, ok: false)
-        GpuDmaAllocResult(virt: aligned, phys: aligned, ok: true)
+            return GpuDmaAllocResult(virt: 0, phys: 0, device: 0, size: 0, cache_policy: DMA_CACHE_COHERENT, ok: false)
+        GpuDmaAllocResult(virt: aligned, phys: aligned, device: aligned, size: size, cache_policy: DMA_CACHE_COHERENT, ok: true)
 
     # ========================================================================
     # Register Access Helpers (I/O port for legacy VirtIO, MMIO otherwise)
@@ -1152,3 +1177,11 @@ impl VirtioGpuDriver:
 
     fn is_initialized() -> bool:
         self.initialized
+
+    fn capabilities() -> VirtioGpuCapabilities:
+        VirtioGpuCapabilities(
+            backend_kind: if self.initialized: "virtio-gpu-dma" else: "virtio-gpu-unavailable",
+            flush_mode: "dirty-rect",
+            cache_policy: "coherent",
+            dma_accelerated: self.initialized
+        )
