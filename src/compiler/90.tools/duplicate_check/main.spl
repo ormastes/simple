@@ -2,7 +2,7 @@
 # Duplication detection CLI
 
 use compiler.tools.duplicate_check.config (load_config, DuplicationConfig)
-use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_in_file, find_duplicates_in_file_with_hash_filter, collect_repeated_hashes, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, HashScanSummary, DuplicateGroup, DuplicateBlock}
+use compiler.tools.duplicate_check.detector.{collect_files, scan_duplicate_blocks, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, DuplicateGroup, DuplicateBlock}
 use compiler.tools.duplicate_check.formatter (print_text_report, print_json_report, write_sdn_database)
 use compiler.tools.duplicate_check.debug (init_debug)
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
@@ -65,23 +65,9 @@ fn build_groups_from_blocks(all_blocks: [DuplicateBlock], config: DuplicationCon
     sort_by_impact(refined_groups)
 
 fn scan_files_sequential(files: [text], config: DuplicationConfig, cache_manager) -> [DuplicateBlock]:
-    var all_blocks: [DuplicateBlock] = []
     val interner = new_token_interner()
-    val hash_scan = if config.use_cosine_similarity:
-        HashScanSummary(repeated_hashes: {}, candidate_files: {})
-    else:
-        collect_repeated_hashes(files, config, cache_manager, interner)
-
-    for file in files:
-        if not config.use_cosine_similarity and not hash_scan.candidate_files.contains_key(file):
-            continue
-        val blocks = if config.use_cosine_similarity:
-            find_duplicates_in_file(file, config, cache_manager, interner)
-        else:
-            find_duplicates_in_file_with_hash_filter(file, config, cache_manager, interner, hash_scan.repeated_hashes)
-        all_blocks.merge(blocks)
-
-    normalize_block_hashes(all_blocks)
+    val blocks = scan_duplicate_blocks(files, config, cache_manager, interner)
+    normalize_block_hashes(blocks)
 
 fn scan_files(files: [text], config: DuplicationConfig, cache_manager) -> ([DuplicateBlock], text):
     if config.use_incremental:
