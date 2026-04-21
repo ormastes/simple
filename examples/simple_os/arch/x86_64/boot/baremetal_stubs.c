@@ -4382,11 +4382,10 @@ extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_a
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 ) __attribute__((weak));
-extern int64_t spl_x86_dispatch_installed_syscall_abi(
-    uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
-    uint64_t arg3, uint64_t arg4, uint64_t arg5
-) __attribute__((weak));
-extern int64_t os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+/* Forward declaration of the real Simple implementation (no spl_ prefix, no os__ prefix).
+ * The linker.ld assignment makes spl_x86_dispatch_installed_syscall_abi a strong alias
+ * to this symbol, overriding any freestanding stubs. */
+extern int64_t kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 );
@@ -4471,12 +4470,12 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
             uint64_t path_ptr = app_id ? app_id : simpleos_decode_path_data_ptr(a0, a1);
             uint64_t path_len = app_id ? 0 : a1;
-            return os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+            return kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
                 id, path_ptr, path_len, a2, a3, a4, 0
             );
         }
         case 14: /* EnterUserBlocking — pid_hint in a0, noreturn on success */
-            return os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+            return kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
                 14, a0, a1, a2, a3, a4, 0
             );
         case 60: /* DebugWrite */
@@ -4539,12 +4538,11 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return 0;
         case 106: /* Schedule */
         case 107: /* SchedCtl */
-            if (spl_x86_dispatch_installed_syscall_abi) {
-                return spl_x86_dispatch_installed_syscall_abi(
-                    id, a0, a1, a2, a3, a4, 0
-                );
-            }
-            return -38; /* ENOSYS */
+            /* spl_x86_dispatch_installed_syscall_abi is a linker-assigned strong
+             * alias; call the inner symbol directly (always present). */
+            return kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+                id, a0, a1, a2, a3, a4, 0
+            );
         default:
             return -38; /* ENOSYS */
     }
