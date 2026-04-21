@@ -1,0 +1,67 @@
+use std.spec.*
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.socket.{SocketTable, SocketProtocol, SockAddr, socket_state_name}
+use os.services.netstack.tcp.{TcpHeader, TcpSegment, TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_DEFAULT_WINDOW, tcp_state_name}
+use os.services.netstack.tcp_connection.{TcpConnection}
+
+fn check_ok(result: Result<bool, text>):
+    match result:
+        Ok(_): return
+        Err(msg): expect(msg.len()).to_equal(0)
+
+describe "netstack TCP socket lifecycle":
+    it "keeps active open connecting until the TCP handshake is established":
+        var table = SocketTable.new()
+        val fd = table.create(SocketProtocol.Tcp)
+        val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
+        val local = SockAddr(ip: Ipv4Address.from_u32(0x0A00020Fu32), port: 49152u16)
+
+        check_ok(table.connect(fd, remote))
+        table.attach_connecting(fd, local, 42u64)
+
+        val connecting = table.get_socket(fd).unwrap()
+        expect(socket_state_name(connecting.state)).to_equal("CONNECTING")
+        expect(connecting.conn_id).to_equal(42u64)
+
+        expect(table.mark_connected_by_conn(42u64)).to_equal(true)
+
+        val connected = table.get_socket(fd).unwrap()
+        expect(socket_state_name(connected.state)).to_equal("CONNECTED")
+        expect(connected.conn_id).to_equal(42u64)
+
+        match table.send(fd, [1u8, 2u8]):
+            Ok(n): expect(n).to_equal(0u64)
+            Err(msg): expect(msg).to_contain("TCP send buffers")
+
+        match table.recv(fd, 16u64):
+            Ok(data): expect(data.len()).to_equal(999u64)
+            Err(msg): expect(msg).to_contain("TCP receive buffers")
+
+    it "moves a client TCP connection from SYN_SENT to ESTABLISHED on SYN ACK":
+        val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
+        val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+        var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
+
+        val syn = conn.connect()
+        expect(tcp_state_name(conn.state)).to_equal("SYN_SENT")
+        expect(syn.len()).to_equal(1u64)
+
+        val syn_ack = TcpSegment(
+            header: TcpHeader(
+                src_port: 80u16,
+                dst_port: 49152u16,
+                seq_num: 1000u32,
+                ack_num: conn.snd_nxt,
+                data_offset: 5u8,
+                flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                window: TCP_DEFAULT_WINDOW,
+                checksum: 0u16,
+                urgent_ptr: 0u16
+            ),
+            data: []
+        )
+
+        val replies = conn.process_segment(syn_ack, remote_ip)
+        expect(tcp_state_name(conn.state)).to_equal("ESTABLISHED")
+        expect(replies.len()).to_equal(1u64)
+        expect(replies[0].header.flags & TCP_FLAG_ACK).to_equal(TCP_FLAG_ACK)

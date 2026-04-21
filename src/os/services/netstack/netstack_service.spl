@@ -401,7 +401,10 @@ impl NetstackService:
 
                 if conn_idx >= 0:
                     # Existing connection: process segment
+                    val was_established = self.tcp_connections[conn_idx.to_u64()].is_established()
                     val reply_segments = self.tcp_connections[conn_idx.to_u64()].process_segment(segment, src_ip)
+                    if not was_established and self.tcp_connections[conn_idx.to_u64()].is_established():
+                        self._tcp_connection_established(conn_idx.to_u64())
                     self._send_tcp_segments(conn_idx.to_u64(), reply_segments)
                 else:
                     # No existing connection: check for SYN to a listener
@@ -415,7 +418,6 @@ impl NetstackService:
         """Handle a SYN to a listening socket: create new connection."""
         val listener = self.sockets.find_listener(dst_port)
         if listener.?:
-            val listener_sock = listener.unwrap()
             # Create a new TcpConnection in LISTEN state, then process the SYN
             var conn = TcpConnection.new_listener(self.local_ip, dst_port)
             conn.conn_id = self.next_conn_id
@@ -426,12 +428,19 @@ impl NetstackService:
             self.tcp_connections.push(conn)
             val conn_idx = self.tcp_connections.len() - 1
 
-            # Queue the connection for accept
-            self.sockets.queue_accepted(listener_sock.fd, conn.conn_id)
-
             self._send_tcp_segments(conn_idx, reply_segments)
             serial_println("[netstack] New TCP connection from {src_ip.to_text()}:{segment.header.src_port} -> :{dst_port}")
         # else: no listener, ignore (real stack sends RST)
+
+    me _tcp_connection_established(conn_idx: u64):
+        """Publish a TCP connection only after the handshake reaches ESTABLISHED."""
+        val conn = self.tcp_connections[conn_idx]
+        if self.sockets.mark_connected_by_conn(conn.conn_id):
+            return
+
+        val listener = self.sockets.find_listener(conn.local_port)
+        if listener.?:
+            self.sockets.queue_accepted(listener.unwrap().fd, conn.conn_id)
 
     me _send_tcp_segments(conn_idx: u64, segments: [TcpSegment]):
         """Send TCP segments for a connection, computing checksums."""
@@ -655,7 +664,11 @@ impl NetstackService:
                         val syn_segments = conn.connect()
                         self.tcp_connections.push(conn)
                         val conn_idx = self.tcp_connections.len() - 1
-                        self.sockets.set_connected(fd, conn.conn_id)
+                        self.sockets.attach_connecting(
+                            fd,
+                            SockAddr(ip: self.local_ip, port: local_port),
+                            conn.conn_id
+                        )
 
                         self._send_tcp_segments(conn_idx, syn_segments)
 

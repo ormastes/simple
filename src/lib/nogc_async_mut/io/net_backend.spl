@@ -1,0 +1,86 @@
+"""
+# Network Backend Capabilities
+
+Pure Simple capability model for async network backends. The HTTP server and
+socket libraries use this to choose portable paths first and opt into kernel or
+hardware acceleration only when a backend explicitly reports support.
+"""
+
+struct NetBackendCapabilities:
+    """Feature flags for a network I/O backend."""
+    backend_name: text
+    supports_async: bool
+    supports_batch_io: bool
+    supports_sendfile: bool
+    supports_zero_copy: bool
+    supports_packet_io: bool
+    supports_sriov: bool
+    supports_rdma: bool
+
+fn net_backend_capabilities(backend_name: text,
+                            supports_async: bool,
+                            supports_batch_io: bool,
+                            supports_sendfile: bool,
+                            supports_zero_copy: bool) -> NetBackendCapabilities:
+    """Build host async-driver capabilities for the current runtime backend."""
+    NetBackendCapabilities(
+        backend_name: backend_name,
+        supports_async: supports_async,
+        supports_batch_io: supports_batch_io,
+        supports_sendfile: supports_sendfile,
+        supports_zero_copy: supports_zero_copy,
+        supports_packet_io: false,
+        supports_sriov: false,
+        supports_rdma: false
+    )
+
+fn portable_net_backend_capabilities() -> NetBackendCapabilities:
+    """Baseline socket backend used by QEMU and hosted CI."""
+    NetBackendCapabilities(
+        backend_name: "portable-socket",
+        supports_async: false,
+        supports_batch_io: false,
+        supports_sendfile: false,
+        supports_zero_copy: false,
+        supports_packet_io: false,
+        supports_sriov: false,
+        supports_rdma: false
+    )
+
+fn accelerated_net_backend_capabilities(backend_name: text,
+                                        packet_io: bool,
+                                        sriov: bool,
+                                        rdma: bool) -> NetBackendCapabilities:
+    """Declare an explicitly enabled high-performance backend."""
+    NetBackendCapabilities(
+        backend_name: backend_name,
+        supports_async: true,
+        supports_batch_io: true,
+        supports_sendfile: true,
+        supports_zero_copy: true,
+        supports_packet_io: packet_io,
+        supports_sriov: sriov,
+        supports_rdma: rdma
+    )
+
+fn net_backend_acceleration_tier(caps: NetBackendCapabilities) -> text:
+    """Return the strongest acceleration tier available for routing decisions."""
+    if caps.supports_rdma:
+        return "rdma"
+    if caps.supports_sriov and caps.supports_packet_io:
+        return "sriov-packet"
+    if caps.supports_zero_copy:
+        return "zero-copy"
+    if caps.supports_sendfile:
+        return "sendfile"
+    if caps.supports_batch_io:
+        return "batched-async"
+    "portable"
+
+fn net_backend_can_accelerate_static_files(caps: NetBackendCapabilities) -> bool:
+    """Static file responses can accelerate when sendfile or zero-copy exists."""
+    caps.supports_sendfile or caps.supports_zero_copy
+
+fn net_backend_summary(caps: NetBackendCapabilities) -> text:
+    """Compact human-readable capability summary."""
+    "{caps.backend_name}:{net_backend_acceleration_tier(caps)}"

@@ -1318,10 +1318,32 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (a->len >= a->cap) {
-        /* At capacity -- cannot grow. Silently drop. */
-        return ENCODE_PTR(a);
+        uint32_t old_cap = a->cap;
+        uint32_t new_cap = old_cap ? old_cap * 2 : 64;
+        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
+        if (!grown) return ENCODE_PTR(a);
+        grown->hdr.size = (uint32_t)new_size;
+        grown->cap = new_cap;
+        for (uint32_t i = old_cap; i < new_cap; i++) grown->items[i] = NIL_VALUE;
+        a = grown;
     }
     a->items[a->len] = val; a->len++;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
+    int64_t cap = (int64_t)cap_val;
+    if (cap <= 0) cap = 1;
+    if (cap > 0x100000) cap = 0x100000;
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = 0;
+    a->cap = (uint32_t)cap;
+    for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
 }
 
@@ -2097,6 +2119,17 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
         a->items[i] = ENCODE_INT(src[i]);
     }
     return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    uint64_t idx = (uint64_t)idx_val;
+    if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
+    RuntimeValue v = a->items[idx];
+    if (IS_INT(v)) return (RuntimeValue)DECODE_INT(v);
+    return (RuntimeValue)(uint8_t)(uint64_t)v;
 }
 
 /* ===================================================================

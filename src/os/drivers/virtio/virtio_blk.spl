@@ -125,7 +125,6 @@ fn _virtio_blk_alloc_dma(size: u64) -> Result<VirtioBlkDmaAlloc, text>:
         g_virtio_blk_dma_next = VIRTIO_BLK_DMA_BASE
     val alloc_size: u64 = 1024
     val addr = g_virtio_blk_dma_next
-    serial_println("[virtio-blk] dma alloc size={size} fixed={alloc_size} addr=0x{addr}")
     if addr + alloc_size > VIRTIO_BLK_DMA_LIMIT:
         return Result.Err("virtio-blk early DMA arena exhausted")
     g_virtio_blk_dma_next = addr + alloc_size
@@ -243,9 +242,7 @@ impl VirtioBlkDriver:
             val addr = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE
             val magic = mmio_read32(addr)
             if magic == VIRTIO_MAGIC:
-                val slot_version = mmio_read32(addr + 4)
                 val dev_type = mmio_read32(addr + 8)
-                serial_println("[virtio-blk] probe addr=0x{addr} version={slot_version} dev={dev_type}")
                 if dev_type == VIRTIO_DEV_BLK:
                     g_virtio_blk_mmio_base = addr
                     return VirtioBlkDriver.new(addr)
@@ -255,17 +252,14 @@ impl VirtioBlkDriver:
     me init() -> Result<bool, text>:
         """Initialize VirtIO block device."""
         val magic = mmio_read32(_virtio_blk_base())
-        serial_println("[virtio-blk] init base=0x{_virtio_blk_base()} magic=0x{magic}")
         if magic != VIRTIO_MAGIC:
             return Result.Err("not a virtio device")
 
         val version = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_VERSION)
-        serial_println("[virtio-blk] version={version}")
         if version == 0:
             return Result.Err("unsupported virtio version")
 
         val device_id = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_DEVICE_ID)
-        serial_println("[virtio-blk] device_id={device_id}")
         if device_id != VIRTIO_DEV_BLK:
             return Result.Err("not a block device")
 
@@ -287,7 +281,6 @@ impl VirtioBlkDriver:
 
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_SEL, 0)
         val max_queue = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NUM_MAX)
-        serial_println("[virtio-blk] queue0 max={max_queue}")
         if max_queue == 0:
             return Result.Err("virtqueue 0 not available")
         val queue_size: u32 = 128
@@ -308,7 +301,6 @@ impl VirtioBlkDriver:
             mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_USED_LOW, (g_virtio_blk_used_addr & 0xFFFFFFFF).to_u32())
             mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_USED_HIGH, (g_virtio_blk_used_addr >> 32).to_u32())
             mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_READY, 1)
-        serial_println("[virtio-blk] queue size={g_virtio_blk_queue_size} desc=0x{g_virtio_blk_desc_addr} avail=0x{g_virtio_blk_avail_addr} used=0x{g_virtio_blk_used_addr}")
 
         mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS,
             VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -385,16 +377,12 @@ impl VirtioBlkDriver:
             val _status_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return []
 
-        serial_println("[virtio-blk] direct dma b0={mmio_read8(data_addr)} b11={mmio_read8(data_addr + 11)} b12={mmio_read8(data_addr + 12)}")
-
         val out = rt_dma_bytes_to_array(data_addr, 512)
-        serial_println("[virtio-blk] direct bytes b0={out[0]} b11={out[11]} b12={out[12]}")
         val _ok_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
         out
 
     me read_sectors(lba: u64, count: u32, buffer: [u8]) -> Result<bool, text>:
         """Read sectors from device into buffer."""
-        serial_println("[virtio-blk] read start lba={lba} count={count} cap={self.capacity_sectors} qn={g_virtio_blk_queue_size} free={g_virtio_blk_free_head} desc=0x{g_virtio_blk_desc_addr}")
         if self.capacity_sectors != 0 and lba >= self.capacity_sectors:
             serial_println("[virtio-blk] read capacity reject lba={lba} count={count} cap={self.capacity_sectors}")
             return Result.Err("read beyond disk capacity")
@@ -413,7 +401,6 @@ impl VirtioBlkDriver:
             serial_println("[virtio-blk] read DMA allocation failed bytes={dma_total}")
             return Result.Err("virtio-blk read DMA allocation failed")
         val dma = dma_result.unwrap()
-        serial_println("[virtio-blk] read dma=0x{dma.virt_addr} bytes={dma_total}")
         val header_addr = dma.virt_addr
         val data_addr = header_addr + 16
         val status_addr = data_addr + data_len.to_u64()
@@ -463,8 +450,6 @@ impl VirtioBlkDriver:
             serial_println("[virtio-blk] read status={status} lba={lba} count={count}")
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return Result.Err("virtio-blk read error (status={status})")
-
-        serial_println("[virtio-blk] dma data b0={mmio_read8(data_addr)} b11={mmio_read8(data_addr + 11)} b12={mmio_read8(data_addr + 12)}")
 
         val direct_out = rt_dma_bytes_to_array(data_addr, 512)
         g_virtio_blk_last_read_bytes = direct_out

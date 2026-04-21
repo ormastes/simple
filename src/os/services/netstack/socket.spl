@@ -208,6 +208,39 @@ impl SocketTable:
             backlog: sock.backlog, accept_queue: sock.accept_queue
         )
 
+    me attach_connecting(fd: i32, local: SockAddr, conn_id: u64):
+        """Attach an in-flight TCP connection without marking it established."""
+        var idx = self._find_idx(fd)
+        if idx < 0:
+            return
+
+        val i = idx.to_u64()
+        val sock = self.sockets[i]
+        self.sockets[i] = OsSocket(
+            fd: sock.fd, protocol: sock.protocol,
+            local_addr: local, remote_addr: sock.remote_addr,
+            state: SocketState.Connecting,
+            conn_id: conn_id, active: true,
+            backlog: sock.backlog, accept_queue: sock.accept_queue
+        )
+
+    me mark_connected_by_conn(conn_id: u64) -> bool:
+        """Mark the connecting socket for conn_id as connected."""
+        var i: u64 = 0
+        while i < self.sockets.len():
+            val sock = self.sockets[i]
+            if sock.active and sock.conn_id == conn_id and _is_socket_state(sock.state, SocketState.Connecting):
+                self.sockets[i] = OsSocket(
+                    fd: sock.fd, protocol: sock.protocol,
+                    local_addr: sock.local_addr, remote_addr: sock.remote_addr,
+                    state: SocketState.Connected,
+                    conn_id: conn_id, active: true,
+                    backlog: sock.backlog, accept_queue: sock.accept_queue
+                )
+                return true
+            i = i + 1
+        false
+
     me queue_accepted(listener_fd: i32, conn_id: u64):
         """Queue an accepted connection for a listening socket."""
         var idx = self._find_idx(listener_fd)
@@ -263,7 +296,11 @@ impl SocketTable:
         Ok(new_fd)
 
     me send(fd: i32, data: [u8]) -> Result<u64, text>:
-        """Placeholder: the actual send is handled by netstack_service via conn_id."""
+        """Validate direct socket-table sends.
+
+        TCP payload ownership lives in TcpConnection; netstack_service queues
+        bytes there after resolving the socket conn_id.
+        """
         var idx = self._find_idx(fd)
         if idx < 0:
             return Err("invalid fd: {fd}")
@@ -272,11 +309,14 @@ impl SocketTable:
         if not _is_socket_state(self.sockets[i].state, SocketState.Connected):
             return Err("socket not connected")
 
-        # Data is passed to the netstack service which manages the TcpConnection
-        Ok(data.len())
+        Err("socket table does not own TCP send buffers")
 
     me recv(fd: i32, max: u64) -> Result<[u8], text>:
-        """Placeholder: the actual recv is handled by netstack_service via conn_id."""
+        """Validate direct socket-table receives.
+
+        TCP payload ownership lives in TcpConnection; netstack_service reads
+        bytes there after resolving the socket conn_id.
+        """
         var idx = self._find_idx(fd)
         if idx < 0:
             return Err("invalid fd: {fd}")
@@ -285,7 +325,7 @@ impl SocketTable:
         if not _is_socket_state(self.sockets[i].state, SocketState.Connected):
             return Err("socket not connected")
 
-        Ok([])  # Actual data comes from TcpConnection.recv_data()
+        Err("socket table does not own TCP receive buffers")
 
     me close(fd: i32) -> Result<bool, text>:
         """Close a socket and release its resources."""
