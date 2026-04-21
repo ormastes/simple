@@ -17,7 +17,25 @@
 # 3. Fallback to src/lib/ (standard library)
 
 use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
+use compiler.core.ast.{
+    decl_get_imports,
+    decl_get_name,
+    decl_get_ret_type,
+    decl_get_tag,
+    module_get_decls,
+    module_get_path
+}
 use compiler.common.gc_config.{is_nogc_family, is_gc_family, is_noalloc_family, is_allocating_family}
+use compiler.core.interpreter.eval.{eval_warnings}
+use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register}
+use compiler.core.interpreter.interp_resource_tracker.{
+    irt_begin_module,
+    irt_init,
+    irt_track_enum,
+    irt_track_func,
+    irt_track_struct,
+    irt_unload_module
+}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text
@@ -110,6 +128,15 @@ fn try_force_any_deferred_for(symbol_name: text) -> i64:
     for mod_name in deferred_module_names:
         val still_deferred = deferred_module_set[mod_name]
         if still_deferred == true:
+            val imported_names = deferred_module_imports[i]
+            if imported_names.len() > 0:
+                var can_provide = false
+                for imported_name in imported_names:
+                    if imported_name == symbol_name:
+                        can_provide = true
+                if not can_provide:
+                    i = i + 1
+                    continue
             val ok = force_deferred_module(mod_name)
             if ok == 1:
                 # Check if this module provided the symbol
@@ -188,6 +215,12 @@ fn _replace_text(value: text, from: text, to: text) -> text:
 fn _domain_to_dir(domain: text) -> text:
     _replace_text(domain, "-", "_")
 
+fn _interp_path_parent(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return path
+    path.substring(0, slash)
+
 fn _resolve_project_relative_path(current_dir: text, relative_path: text) -> text:
     var probe_dir = current_dir
     for _unused in 0..10:
@@ -195,7 +228,7 @@ fn _resolve_project_relative_path(current_dir: text, relative_path: text) -> tex
         if rt_file_exists(candidate) == 1:
             return candidate
 
-        val parent = rt_path_parent(probe_dir)
+        val parent = _interp_path_parent(probe_dir)
         if parent == probe_dir:
             break
         probe_dir = parent
@@ -440,6 +473,53 @@ fn register_module_functions():
             irt_track_enum(mod_path, name)
 
 # ===== Public API =====
+
+fn load_module_parse_only(module_name: text, current_file: text) -> i64:
+    # Parse a module by name without registering its symbols.
+    if _module_load_depth >= _MODULE_LOAD_MAX_DEPTH:
+        return 0
+    _module_load_depth = _module_load_depth + 1
+
+    val resolved_path = resolve_module_path(module_name, current_file)
+    check_gc_family_boundary(current_file, resolved_path, module_name)
+
+    val source = load_module_source(resolved_path)
+    if source == "":
+        _module_load_depth = _module_load_depth - 1
+        return 0
+
+    val parse_ok = parse_module_ast(source, resolved_path)
+    _module_load_depth = _module_load_depth - 1
+    parse_ok
+
+fn load_module_register_only(module_name: text, current_file: text) -> i64:
+    # Parse a module and register its symbols without evaluating a caller module.
+    if module_is_loaded(module_name) == 1:
+        return 1
+    if _module_load_depth >= _MODULE_LOAD_MAX_DEPTH:
+        return 0
+    _module_load_depth = _module_load_depth + 1
+
+    val resolved_path = resolve_module_path(module_name, current_file)
+    check_gc_family_boundary(current_file, resolved_path, module_name)
+
+    val source = load_module_source(resolved_path)
+    if source == "":
+        _module_load_depth = _module_load_depth - 1
+        return 0
+
+    val parse_ok = parse_module_ast(source, resolved_path)
+    if parse_ok == 0:
+        _module_load_depth = _module_load_depth - 1
+        return 0
+
+    irt_begin_module(module_name)
+    val exports = extract_module_exports()
+    register_module_functions()
+    module_mark_loaded(module_name, resolved_path, exports)
+
+    _module_load_depth = _module_load_depth - 1
+    1
 
 fn load_module(module_name: text, current_file: text) -> i64:
     # Load a module by name and register its exports

@@ -16,6 +16,7 @@
 #   FIND impl WHERE trait = "Iterator"
 
 use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
+use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
 
 # ============================================================================
 # Types
@@ -80,7 +81,7 @@ fn _parse_source(content: text) -> [_SymInfo]:
             doc_lines.push(trimmed.substring(1).trim())
             continue
 
-        val indent = _leading_spaces(line)
+        val indent = _count_indent(line)
         val doc = doc_lines.join("\n")
         doc_lines = []
 
@@ -95,29 +96,29 @@ fn _parse_source(content: text) -> [_SymInfo]:
             elif trimmed.starts_with("extern fn "):
                 symbols.push(_parse_fn(trimmed, line_num, doc, ""))
             elif trimmed.starts_with("class "):
-                val name = _extract_ident(trimmed.substring(6))
+                val name = _extract_ident_from(trimmed.substring(6))
                 symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
                 current_parent = name
             elif trimmed.starts_with("struct "):
-                val name = _extract_ident(trimmed.substring(7))
+                val name = _extract_ident_from(trimmed.substring(7))
                 symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
                 current_parent = name
             elif trimmed.starts_with("enum "):
-                val name = _extract_ident(trimmed.substring(5))
+                val name = _extract_ident_from(trimmed.substring(5))
                 symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
             elif trimmed.starts_with("trait "):
-                val name = _extract_ident(trimmed.substring(6))
+                val name = _extract_ident_from(trimmed.substring(6))
                 symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
                 current_parent = name
             elif trimmed.starts_with("impl "):
-                val name = _extract_ident(trimmed.substring(5))
+                val name = _extract_ident_from(trimmed.substring(5))
                 symbols.push(_SymInfo(name: name, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
                 current_parent = name
             elif trimmed.starts_with("val "):
-                val name = _extract_ident(trimmed.substring(4))
+                val name = _extract_ident_from(trimmed.substring(4))
                 symbols.push(_SymInfo(name: name, kind: "val", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
             elif trimmed.starts_with("var "):
-                val name = _extract_ident(trimmed.substring(4))
+                val name = _extract_ident_from(trimmed.substring(4))
                 symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
             elif trimmed.starts_with("use ") or trimmed.starts_with("import "):
                 var mod_path = trimmed
@@ -171,77 +172,13 @@ fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> _SymInfo:
         rest = rest.substring(3)
         if parent != "":
             kind = "method"
-    val name = _extract_ident(rest)
+    val name = _extract_ident_from(rest)
     val params = _extract_params(rest)
-    val ret = _extract_return_type(rest)
+    val ret = _extract_return_from(rest)
     _SymInfo(name: name, kind: kind, line: line_num, signature: trimmed, doc_comment: doc, parent: parent, return_type: ret, params: params)
 
-fn _extract_ident(s: text) -> text:
-    var end_pos = 0
-    while end_pos < s.len():
-        val ch = s.substring(end_pos, end_pos + 1)
-        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
-        if not ok:
-            break
-        end_pos = end_pos + 1
-    if end_pos == 0:
-        return ""
-    s.substring(0, end_pos)
-
 fn _extract_params(s: text) -> text:
-    var paren_start = -1
-    var pi = 0
-    while pi < s.len():
-        if s.substring(pi, pi + 1) == "(":
-            paren_start = pi
-            break
-        pi = pi + 1
-    if paren_start < 0:
-        return ""
-    var depth = 0
-    var paren_end = -1
-    var qi = paren_start
-    while qi < s.len():
-        val ch = s.substring(qi, qi + 1)
-        if ch == "(":
-            depth = depth + 1
-        elif ch == ")":
-            depth = depth - 1
-            if depth == 0:
-                paren_end = qi
-                break
-        qi = qi + 1
-    if paren_end < 0:
-        return ""
-    s.substring(paren_start + 1, paren_end)
-
-fn _extract_return_type(s: text) -> text:
-    var ai = 0
-    while ai < s.len() - 1:
-        val two = s.substring(ai, ai + 2)
-        if two == "->":
-            val after = s.substring(ai + 2).trim()
-            var end_pos = 0
-            while end_pos < after.len():
-                val ch = after.substring(end_pos, end_pos + 1)
-                if ch == ":":
-                    break
-                end_pos = end_pos + 1
-            return after.substring(0, end_pos).trim()
-        ai = ai + 1
-    ""
-
-fn _leading_spaces(line: text) -> i64:
-    var count = 0
-    while count < line.len():
-        val ch = line.substring(count, count + 1)
-        if ch == " ":
-            count = count + 1
-        elif ch == "\t":
-            count = count + 4
-        else:
-            break
-    count
+    _extract_params_from(s)
 
 fn _find_char(s: text, target: text) -> i64:
     var i = 0
@@ -369,7 +306,7 @@ fn _parse_single_pred(s: text) -> _SemPred:
         return _SemPred(kind: "fn_call", field: "", op: "", value: "", fn_name: "imports", fn_arg: arg)
 
     # field op value patterns
-    val field = _extract_ident(s)
+    val field = _extract_ident_from(s)
     if field == "":
         return _SemPred(kind: "", field: "", op: "", value: "", fn_name: "", fn_arg: "")
     var rest = s.substring(field.len()).trim()
@@ -568,7 +505,7 @@ fn _extract_trait_from_impl(sig: text) -> text:
     var rest = sig
     if rest.starts_with("impl "):
         rest = rest.substring(5).trim()
-    val first_word = _extract_ident(rest)
+    val first_word = _extract_ident_from(rest)
     val after = rest.substring(first_word.len()).trim()
     if after.starts_with("for "):
         return first_word
@@ -602,7 +539,7 @@ fn _eval_calls(fn_name: text, callee: text, file: text) -> bool:
     var fn_indent = -1
     for line in lines:
         val trimmed = line.trim()
-        val indent = _leading_spaces(line)
+        val indent = _count_indent(line)
         if indent == 0:
             if in_fn:
                 in_fn = false
@@ -750,4 +687,3 @@ fn engine_sem_query(query_str: text, files: [text], format_str: text) -> i64:
     print ""
     print "Total: {results.len()} results"
     0
-

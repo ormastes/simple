@@ -25,9 +25,9 @@
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
-use os.drivers.pci.pci.{PciDevice, pci_read_bar}
+use os.drivers.pci.pci.{PciDevice}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
-use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.types.device_mem_types.{DeviceGrant, new_device_grant}
 use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -37,6 +37,7 @@ use std.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
 extern fn serial_println(msg: text)
 extern fn rt_pci_device_count() -> i64
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+extern fn rt_pci_read_bar0(index: i64) -> i64
 
 # ============================================================================
 # Helper — build a DeviceGrant from a discovered PciDevice.
@@ -48,32 +49,23 @@ fn grant_from_pci(dev: PciDevice) -> DeviceGrant:
     var bar0_phys: u64 = dev.bar0.to_u64()
     if bar0_phys == 0:
         bar0_phys = (dev.bar1 & 0xFFFFFFF0).to_u64()
-    serial_writeln("[grant] using pci bar")
+    serial_writeln("[grant] dev.bar0={dev.bar0} dev.bar1={dev.bar1} using=0x{bar0_phys}")
 
     val bar0_size: u64 = 4096
 
-    DeviceGrant(
-        pci_vendor: dev.vendor_id,
-        pci_device: dev.device_id,
-        pci_bus: dev.bus,
-        pci_dev: dev.device,
-        pci_func: dev.func,
-        pci_class: dev.class_code,
-        pci_subclass: dev.subclass,
-        bar0_phys: bar0_phys,
-        bar0_size: bar0_size,
-        bar0_cap: 0,
-        irq_vector: dev.irq_line.to_u32(),
-        irq_notification_id: 0,
-        irq_notification_bit: 0,
-        irq_cap: 0,
-        dma_device_addr: 0,
-        dma_host_addr: 0,
-        dma_size: 0,
-        dma_cap: 0,
-        iommu_domain_id: 0,
-        iommu_cap: 0
-    )
+    var grant = new_device_grant()
+    grant.pci_vendor = dev.vendor_id
+    grant.pci_device = dev.device_id
+    grant.pci_bus = dev.bus
+    grant.pci_dev = dev.device
+    grant.pci_func = dev.func
+    grant.pci_class = dev.class_code
+    grant.pci_subclass = dev.subclass
+    grant.bar0_phys = bar0_phys
+    grant.bar0_size = bar0_size
+    grant.bar0_cap = 1
+    grant.irq_vector = dev.irq_line.to_u32()
+    grant
 
 fn halt_forever():
     """Spin halt — end-of-entry gate when we don't want to continue booting."""
@@ -125,8 +117,8 @@ fn find_virtio_gpu_from_c_pci_cache() -> PciDevice?:
                 subclass: subclass.to_u8(),
                 prog_if: 0,
                 header_type: 0,
-                bar0: pci_read_bar(bus, dev, func, 0),
-                bar1: pci_read_bar(bus, dev, func, 1),
+                bar0: rt_pci_read_bar0(i).to_u32(),
+                bar1: 0,
                 irq_line: rt_pci_get_field(i, 7).to_u8()
             ))
         i = i + 1
@@ -155,7 +147,7 @@ fn spl_start():
         # --- VirtIO-GPU driver init ---
         val grant = grant_from_pci(found_dev)
         var gpu = VirtioGpuDriver.new()
-        if val Ok(_ok) = gpu.init_from_grant(grant):
+        if val Ok(_ok) = gpu.init_legacy_from_bar0(found_dev.bar0.to_u64(), 4096, 0):
             serial_println("[BOOT] VirtIO-GPU initialized")
 
             # --- VirtioGpuBackend verification ---

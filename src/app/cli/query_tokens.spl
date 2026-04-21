@@ -4,7 +4,7 @@
 # Token-related query implementations: semantic-tokens, inlay-hints.
 
 use app.cli.query_sanitize.{sanitize_path}
-use app.cli.query_helpers.{_collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _extract_flag, _extract_call_name}
+use app.cli.query_helpers.{_collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _extract_flag, _extract_call_name, _extract_ident_from, _extract_params_from}
 use app.cli.query_rich_common.{query_file_read_rich, _find_in_line_from}
 
 fn query_semantic_tokens(file: text, cmd_args: [text]) -> i64:
@@ -252,56 +252,17 @@ fn _collect_fn_param_names(content: text, fn_names: [text], fn_params: [text]):
         elif trimmed.starts_with("extern fn "):
             rest = trimmed.substring(10)
         if rest != "":
-            val name = _extract_ident_from_str(rest)
+            val name = _extract_ident_from(rest)
             if name != "":
                 val params_str = _extract_param_names_from(rest)
                 fn_names.push(name)
                 fn_params.push(params_str)
 
-fn _extract_ident_from_str(s: text) -> text:
-    """Extract leading identifier from a string."""
-    var end_pos = 0
-    while end_pos < s.len():
-        val ch = s.substring(end_pos, end_pos + 1)
-        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
-        if not ok:
-            break
-        end_pos = end_pos + 1
-    if end_pos == 0:
-        return ""
-    s.substring(0, end_pos)
-
 fn _extract_param_names_from(s: text) -> text:
     """Extract parameter names (without types) from a function signature string.
     Returns comma-separated names like 'x,y,z'.
     """
-    # Find opening paren
-    var paren_start = -1
-    var pi = 0
-    while pi < s.len():
-        if s.substring(pi, pi + 1) == "(":
-            paren_start = pi
-            break
-        pi = pi + 1
-    if paren_start < 0:
-        return ""
-    # Find matching close paren
-    var depth = 0
-    var paren_end = -1
-    var qi = paren_start
-    while qi < s.len():
-        val ch = s.substring(qi, qi + 1)
-        if ch == "(":
-            depth = depth + 1
-        elif ch == ")":
-            depth = depth - 1
-            if depth == 0:
-                paren_end = qi
-                break
-        qi = qi + 1
-    if paren_end < 0:
-        return ""
-    val inner = s.substring(paren_start + 1, paren_end)
+    val inner = _extract_params_from(s)
     if inner.trim() == "":
         return ""
     # Split by commas and extract each param name
@@ -311,7 +272,7 @@ fn _extract_param_names_from(s: text) -> text:
         val pt = param.trim()
         if pt == "":
             continue
-        val pname = _extract_ident_from_str(pt)
+        val pname = _extract_ident_from(pt)
         if pname != "" and pname != "self":
             names.push(pname)
     names.join(",")

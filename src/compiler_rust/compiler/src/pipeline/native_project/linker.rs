@@ -1,6 +1,6 @@
 //! Linker selection, linking, system symbols, stub generation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -11,6 +11,75 @@ use super::tools::{
 };
 
 impl NativeProjectBuilder {
+    fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
+        let output = std::process::Command::new("nm")
+            .arg("-g")
+            .arg("-p")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("nm: {e}"))?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let mut symbols = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let parsed = match parts.as_slice() {
+                [sym_type, name] if *sym_type != "U" => Some((*sym_type, *name)),
+                [_addr, sym_type, name] if *sym_type != "U" => Some((*sym_type, *name)),
+                _ => None,
+            };
+            if let Some((sym_type, raw_name)) = parsed {
+                let name = if cfg!(target_os = "macos") {
+                    raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
+                } else {
+                    raw_name.to_string()
+                };
+                symbols.push((sym_type.to_string(), name));
+            }
+        }
+        Ok(symbols)
+    }
+
+    fn freestanding_weak_boot_defsyms(
+        object_paths: &[PathBuf],
+        boot_objects: &[PathBuf],
+        imports: &ModuleImports,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut boot_weak = HashSet::new();
+        for obj in boot_objects {
+            for (kind, name) in Self::read_global_symbol_types(obj)? {
+                if matches!(kind.as_str(), "W" | "w" | "V" | "v") {
+                    boot_weak.insert(name);
+                }
+            }
+        }
+        if boot_weak.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut simple_defined = HashSet::new();
+        for obj in object_paths {
+            for (_kind, name) in Self::read_global_symbol_types(obj)? {
+                simple_defined.insert(name);
+            }
+        }
+
+        let mut aliases = BTreeMap::new();
+        for (raw, variants) in imports.all_mangled.iter() {
+            if !boot_weak.contains(raw) {
+                continue;
+            }
+            if let Some(target) = variants
+                .iter()
+                .find(|candidate| *candidate != raw && simple_defined.contains(*candidate))
+            {
+                aliases.insert(raw.clone(), target.clone());
+            }
+        }
+        Ok(aliases.into_iter().collect())
+    }
+
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
         let output = std::process::Command::new("nm")
             .arg("-g")
@@ -578,7 +647,7 @@ int main(int argc, char** argv) {
         &self,
         object_paths: &[PathBuf],
         temp_dir: &Path,
-        _imports: &ModuleImports,
+        imports: &ModuleImports,
     ) -> Result<(), String> {
         let cross_target = effective_target();
         let triple = match cross_target.arch {
@@ -848,11 +917,21 @@ int main(int argc, char** argv) {
 
         let freestanding_stub_obj =
             generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi)?;
+        let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
+        if !weak_boot_defsyms.is_empty() {
+            eprintln!(
+                "Freestanding weak boot alias override: {} symbol(s)",
+                weak_boot_defsyms.len()
+            );
+        }
 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
             if let Some(ref ls) = self.config.linker_script {
                 c.arg(format!("-T{}", ls.display()));
+            }
+            for (raw, target) in &weak_boot_defsyms {
+                c.arg(format!("--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);
             for boot_obj in &boot_objects {
@@ -882,6 +961,9 @@ int main(int argc, char** argv) {
             c.arg("-fuse-ld=lld");
             if let Some(ref ls) = self.config.linker_script {
                 c.arg(format!("-T{}", ls.display()));
+            }
+            for (raw, target) in &weak_boot_defsyms {
+                c.arg(format!("-Wl,--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);
             for boot_obj in &boot_objects {

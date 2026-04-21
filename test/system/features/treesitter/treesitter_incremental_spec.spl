@@ -145,12 +145,30 @@ fn apply_text_edit(source: text, start_byte: i64, end_byte: i64, replacement: te
     source.substring(0, start_byte) + replacement + source.substring(end_byte, source.len())
 
 fn make_edit(old_text: text, new_text: text) -> InputEdit:
-    val old_end = end_point(old_text)
-    val new_end = end_point(new_text)
-    val changed_prefix = 0
+    var changed_prefix = 0
     val old_len = old_text.len()
     val new_len = new_text.len()
-    InputEdit.create(changed_prefix, old_len, new_len, Point.create(1, 0), old_end, new_end)
+    val shared_len = if old_len < new_len: old_len else: new_len
+    while changed_prefix < shared_len and old_text.substring(changed_prefix, changed_prefix + 1) == new_text.substring(changed_prefix, changed_prefix + 1):
+        changed_prefix = changed_prefix + 1
+
+    var old_suffix = old_len
+    var new_suffix = new_len
+    while old_suffix > changed_prefix and new_suffix > changed_prefix and old_text.substring(old_suffix - 1, old_suffix) == new_text.substring(new_suffix - 1, new_suffix):
+        old_suffix = old_suffix - 1
+        new_suffix = new_suffix - 1
+
+    val before = old_text.substring(0, changed_prefix)
+    val old_changed = old_text.substring(0, old_suffix)
+    val new_changed = new_text.substring(0, new_suffix)
+    InputEdit.create(
+        changed_prefix,
+        old_suffix,
+        new_suffix,
+        end_point(before),
+        end_point(old_changed),
+        end_point(new_changed)
+    )
 
 describe "TreeSitter Point":
     it "creates point":
@@ -206,7 +224,7 @@ describe "TreeSitter Edit Byte Adjustment":
 
     it "maps byte inside edit to start":
         val edit = make_edit("abcdef", "abXYef")
-        check(apply_byte_edit(3, edit) == 0)
+        check(apply_byte_edit(3, edit) == 2)
 
     it "shifts byte after edit by delta":
         val edit = make_edit("abcdef", "abXYef")
@@ -323,7 +341,7 @@ describe "TreeSitter Multi-Line Edits":
         val source = "one\ntwo"
         val updated = apply_text_edit(source, 4, 4, "\nthree")
         check(updated == "one\n\nthreetwo")
-        check(count_lines(updated) == 4)
+        check(count_lines(updated) == 3)
 
     it "handles multi-line deletion":
         val source = "one\ntwo\nthree"

@@ -309,15 +309,21 @@ pub struct Node:
     kind_: text
     text_: text
     span_: Span
+    span: Span
+    child_count_value: i64
 
 impl Node:
     pub fn kind(self) -> text:
         return self.kind_
 
+    pub fn child_count(self) -> i64:
+        return self.child_count_value
+
 # Parse tree
 pub struct Tree:
     root_node: Node
     source: text
+    version: i64
 
 impl Tree:
     pub fn root(self) -> Option<Node>:
@@ -332,11 +338,39 @@ impl TreeSitterParser:
         return Ok(TreeSitterParser(language: language))
 
     pub me parse(self, source: text) -> Result<Tree, text>:
+        val root_span = Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: 1, start_column: 1, end_column: source.len() + 1)
         val root = Node(
-            kind_: "source_file",
+            kind_: "module",
             text_: source,
-            span_: Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: 1, start_column: 1, end_column: source.len() + 1),
+            span_: root_span,
+            span: root_span,
+            child_count_value: treesitter_count_top_level_items(source),
         )
-        return Ok(Tree(root_node: root, source: source))
+        return Ok(Tree(root_node: root, source: source, version: 0))
 
-export edits
+fn treesitter_count_top_level_items(source: text) -> i64:
+    var count = 0
+    var at_line_start = true
+    var top_level = true
+    var saw_content = false
+
+    for ch in source:
+        if ch == '\n':
+            if top_level and saw_content:
+                count = count + 1
+            at_line_start = true
+            top_level = true
+            saw_content = false
+        else:
+            if at_line_start:
+                if ch == ' ' or ch == '\t':
+                    top_level = false
+                else:
+                    at_line_start = false
+                    saw_content = true
+            else:
+                saw_content = true
+
+    if top_level and saw_content:
+        count = count + 1
+    return count

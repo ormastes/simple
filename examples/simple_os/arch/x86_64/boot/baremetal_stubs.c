@@ -6773,6 +6773,20 @@ int64_t rt_pci_get_field(int64_t index, int64_t field)
     }
 }
 
+int64_t rt_pci_read_bar0(int64_t index)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    if (index < 0 || index >= _pci_cache_count) return -1;
+    int i = (int)index;
+    uint32_t pci_addr = 0x80000000
+        | ((uint32_t)_pci_cache[i].bus << 16)
+        | ((uint32_t)_pci_cache[i].dev << 11)
+        | ((uint32_t)_pci_cache[i].func << 8)
+        | 0x10;
+    outl(0xCF8, pci_addr);
+    return (int64_t)inl(0xCFC);
+}
+
 /* ===================================================================
  * 9. _start — serial init, spl_start, isa-debug-exit
  * =================================================================== */

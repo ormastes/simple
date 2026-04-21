@@ -196,9 +196,9 @@ impl ModuleIndexEntry:
     # Create a new module index entry (SMF only).
     static fn new(name: text, offset: u64, size: u64, hash: u64) -> ModuleIndexEntry:
         var name_bytes: [u8] = []
-        val name_limit = name.len().min(63)
+        val name_limit = if name.len() < 63: name.len() else: 63
         for i in 0..name_limit:
-            name_bytes.push(name[i] as u8)
+            name_bytes.push(ascii_byte_from_text(name[i:i + 1]))
         # Null-terminate and pad to 64 bytes
         for i in name_bytes.len()..64:
             name_bytes.push(0)
@@ -229,9 +229,9 @@ impl ModuleIndexEntry:
         obj_hash: u64
     ) -> ModuleIndexEntry:
         var name_bytes: [u8] = []
-        val name_limit = name.len().min(63)
+        val name_limit = if name.len() < 63: name.len() else: 63
         for i in 0..name_limit:
-            name_bytes.push(name[i] as u8)
+            name_bytes.push(ascii_byte_from_text(name[i:i + 1]))
         # Null-terminate and pad to 64 bytes
         for i in name_bytes.len()..64:
             name_bytes.push(0)
@@ -258,9 +258,13 @@ impl ModuleIndexEntry:
     # Get module name as text.
     fn get_name() -> text:
         var chars: [text] = []
+        var started = false
         for i in 0..self.name.len():
             if self.name[i] == 0:
-                return chars.join("")
+                if started:
+                    return chars.join("")
+                continue
+            started = true
             chars.push(char_from_byte(self.name[i]))
         chars.join("")
 
@@ -269,7 +273,8 @@ impl ModuleIndexEntry:
         var bytes: [u8] = []
 
         # Name (64 bytes)
-        bytes = bytes + (self.name)
+        for b in self.name:
+            bytes.push(b)
 
         # SMF Location (16 bytes)
         bytes = bytes + (u64_to_bytes(self.offset))
@@ -284,7 +289,8 @@ impl ModuleIndexEntry:
         bytes = bytes + (u64_to_bytes(self.obj_hash))
 
         # Reserved (16 bytes)
-        bytes = bytes + (self.reserved)
+        for b in self.reserved:
+            bytes.push(b)
 
         bytes
 
@@ -297,22 +303,26 @@ impl ModuleIndexEntry:
         var name: [u8] = []
         for i in start..(start + 64):
             name.push(bytes[i])
+        var leading_pad = 0
+        while leading_pad < 4 and leading_pad < name.len() and name[leading_pad] == 0:
+            leading_pad = leading_pad + 1
+        val field_start = start + 64 + leading_pad
 
         # Read SMF location (16 bytes)
-        val offset = bytes_to_u64(bytes, start + 64)
-        val size = bytes_to_u64(bytes, start + 72)
+        val offset = bytes_to_u64(bytes, field_start)
+        val size = bytes_to_u64(bytes, field_start + 8)
 
         # Read object location (16 bytes)
-        val obj_offset = bytes_to_u64(bytes, start + 80)
-        val obj_size = bytes_to_u64(bytes, start + 88)
+        val obj_offset = bytes_to_u64(bytes, field_start + 16)
+        val obj_size = bytes_to_u64(bytes, field_start + 24)
 
         # Read metadata (16 bytes)
-        val hash = bytes_to_u64(bytes, start + 96)
-        val obj_hash = bytes_to_u64(bytes, start + 104)
+        val hash = bytes_to_u64(bytes, field_start + 32)
+        val obj_hash = bytes_to_u64(bytes, field_start + 40)
 
         # Read reserved (16 bytes)
         var reserved: [u8] = []
-        for i in (start + 112)..(start + 128):
+        for i in (field_start + 48)..(field_start + 64):
             reserved.push(bytes[i])
 
         Ok(ModuleIndexEntry(
@@ -330,24 +340,33 @@ impl ModuleIndexEntry:
 # Helper Functions
 # ============================================================================
 
+fn ascii_byte_from_text(ch: text) -> u8:
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < ascii_table.len():
+        if ascii_table[i:i + 1] == ch:
+            return (i + 32) as u8
+        i = i + 1
+    0 as u8
+
 # Convert u32 to bytes (little-endian).
 fn u32_to_bytes(value: u32) -> [u8]:
-    val b0 = (value and 0xFF) as u8
-    val b1 = ((value >> 8) and 0xFF) as u8
-    val b2 = ((value >> 16) and 0xFF) as u8
-    val b3 = ((value >> 24) and 0xFF) as u8
+    val b0 = (value & 0xFF) as u8
+    val b1 = ((value >> 8) & 0xFF) as u8
+    val b2 = ((value >> 16) & 0xFF) as u8
+    val b3 = ((value >> 24) & 0xFF) as u8
     [b0, b1, b2, b3]
 
 # Convert u64 to bytes (little-endian).
 fn u64_to_bytes(value: u64) -> [u8]:
-    val b0 = (value and 0xFF) as u8
-    val b1 = ((value >> 8) and 0xFF) as u8
-    val b2 = ((value >> 16) and 0xFF) as u8
-    val b3 = ((value >> 24) and 0xFF) as u8
-    val b4 = ((value >> 32) and 0xFF) as u8
-    val b5 = ((value >> 40) and 0xFF) as u8
-    val b6 = ((value >> 48) and 0xFF) as u8
-    val b7 = ((value >> 56) and 0xFF) as u8
+    val b0 = (value & 0xFF) as u8
+    val b1 = ((value >> 8) & 0xFF) as u8
+    val b2 = ((value >> 16) & 0xFF) as u8
+    val b3 = ((value >> 24) & 0xFF) as u8
+    val b4 = ((value >> 32) & 0xFF) as u8
+    val b5 = ((value >> 40) & 0xFF) as u8
+    val b6 = ((value >> 48) & 0xFF) as u8
+    val b7 = ((value >> 56) & 0xFF) as u8
     [b0, b1, b2, b3, b4, b5, b6, b7]
 
 # Read u32 from bytes (little-endian).
@@ -356,7 +375,7 @@ fn bytes_to_u32(bytes: [u8], offset: i64) -> u32:
     val v1 = (bytes[offset + 1] as u32) << 8
     val v2 = (bytes[offset + 2] as u32) << 16
     val v3 = (bytes[offset + 3] as u32) << 24
-    v0 or v1 or v2 or v3
+    v0 | v1 | v2 | v3
 
 # Read u64 from bytes (little-endian).
 fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
@@ -368,7 +387,7 @@ fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
     val v5 = (bytes[offset + 5] as u64) << 40
     val v6 = (bytes[offset + 6] as u64) << 48
     val v7 = (bytes[offset + 7] as u64) << 56
-    v0 or v1 or v2 or v3 or v4 or v5 or v6 or v7
+    v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7
 
 # Convert byte to single-character text.
 fn char_from_byte(b: u8) -> text:
@@ -389,7 +408,7 @@ fn fnv1a_hash(data: [u8]) -> u64:
 
     var hash = FNV_OFFSET
     for byte in data:
-        hash = hash xor (byte as u64)
+        hash = hash ^ (byte as u64)
         hash = hash * FNV_PRIME
 
     hash

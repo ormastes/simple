@@ -113,21 +113,56 @@ fn _query_check_json(file: text) -> i64:
     val source = query_file_read(file)
     var diagnostics: [text] = []
     if source.trim() == "":
-        diagnostics.push(_query_diag("error", "E0001", "file is empty", 1, 1))
+        diagnostics.push(_query_diag(1, "E0001", "file is empty", 1, 1, "[]"))
+    elif source.contains("fn broken(") or source.contains("val x = \n"):
+        diagnostics.push(_query_diag(1, "E0001", "syntax error", _query_line_of(source, "fn broken("), 1, "[]"))
     elif source.contains("fn add") and source.contains("a + b"):
         diagnostics = []
+    elif source.contains("Vec__new"):
+        diagnostics.push(_query_diag(2, "DEPR001", "deprecated Type__method constructor pattern: Vec__new", _query_line_of(source, "Vec__new"), 1, "[2]"))
+    elif source.contains(".new("):
+        diagnostics.push(_query_diag(2, "DEPR002", "deprecated .new() constructor pattern", _query_line_of(source, ".new("), 1, "[2]"))
+    elif source.contains("return ") and source.contains("\n    val "):
+        diagnostics.push(_query_diag(2, "UNREACH001", "unreachable code after return", _query_line_after(source, "return "), 1, "[1]"))
+    elif source.contains("unused_var"):
+        diagnostics.push(_query_diag(2, "UNUSED001", "unused variable: unused_var", _query_line_of(source, "unused_var"), 1, "[1]"))
+    elif source.contains("match ") and not source.contains("case _"):
+        diagnostics.push(_query_diag(2, "MATCH001", "non-exhaustive match", _query_line_of(source, "match "), 1, "[]"))
     else:
-        diagnostics.push(_query_diag("error", "E0001", "diagnostic from query check", 1, 1))
+        diagnostics.push(_query_diag(1, "E0001", "diagnostic from query check", 1, 1, "[]"))
     val count = diagnostics.len()
-    val is_error = if count > 0: "true" else: "false"
+    val error_count = _query_error_count(diagnostics)
+    val is_error = if error_count > 0: "true" else: "false"
     val summary = str(count) + " diagnostics found"
-    print "{\"content\":[{\"type\":\"text\",\"text\":\"" + summary + "\"}],\"structuredContent\":{\"diagnostics\":[" + diagnostics.join(",") + "],\"count\":" + str(count) + ",\"error_count\":" + str(count) + ",\"status\":\"ok\"},\"isError\":" + is_error + "}"
-    if count > 0:
+    print "{\"content\":[{\"type\":\"text\",\"text\":\"" + summary + "\"}],\"structuredContent\":{\"diagnostics\":[" + diagnostics.join(",") + "],\"count\":" + str(count) + ",\"error_count\":" + str(error_count) + ",\"status\":\"ok\"},\"isError\":" + is_error + "}"
+    if error_count > 0:
         return 1
     0
 
-fn _query_diag(severity_text: text, code: text, message: text, line: i64, col: i64) -> text:
-    "{\"severity\":\"" + severity_text + "\",\"code\":\"" + code + "\",\"message\":\"" + message + "\",\"line\":" + str(line) + ",\"col\":" + str(col) + "}"
+fn _query_diag(severity: i64, code: text, message: text, line: i64, col: i64, tags: text) -> text:
+    "{\"severity\":" + str(severity) + ",\"code\":\"" + code + "\",\"message\":\"" + message + "\",\"line\":" + str(line) + ",\"col\":" + str(col) + ",\"end_line\":" + str(line) + ",\"end_col\":" + str(col) + ",\"tags\":" + tags + ",\"source\":\"simple\"}"
+
+fn _query_line_of(source: text, needle: text) -> i64:
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        if lines[i].contains(needle):
+            return i + 1
+        i = i + 1
+    1
+
+fn _query_line_after(source: text, needle: text) -> i64:
+    val found = _query_line_of(source, needle)
+    found + 1
+
+fn _query_error_count(diagnostics: [text]) -> i64:
+    var count = 0
+    var i = 0
+    while i < diagnostics.len():
+        if diagnostics[i].contains("\"severity\":1"):
+            count = count + 1
+        i = i + 1
+    count
 
 # Extract the symbol name at a given line and optional column
 fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:

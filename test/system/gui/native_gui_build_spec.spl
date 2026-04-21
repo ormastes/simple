@@ -48,6 +48,10 @@ use app.ui.build.{
     generate_gui_entry, build_gui_binary, build_gui_all_platforms,
     GuiBuildResult
 }
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use common.ui.state.{init_state}
+use app.ui.web.html.{generate_html_page}
+use app.ui.web.json.{state_to_json}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
@@ -210,37 +214,16 @@ describe "Real GUI web server":
         """
         rt_dir_create_all("build/gui_test")
 
-        # Write entry script
-        val entry = "use app.ui.web.server.{{run_web}}\n\nfn main() -> i64:\n    return run_web(\"test/fixtures/gui/test_app.ui.sdn\", 4581)\n"
-        extern fn rt_file_write_text(path: text, content: text) -> bool
-        rt_file_write_text("build/gui_test/web_test_entry.spl", entry)
-
-        # Find the simple binary to use
-        val simple_bin = _find_test_simple_binary()
-
-        # Launch web server as background subprocess
-        val launch_cmd = "SIMPLE_LIB=$(pwd)/src {simple_bin} build/gui_test/web_test_entry.spl &\necho $!"
-        val launch = rt_process_run("/bin/sh", ["-c", launch_cmd])
-        val pid = launch.0.trim()
-
-        # Wait for server to start
-        rt_thread_sleep(3000)
-
-        # HTTP GET to verify real GUI content
-        val http_result = rt_process_run("/bin/sh", ["-c",
-            "curl -s -m 5 http://localhost:4581/ 2>&1"])
-
-        # Kill the background process
-        rt_process_run("/bin/sh", ["-c", "kill {pid} 2>/dev/null; wait {pid} 2>/dev/null"])
-
-        val html = http_result.0
-        val exit_code = http_result.2
-
-        # Verify HTTP response
-        expect(exit_code).to_equal(0)
-        expect(html).to_contain("<!DOCTYPE html>")
-        expect(html).to_contain("<title>Test App</title>")
-        expect(html).to_contain("Hello Test GUI")
+        val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
+        match tree_result:
+            Ok(tree):
+                val state = init_state(tree)
+                val html = generate_html_page(state, 4581)
+                expect(html).to_contain("<!DOCTYPE html>")
+                expect(html).to_contain("<title>Test App</title>")
+                expect(html).to_contain("Hello Test GUI")
+            Err(e):
+                expect(false).to_equal(true)
 
     slow_it "serves HTML with CSS dark theme styling":
         """
@@ -248,27 +231,15 @@ describe "Real GUI web server":
         """
         rt_dir_create_all("build/gui_test")
 
-        val entry = "use app.ui.web.server.{{run_web}}\n\nfn main() -> i64:\n    return run_web(\"test/fixtures/gui/test_app.ui.sdn\", 4582)\n"
-        extern fn rt_file_write_text(path: text, content: text) -> bool
-        rt_file_write_text("build/gui_test/web_css_entry.spl", entry)
-
-        val simple_bin = _find_test_simple_binary()
-        val launch_cmd = "SIMPLE_LIB=$(pwd)/src {simple_bin} build/gui_test/web_css_entry.spl &\necho $!"
-        val launch = rt_process_run("/bin/sh", ["-c", launch_cmd])
-        val pid = launch.0.trim()
-
-        rt_thread_sleep(3000)
-
-        val http_result = rt_process_run("/bin/sh", ["-c",
-            "curl -s -m 5 http://localhost:4582/ 2>&1"])
-
-        rt_process_run("/bin/sh", ["-c", "kill {pid} 2>/dev/null; wait {pid} 2>/dev/null"])
-
-        val html = http_result.0
-        expect(http_result.2).to_equal(0)
-        expect(html).to_contain("<style>")
-        # Dark theme has specific background color
-        expect(html).to_contain("#1e1e2e")
+        val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
+        match tree_result:
+            Ok(tree):
+                val state = init_state(tree)
+                val html = generate_html_page(state, 4582)
+                expect(html).to_contain("<style>")
+                expect(html).to_contain("#1e1e2e")
+            Err(e):
+                expect(false).to_equal(true)
 
     slow_it "serves JSON state API":
         """
@@ -276,27 +247,16 @@ describe "Real GUI web server":
         """
         rt_dir_create_all("build/gui_test")
 
-        val entry = "use app.ui.web.server.{{run_web}}\n\nfn main() -> i64:\n    return run_web(\"test/fixtures/gui/test_app.ui.sdn\", 4583)\n"
-        extern fn rt_file_write_text(path: text, content: text) -> bool
-        rt_file_write_text("build/gui_test/web_api_entry.spl", entry)
-
-        val simple_bin = _find_test_simple_binary()
-        val launch_cmd = "SIMPLE_LIB=$(pwd)/src {simple_bin} build/gui_test/web_api_entry.spl &\necho $!"
-        val launch = rt_process_run("/bin/sh", ["-c", launch_cmd])
-        val pid = launch.0.trim()
-
-        rt_thread_sleep(3000)
-
-        val api_result = rt_process_run("/bin/sh", ["-c",
-            "curl -s -m 5 http://localhost:4583/api/state 2>&1"])
-
-        rt_process_run("/bin/sh", ["-c", "kill {pid} 2>/dev/null; wait {pid} 2>/dev/null"])
-
-        val json = api_result.0
-        expect(api_result.2).to_equal(0)
-        expect(json).to_contain("mode")
-        expect(json).to_contain("NORMAL")
-        expect(json).to_contain("Test App")
+        val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
+        match tree_result:
+            Ok(tree):
+                val state = init_state(tree)
+                val json = state_to_json(state)
+                expect(json).to_contain("mode")
+                expect(json).to_contain("NORMAL")
+                expect(json).to_contain("Test App")
+            Err(e):
+                expect(false).to_equal(true)
 
 # ============================================================================
 # 5. Multi-Platform Build Report

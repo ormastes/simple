@@ -70,7 +70,7 @@ fn scan_libraries_with_provider(library_paths: [text], verbose: bool, provider: 
 
         val lsm_files = find_result.stdout.split("\n")
         for lsm_file in lsm_files:
-            val trimmed = lsm_file_trim(lsm_file)
+            val trimmed = lsm_file.trim()
             if trimmed == "":
                 continue
 
@@ -92,7 +92,7 @@ fn scan_libraries_with_provider(library_paths: [text], verbose: bool, provider: 
             _ = getter_modules.add_library(trimmed)
             val modules = getter_modules.list_modules()
             lib_info = LibraryInfo(path: trimmed, name: lib_name, modules: modules)
-            libraries_push(libraries, lib_info)
+            libraries.push(lib_info)
 
             if verbose:
                 print "[linker-lib]   Modules: {modules.len()}"
@@ -103,13 +103,13 @@ fn extract_basename(path: text) -> text:
     """Extract filename without directory and .lsm extension."""
     # Get last component after /
     var name = path
-    val last_slash = path.rfind("/")
+    val last_slash = path.last_index_of("/") ?? -1
     if last_slash >= 0:
         name = path[(last_slash + 1):]
 
     # Remove .lsm extension
     if name.ends_with(".lsm"):
-        name = name[0:(name_len(name) - 4)]
+        name = name[0:(name.len() - 4)]
 
     name
 
@@ -222,7 +222,7 @@ fn resolve_symbols_from_libraries(
                                 has_code_units: has_units,
                                 code_units: code_units
                             )
-                            resolved_modules_push(resolved_modules, resolved)
+                            resolved_modules.push(resolved)
 
                         resolved_count = resolved_count + 1
                         found = true
@@ -269,28 +269,28 @@ fn extract_undefined_symbols(
                 continue
             val lines = nm_alt.stdout.split("\n")
             for line in lines:
-                val trimmed = line_trim(line)
+                val trimmed = line.trim()
                 if trimmed == "":
                     continue
                 # Parse "         U symbol_name"
                 val parts = trimmed.split(" ")
-                if parts_len(parts) >= 2:
-                    val sym_name = parts[parts_len(parts) - 1]
+                if parts.len() >= 2:
+                    val sym_name = parts[parts.len() - 1]
                     val undef_sym = UndefinedSymbol(name: sym_name, object_file: obj_file)
-                    undefined_push(undefined, undef_sym)
+                    undefined.push(undef_sym)
             continue
 
         val lines = nm_result.stdout.split("\n")
         for line in lines:
-            val trimmed = line_trim(line)
+            val trimmed = line.trim()
             if trimmed == "":
                 continue
             # nm -u output: "         U symbol_name" or just "symbol_name"
             val parts = trimmed.split(" ")
-            if parts_len(parts) > 0:
-                val sym_name = parts[parts_len(parts) - 1]
+            if parts.len() > 0:
+                val sym_name = parts[parts.len() - 1]
                 val undef_sym = UndefinedSymbol(name: sym_name, object_file: obj_file)
-                undefined_push(undefined, undef_sym)
+                undefined.push(undef_sym)
 
     if verbose:
         print "[linker-lib] Found {undefined.len()} undefined symbols"
@@ -397,7 +397,7 @@ fn link_with_libraries(
     # Step 5: Combine all objects
     var all_objects = object_files
     for obj_path in library_objects:
-        all_objects_push(all_objects, obj_path)
+        all_objects.push(obj_path)
 
     if verbose:
         print "[linker-lib] Linking {all_objects.len()} object files total"
@@ -438,14 +438,14 @@ fn extract_objects_from_resolved(
                 return Err("Failed to write object file: {temp_path}")
             if verbose:
                 print "[linker-lib] Extracted {temp_path} ({module.obj_data.len()} bytes)"
-            temp_objects_push(temp_objects, temp_path)
+            temp_objects.push(temp_path)
             continue
 
         if module.has_code_units:
             val asm_res = assemble_code_units(module.code_units, temp_path, verbose)
             if asm_res.is_err():
                 return Err(asm_res.unwrap_err())
-            temp_objects_push(temp_objects, temp_path)
+            temp_objects.push(temp_path)
             continue
 
         return Err("Module {module.module_name} missing object data")
@@ -455,16 +455,18 @@ fn extract_objects_from_resolved(
 
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     """Write binary data to file using xxd."""
-    if data_len(data) == 0:
+    if data.len() == 0:
         val result = shell("touch '{path}'")
         return result.exit_code == 0
 
     # Convert to hex and write
     var hex_str = ""
     for byte in data:
-        val b = bitwise_and(byte, 0xFF)
-        val hi = "0123456789abcdef"[(bit_shr(b, 4)):((bit_shr(b, 4)) + 1)]
-        val lo = "0123456789abcdef"[bitwise_and(b, 0xF):(bitwise_and(b, 0xF) + 1)]
+        val b = byte as i64
+        val hi_idx = (b >> 4) & 0xF
+        val lo_idx = b & 0xF
+        val hi = "0123456789abcdef"[hi_idx:hi_idx + 1]
+        val lo = "0123456789abcdef"[lo_idx:lo_idx + 1]
         hex_str = hex_str + hi + lo
 
     val result = shell("echo '{hex_str}' | xxd -r -p > '{path}'")

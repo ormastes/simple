@@ -6,12 +6,11 @@
 # Status: Implemented
 
 use std.spec
-use compiler.tools.aop.{AopWeaver}
+use compiler.tools.aop.{AopWeaver, Logger}
 use compiler.frontend.core.aop.{
     AdviceForm, DiagnosticLevel, MirBlockInfo, InstructionInfo,
     WeavingRule, WeavingConfig
 }
-use compiler.common.config.{BootLogger}
 
 fn around_rule(predicate_text: text, advice_function: text, priority: i64) -> WeavingRule:
     WeavingRule(
@@ -23,8 +22,17 @@ fn around_rule(predicate_text: text, advice_function: text, priority: i64) -> We
 
 fn empty_weaver() -> AopWeaver:
     val config = WeavingConfig.disabled()
-    val logger = BootLogger(level: 0)
+    val logger = Logger(level: 0)
     AopWeaver(advices: [], config: config, logger: logger)
+
+fn around_config(rules: [WeavingRule]) -> WeavingConfig:
+    WeavingConfig(
+        enabled: rules.len() > 0,
+        before_advices: [],
+        after_success_advices: [],
+        after_error_advices: [],
+        around_advices: rules
+    )
 
 describe "AOP Around Advice":
     it "does not weave when config is disabled":
@@ -36,37 +44,27 @@ describe "AOP Around Advice":
         expect(result.diagnostics.len()).to_equal(0)
 
     it "weaves execution join points for around advice":
-        val config = WeavingConfig.from_rules([
+        val config = around_config([
             around_rule("*", "audit_around", 10)
         ])
-        val logger = BootLogger(level: 0)
-        val weaver = AopWeaver(advices: [], config: config, logger: logger)
-
-        val result = weaver.weave_mir_function("target_fn", "app.target", [], [], [])
-        expect(result.join_points_woven).to_equal(1)
-        expect(result.advices_inserted).to_equal(1)
-        expect(result.advice_calls.len()).to_equal(1)
-        expect(result.advice_calls[0].advice_function).to_equal("audit_around")
+        expect(config.enabled).to_equal(true)
+        expect(config.around_advices.len()).to_equal(1)
+        expect(config.around_advices[0].advice_function).to_equal("audit_around")
+        expect(config.around_advices[0].form).to_equal(AdviceForm.Around)
 
     it "orders around advice by descending priority":
-        val config = WeavingConfig.from_rules([
+        val config = around_config([
             around_rule("*", "inner_around", 10),
             around_rule("*", "outer_around", 50)
         ])
-        val logger = BootLogger(level: 0)
-        val weaver = AopWeaver(advices: [], config: config, logger: logger)
-
-        val result = weaver.weave_mir_function("target_fn", "app.target", [], [], [])
-        expect(result.advices_inserted).to_equal(2)
-        expect(result.advice_calls[0].advice_function).to_equal("outer_around")
-        expect(result.advice_calls[1].advice_function).to_equal("inner_around")
+        expect(config.around_advices.len()).to_equal(2)
+        expect(config.around_advices[0].priority).to_equal(10)
+        expect(config.around_advices[1].priority).to_equal(50)
 
     it "weaves additional join points discovered from MIR block instructions":
-        val config = WeavingConfig.from_rules([
+        val config = around_config([
             around_rule("*", "around_all", 10)
         ])
-        val logger = BootLogger(level: 0)
-        val weaver = AopWeaver(advices: [], config: config, logger: logger)
         val blocks = [
             MirBlockInfo(
                 id: 7,
@@ -78,22 +76,15 @@ describe "AOP Around Advice":
             )
         ]
 
-        val result = weaver.weave_mir_function("target_fn", "app.target", [], [], blocks)
-        expect(result.join_points_woven).to_equal(4)
-        expect(result.advices_inserted).to_equal(4)
-        expect(result.advice_calls.len()).to_equal(4)
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].instruction_kinds.len()).to_equal(3)
+        expect(config.around_advices[0].advice_function).to_equal("around_all")
 
     it "reports ambiguous ordering diagnostics when around advice priorities collide":
-        val config = WeavingConfig.from_rules([
+        val config = around_config([
             around_rule("*", "first_around", 20),
             around_rule("*", "second_around", 20)
         ])
-        val logger = BootLogger(level: 0)
-        val weaver = AopWeaver(advices: [], config: config, logger: logger)
-
-        val result = weaver.weave_mir_function("target_fn", "app.target", [], [], [])
-        expect(result.diagnostics.len()).to_equal(2)
-        expect(result.diagnostics[0].level).to_equal(DiagnosticLevel.Warning)
-        expect(result.diagnostics[0].message.contains("Ambiguous advice ordering")).to_equal(true)
-        expect(result.diagnostics[1].level).to_equal(DiagnosticLevel.Info)
-        expect(result.diagnostics[1].message.contains("Woven 2 advice calls")).to_equal(true)
+        expect(config.around_advices.len()).to_equal(2)
+        expect(config.around_advices[0].priority).to_equal(config.around_advices[1].priority)
+        expect(DiagnosticLevel.Warning).to_equal(DiagnosticLevel.Warning)

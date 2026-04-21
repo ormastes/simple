@@ -29,7 +29,7 @@
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.drivers.pci.pci.{PciBus, PciDevice}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
-use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.types.device_mem_types.{DeviceGrant, new_device_grant}
 use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -54,28 +54,18 @@ fn grant_from_pci(dev: PciDevice) -> DeviceGrant:
 
     val bar0_size: u64 = 4096
 
-    DeviceGrant(
-        pci_vendor: dev.vendor_id,
-        pci_device: dev.device_id,
-        pci_bus: dev.bus,
-        pci_dev: dev.device,
-        pci_func: dev.func,
-        pci_class: dev.class_code,
-        pci_subclass: dev.subclass,
-        bar0_phys: bar0_phys,
-        bar0_size: bar0_size,
-        bar0_cap: 0,
-        irq_vector: dev.irq_line.to_u32(),
-        irq_notification_id: 0,
-        irq_notification_bit: 0,
-        irq_cap: 0,
-        dma_device_addr: 0,
-        dma_host_addr: 0,
-        dma_size: 0,
-        dma_cap: 0,
-        iommu_domain_id: 0,
-        iommu_cap: 0
-    )
+    var grant = new_device_grant()
+    grant.pci_vendor = dev.vendor_id
+    grant.pci_device = dev.device_id
+    grant.pci_bus = dev.bus
+    grant.pci_dev = dev.device
+    grant.pci_func = dev.func
+    grant.pci_class = dev.class_code
+    grant.pci_subclass = dev.subclass
+    grant.bar0_phys = bar0_phys
+    grant.bar0_size = bar0_size
+    grant.irq_vector = dev.irq_line.to_u32()
+    grant
 
 fn halt_forever():
     """Spin halt — end-of-entry gate (baremetal kernel, no shell)."""
@@ -114,6 +104,13 @@ fn spl_start():
         val disp00 = pci.find_by_class(0x03, 0x00)
         if disp00.len() > 0:
             gpu_dev = disp00[0]
+        else:
+            # QEMU legacy virtio-gpu may enumerate as a transitional VirtIO
+            # function instead of display-class. This target has no other
+            # VirtIO device, so the fallback remains deterministic.
+            val virtio_devs = pci.find_virtio_devices()
+            if virtio_devs.len() > 0:
+                gpu_dev = virtio_devs[0]
 
     if val Some(found_dev) = gpu_dev:
         serial_println("[sys-gui-008] Found GPU: {found_dev.description()}")

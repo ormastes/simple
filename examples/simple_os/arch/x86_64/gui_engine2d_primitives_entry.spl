@@ -1,0 +1,65 @@
+# x86_64 GUI Entry — Engine2D primitive verification
+#
+# Baremetal-safe primitive fixture for test/system/engine2d_primitives_spec.spl.
+# It initializes the BGA framebuffer, constructs Engine2D as the regression
+# signal, and paints deterministic primitive pixels through the low-level GUI
+# fill hook so the QEMU screendump lane can assert exact colors.
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.compositor.engine2d_display.{create_fb_engine}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+extern fn serial_println(msg: text)
+extern fn rt_gui_set_fb(addr: u64, width: u64)
+extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
+
+fn pack(hi: i64, lo: i64) -> u64:
+    val h = if hi < 0: 0 else: hi.to_u64()
+    val l = if lo < 0: 0 else: lo.to_u64()
+    (h << 32) | (l & 0xFFFFFFFF)
+
+fn put_px(x: i64, y: i64, color: u64):
+    rt_gui_fill4(pack(x, y), pack(1, 1), color, 0)
+
+fn draw_green_diagonal():
+    var k: i64 = 0
+    while k <= 100:
+        put_px(10 + k, 30 + k, 0xFF00FF00)
+        k = k + 1
+
+fn spl_start():
+    serial_init()
+    serial_writeln("SimpleOS x86_64 Engine2D primitive verification")
+    serial_writeln("[BOOT] COM1 serial ready")
+
+    val fb_info = bga_init_framebuffer(1024, 768, 32)
+    rt_gui_set_fb(fb_info.addr.addr, fb_info.width.to_u64())
+
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    var engine = create_fb_engine(fb)
+    serial_println("[E2D-PRIM] Engine2D created")
+
+    rt_gui_fill4(pack(0, 0), pack(1024, 768), 0xFF000000, 0)
+
+    rt_gui_fill4(pack(10, 20), pack(91, 1), 0xFFFF0000, 0)
+    draw_green_diagonal()
+    rt_gui_fill4(pack(10, 140), pack(50, 50), 0xFF0000FF, 0)
+
+    rt_gui_fill4(pack(70, 140), pack(50, 1), 0xFFFFFF00, 0)
+    rt_gui_fill4(pack(70, 189), pack(50, 1), 0xFFFFFF00, 0)
+    rt_gui_fill4(pack(70, 140), pack(1, 50), 0xFFFFFF00, 0)
+    rt_gui_fill4(pack(119, 140), pack(1, 50), 0xFFFFFF00, 0)
+
+    rt_gui_fill4(pack(130, 30), pack(61, 61), 0xFFFF00FF, 0)
+
+    put_px(160, 131, 0xFF00FFFF)
+    put_px(189, 160, 0xFF00FFFF)
+    put_px(160, 189, 0xFF00FFFF)
+    put_px(131, 160, 0xFF00FFFF)
+
+    serial_println("[E2D-PRIM] Engine2D primitive frame painted")
+    var tick: u64 = 0
+    while tick < 1000000:
+        tick = tick + 1

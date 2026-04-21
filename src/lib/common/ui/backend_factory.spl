@@ -9,7 +9,12 @@
 #   - "browser" / "os"    — BrowserBackend (browser engine pipeline)
 
 use common.ui.widget.{UITree, UIState, UIEvent}
+use common.ui.capability.{Capability, NotSupported}
 use os.compositor.browser_backend.{BrowserBackend}
+use app.ui.none.event_queue.{EventQueue}
+use app.ui.tui.backend.{TuiBackend}
+use app.ui.web.backend.{WebBackend}
+use app.ui.tauri.backend.{TauriBackend}
 
 # =========================================================================
 # NoneBackend — minimal no-op backend for headless/test use
@@ -17,10 +22,12 @@ use os.compositor.browser_backend.{BrowserBackend}
 
 class NoneBackend:
     _name: text
+    _event_queue: EventQueue
+    _render_count: i32
 
 impl NoneBackend:
     static fn create(name: text) -> NoneBackend:
-        NoneBackend(_name: name)
+        NoneBackend(_name: name, _event_queue: EventQueue.new(), _render_count: 0)
 
     fn init() -> Result<bool, text>:
         Ok(true)
@@ -28,14 +35,15 @@ impl NoneBackend:
     fn shutdown():
         pass_dn
 
-    fn render(state: UIState) -> Result<bool, text>:
+    me render(state: UIState) -> Result<bool, text>:
+        self._render_count = self._render_count + 1
         Ok(true)
 
     fn render_html(state: UIState) -> text:
         ""
 
-    fn poll_event(timeout_ms: i32) -> UIEvent?:
-        nil
+    me poll_event(timeout_ms: i32) -> UIEvent?:
+        self._event_queue.dequeue()
 
     fn supports_mouse() -> bool: false
     fn supports_color() -> bool: false
@@ -47,6 +55,21 @@ impl NoneBackend:
 
     fn backend_name() -> text:
         self._name
+
+    fn capabilities() -> [Capability]:
+        []
+
+    fn show_notification(title: text, body: text) -> Result<bool, NotSupported>:
+        Err(NotSupported.for_capability("show_notification", Capability.Notification, self._name))
+
+    fn render_image(node: any, rect: any) -> Result<bool, NotSupported>:
+        Err(NotSupported.for_capability("render_image", Capability.Images, self._name))
+
+    me inject_event(event: UIEvent):
+        self._event_queue.push(event)
+
+    fn render_count() -> i32:
+        self._render_count
 
 # =========================================================================
 # Factory
@@ -64,6 +87,17 @@ fn create_backend(mode: text, port: i64) -> Result<any, text>:
     """
     if mode == "none" or mode == "headless":
         return Ok(NoneBackend.create("none"))
+    if mode == "tui":
+        return Ok(TuiBackend.new())
+    if mode == "web":
+        return Ok(WebBackend.new(port as i32))
+    if mode == "tauri":
+        val result = TauriBackend.new(port as i32)
+        match result:
+            Ok(backend):
+                return Ok(backend)
+            Err(e):
+                return Err(e)
     if mode == "browser" or mode == "os":
         return Ok(create_browser_backend(1024, 768, "glass_dark"))
     Err("Unknown backend mode: {mode}")

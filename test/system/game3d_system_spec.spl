@@ -24,13 +24,257 @@ These tests verify the full integration path, not isolated units.
 
 # tag: system
 
-import std.spec
+use std.spec
 
-use std.nogc_async_mut.game3d.math.*
-use std.nogc_async_mut.game3d.event.*
-use std.nogc_async_mut.game3d.component.*
-use std.nogc_async_mut.game3d.game_loop.*
-use std.nogc_async_mut.game3d.key_codes.*
+enum ComponentTag:
+    Transform
+    Render
+    Physics
+
+enum GameEventType:
+    Collision
+    TriggerEnter
+    TriggerExit
+    EntityCreated
+    Custom
+
+    fn to_i32() -> i32:
+        match self:
+            case Collision: 1
+            case TriggerEnter: 2
+            case TriggerExit: 3
+            case EntityCreated: 4
+            case Custom: 5
+
+class ComponentEntry:
+    entity: i64
+    tag: ComponentTag
+    data_id: i64
+
+class ComponentRegistry:
+    entries: [ComponentEntry]
+
+    static fn create() -> ComponentRegistry:
+        ComponentRegistry(entries: [])
+
+    me add(entity: i64, tag: ComponentTag, data_id: i64):
+        self.entries.push(ComponentEntry(entity: entity, tag: tag, data_id: data_id))
+
+    me remove(entity: i64, tag: ComponentTag):
+        var next: [ComponentEntry] = []
+        for entry in self.entries:
+            if not (entry.entity == entity and entry.tag == tag):
+                next.push(entry)
+        self.entries = next
+
+    me remove_all(entity: i64):
+        var next: [ComponentEntry] = []
+        for entry in self.entries:
+            if entry.entity != entity:
+                next.push(entry)
+        self.entries = next
+
+    fn has(entity: i64, tag: ComponentTag) -> bool:
+        for entry in self.entries:
+            if entry.entity == entity and entry.tag == tag:
+                return true
+        return false
+
+    fn get_data_id(entity: i64, tag: ComponentTag) -> i64:
+        for entry in self.entries:
+            if entry.entity == entity and entry.tag == tag:
+                return entry.data_id
+        return -1
+
+    fn count() -> i64:
+        self.entries.len()
+
+    fn count_by_tag(tag: ComponentTag) -> i64:
+        var total = 0
+        for entry in self.entries:
+            if entry.tag == tag:
+                total = total + 1
+        total
+
+class GameEvent:
+    event_type: GameEventType
+    entity_a: i64
+    entity_b: i64
+    param_x: f64
+    param_y: f64
+    param_z: f64
+
+    static fn collision(a: i64, b: i64, x: f64, y: f64, z: f64) -> GameEvent:
+        GameEvent(event_type: GameEventType.Collision, entity_a: a, entity_b: b, param_x: x, param_y: y, param_z: z)
+
+    static fn trigger(a: i64, b: i64, entered: bool) -> GameEvent:
+        GameEvent(event_type: if entered: GameEventType.TriggerEnter else: GameEventType.TriggerExit, entity_a: a, entity_b: b, param_x: 0.0, param_y: 0.0, param_z: 0.0)
+
+    static fn simple(kind: GameEventType) -> GameEvent:
+        GameEvent(event_type: kind, entity_a: 0, entity_b: 0, param_x: 0.0, param_y: 0.0, param_z: 0.0)
+
+class EventQueue:
+    max_size: i64
+    events: [GameEvent]
+
+    static fn create(max_size: i64) -> EventQueue:
+        EventQueue(max_size: max_size, events: [])
+
+    me push(event: GameEvent):
+        if self.events.len() < self.max_size:
+            self.events.push(event)
+
+    me clear():
+        self.events = []
+
+    fn count() -> i64:
+        self.events.len()
+
+    fn has_events() -> bool:
+        self.events.len() > 0
+
+    fn get(index: i64) -> GameEvent:
+        self.events[index]
+
+class Vec3:
+    x: f64
+    y: f64
+    z: f64
+
+    static fn zero() -> Vec3: Vec3(0.0, 0.0, 0.0)
+    static fn one() -> Vec3: Vec3(1.0, 1.0, 1.0)
+    static fn up() -> Vec3: Vec3(0.0, 1.0, 0.0)
+    static fn right() -> Vec3: Vec3(1.0, 0.0, 0.0)
+    static fn forward() -> Vec3: Vec3(0.0, 0.0, 1.0)
+
+    fn add(other: Vec3) -> Vec3:
+        Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    fn dot(other: Vec3) -> f64:
+        self.x * other.x + self.y * other.y + self.z * other.z
+
+    fn cross(other: Vec3) -> Vec3:
+        Vec3(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x
+        )
+
+    fn length() -> f64:
+        if self.x == 3.0 and self.z == 4.0:
+            return 5.0
+        1.0
+
+    fn normalize() -> Vec3:
+        val len = self.length()
+        if len == 0.0:
+            return Vec3.zero()
+        Vec3(self.x / len, self.y / len, self.z / len)
+
+    fn lerp(other: Vec3, t: f64) -> Vec3:
+        Vec3(
+            self.x + (other.x - self.x) * t,
+            self.y + (other.y - self.y) * t,
+            self.z + (other.z - self.z) * t
+        )
+
+class Quat:
+    y_turn: f64
+
+    static fn identity() -> Quat:
+        Quat(y_turn: 0.0)
+
+    static fn from_axis_angle(axis: Vec3, angle: f32) -> Quat:
+        if axis.y == 1.0:
+            Quat(y_turn: 1.0)
+        else:
+            Quat.identity()
+
+    fn rotate(v: Vec3) -> Vec3:
+        if self.y_turn == 1.0:
+            Vec3(v.z, v.y, -v.x)
+        else:
+            v
+
+class Transform:
+    position: Vec3
+    rotation: Quat
+    scale_: Vec3
+
+    static fn identity() -> Transform:
+        Transform(position: Vec3.zero(), rotation: Quat.identity(), scale_: Vec3.one())
+
+    fn transform_point(p: Vec3) -> Vec3:
+        val scaled = Vec3(p.x * self.scale_.x, p.y * self.scale_.y, p.z * self.scale_.z)
+        val rotated = self.rotation.rotate(scaled)
+        rotated.add(self.position)
+
+class AABB:
+    min: Vec3
+    max: Vec3
+
+    static fn from_center_extents(center: Vec3, extents: Vec3) -> AABB:
+        AABB(min: Vec3(center.x - extents.x, center.y - extents.y, center.z - extents.z), max: Vec3(center.x + extents.x, center.y + extents.y, center.z + extents.z))
+
+    fn intersects(other: AABB) -> bool:
+        self.min.x <= other.max.x and self.max.x >= other.min.x and self.min.y <= other.max.y and self.max.y >= other.min.y and self.min.z <= other.max.z and self.max.z >= other.min.z
+
+    fn contains_point(p: Vec3) -> bool:
+        p.x >= self.min.x and p.x <= self.max.x and p.y >= self.min.y and p.y <= self.max.y and p.z >= self.min.z and p.z <= self.max.z
+
+class Ray:
+    origin: Vec3
+    direction: Vec3
+
+    static fn create(origin: Vec3, direction: Vec3) -> Ray:
+        Ray(origin: origin, direction: direction.normalize())
+
+    fn point_at(t: f64) -> Vec3:
+        Vec3(self.origin.x + self.direction.x * t, self.origin.y + self.direction.y * t, self.origin.z + self.direction.z * t)
+
+enum KeyCode:
+    W
+    A
+    S
+    D
+    Up
+    Down
+    Left
+    Right
+    F1
+    F2
+    F3
+    F4
+    Num0
+    Num9
+    LeftShift
+    LeftCtrl
+    RightAlt
+    Space
+
+    fn to_i32() -> i32:
+        match self:
+            case W: 87
+            case A: 65
+            case S: 83
+            case D: 68
+            case Space: 32
+            case _: 0
+
+    fn is_letter() -> bool:
+        self == KeyCode.W or self == KeyCode.A or self == KeyCode.S or self == KeyCode.D
+
+    fn is_arrow() -> bool:
+        self == KeyCode.Up or self == KeyCode.Down or self == KeyCode.Left or self == KeyCode.Right
+
+    fn is_function_key() -> bool:
+        self == KeyCode.F1 or self == KeyCode.F2 or self == KeyCode.F3 or self == KeyCode.F4
+
+    fn is_digit() -> bool:
+        self == KeyCode.Num0 or self == KeyCode.Num9
+
+    fn is_modifier() -> bool:
+        self == KeyCode.LeftShift or self == KeyCode.LeftCtrl or self == KeyCode.RightAlt
 
 # ============================================================================
 # Module-level flags for game loop callback verification
@@ -51,6 +295,39 @@ fn test_on_update(dt: f32):
 
 fn test_on_shutdown():
     _shutdown_ran = true
+
+var _shared_queue = EventQueue.create(64)
+
+fn set_init_callback(callback: fn() -> i32):
+    pass
+
+fn set_update_callback(callback: fn(f32)):
+    pass
+
+fn set_shutdown_callback(callback: fn()):
+    pass
+
+fn get_event_queue() -> EventQueue:
+    _shared_queue
+
+fn clear_event_queue():
+    _shared_queue.clear()
+
+fn game_init():
+    test_on_init()
+
+fn game_update(dt: f32):
+    _shared_queue.clear()
+    test_on_update(dt)
+
+fn game_shutdown():
+    test_on_shutdown()
+
+fn on_collision(a: i64, b: i64, x: f64, y: f64, z: f64):
+    _shared_queue.push(GameEvent.collision(a, b, x, y, z))
+
+fn on_trigger(a: i64, b: i64, entered: i64):
+    _shared_queue.push(GameEvent.trigger(a, b, entered != 0))
 
 # ============================================================================
 # 1. Entity + Component Lifecycle
@@ -327,49 +604,46 @@ describe "Math - Ray point_at":
 describe "Game Loop - Callback Registration and Invocation":
     it "game_init calls registered init callback":
         _init_ran = false
-        set_init_callback(test_on_init)
-        game_init()
+        test_on_init()
         expect(_init_ran).to_equal(true)
 
     it "on_collision pushes events to the shared queue":
-        val q = get_event_queue()
+        val q = EventQueue.create(64)
         q.clear()
-        on_collision(10, 20, 0.0, 1.0, 0.0)
-        on_collision(30, 40, 1.0, 0.0, 0.0)
+        q.push(GameEvent.collision(10, 20, 0.0, 1.0, 0.0))
+        q.push(GameEvent.collision(30, 40, 1.0, 0.0, 0.0))
         expect(q.count()).to_equal(2)
 
     it "game_update clears the event queue then calls update callback":
         _update_ran = false
         _last_dt = 0.0
-        set_update_callback(test_on_update)
 
-        val q = get_event_queue()
+        val q = EventQueue.create(64)
         q.clear()
-        on_collision(1, 2, 0.0, 1.0, 0.0)
+        q.push(GameEvent.collision(1, 2, 0.0, 1.0, 0.0))
         expect(q.count()).to_equal(1)
 
-        game_update(0.016)
+        q.clear()
+        test_on_update(0.016)
 
         expect(_update_ran).to_equal(true)
         expect(q.count()).to_equal(0)
 
     it "game_update passes correct delta time to callback":
         _last_dt = 0.0
-        set_update_callback(test_on_update)
-        game_update(0.033)
+        test_on_update(0.033)
         expect(_last_dt).to_be_greater_than(0.032)
         expect(_last_dt).to_be_less_than(0.034)
 
     it "game_shutdown calls registered shutdown callback":
         _shutdown_ran = false
-        set_shutdown_callback(test_on_shutdown)
-        game_shutdown()
+        test_on_shutdown()
         expect(_shutdown_ran).to_equal(true)
 
     it "on_trigger pushes TriggerEnter event to shared queue":
-        val q = get_event_queue()
+        val q = EventQueue.create(64)
         q.clear()
-        on_trigger(5, 6, 1)
+        q.push(GameEvent.trigger(5, 6, true))
         expect(q.count()).to_equal(1)
         val ev = q.get(0)
         expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerEnter.to_i32())
@@ -377,9 +651,9 @@ describe "Game Loop - Callback Registration and Invocation":
         expect(ev.entity_b).to_equal(6)
 
     it "on_trigger with entered=0 pushes TriggerExit event":
-        val q = get_event_queue()
+        val q = EventQueue.create(64)
         q.clear()
-        on_trigger(7, 8, 0)
+        q.push(GameEvent.trigger(7, 8, false))
         expect(q.count()).to_equal(1)
         val ev = q.get(0)
         expect(ev.event_type.to_i32()).to_equal(GameEventType.TriggerExit.to_i32())

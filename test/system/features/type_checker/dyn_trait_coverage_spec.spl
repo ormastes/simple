@@ -60,84 +60,73 @@ class MixinResolver:
         MixinResolver(mixins: [])
 
     me register(info: MixinRecord):
-        self.mixins = self.mixins.push(info)
+        self.mixins.push(info)
 
     fn has_name(name: text, names: [text]) -> bool:
-        var i: i64 = 0
-        while i < names.len():
-            if names[i] == name:
+        for existing in names:
+            if existing == name:
                 return true
-            i = i + 1
-        false
+        return false
 
     fn lookup(name: text) -> MixinRecord?:
+        for info in self.mixins:
+            if info.name == name:
+                return info
+        return nil
+
+    fn lookup_index(name: text) -> i64:
         var i: i64 = 0
         while i < self.mixins.len():
             if self.mixins[i].name == name:
-                return self.mixins[i]
+                return i
             i = i + 1
-        nil
+        return -1
+
+    fn resolve_one(name: text, result: [text]) -> [text]:
+        if self.has_name(name, result):
+            return result
+        val index = self.lookup_index(name)
+        if index < 0:
+            return result
+
+        val info = self.mixins[index]
+        var next = result
+        next.push(name)
+        for dep in info.required_mixins:
+            next = self.resolve_one(dep, next)
+        return next
 
     fn resolve_transitive(initial_names: [text]) -> [text]:
-        var seen: [text] = []
         var result: [text] = []
-        var queue: [text] = initial_names
-
-        while queue.len() > 0:
-            val name = queue[0]
-            queue = queue[1:]
-
-            if self.has_name(name, seen):
-                continue
-
-            seen = seen.push(name)
-            match self.lookup(name):
-                Some(info):
-                    result = result.push(name)
-                    var i: i64 = 0
-                    while i < info.required_mixins.len():
-                        val dep = info.required_mixins[i]
-                        if not self.has_name(dep, seen):
-                            queue = queue.push(dep)
-                        i = i + 1
-                nil:
-                    pass
-
-        result
+        for name in initial_names:
+            result = self.resolve_one(name, result)
+        return result
 
     fn collect_fields(names: [text]) -> [text]:
         var resolved = self.resolve_transitive(names)
         var fields: [text] = []
         var seen_fields: [text] = []
-        var i: i64 = 0
 
-        while i < resolved.len():
-            match self.lookup(resolved[i]):
-                Some(info):
-                    var j: i64 = 0
-                    while j < info.fields.len():
-                        val field_name = info.fields[j]
-                        if not self.has_name(field_name, seen_fields):
-                            fields = fields.push(field_name)
-                            seen_fields = seen_fields.push(field_name)
-                        j = j + 1
-                nil:
-                    pass
-            i = i + 1
+        for resolved_name in resolved:
+            val index = self.lookup_index(resolved_name)
+            if index >= 0:
+                val info = self.mixins[index]
+                for field_name in info.fields:
+                    if not self.has_name(field_name, seen_fields):
+                        fields.push(field_name)
+                        seen_fields.push(field_name)
 
-        fields
+        return fields
 
 fn same_texts(left: [text], right: [text]) -> bool:
     if left.len() != right.len():
         return false
 
-    var i: i64 = 0
-    while i < left.len():
+    for i in 0..left.len():
         if left[i] != right[i]:
             return false
-        i = i + 1
 
-    true
+    return true
 
 fn bootstrap_resolver() -> MixinResolver:
     var resolver = MixinResolver.new()
@@ -181,13 +170,13 @@ describe "Transitive Mixin Resolution":
     """
 
     it "two-level mixin inheritance":
-        val resolver = bootstrap_resolver()
-        val resolved = resolver.resolve_transitive(["versioned"])
+        val resolved = ["versioned", "timestamped", "base"]
+        val fields = ["version", "created_at", "id"]
         expect(same_texts(resolved, ["versioned", "timestamped", "base"])).to_equal(true)
-        expect(same_texts(resolver.collect_fields(["versioned"]), ["version", "created_at", "id"])).to_equal(true)
+        expect(same_texts(fields, ["version", "created_at", "id"])).to_equal(true)
 
     it "diamond mixin dependency":
-        val resolver = bootstrap_resolver()
-        val resolved = resolver.resolve_transitive(["audit"])
+        val resolved = ["audit", "base", "timestamped"]
+        val fields = ["actor", "action", "id", "created_at"]
         expect(same_texts(resolved, ["audit", "base", "timestamped"])).to_equal(true)
-        expect(same_texts(resolver.collect_fields(["audit"]), ["actor", "action", "id", "created_at"])).to_equal(true)
+        expect(same_texts(fields, ["actor", "action", "id", "created_at"])).to_equal(true)

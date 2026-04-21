@@ -298,8 +298,9 @@ impl VirtioGpuDriver:
         """
         # -- Step 1: Detect BAR type and set up access --
         self.notif_id = grant.irq_notification_id
+        serial_println("[virtio-gpu] grant bar0=0x{grant.bar0_phys} bar0_cap={grant.bar0_cap}")
 
-        if self.try_map_modern_pci_caps(grant):
+        if grant.bar0_cap != 1 and (grant.bar0_phys & 1) == 0 and self.try_map_modern_pci_caps(grant):
             serial_println("[virtio-gpu] using modern virtio-pci capabilities")
 
             self.modern_write8(MODERN_COMMON_DEVICE_STATUS, 0)
@@ -465,6 +466,94 @@ impl VirtioGpuDriver:
         serial_println("[virtio-gpu] Backing attached")
 
         # -- Step 9: SET_SCANOUT --
+        val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
+        if scanout_result.is_err():
+            return Err("SET_SCANOUT failed")
+        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+
+        self.initialized = true
+        serial_println("[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
+        Ok(true)
+
+    me init_legacy_from_bar0(bar0_phys: u64, bar0_size: u64, notif_id: u64) -> Result<bool, text>:
+        """Initialize the legacy transport from scalar grant fields.
+
+        Baremetal wrapper entries use this to avoid the current large-struct
+        DeviceGrant ABI issue where fields after pci_subclass arrive as zero.
+        """
+        self.notif_id = notif_id
+        serial_println("[virtio-gpu] scalar legacy bar0=0x{bar0_phys}")
+
+        if (bar0_phys & 1) != 0:
+            self.is_io_bar = true
+            self.bar0_port = (bar0_phys & 0xFFFC).to_u16()
+            self.bar0_virt = 0
+            serial_println("[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
+        else:
+            self.is_io_bar = false
+            val bar_result = syscall(83, bar0_phys, bar0_size, 0, 0, 0)
+            if bar_result < 0:
+                return Err("MapBar failed: error {bar_result}")
+            self.bar0_virt = bar_result as u64
+            self.bar0_port = 0
+            serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
+
+        self.write_status(0)
+        self.write_status(STATUS_ACKNOWLEDGE)
+        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
+
+        val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
+        serial_println("[virtio-gpu] host_features=0x{host_features}")
+        self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
+
+        val ctrl_result = self.setup_controlq()
+        if val Err(msg) = ctrl_result:
+            self.write_status(STATUS_FAILED)
+            return Err("Controlq setup failed: {msg}")
+        serial_println("[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
+
+        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK)
+
+        val cmd_dma = self.alloc_dma(4096)
+        if cmd_dma.is_err():
+            return Err("Command buffer DMA alloc failed")
+        self.cmd_buf_virt = cmd_dma.unwrap_virt()
+        self.cmd_buf_phys = cmd_dma.unwrap_device()
+
+        val resp_dma = self.alloc_dma(4096)
+        if resp_dma.is_err():
+            return Err("Response buffer DMA alloc failed")
+        self.resp_buf_virt = resp_dma.unwrap_virt()
+        self.resp_buf_phys = resp_dma.unwrap_device()
+        serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
+
+        val display_result = self.cmd_get_display_info()
+        if display_result.is_err():
+            return Err("GET_DISPLAY_INFO failed")
+        serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+
+        self.resource_id = 1
+        self.next_resource_id = 2
+        val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
+        if create_result.is_err():
+            return Err("RESOURCE_CREATE_2D failed")
+        serial_println("[virtio-gpu] Resource {self.resource_id} created")
+
+        self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
+        val fb_dma = self.alloc_dma(self.fb_size)
+        if fb_dma.is_err():
+            return Err("Framebuffer DMA alloc failed")
+        self.fb_virt = fb_dma.unwrap_virt()
+        self.fb_phys = fb_dma.unwrap_device()
+        serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
+
+        self.clear(0x00000000)
+
+        val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
+        if attach_result.is_err():
+            return Err("RESOURCE_ATTACH_BACKING failed")
+        serial_println("[virtio-gpu] Backing attached")
+
         val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
         if scanout_result.is_err():
             return Err("SET_SCANOUT failed")

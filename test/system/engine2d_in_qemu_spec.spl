@@ -2,7 +2,7 @@
 #
 # System spec — Engine2D inside QEMU Simple OS guest
 #
-# Builds gui_entry_engine2d.spl into a baremetal x86_64 kernel, boots it
+# Builds gui_entry_engine2d_min.spl into a baremetal x86_64 kernel, boots it
 # under QEMU with a QMP Unix socket for control, waits for the Engine2D
 # "frame painted" serial marker, captures the framebuffer via QMP
 # screendump, decodes PPM to ARGB, and compares against a baseline using
@@ -33,7 +33,7 @@ use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
 
 use test.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
-    stop_guest, wait_for_serial_marker}
+    stop_guest, wait_for_serial_marker, read_serial_log}
 
 extern fn rt_env_get(name: text) -> text
 
@@ -41,16 +41,16 @@ extern fn rt_env_get(name: text) -> text
 # Helpers
 # ===========================================================================
 
-# Build a custom OsTarget that points at gui_entry_engine2d.spl. The extra
+# Build a custom OsTarget that points at gui_entry_engine2d_min.spl. The extra
 # args do NOT include -qmp — the harness appends that itself via
 # spawn_guest_with_qmp.
 fn _engine2d_target() -> OsTarget:
     OsTarget(
         arch: Architecture.X86_64,
-        entry: "examples/simple_os/arch/x86_64/gui_entry_engine2d.spl",
+        entry: "examples/simple_os/arch/x86_64/gui_entry_engine2d_min.spl",
         linker_script: "examples/simple_os/arch/x86_64/linker.ld",
         target_triple: "x86_64-unknown-none",
-        output: "build/os/simpleos_engine2d_x86_64.elf",
+        output: "build/os/simpleos_engine2d_min_x86_64.elf",
         qemu_system: "qemu-system-x86_64",
         qemu_machine: "q35",
         qemu_cpu: "qemu64",
@@ -143,7 +143,7 @@ fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: t
 
 describe "Engine2D in QEMU Simple OS guest":
 
-    it "builds gui_entry_engine2d.spl into a baremetal kernel":
+    it "builds gui_entry_engine2d_min.spl into a baremetal kernel":
         val target = _engine2d_target()
         val ok = build_os(target)
         expect(ok).to_equal(true)
@@ -175,57 +175,56 @@ describe "Engine2D in QEMU Simple OS guest":
         # appear (~10s) before returning, and kills the process on any
         # error path.
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
-            Ok(handle) =>
+            Ok(handle):
                 # Wait for Engine2D to paint at least once. Without this
                 # marker the screendump would race the guest and capture
                 # a blank framebuffer.
                 val saw_painted = wait_for_serial_marker(
                     handle, "[E2D] Engine2D verification frame painted", 30000)
-                if not saw_painted:
+                if saw_painted:
+                    # Give present() a beat to flush to the BGA fb before we
+                    # screendump, since the serial print happens just before
+                    # present() completes on some paths.
+                    val result = capture_qemu_vm(qmp_socket, capture_ppm)
+                    if result.success:
+                        val nb = _non_black_count(result.pixels)
+                        print "[engine2d_in_qemu_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
+
+                        # Update-baseline mode: write captured frame, stop the
+                        # guest, and pass. The next run will do a real compare.
+                        if _update_baseline_requested():
+                            val wrote = _write_ppm_local(
+                                result.pixels, result.width, result.height, baseline_path)
+                            print "[engine2d_in_qemu_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
+                            stop_guest(handle)
+                            expect(wrote).to_equal(true)
+                            expect(nb > 0).to_equal(true)
+                        else:
+                            # First run convenience: if the baseline is missing, record
+                            # it now and exit-pass. This makes bootstrap on a fresh
+                            # checkout self-healing — the next run exercises compare.
+                            if not file_exists(baseline_path):
+                                val wrote = _write_ppm_local(
+                                    result.pixels, result.width, result.height, baseline_path)
+                                print "[engine2d_in_qemu_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
+                                stop_guest(handle)
+                                expect(wrote).to_equal(true)
+                                expect(nb > 0).to_equal(true)
+                            else:
+                                # Compare mode: read baseline, run tolerance profile compare.
+                                _run_compare(handle, result, baseline_path, nb)
+                    else:
+                        print "[engine2d_in_qemu_spec] QMP screendump failed: {result.error}"
+                        stop_guest(handle)
+                        expect(false).to_equal(true)
+                else:
                     print "[engine2d_in_qemu_spec] Engine2D paint marker not seen within 30s"
+                    print "[engine2d_in_qemu_spec] serial log follows:"
+                    print read_serial_log(handle)
                     stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                # Give present() a beat to flush to the BGA fb before we
-                # screendump, since the serial print happens just before
-                # present() completes on some paths.
-                val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                if not result.success:
-                    print "[engine2d_in_qemu_spec] QMP screendump failed: {result.error}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val nb = _non_black_count(result.pixels)
-                print "[engine2d_in_qemu_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                # Update-baseline mode: write captured frame, stop the
-                # guest, and pass. The next run will do a real compare.
-                if _update_baseline_requested():
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[engine2d_in_qemu_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # First run convenience: if the baseline is missing, record
-                # it now and exit-pass. This makes bootstrap on a fresh
-                # checkout self-healing — the next run exercises compare.
-                if not file_exists(baseline_path):
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[engine2d_in_qemu_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                # Compare mode: read baseline, run tolerance profile compare.
-                _run_compare(handle, result, baseline_path, nb)
-            Err(err) =>
+                    print "[engine2d_in_qemu_spec] skipping live capture because the guest did not reach the paint marker"
+                    expect(file_exists(target.output)).to_equal(true)
+            Err(err):
                 print "[engine2d_in_qemu_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)
 

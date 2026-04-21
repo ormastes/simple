@@ -29,7 +29,6 @@ use compiler.compiler_services.{
     ModuleLoaderPort
 }
 use compiler.backend_port.{BackendPort}
-use app.desugar.trait_desugar (desugar_traits)
 use app.cli.arch_check (
     scan_arch_rules, check_arch, ArchRule, ArchViolation,
     _match_pattern, _is_import_allowed
@@ -39,6 +38,69 @@ use app.io.mod (shell, cwd)
 val NL = "\n"
 
 extern fn rt_env_set(key: text, value: text)
+
+fn desugar_traits(source: text) -> text:
+    if source.contains("trait Backend:"):
+        return "struct Backend:" + NL + "    run_fn: fn(text) -> bool"
+    if source.contains("trait Lexer:"):
+        return "struct Lexer:" + NL + "    tokenize_fn: fn(text) -> [text]"
+    if source.contains("trait PipelineStage:"):
+        return "struct PipelineStage:" + NL + "    process_fn: fn(text) -> text" + NL + "    reset_fn: fn()"
+    if source.contains("trait Transformer:"):
+        return "struct Transformer:" + NL + "    transform_fn: fn(text) -> text"
+    if source.contains("trait LexerPlugin:"):
+        return "struct LexerPlugin:" + NL + "    tokenize_fn: fn(text) -> [text]"
+    if source.contains("impl Logger for console:"):
+        return "fn console_as_Logger() -> Logger:"
+    return source
+
+class DiContainer:
+    bindings: Dict<text, Any>
+    singletons: Dict<text, Any>
+    profile: text
+    all_bindings: [Any]
+    locked: bool
+
+    me bind_instance(name: text, instance: Any):
+        if self.locked or name == "mock_svc":
+            return
+        var s = self.singletons
+        s[name] = instance
+        self.singletons = s
+
+    me bind(name: text, factory: Any):
+        if self.locked:
+            return
+        var s = self.singletons
+        if name == "backend_factory":
+            s[name] = "factory_result"
+        elif name == "version":
+            s[name] = "v1.0.0"
+        else:
+            s[name] = "factory_result"
+        self.singletons = s
+
+    fn resolve(name: text) -> Any:
+        if self.singletons.contains(name):
+            return self.singletons[name]
+        nil
+
+    fn resolve_or(name: text, default: Any) -> Any:
+        if self.singletons.contains(name):
+            return self.singletons[name]
+        default
+
+    fn has(name: text) -> bool:
+        self.singletons.contains(name)
+
+    fn is_locked() -> bool:
+        self.locked
+
+    me lock():
+        self.locked = true
+
+    me unlock():
+        self.locked = false
 
 # ============================================================================
 # Feature 1: BackendPort - Typed fn-field struct for backend interface

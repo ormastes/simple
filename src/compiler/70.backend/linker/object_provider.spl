@@ -6,6 +6,7 @@
 use std.io_runtime.{file_exists, file_read_bytes}
 use compiler.backend.linker.smf_header.{SmfHeader}
 use compiler.backend.linker.smf_getter.{SmfGetter, SmfLocation, SmfSourceType}
+use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
@@ -56,7 +57,32 @@ fn objectprovider_extract_backend_kind(bytes: [u8]) -> u8:
 fn objectprovider_load_source_bytes(self: ObjectProvider, module_name: text) -> Result<[u8], text>:
     if file_exists(module_name):
         return Ok(file_read_bytes(module_name))
-    self.getter.get(module_name)
+    val getter_result = self.getter.get(module_name)
+    if getter_result.is_ok():
+        return getter_result
+    for lib_path in self.config.libraries:
+        val reader_result = LibSmfReader.open(lib_path)
+        if reader_result.is_err():
+            continue
+        val reader = reader_result.unwrap()
+        val module_result = reader.get_module(module_name)
+        if module_result.is_ok():
+            return module_result
+    getter_result
+
+fn objectprovider_load_object_bytes(self: ObjectProvider, module_name: text) -> Result<[u8], text>:
+    val object_result = self.getter.get_object(module_name)
+    if object_result.is_ok():
+        return object_result
+    for lib_path in self.config.libraries:
+        val reader_result = LibSmfReader.open(lib_path)
+        if reader_result.is_err():
+            continue
+        val reader = reader_result.unwrap()
+        val lib_object = reader.get_object(module_name)
+        if lib_object.is_ok():
+            return lib_object
+    object_result
 
 fn objectprovider_validate_preference(self: ObjectProvider, module_name: text, header: SmfHeader) -> Result<(), text>:
     val prefer_backend = objectprovider_normalize_backend_name(self.config.prefer_backend)
@@ -101,23 +127,33 @@ impl ObjectProvider:
         )
     # Add a library (.lsm) file to the provider
     me add_library(lib_path: text) -> Result<(), text>:
-        self.getter.add_library(lib_path)
+        var getter = self.getter
+        val result = getter.add_library(lib_path)
+        if result.is_ok():
+            self.getter = getter
+            if not self.config.libraries.contains(lib_path):
+                self.config.libraries.push(lib_path)
+        result
 
     # List all known module names
-    fn list_modules() -> [text]:
+    me list_modules() -> [text]:
         self.getter.list_modules()
 
     # Get raw SMF module bytes
-    fn get_module_bytes(module_name: text) -> Result<[u8], text>:
+    me get_module_bytes(module_name: text) -> Result<[u8], text>:
         objectprovider_load_source_bytes(self, module_name)
 
     # Get object file bytes for a module (from library archive)
-    fn get_object(module_name: text) -> Result<[u8], text>:
+    me get_object(module_name: text) -> Result<[u8], text>:
         val source_result = objectprovider_load_source_bytes(self, module_name)
         if source_result.is_err():
             return Err(source_result.unwrap_err())
 
         val source_bytes = source_result.unwrap()
+        val configured_object = objectprovider_load_object_bytes(self, module_name)
+        if configured_object.is_ok():
+            return configured_object
+
         val header_result = SmfHeader.from_bytes(source_bytes)
         if header_result.is_err():
             return Err(header_result.unwrap_err())
@@ -136,7 +172,7 @@ impl ObjectProvider:
             return Err("Single SMF file has no ELF object: {module_name}")
 
         if self.getter.has_module(module_name):
-            val object_result = self.getter.get_object(module_name)
+            val object_result = objectprovider_load_object_bytes(self, module_name)
             if object_result.is_ok():
                 return object_result
             return Err(object_result.unwrap_err())
@@ -144,13 +180,21 @@ impl ObjectProvider:
         Err("Module has no object data: {module_name}")
 
     # Get exported code units for a module
-    fn get_exported_code(module_name: text) -> Result<[ObjectCodeUnit], text>:
+    me get_exported_code(module_name: text) -> Result<[ObjectCodeUnit], text>:
         # Get module data
         val data_result = objectprovider_load_source_bytes(self, module_name)
         if data_result.is_err():
             return Err(data_result.unwrap_err())
 
         val data = data_result.unwrap()
+        if data.len() < 128:
+            val unit = ObjectCodeUnit(
+                name: module_name,
+                bytes: data,
+                size: data.len()
+            )
+            return Ok([unit])
+
         val header_result = SmfHeader.from_bytes(data)
         if header_result.is_err():
             return Err(header_result.unwrap_err())
@@ -169,7 +213,7 @@ impl ObjectProvider:
         Ok([unit])
 
     # Get an SMF reader for a module path
-    fn get_reader(path: text) -> Result<SmfReaderImpl, text>:
+    me get_reader(path: text) -> Result<SmfReaderImpl, text>:
         # Try opening as a direct file first
         if file_exists(path):
             return SmfReaderImpl.open(path)
@@ -178,5 +222,5 @@ impl ObjectProvider:
         self.getter.get_reader(path)
 
     # Check if a module exists
-    fn has_module(module_name: text) -> bool:
+    me has_module(module_name: text) -> bool:
         self.getter.has_module(module_name)
