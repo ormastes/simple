@@ -176,10 +176,25 @@ direct-handoff diagnostic run reached:
 - `[scheduler] create_user_task: task stored`
 - `[scheduler] create_user_task: caps registered`
 
-The run then stalled before `_enqueue_ready` could enter. Until the scheduler
-runqueue handoff works from syscall/trap context and the x86_64 return path can
-actually switch into the new user context, syscall 13 remains gated and returns
-`-12` so the launcher uses the validated resident-manifest compatibility path.
+FR-SOS-024 Phase 3 partial (commits `4708c2c9`, `70b86c97`, `df557a44`,
+`fe81b853`, `a0e65c3b`, `a3f4f666`) resolved the scheduler enqueue path,
+added the `arch_x86_64_enter_user_first` ring-3 dispatch helper, wired
+syscall 14 (EnterUserBlocking) end-to-end, fixed the VMM init sentinel,
+and corrected the launcher process-scanner loop. A pre-blocker live
+x86_64 desktop disk run produced:
+
+- `[desktop-e2e] process-backed:ok app=browser_demo pid=1`
+- `[desktop-e2e] process-backed:ok app=hello_world pid=2`
+- `[desktop-e2e] process-backed:ok app=editor pid=3`
+- `mode=filesystem-process`, `editor-save:ok`, `cli-verify:ok`
+- `TEST PASSED`, 0 faults
+
+Full live re-verification against HEAD is blocked by a compiler-level
+freestanding-stub symbol-weakness collision (tracked in
+`doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`).
+The syscall 13 gate at `src/os/kernel/ipc/syscall.spl:1246` remains in
+place until that compiler fix lands and a clean QEMU run confirms the
+evidence above reproduces.
 
 The x86_64 desktop lane now uses single-CPU `Scheduler.new_bootstrap()` for
 early syscall/trap globals and clamps impossible early CPUID/SMP topology

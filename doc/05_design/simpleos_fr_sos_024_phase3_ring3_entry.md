@@ -2,11 +2,32 @@
 
 ## Status
 
-Design only. Not implemented. Sibling phases:
+Phase 3 partial — implemented. Sibling phases:
 
+- Phase 1 (diagnosis) — `doc/08_tracking/bug/syscall13_enqueue_stall_2026-04-21.md`.
 - Phase 2 (bulk-copy fix) — committed 2026-04-21 as `9e62c438`.
-- Desktop-lane compositor fault — workaround committed 2026-04-21 as
-  `857f9f42`.
+- Desktop-lane compositor fault — workaround committed 2026-04-21 as `857f9f42`.
+
+Commits that landed Phase 3 partial (all on main):
+
+- `4708c2c9` — `arch_x86_64_enter_user_first` ring-3 first-dispatch helper
+- `70b86c97` — scheduler enqueue path unblocked for user tasks
+- `df557a44` — VMM init sentinel (`g_vmm_initialized` → `u64` sentinel)
+- `fe81b853` — VMM gate on `g_vmm.pml4_phys` instead of init flag
+- `a0e65c3b` — module counter `g_user_task_next_pid` for user-task PIDs
+- `a3f4f666` — launcher scanner fix + scheduler module global + syscall 14
+  (EnterUserBlocking) wired end-to-end
+
+Pre-blocker x86_64 desktop disk live result: Browser Demo pid=1, Hello World
+pid=2, Editor pid=3, `mode=filesystem-process`, `editor-save:ok`,
+`cli-verify:ok`, `TEST PASSED`, 0 faults.
+
+Full live re-verification is blocked by a compiler freestanding-stub
+symbol-weakness collision tracked in
+`doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`.
+Once that compiler fix lands, the syscall 13 gate at
+`src/os/kernel/ipc/syscall.spl:1246` can be lifted and the live evidence
+re-confirmed.
 
 ## Goal
 
