@@ -131,6 +131,7 @@ pub(crate) fn compile_file_to_object(
     file_path: &Path,
     project_root: &Path,
     source_root: &Path,
+    source_dirs: &[PathBuf],
     no_mangle: bool,
     is_entry: bool,
     imports: &ModuleImports,
@@ -158,7 +159,8 @@ pub(crate) fn compile_file_to_object(
 
     // HIR
     let hir_source_root = source_root.to_path_buf();
-    let resolver = ModuleResolver::new(project_root.to_path_buf(), hir_source_root);
+    let resolver =
+        ModuleResolver::new(project_root.to_path_buf(), hir_source_root).with_extra_source_roots(source_dirs.to_vec());
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
@@ -333,6 +335,7 @@ pub(crate) fn compile_file_safe(
                     &file_path,
                     &project_root,
                     &source_root,
+                    &source_dirs,
                     no_mangle,
                     is_entry,
                     &imports,
@@ -344,6 +347,7 @@ pub(crate) fn compile_file_safe(
                         &file_path,
                         &project_root,
                         &source_root,
+                        &source_dirs,
                         no_mangle,
                         is_entry,
                         &imports,

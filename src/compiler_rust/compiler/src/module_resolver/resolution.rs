@@ -109,6 +109,17 @@ fn resolve_stdlib_from_root(
     Err(CompileError::semantic("stdlib module not found".to_string()))
 }
 
+fn ordered_source_roots(resolver: &ModuleResolver) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.push(resolver.source_root.clone());
+    for root in &resolver.extra_source_roots {
+        if !roots.iter().any(|existing| existing == root) {
+            roots.push(root.clone());
+        }
+    }
+    roots
+}
+
 impl ModuleResolver {
     /// Resolve a module path to a filesystem path
     ///
@@ -191,10 +202,12 @@ impl ModuleResolver {
 
                 // Strategy 2: Try "compiler.*" → source_root/compiler/ with numbered prefix support
                 if segments[0] == "compiler" && segments.len() > 1 {
-                    let compiler_dir = self.source_root.join("compiler");
-                    if compiler_dir.is_dir() {
-                        if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
-                            return Ok(resolved);
+                    for root in ordered_source_roots(self) {
+                        let compiler_dir = root.join("compiler");
+                        if compiler_dir.is_dir() {
+                            if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
+                                return Ok(resolved);
+                            }
                         }
                     }
                     // Also try project_root/src/compiler/
@@ -208,10 +221,12 @@ impl ModuleResolver {
 
                 // Strategy 3: Try numbered directory at source root level
                 if segments[0] != "crate" && !segments.is_empty() {
-                    if let Some(numbered) = find_numbered_dir(&self.source_root, &segments[0]) {
-                        if segments.len() > 1 {
-                            if let Ok(resolved) = self.resolve_from_base(&numbered, &segments[1..], path) {
-                                return Ok(resolved);
+                    for root in ordered_source_roots(self) {
+                        if let Some(numbered) = find_numbered_dir(&root, &segments[0]) {
+                            if segments.len() > 1 {
+                                if let Ok(resolved) = self.resolve_from_base(&numbered, &segments[1..], path) {
+                                    return Ok(resolved);
+                                }
                             }
                         }
                     }
@@ -221,10 +236,12 @@ impl ModuleResolver {
                 // e.g., "use app.ffi_gen.parser" → source_root/app/ffi_gen/parser.spl
                 // This handles cross-project imports declared in simple.sdn
                 if segments[0] != "crate" && segments.len() > 1 {
-                    let top_dir = self.source_root.join(&segments[0]);
-                    if top_dir.is_dir() {
-                        if let Ok(resolved) = self.resolve_from_base(&top_dir, &segments[1..], path) {
-                            return Ok(resolved);
+                    for root in ordered_source_roots(self) {
+                        let top_dir = root.join(&segments[0]);
+                        if top_dir.is_dir() {
+                            if let Ok(resolved) = self.resolve_from_base(&top_dir, &segments[1..], path) {
+                                return Ok(resolved);
+                            }
                         }
                     }
                 }

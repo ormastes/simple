@@ -61,7 +61,7 @@ fn hir_inline_asm_volatile_flag_is_preserved() {
     let body = lower_body(
         r#"
 fn main() -> i64:
-    asm volatile { "sti" }
+    asm volatile { sti }
     return 0
 "#,
     );

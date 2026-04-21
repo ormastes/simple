@@ -586,6 +586,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _is_arm_fs_exec_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
+        envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if objcopy_prefix != "":
         envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
@@ -1081,30 +1082,6 @@ fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
     val img = arm_fs_exec_disk_image_path(arch)
     ["-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
 
-fn scenario_arm64_virtio_fat32_smf() -> QemuScenario:
-    QemuScenario(
-        name: "arm64-virtio-fat32-smf",
-        arch: Architecture.Arm64,
-        machine: "virt",
-        cpu: "cortex-a72",
-        memory: "384M",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm64) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false,
-        description: "ARM64 virtio-blk FAT32 SMF filesystem execution"
-    )
-
-fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
-    QemuScenario(
-        name: "arm32-virtio-fat32-smf",
-        arch: Architecture.Arm32,
-        machine: "virt",
-        cpu: "cortex-a15",
-        memory: "384M",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false,
-        description: "ARM32 virtio-blk FAT32 SMF filesystem execution"
-    )
-
 fn get_all_scenarios() -> [QemuScenario]:
     """Returns all defined QEMU scenarios."""
     [
@@ -1122,8 +1099,6 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_arm32_virtio_fat32_smf(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
-        scenario_arm64_virtio_fat32_smf(),
-        scenario_arm32_virtio_fat32_smf(),
         scenario_x64_desktop_disk()
     ]
 
@@ -1227,24 +1202,11 @@ fn desktop_disk_image_path() -> text:
 fn fs_test_disk_image_path() -> text:
     "build/os/fat32.img"
 
-fn arm_fs_exec_disk_image_path(arch: Architecture) -> text:
-    match arch:
-        Architecture.Arm64: "build/os/fat32-arm64.img"
-        Architecture.Arm32: "build/os/fat32-arm32.img"
-        _: "build/os/fat32-arm.img"
-
 fn _x64_nvme_fs_test_disk_args() -> [text]:
     val img_path = fs_test_disk_image_path()
     [
         "-drive", "file={img_path},if=none,id=nvm,format=raw",
         "-device", "nvme,serial=deadbeef,drive=nvm"
-    ]
-
-fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
-    val img_path = arm_fs_exec_disk_image_path(arch)
-    [
-        "-drive", "file={img_path},if=none,id=armdisk,format=raw",
-        "-device", "virtio-blk-device,drive=armdisk"
     ]
 
 fn desktop_installer_iso_path_in(release_root: text) -> text?:
@@ -1380,23 +1342,6 @@ fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
-fn ensure_arm_fs_exec_disk_image(arch: Architecture) -> bool:
-    val img_path = arm_fs_exec_disk_image_path(arch)
-    if rt_file_exists(img_path) and _arm_fs_exec_disk_image_has_required_smf(img_path, arch):
-        return true
-    val arch_name = if arch == Architecture.Arm64: "arm64" else: "arm32"
-    print "[ensure_arm_fs_exec_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
-        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_name], 60000)
-    if stdout != "":
-        print "[ensure_arm_fs_exec_disk_image] stdout:\n{stdout}"
-    if stderr != "":
-        print "[ensure_arm_fs_exec_disk_image] stderr:\n{stderr}"
-    if exit_code != 0:
-        print "[ensure_arm_fs_exec_disk_image] make_os_disk.shs exited {exit_code}"
-        return false
-    rt_file_exists(img_path) and _arm_fs_exec_disk_image_has_required_smf(img_path, arch)
-
 fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
     val marker = if arch == Architecture.Arm64: "SIMPLEOS_ARM64_HELLO_ELF" else: "SIMPLEOS_ARM32_HELLO_ELF"
     val cmd =
@@ -1430,14 +1375,6 @@ fn scenario_kernel_path(scenario: QemuScenario, target: OsTarget) -> text:
         return arm_fs_exec_kernel_bin_path(scenario.arch)
     target.output
 
-fn ensure_scenario_media(scenario: QemuScenario) -> bool:
-    if scenario.name == "x64-nvme-fat32":
-        return ensure_fs_test_disk_image()
-    if scenario.name == "x64-desktop-test" or scenario.name == "x64-desktop-disk":
-        return ensure_desktop_disk_image()
-    if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
-        return ensure_arm_fs_exec_disk_image(scenario.arch)
-    true
 fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     """Best-effort host-side validation that the disk image is populated.
 

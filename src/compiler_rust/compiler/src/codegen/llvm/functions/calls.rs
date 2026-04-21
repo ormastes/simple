@@ -565,6 +565,7 @@ impl LlvmBackend {
             let base_ptr = builder
                 .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
+            let ptr_slot_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
             let offset_val = self.context.i32_type().const_int(0, false);
             let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
@@ -573,7 +574,7 @@ impl LlvmBackend {
             let fn_ptr_slot = builder
                 .build_pointer_cast(
                     fn_ptr_slot,
-                    i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
+                    ptr_slot_type,
                     "fn_ptr_slot_cast",
                 )
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot ptr", &e))?;

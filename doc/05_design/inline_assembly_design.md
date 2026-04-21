@@ -20,16 +20,17 @@ asm volatile {
 }
 ```
 
-Compatibility forms remain accepted while the compiler catches up:
+Compatibility forms remain accepted with parser warnings while the compiler catches up:
 
 - `asm: "nop"` and indented `asm:` blocks
 - `asm volatile: "nop"` and indented `asm volatile:` blocks
 - `asm(...)` only for legacy operand/constraint syntax
 
-Old `asm(...)` is accepted without warning because operand constraints still
-depend on it. The current Rust compiler path preserves raw no-operand asm during
-HIR lowering; operand-bound `asm(...)` is parsed but currently skipped by Rust
-HIR lowering. New Simple OS code should prefer raw `asm {}` wrappers for
+Old `asm(...)` now emits a legacy syntax warning because canonical instruction
+blocks use `asm { ... }`. Operand-bound `asm(...)` remains parseable while the
+compiler catches up on operand-aware raw blocks. The current Rust compiler path
+preserves raw no-operand asm during HIR lowering; operand-bound `asm(...)` is
+parsed but currently skipped by Rust HIR lowering. New Simple OS code should prefer raw `asm {}` wrappers for
 instruction-only helpers and keep ABI-sensitive boot entry assembly in `.s/.S`
 until Simple supports naked functions, section placement, global labels, and
 early stack setup.
@@ -41,6 +42,12 @@ Runtime mode contract:
 | Interpreter | Parse and skip inline asm; safe only for no-op smoke fixtures |
 | Loader | Preserve raw asm blocks so native project linking can include generated asm objects |
 | Compiler | Lower raw asm to MIR/codegen and emit generated inline asm objects |
+
+Tree-sitter/tooling contract:
+
+- `asm { ... }` is represented as an `asm_block` with `asm_content`.
+- `asm_content` is injected as `asm` for highlighting and editor tooling.
+- The payload is raw text, not Simple string literals.
 
 Target coverage must include `x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`,
 and `riscv64` across interpreter, loader, and compiler mode tests.

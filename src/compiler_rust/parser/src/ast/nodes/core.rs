@@ -95,7 +95,7 @@ pub enum Node {
     LeanBlock(LeanBlock),
 
     // Low-level features
-    /// Inline assembly: `asm: "instruction"` or `asm: block`
+    /// Inline assembly: `asm { instruction }` or legacy `asm("instruction")`
     InlineAsm(InlineAsmStmt),
     /// Newtype wrapper: `newtype Name = Type`
     Newtype(NewtypeDef),

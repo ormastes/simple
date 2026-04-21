@@ -32,6 +32,8 @@ use os.userlib.window.{WindowClient}
 use os.userlib.process.{yield_, exit_}
 use os.userlib.log.{log_info, log_error}
 
+extern fn rt_sleep_ms(ms: i64)
+
 # =========================================================================
 # Browser Demo App — Widget-based UI (Part A)
 # =========================================================================
@@ -250,11 +252,8 @@ fn render_demo_to_pixels(width: i32, height: i32) -> [u32]:
     and rasterizes to a pixel buffer via the software executor.
     """
     val dom = create_demo_dom()
-    var renderer = BrowserRenderer(
-        viewport_w: width,
-        viewport_h: height,
-        bg_color: 0xFFF0F0F0
-    )
+    var renderer = BrowserRenderer.create(width, height)
+    renderer.set_background(0xFFF0F0F0)
     val result = renderer.render_dom(dom)
     val scene = result.to_scene()
 
@@ -349,6 +348,68 @@ fn browser_demo_remote_main():
     main_client.disconnect()
     log_info("[browser_demo] exit app_id=/sys/apps/browser_demo code=0")
     exit_(0)
+
+fn browser_demo_hosted_main() -> i64:
+    """Launch Browser Demo inside the host WM without kernel-only process exits."""
+    log_info("[browser_demo] start app_id=/sys/apps/browser_demo mode=hosted")
+    val (node_count, pixel_count) = render_demo_stats(600, 400)
+    log_info("[browser_demo] render stats nodes={node_count} pixels={pixel_count} mode=hosted")
+
+    var main_client = WindowClient.new()
+    main_client.set_app_identity("/sys/apps/browser_demo")
+    if not main_client.connect():
+        log_error("[browser_demo] connect_failed app_id=/sys/apps/browser_demo client=main mode=hosted")
+        return 1
+
+    val main_wid = main_client.create_window("Browser Demo", 120, 90, 460, 260)
+    if main_wid == 0:
+        log_error("[browser_demo] create_window_failed app_id=/sys/apps/browser_demo client=main mode=hosted")
+        main_client.disconnect()
+        return 1
+    log_info("[browser_demo] window_created app_id=/sys/apps/browser_demo wid={main_wid} role=main mode=hosted")
+    main_client.update_content(
+        "Browser Demo\n\napp_id: /sys/apps/browser_demo\nwindow: main\nrenderer: original browser engine\nnodes: {node_count}\npixels: {pixel_count}"
+    )
+
+    var inspector_client = WindowClient.new()
+    inspector_client.set_app_identity("/sys/apps/browser_demo")
+    if not inspector_client.connect():
+        log_error("[browser_demo] connect_failed app_id=/sys/apps/browser_demo client=inspector mode=hosted")
+        main_client.destroy_window()
+        main_client.disconnect()
+        return 1
+
+    val inspector_wid = inspector_client.create_window("Browser Demo Inspector", 620, 120, 320, 220)
+    if inspector_wid == 0:
+        log_error("[browser_demo] create_window_failed app_id=/sys/apps/browser_demo client=inspector mode=hosted")
+        inspector_client.disconnect()
+        main_client.destroy_window()
+        main_client.disconnect()
+        return 1
+    log_info("[browser_demo] window_created app_id=/sys/apps/browser_demo wid={inspector_wid} role=inspector mode=hosted")
+
+    inspector_client.update_content(
+        "Inspector\n\napp_id: /sys/apps/browser_demo\nwindow: secondary\nrenderer: original browser engine\nnodes: {node_count}\npixels: {pixel_count}"
+    )
+
+    var running = true
+    while running:
+        val main_event = main_client.poll_event()
+        if main_event != nil and main_event.event_type == WM_EVENT_CLOSE:
+            running = false
+
+        val inspector_event = inspector_client.poll_event()
+        if inspector_event != nil and inspector_event.event_type == WM_EVENT_CLOSE:
+            running = false
+
+        rt_sleep_ms(16)
+
+    inspector_client.destroy_window()
+    inspector_client.disconnect()
+    main_client.destroy_window()
+    main_client.disconnect()
+    log_info("[browser_demo] exit app_id=/sys/apps/browser_demo code=0 mode=hosted")
+    0
 
 fn browser_demo_remote_launch_once(process_id: u64) -> bool:
     """Create the packaged Browser Demo windows and return immediately."""

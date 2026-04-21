@@ -44,6 +44,12 @@ fn toplevelitem_Const(item) -> TopLevelItem: TopLevelItem.Const(item)
 fn items_push(items, item):
         items.push(item)
 
+fn asm_blocks_push(blocks: [AsmBlockOutline], item: AsmBlockOutline) -> [AsmBlockOutline]:
+        blocks.push(item)
+
+fn parse_errors_push(items: [ParseError], item: ParseError) -> [ParseError]:
+        items.push(item)
+
 fn h_skip_policy(h) -> BlockSkipPolicy:
         BlockSkipPolicy.OutlineRequired
 
@@ -503,6 +509,228 @@ fn treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> Blo
             return b
 
         block
+
+
+# ============================================================================
+# Inline ASM Outline Parsing
+# ============================================================================
+
+fn treesitter_warn_legacy_asm(self: TreeSitter, span: Span):
+        self.errors = parse_errors_push(self.errors, ParseError(
+            message: "legacy inline asm syntax; use asm { ... }",
+            span: span,
+            severity: ErrorSeverity.Warning
+        ))
+
+
+fn treesitter_append_asm_payload(payload: text, piece: text) -> text:
+        if piece == "":
+            return payload
+        if payload == "":
+            return piece
+        if piece == "," or piece == ";" or piece == ")" or piece == "]" or piece == "}":
+            return payload + piece
+        if payload.ends_with("#") or payload.ends_with("{") or payload.ends_with("(") or payload.ends_with("["):
+            return payload + piece
+        if piece == "#":
+            return payload + " " + piece
+        if piece == "{" or piece == "(" or piece == "[":
+            return payload + " " + piece
+        return payload + " " + piece
+
+
+fn treesitter_parse_asm_braced_outline(self: TreeSitter, start: Span, is_volatile: bool) -> AsmBlockOutline:
+        val open_span = self.current.span
+        self.advance()  # consume {
+
+        var depth = 1
+        var payload = ""
+        var close_span = open_span
+
+        while depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LBrace:
+                    depth = depth + 1
+                    payload = treesitter_append_asm_payload(payload, "{")
+                    self.advance()
+                case RBrace:
+                    depth = depth - 1
+                    close_span = self.current.span
+                    if depth > 0:
+                        payload = treesitter_append_asm_payload(payload, "}")
+                    self.advance()
+                case Newline:
+                    if payload != "" and not payload.ends_with("\n"):
+                        payload = payload + "\n"
+                    self.advance()
+                case Indent:
+                    self.advance()
+                case Dedent:
+                    self.advance()
+                case _:
+                    payload = treesitter_append_asm_payload(payload, self.current.text)
+                    self.advance()
+
+        AsmBlockOutline(
+            payload: payload.trim(),
+            payload_span: span_new(open_span.end, close_span.start, open_span.line, open_span.col),
+            span: merge_spans(start, close_span),
+            is_volatile: is_volatile,
+            syntax_form: "braced",
+            is_legacy: false
+        )
+
+
+fn treesitter_parse_asm_paren_outline(self: TreeSitter, start: Span, is_volatile: bool) -> AsmBlockOutline:
+        self.warn_legacy_asm(start)
+        val open_span = self.current.span
+        self.advance()  # consume (
+
+        var depth = 1
+        var payload = ""
+        var close_span = open_span
+
+        while depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LParen:
+                    depth = depth + 1
+                    payload = treesitter_append_asm_payload(payload, "(")
+                    self.advance()
+                case RParen:
+                    depth = depth - 1
+                    close_span = self.current.span
+                    if depth > 0:
+                        payload = treesitter_append_asm_payload(payload, ")")
+                    self.advance()
+                case Newline:
+                    if payload != "" and not payload.ends_with("\n"):
+                        payload = payload + "\n"
+                    self.advance()
+                case _:
+                    payload = treesitter_append_asm_payload(payload, self.current.text)
+                    self.advance()
+
+        AsmBlockOutline(
+            payload: payload.trim(),
+            payload_span: span_new(open_span.end, close_span.start, open_span.line, open_span.col),
+            span: merge_spans(start, close_span),
+            is_volatile: is_volatile,
+            syntax_form: "paren",
+            is_legacy: true
+        )
+
+
+fn treesitter_parse_asm_colon_outline(self: TreeSitter, start: Span, is_volatile: bool) -> AsmBlockOutline:
+        self.warn_legacy_asm(start)
+        val colon_span = self.current.span
+        self.advance()  # consume :
+
+        var payload = ""
+        var end_span = colon_span
+        var syntax_form = "colon_string"
+
+        if self.check(TokenKind.StringLit):
+            payload = self.current.text
+            end_span = self.current.span
+            self.advance()
+        else:
+            syntax_form = "colon_block"
+            self.skip_newlines()
+            if self.check(TokenKind.Indent):
+                self.advance()
+                while not self.check(TokenKind.Dedent) and not self.is_at_end():
+                    self.skip_newlines()
+                    if self.check(TokenKind.Dedent) or self.is_at_end():
+                        break
+                    if self.check(TokenKind.StringLit):
+                        payload = treesitter_append_asm_payload(payload, self.current.text)
+                    end_span = self.current.span
+                    self.advance()
+                self.match_token(TokenKind.Dedent)
+
+        AsmBlockOutline(
+            payload: payload.trim(),
+            payload_span: span_new(colon_span.end, end_span.end, colon_span.line, colon_span.col),
+            span: merge_spans(start, end_span),
+            is_volatile: is_volatile,
+            syntax_form: syntax_form,
+            is_legacy: true
+        )
+
+
+fn treesitter_parse_asm_outline(self: TreeSitter) -> AsmBlockOutline:
+        val start = self.current.span
+        self.advance()  # consume asm
+
+        var is_volatile = false
+        if self.check(TokenKind.Ident) and self.current.text == "volatile":
+            is_volatile = true
+            self.advance()
+
+        if self.check(TokenKind.LBrace):
+            return self.parse_asm_braced_outline(start, is_volatile)
+        if self.check(TokenKind.LParen):
+            return self.parse_asm_paren_outline(start, is_volatile)
+        if self.check(TokenKind.Colon):
+            return self.parse_asm_colon_outline(start, is_volatile)
+        if self.check(TokenKind.StringLit):
+            self.warn_legacy_asm(start)
+            val str_span = self.current.span
+            val payload = self.current.text
+            self.advance()
+            return AsmBlockOutline(
+                payload: payload,
+                payload_span: str_span,
+                span: merge_spans(start, str_span),
+                is_volatile: is_volatile,
+                syntax_form: "bare_string",
+                is_legacy: true
+            )
+
+        self.error("expected asm body")
+        AsmBlockOutline(
+            payload: "",
+            payload_span: start,
+            span: start,
+            is_volatile: is_volatile,
+            syntax_form: "error",
+            is_legacy: false
+        )
+
+
+fn treesitter_skip_block(self: TreeSitter):
+        """Skip an indented body while collecting inline asm outlines."""
+        if self.check(TokenKind.Indent):
+            self.advance()
+
+        var depth = 1
+        while depth > 0 and not self.is_at_end():
+            self.skip_newlines()
+            if self.is_at_end():
+                break
+
+            if self.check(TokenKind.Dedent):
+                self.advance()
+                depth = depth - 1
+                continue
+
+            if self.check(TokenKind.Indent):
+                self.advance()
+                depth = depth + 1
+                continue
+
+            if self.check(TokenKind.KwAsm):
+                val asm_outline = self.parse_asm_outline()
+                self.asm_blocks = asm_blocks_push(self.asm_blocks, asm_outline)
+                continue
+
+            if self.check(TokenKind.BlockStart):
+                var nested = self.parse_block_outline()
+                nested = self.apply_outline_policy(nested)
+                self.inline_blocks = self.inline_blocks_push(inline_blocks, nested)
+                continue
+
+            self.advance()
 
 
 # ============================================================================

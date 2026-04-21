@@ -155,6 +155,8 @@ pub struct ModuleResolver {
     pub(super) project_root: PathBuf,
     /// Source root directory (from simple.toml [project].root)
     pub(super) source_root: PathBuf,
+    /// Additional source roots available for native multi-root builds.
+    pub(super) extra_source_roots: Vec<PathBuf>,
     /// Project-scoped logical type root (project_root/type)
     pub(super) type_root: PathBuf,
     /// Default owned domain used for bare type imports
@@ -184,6 +186,7 @@ impl ModuleResolver {
             type_root: project_root.join("type"),
             project_root,
             source_root,
+            extra_source_roots: Vec::new(),
             default_type_domain: "simple-lang".to_string(),
             stdlib_root,
             manifests: HashMap::new(),
@@ -270,6 +273,7 @@ impl ModuleResolver {
             type_root: project_root.join("type"),
             project_root,
             source_root,
+            extra_source_roots: Vec::new(),
             default_type_domain: "simple-lang".to_string(),
             stdlib_root,
             manifests: HashMap::new(),
@@ -283,6 +287,12 @@ impl ModuleResolver {
     /// Set enabled features
     pub fn with_features(mut self, features: HashSet<String>) -> Self {
         self.features = features;
+        self
+    }
+
+    /// Set additional source roots searched for top-level imports.
+    pub fn with_extra_source_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.extra_source_roots = roots;
         self
     }
 

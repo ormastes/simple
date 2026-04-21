@@ -2062,6 +2062,25 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
 
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
+RuntimeValue rt_memory_barrier(void)
+{
+    __asm__ volatile("dmb sy" ::: "memory");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
+                                 RuntimeValue addr_hi, RuntimeValue len,
+                                 RuntimeValue flags, RuntimeValue next)
+{
+    uint8_t *desc = (uint8_t *)(uintptr_t)((uint64_t)base + ((uint64_t)index * 16ULL));
+    *(volatile uint32_t *)(void *)(desc + 0)  = (uint32_t)(uint64_t)addr_lo;
+    *(volatile uint32_t *)(void *)(desc + 4)  = (uint32_t)(uint64_t)addr_hi;
+    *(volatile uint32_t *)(void *)(desc + 8)  = (uint32_t)(uint64_t)len;
+    *(volatile uint16_t *)(void *)(desc + 12) = (uint16_t)(uint64_t)flags;
+    *(volatile uint16_t *)(void *)(desc + 14) = (uint16_t)(uint64_t)next;
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */

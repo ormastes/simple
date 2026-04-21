@@ -7,18 +7,31 @@ use super::tools::{
     find_c_compiler, find_native_all_library, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol,
 };
 
-/// Generate a stub object file for a FREESTANDING (cross) target.
+fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
+    matches!(
+        sym,
+        "_sbss"
+            | "_ebss"
+            | "_stack_top"
+            | "_stack_bottom"
+            | "_kernel_end"
+            | "__heap_start"
+            | "__heap_end"
+            | "__global_pointer$"
+    ) || (sym == "spl_start"
+        && defined
+            .iter()
+            .any(|defined_sym| defined_sym == "spl_start" || defined_sym.ends_with("__spl_start")))
+}
+
+/// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
 /// and does not scan host system libraries. It discovers unresolved symbols across
 /// the provided `object_paths` (and any boot objects), filters out symbols defined
-/// elsewhere in that same object set, and emits weak C stub definitions compiled
-/// with the cross `--target=<triple>` so that undefined Simple class/method symbols
-/// resolve to harmless `return 0` functions instead of null-address jumps.
-///
-/// This is the fix for the SimpleOS `0x950a` null-call cascade: without it, the
-/// link still succeeds (because `--unresolved-symbols=ignore-all` is set) but any
-/// call through an unresolved symbol traps on address 0 at runtime.
+/// elsewhere in that same object set, and fails on unexpected unresolved names
+/// by default. Set `SIMPLE_ALLOW_FREESTANDING_STUBS=1` to emit weak legacy stubs
+/// while debugging incomplete ports.
 pub(crate) fn generate_stub_object_freestanding(
     temp_dir: &Path,
     object_paths: &[PathBuf],
@@ -26,7 +39,7 @@ pub(crate) fn generate_stub_object_freestanding(
     triple: &str,
     march: &str,
     mabi: &str,
-) -> Result<PathBuf, String> {
+) -> Result<Option<PathBuf>, String> {
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
@@ -110,11 +123,12 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| !s.starts_with("_ZSt") && !s.starts_with("_ZNSt"))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !is_compiler_rt_builtin_symbol(s))
+        .filter(|s| !is_linker_provided_symbol(s, &defined))
         .filter(|s| s != "main" && s != "_main")
         .collect();
 
     eprintln!(
-        "Freestanding stub generation: {} unresolved symbol(s) to stub",
+        "Freestanding unresolved symbol check: {} unexpected symbol(s)",
         needs_stub.len()
     );
     if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
@@ -126,7 +140,16 @@ pub(crate) fn generate_stub_object_freestanding(
         }
     }
 
-    // Always emit the stubs.c file even if empty — callers still link it.
+    if needs_stub.is_empty() {
+        return Ok(None);
+    }
+    if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() != Ok("1") {
+        return Err(format!(
+            "freestanding link has unexpected unresolved symbol(s): {}",
+            needs_stub.join(", ")
+        ));
+    }
+
     let stub_c = temp_dir.join("_stubs_freestanding.c");
     let mut code = String::from("/* Auto-generated freestanding stubs — weak definitions return 0 */\n");
     code.push_str("typedef long long __stub_i64;\n\n");
@@ -192,7 +215,7 @@ pub(crate) fn generate_stub_object_freestanding(
             .output()
             .map_err(|e| format!("compile freestanding stubs ({compiler}): {e}"))?;
         if output.status.success() {
-            return Ok(stub_o);
+            return Ok(Some(stub_o));
         }
         last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     }

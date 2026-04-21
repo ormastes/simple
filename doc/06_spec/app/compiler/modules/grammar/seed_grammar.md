@@ -92,9 +92,9 @@
 
 | Capability | Kind | Tier | Description |
 |------------|------|------|-------------|
-| asm_single_line | clang-depend | seed | Single-line asm statement (`asm "nop"`) |
-| asm_indented_block | clang-depend | seed | Indented asm block (`asm:\n    "nop"`) |
-| asm_braced_block | clang-depend | seed | Braced asm block (`asm nop`) |
+| asm_single_line | clang-depend | seed | Legacy single-line asm statement (`asm "nop"`, warns) |
+| asm_indented_block | clang-depend | seed | Legacy indented asm block (`asm:\n    "nop"`, warns) |
+| asm_braced_block | clang-depend | seed | Raw braced asm block (`asm { nop }`) |
 | asm_match | clang-depend | seed | Target-conditional asm (`asm match: case [x86_64]: ...`) |
 | asm_assert | clang-depend | seed | Target assertion (`asm assert [x86_64, linux]`) |
 

@@ -122,7 +122,7 @@ typedef struct {
  * (Smaller than 64-bit targets to fit RV32 memory constraints)
  * ================================================================ */
 
-static char _heap[4 * 1024 * 1024]; /* 4 MB */
+static char _heap[16 * 1024 * 1024]; /* 16 MB */
 static size_t _heap_offset = 0;
 
 void *malloc(size_t size) {
@@ -575,6 +575,25 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx_val, RuntimeValue v
     return value;
 }
 
+RuntimeValue rt_index_get(RuntimeValue arr, RuntimeValue idx_val) {
+    return rt_array_get(arr, idx_val);
+}
+
+RuntimeValue rt_index_set(RuntimeValue arr, RuntimeValue idx_val, RuntimeValue value) {
+    return rt_array_set(arr, idx_val, value);
+}
+
+RuntimeValue rt_value_bool(RuntimeValue value) {
+    if (value == TRUE_VALUE || value == 1) return TRUE_VALUE;
+    if (value == FALSE_VALUE || value == 0 || value == NIL_VALUE) return FALSE_VALUE;
+    if (IS_INT(value)) return DECODE_INT(value) != 0 ? TRUE_VALUE : FALSE_VALUE;
+    return TRUE_VALUE;
+}
+
+RuntimeValue ptr(RuntimeValue value) {
+    return value;
+}
+
 RuntimeValue rt_array_len(RuntimeValue arr) {
     if (!IS_HEAP(arr)) return ENCODE_INT(0);
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
@@ -790,6 +809,15 @@ static int32_t _pci_enumerate(uint32_t mode, uint32_t index, uint32_t buf_addr) 
     return -38; /* ENOSYS */
 }
 
+int64_t rt_net_init(void);
+int64_t rt_net_tx_test(void);
+int64_t rt_net_stats(void);
+int64_t rt_display_init(void);
+int64_t rt_display_flush_test(void);
+int64_t rt_display_width(void);
+int64_t rt_display_height(void);
+__attribute__((noreturn)) static void qemu_poweroff(int32_t code);
+
 /* ================================================================
  * 12. Syscall dispatcher (32-bit trap handler)
  *
@@ -801,9 +829,9 @@ int32_t _trap_syscall(uint32_t id, uint32_t a0, uint32_t a1,
                       uint32_t a2, uint32_t a3, uint32_t a4) {
     (void)a3; (void)a4;
     switch (id) {
-        case 0: /* Exit: halt with WFI loop */
-            serial_puts("[HALT] exit syscall\r\n");
-            for (;;) __asm__ volatile("wfi");
+        case 0:
+            serial_puts("[exit] syscall exit\r\n");
+            qemu_poweroff((int32_t)a0);
             return 0;
         case 4: return 1; /* GetPid */
         case 60: serial_putchar((char)(a0 & 0xFF)); return 0; /* DebugWrite */
@@ -816,10 +844,397 @@ int32_t _trap_syscall(uint32_t id, uint32_t a0, uint32_t a1,
         }
         case 85: return 0; /* NvmeReadSector: stub success */
         case 86: return 0; /* NvmeInit: stub success */
-        case 90: return 0; /* VirtioNetInit: stub */
-        case 93: return 0; /* NetStats: stub */
+        case 90: return (int32_t)rt_net_init(); /* VirtioNetInit */
+        case 91: return (int32_t)rt_net_tx_test(); /* VirtioNetTxTest */
+        case 92: return (int32_t)rt_display_init(); /* VirtioGpuInit */
+        case 93: return (int32_t)rt_net_stats(); /* NetStats */
+        case 94: return (int32_t)rt_display_flush_test(); /* VirtioGpuFlushTest */
         default: return -38; /* ENOSYS */
     }
+}
+
+int64_t rt_pci_device_count(void) {
+    if (_pci_cache_count == 0) _pci_scan();
+    return (int64_t)_pci_cache_count;
+}
+
+int64_t rt_pci_get_field(int64_t index, int64_t field) {
+    if (_pci_cache_count == 0) _pci_scan();
+    if (index < 0 || index >= _pci_cache_count) return -22;
+    int i = (int)index;
+    switch (field) {
+        case 0: return (int64_t)_pci_cache[i].bus;
+        case 1: return (int64_t)_pci_cache[i].dev;
+        case 2: return (int64_t)_pci_cache[i].func;
+        case 3: return (int64_t)_pci_cache[i].class_code;
+        case 4: return (int64_t)_pci_cache[i].subclass;
+        case 5: return (int64_t)_pci_cache[i].vendor;
+        case 6: return (int64_t)_pci_cache[i].device;
+        case 7: return (int64_t)_pci_cache[i].bar0;
+        case 8: return (int64_t)_pci_cache[i].irq;
+        default: return -22;
+    }
+}
+
+/* ================================================================
+ * 12b. QEMU virt poweroff + minimal modern VirtIO device tests
+ * ================================================================ */
+
+#define QEMU_TEST_BASE 0x100000UL
+#define QEMU_TEST_PASS 0x5555U
+#define QEMU_TEST_FAIL 0x3333U
+
+__attribute__((noreturn))
+static void qemu_poweroff(int32_t code) {
+    uint32_t value = (code == 0) ? QEMU_TEST_PASS : (QEMU_TEST_FAIL | ((uint32_t)(code & 0xffff) << 16));
+    *(volatile uint32_t *)(uintptr_t)QEMU_TEST_BASE = value;
+    for (;;) __asm__ volatile("wfi");
+}
+
+static void *dma_alloc_aligned(size_t size, size_t align) {
+    uintptr_t raw = (uintptr_t)malloc(size + align + 64);
+    if (!raw) return 0;
+    uintptr_t aligned = (raw + align - 1) & ~(uintptr_t)(align - 1);
+    __builtin_memset((void *)aligned, 0, size);
+    return (void *)aligned;
+}
+
+static inline uint8_t pci_cfg_read8(int cache_idx, uint32_t off) {
+    uint32_t dev = _pci_cache[cache_idx].dev;
+    return *(volatile uint8_t *)(ECAM_BASE + (dev << 15) + off);
+}
+
+static inline uint16_t pci_cfg_read16(int cache_idx, uint32_t off) {
+    uint32_t dev = _pci_cache[cache_idx].dev;
+    return *(volatile uint16_t *)(ECAM_BASE + (dev << 15) + off);
+}
+
+static inline uint32_t pci_cfg_read32(int cache_idx, uint32_t off) {
+    uint32_t dev = _pci_cache[cache_idx].dev;
+    return *(volatile uint32_t *)(ECAM_BASE + (dev << 15) + off);
+}
+
+static inline void pci_cfg_write16(int cache_idx, uint32_t off, uint16_t value) {
+    uint32_t dev = _pci_cache[cache_idx].dev;
+    *(volatile uint16_t *)(ECAM_BASE + (dev << 15) + off) = value;
+}
+
+static inline void pci_cfg_write32(int cache_idx, uint32_t off, uint32_t value) {
+    uint32_t dev = _pci_cache[cache_idx].dev;
+    *(volatile uint32_t *)(ECAM_BASE + (dev << 15) + off) = value;
+}
+
+static uint32_t _pci_mmio_next = 0x40000000U;
+
+static uint64_t pci_bar_addr(int cache_idx, uint8_t bar) {
+    if (bar >= 6) return 0;
+    uint32_t low = pci_cfg_read32(cache_idx, 0x10 + (uint32_t)bar * 4);
+    if (low == 0 || low == 0xffffffffU) return 0;
+    if (low & 1U) return (uint64_t)(low & 0xfffffffcU);
+    if ((low & 0xfffffff0U) == 0) {
+        uint32_t flags = low & 0x0fU;
+        uint32_t assigned = _pci_mmio_next;
+        _pci_mmio_next += 0x00010000U;
+        pci_cfg_write32(cache_idx, 0x10 + (uint32_t)bar * 4, assigned | flags);
+        if ((flags & 0x6U) == 0x4U && bar < 5) {
+            pci_cfg_write32(cache_idx, 0x10 + ((uint32_t)bar + 1) * 4, 0);
+        }
+        low = pci_cfg_read32(cache_idx, 0x10 + (uint32_t)bar * 4);
+    }
+    if ((low & 0x6U) == 0x4U && bar < 5) {
+        uint32_t high = pci_cfg_read32(cache_idx, 0x10 + ((uint32_t)bar + 1) * 4);
+        return ((uint64_t)high << 32) | (uint64_t)(low & 0xfffffff0U);
+    }
+    return (uint64_t)(low & 0xfffffff0U);
+}
+
+typedef struct {
+    uint64_t common;
+    uint64_t notify;
+    uint64_t isr;
+    uint32_t notify_mult;
+} VirtioCaps;
+
+typedef struct {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+} VirtqDesc;
+
+typedef struct {
+    uint16_t qsize;
+    uint16_t notify_off;
+    uint16_t last_used;
+    uint16_t avail_idx;
+    VirtqDesc *desc;
+    uint16_t *avail;
+    uint16_t *used;
+} Virtq;
+
+static inline uint8_t mmio8(uint64_t addr) { return *(volatile uint8_t *)(uintptr_t)addr; }
+static inline uint16_t mmio16(uint64_t addr) { return *(volatile uint16_t *)(uintptr_t)addr; }
+static inline uint32_t mmio32(uint64_t addr) { return *(volatile uint32_t *)(uintptr_t)addr; }
+static inline void mmio_w8(uint64_t addr, uint8_t v) { *(volatile uint8_t *)(uintptr_t)addr = v; }
+static inline void mmio_w16(uint64_t addr, uint16_t v) { *(volatile uint16_t *)(uintptr_t)addr = v; }
+static inline void mmio_w32(uint64_t addr, uint32_t v) { *(volatile uint32_t *)(uintptr_t)addr = v; }
+static inline void mmio_w64(uint64_t addr, uint64_t v) { *(volatile uint64_t *)(uintptr_t)addr = v; }
+
+static int virtio_find_caps(int cache_idx, VirtioCaps *caps) {
+    __builtin_memset(caps, 0, sizeof(*caps));
+    uint8_t cap = pci_cfg_read8(cache_idx, 0x34);
+    for (int guard = 0; cap >= 0x40 && cap != 0xff && guard < 32; guard++) {
+        uint8_t cap_id = pci_cfg_read8(cache_idx, cap);
+        uint8_t next = pci_cfg_read8(cache_idx, cap + 1);
+        if (cap_id == 0x09) {
+            uint8_t cfg_type = pci_cfg_read8(cache_idx, cap + 3);
+            uint8_t bar = pci_cfg_read8(cache_idx, cap + 4);
+            uint32_t offset = pci_cfg_read32(cache_idx, cap + 8);
+            uint32_t length = pci_cfg_read32(cache_idx, cap + 12);
+            uint64_t base = pci_bar_addr(cache_idx, bar);
+            if (base && length) {
+                if (cfg_type == 1) caps->common = base + offset;
+                else if (cfg_type == 2) {
+                    caps->notify = base + offset;
+                    caps->notify_mult = pci_cfg_read32(cache_idx, cap + 16);
+                } else if (cfg_type == 3) caps->isr = base + offset;
+            }
+        }
+        if (next == 0 || next == cap) break;
+        cap = next;
+    }
+    return caps->common != 0 && caps->notify != 0;
+}
+
+static int virtio_modern_begin(int cache_idx, VirtioCaps *caps) {
+    if (!virtio_find_caps(cache_idx, caps)) return -19;
+    uint16_t cmd = pci_cfg_read16(cache_idx, 0x04);
+    pci_cfg_write16(cache_idx, 0x04, (uint16_t)(cmd | 0x0006));
+    mmio_w8(caps->common + 0x14, 0);
+    mmio_w8(caps->common + 0x14, 1);
+    mmio_w8(caps->common + 0x14, 3);
+    mmio_w32(caps->common + 0x08, 0);
+    mmio_w32(caps->common + 0x0c, 0);
+    mmio_w32(caps->common + 0x08, 1);
+    mmio_w32(caps->common + 0x0c, 1);
+    mmio_w8(caps->common + 0x14, 11);
+    if ((mmio8(caps->common + 0x14) & 8) == 0) return -5;
+    return 0;
+}
+
+static int virtio_setup_queue(VirtioCaps *caps, uint16_t queue, Virtq *vq, uint16_t wanted) {
+    mmio_w16(caps->common + 0x16, queue);
+    uint16_t max = mmio16(caps->common + 0x18);
+    if (max < 2) return -19;
+    uint16_t qsize = wanted;
+    if (qsize > max) qsize = max;
+    if (qsize < 2) qsize = 2;
+    __builtin_memset(vq, 0, sizeof(*vq));
+    vq->qsize = qsize;
+    vq->desc = (VirtqDesc *)dma_alloc_aligned((size_t)qsize * sizeof(VirtqDesc), 4096);
+    vq->avail = (uint16_t *)dma_alloc_aligned(6 + (size_t)qsize * 2, 4096);
+    vq->used = (uint16_t *)dma_alloc_aligned(6 + (size_t)qsize * 8, 4096);
+    if (!vq->desc || !vq->avail || !vq->used) return -12;
+    mmio_w16(caps->common + 0x18, qsize);
+    vq->notify_off = mmio16(caps->common + 0x1e);
+    mmio_w64(caps->common + 0x20, (uint64_t)(uintptr_t)vq->desc);
+    mmio_w64(caps->common + 0x28, (uint64_t)(uintptr_t)vq->avail);
+    mmio_w64(caps->common + 0x30, (uint64_t)(uintptr_t)vq->used);
+    mmio_w16(caps->common + 0x1c, 1);
+    return 0;
+}
+
+static int virtio_wait_used(Virtq *vq, uint32_t spins) {
+    while (spins-- > 0) {
+        __sync_synchronize();
+        if (vq->used[1] != vq->last_used) {
+            vq->last_used = vq->used[1];
+            return 0;
+        }
+    }
+    return -110;
+}
+
+static void virtio_notify(VirtioCaps *caps, Virtq *vq, uint16_t queue) {
+    uint64_t addr = caps->notify + ((uint64_t)vq->notify_off * (uint64_t)caps->notify_mult);
+    __sync_synchronize();
+    mmio_w16(addr, queue);
+}
+
+static int _net_ready = 0;
+static int64_t _net_tx_count = 0;
+static VirtioCaps _net_caps;
+static Virtq _net_txq;
+
+int64_t rt_net_init(void) {
+    if (_pci_cache_count == 0) _pci_scan();
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].class_code == 0x02 && _pci_cache[i].subclass == 0x00 && _pci_cache[i].vendor == 0x1af4) {
+            int rc = virtio_modern_begin(i, &_net_caps);
+            if (rc < 0) return rc;
+            rc = virtio_setup_queue(&_net_caps, 1, &_net_txq, 8);
+            if (rc < 0) return rc;
+            mmio_w8(_net_caps.common + 0x14, 15);
+            _net_ready = 1;
+            return 0;
+        }
+    }
+    _net_ready = 0;
+    return -19; /* ENODEV */
+}
+
+int64_t rt_net_tx_test(void) {
+    if (!_net_ready) {
+        int64_t rc = rt_net_init();
+        if (rc < 0) return rc;
+    }
+    uint8_t *hdr = (uint8_t *)dma_alloc_aligned(64, 64);
+    uint8_t *frame = (uint8_t *)dma_alloc_aligned(128, 64);
+    if (!hdr || !frame) return -12;
+    __builtin_memset(hdr, 0, 64);
+    __builtin_memset(frame, 0, 128);
+    for (int i = 0; i < 6; i++) frame[i] = 0xff;
+    frame[6] = 0x52; frame[7] = 0x54; frame[8] = 0x00; frame[9] = 0x12; frame[10] = 0x34; frame[11] = 0x56;
+    frame[12] = 0x88; frame[13] = 0xb5;
+    for (int i = 14; i < 60; i++) frame[i] = (uint8_t)i;
+    _net_txq.desc[0].addr = (uint64_t)(uintptr_t)hdr;
+    _net_txq.desc[0].len = 10;
+    _net_txq.desc[0].flags = 1;
+    _net_txq.desc[0].next = 1;
+    _net_txq.desc[1].addr = (uint64_t)(uintptr_t)frame;
+    _net_txq.desc[1].len = 60;
+    _net_txq.desc[1].flags = 0;
+    _net_txq.desc[1].next = 0;
+    uint16_t slot = (uint16_t)(2 + (_net_txq.avail_idx % _net_txq.qsize));
+    _net_txq.avail[slot] = 0;
+    _net_txq.avail_idx++;
+    _net_txq.avail[1] = _net_txq.avail_idx;
+    virtio_notify(&_net_caps, &_net_txq, 1);
+    int rc = virtio_wait_used(&_net_txq, 10000000);
+    if (rc < 0) return rc;
+    _net_tx_count++;
+    return 0;
+}
+
+int64_t rt_net_stats(void) {
+    return _net_ready ? _net_tx_count : -19;
+}
+
+static int _gpu_ready = 0;
+static int _gpu_flushed = 0;
+static int64_t _gpu_width = 0;
+static int64_t _gpu_height = 0;
+static VirtioCaps _gpu_caps;
+static Virtq _gpu_q;
+static uint8_t *_gpu_cmd = 0;
+static uint8_t *_gpu_resp = 0;
+static uint32_t *_gpu_fb = 0;
+
+static void gpu_hdr(uint32_t type) {
+    __builtin_memset(_gpu_cmd, 0, 4096);
+    __builtin_memset(_gpu_resp, 0, 4096);
+    *(uint32_t *)(_gpu_cmd + 0) = type;
+}
+
+static uint32_t gpu_cmd(uint32_t req_len, uint32_t resp_len) {
+    _gpu_q.desc[0].addr = (uint64_t)(uintptr_t)_gpu_cmd;
+    _gpu_q.desc[0].len = req_len;
+    _gpu_q.desc[0].flags = 1;
+    _gpu_q.desc[0].next = 1;
+    _gpu_q.desc[1].addr = (uint64_t)(uintptr_t)_gpu_resp;
+    _gpu_q.desc[1].len = resp_len;
+    _gpu_q.desc[1].flags = 2;
+    _gpu_q.desc[1].next = 0;
+    uint16_t slot = (uint16_t)(2 + (_gpu_q.avail_idx % _gpu_q.qsize));
+    _gpu_q.avail[slot] = 0;
+    _gpu_q.avail_idx++;
+    _gpu_q.avail[1] = _gpu_q.avail_idx;
+    virtio_notify(&_gpu_caps, &_gpu_q, 0);
+    if (virtio_wait_used(&_gpu_q, 10000000) < 0) return 0;
+    return *(uint32_t *)_gpu_resp;
+}
+
+int64_t rt_display_init(void) {
+    if (_gpu_ready) return 0;
+    if (_pci_cache_count == 0) _pci_scan();
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].vendor != 0x1af4) continue;
+        if (!(_pci_cache[i].class_code == 0x03 || _pci_cache[i].device == 0x1050)) continue;
+        int rc = virtio_modern_begin(i, &_gpu_caps);
+        if (rc < 0) return rc;
+        rc = virtio_setup_queue(&_gpu_caps, 0, &_gpu_q, 8);
+        if (rc < 0) return rc;
+        mmio_w8(_gpu_caps.common + 0x14, 15);
+        _gpu_cmd = (uint8_t *)dma_alloc_aligned(4096, 4096);
+        _gpu_resp = (uint8_t *)dma_alloc_aligned(4096, 4096);
+        if (!_gpu_cmd || !_gpu_resp) return -12;
+        gpu_hdr(0x0100);
+        if (gpu_cmd(24, 408) != 0x1101) return -5;
+        _gpu_width = 320;
+        _gpu_height = 240;
+        gpu_hdr(0x0101);
+        *(uint32_t *)(_gpu_cmd + 24) = 1;
+        *(uint32_t *)(_gpu_cmd + 28) = 1;
+        *(uint32_t *)(_gpu_cmd + 32) = (uint32_t)_gpu_width;
+        *(uint32_t *)(_gpu_cmd + 36) = (uint32_t)_gpu_height;
+        if (gpu_cmd(40, 24) != 0x1100) return -5;
+        _gpu_fb = (uint32_t *)dma_alloc_aligned((size_t)(_gpu_width * _gpu_height * 4), 4096);
+        if (!_gpu_fb) return -12;
+        gpu_hdr(0x0106);
+        *(uint32_t *)(_gpu_cmd + 24) = 1;
+        *(uint32_t *)(_gpu_cmd + 28) = 1;
+        *(uint64_t *)(_gpu_cmd + 32) = (uint64_t)(uintptr_t)_gpu_fb;
+        *(uint32_t *)(_gpu_cmd + 40) = (uint32_t)(_gpu_width * _gpu_height * 4);
+        if (gpu_cmd(48, 24) != 0x1100) return -5;
+        gpu_hdr(0x0103);
+        *(uint32_t *)(_gpu_cmd + 32) = (uint32_t)_gpu_width;
+        *(uint32_t *)(_gpu_cmd + 36) = (uint32_t)_gpu_height;
+        *(uint32_t *)(_gpu_cmd + 40) = 0;
+        *(uint32_t *)(_gpu_cmd + 44) = 1;
+        if (gpu_cmd(48, 24) != 0x1100) return -5;
+        _gpu_ready = 1;
+        return 0;
+    }
+    return -19;
+}
+
+int64_t rt_display_flush_test(void) {
+    if (!_gpu_ready) {
+        int64_t rc = rt_display_init();
+        if (rc < 0) return rc;
+    }
+    for (uint32_t y = 0; y < (uint32_t)_gpu_height; y++) {
+        for (uint32_t x = 0; x < (uint32_t)_gpu_width; x++) {
+            uint32_t band = (x * 4) / (uint32_t)_gpu_width;
+            uint32_t c = band == 0 ? 0xffff0000U : (band == 1 ? 0xff00ff00U : (band == 2 ? 0xff0000ffU : 0xffffffffU));
+            _gpu_fb[y * (uint32_t)_gpu_width + x] = c;
+        }
+    }
+    gpu_hdr(0x0105);
+    *(uint32_t *)(_gpu_cmd + 32) = (uint32_t)_gpu_width;
+    *(uint32_t *)(_gpu_cmd + 36) = (uint32_t)_gpu_height;
+    *(uint64_t *)(_gpu_cmd + 40) = 0;
+    *(uint32_t *)(_gpu_cmd + 48) = 1;
+    if (gpu_cmd(56, 24) != 0x1100) return -5;
+    gpu_hdr(0x0104);
+    *(uint32_t *)(_gpu_cmd + 32) = (uint32_t)_gpu_width;
+    *(uint32_t *)(_gpu_cmd + 36) = (uint32_t)_gpu_height;
+    *(uint32_t *)(_gpu_cmd + 40) = 1;
+    if (gpu_cmd(48, 24) != 0x1100) return -5;
+    _gpu_flushed = 1;
+    serial_puts("[display-riscv] Display capture ready\r\n");
+    for (volatile uint32_t delay = 0; delay < 300000000U; delay++) {
+        __asm__ volatile("" ::: "memory");
+    }
+    return 0;
+}
+
+int64_t rt_display_width(void) { return _gpu_width; }
+int64_t rt_display_height(void) { return _gpu_height; }
+
+int32_t rt_x86_syscall(uint32_t id, uint32_t a0, uint32_t a1,
+                       uint32_t a2, uint32_t a3, uint32_t a4) {
+    return _trap_syscall(id, a0, a1, a2, a3, a4);
 }
 
 /* ================================================================
@@ -858,7 +1273,7 @@ void _boot_init(void) {
     _uart_init();
     serial_puts("SimpleOS RISC-V32 boot\r\n");
     serial_puts("[BOOT] 16550 UART initialized at 0x10000000\r\n");
-    serial_puts("[BOOT] Heap: 4 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 16 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 32-bit (LLVM i32)\r\n");
 
     _pci_scan();
@@ -957,9 +1372,9 @@ __attribute__((noreturn))
 void rt_exit(int32_t code) {
     serial_puts("[exit] rt_exit(");
     serial_put_dec(code);
-    serial_puts(") -- halting\r\n");
+    serial_puts(") -- poweroff\r\n");
     __asm__ volatile("csrci mstatus, 8"); /* clear MIE bit -- disable M-mode interrupts */
-    for (;;) { __asm__ volatile("wfi"); }
+    qemu_poweroff(code);
 }
 
 /* rt_exit_code — no parent process yet; always reports 0 (no prior exit). */

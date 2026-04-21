@@ -518,15 +518,22 @@ impl<'a> Parser<'a> {
             }
             // Low-level features - disambiguate keyword vs identifier usage
             TokenKind::Asm => {
-                // asm { ... }, asm: "...", or asm match: ... -> inline assembly
-                // asm volatile { ... }, asm volatile: ..., or asm volatile(...) -> volatile inline assembly
+                // asm { ... }, legacy asm(...), or asm match: ... -> inline assembly
+                // asm volatile { ... } or legacy asm volatile(...) -> volatile inline assembly
                 // asm = ... or asm.method() -> expression (variable named 'asm')
                 let next = self.peek_next();
                 if matches!(
                     next.kind,
-                    TokenKind::Colon | TokenKind::LBrace | TokenKind::LParen | TokenKind::Match
-                )
-                    || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
+                    TokenKind::Colon
+                        | TokenKind::LBrace
+                        | TokenKind::LParen
+                        | TokenKind::Match
+                        | TokenKind::String(_)
+                        | TokenKind::FString(_)
+                        | TokenKind::RawString(_)
+                        | TokenKind::TypedString(_, _)
+                        | TokenKind::TypedRawString(_, _)
+                ) || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
                 {
                     self.parse_asm()
                 } else {

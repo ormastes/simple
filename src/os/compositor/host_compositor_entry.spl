@@ -8,10 +8,11 @@
 # The compositor and WM are represented here as lightweight host-side
 # wrappers that select the right hosted backend at runtime.
 
-use common.window_protocol.geometry.{Size}
-use common.window_protocol.window_protocol.{WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
+use common.window_protocol.geometry.{Size, Rect, Point, Px}
+use common.window_protocol.window_protocol.{WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE, WM_EVENT_RESIZE}
 use os.compositor.display_backend.{CompositorBackend}
-use os.compositor.hosted_backend.{select_hosted_backend, rt_hosted_set_surface_override}
+use os.compositor.hosted_backend.{hosted_compositor_save_bmp, select_hosted_backend, rt_hosted_set_surface_override}
+use os.compositor.wm_core.{EDGE_NONE, detect_resize_edge, apply_resize}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
 extern fn rt_winit_event_loop_new() -> i64
@@ -25,11 +26,13 @@ extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_host_wm_server_start() -> text
+extern fn rt_host_wm_server_cleanup(dir: text) -> bool
 extern fn rt_host_wm_server_poll(dir: text, max: i64) -> [(i64, i64, i64, i64, text, i64, i64, i64, i64, text, i64, text)]
 extern fn rt_host_wm_server_reply_create(dir: text, request_id: i64, status: i64, window_id: i64) -> bool
 extern fn rt_host_wm_server_reply_status(dir: text, request_id: i64, status: i64) -> bool
 extern fn rt_host_wm_server_send_event(dir: text, client_id: i64, window_id: i64, event_type: i64, key: i64, x: i64, y: i64, mods: i64) -> bool
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -42,6 +45,9 @@ val HOST_WM_TITLE_H: i32 = 36
 val HOST_WM_TASKBAR_H: i32 = 62
 val HOST_WM_LEFT_BUTTON_A: i64 = 0
 val HOST_WM_LEFT_BUTTON_B: i64 = 1
+val HOST_WM_RESIZE_EDGE_PX: i32 = 8
+val HOST_WM_MIN_WINDOW_W: i32 = 160
+val HOST_WM_MIN_WINDOW_H: i32 = 120
 
 # =========================================================================
 # Public types
@@ -80,8 +86,10 @@ class HostWmWindow:
 
 class HostWmAppProcess:
     title: text
+    app_id: text
     source_path: text
     pid: i64
+    failed: bool
 
 # WmService — thin lifecycle wrapper around the host event loop
 class WmService:
@@ -112,6 +120,15 @@ class HostCompositor:
     drag_window_id: i64
     drag_offset_x: i32
     drag_offset_y: i32
+    resizing: bool
+    resize_window_id: i64
+    resize_edge: i32
+    resize_start_x: i32
+    resize_start_y: i32
+    resize_orig_x: i32
+    resize_orig_y: i32
+    resize_orig_w: i32
+    resize_orig_h: i32
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -128,7 +145,16 @@ class HostCompositor:
             dragging: false,
             drag_window_id: 0,
             drag_offset_x: 0,
-            drag_offset_y: 0
+            drag_offset_y: 0,
+            resizing: false,
+            resize_window_id: 0,
+            resize_edge: EDGE_NONE,
+            resize_start_x: 0,
+            resize_start_y: 0,
+            resize_orig_x: 0,
+            resize_orig_y: 0,
+            resize_orig_w: 0,
+            resize_orig_h: 0
         )
 
     static fn new_hosted(backend: CompositorBackend, size: Size) -> HostCompositor:
@@ -147,15 +173,28 @@ class HostCompositor:
             dragging: false,
             drag_window_id: 0,
             drag_offset_x: 0,
-            drag_offset_y: 0
+            drag_offset_y: 0,
+            resizing: false,
+            resize_window_id: 0,
+            resize_edge: EDGE_NONE,
+            resize_start_x: 0,
+            resize_start_y: 0,
+            resize_orig_x: 0,
+            resize_orig_y: 0,
+            resize_orig_w: 0,
+            resize_orig_h: 0
         )
 
     me tick():
         """Process one compositor frame through the hosted backend."""
         self.launch_default_apps_if_needed()
         self.poll_bridge_requests()
+        self.check_app_launches()
         self.draw()
         self.backend.present()
+        val snapshot_path = rt_env_get("SIMPLE_HOST_WM_SNAPSHOT") ?? ""
+        if snapshot_path != "":
+            hosted_compositor_save_bmp(snapshot_path)
 
     me resize(w: i32, h: i32):
         """Record the current host surface size after an external resize."""
@@ -168,14 +207,66 @@ class HostCompositor:
         self.launched_default_apps = true
         val simple_bin = _host_wm_simple_binary()
         rt_env_set("SIMPLE_HOST_WM_DIR", self.bridge_dir)
-        self.spawn_app(simple_bin, "Hello", "src/app/hosted_apps/hello_world_client.spl")
-        self.spawn_app(simple_bin, "Terminal", "src/app/hosted_apps/shell_client.spl")
-        self.spawn_app(simple_bin, "Files", "src/app/hosted_apps/file_manager_client.spl")
-        self.spawn_app(simple_bin, "Browser", "src/app/hosted_apps/browser_demo_client.spl")
+        self.spawn_app(simple_bin, "Hello World", "/sys/apps/hello_world", "src/app/hosted_apps/hello_world_client.spl")
+        self.spawn_app(simple_bin, "Terminal", "/sys/apps/shell", "src/app/hosted_apps/shell_client.spl")
+        self.spawn_app(simple_bin, "File Manager", "/sys/apps/file_manager", "src/app/hosted_apps/file_manager_client.spl")
+        self.spawn_app(simple_bin, "Browser Demo", "/sys/apps/browser_demo", "src/app/hosted_apps/browser_demo_client.spl")
 
-    me spawn_app(simple_bin: text, title: text, source_path: text):
+    me spawn_app(simple_bin: text, title: text, app_id: text, source_path: text):
         val pid = rt_process_spawn_async(simple_bin, ["run", source_path])
-        self.app_processes.push(HostWmAppProcess(title: title, source_path: source_path, pid: pid))
+        self.app_processes.push(HostWmAppProcess(title: title, app_id: app_id, source_path: source_path, pid: pid, failed: false))
+
+    me check_app_launches():
+        if self.bridge_dir == "":
+            return
+        var i = 0
+        while i < self.app_processes.len():
+            val app = self.app_processes[i]
+            if not app.failed and not self.has_window_for_app(app.app_id):
+                if app.pid <= 0 or not rt_process_is_running(app.pid):
+                    self.record_launch_failure(i)
+            i = i + 1
+
+    me has_window_for_app(app_id: text) -> bool:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].app_id == app_id:
+                return true
+            i = i + 1
+        false
+
+    me record_launch_failure(app_index: i32):
+        val app = self.app_processes[app_index]
+        val wid = self.next_window_id
+        self.next_window_id = self.next_window_id + 1
+        self.windows.push(HostWmWindow(
+            id: wid,
+            client_id: 0,
+            process_id: app.pid,
+            app_id: app.app_id,
+            title: "{app.title} failed",
+            content: "Hosted app failed to create a window.\n\nsource: {app.source_path}\npid: {app.pid}",
+            x: 120 + (app_index * 26),
+            y: 120 + (app_index * 26),
+            w: 520,
+            h: 220,
+            minimized: false,
+            focused: false
+        ))
+        var updated = app
+        updated.failed = true
+        self.replace_app_process_at(app_index, updated)
+
+    me replace_app_process_at(idx: i32, app: HostWmAppProcess):
+        var updated: [HostWmAppProcess] = []
+        var i = 0
+        while i < self.app_processes.len():
+            if i == idx:
+                updated.push(app)
+            else:
+                updated.push(self.app_processes[i])
+            i = i + 1
+        self.app_processes = updated
 
     me poll_bridge_requests():
         if self.bridge_dir == "":
@@ -221,36 +312,63 @@ class HostCompositor:
         if method == COMP_DESTROY_WINDOW.to_i64():
             self.remove_window_at(idx)
         elif method == COMP_UPDATE_TREE.to_i64():
-            self.windows[idx].content = content
+            var win = self.windows[idx]
+            win.content = content
+            self.replace_window_at(idx, win)
         elif method == COMP_FOCUS.to_i64():
             self.focus_window(window_id)
         elif method == COMP_RESIZE.to_i64():
-            self.windows[idx].w = w.to_i32()
-            self.windows[idx].h = h.to_i32()
+            var win = self.windows[idx]
+            win.w = w.to_i32()
+            win.h = h.to_i32()
+            self.replace_window_at(idx, win)
         elif method == COMP_MOVE.to_i64():
-            self.windows[idx].x = x.to_i32()
-            self.windows[idx].y = y.to_i32()
+            var win = self.windows[idx]
+            win.x = x.to_i32()
+            win.y = y.to_i32()
+            self.replace_window_at(idx, win)
         elif method == COMP_SET_TITLE.to_i64():
-            self.windows[idx].title = title
+            var win = self.windows[idx]
+            win.title = title
+            self.replace_window_at(idx, win)
         elif method == COMP_MINIMIZE.to_i64():
-            self.windows[idx].minimized = true
-            self.windows[idx].focused = false
+            var win = self.windows[idx]
+            win.minimized = true
+            win.focused = false
+            self.replace_window_at(idx, win)
         elif method == COMP_MAXIMIZE.to_i64():
-            self.windows[idx].x = 24
-            self.windows[idx].y = 70
-            self.windows[idx].w = self.width - 48
-            self.windows[idx].h = self.height - HOST_WM_TASKBAR_H - 94
-            self.windows[idx].minimized = false
+            var win = self.windows[idx]
+            win.x = 24
+            win.y = 70
+            win.w = self.width - 48
+            win.h = self.height - HOST_WM_TASKBAR_H - 94
+            win.minimized = false
+            self.replace_window_at(idx, win)
             self.focus_window(window_id)
         elif method == COMP_RESTORE.to_i64():
-            self.windows[idx].minimized = false
+            var win = self.windows[idx]
+            win.minimized = false
+            self.replace_window_at(idx, win)
             self.focus_window(window_id)
         rt_host_wm_server_reply_status(self.bridge_dir, request_id, WM_STATUS_OK.value.to_i64())
+
+    me replace_window_at(idx: i32, win: HostWmWindow):
+        var updated: [HostWmWindow] = []
+        var i = 0
+        while i < self.windows.len():
+            if i == idx:
+                updated.push(win)
+            else:
+                updated.push(self.windows[i])
+            i = i + 1
+        self.windows = updated
 
     me clear_focus():
         var i = 0
         while i < self.windows.len():
-            self.windows[i].focused = false
+            var win = self.windows[i]
+            win.focused = false
+            self.replace_window_at(i, win)
             i = i + 1
 
     me find_window_index(window_id: i64) -> i32:
@@ -272,6 +390,10 @@ class HostCompositor:
         if self.drag_window_id > 0 and self.find_window_index(self.drag_window_id) < 0:
             self.dragging = false
             self.drag_window_id = 0
+        if self.resize_window_id > 0 and self.find_window_index(self.resize_window_id) < 0:
+            self.resizing = false
+            self.resize_window_id = 0
+            self.resize_edge = EDGE_NONE
         self.focus_top_visible_window()
 
     me focus_top_visible_window():
@@ -281,7 +403,9 @@ class HostCompositor:
         var i = self.windows.len() - 1
         while i >= 0:
             if not self.windows[i].minimized:
-                self.windows[i].focused = true
+                var win = self.windows[i]
+                win.focused = true
+                self.replace_window_at(i, win)
                 return
             i = i - 1
 
@@ -294,8 +418,9 @@ class HostCompositor:
         var i = 0
         while i < self.windows.len():
             if i != idx:
-                self.windows[i].focused = false
-                ordered.push(self.windows[i])
+                var other = self.windows[i]
+                other.focused = false
+                ordered.push(other)
             i = i + 1
         chosen.minimized = false
         chosen.focused = true
@@ -326,16 +451,41 @@ class HostCompositor:
     me handle_mouse_move(x: i32, y: i32):
         self.mouse_x = x
         self.mouse_y = y
+        if self.resizing and self.resize_window_id > 0:
+            val idx = self.find_window_index(self.resize_window_id)
+            if idx >= 0:
+                val dx = x - self.resize_start_x
+                val dy = y - self.resize_start_y
+                val orig = Rect.xywh(self.resize_orig_x, self.resize_orig_y, self.resize_orig_w, self.resize_orig_h)
+                val resized = apply_resize(orig, self.resize_edge, Point.xy(dx, dy), Size.wh(HOST_WM_MIN_WINDOW_W, HOST_WM_MIN_WINDOW_H))
+                var win = self.windows[idx]
+                win.x = resized.origin.x.to_i32()
+                win.y = resized.origin.y.to_i32()
+                win.w = resized.size.width.to_i32()
+                win.h = resized.size.height.to_i32()
+                self.replace_window_at(idx, win)
+                self.keep_window_on_screen(idx)
+                self.send_mouse_event(self.windows[idx], WM_EVENT_RESIZE.value.to_i64(), 0, self.windows[idx].w, self.windows[idx].h)
+            return
         if self.dragging and self.drag_window_id > 0:
             val idx = self.find_window_index(self.drag_window_id)
             if idx >= 0:
-                self.windows[idx].x = x - self.drag_offset_x
-                self.windows[idx].y = y - self.drag_offset_y
+                var win = self.windows[idx]
+                win.x = x - self.drag_offset_x
+                win.y = y - self.drag_offset_y
+                self.replace_window_at(idx, win)
                 self.keep_window_on_screen(idx)
                 self.send_mouse_event(self.windows[idx], WM_EVENT_MOUSE_MOVE.value.to_i64(), 0, x - self.windows[idx].x, y - self.windows[idx].y)
 
     me handle_left_button(pressed: bool):
         if not pressed:
+            if self.resizing:
+                val idx = self.find_window_index(self.resize_window_id)
+                if idx >= 0:
+                    self.send_mouse_event(self.windows[idx], WM_EVENT_RESIZE.value.to_i64(), 0, self.windows[idx].w, self.windows[idx].h)
+            self.resizing = false
+            self.resize_window_id = 0
+            self.resize_edge = EDGE_NONE
             if self.dragging:
                 val idx = self.find_window_index(self.drag_window_id)
                 if idx >= 0:
@@ -366,29 +516,61 @@ class HostCompositor:
                 self.remove_window_at(idx)
                 return
             if local_x >= 31 and local_x <= 45:
-                self.windows[idx].minimized = true
-                self.windows[idx].focused = false
+                var minimized = self.windows[idx]
+                minimized.minimized = true
+                minimized.focused = false
+                self.replace_window_at(idx, minimized)
                 self.focus_top_visible_window()
+                return
+            val title_edge = self.detect_resize_edge_for_window(win, self.mouse_x, self.mouse_y)
+            if title_edge != EDGE_NONE:
+                self.start_resize(hit, title_edge)
                 return
             self.dragging = true
             self.drag_window_id = hit
             self.drag_offset_x = local_x
             self.drag_offset_y = local_y
             return
+        val edge = self.detect_resize_edge_for_window(win, self.mouse_x, self.mouse_y)
+        if edge != EDGE_NONE:
+            self.start_resize(hit, edge)
+            return
         self.send_mouse_event(win, WM_EVENT_MOUSE_CLICK.value.to_i64(), 0, local_x, local_y)
 
+    me detect_resize_edge_for_window(win: HostWmWindow, x: i32, y: i32) -> i32:
+        detect_resize_edge(Rect.xywh(win.x, win.y, win.w, win.h), Point.xy(x, y), Px(value: HOST_WM_RESIZE_EDGE_PX))
+
+    me start_resize(window_id: i64, edge: i32):
+        val idx = self.find_window_index(window_id)
+        if idx < 0:
+            return
+        val win = self.windows[idx]
+        self.dragging = false
+        self.drag_window_id = 0
+        self.resizing = true
+        self.resize_window_id = window_id
+        self.resize_edge = edge
+        self.resize_start_x = self.mouse_x
+        self.resize_start_y = self.mouse_y
+        self.resize_orig_x = win.x
+        self.resize_orig_y = win.y
+        self.resize_orig_w = win.w
+        self.resize_orig_h = win.h
+
     me keep_window_on_screen(idx: i32):
-        if self.windows[idx].x < 0:
-            self.windows[idx].x = 0
-        if self.windows[idx].y < 48:
-            self.windows[idx].y = 48
-        if self.windows[idx].x + self.windows[idx].w > self.width:
-            self.windows[idx].x = self.width - self.windows[idx].w
-        if self.windows[idx].y + self.windows[idx].h > self.height - HOST_WM_TASKBAR_H:
-            self.windows[idx].y = self.height - HOST_WM_TASKBAR_H - self.windows[idx].h
+        var win = self.windows[idx]
+        if win.x < 0:
+            win.x = 0
+        if win.y < 48:
+            win.y = 48
+        if win.x + win.w > self.width:
+            win.x = self.width - win.w
+        if win.y + win.h > self.height - HOST_WM_TASKBAR_H:
+            win.y = self.height - HOST_WM_TASKBAR_H - win.h
+        self.replace_window_at(idx, win)
 
     me send_mouse_event(win: HostWmWindow, event_type: i64, key: i64, x: i32, y: i32):
-        if self.bridge_dir == "":
+        if self.bridge_dir == "" or win.client_id <= 0:
             return
         rt_host_wm_server_send_event(self.bridge_dir, win.client_id, win.id, event_type, key, x.to_i64(), y.to_i64(), 0)
 
@@ -404,16 +586,18 @@ class HostCompositor:
         0
 
     me hit_taskbar(x: i32, y: i32) -> i64:
-        val dock_y = if self.height > 74: self.height - 62 else: self.height - 46
+        val count = self.windows.len()
+        if count <= 0:
+            return 0
+        val dock_y = host_taskbar_dock_y(self.height)
         if y < dock_y or y > dock_y + 46:
             return 0
-        val dock_x = if self.width > 580: (self.width - 520) / 2 else: 18
-        var item_x = dock_x + 14
+        val item_w = host_taskbar_item_width(self.width, count)
         var i = 0
         while i < self.windows.len():
-            if x >= item_x and x < item_x + 108:
+            val item_x = host_taskbar_item_x(self.width, count, i)
+            if x >= item_x and x < item_x + item_w:
                 return self.windows[i].id
-            item_x = item_x + 122
             i = i + 1
         0
 
@@ -435,17 +619,19 @@ class HostCompositor:
         self.draw_taskbar()
 
     me draw_taskbar():
-        val dock_y = if self.height > 74: self.height - 62 else: self.height - 46
-        val dock_x = if self.width > 580: (self.width - 520) / 2 else: 18
-        self.backend.fill_rect(dock_x + 8, dock_y + 8, 504, 46, 0x77000000)
-        self.backend.fill_rect(dock_x, dock_y, 520, 46, 0xCC141827)
-        self.backend.fill_rect(dock_x, dock_y, 520, 1, 0x44FFFFFF)
-        self.backend.fill_rect(dock_x, dock_y + 45, 520, 1, 0x66000000)
-        var item_x = dock_x + 14
+        val count = self.windows.len()
+        val dock_y = host_taskbar_dock_y(self.height)
+        val dock_x = host_taskbar_dock_x(self.width, count)
+        val dock_w = host_taskbar_dock_width(self.width, count)
+        self.backend.fill_rect(dock_x + 8, dock_y + 8, dock_w - 16, 46, 0x77000000)
+        self.backend.fill_rect(dock_x, dock_y, dock_w, 46, 0xCC141827)
+        self.backend.fill_rect(dock_x, dock_y, dock_w, 1, 0x44FFFFFF)
+        self.backend.fill_rect(dock_x, dock_y + 45, dock_w, 1, 0x66000000)
+        val item_w = host_taskbar_item_width(self.width, count)
         var i = 0
-        while i < self.windows.len() and i < 4:
-            _draw_taskbar_item(self.backend, item_x, dock_y + 8, _short_title(self.windows[i].title), self.windows[i].focused)
-            item_x = item_x + 122
+        while i < self.windows.len():
+            val item_x = host_taskbar_item_x(self.width, count, i)
+            _draw_taskbar_item(self.backend, item_x, dock_y + 8, item_w, _fit_title(self.windows[i].title, (item_w - 16) / 8), self.windows[i].focused)
             i = i + 1
 
     me shutdown_apps():
@@ -454,6 +640,10 @@ class HostCompositor:
             if self.app_processes[i].pid > 0:
                 rt_process_kill(self.app_processes[i].pid)
             i = i + 1
+        if self.bridge_dir != "":
+            rt_host_wm_server_cleanup(self.bridge_dir)
+            rt_env_set("SIMPLE_HOST_WM_DIR", "")
+            self.bridge_dir = ""
 
 fn _host_wm_simple_binary() -> text:
     val configured = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -461,10 +651,67 @@ fn _host_wm_simple_binary() -> text:
         return configured
     "bin/simple"
 
+fn host_taskbar_dock_y(screen_height: i32) -> i32:
+    if screen_height > 74:
+        return screen_height - 62
+    screen_height - 46
+
+fn host_taskbar_max_width(screen_width: i32) -> i32:
+    if screen_width > 72:
+        return screen_width - 36
+    screen_width
+
+fn host_taskbar_item_gap(count: i32) -> i32:
+    if count <= 1:
+        return 0
+    if count <= 4:
+        return 14
+    if count <= 6:
+        return 8
+    4
+
+fn host_taskbar_item_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 0
+    val max_width = host_taskbar_max_width(screen_width)
+    val gap = host_taskbar_item_gap(count)
+    val desired = (108 * count) + (gap * (count - 1)) + 28
+    if desired <= max_width:
+        return 108
+    val compact = (max_width - 28 - (gap * (count - 1))) / count
+    if compact < 28:
+        return 28
+    compact
+
+fn host_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 96
+    val gap = host_taskbar_item_gap(count)
+    (host_taskbar_item_width(screen_width, count) * count) + (gap * (count - 1)) + 28
+
+fn host_taskbar_dock_x(screen_width: i32, count: i32) -> i32:
+    val dock_w = host_taskbar_dock_width(screen_width, count)
+    if screen_width > dock_w + 36:
+        return (screen_width - dock_w) / 2
+    18
+
+fn host_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
+    val dock_x = host_taskbar_dock_x(screen_width, count)
+    val item_w = host_taskbar_item_width(screen_width, count)
+    val gap = host_taskbar_item_gap(count)
+    dock_x + 14 + (index * (item_w + gap))
+
 fn _short_title(title: text) -> text:
     if title.len() <= 11:
         return title
     title.substring(0, 11)
+
+fn _fit_title(title: text, max_chars: i32) -> text:
+    if max_chars <= 0:
+        return ""
+    if title.len() <= max_chars:
+        return title
+    title.substring(0, max_chars)
 
 fn _draw_hosted_app_window(backend: CompositorBackend, win: HostWmWindow):
     val title_color: u32 = if win.focused: 0xFF2B3762 else: 0xFF1B1F33
@@ -482,6 +729,10 @@ fn _draw_hosted_app_window(backend: CompositorBackend, win: HostWmWindow):
     val label = if win.app_id != "": win.app_id else: "hosted app"
     backend.draw_text(win.x + 22, win.y + 76, label, 0xFFA9C7FF, 0xFF101321)
     _draw_multiline_text(backend, win.x + 22, win.y + 112, win.content, win.w - 44, win.h - 128)
+    if win.focused:
+        backend.fill_rect(win.x + win.w - 20, win.y + win.h - 6, 14, 2, 0xFF8DB7FF)
+        backend.fill_rect(win.x + win.w - 14, win.y + win.h - 12, 8, 2, 0xFF8DB7FF)
+        backend.fill_rect(win.x + win.w - 8, win.y + win.h - 18, 2, 12, 0xFF8DB7FF)
 
 fn _draw_multiline_text(backend: CompositorBackend, x: i32, y: i32, content: text, max_w: i32, max_h: i32):
     var line = ""
@@ -521,17 +772,23 @@ fn _draw_shared_host_wm_frame(backend: CompositorBackend, width: i32, height: i3
     backend.fill_rect(dock_x, dock_y, 520, 46, 0xCC141827)
     backend.fill_rect(dock_x, dock_y, 520, 1, 0x44FFFFFF)
     backend.fill_rect(dock_x, dock_y + 45, 520, 1, 0x66000000)
-    _draw_taskbar_item(backend, dock_x + 14, dock_y + 8, "Files", false)
-    _draw_taskbar_item(backend, dock_x + 136, dock_y + 8, "Terminal", false)
-    _draw_taskbar_item(backend, dock_x + 258, dock_y + 8, "Browser", true)
-    _draw_taskbar_item(backend, dock_x + 380, dock_y + 8, "Inspector", false)
+    _draw_taskbar_item(backend, dock_x + 14, dock_y + 8, 108, "Files", false)
+    _draw_taskbar_item(backend, dock_x + 136, dock_y + 8, 108, "Terminal", false)
+    _draw_taskbar_item(backend, dock_x + 258, dock_y + 8, 108, "Browser", true)
+    _draw_taskbar_item(backend, dock_x + 380, dock_y + 8, 108, "Inspector", false)
 
-fn _draw_taskbar_item(backend: CompositorBackend, x: i32, y: i32, title: text, active: bool):
+fn _draw_taskbar_item(backend: CompositorBackend, x: i32, y: i32, w: i32, title: text, active: bool):
+    if w <= 0:
+        return
     val color: u32 = if active: 0xFF2F6CCF else: 0xFF23283A
     val border: u32 = if active: 0xFF8DB7FF else: 0xFF34384A
-    backend.fill_rect(x, y, 108, 30, border)
-    backend.fill_rect(x + 1, y + 1, 106, 28, color)
-    backend.draw_text(x + 10, y + 8, title, 0xFFE8EEF7, color)
+    val inner_w = if w > 2: w - 2 else: 1
+    backend.fill_rect(x, y, w, 30, border)
+    backend.fill_rect(x + 1, y + 1, inner_w, 28, color)
+    if w >= 48:
+        backend.draw_text(x + 10, y + 8, title, 0xFFE8EEF7, color)
+    else:
+        backend.fill_rect(x + (w / 2) - 4, y + 10, 8, 8, 0xFFE8EEF7)
 
 fn _draw_browser_match_window(
     backend: CompositorBackend,
@@ -583,6 +840,7 @@ class HostWmHandle:
         while self.wm.is_running():
             self.run_once()
             rt_sleep_ms(HOST_WM_IDLE_SLEEP_MS)
+        self.shutdown()
 
     me pump_host_events() -> i64:
         """Drain a small batch of host events. A close event stops the WM."""

@@ -972,6 +972,25 @@ S1(rt_invlpg) S0(rt_rdtsc)
 S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr)
 S1(rt_read_cr3) S1(rt_write_cr3) S1(rt_read_cr2)
 
+RuntimeValue rt_memory_barrier(void)
+{
+    __asm__ volatile("dmb sy" ::: "memory");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
+                                 RuntimeValue addr_hi, RuntimeValue len,
+                                 RuntimeValue flags, RuntimeValue next)
+{
+    uint8_t *desc = (uint8_t *)(uintptr_t)((uint32_t)DECODE_INT(base) + ((uint32_t)DECODE_INT(index) * 16U));
+    *(volatile uint32_t *)(void *)(desc + 0)  = (uint32_t)DECODE_INT(addr_lo);
+    *(volatile uint32_t *)(void *)(desc + 4)  = (uint32_t)DECODE_INT(addr_hi);
+    *(volatile uint32_t *)(void *)(desc + 8)  = (uint32_t)DECODE_INT(len);
+    *(volatile uint16_t *)(void *)(desc + 12) = (uint16_t)DECODE_INT(flags);
+    *(volatile uint16_t *)(void *)(desc + 14) = (uint16_t)DECODE_INT(next);
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */

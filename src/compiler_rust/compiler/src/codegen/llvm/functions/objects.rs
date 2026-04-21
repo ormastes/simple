@@ -215,10 +215,11 @@ impl LlvmBackend {
         let func_ptr_cast = builder
             .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn ptr", &e))?;
+        let ptr_slot_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_slot = builder
             .build_pointer_cast(
                 closure_ptr,
-                i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
+                ptr_slot_type,
                 "fn_slot",
             )
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot", &e))?;

@@ -1,0 +1,142 @@
+# RISC-V service initialization for QEMU virt bring-up.
+
+use os.kernel.ipc.spm_port.{spm_port_register}
+
+extern fn serial_println(msg: text)
+extern fn rt_pci_device_count() -> i64
+extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+extern fn rt_net_init() -> i64
+extern fn rt_net_tx_test() -> i64
+extern fn rt_net_stats() -> i64
+extern fn rt_display_init() -> i64
+extern fn rt_display_flush_test() -> i64
+extern fn rt_display_width() -> i64
+extern fn rt_display_height() -> i64
+
+val RISCV_SPM_WELL_KNOWN_TASK_ID: u64 = 0xfffffff0 as u64
+val RISCV_DISPLAY_WIDTH: u32 = 320
+val RISCV_DISPLAY_HEIGHT: u32 = 240
+
+var riscv_services_started: bool = false
+var riscv_spm_port_ok: bool = false
+var riscv_network_ok: i64 = 0
+var riscv_display_ok: i64 = 0
+var riscv_network_device_index: i64 = -1
+var riscv_display_width: u32 = 0
+var riscv_display_height: u32 = 0
+
+fn init_riscv_services():
+    """Initialize the architecture-safe service surface for RISC-V boot."""
+    init_riscv_services_impl(0)
+
+fn init_riscv_services_with_network():
+    """Initialize RISC-V services with the opt-in network probe enabled."""
+    init_riscv_services_impl(1)
+
+fn init_riscv_services_impl(enable_network: i64):
+    """Initialize the architecture-safe service surface for RISC-V boot."""
+    serial_println("========================================")
+    serial_println("[init] Starting SimpleOS RISC-V services...")
+    serial_println("========================================")
+
+    spm_port_register(RISCV_SPM_WELL_KNOWN_TASK_ID)
+    riscv_spm_port_ok = true
+    serial_println("[init] SPM port: registered placeholder receiver")
+
+    var network_ok: i64 = 0
+    if enable_network == 0:
+        serial_println("[net-riscv] Network service disabled")
+    else:
+        serial_println("[net-riscv] Starting network service probe...")
+        val count = rt_pci_device_count()
+        riscv_network_device_index = -1
+        var i: i64 = 0
+        while i < count:
+            val cls = rt_pci_get_field(i, 3)
+            val sub = rt_pci_get_field(i, 4)
+            if cls == 2 and sub == 0:
+                riscv_network_device_index = i
+                break
+            i = i + 1
+
+        if riscv_network_device_index < 0:
+            serial_println("[net-riscv] Network unavailable: no PCI Ethernet/VirtIO device")
+            network_ok = 0
+        else:
+            serial_println("[net-riscv] PCI network device index {riscv_network_device_index}")
+            val init_rc = rt_net_init()
+            if init_rc < 0:
+                serial_println("[net-riscv] Network init failed rc={init_rc}")
+                network_ok = 0
+            else:
+                serial_println("[net-riscv] Network device ready")
+                val tx_rc = rt_net_tx_test()
+                if tx_rc < 0:
+                    serial_println("[net-riscv] Network TX test failed rc={tx_rc}")
+                    network_ok = 0
+                else:
+                    val stats_rc = rt_net_stats()
+                    if stats_rc < 0:
+                        serial_println("[net-riscv] Network stats probe failed rc={stats_rc}")
+                        network_ok = 0
+                    else:
+                        network_ok = 1
+                        serial_println("[net-riscv] Network TX test passed")
+                        serial_println("[net-riscv] Network stats tx={stats_rc}")
+                        serial_println("[net-riscv] Network service ready")
+
+    riscv_network_ok = network_ok
+    if network_ok == 1:
+        serial_println("[init] network: ready")
+    else:
+        serial_println("[init] network: unavailable")
+
+    serial_println("[display-riscv] Starting display service...")
+    var display_ok: i64 = 0
+    val display_rc = rt_display_init()
+    if display_rc < 0:
+        serial_println("[display-riscv] Display unavailable")
+        riscv_display_width = 0
+        riscv_display_height = 0
+    else:
+        serial_println("[display-riscv] Display GPU ready")
+        val flush_rc = rt_display_flush_test()
+        if flush_rc < 0:
+            serial_println("[display-riscv] Display flush failed rc={flush_rc}")
+            riscv_display_width = 0
+            riscv_display_height = 0
+        else:
+            display_ok = 1
+            riscv_display_width = RISCV_DISPLAY_WIDTH
+            riscv_display_height = RISCV_DISPLAY_HEIGHT
+            serial_println("[display-riscv] Display flush passed")
+            serial_println("[display-riscv] Display service ready: 320x240 framebuffer")
+    riscv_display_ok = display_ok
+
+    if display_ok == 1:
+        serial_println("[init] display: ready")
+    else:
+        serial_println("[init] display: unavailable")
+
+    riscv_services_started = true
+    serial_println("[init] storage: deferred")
+    serial_println("[init] Service initialization complete")
+    serial_println("========================================")
+
+fn riscv_services_ready() -> bool:
+    """Check whether RISC-V boot services reached the initialized state."""
+    riscv_services_started and riscv_spm_port_ok
+
+fn riscv_network_ready() -> bool:
+    """Check whether the RISC-V network service found and initialized a NIC."""
+    riscv_network_ok == 1
+
+fn riscv_display_ready() -> bool:
+    """Check whether the RISC-V display service initialized a framebuffer."""
+    riscv_display_ok == 1
+
+fn riscv_display_mode_width() -> u32:
+    RISCV_DISPLAY_WIDTH
+
+fn riscv_display_mode_height() -> u32:
+    RISCV_DISPLAY_HEIGHT

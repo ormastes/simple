@@ -2,8 +2,10 @@
 # SimpleOS QEMU Runner — RISC-V 32 (direct M-mode virt machine)
 #
 # Usage:
-#   sh scripts/qemu_riscv32.shs              # boot and validate serial output
+#   sh scripts/qemu_riscv32.shs              # full boot and validate serial output
+#   sh scripts/qemu_riscv32.shs --smoke      # minimal boot smoke
 #   sh scripts/qemu_riscv32.shs --skip-build # use prebuilt kernel
+#   sh scripts/qemu_riscv32.shs --interactive --net --display
 #
 # Exit codes:
 #   0 — boot markers found or QEMU/kernel unavailable (SKIP)
@@ -14,11 +16,17 @@ KERNEL="$REPO_ROOT/build/os/simpleos_riscv32.elf"
 SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32.log"
 BUILD_LOG="$REPO_ROOT/build/os/build_riscv32.log"
 SIMPLE_BIN="${SIMPLE_BINARY:-$REPO_ROOT/bin/simple}"
-ENTRY_FILE="${RISCV32_ENTRY:-examples/simple_os/arch/riscv32/smoke_entry.spl}"
-SOURCE_DIR="${RISCV32_SOURCE:-examples/simple_os/arch/riscv32}"
+ENTRY_FILE="${RISCV32_ENTRY:-}"
+SOURCE_ARGS="${RISCV32_SOURCE_ARGS:-}"
 TIMEOUT_SEC=30
 BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-180}"
 SKIP_BUILD=0
+SMOKE=0
+INTERACTIVE=0
+NET=0
+DISPLAY=0
+QMP_SOCKET=""
+CAPTURE_PPM=""
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -26,10 +34,49 @@ SKIP_BUILD=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-build) SKIP_BUILD=1 ;;
+        --smoke)      SMOKE=1 ;;
+        --interactive) INTERACTIVE=1 ;;
+        --net) NET=1 ;;
+        --display) DISPLAY=1 ;;
         *)            echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
 done
+
+if [ "$NET" -eq 1 ]; then
+    KERNEL="$REPO_ROOT/build/os/simpleos_riscv32_net.elf"
+    SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32_net.log"
+    BUILD_LOG="$REPO_ROOT/build/os/build_riscv32_net.log"
+elif [ "$SMOKE" -eq 1 ]; then
+    KERNEL="$REPO_ROOT/build/os/simpleos_riscv32_smoke.elf"
+    SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32_smoke.log"
+    BUILD_LOG="$REPO_ROOT/build/os/build_riscv32_smoke.log"
+fi
+
+if [ "$DISPLAY" -eq 1 ]; then
+    QMP_SOCKET="$REPO_ROOT/build/os/qmp_riscv32_display.sock"
+    CAPTURE_PPM="$REPO_ROOT/build/os/riscv32_display.ppm"
+fi
+
+if [ -z "$ENTRY_FILE" ]; then
+    if [ "$SMOKE" -eq 1 ]; then
+        ENTRY_FILE="examples/simple_os/arch/riscv32/smoke_entry.spl"
+    elif [ "$NET" -eq 1 ]; then
+        ENTRY_FILE="examples/simple_os/arch/riscv32/net_entry.spl"
+    else
+        ENTRY_FILE="examples/simple_os/arch/riscv32/os_entry.spl"
+    fi
+fi
+
+if [ -z "$SOURCE_ARGS" ]; then
+    if [ -n "$RISCV32_SOURCE" ]; then
+        SOURCE_ARGS="--source $RISCV32_SOURCE"
+    elif [ "$SMOKE" -eq 1 ]; then
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv32"
+    else
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv32 --source src"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Locate timeout command
@@ -58,7 +105,7 @@ if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
     "$SIMPLE_BIN" native-build \
         --backend llvm \
         --timeout "$BUILD_TIMEOUT_SEC" \
-        --source "$SOURCE_DIR" \
+        $SOURCE_ARGS \
         --entry "$ENTRY_FILE" \
         --entry-closure \
         --target riscv32-unknown-none \
@@ -81,7 +128,7 @@ fi
 # ---------------------------------------------------------------------------
 if [ ! -f "$KERNEL" ]; then
     echo "SKIP: Kernel not found at $KERNEL"
-    echo "  Build with: bin/simple native-build --source $SOURCE_DIR --entry $ENTRY_FILE --entry-closure \\"
+    echo "  Build with: bin/simple native-build $SOURCE_ARGS --entry $ENTRY_FILE --entry-closure \\"
     echo "    --target riscv32-unknown-none -o $KERNEL \\"
     echo "    --linker-script examples/simple_os/arch/riscv32/linker.ld"
     exit 0
@@ -91,16 +138,154 @@ fi
 # Boot QEMU — direct M-mode virt machine, serial to log file
 # ---------------------------------------------------------------------------
 echo "[boot] Booting SimpleOS riscv32 in QEMU (timeout: ${TIMEOUT_SEC}s)..."
-rm -f "$SERIAL_LOG"
+rm -f "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_PPM"
 
-QEMU_ARGS="-machine virt -cpu rv32 -m 256M \
+QEMU_DEVICE_ARGS=""
+if [ "$NET" -eq 1 ]; then
+    QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on"
+else
+    QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -nic none"
+fi
+if [ "$DISPLAY" -eq 1 ]; then
+    QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -device virtio-gpu-pci,disable-legacy=on"
+fi
+
+QMP_ARGS=""
+if [ "$DISPLAY" -eq 1 ]; then
+    QMP_ARGS="-qmp unix:$QMP_SOCKET,server,nowait"
+fi
+
+QEMU_ARGS="-nodefaults \
+    -machine virt -cpu rv32 -m 256M \
     -bios none \
     -kernel $KERNEL \
     -serial file:$SERIAL_LOG \
     -display none \
+    $QEMU_DEVICE_ARGS \
+    $QMP_ARGS \
     -no-reboot"
 
-if [ -n "$TIMEOUT_CMD" ]; then
+wait_for_serial_marker() {
+    _pattern="$1"
+    _timeout="$2"
+    _elapsed=0
+    while [ "$_elapsed" -lt "$_timeout" ]; do
+        if [ -f "$SERIAL_LOG" ] && grep -qiE "$_pattern" "$SERIAL_LOG"; then
+            return 0
+        fi
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+    return 1
+}
+
+qmp_screendump() {
+    _socket="$1"
+    _out="$2"
+    python3 - "$_socket" "$_out" <<'PY'
+import json, os, socket, sys, time
+sock_path, out_path = sys.argv[1], sys.argv[2]
+deadline = time.time() + 10
+while not os.path.exists(sock_path):
+    if time.time() > deadline:
+        raise SystemExit(2)
+    time.sleep(0.1)
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock_path)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+f.write(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n")
+f.readline()
+for cmd in (
+    {"execute": "screendump", "arguments": {"filename": out_path, "format": "ppm"}},
+    {"execute": "screendump", "arguments": {"filename": out_path}},
+):
+    f.write(json.dumps(cmd).encode() + b"\n")
+    line = f.readline()
+    try:
+        resp = json.loads(line.decode() or "{}")
+    except Exception:
+        resp = {"error": {}}
+    if "error" not in resp:
+        break
+for _ in range(50):
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 32:
+        raise SystemExit(0)
+    time.sleep(0.1)
+raise SystemExit(3)
+PY
+}
+
+validate_ppm() {
+    _path="$1"
+    python3 - "$_path" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    def tok():
+        b = bytearray()
+        while True:
+            c = f.read(1)
+            if not c:
+                return bytes(b)
+            if c == b"#":
+                f.readline()
+                continue
+            if c.isspace():
+                if b:
+                    return bytes(b)
+                continue
+            b.extend(c)
+    if tok() != b"P6":
+        raise SystemExit(1)
+    w, h, m = int(tok()), int(tok()), int(tok())
+    data = f.read()
+if w <= 0 or h <= 0 or m != 255 or len(data) < w * h * 3:
+    raise SystemExit(1)
+sample = data[:min(len(data), 200000)]
+colors = {sample[i:i+3] for i in range(0, len(sample) - 2, 3)}
+if len(colors) < 3 or all(c == b"\x00\x00\x00" for c in colors):
+    raise SystemExit(1)
+print(f"PPM {w}x{h} colors={len(colors)}")
+PY
+}
+
+if [ "$DISPLAY" -eq 1 ]; then
+    qemu-system-riscv32 $QEMU_ARGS 2>/dev/null &
+    QEMU_PID=$!
+    if ! wait_for_serial_marker "Display capture ready" 20; then
+        echo "FAIL: Display capture marker not seen before capture"
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        exit 1
+    fi
+    if ! qmp_screendump "$QMP_SOCKET" "$CAPTURE_PPM"; then
+        echo "FAIL: QMP screendump failed"
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        exit 1
+    fi
+    if ! validate_ppm "$CAPTURE_PPM"; then
+        echo "FAIL: Display screenshot validation failed"
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        exit 1
+    fi
+    _elapsed=0
+    while kill -0 "$QEMU_PID" 2>/dev/null && [ "$_elapsed" -lt "$TIMEOUT_SEC" ]; do
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+    if kill -0 "$QEMU_PID" 2>/dev/null; then
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        QEMU_EXIT=124
+    else
+        wait "$QEMU_PID" 2>/dev/null
+        QEMU_EXIT=$?
+    fi
+elif [ -n "$TIMEOUT_CMD" ]; then
     $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-riscv32 $QEMU_ARGS 2>/dev/null
     QEMU_EXIT=$?
 else
@@ -113,6 +298,11 @@ else
 fi
 
 echo "[boot] QEMU exited with code: $QEMU_EXIT"
+
+if [ "$QEMU_EXIT" -eq 124 ]; then
+    echo "FAIL: QEMU timed out instead of exiting cleanly"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Check serial output
@@ -147,6 +337,27 @@ check_marker() {
 check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
 check_marker "UART / SBI console" "UART|SBI|serial"
 check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
+
+if [ "$INTERACTIVE" -eq 1 ]; then
+    check_marker "SPM service"      "SPM port"
+    if [ "$DISPLAY" -eq 1 ]; then
+        check_marker "Display service"  "Display service ready|display: ready"
+    else
+        check_marker "Display probe"    "Display unavailable|display: unavailable"
+    fi
+    check_marker "Shell service"    "Shell ready"
+    if [ "$NET" -eq 1 ]; then
+        check_marker "Network service" "Network service ready|network: ready"
+    else
+        check_marker "Network probe"   "Network unavailable|network: unavailable"
+    fi
+fi
+
+if [ "$DISPLAY" -eq 1 ]; then
+    check_marker "Display GPU I/O" "Display GPU ready|Display flush passed"
+    echo "PASS: Display screenshot"
+    PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

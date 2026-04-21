@@ -263,7 +263,7 @@
   body: (block_expression) @injection.content)
  (#set! injection.language "c"))
 
-;; Inline assembly (if supported)
+;; Inline assembly raw block payload
 ((asm_block
   (asm_content) @injection.content)
  (#set! injection.language "asm"))

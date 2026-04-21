@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::error_recovery::ErrorHint;
 use crate::token::{Span, TokenKind};
 
 use super::super::Parser;
@@ -28,7 +29,26 @@ impl<'a> Parser<'a> {
             return self.parse_asm_braced(start_span, is_volatile);
         }
 
+        if self.is_asm_string_token() {
+            self.warn_legacy_asm_syntax(start_span);
+            let instr = self.expect_string_value()?;
+            return Ok(Node::InlineAsm(InlineAsmStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                volatile: is_volatile,
+                instructions: vec![instr],
+                target_match: vec![],
+                clobbers: vec![],
+                constraints: vec![],
+            }));
+        }
+
         self.expect(&TokenKind::Colon)?;
+        self.warn_legacy_asm_syntax(start_span);
 
         let mut instructions = Vec::new();
         let mut clobbers = Vec::new();
@@ -100,6 +120,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_asm_parenthesized(&mut self, start_span: Span, is_volatile: bool) -> Result<Node, ParseError> {
+        self.warn_legacy_asm_syntax(start_span);
         self.expect(&TokenKind::LParen)?;
         let mut instructions = Vec::new();
         let mut constraints = Vec::new();
@@ -144,6 +165,13 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    fn warn_legacy_asm_syntax(&mut self, span: Span) {
+        self.error_hints.push(
+            ErrorHint::warning("legacy inline asm syntax; use asm { ... }".to_string(), span)
+                .with_suggestion("Use `asm { ... }` or `asm volatile { ... }`".to_string()),
+        );
+    }
+
     fn find_raw_asm_block_end(&self, content_start: usize) -> Result<usize, ParseError> {
         let mut depth = 1usize;
         let mut in_string: Option<char> = None;
@@ -181,7 +209,12 @@ impl<'a> Parser<'a> {
 
         Err(ParseError::syntax_error_with_span(
             "unterminated asm { ... } block".to_string(),
-            Span::new(content_start, self.source.len(), self.current.span.line, self.current.span.column),
+            Span::new(
+                content_start,
+                self.source.len(),
+                self.current.span.line,
+                self.current.span.column,
+            ),
         ))
     }
 
@@ -567,15 +600,66 @@ mod tests {
     }
 
     #[test]
+    fn test_asm_braced_raw_accepts_x86_arm_and_riscv_text() {
+        let cases = [
+            ("asm { cli }", "cli"),
+            ("asm { mfence }", "mfence"),
+            ("asm { cpsid i }", "cpsid i"),
+            ("asm { wfi }", "wfi"),
+            ("asm { fence rw, rw }", "fence rw, rw"),
+            ("asm { csrr a0, mstatus }", "csrr a0, mstatus"),
+        ];
+        for (source, expected) in cases {
+            let asm = parse_first_asm(&format!("fn test():\n    {source}\n"));
+            assert_eq!(asm.instructions, vec![expected.to_string()]);
+        }
+    }
+
+    #[test]
+    fn test_asm_braced_raw_allows_placeholder_braces() {
+        let asm = parse_first_asm("fn test():\n    asm { mov {out}, eax }\n");
+        assert_eq!(asm.instructions, vec!["mov {out}, eax"]);
+    }
+
+    #[test]
+    fn test_asm_braced_raw_allows_comment_like_hash_text_until_close() {
+        let asm = parse_first_asm("fn test():\n    asm { svc #0 }\n");
+        assert_eq!(asm.instructions, vec!["svc #0"]);
+    }
+
+    #[test]
     fn test_asm_volatile_paren_simple() {
         parse_succeeds("fn test():\n    asm volatile(\n        \"mov r0, r1\",\n        \"bkpt #0xAB\"\n    )\n");
     }
 
     #[test]
-    fn test_asm_parenthesized_parses_without_warning() {
+    fn test_asm_parenthesized_parses_with_legacy_warning() {
         let mut parser = crate::Parser::new("fn test():\n    asm(\"nop\")\n");
         parser.parse().expect("parse");
-        assert!(parser.error_hints().is_empty());
+        assert!(parser
+            .error_hints()
+            .iter()
+            .any(|hint| hint.message.contains("legacy inline asm syntax")));
+    }
+
+    #[test]
+    fn test_asm_bare_string_parses_with_legacy_warning() {
+        let mut parser = crate::Parser::new("fn test():\n    asm \"nop\"\n");
+        parser.parse().expect("parse");
+        assert!(parser
+            .error_hints()
+            .iter()
+            .any(|hint| hint.message.contains("legacy inline asm syntax")));
+    }
+
+    #[test]
+    fn test_asm_colon_string_parses_with_legacy_warning() {
+        let mut parser = crate::Parser::new("fn test():\n    asm: \"nop\"\n");
+        parser.parse().expect("parse");
+        assert!(parser
+            .error_hints()
+            .iter()
+            .any(|hint| hint.message.contains("legacy inline asm syntax")));
     }
 
     #[test]

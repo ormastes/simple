@@ -44,6 +44,13 @@ pub(crate) fn compile_inline_asm_c(
     temp_dir: &Path,
     target: Option<(&str, &str, &str)>,
 ) -> Result<Option<PathBuf>, String> {
+    if let Some((triple, _, _)) = target {
+        if triple.starts_with("aarch64") || triple.starts_with("arm") {
+            if !crate::codegen::inline_asm::collected_inline_asm_blocks().is_empty() {
+                return Ok(None);
+            }
+        }
+    }
     let Some(c_path) = write_inline_asm_c(temp_dir)? else {
         return Ok(None);
     };

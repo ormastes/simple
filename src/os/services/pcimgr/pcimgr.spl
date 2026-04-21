@@ -11,7 +11,6 @@
 #   22 (IpcCreatePort) — create service IPC port
 #   21 (IpcRecv)       — receive IPC messages
 
-use os.userlib.syscall_raw.{syscall}
 use os.services.pcimgr.driver_match.{device_class_description, match_driver_name}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
@@ -50,6 +49,7 @@ var dev_state: [i64; 64]
 var dev_grant_owner: [u64; 64]  # Task ID that holds the grant
 
 extern fn serial_println(msg: text)
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
 # Direct C PCI cache access (bypasses syscall tagging issues)
 extern fn rt_pci_device_count() -> i64
@@ -167,9 +167,51 @@ fn pcimgr_device_count() -> u64:
 # ============================================================================
 
 fn pcimgr_grant_device(dev_idx: u64, requester_task: u64) -> Result<DeviceGrant, text>:
-    """Grant a device — returns Err on baremetal (no kernel grant syscall)."""
-    serial_println("[pcimgr] grant_device: not available on baremetal")
-    Err("not available on baremetal")
+    """Grant a RISC-V baremetal PCI device from the C PCI cache."""
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return Err("invalid device index: {dev_idx}")
+
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0)
+    val dev = rt_pci_get_field(idx, 1)
+    val func = rt_pci_get_field(idx, 2)
+    val cls = rt_pci_get_field(idx, 3)
+    val sub = rt_pci_get_field(idx, 4)
+    val vendor = rt_pci_get_field(idx, 5)
+    val device = rt_pci_get_field(idx, 6)
+    val bar0 = rt_pci_get_field(idx, 7)
+    val irq = rt_pci_get_field(idx, 8)
+    if bar0 <= 0:
+        return Err("device {dev_idx} has no BAR0")
+
+    if dev_idx < MAX_TRACKED_DEVICES:
+        dev_state[dev_idx] = DEV_STATE_GRANTED
+        dev_grant_owner[dev_idx] = requester_task
+
+    serial_println("[pcimgr] Granted device [{dev_idx}] to task {requester_task}")
+    Ok(DeviceGrant(
+        pci_vendor: vendor as u16,
+        pci_device: device as u16,
+        pci_bus: bus as u8,
+        pci_dev: dev as u8,
+        pci_func: func as u8,
+        pci_class: cls as u8,
+        pci_subclass: sub as u8,
+        bar0_phys: bar0 as u64,
+        bar0_size: 4096,
+        bar0_cap: dev_idx + 1,
+        irq_vector: irq as u32,
+        irq_notification_id: dev_idx + 1,
+        irq_notification_bit: 0,
+        irq_cap: dev_idx + 1,
+        dma_device_addr: 0,
+        dma_host_addr: 0,
+        dma_size: 0,
+        dma_cap: 0,
+        iommu_domain_id: 0,
+        iommu_cap: 0
+    ))
 
 fn pcimgr_release_device(dev_idx: u64, requester_task: u64) -> Result<bool, text>:
     """Release a previously granted device back to the available pool."""

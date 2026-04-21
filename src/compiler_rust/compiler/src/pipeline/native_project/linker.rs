@@ -846,27 +846,8 @@ int main(int argc, char** argv) {
             ordered
         };
 
-        // Blocker A fix: mirror the hosted-path `generate_stub_object` injection for
-        // freestanding links. Without this, 174+ undefined Simple class-method symbols
-        // (apps__installer_gui__..., common__render_scene__executor__..., etc.) were
-        // being accepted by `--unresolved-symbols=ignore-all` and resolved to address 0
-        // — calling them at runtime produced the `FAULT @ 0x950a` cascade through the
-        // legacy VGA MMIO region. The freestanding stub generator emits weak `return 0`
-        // definitions compiled with the cross `--target=<triple>` so every unresolved
-        // ref lands on a harmless no-op instead of null. We KEEP --unresolved-symbols=
-        // ignore-all as a belt-and-suspenders safety net for this commit; removing it
-        // can be a follow-up slice once stub coverage is proven across arches.
         let freestanding_stub_obj =
-            match generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    eprintln!(
-                    "  WARNING: freestanding stub generation failed: {} (link will proceed with ignore-all fallback)",
-                    e
-                );
-                    None
-                }
-            };
+            generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi)?;
 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
@@ -994,13 +975,17 @@ int main(int argc, char** argv) {
 
         if use_direct_lld.is_some() {
             cmd.arg("-z").arg("muldefs");
-            cmd.arg("--unresolved-symbols=ignore-all");
+            if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() == Ok("1") {
+                cmd.arg("--unresolved-symbols=ignore-all");
+            }
             if self.config.strip {
                 cmd.arg("-s");
             }
         } else {
             cmd.arg("-Wl,-z,muldefs");
-            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+            if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() == Ok("1") {
+                cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+            }
             if self.config.strip {
                 cmd.arg("-Wl,-s");
             }

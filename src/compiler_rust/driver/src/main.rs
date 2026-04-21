@@ -763,8 +763,8 @@ const COMMAND_TABLE: &[CommandEntry] = &[
 
 fn main() {
     // macOS GUI mode: run on main thread (Cocoa requires EventLoop on main thread).
-    // Set SIMPLE_GUI=1 when running GUI apps that need native windows.
-    if std::env::var("SIMPLE_GUI").is_ok() {
+    // Shared-WM browser mode also needs this even when SIMPLE_GUI is not set.
+    if std::env::var("SIMPLE_GUI").is_ok() || browser_shared_wm_needs_main_thread() {
         real_main();
         return;
     }
@@ -792,6 +792,25 @@ fn main() {
         return;
     }
     real_main();
+}
+
+#[cfg(target_os = "macos")]
+fn browser_shared_wm_needs_main_thread() -> bool {
+    if std::env::var("SIMPLE_UI_BROWSER_SHARED_WM").as_deref() == Ok("1") {
+        return true;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    let shared = args.iter().any(|arg| arg == "--shared-wm");
+    if !shared {
+        return false;
+    }
+    args.iter()
+        .any(|arg| arg == "browser" || arg == "src/app/ui.browser/main.spl")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn browser_shared_wm_needs_main_thread() -> bool {
+    false
 }
 
 fn real_main() {

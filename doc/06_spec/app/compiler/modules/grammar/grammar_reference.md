@@ -160,9 +160,9 @@
 
 | Capability | Kind | Description |
 |------------|------|-------------|
-| asm_single_line | clang-depend | Single-line asm statement (`asm "nop"`) |
-| asm_indented_block | clang-depend | Indented asm block (`asm:\n    "nop"`) |
-| asm_braced_block | clang-depend | Braced asm block (`asm nop`) |
+| asm_single_line | clang-depend | Legacy single-line asm statement (`asm "nop"`, warns) |
+| asm_indented_block | clang-depend | Legacy indented asm block (`asm:\n    "nop"`, warns) |
+| asm_braced_block | clang-depend | Raw braced asm block (`asm { nop }`) |
 | asm_match | clang-depend | Target-conditional asm (`asm match: case [x86_64]: ...`) |
 | asm_assert | clang-depend | Target assertion (`asm assert [x86_64, linux]`) |
 | asm_operands | compiler-depend | Register operands (`in(reg) var, out(reg) var`) |

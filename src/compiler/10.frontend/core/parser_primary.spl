@@ -40,13 +40,108 @@ use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
+use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
-use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
 use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
 use compiler.core.parser_stmts.{parse_block, parse_match_stmt, parse_if_expr}
 use compiler.core.parser_expr.{parse_expr, parse_not, parse_unary}
+
+fn parse_raw_asm_normalize(payload: text) -> text:
+    var parts: [text] = []
+    for line in payload.split("\n"):
+        var trimmed = line.trim()
+        while trimmed.ends_with(";") or trimmed.ends_with(","):
+            trimmed = trimmed[0:trimmed.len() - 1].trim()
+        if trimmed.len() >= 2:
+            val first = trimmed[0:1]
+            val last = trimmed[trimmed.len() - 1:trimmed.len()]
+            if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+                trimmed = trimmed[1:trimmed.len() - 1]
+        if trimmed != "":
+            parts.push(trimmed)
+    parts.join("\n")
+
+fn parse_raw_asm_advance_lexer(start_pos: i64, end_pos: i64):
+    var line = lex_line_get()
+    var col = lex_col_get()
+    var pos = start_pos
+    while pos < end_pos:
+        val ch = lex_source_char_at(pos)
+        if ch == "\n":
+            line = line + 1
+            col = 1
+        else:
+            col = col + 1
+        pos = pos + 1
+    lex_pos_set(end_pos)
+    lex_line_set(line)
+    lex_col_set(col)
+
+fn parse_raw_asm_braced_payload() -> text:
+    val content_start = lex_pos_get()
+    val source_len = lex_source_len()
+    var pos = content_start
+    var depth = 1
+    var in_string = false
+    var string_quote = ""
+    var escaped = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == string_quote:
+                in_string = false
+        else:
+            if ch == "\"" or ch == "'":
+                in_string = true
+                string_quote = ch
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    val payload = lex_source_slice(content_start, pos)
+                    parse_raw_asm_advance_lexer(content_start, pos + 1)
+                    parser_advance()
+                    return parse_raw_asm_normalize(payload)
+        pos = pos + 1
+    parser_error("unterminated asm { ... } block")
+    val payload = lex_source_slice(content_start, source_len)
+    parse_raw_asm_advance_lexer(content_start, source_len)
+    parser_advance()
+    parse_raw_asm_normalize(payload)
+
+fn parse_legacy_parenthesized_asm() -> text:
+    parser_warn("legacy inline asm syntax; use asm { ... }")
+    parser_expect(TOK_LPAREN)
+    var depth = 1
+    var asm_lines: [text] = []
+    for ai in 0..100000:
+        if depth <= 0:
+            break
+        if par_kind_get() == TOK_EOF:
+            break
+        if par_kind_get() == TOK_LPAREN:
+            depth = depth + 1
+            parser_advance()
+            continue
+        if par_kind_get() == TOK_RPAREN:
+            depth = depth - 1
+            parser_advance()
+            continue
+        if par_kind_get() == TOK_STRING_LIT:
+            asm_lines.push(par_text_get())
+            parser_advance()
+            continue
+        parser_advance()
+    asm_lines.join("\n")
 
 fn parse_primary_expr() -> i64:
     # @annotation(...) -- compile-time introspection built-ins
@@ -127,12 +222,17 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == TOK_IDENT and par_text_get() == "volatile":
             parser_advance()
 
+        if par_kind_get() == TOK_LPAREN:
+            return expr_asm(parse_legacy_parenthesized_asm(), 0)
+
         if par_kind_get() == TOK_STRING_LIT:
+            parser_warn("legacy inline asm syntax; use asm { ... }")
             val inline_asm = par_text_get()
             parser_advance()
             return expr_asm(inline_asm, 0)
 
         if par_kind_get() == TOK_COLON:
+            parser_warn("legacy inline asm syntax; use asm { ... }")
             parser_advance()
             parser_skip_newlines()
             if par_kind_get() != TOK_INDENT:
@@ -162,52 +262,8 @@ fn parse_primary_expr() -> i64:
             return expr_asm(asm_lines.join("\n"), 0)
 
         if par_kind_get() == TOK_LBRACE:
-            parser_advance()
-            var asm_parts: [text] = []
-            var asm_line = ""
-            var brace_depth = 1
-            for ai in 0..100000:
-                if par_kind_get() == TOK_RBRACE:
-                    brace_depth = brace_depth - 1
-                    if brace_depth > 0:
-                        if asm_line != "" and not asm_line.ends_with(" "):
-                            asm_line = asm_line + " "
-                        asm_line = asm_line + "}"
-                        parser_advance()
-                        continue
-                    if asm_line.trim() != "":
-                        asm_parts.push(asm_line.trim())
-                    parser_advance()
-                    break
-                if par_kind_get() == TOK_EOF:
-                    parser_error("unterminated asm { ... } block")
-                    break
-                if par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON:
-                    if asm_line.trim() != "":
-                        asm_parts.push(asm_line.trim())
-                        asm_line = ""
-                    parser_advance()
-                    continue
-                if par_kind_get() == TOK_STRING_LIT:
-                    if asm_line.trim() != "":
-                        asm_parts.push(asm_line.trim())
-                        asm_line = ""
-                    asm_parts.push(par_text_get())
-                    parser_advance()
-                    continue
-                if par_kind_get() == TOK_COMMA:
-                    asm_line = asm_line + ","
-                    parser_advance()
-                    continue
-                if par_kind_get() == TOK_LBRACE:
-                    brace_depth = brace_depth + 1
-                val token_text = par_text_get()
-                if token_text != "":
-                    if asm_line != "" and not asm_line.ends_with(" ") and not asm_line.ends_with(","):
-                        asm_line = asm_line + " "
-                    asm_line = asm_line + token_text
-                parser_advance()
-            return expr_asm(asm_parts.join("\n"), 0)
+            val raw_asm = parse_raw_asm_braced_payload()
+            return expr_asm(raw_asm, 0)
 
         parser_error("expected string literal, ':' block, or '{...}' after 'asm'")
         return expr_asm("", 0)

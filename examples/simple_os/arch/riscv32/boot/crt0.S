@@ -39,7 +39,12 @@ _start:
     /* Call Simple entry point */
     call    spl_start
 
-    /* Halt: infinite WFI loop */
+    /* QEMU virt finisher success exit when spl_start returns */
+    li      t0, 0x100000
+    li      t1, 0x5555
+    sw      t1, 0(t0)
+
+    /* Fallback halt if the finisher is unavailable */
 .Lhalt:
     wfi
     j       .Lhalt

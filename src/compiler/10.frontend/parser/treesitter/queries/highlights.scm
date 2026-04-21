@@ -51,6 +51,12 @@
   "priv"       ; aspirational (not a keyword, use pub for visibility)
 ] @keyword.module
 
+;; Low-level / Embedded Assembly
+[
+  "asm"        ; tier: seed
+  "volatile"  ; asm modifier
+] @keyword.asm
+
 ;; ============================================================================
 ;; Keywords - Control Flow
 ;; ============================================================================

@@ -143,6 +143,31 @@ pub fn rt_host_wm_server_start(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(dir.to_string_lossy().to_string()))
 }
 
+pub fn rt_host_wm_server_cleanup(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_host_wm_server_cleanup requires dir"));
+    }
+    let dir = PathBuf::from(get_string(args, 0, "rt_host_wm_server_cleanup")?);
+    let temp_dir = std::env::temp_dir();
+    let allowed = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("simple-host-wm-"))
+        .unwrap_or(false)
+        && dir.parent().map(|p| p == temp_dir.as_path()).unwrap_or(false);
+    if !allowed {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(fs::remove_dir_all(dir).is_ok()))
+}
+
+pub fn serial_println(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Str(msg)) = args.first() {
+        eprintln!("{msg}");
+    }
+    Ok(Value::Nil)
+}
+
 pub fn rt_host_wm_server_poll(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("rt_host_wm_server_poll requires dir and max"));
