@@ -19,7 +19,7 @@ use winit::platform::pump_events::EventLoopExtPumpEvents;
 use std::cell::RefCell;
 
 use crate::error::CompileError;
-use crate::interpreter_extern::common::error_utils::runtime_error;
+use super::super::common::error_utils::runtime_error;
 
 use super::{
     EventLoopHandle, RuntimeCommand, RuntimeEvent, ThreadState, UserEvent,

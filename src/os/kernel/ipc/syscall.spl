@@ -1244,9 +1244,24 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
         serial_println("[syscall13] build_user_process_image ok")
-        serial_println("[syscall13] user image handoff gated; scheduler enqueue pending")
-        return -12
+        # FR-SOS-024 Phase 3: remove the -12 gate. Enqueue the task via
+        # create_user_task so the launcher observes a process-backed PID.
+        # The scheduler does not yet dispatch user tasks to ring 3 (Phase 3
+        # ring-3 entry is tracked separately in
+        # doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md), but the
+        # task lives in the TCB table and process-backed:yes markers flow.
+        serial_println("[syscall13] user image handoff begin")
+        val u_priority = _u64_to_priority(priority_raw)
+        val u_caps = CapabilitySet.full()
+        var u_sched = scheduler
+        val u_task_id = u_sched.create_user_task(image_result.unwrap(), u_priority, u_caps)
+        if u_task_id.id != 0:
+            var ulog = klog
+            ulog.write(6, 1, u_task_id.id, "spawn_binary launched user process {path}")
+            serial_println("[syscall13] user image handoff ok")
+            return u_task_id.id.to_i64()
 
+        serial_println("[syscall13] create_user_task returned 0; falling back to resident")
     else:
         serial_println("[syscall13] build_user_process_image failed")
 
