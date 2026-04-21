@@ -23,6 +23,7 @@ use os.services.launcher.launcher.{
     launcher_get_process_icon, launcher_get_process_state,
     launcher_get_process_exit_code, launcher_get_process_window_count,
     launcher_get_process_is_headless, launcher_get_process_launch_seq,
+    launcher_get_last_launch_pid,
     launcher_process_uses_resident_manifest, launcher_process_is_process_backed,
     launcher_record_process, launcher_note_window_opened,
     launcher_note_window_closed, launcher_mark_exited,
@@ -120,6 +121,25 @@ describe "Launcher registry":
         expect(launcher_process_is_process_backed(404)).to_equal(false)
         expect(launcher_record_process(0x40000010, -1, "running", 0, 0, true)).to_equal(true)
         expect(launcher_process_is_process_backed(0x40000010)).to_equal(false)
+
+    it "clears stale resident fallback state on init":
+        launcher_init()
+        expect(launcher_record_process(0x40000000, 0, "resident-manifest", 0, 0, true)).to_equal(true)
+        expect(launcher_process_uses_resident_manifest(0x40000000)).to_equal(true)
+        launcher_init()
+        expect(launcher_get_last_launch_pid()).to_equal(0)
+        expect(launcher_process_uses_resident_manifest(0x40000000)).to_equal(false)
+
+    it "appends a new row when a kernel pid is reused after exit":
+        launcher_init()
+        launcher_register("Demo App", "/apps/demo", "D", 0x44, MOD_META)
+        expect(launcher_record_process(505, 5, "running", 0, 0, true)).to_equal(true)
+        launcher_mark_exited_with_code(505, 0)
+        expect(launcher_record_process(505, 5, "running", 0, 0, true)).to_equal(true)
+        expect(launcher_get_process_count()).to_equal(2)
+        expect(launcher_get_process_state(0)).to_equal("exited")
+        expect(launcher_get_process_state(1)).to_equal("running")
+        expect(launcher_get_process_launch_seq(1)).to_equal(2)
 
     it "marks exits and preserves exit codes":
         launcher_init()

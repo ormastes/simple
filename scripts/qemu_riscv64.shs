@@ -1,0 +1,129 @@
+#!/bin/sh
+# SimpleOS QEMU Runner — RISC-V 64 (OpenSBI S-mode virt machine)
+#
+# Usage:
+#   sh scripts/qemu_riscv64.shs              # boot and validate serial output
+#   sh scripts/qemu_riscv64.shs --skip-build # use prebuilt kernel
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KERNEL="$REPO_ROOT/build/os/simpleos_riscv64.elf"
+SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv64.log"
+BUILD_LOG="$REPO_ROOT/build/os/build_riscv64.log"
+SIMPLE_BIN="${SIMPLE_BINARY:-$REPO_ROOT/bin/simple}"
+ENTRY_FILE="${RISCV64_ENTRY:-examples/simple_os/arch/riscv64/smoke_entry.spl}"
+SOURCE_DIR="${RISCV64_SOURCE:-examples/simple_os/arch/riscv64}"
+TIMEOUT_SEC=30
+BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-180}"
+SKIP_BUILD=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --skip-build) SKIP_BUILD=1 ;;
+        *)            echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
+if ! command -v qemu-system-riscv64 >/dev/null 2>&1; then
+    echo "SKIP: qemu-system-riscv64 not found"
+    exit 0
+fi
+
+if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
+    echo "[build] Building SimpleOS riscv64 kernel (per-file timeout: ${BUILD_TIMEOUT_SEC}s)..."
+    mkdir -p "$REPO_ROOT/build/os"
+    SIMPLE_BOOT_MINIMAL=1 "$SIMPLE_BIN" native-build \
+        --backend llvm \
+        --timeout "$BUILD_TIMEOUT_SEC" \
+        --source "$SOURCE_DIR" \
+        --entry "$ENTRY_FILE" \
+        --entry-closure \
+        --target riscv64-unknown-none \
+        -o "$KERNEL" \
+        --linker-script examples/simple_os/arch/riscv64/linker.ld >"$BUILD_LOG" 2>&1
+    BUILD_RC=$?
+    if [ "$BUILD_RC" -ne 0 ]; then
+        echo "FAIL: Kernel build failed (exit $BUILD_RC)"
+        echo "[build] Log tail ($BUILD_LOG):"
+        tail -n 80 "$BUILD_LOG"
+        exit 1
+    fi
+fi
+
+if [ ! -f "$KERNEL" ]; then
+    echo "SKIP: Kernel not found at $KERNEL"
+    echo "  Build with: bin/simple native-build --source $SOURCE_DIR --entry $ENTRY_FILE --entry-closure \\"
+    echo "    --target riscv64-unknown-none -o $KERNEL \\"
+    echo "    --linker-script examples/simple_os/arch/riscv64/linker.ld"
+    exit 0
+fi
+
+echo "[boot] Booting SimpleOS riscv64 in QEMU (timeout: ${TIMEOUT_SEC}s)..."
+rm -f "$SERIAL_LOG"
+
+QEMU_ARGS="-machine virt -cpu rv64 -m 512M \
+    -bios default \
+    -kernel $KERNEL \
+    -serial file:$SERIAL_LOG \
+    -display none \
+    -no-reboot"
+
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-riscv64 $QEMU_ARGS 2>/dev/null
+    QEMU_EXIT=$?
+else
+    qemu-system-riscv64 $QEMU_ARGS 2>/dev/null &
+    QEMU_PID=$!
+    sleep "$TIMEOUT_SEC"
+    kill "$QEMU_PID" 2>/dev/null
+    wait "$QEMU_PID" 2>/dev/null
+    QEMU_EXIT=$?
+fi
+
+echo "[boot] QEMU exited with code: $QEMU_EXIT"
+
+if [ ! -f "$SERIAL_LOG" ]; then
+    echo "FAIL: No serial output captured"
+    exit 1
+fi
+
+echo "[boot] Serial output:"
+head -80 "$SERIAL_LOG"
+echo ""
+
+PASS=0
+FAIL=0
+
+check_marker() {
+    _name="$1"
+    _pattern="$2"
+    if grep -qiE "$_pattern" "$SERIAL_LOG"; then
+        echo "PASS: $_name"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $_name"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
+check_marker "UART / SBI console" "UART|SBI|serial"
+check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
+
+echo ""
+echo "=== Results: $PASS passed, $FAIL failed ==="
+
+if [ "$FAIL" -gt 0 ]; then
+    echo "TEST FAILED"
+    exit 1
+fi
+
+echo "TEST PASSED"
+exit 0

@@ -14,20 +14,24 @@ use crate::hir::types::*;
 impl Lowerer {
     fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
-            Some(HirType::Enum { name, variants, .. }) if name == "Result" => variants.iter().find_map(|(variant, payload)| {
-                if variant == "Ok" {
-                    payload.as_ref().and_then(|fields| fields.first()).copied()
-                } else {
-                    None
-                }
-            }),
-            Some(HirType::Enum { name, variants, .. }) if name == "Option" => variants.iter().find_map(|(variant, payload)| {
-                if variant == "Some" {
-                    payload.as_ref().and_then(|fields| fields.first()).copied()
-                } else {
-                    None
-                }
-            }),
+            Some(HirType::Enum { name, variants, .. }) if name == "Result" => {
+                variants.iter().find_map(|(variant, payload)| {
+                    if variant == "Ok" {
+                        payload.as_ref().and_then(|fields| fields.first()).copied()
+                    } else {
+                        None
+                    }
+                })
+            }
+            Some(HirType::Enum { name, variants, .. }) if name == "Option" => {
+                variants.iter().find_map(|(variant, payload)| {
+                    if variant == "Some" {
+                        payload.as_ref().and_then(|fields| fields.first()).copied()
+                    } else {
+                        None
+                    }
+                })
+            }
             Some(HirType::Pointer { inner, .. }) => self.result_like_payload_type(*inner),
             _ => None,
         }

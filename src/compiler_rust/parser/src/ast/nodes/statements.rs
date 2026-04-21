@@ -376,9 +376,9 @@ pub struct LeanBlock {
     pub code: String,
 }
 
-/// Inline assembly statement: `asm: "instruction"` or `asm: block`
+/// Inline assembly statement: `asm { "instruction" }`, `asm: "instruction"`, or `asm: block`
 /// Also supports target-conditional: `asm match: case [target]: instructions`
-/// Also supports volatile forms: `asm volatile: block` and `asm volatile(...)`
+/// Also supports volatile forms: `asm volatile { ... }`, `asm volatile: block`, and `asm volatile(...)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineAsmStmt {
     pub span: Span,

@@ -7,8 +7,19 @@ check(code.contains("out dx, al"))
 | Field | Value |
 |-------|-------|
 | Source | `test/feature/baremetal/inline_asm_integration_spec.spl` |
-| Updated | 2026-04-07 |
+| Updated | 2026-04-21 |
 | Generator | `simple sspec-docgen` (Rust) |
+
+## 2026-04-21 Syntax Update
+
+Raw embedded assembly examples use canonical `asm { ... }` or
+`asm volatile { ... }` blocks. Parenthesized `asm(...)` remains in legacy
+constraint examples only, because operand-bearing braced asm is not lowered yet.
+
+The new matrix coverage lives in
+`test/unit/compiler/native/inline_asm_matrix_spec.spl` and covers six targets
+(`x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`, `riscv64`) across three
+modes (`interpreter`, `loader`, `compiler`).
 
 ## Scenario Summary
 

@@ -76,12 +76,8 @@ fn test_valid_none_variant_contexts_are_not_python_warnings() {
     let dot_token = Token::new(TokenKind::Dot, Span::new(12, 13, 1, 13), ".".to_string());
     assert_eq!(detect_common_mistake(&none_token, &dot_token, None), None);
 
-    let double_colon_token =
-        Token::new(TokenKind::DoubleColon, Span::new(11, 13, 1, 12), "::".to_string());
-    assert_eq!(
-        detect_common_mistake(&none_token, &double_colon_token, None),
-        None
-    );
+    let double_colon_token = Token::new(TokenKind::DoubleColon, Span::new(11, 13, 1, 12), "::".to_string());
+    assert_eq!(detect_common_mistake(&none_token, &double_colon_token, None), None);
 
     let colon_token = Token::new(TokenKind::Colon, Span::new(9, 10, 1, 10), ":".to_string());
     assert_eq!(detect_common_mistake(&none_token, &colon_token, None), None);

@@ -11,7 +11,11 @@ use crate::mir::{
 #[test]
 fn codegen_closure_create_and_indirect_call() {
     // Need a callable function in the module for the closure
-    let mut func = MirFunction::new("identity".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut func = MirFunction::new(
+        "identity".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let param_vreg = func.new_vreg();
     func.params.push(MirLocal {
         name: "x".to_string(),
@@ -21,7 +25,11 @@ fn codegen_closure_create_and_indirect_call() {
     });
     func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(param_vreg));
 
-    let mut main = MirFunction::new("clos_test".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut main = MirFunction::new(
+        "clos_test".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let closure = main.new_vreg();
     let arg = main.new_vreg();
     let dest = main.new_vreg();
@@ -61,7 +69,11 @@ fn codegen_closure_create_and_indirect_call() {
 fn codegen_method_call_static() {
     // MethodCallStatic compiles as Call with receiver prepended
     // Need a target function
-    let mut target = MirFunction::new("Point::get_x".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut target = MirFunction::new(
+        "Point::get_x".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let self_vreg = target.new_vreg();
     target.params.push(MirLocal {
         name: "self".to_string(),
@@ -71,7 +83,11 @@ fn codegen_method_call_static() {
     });
     target.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(self_vreg));
 
-    let mut main = MirFunction::new("method_static".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut main = MirFunction::new(
+        "method_static".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let recv = main.new_vreg();
     let dest = main.new_vreg();
     let block = main.block_mut(BlockId(0)).unwrap();
@@ -452,7 +468,11 @@ fn codegen_par_for_each() {
 #[test]
 fn codegen_call() {
     // Call a function defined in the same module
-    let mut target = MirFunction::new("add_one".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut target = MirFunction::new(
+        "add_one".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let param = target.new_vreg();
     target.params.push(MirLocal {
         name: "x".to_string(),
@@ -472,7 +492,11 @@ fn codegen_call() {
     });
     block.terminator = Terminator::Return(Some(result));
 
-    let mut main = MirFunction::new("call_test".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut main = MirFunction::new(
+        "call_test".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let arg = main.new_vreg();
     let dest = main.new_vreg();
     let block = main.block_mut(BlockId(0)).unwrap();

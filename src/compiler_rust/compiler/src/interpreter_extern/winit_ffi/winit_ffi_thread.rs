@@ -24,9 +24,8 @@ use crate::error::CompileError;
 use super::super::common::error_utils::runtime_error;
 
 use super::{
-    EventLoopHandle, RuntimeCommand, RuntimeEvent, ThreadState, UserEvent,
-    WindowConfig, WindowRuntimeState, WindowState,
-    WINDOW_OWNERS, WINDOW_STATES, NEXT_EVENT_ID, EVENTS,
+    EventLoopHandle, RuntimeCommand, RuntimeEvent, ThreadState, UserEvent, WindowConfig, WindowRuntimeState,
+    WindowState, WINDOW_OWNERS, WINDOW_STATES, NEXT_EVENT_ID, EVENTS,
 };
 use super::winit_ffi_input::{keycode_to_simple, mouse_button_to_simple};
 

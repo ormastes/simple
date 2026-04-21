@@ -171,7 +171,11 @@ fn codegen_get_element_ptr() {
 
 #[test]
 fn codegen_global_load_store() {
-    let mut func = MirFunction::new("global_test".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut func = MirFunction::new(
+        "global_test".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let val = func.new_vreg();
     let loaded = func.new_vreg();
     let block = func.block_mut(BlockId(0)).unwrap();

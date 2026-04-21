@@ -255,8 +255,14 @@ fn codegen_struct_field_get_native_types() {
         let got_int = f.new_vreg();
         let got_float = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: int_val, value: 42 });
-        block.instructions.push(MirInst::ConstFloat { dest: float_val, value: 3.5 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: int_val,
+            value: 42,
+        });
+        block.instructions.push(MirInst::ConstFloat {
+            dest: float_val,
+            value: 3.5,
+        });
         block.instructions.push(MirInst::StructInit {
             dest: obj,
             type_id: TypeId::I64,

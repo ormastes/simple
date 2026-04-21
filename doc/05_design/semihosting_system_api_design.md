@@ -508,6 +508,10 @@ impl SemiHostReader:
 
 ## 6. Architecture-Specific Implementation
 
+> 2026-04-21 note: raw instruction-only asm should use `asm {}` or
+> `asm volatile {}`. The examples below still use legacy `asm(...)` where they
+> need operand constraints; operand-bearing braced asm is not lowered yet.
+
 ### 6.1 ARM Cortex-M Implementation
 
 ```simple

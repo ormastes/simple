@@ -14,10 +14,7 @@ impl Lowerer {
                 };
                 Some(Ok(self.module.types.register(HirType::Enum {
                     name: "Option".to_string(),
-                    variants: vec![
-                        ("Some".to_string(), Some(vec![inner])),
-                        ("None".to_string(), None),
-                    ],
+                    variants: vec![("Some".to_string(), Some(vec![inner])), ("None".to_string(), None)],
                     generic_params: vec!["T".to_string()],
                     is_generic_template: false,
                     type_bindings: std::collections::HashMap::from([("T".to_string(), inner)]),

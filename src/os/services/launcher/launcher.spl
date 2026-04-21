@@ -351,10 +351,6 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
         serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
         if pid_result < 0:
-            if pid_result == -38:
-                val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
-                if resident_pid >= 0:
-                    return resident_pid
             app_launch_state[slot] = "failed"
             app_exit_code[slot] = pid_result.to_i32()
             serial_println("[launcher] Failed to launch {name}: {pid_result}")
@@ -395,8 +391,14 @@ fn _app_index_by_pid(pid: u64) -> i64:
     -1
 
 fn _process_index_by_pid(pid: u64) -> i64:
+    # Scan up to MAX_PROCESSES rather than process_count: in the baremetal
+    # build `process_count` is a module global whose write from
+    # launcher_record_process does not always propagate to reads at this
+    # call site (cross-module staleness), which makes
+    # launcher_process_is_process_backed miss freshly-recorded entries
+    # even though process_pid[slot] was correctly set. O(64) is negligible.
     var i: u64 = 0
-    while i < process_count:
+    while i < MAX_PROCESSES:
         if process_pid[i] == pid:
             return i.to_i64()
         i = i + 1
@@ -431,6 +433,8 @@ fn _sync_app_slot(slot: u64, pid: u64, state: text, exit_code: i32, window_count
 fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code: i32, window_count: u64, is_headless: bool) -> bool:
     """Record or append a process snapshot for the launcher registry."""
     var existing = _process_index_by_pid(pid)
+    if existing >= 0 and not _is_running_state(process_state[existing.to_u64()]) and _is_running_state(state):
+        existing = -1
     var name = ""
     var path = ""
     var icon = ""
@@ -596,6 +600,8 @@ fn launcher_init():
         p = p + 1
     process_count = 0
     process_sequence = 1
+    synthetic_pid_next = 0x40000000
+    launcher_last_launch_pid = 0
 
     # Register default apps
     launcher_register("Hello World", _preferred_app_exec_path("/sys/apps/hello_world"), "H", 0x48, MOD_META)    # Meta+H

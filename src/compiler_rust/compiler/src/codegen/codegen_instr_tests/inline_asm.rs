@@ -8,11 +8,7 @@ fn lower_body(source: &str) -> Vec<HirStmt> {
     let mut lowerer = Lowerer::new();
     lowerer.set_lenient_types(true);
     let hir = lowerer.lower_module(&ast).expect("lower");
-    hir.functions
-        .into_iter()
-        .find(|f| f.name == "main")
-        .expect("main")
-        .body
+    hir.functions.into_iter().find(|f| f.name == "main").expect("main").body
 }
 
 #[test]
@@ -65,7 +61,7 @@ fn hir_inline_asm_volatile_flag_is_preserved() {
     let body = lower_body(
         r#"
 fn main() -> i64:
-    asm volatile: "sti"
+    asm volatile { "sti" }
     return 0
 "#,
     );

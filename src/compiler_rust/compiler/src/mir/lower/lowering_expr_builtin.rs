@@ -171,13 +171,7 @@ impl<'a> MirLowerer<'a> {
                 let arg_reg = self.lower_expr(arg)?;
                 let needs_int_boxing = matches!(
                     arg.ty,
-                    TypeId::I16
-                        | TypeId::I32
-                        | TypeId::I64
-                        | TypeId::U8
-                        | TypeId::U16
-                        | TypeId::U32
-                        | TypeId::U64
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
                 );
                 let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
                 let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;

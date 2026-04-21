@@ -48,8 +48,8 @@ impl NativeBinaryBuilder {
     }
 
     pub fn build(self) -> LinkerResult<NativeBinaryResult> {
-        let temp_dir = tempfile::tempdir()
-            .map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
         let (temp_path, _temp_guard) = if std::env::var("SIMPLE_KEEP_TEMP").is_ok() {
             let path = temp_dir.keep();
             eprintln!("SIMPLE_KEEP_TEMP=1: keeping temp objects in {}", path.display());
@@ -102,7 +102,14 @@ impl NativeBinaryBuilder {
         } else {
             Path::new(&self.options.output)
         };
-        self.run_link_pass(first_out, bootstrap_mode, &bootstrap_stubs, require_crypto, &obj_path, &crt_files)?;
+        self.run_link_pass(
+            first_out,
+            bootstrap_mode,
+            &bootstrap_stubs,
+            require_crypto,
+            &obj_path,
+            &crt_files,
+        )?;
 
         let final_result = if bootstrap_mode {
             self.build_pass2_stubs(&temp_path, first_out, ret_insn, &mut bootstrap_stubs)?;

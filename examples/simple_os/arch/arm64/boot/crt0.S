@@ -13,6 +13,12 @@
     .type _start, @function
 
 _start:
+    /* Early UART marker before stack/BSS setup. This keeps ARM64 QEMU smoke
+     * failures diagnosable even if the C runtime handoff faults.
+     */
+    adr     x0, .Lcrt0_banner
+    bl      .Lserial_puts_early
+
     /* Check current EL — if EL2, drop to EL1 */
     mrs     x0, CurrentEL
     lsr     x0, x0, #2
@@ -46,10 +52,14 @@ _start:
     bic     x0, x0, #(1 << 12) /* Clear I bit (instruction cache off) */
     msr     sctlr_el1, x0
     isb
+    adr     x0, .Lcrt0_sctlr
+    bl      .Lserial_puts_early
 
     /* Set up stack pointer from linker symbol */
     adrp    x0, _stack_top
     add     sp, x0, :lo12:_stack_top
+    adr     x0, .Lcrt0_stack
+    bl      .Lserial_puts_early
 
     /* Zero BSS section */
     adrp    x0, _sbss
@@ -62,12 +72,16 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
+    adr     x0, .Lcrt0_bss
+    bl      .Lserial_puts_early
 
     /* Install exception vector table */
     adrp    x0, _vectors
     add     x0, x0, :lo12:_vectors
     msr     vbar_el1, x0
     isb
+    adr     x0, .Lcrt0_vectors
+    bl      .Lserial_puts_early
 
     /* Call C _start (PL011 init + spl_start) */
     bl      _c_start
@@ -78,6 +92,27 @@ _start:
     b       .Lhalt
 
     .size _start, . - _start
+
+.Lserial_puts_early:
+    ldr     x1, =0x09000000
+.Lserial_puts_early_loop:
+    ldrb    w2, [x0], #1
+    cbz     w2, .Lserial_puts_early_done
+    str     w2, [x1]
+    b       .Lserial_puts_early_loop
+.Lserial_puts_early_done:
+    ret
+
+.Lcrt0_banner:
+    .asciz  "[BOOT] ARM64 crt0 entered\r\n"
+.Lcrt0_sctlr:
+    .asciz  "[BOOT] ARM64 sctlr ok\r\n"
+.Lcrt0_stack:
+    .asciz  "[BOOT] ARM64 stack ok\r\n"
+.Lcrt0_bss:
+    .asciz  "[BOOT] ARM64 bss ok\r\n"
+.Lcrt0_vectors:
+    .asciz  "[BOOT] ARM64 vectors ok\r\n"
 
 /* ===================================================================
  * Exception Vector Table — 16 entries, 128 bytes each, 2KB aligned

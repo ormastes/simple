@@ -12,6 +12,7 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_service.{VfsService}
 use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
 use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
@@ -55,6 +56,19 @@ extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
 val KNOWN_APP_ELF_BUFFER_MAX: u64 = 32768
 val FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304
 
+@cfg(arm64)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = true
+@cfg(arm32)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = true
+@cfg(x86_64)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = false
+@cfg(x86)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = false
+@cfg(riscv64)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = false
+@cfg(riscv32)
+val VFS_BOOT_USE_VIRTIO_FAT32: bool = false
+
 class CNvmeBlockAdapter:
     """Wraps C NVMe bridge as BlockDevice for FAT32."""
     sector_buf_addr: u64    # DMA buffer address for sector transfers
@@ -67,20 +81,24 @@ impl CNvmeBlockAdapter:
             ready: false
         )
 
-    me init() -> Result<bool, text>:
-        """Initialize: call the C NVMe bridge and allocate a sector buffer."""
-        # Initialize the C NVMe controller
+    me init_c_bridge() -> bool:
+        """Initialize the baremetal C NVMe/FAT32 bridge with primitive status."""
         val init_result = simpleos_nvme_init()
         if init_result < 0:
-            return Result.Err("CNvmeBlockAdapter: C NVMe init failed")
+            return false
 
-        # Allocate a DMA buffer for sector transfers
-        val buf = syscall(SYS_ALLOC_DMA, DMA_PAGE_SIZE, 0, 0, 0, 0)
-        if buf < 0:
-            return Result.Err("CNvmeBlockAdapter: DMA buffer alloc failed")
-        self.sector_buf_addr = buf.to_u64()
+        val buf = simpleos_fat32_path_read_buffer_addr()
+        if buf == 0:
+            return false
+        self.sector_buf_addr = buf
         self.ready = true
         serial_println("[c-nvme-adapter] Ready, sector buffer at 0x{self.sector_buf_addr}")
+        true
+
+    me init() -> Result<bool, text>:
+        """Initialize: call the C NVMe bridge and allocate a sector buffer."""
+        if not self.init_c_bridge():
+            return Result.Err("CNvmeBlockAdapter: C NVMe init failed")
         Result.Ok(true)
 
 impl BlockDevice for CNvmeBlockAdapter:
@@ -243,14 +261,14 @@ fn vfs_boot_init() -> bool:
     val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
     if nvme_idx < 0:
         serial_println("[vfs-init] No NVMe device found -- VFS unavailable")
-        return false
+        return _vfs_boot_init_virtio_fat32()
     serial_println("[vfs-init] Found NVMe device at index {nvme_idx}")
 
     serial_println("[vfs-init] Initializing C-backed NVMe block adapter...")
-    val adapter_init = g_c_adapter.init()
-    if adapter_init.is_err():
-        serial_println("[vfs-init] C NVMe adapter init failed: {adapter_init.unwrap_err()}")
-        return false
+    val adapter_init = g_c_adapter.init_c_bridge()
+    if not adapter_init:
+        serial_println("[vfs-init] C NVMe adapter init failed")
+        return _vfs_boot_init_virtio_fat32()
     serial_println("[vfs-init] C NVMe controller initialized!")
     serial_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
     g_vfs_initialized = true
@@ -280,6 +298,37 @@ fn vfs_boot_init() -> bool:
 
     serial_println("[vfs-init] VFS ready (C-backed)")
     return true
+
+fn _vfs_boot_init_virtio_fat32() -> bool:
+    """Initialize VFS from QEMU virtio-blk FAT32 media on ARM virt machines."""
+    serial_println("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
+    val dev_opt = VirtioBlkDriver.probe()
+    if dev_opt == nil:
+        serial_println("[vfs-init] No VirtIO-BLK device found -- VFS unavailable")
+        return false
+    var dev = dev_opt.unwrap()
+    val dev_init = dev.init()
+    if dev_init.is_err():
+        serial_println("[vfs-init] VirtIO-BLK init failed: {dev_init.unwrap_err()}")
+        return false
+
+    var root = Fat32Core.new(dev)
+    val mount_result = root.mount("", "")
+    if mount_result.is_err():
+        serial_println("[vfs-init] VirtIO FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+
+    g_root_fat32 = Some(root)
+    g_vfs_initialized = true
+    serial_println("[vfs-init] VirtIO FAT32 mounted at /")
+
+    val probe = g_vfs_read_file_bytes("/SYS/APPS/HELLOSMF.SMF")
+    if probe.len() <= 4:
+        serial_println("[vfs-init] executable load probe failed path=/SYS/APPS/HELLOSMF.SMF")
+        return false
+    serial_println("[vfs-init] executable load probe ok path=/sys/apps/hello_world.smf bytes={probe.len()}")
+    serial_println("[vfs-init] VFS ready (VirtIO-BLK FAT32)")
+    true
 
 # ============================================================================
 # VFS IPC Service

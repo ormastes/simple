@@ -168,33 +168,25 @@ fn enum_payload_as_call() {
 #[test]
 fn option_some_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Some(42)\n").unwrap();
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::OptionSome { .. })
-    }));
+    assert!(has_inst(&mir, |i| { matches!(i, MirInst::OptionSome { .. }) }));
 }
 
 #[test]
 fn result_ok_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Ok(42)\n").unwrap();
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::ResultOk { .. })
-    }));
+    assert!(has_inst(&mir, |i| { matches!(i, MirInst::ResultOk { .. }) }));
 }
 
 #[test]
 fn result_err_as_call() {
     let mir = compile_to_mir("fn test():\n    val x = Err(-1)\n").unwrap();
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::ResultErr { .. })
-    }));
+    assert!(has_inst(&mir, |i| { matches!(i, MirInst::ResultErr { .. }) }));
 }
 
 #[test]
 fn result_ok_as_qualified_constructor() {
     let mir = compile_to_mir("fn test():\n    val x = Result.Ok(42)\n").unwrap();
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::ResultOk { .. })
-    }));
+    assert!(has_inst(&mir, |i| { matches!(i, MirInst::ResultOk { .. }) }));
 }
 
 #[test]

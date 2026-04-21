@@ -630,7 +630,6 @@ impl LintChecker {
     }
 }
 
-
 impl Default for LintChecker {
     fn default() -> Self {
         Self::new()

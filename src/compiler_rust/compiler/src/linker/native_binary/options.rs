@@ -307,10 +307,7 @@ impl NativeBinaryOptions {
         }
 
         if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let workspace_root = PathBuf::from(&manifest_dir)
-                .ancestors()
-                .nth(1)
-                .map(|p| p.to_path_buf());
+            let workspace_root = PathBuf::from(&manifest_dir).ancestors().nth(1).map(|p| p.to_path_buf());
 
             if let Some(root) = workspace_root {
                 for profile in ["release", "debug", "bootstrap"] {

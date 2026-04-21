@@ -190,11 +190,7 @@ impl<'a> MirLowerer<'a> {
         Ok(dict_reg)
     }
 
-    pub(super) fn lower_array_repeat_expr(
-        &mut self,
-        value: &HirExpr,
-        count: &HirExpr,
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_array_repeat_expr(&mut self, value: &HirExpr, count: &HirExpr) -> MirLowerResult<VReg> {
         // Array repeat: [value; count] - creates array with count copies of value
         // Lower to runtime call: rt_array_repeat(value, count)
         let value_reg = self.lower_expr(value)?;

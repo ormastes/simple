@@ -286,10 +286,7 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
                 // preserves legacy unsigned-widen default for runtime/FFI
                 // boundaries).
                 if actual_ty.bits() < expected_ty.bits() {
-                    let signed = arg_signed
-                        .and_then(|s| s.get(i).copied())
-                        .flatten()
-                        .unwrap_or(false);
+                    let signed = arg_signed.and_then(|s| s.get(i).copied()).flatten().unwrap_or(false);
                     if signed {
                         adapted.push(builder.ins().sextend(expected_ty, val));
                     } else {

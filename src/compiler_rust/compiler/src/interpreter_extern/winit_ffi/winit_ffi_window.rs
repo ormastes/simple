@@ -4,9 +4,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::{
-    get_i64, get_string, get_pixels, int_value, bool_value, tuple_value,
-    unsupported_window_mutation, parse_window_config, set_last_error,
-    WindowConfig, NEXT_EVENT_LOOP_ID, EVENT_LOOPS, WINDOW_STATES, WINDOW_OWNERS,
+    get_i64, get_string, get_pixels, int_value, bool_value, tuple_value, unsupported_window_mutation,
+    parse_window_config, set_last_error, WindowConfig, NEXT_EVENT_LOOP_ID, EVENT_LOOPS, WINDOW_STATES, WINDOW_OWNERS,
     RuntimeCommand,
 };
 use super::winit_ffi_thread::{start_event_loop_thread, event_to_handle};
@@ -234,7 +233,9 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                         set_last_error(err);
                         Ok(bool_value(false))
                     }
-                    Err(err) => Err(super::runtime_error(format!("failed to receive present response: {err}"))),
+                    Err(err) => Err(super::runtime_error(format!(
+                        "failed to receive present response: {err}"
+                    ))),
                 };
             }
             set_last_error(format!("invalid window handle: {window_id}"));

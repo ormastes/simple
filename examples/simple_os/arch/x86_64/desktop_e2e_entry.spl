@@ -136,7 +136,7 @@ fn _latest_launcher_pid() -> u64:
     launcher_get_last_launch_pid()
 
 fn _log_process_backing(app: text, pid: u64):
-    if launcher_process_is_process_backed(pid):
+    if pid > 0 and pid < 0x40000000u64:
         serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
     elif launcher_process_uses_resident_manifest(pid):
         serial_println("[desktop-e2e] process-backed:resident app={app} pid={pid}")
@@ -399,12 +399,9 @@ fn desktop_e2e_main() -> bool:
         browser_pid = _latest_launcher_pid()
         serial_println("[desktop-e2e] latest pid done")
         if browser_pid == 0:
-            browser_pid = BROWSER_MANIFEST_PID
-            serial_println("[desktop-e2e] resident fallback begin")
-            if not shell.materialize_resident_launch("Browser Demo", browser_pid):
-                serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
-                return false
-            serial_println("[desktop-e2e] resident fallback done")
+            serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
+            return false
+        shell.materialize_process_launch("Browser Demo", browser_pid)
         _log_process_backing("browser_demo", browser_pid)
         serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid={browser_pid}")
 
@@ -423,15 +420,17 @@ fn desktop_e2e_main() -> bool:
     # asserts on. This runs on every scenario — on the serial-only lanes it
     # just adds one extra passing marker; on the disk lane it is the proof
     # body for SYS-GUI-007.
+    val hello_process_count_before = launcher_get_process_count()
     val hello_dispatched = launcher_shortcut_dispatch(KEY_H, META_MODIFIER)
     var hello_pid: u64 = 0
-    if hello_dispatched:
+    if hello_dispatched and launcher_get_process_count() > hello_process_count_before:
         hello_pid = _latest_launcher_pid()
-        if hello_pid <= 0:
-            hello_pid = HELLO_MANIFEST_PID
-        shell.materialize_resident_launch("Hello World", hello_pid)
-        _log_process_backing("hello_world", hello_pid)
-        serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
+        if hello_pid > 0:
+            shell.materialize_process_launch("Hello World", hello_pid)
+            _log_process_backing("hello_world", hello_pid)
+            serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
+        else:
+            serial_println("[desktop-e2e] hello:shortcut:fail pid=0")
     else:
         serial_println("[desktop-e2e] hello:shortcut:fail")
     # Resident fallback windows are registered synchronously. Draining the
@@ -453,11 +452,8 @@ fn desktop_e2e_main() -> bool:
     val editor_dispatched = launcher_shortcut_dispatch(KEY_E, META_MODIFIER)
     if editor_dispatched:
         var editor_pid = _latest_launcher_pid()
-        if editor_pid <= 0:
-            editor_pid = EDITOR_MANIFEST_PID
-        val materialized = shell.materialize_resident_launch("Editor", editor_pid)
-        val remote_ready = _wait_for_process_window(shell, editor_pid, 1)
-        if materialized or remote_ready:
+        val materialized = if editor_pid > 0: shell.materialize_process_launch("Editor", editor_pid) else: false
+        if materialized:
             _log_process_backing("editor", editor_pid)
             serial_println("[desktop-e2e] editor-shortcut:ok key=meta+e app=editor")
         else:

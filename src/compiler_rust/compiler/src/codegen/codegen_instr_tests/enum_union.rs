@@ -195,7 +195,11 @@ fn codegen_result_err() {
 fn codegen_try_unwrap() {
     // TryUnwrap creates internal Cranelift blocks for branching, which requires
     // the full block-sealing infrastructure. Verify MIR construction is valid.
-    let mut func = MirFunction::new("try_unwrap".to_string(), TypeId::I64, simple_parser::ast::Visibility::Public);
+    let mut func = MirFunction::new(
+        "try_unwrap".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
     let val = func.new_vreg();
     let opt = func.new_vreg();
     let dest = func.new_vreg();

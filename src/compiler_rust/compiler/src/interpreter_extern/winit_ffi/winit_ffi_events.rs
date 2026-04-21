@@ -2,10 +2,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::{
-    get_i64, int_value, tuple_value, bool_value,
-    EVENTS, RuntimeEvent,
-    EVENT_WINDOW_RESIZED, EVENT_WINDOW_MOVED, EVENT_WINDOW_CLOSE_REQUESTED,
-    EVENT_WINDOW_FOCUSED, EVENT_WINDOW_UNFOCUSED, EVENT_WINDOW_SCALE_FACTOR_CHANGED,
+    get_i64, int_value, tuple_value, bool_value, EVENTS, RuntimeEvent, EVENT_WINDOW_RESIZED, EVENT_WINDOW_MOVED,
+    EVENT_WINDOW_CLOSE_REQUESTED, EVENT_WINDOW_FOCUSED, EVENT_WINDOW_UNFOCUSED, EVENT_WINDOW_SCALE_FACTOR_CHANGED,
     EVENT_KEYBOARD_INPUT, EVENT_MOUSE_BUTTON, EVENT_MOUSE_MOVED, EVENT_MOUSE_WHEEL,
 };
 use super::winit_ffi_thread::event_window_id;

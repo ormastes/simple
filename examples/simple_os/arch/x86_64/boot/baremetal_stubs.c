@@ -4386,6 +4386,10 @@ extern int64_t spl_x86_dispatch_installed_syscall_abi(
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 ) __attribute__((weak));
+extern int64_t os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+    uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+    uint64_t arg3, uint64_t arg4, uint64_t arg5
+);
 
 static int simpleos_path_eq_raw(const char *p, uint64_t len, const char *expected)
 {
@@ -4439,11 +4443,16 @@ static uint64_t simpleos_decode_path_data_ptr(uint64_t ptr, uint64_t len)
 static uint64_t simpleos_known_app_id_from_path(uint64_t ptr, uint64_t len)
 {
     if (simpleos_path_eq(ptr, len, "/sys/apps/browser_demo")) return 1;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/browser_demo.smf")) return 1;
     if (simpleos_path_eq(ptr, len, "/sys/apps/file_manager")) return 2;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/file_manager.smf")) return 2;
     if (simpleos_path_eq(ptr, len, "/sys/apps/hello_world")) return 3;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/hello_world.smf")) return 3;
     if (simpleos_path_eq(ptr, len, "/sys/apps/terminal")) return 4;
     if (simpleos_path_eq(ptr, len, "/sys/apps/shell")) return 4;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/shell.smf")) return 4;
     if (simpleos_path_eq(ptr, len, "/sys/apps/editor")) return 5;
+    if (simpleos_path_eq(ptr, len, "/sys/apps/editor.smf")) return 5;
     return 0;
 }
 
@@ -4462,18 +4471,9 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
             uint64_t path_ptr = app_id ? app_id : simpleos_decode_path_data_ptr(a0, a1);
             uint64_t path_len = app_id ? 0 : a1;
-            if (spl_x86_dispatch_installed_syscall_abi) {
-                int64_t rc = spl_x86_dispatch_installed_syscall_abi(
-                    id, path_ptr, path_len, a2, a3, a4, 0
-                );
-                if (rc != -38)
-                    return rc;
-            }
-            if (app_id != 0 && simpleos_fat32_read_known_app(app_id) == 0) {
-                serial_puts("[c-syscall13] fat32 app image validated; resident pid allocated\n");
-                return (int64_t)(4100 + app_id);
-            }
-            return -38; /* ENOSYS */
+            return os__kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+                id, path_ptr, path_len, a2, a3, a4, 0
+            );
         }
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
@@ -4544,6 +4544,12 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         default:
             return -38; /* ENOSYS */
     }
+}
+
+int64_t os__userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                                           uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
 /* ===================================================================

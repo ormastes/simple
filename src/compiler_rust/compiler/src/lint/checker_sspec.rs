@@ -781,5 +781,4 @@ impl LintChecker {
             i = j;
         }
     }
-
 }

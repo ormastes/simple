@@ -239,10 +239,7 @@ impl CoverageCollector {
         if total_lines == 0 {
             return 100.0;
         }
-        let hit = self
-            .lines_for_file(file)
-            .map(|lines| lines.len() as f64)
-            .unwrap_or(0.0);
+        let hit = self.lines_for_file(file).map(|lines| lines.len() as f64).unwrap_or(0.0);
         (hit / total_lines as f64) * 100.0
     }
 
@@ -309,9 +306,7 @@ pub fn is_coverage_enabled() -> bool {
 pub fn save_global_coverage() -> Result<(), String> {
     let mut sdn = String::new();
     if let Some(cov) = get_global_coverage() {
-        let guard = cov
-            .lock()
-            .map_err(|_| "coverage collector lock poisoned".to_string())?;
+        let guard = cov.lock().map_err(|_| "coverage collector lock poisoned".to_string())?;
         sdn.push_str(&guard.to_sdn());
     }
 
@@ -359,8 +354,7 @@ fn coverage_output_path_buf() -> PathBuf {
 
 fn write_coverage_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
     }
     std::fs::write(path, content).map_err(|e| format!("failed to write {}: {}", path.display(), e))
 }
@@ -371,9 +365,7 @@ fn dump_runtime_coverage_sdn() -> String {
         if ptr.is_null() {
             return String::new();
         }
-        let sdn = std::ffi::CStr::from_ptr(ptr)
-            .to_string_lossy()
-            .into_owned();
+        let sdn = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
         simple_runtime::rt_coverage_free_sdn(ptr);
         sdn
     }

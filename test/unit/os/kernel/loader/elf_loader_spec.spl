@@ -1,5 +1,5 @@
 use std.spec
-use os.kernel.loader.elf_loader.{load_riscv_executable, ElfClass}
+use os.kernel.loader.elf_loader.{load_riscv_executable, load_user_executable, ElfClass}
 use os.kernel.arch.arch_context.{Architecture}
 
 fn push_u16_le(buf: [u8], value: i64) -> [u8]:
@@ -68,6 +68,12 @@ fn make_x86_64_exec() -> [u8]:
     bytes[19] = 0.to_u8()
     bytes
 
+fn make_arm64_exec() -> [u8]:
+    var bytes = make_rv64_exec()
+    bytes[18] = 183.to_u8()
+    bytes[19] = 0.to_u8()
+    bytes
+
 fn make_rv32_exec() -> [u8]:
     var bytes: [u8] = []
     bytes.push(0x7F.to_u8())
@@ -108,6 +114,12 @@ fn make_rv32_exec() -> [u8]:
     bytes.push(0x00.to_u8())
     bytes.push(0x00.to_u8())
     bytes.push(0x00.to_u8())
+    bytes
+
+fn make_arm32_exec() -> [u8]:
+    var bytes = make_rv32_exec()
+    bytes[18] = 40.to_u8()
+    bytes[19] = 0.to_u8()
     bytes
 
 describe "ELF loader":
@@ -153,3 +165,23 @@ describe "ELF loader":
         expect(loaded.class_).to_equal(ElfClass.Elf64)
         expect(loaded.entry).to_equal(0x400000)
         expect(loaded.segments.len()).to_equal(1)
+
+    it "parses a minimal ARM64 executable load plan":
+        val image = load_user_executable(make_arm64_exec(), Architecture.Arm64)
+        expect(image.is_ok()).to_equal(true)
+        val loaded = image.unwrap()
+        expect(loaded.class_).to_equal(ElfClass.Elf64)
+        expect(loaded.entry).to_equal(0x400000)
+        expect(loaded.segments.len()).to_equal(1)
+
+    it "parses a minimal ARM32 executable load plan":
+        val image = load_user_executable(make_arm32_exec(), Architecture.Arm32)
+        expect(image.is_ok()).to_equal(true)
+        val loaded = image.unwrap()
+        expect(loaded.class_).to_equal(ElfClass.Elf32)
+        expect(loaded.entry).to_equal(0x80000000)
+        expect(loaded.segments.len()).to_equal(1)
+
+    it "rejects ARM machine mismatches":
+        expect(load_user_executable(make_arm64_exec(), Architecture.Arm32).is_err()).to_equal(true)
+        expect(load_user_executable(make_arm32_exec(), Architecture.Arm64).is_err()).to_equal(true)

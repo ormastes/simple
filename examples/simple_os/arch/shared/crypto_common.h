@@ -1246,6 +1246,39 @@ static void sc_reduce(uint8_t out[32], const uint8_t in[64])
 /* sc_muladd: out = (a * b + c) mod L */
 static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32], const uint8_t c[32])
 {
+#ifndef __SIZEOF_INT128__
+    uint16_t al[16], bl[16], cl[16];
+    for (int i = 0; i < 16; i++) {
+        al[i] = (uint16_t)a[i * 2] | ((uint16_t)a[i * 2 + 1] << 8);
+        bl[i] = (uint16_t)b[i * 2] | ((uint16_t)b[i * 2 + 1] << 8);
+        cl[i] = (uint16_t)c[i * 2] | ((uint16_t)c[i * 2 + 1] << 8);
+    }
+
+    uint64_t accum[32];
+    for (int i = 0; i < 32; i++) accum[i] = 0;
+    for (int i = 0; i < 16; i++) {
+        accum[i] += cl[i];
+        for (int j = 0; j < 16; j++) {
+            accum[i + j] += (uint64_t)al[i] * (uint64_t)bl[j];
+        }
+    }
+    for (int i = 0; i < 31; i++) {
+        accum[i + 1] += accum[i] >> 16;
+        accum[i] &= 0xFFFFu;
+    }
+    accum[31] &= 0xFFFFu;
+
+    uint8_t prod[64];
+    for (int i = 0; i < 32; i++) {
+        prod[i * 2 + 0] = (uint8_t)(accum[i] & 0xFFu);
+        prod[i * 2 + 1] = (uint8_t)((accum[i] >> 8) & 0xFFu);
+    }
+
+    uint8_t reduced[32];
+    sc_reduce(reduced, prod);
+    for (int i = 0; i < 32; i++) out[i] = reduced[i];
+    return;
+#else
     uint32_t al[8], bl[8], cl[8];
     _sc_load_u32_8(al, a);
     _sc_load_u32_8(bl, b);
@@ -1283,6 +1316,7 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
         _sc_sub_u32_8(prod32, prod32, _sc_l32);
     }
     _sc_store_u32_8(out, prod32);
+#endif
 }
 
 /* ---------- Ed25519 high-level API ---------- */

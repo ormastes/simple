@@ -479,6 +479,22 @@ describe "syscall_handler":
             expect(task.entry_point).to_equal(0x400000)
         _clear_synthetic_vfs_for_test()
 
+    it "direct SMF sentinel spawn creates process-backed user task without resident fallback":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world.smf", _make_exec_smf(_make_x86_64_exec()))
+        var scheduler = Scheduler.new()
+        val pid = dispatch_spawn_binary_direct(103, 0, 2, scheduler, KernelLog.new(16))
+        expect(pid).to_be_greater_than(0)
+        expect(pid).not_to_equal(4103)
+        val spawned = scheduler.get_task(TaskId(id: pid as u64))
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(true)
+            expect(task.entry_point).to_equal(0x400000)
+        _clear_synthetic_vfs_for_test()
+
     it "spawn_binary creates process-backed user task for executable SMF package":
         _clear_synthetic_vfs_for_test()
         val path = "/home/RUNME.SMF"
@@ -508,19 +524,14 @@ describe "syscall_handler":
             expect(task.entry_point).to_equal(0x400000)
         _clear_synthetic_vfs_for_test()
 
-    it "direct sentinel spawn keeps resident fallback for malformed filesystem bytes":
+    it "direct sentinel spawn rejects malformed filesystem bytes without resident fallback":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
         var scheduler = Scheduler.new()
         val pid = dispatch_spawn_binary_direct(3, 0, 2, scheduler, KernelLog.new(16))
-        expect(pid).to_be_greater_than(0)
-        val spawned = scheduler.get_task(TaskId(id: pid as u64))
-        val found = if spawned == nil: 0 else: 1
-        expect(found).to_equal(1)
-        if spawned != nil:
-            val task = spawned
-            expect(task.is_user).to_equal(false)
-            expect(task.entry_point).to_equal(hello_world_remote_main as u64)
+        expect(pid).to_equal(-8)
+        val spawned = scheduler.get_task(TaskId(id: 1))
+        expect(spawned).to_be_nil()
         _clear_synthetic_vfs_for_test()
 
     it "rejects unknown spawn_binary paths":

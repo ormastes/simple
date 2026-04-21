@@ -332,11 +332,7 @@ impl LlvmBackend {
                 arg_vals.iter().map(|_| i64_type.into()).collect();
             let returns_bool = matches!(
                 rt_fn_name,
-                "rt_array_push"
-                    | "rt_array_clear"
-                    | "rt_array_reverse"
-                    | "rt_array_sort"
-                    | "rt_index_set"
+                "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
             );
             let fn_type = if returns_bool {
                 self.context.bool_type().fn_type(&param_types, false)

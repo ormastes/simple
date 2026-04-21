@@ -173,8 +173,7 @@ impl LlvmBackend {
             let builder = self.context.create_builder();
             let entry = self.context.append_basic_block(alias, "entry");
             builder.position_at_end(entry);
-            let args: Vec<BasicMetadataValueEnum<'static>> =
-                alias.get_param_iter().map(Into::into).collect();
+            let args: Vec<BasicMetadataValueEnum<'static>> = alias.get_param_iter().map(Into::into).collect();
             let call = builder
                 .build_call(target, &args, "dot_alias")
                 .map_err(|e| crate::error::factory::llvm_build_failed("dot alias call", &e))?;

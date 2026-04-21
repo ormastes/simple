@@ -112,5 +112,4 @@ impl LintChecker {
             }
         }
     }
-
 }

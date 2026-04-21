@@ -277,11 +277,7 @@ fn gen_stub_code(
 
 impl NativeBinaryBuilder {
     /// Build the main shim (C `main()` → `spl_main()`) and add to stubs list.
-    pub(super) fn build_main_shim(
-        &self,
-        temp_path: &Path,
-        bootstrap_stubs: &mut Vec<PathBuf>,
-    ) -> LinkerResult<()> {
+    pub(super) fn build_main_shim(&self, temp_path: &Path, bootstrap_stubs: &mut Vec<PathBuf>) -> LinkerResult<()> {
         let cc = detect_c_compiler(&self.options.target);
         let stub_c = temp_path.join("_main_shim.c");
         let stub_o = temp_path.join("_main_shim.o");
@@ -324,7 +320,16 @@ int main(int argc, char** argv) {
         self.build_missing_sym_stub(temp_path, &cc, use_strong, ret_insn, bootstrap_stubs)?;
 
         // 3) auto-generate stubs from obj symbols
-        self.build_auto_stubs_from_obj(temp_path, obj_path, &cc, use_strong, ret_insn, bootstrap_stubs, "_bootstrap_auto.c", "_bootstrap_auto.o")?;
+        self.build_auto_stubs_from_obj(
+            temp_path,
+            obj_path,
+            &cc,
+            use_strong,
+            ret_insn,
+            bootstrap_stubs,
+            "_bootstrap_auto.c",
+            "_bootstrap_auto.o",
+        )?;
 
         Ok(())
     }
@@ -481,9 +486,7 @@ static inline int64_t _rt_now_nanos(void) {{
             .args(&nm_args2)
             .arg(first_out)
             .output()
-            .map_err(|e| {
-                LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e))
-            })?;
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e)))?;
 
         let mut symbols = std::collections::BTreeSet::new();
         for line in String::from_utf8_lossy(&nm_out.stdout).lines() {

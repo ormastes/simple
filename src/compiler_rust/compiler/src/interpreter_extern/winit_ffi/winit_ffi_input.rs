@@ -3,10 +3,7 @@ use winit::keyboard::KeyCode;
 use crate::error::CompileError;
 use crate::value::Value;
 
-use super::{
-    get_i64, int_value, tuple_value, bool_value,
-    EVENTS, RuntimeEvent,
-};
+use super::{get_i64, int_value, tuple_value, bool_value, EVENTS, RuntimeEvent};
 
 pub(super) fn keycode_to_simple(code: KeyCode) -> Option<i64> {
     Some(match code {

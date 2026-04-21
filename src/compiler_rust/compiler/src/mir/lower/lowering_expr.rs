@@ -186,9 +186,7 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Cast { expr: inner, target } => self.lower_cast_expr(inner, *target),
 
             HirExprKind::Call { func: callee, args } => self.lower_call_expr(callee, args),
-            HirExprKind::BuiltinCall { name, args } => {
-                self.lower_builtin_call_expr(name, args, expr_ty)
-            }
+            HirExprKind::BuiltinCall { name, args } => self.lower_builtin_call_expr(name, args, expr_ty),
             HirExprKind::MethodCall {
                 receiver,
                 method,
@@ -217,29 +215,21 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::FieldAccess { receiver, field_index } => {
                 self.lower_field_access_expr(receiver, *field_index, expr_ty)
             }
-            HirExprKind::Index { receiver, index } => {
-                self.lower_index_expr(receiver, index, expr_ty)
-            }
+            HirExprKind::Index { receiver, index } => self.lower_index_expr(receiver, index, expr_ty),
 
             HirExprKind::PointerNew { kind, value } => self.lower_pointer_new_expr(*kind, value),
             HirExprKind::Ref(inner) => self.lower_ref_expr(inner),
             HirExprKind::Deref(inner) => self.lower_deref_expr(inner),
             HirExprKind::ContractOld(inner) => self.lower_contract_old_expr(inner),
-            HirExprKind::NeighborAccess { array, direction } => {
-                self.lower_neighbor_access_expr(array, direction)
-            }
-            HirExprKind::GpuIntrinsic { intrinsic, args } => {
-                self.lower_gpu_intrinsic(*intrinsic, args)
-            }
+            HirExprKind::NeighborAccess { array, direction } => self.lower_neighbor_access_expr(array, direction),
+            HirExprKind::GpuIntrinsic { intrinsic, args } => self.lower_gpu_intrinsic(*intrinsic, args),
 
             HirExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => self.lower_if_expr(condition, then_branch, else_branch, expr_ty),
-            HirExprKind::LetIn { local_idx, value, body } => {
-                self.lower_let_in_expr(*local_idx, value, body)
-            }
+            HirExprKind::LetIn { local_idx, value, body } => self.lower_let_in_expr(*local_idx, value, body),
         }
     }
 }

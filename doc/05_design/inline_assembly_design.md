@@ -6,9 +6,49 @@
 
 ---
 
+## 0. 2026-04-21 Implementation Contract
+
+`asm { ... }` is the canonical raw embedded assembly form for new Simple code:
+
+```simple
+asm {
+    "nop"
+}
+
+asm volatile {
+    "wfi"
+}
+```
+
+Compatibility forms remain accepted while the compiler catches up:
+
+- `asm: "nop"` and indented `asm:` blocks
+- `asm volatile: "nop"` and indented `asm volatile:` blocks
+- `asm(...)` only for legacy operand/constraint syntax
+
+The current Rust compiler path preserves only raw no-operand asm blocks during
+HIR lowering. Operand-bound `asm(...)` is parsed but currently skipped by Rust
+HIR lowering, so new Simple OS code should prefer raw `asm {}` wrappers for
+instruction-only helpers and keep ABI-sensitive boot entry assembly in `.s/.S`
+until Simple supports naked functions, section placement, global labels, and
+early stack setup.
+
+Runtime mode contract:
+
+| Mode | Expected behavior |
+|------|-------------------|
+| Interpreter | Parse and skip inline asm; safe only for no-op smoke fixtures |
+| Loader | Preserve raw asm blocks so native project linking can include generated asm objects |
+| Compiler | Lower raw asm to MIR/codegen and emit generated inline asm objects |
+
+Target coverage must include `x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`,
+and `riscv64` across interpreter, loader, and compiler mode tests.
+
+---
+
 ## 1. Executive Summary
 
-This document designs the `asm{}` block syntax for Simple, enabling inline assembly with proper platform specification. Key innovations:
+This document designs the `asm {}` block syntax for Simple, enabling inline assembly with proper platform specification. Key innovations:
 
 1. **Platform specification at multiple levels** (file, module, attribute)
 2. **Simple-style symbolic operands** (not GCC's cryptic constraint letters)
@@ -57,10 +97,9 @@ This document designs the `asm{}` block syntax for Simple, enabling inline assem
 
 fn fast_multiply(a: i64, b: i64) -> i64:
     var result: i64 = 0
-    asm:
+    asm {
         "imul {result}, {a}, {b}"
-        out result
-        in a, b
+    }
     result
 ```
 
@@ -95,10 +134,9 @@ fn fast_multiply(a: i64, b: i64) -> i64:
     var result: i64 = 0
 
     @platform("x86_64")
-    asm:
+    asm {
         "imul {result}, {a}, {b}"
-        out result
-        in a, b
+    }
 
     result
 ```
@@ -119,13 +157,15 @@ fn fast_multiply(a: i64, b: i64) -> i64:
 
 fn example():
     # Uses file-level platform
-    asm:
+    asm {
         "nop"
+    }
 
     # Override for specific block
     @platform("arm")
-    asm:
+    asm {
         "nop"
+    }
 ```
 
 **Inheritance rules:**
@@ -166,11 +206,15 @@ fn example():
 ### Basic Syntax
 
 ```simple
-asm:
+asm {
     "instruction template"
-    [operand declarations]
-    [options]
+    "second instruction"
+}
 ```
+
+The current implemented braced form accepts string literals only. Operand
+declarations remain in the legacy parenthesized form until operand-bearing
+`asm {}` lowering is implemented.
 
 ### Operand Types
 
@@ -185,18 +229,16 @@ asm:
 
 ```simple
 # Compiler chooses register (recommended)
-asm:
-    "add {a}, {b}"
-    inout a
-    in b
+asm("add {a}, {b}", a = inout(reg) a, b = in(reg) b)
 
 # Explicit register (when needed)
-asm:
+asm(
     "syscall"
-    in(rax) syscall_num
-    in(rdi) arg1
-    out(rax) result
-    clobber rcx, r11
+    in("rax") syscall_num,
+    in("rdi") arg1,
+    out("rax") result,
+    clobber_abi("C")
+)
 ```
 
 ### Template Syntax

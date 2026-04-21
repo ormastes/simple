@@ -279,5 +279,4 @@ impl LintChecker {
             _ => {}
         }
     }
-
 }

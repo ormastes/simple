@@ -5,11 +5,7 @@ use crate::hir::{HirExpr, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_lambda_expr(
-        &mut self,
-        body: &HirExpr,
-        captures: &[usize],
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_lambda_expr(&mut self, body: &HirExpr, captures: &[usize]) -> MirLowerResult<VReg> {
         // Save current block
         let original_block = self.with_func(|_, current_block| current_block)?;
 

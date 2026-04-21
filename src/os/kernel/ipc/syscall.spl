@@ -1171,34 +1171,20 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val priority = _u64_to_priority(args.arg2)
         val caps = CapabilitySet.full()
         var sched = scheduler
+        val before_next_task_id = sched.next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        var pid = raw_pid
-        if raw_pid >= 0x40000000u64:
-            pid = 0
-            val low16 = raw_pid & 0xFFFFu64
-            if (low16 & 0xFF00u64) == 0xFF00u64:
-                val low8 = low16 & 0x00FFu64
-                if low8 != 0:
-                    pid = low8
+        val pid = if sched.next_task_id > before_next_task_id:
+            sched.next_task_id - 1
+        elif raw_pid > 0 and raw_pid < 0x40000000:
+            raw_pid
+        else:
+            0
         if pid == 0:
             return SyscallResult(value: -12)
 
         var ulog = klog
         ulog.write(6, 1, pid, "spawn_binary launched user process {path}")
         return SyscallResult(value: pid.to_i64())
-
-    val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
-    if resident_entry != nil:
-        val priority = _u64_to_priority(args.arg2)
-        val caps = CapabilitySet.full()
-        var sched = scheduler
-        val task_id = sched.create_task(resident_entry.unwrap(), priority, caps)
-        if task_id.id == 0:
-            return SyscallResult(value: -12)
-
-        var rlog = klog
-        rlog.write(6, 1, task_id.id, "spawn_binary validated filesystem image and launched resident handoff {path}")
-        return SyscallResult(value: task_id.id.to_i64())
 
     var log = klog
     log.write(3, 1, 0, "spawn_binary rejected invalid executable: {path}")
@@ -1245,6 +1231,8 @@ fn _direct_spawn_app_id_path(app_id: u64) -> text?:
             Some("/sys/apps/file_manager")
         case 3:
             Some("/sys/apps/hello_world")
+        case 103:
+            Some("/sys/apps/hello_world.smf")
         case 4:
             Some("/sys/apps/shell")
         case 5:
@@ -1264,15 +1252,14 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
         val caps = CapabilitySet.full()
         var sched = scheduler
         serial_println("[syscall13] create_user_task begin")
+        val before_next_task_id = sched.next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        var pid = raw_pid
-        if raw_pid >= 0x40000000u64:
-            pid = 0
-            val low16 = raw_pid & 0xFFFFu64
-            if (low16 & 0xFF00u64) == 0xFF00u64:
-                val low8 = low16 & 0x00FFu64
-                if low8 != 0:
-                    pid = low8
+        val pid = if sched.next_task_id > before_next_task_id:
+            sched.next_task_id - 1
+        elif raw_pid > 0 and raw_pid < 0x40000000:
+            raw_pid
+        else:
+            0
         if pid == 0:
             serial_println("[syscall13] create_user_task failed")
             return -12
@@ -1285,24 +1272,9 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     else:
         serial_println("[syscall13] build_user_process_image failed")
 
-    serial_println("[syscall13] validated resident resolve begin")
-    val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
-    if resident_entry != nil:
-        serial_println("[syscall13] validated resident create begin")
-        val priority = _u64_to_priority(priority_raw)
-        val caps = CapabilitySet.full()
-        var sched = scheduler
-        val task_id = sched.create_task(resident_entry.unwrap(), priority, caps)
-        if task_id.id == 0:
-            return -12
-
-        var dlog = klog
-        dlog.write(6, 1, task_id.id, "spawn_binary validated filesystem image and launched resident handoff {path}")
-        serial_println("[syscall13] validated resident handoff ok")
-        return task_id.id.to_i64()
-
     var log = klog
     log.write(3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+    serial_println("[syscall13] rejected invalid filesystem executable")
     -8
 
 fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:

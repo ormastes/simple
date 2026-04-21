@@ -274,5 +274,4 @@ impl LintChecker {
             check_stmt(self, item);
         }
     }
-
 }

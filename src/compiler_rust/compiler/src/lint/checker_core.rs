@@ -457,5 +457,4 @@ impl LintChecker {
         "inline",
         "ignore",
     ];
-
 }

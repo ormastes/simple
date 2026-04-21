@@ -48,8 +48,12 @@ typedef int32_t RuntimeValue;
 
 static void serial_putchar(char c)
 {
-    /* Wait until TX FIFO is not full (bit 5 of FR) */
-    while (UART_FR & (1U << 5)) {}
+    /* Wait briefly until TX FIFO is not full (bit 5 of FR). Keep boot logs
+     * non-blocking on QEMU loader paths that expose stale UART flags.
+     */
+    for (uint32_t spin = 0; spin < 100000; spin++) {
+        if ((UART_FR & (1U << 5)) == 0) break;
+    }
     UART_DR = (uint32_t)c;
 }
 
@@ -565,6 +569,22 @@ void rt_println_bool(RuntimeValue val)
     serial_putchar('\n');
 }
 
+RuntimeValue serial_println(RuntimeValue val)
+{
+    rt_print_value(val);
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_qemu_exit_success(void)
+{
+    register uint32_t op asm("r0") = 0x18;
+    __asm__ volatile("svc #0x123456" : : "r"(op) : "memory");
+    for (;;) __asm__ volatile("wfe");
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * 8. Framebuffer copy
  * =================================================================== */
@@ -956,6 +976,7 @@ S1(rt_read_cr3) S1(rt_write_cr3) S1(rt_read_cr2)
  * Crypto — shared portable implementation
  * =================================================================== */
 #define RV_INT int32_t
+#define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
 
 /* End of arm32 baremetal_stubs.c */

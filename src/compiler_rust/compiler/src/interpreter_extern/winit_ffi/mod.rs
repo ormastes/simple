@@ -38,13 +38,16 @@ pub(super) const EVENT_MOUSE_WHEEL: i64 = 22;
 
 pub(super) static NEXT_EVENT_LOOP_ID: AtomicI64 = AtomicI64::new(1);
 pub(super) static NEXT_EVENT_ID: AtomicI64 = AtomicI64::new(1);
-pub(super) static EVENT_LOOPS: LazyLock<Mutex<HashMap<i64, EventLoopHandle>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(super) static EVENT_LOOPS: LazyLock<Mutex<HashMap<i64, EventLoopHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 pub(super) static EVENTS: LazyLock<Mutex<HashMap<i64, RuntimeEvent>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-pub(super) static WINDOW_STATES: LazyLock<Mutex<HashMap<i64, WindowRuntimeState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(super) static WINDOW_STATES: LazyLock<Mutex<HashMap<i64, WindowRuntimeState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 pub(super) static WINDOW_OWNERS: LazyLock<Mutex<HashMap<i64, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 pub(super) static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 pub(super) static NEXT_BUFFER_ID: AtomicI64 = AtomicI64::new(1);
-pub(super) static PIXEL_BUFFERS: LazyLock<Mutex<HashMap<i64, PixelBuffer>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(super) static PIXEL_BUFFERS: LazyLock<Mutex<HashMap<i64, PixelBuffer>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(super) struct PixelBuffer {
     pub(super) width: u32,
@@ -356,10 +359,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         n if n.starts_with("rt_winit_event_loop_") || n.starts_with("rt_winit_window_") => {
             winit_ffi_window::dispatch_window(name, args)
         }
-        n if n.starts_with("rt_winit_event_get_") || n == "rt_winit_event_free"
+        n if n.starts_with("rt_winit_event_get_")
+            || n == "rt_winit_event_free"
             || n.starts_with("rt_winit_event_window_")
             || n.starts_with("rt_winit_event_cursor_")
-            || n == "rt_winit_event_touch" => {
+            || n == "rt_winit_event_touch" =>
+        {
             winit_ffi_events::dispatch_events(name, args)
         }
         n if n.starts_with("rt_winit_event_keyboard_") || n.starts_with("rt_winit_event_mouse_") => {
@@ -367,7 +372,8 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
         n if n.starts_with("rt_winit_monitor_")
             || n.starts_with("rt_winit_clipboard_")
-            || n == "rt_winit_get_last_error" => {
+            || n == "rt_winit_get_last_error" =>
+        {
             winit_ffi_display::dispatch_display(name, args)
         }
         n if n.starts_with("rt_winit_buffer_") || n == "rt_winit_save_pixels_bmp" => {

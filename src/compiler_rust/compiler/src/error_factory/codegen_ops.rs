@@ -312,12 +312,7 @@ pub fn trait_coherence_errors(errors: &[String]) -> CompileError {
 }
 
 /// Error when function effect violates module capabilities.
-pub fn effect_violates_capabilities(
-    func_name: &str,
-    effect: &str,
-    allowed_caps: &str,
-    cap_name: &str,
-) -> CompileError {
+pub fn effect_violates_capabilities(func_name: &str, effect: &str, allowed_caps: &str, cap_name: &str) -> CompileError {
     CompileError::Semantic(format!(
         "function '{}' has @{} effect but module only allows capabilities: [{}]\n\
          help: add '{}' to module's 'requires [...]' statement or remove @{} from function",
@@ -420,4 +415,3 @@ pub fn input_error(e: &impl std::fmt::Display) -> CompileError {
 pub fn unsupported_constant_type(ty: &impl std::fmt::Debug) -> CompileError {
     CompileError::Semantic(format!("Unsupported constant type for test helper: {:?}", ty))
 }
-

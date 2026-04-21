@@ -325,7 +325,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-
     /// Parse optional parenthesized argument list: `(arg1, arg2, ...)`
     pub(super) fn parse_optional_paren_args(&mut self) -> Result<Option<Vec<Expr>>, ParseError> {
         if self.check(&TokenKind::LParen) {

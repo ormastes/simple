@@ -146,36 +146,57 @@ pub(crate) fn generate_stub_object_freestanding(
 
     let stub_o = temp_dir.join("_stubs_freestanding.o");
     let cc = find_c_compiler();
-    let mut cmd = std::process::Command::new(&cc);
-    cmd.args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie"])
-        .arg("-ffunction-sections")
-        .arg("-fdata-sections")
-        .arg("-o")
-        .arg(&stub_o)
-        .arg(&stub_c)
-        .arg(format!("--target={}", triple));
-    if triple.contains("x86_64") {
-        cmd.arg("-mno-red-zone");
-    }
-    if !march.is_empty() {
-        cmd.arg(march);
-    }
-    if !mabi.is_empty() {
-        cmd.arg(mabi);
-    }
-    // For RISC-V, medany needed for freestanding.
-    if march.contains("rv") {
-        cmd.arg("-mcmodel=medany");
-    }
+    let compilers: Vec<String> = {
+        let mut v = vec![];
+        #[cfg(target_os = "macos")]
+        for p in [
+            "/opt/homebrew/opt/llvm@18/bin/clang",
+            "/opt/homebrew/opt/llvm/bin/clang",
+            "/usr/local/opt/llvm/bin/clang",
+        ] {
+            if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
+                v.push(p.to_string());
+            }
+        }
+        if !v.contains(&cc) {
+            v.push(cc.clone());
+        }
+        v
+    };
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("compile freestanding stubs ({cc}): {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("failed to compile freestanding stubs ({}): {}", cc, stderr));
+    let mut last_stderr = String::new();
+    for compiler in &compilers {
+        let mut cmd = std::process::Command::new(compiler);
+        cmd.args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie"])
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-o")
+            .arg(&stub_o)
+            .arg(&stub_c)
+            .arg(format!("--target={}", triple));
+        if triple.contains("x86_64") {
+            cmd.arg("-mno-red-zone");
+        }
+        if !march.is_empty() {
+            cmd.arg(march);
+        }
+        if !mabi.is_empty() {
+            cmd.arg(mabi);
+        }
+        // For RISC-V, medany needed for freestanding.
+        if march.contains("rv") {
+            cmd.arg("-mcmodel=medany");
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("compile freestanding stubs ({compiler}): {e}"))?;
+        if output.status.success() {
+            return Ok(stub_o);
+        }
+        last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     }
-    Ok(stub_o)
+    Err(format!("failed to compile freestanding stubs: {}", last_stderr))
 }
 
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.

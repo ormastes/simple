@@ -24,6 +24,10 @@ impl<'a> Parser<'a> {
             return self.parse_asm_parenthesized(start_span, is_volatile);
         }
 
+        if self.check(&TokenKind::LBrace) {
+            return self.parse_asm_braced(start_span, is_volatile);
+        }
+
         self.expect(&TokenKind::Colon)?;
 
         let mut instructions = Vec::new();
@@ -57,6 +61,49 @@ impl<'a> Parser<'a> {
             instructions,
             target_match: vec![],
             clobbers,
+            constraints: vec![],
+        }))
+    }
+
+    fn parse_asm_braced(&mut self, start_span: Span, is_volatile: bool) -> Result<Node, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        let mut instructions = Vec::new();
+        self.skip_asm_ws();
+
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            self.skip_asm_ws();
+            if self.check(&TokenKind::RBrace) {
+                break;
+            }
+
+            if self.is_asm_string_token() {
+                instructions.push(self.expect_string_value()?);
+            } else {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("expected string literal in asm block, got {:?}", self.current.kind),
+                    self.current.span,
+                ));
+            }
+
+            self.skip_asm_ws();
+            if self.check(&TokenKind::Comma) || self.check(&TokenKind::Semicolon) {
+                self.advance();
+            }
+            self.skip_asm_ws();
+        }
+
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Node::InlineAsm(InlineAsmStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            volatile: is_volatile,
+            instructions,
+            target_match: vec![],
+            clobbers: vec![],
             constraints: vec![],
         }))
     }
@@ -433,6 +480,16 @@ mod tests {
     #[test]
     fn test_asm_volatile_block() {
         parse_succeeds("fn test():\n    asm volatile:\n        \"mov r0, r1\"\n        \"add r0, r2\"\n");
+    }
+
+    #[test]
+    fn test_asm_volatile_braced_block() {
+        parse_succeeds("fn test():\n    asm volatile {\n        \"mov r0, r1\"\n        \"add r0, r2\"\n    }\n");
+    }
+
+    #[test]
+    fn test_asm_braced_block_allows_commas_and_semicolons() {
+        parse_succeeds("fn test():\n    asm {\n        \"nop\",\n        \"wfi\";\n    }\n");
     }
 
     #[test]

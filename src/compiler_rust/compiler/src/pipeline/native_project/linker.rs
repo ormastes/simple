@@ -619,7 +619,7 @@ int main(int argc, char** argv) {
                     eprintln!("  Boot directory: {}", boot_dir.display());
                 }
                 let asm_compilers: Vec<String> = {
-                    let mut v = vec![cc.clone()];
+                    let mut v = vec![];
                     #[cfg(target_os = "macos")]
                     for p in [
                         "/opt/homebrew/opt/llvm@18/bin/clang",
@@ -629,6 +629,9 @@ int main(int argc, char** argv) {
                         if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
                             v.push(p.to_string());
                         }
+                    }
+                    if !v.contains(&cc) {
+                        v.push(cc.clone());
                     }
                     v
                 };
@@ -698,60 +701,72 @@ int main(int argc, char** argv) {
                         let path = de.path();
                         if path.extension().and_then(|e| e.to_str()) == Some("c") {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                            let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
+                            if minimal_boot && stem != "baremetal_stubs" {
+                                continue;
+                            }
                             let out = temp_dir.join(format!("_boot_{}.o", stem));
-                            let mut c_cmd = std::process::Command::new(&cc);
-                            c_cmd
-                                .args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
-                                .arg(&out)
-                                .arg(&path)
-                                .arg(format!("--target={}", triple));
-                            if triple.contains("x86_64") {
-                                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                let ring_include = cwd.join("src/compiler_rust/vendor/ring/include");
-                                let ring_root = cwd.join("src/compiler_rust/vendor/ring");
-                                let ring_pregenerated = cwd.join("src/compiler_rust/vendor/ring/pregenerated");
+                            let mut compiled = false;
+                            let mut last_stderr = String::new();
+                            let mut last_code: Option<i32> = None;
+                            for c_cc in &asm_compilers {
+                                let mut c_cmd = std::process::Command::new(c_cc);
                                 c_cmd
-                                    .arg("-mno-red-zone")
-                                    .arg("-DOPENSSL_NO_ASM")
-                                    .arg("-DRING_CORE_NOSTDLIBINC")
-                                    .arg("-I")
-                                    .arg(ring_include)
-                                    .arg("-I")
-                                    .arg(ring_root)
-                                    .arg("-I")
-                                    .arg(ring_pregenerated);
-                            }
-                            if !march.is_empty() {
-                                c_cmd.args([march, mabi, "-mcmodel=medany"]);
-                            }
-                            match c_cmd.output() {
-                                Ok(r) => {
-                                    if r.status.success() {
-                                        boot_objects.push(out);
-                                    } else {
-                                        boot_compile_failures += 1;
-                                        let stderr_str = String::from_utf8_lossy(&r.stderr).into_owned();
-                                        let tail: String = stderr_str
-                                            .lines()
-                                            .rev()
-                                            .take(20)
-                                            .collect::<Vec<_>>()
-                                            .into_iter()
-                                            .rev()
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        eprintln!(
-                                            "  ERROR: failed to compile {} (exit={:?})\n--- stderr tail ---\n{}\n--- end stderr ---",
-                                            path.display(),
-                                            r.status.code(),
-                                            tail
-                                        );
+                                    .args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
+                                    .arg(&out)
+                                    .arg(&path)
+                                    .arg(format!("--target={}", triple));
+                                if triple.contains("x86_64") {
+                                    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let ring_include = cwd.join("src/compiler_rust/vendor/ring/include");
+                                    let ring_root = cwd.join("src/compiler_rust/vendor/ring");
+                                    let ring_pregenerated = cwd.join("src/compiler_rust/vendor/ring/pregenerated");
+                                    c_cmd
+                                        .arg("-mno-red-zone")
+                                        .arg("-DOPENSSL_NO_ASM")
+                                        .arg("-DRING_CORE_NOSTDLIBINC")
+                                        .arg("-I")
+                                        .arg(ring_include)
+                                        .arg("-I")
+                                        .arg(ring_root)
+                                        .arg("-I")
+                                        .arg(ring_pregenerated);
+                                }
+                                if !march.is_empty() {
+                                    c_cmd.args([march, mabi, "-mcmodel=medany"]);
+                                }
+                                match c_cmd.output() {
+                                    Ok(r) => {
+                                        if r.status.success() {
+                                            boot_objects.push(out.clone());
+                                            compiled = true;
+                                            break;
+                                        }
+                                        last_code = r.status.code();
+                                        last_stderr = String::from_utf8_lossy(&r.stderr).into_owned();
+                                    }
+                                    Err(e) => {
+                                        last_stderr = format!("spawn error: {}", e);
                                     }
                                 }
-                                Err(e) => {
-                                    boot_compile_failures += 1;
-                                    eprintln!("  ERROR: failed to spawn clang for {}: {}", path.display(), e);
-                                }
+                            }
+                            if !compiled {
+                                boot_compile_failures += 1;
+                                let tail: String = last_stderr
+                                    .lines()
+                                    .rev()
+                                    .take(20)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                eprintln!(
+                                    "  ERROR: failed to compile {} (exit={:?})\n--- stderr tail ---\n{}\n--- end stderr ---",
+                                    path.display(),
+                                    last_code,
+                                    tail
+                                );
                             }
                         }
                     }

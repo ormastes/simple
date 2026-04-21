@@ -2292,6 +2292,8 @@ RuntimeValue rt_int_to_string(RuntimeValue val) { return rt_value_to_string(val)
  * Crypto — shared portable implementation
  * =================================================================== */
 #define RV_INT int64_t
+#define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
+#define CRYPTO_ARRAY_ITEMS(arr) ((arr)->items)
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #include "../../shared/crypto_common.h"
 

@@ -3,6 +3,9 @@
 # Tests for inline assembly syntax support in Simple.
 # Verifies lexer, parser, HIR lowering, and backend code generation.
 #
+# Raw embedded instructions use canonical `asm {}` blocks. Parenthesized
+# `asm(...)` appears only in legacy operand/constraint examples.
+#
 # Note: Most tests are syntax-only as compiler self-hosting for
 # testing internals is still being developed.
 
@@ -16,22 +19,22 @@ describe "Inline Assembly Syntax":
 
     it "recognizes asm keyword in code":
 
-        val code = "asm(\"nop\")"
+        val code = "asm { \"nop\" }"
 
         # Verify asm keyword is present in syntax
 
         check(code.starts_with("asm"))
 
-        check(code.contains("("))
+        check(code.contains("{"))
 
-        check(code.contains(")"))
+        check(code.contains("}"))
 
         check(code.contains("nop"))
 
 
     it "parses simple asm expression":
 
-        val code = "asm(\"nop\")"
+        val code = "asm { \"nop\" }"
 
         # Parser accepts the syntax (may return error for now without full context)
 
@@ -42,7 +45,7 @@ describe "Inline Assembly Syntax":
 
     it "parses asm with volatile flag":
 
-        val code = "asm volatile(\"nop\")"
+        val code = "asm volatile { \"nop\" }"
 
         # Verify volatile flag syntax
 
@@ -55,7 +58,7 @@ describe "Inline Assembly Syntax":
 
     it "parses asm template string":
 
-        val code = "asm(\"mov eax, ebx\")"
+        val code = "asm { \"mov eax, ebx\" }"
 
         check(code.contains("mov eax, ebx"))
 
@@ -151,54 +154,46 @@ describe "Inline Assembly Architecture Examples":
 
     it "parses x86 port output":
 
-        val code = """asm volatile("out dx, al",
+        val code = """asm volatile {
 
-            in("dx") port,
+            "out dx, al"
 
-            in("al") value
-
-        )"""
+        }"""
 
         check(code.contains("out dx, al"))
 
 
     it "parses x86 port input":
 
-        val code = """asm volatile("in al, dx",
+        val code = """asm volatile {
 
-            out("al") result,
+            "in al, dx"
 
-            in("dx") port
-
-        )"""
+        }"""
 
         check(code.contains("in al, dx"))
 
 
     it "parses ARM semihosting":
 
-        val code = """asm volatile(
+        val code = """asm volatile {
 
             "mov r0, {op}",
 
-            op = in(reg) operation
-
-        )"""
+        }"""
 
         check(code.contains("mov r0"))
 
 
     it "parses RISC-V ebreak":
 
-        val code = """asm volatile(
+        val code = """asm volatile {
 
             "mv a0, {op}",
 
             "ebreak",
 
-            op = in(reg) value
-
-        )"""
+        }"""
 
         check(code.contains("ebreak"))
 
@@ -211,7 +206,7 @@ describe "Inline Assembly in Unsafe Context":
 
         unsafe:
 
-            asm("nop")
+            asm { "nop" }
 
         """
 
@@ -230,7 +225,7 @@ describe "Inline Assembly in Unsafe Context":
 
             unsafe:
 
-                asm volatile("cli")
+                asm volatile { "cli" }
 
         """
 
@@ -239,24 +234,24 @@ describe "Inline Assembly in Unsafe Context":
 
 describe "Inline Assembly Error Cases":
 
-    it "requires parentheses":
+    it "does not require parentheses for raw asm":
 
-        val code = "asm \"nop\""
+        val code = "asm { \"nop\" }"
 
-        # Should fail or require parens
+        # Raw asm uses the custom block form.
 
-        # This tests that parser expects call-like syntax
+        check(code.contains("{"))
 
         check(not code.contains("("))
 
 
     it "requires template string":
 
-        val code = "asm()"
+        val code = "asm {}"
 
         # Should fail - missing template
 
-        check(code == "asm()")
+        check(code == "asm {}")
 
 
 describe "Inline Assembly Constraint Kinds":
@@ -316,23 +311,17 @@ describe "Inline Assembly Real-World Examples":
 
             unsafe:
 
-                asm volatile(
+                asm volatile {
 
                     "out dx, al",
 
-                    in("dx") port,
-
-                    in("al") value
-
-                )
+                }
 
         """
 
         check(code.contains("out dx, al"))
 
-        check(code.contains("in(\"dx\")"))
-
-        check(code.contains("in(\"al\")"))
+        check(not code.contains("asm volatile("))
 
 
     it "implements inb correctly":

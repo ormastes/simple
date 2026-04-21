@@ -122,16 +122,12 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 MirInst::FieldGet { dest, field_type, .. } => {
                     types_map.insert(*dest, *field_type);
                 }
-                MirInst::IndirectCall {
-                    dest, return_type, ..
-                } => {
+                MirInst::IndirectCall { dest, return_type, .. } => {
                     if let Some(d) = dest {
                         types_map.insert(*d, *return_type);
                     }
                 }
-                MirInst::MethodCallVirtual {
-                    dest, return_type, ..
-                } => {
+                MirInst::MethodCallVirtual { dest, return_type, .. } => {
                     if let Some(d) = dest {
                         types_map.insert(*d, *return_type);
                     }
@@ -877,9 +873,7 @@ mod tests {
             addr: r0,
             ty: TypeId::F64,
         });
-        entry
-            .instructions
-            .push(MirInst::ConstBool { dest: r7, value: true });
+        entry.instructions.push(MirInst::ConstBool { dest: r7, value: true });
         entry.terminator = Terminator::Return(Some(r3));
 
         let map = build_vreg_types(&func);

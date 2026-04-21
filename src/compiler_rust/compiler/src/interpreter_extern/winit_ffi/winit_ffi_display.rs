@@ -2,9 +2,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::{
-    get_string, int_value, tuple_value, bool_value,
-    unsupported_window_mutation, set_last_error,
-    WINDOW_STATES, LAST_ERROR,
+    get_string, int_value, tuple_value, bool_value, unsupported_window_mutation, set_last_error, WINDOW_STATES,
+    LAST_ERROR,
 };
 
 pub(super) fn dispatch_display(name: &str, args: &[Value]) -> Result<Value, CompileError> {

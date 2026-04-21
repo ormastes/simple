@@ -6,11 +6,7 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_call_expr(
-        &mut self,
-        callee: &HirExpr,
-        args: &[HirExpr],
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         let mut arg_regs = Vec::new();
         for arg in args {
             arg_regs.push(self.lower_expr(arg)?);
@@ -23,10 +19,7 @@ impl<'a> MirLowerer<'a> {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::OptionSome {
-                            dest,
-                            value: *value,
-                        });
+                        block.instructions.push(MirInst::OptionSome { dest, value: *value });
                         dest
                     });
                 }
@@ -34,10 +27,7 @@ impl<'a> MirLowerer<'a> {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ResultOk {
-                            dest,
-                            value: *value,
-                        });
+                        block.instructions.push(MirInst::ResultOk { dest, value: *value });
                         dest
                     });
                 }
@@ -45,10 +35,7 @@ impl<'a> MirLowerer<'a> {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ResultErr {
-                            dest,
-                            value: *value,
-                        });
+                        block.instructions.push(MirInst::ResultErr { dest, value: *value });
                         dest
                     });
                 }
@@ -70,10 +57,7 @@ impl<'a> MirLowerer<'a> {
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::OptionSome {
-                                dest,
-                                value: *value,
-                            });
+                            block.instructions.push(MirInst::OptionSome { dest, value: *value });
                             dest
                         });
                     }
@@ -89,10 +73,7 @@ impl<'a> MirLowerer<'a> {
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::ResultOk {
-                                dest,
-                                value: *value,
-                            });
+                            block.instructions.push(MirInst::ResultOk { dest, value: *value });
                             dest
                         });
                     }
@@ -100,10 +81,7 @@ impl<'a> MirLowerer<'a> {
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::ResultErr {
-                                dest,
-                                value: *value,
-                            });
+                            block.instructions.push(MirInst::ResultErr { dest, value: *value });
                             dest
                         });
                     }

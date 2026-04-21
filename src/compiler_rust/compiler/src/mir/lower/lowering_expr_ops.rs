@@ -5,12 +5,7 @@ use crate::hir::{BinOp, HirExpr, TypeId, UnaryOp};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_binary_expr(
-        &mut self,
-        op: BinOp,
-        left: &HirExpr,
-        right: &HirExpr,
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_binary_expr(&mut self, op: BinOp, left: &HirExpr, right: &HirExpr) -> MirLowerResult<VReg> {
         // For compound boolean expressions (And, Or), emit condition probes
         // to track each sub-condition for condition/MC-DC coverage (#674)
         if self.coverage_enabled && matches!(op, BinOp::And | BinOp::Or) {
@@ -125,11 +120,7 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
-    pub(super) fn lower_cast_expr(
-        &mut self,
-        inner: &HirExpr,
-        target: TypeId,
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_cast_expr(&mut self, inner: &HirExpr, target: TypeId) -> MirLowerResult<VReg> {
         let source_reg = self.lower_expr(inner)?;
 
         self.with_func(|func, current_block| {

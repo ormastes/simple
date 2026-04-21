@@ -63,8 +63,13 @@ static inline volatile uint32_t *pl011_reg(uint32_t offset)
 
 static void serial_putchar(char c)
 {
-    /* Wait until transmit FIFO is not full */
-    while (*pl011_reg(PL011_FR) & PL011_FR_TXFF) {}
+    /* Wait briefly until transmit FIFO is not full. Some QEMU loader boot
+     * paths leave PL011 flags in a state that should not block boot logs
+     * forever, so fall through and write the byte after a bounded spin.
+     */
+    for (uint32_t spin = 0; spin < 100000; spin++) {
+        if ((*pl011_reg(PL011_FR) & PL011_FR_TXFF) == 0) break;
+    }
     *pl011_reg(PL011_DR) = (uint32_t)(unsigned char)c;
 }
 
@@ -73,6 +78,13 @@ static void serial_puts(const char *s)
     while (*s) {
         if (*s == '\n') serial_putchar('\r');
         serial_putchar(*s++);
+    }
+}
+
+static void serial_puts_direct(const char *s)
+{
+    while (*s) {
+        *pl011_reg(PL011_DR) = (uint32_t)(unsigned char)(*s++);
     }
 }
 
@@ -872,7 +884,9 @@ extern void spl_start(void) __attribute__((weak));
 
 void _c_start(void)
 {
+    serial_puts_direct("[BOOT] ARM64 _c_start entered\r\n");
     _pl011_init();
+    serial_puts_direct("[BOOT] ARM64 pl011 init ok\r\n");
 
     /* Disable alignment checking — Cranelift may emit unaligned literal pools */
     {
@@ -1632,6 +1646,13 @@ RuntimeValue serial_println(RuntimeValue val) {
     return NIL_VALUE;
 }
 
+RuntimeValue rt_qemu_exit_success(void) {
+    register uint64_t op asm("x0") = 0x18;
+    __asm__ volatile("hlt #0xF000" : : "r"(op) : "memory");
+    for (;;) __asm__ volatile("wfe");
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * 15. Fatal-panic stubs — ARM64 version (wfe instead of cli;hlt)
  * =================================================================== */
@@ -2046,6 +2067,7 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;
  * =================================================================== */
 #define RV_INT int64_t
 #define CRYPTO_HAS_SERIAL_PUTHEX
+#define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
 
 /* End of ARM64 baremetal_stubs.c */

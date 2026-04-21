@@ -183,6 +183,33 @@ double rt_unbox_float(RuntimeValue value) {
     return f->value;
 }
 
+static double _rv32_double_from_u32(uint32_t value, uint32_t sign_bit) {
+    if (value == 0) return 0.0;
+
+    int highest = 0;
+    uint32_t scan = value;
+    while (scan >>= 1) highest++;
+
+    uint64_t exponent = (uint64_t)(highest + 1023);
+    uint64_t mantissa = ((uint64_t)value) << (52 - highest);
+    uint64_t bits = ((uint64_t)sign_bit << 32) | (exponent << 52) | (mantissa & 0x000fffffffffffffULL);
+    union { uint64_t bits; double value; } out;
+    out.bits = bits;
+    return out.value;
+}
+
+double __floatsidf(int32_t value) {
+    if (value < 0) {
+        uint32_t magnitude = (uint32_t)(-(int64_t)value);
+        return _rv32_double_from_u32(magnitude, 0x80000000U);
+    }
+    return _rv32_double_from_u32((uint32_t)value, 0);
+}
+
+double __floatunsidf(uint32_t value) {
+    return _rv32_double_from_u32(value, 0);
+}
+
 /* ================================================================
  * 4. String operations
  * ================================================================ */
@@ -1390,9 +1417,11 @@ STUB2(ffi_regex_replace)
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */
+#if !defined(__riscv_xlen) || __riscv_xlen >= 64
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->header.type)
 #define CRYPTO_ARRAY_ITEMS(arr) ((arr)->data)
 #include "../../shared/crypto_common.h"
+#endif
 
 /* End of riscv32 baremetal_stubs.c */

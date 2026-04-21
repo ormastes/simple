@@ -1582,15 +1582,7 @@ impl LlvmBackend {
 
                 if matches!(
                     method,
-                    "to_u8"
-                        | "to_i8"
-                        | "to_u16"
-                        | "to_i16"
-                        | "to_u32"
-                        | "to_i32"
-                        | "to_u64"
-                        | "to_i64"
-                        | "to_int"
+                    "to_u8" | "to_i8" | "to_u16" | "to_i16" | "to_u32" | "to_i32" | "to_u64" | "to_i64" | "to_int"
                 ) {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let int_type = match method {
@@ -1811,8 +1803,7 @@ impl LlvmBackend {
                     let fallback_name = resolved
                         .map(|n| n.replace("_dot_", "."))
                         .unwrap_or_else(|| dotted_name.clone());
-                    let func = called_func
-                        .unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
+                    let func = called_func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for arg in &all_args {
                         let val = self.get_vreg(arg, vreg_map)?;
@@ -2175,9 +2166,7 @@ mod tests {
             let boxed = backend
                 .build_box_float_value(float_val.into(), builder, module)
                 .unwrap();
-            let unboxed = backend
-                .build_unbox_float_value(boxed.into(), builder, module)
-                .unwrap();
+            let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
             let _ = unboxed;
             builder.build_return(None).unwrap();
         }

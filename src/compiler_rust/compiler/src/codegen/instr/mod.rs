@@ -309,10 +309,7 @@ pub fn compile_instruction<M: Module>(
             compile_call(ctx, builder, dest, target, args)?;
         }
 
-        MirInst::InlineAsm {
-            instructions,
-            volatile,
-        } => {
+        MirInst::InlineAsm { instructions, volatile } => {
             let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile);
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id

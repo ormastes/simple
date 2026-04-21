@@ -5,11 +5,7 @@ use crate::hir::{HirExpr, NeighborDirection, PointerKind};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_pointer_new_expr(
-        &mut self,
-        kind: PointerKind,
-        value: &HirExpr,
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_pointer_new_expr(&mut self, kind: PointerKind, value: &HirExpr) -> MirLowerResult<VReg> {
         let value_reg = self.lower_expr(value)?;
 
         self.with_func(|func, current_block| {

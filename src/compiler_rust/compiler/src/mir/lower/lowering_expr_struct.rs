@@ -6,11 +6,7 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_struct_init_expr(
-        &mut self,
-        ty: TypeId,
-        fields: &[HirExpr],
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn lower_struct_init_expr(&mut self, ty: TypeId, fields: &[HirExpr]) -> MirLowerResult<VReg> {
         // Lower field expressions first
         let mut field_regs = Vec::new();
         for field in fields {
@@ -250,13 +246,7 @@ impl<'a> MirLowerer<'a> {
             let boxed_index = {
                 let needs_int_boxing = matches!(
                     index.ty,
-                    TypeId::I16
-                        | TypeId::I32
-                        | TypeId::I64
-                        | TypeId::U8
-                        | TypeId::U16
-                        | TypeId::U32
-                        | TypeId::U64
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
                 );
                 let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
                 if needs_int_boxing {
