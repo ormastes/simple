@@ -11,6 +11,7 @@ use app.ui.browser.dom_bridge.{DomTree}
 use common.ui.widget.{UIEvent}
 use std.common.color.types.{Color, from_rgba}
 use std.common.color.convert.{from_hex, from_name}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_url_to_pixels}
 
 extern fn rt_sleep_ms(ms: i64)
 
@@ -389,33 +390,23 @@ fn color_from_keyword(name: text) -> Color:
 # rect. Consumed by src/os/services/wm/wm_service.spl on COMP_CREATE_WEB_WINDOW
 # and by the Wave 4 host path in src/app/ui.web/simple_web_surface_host.spl.
 #
-# Real DOM rendering flows through the pipeline in this module and
-# src/lib/common/render_scene/*; this helper provides the **rect-scoped
-# frame** the compositor composites on top of its own framebuffer. It fills
-# the rect with a chrome band + body so the test harness can assert
-# non-background pixels without loading a real DOM — a deeper integration
-# with browser_engine comes in a follow-up.
+# Real rendering flows through the canonical Simple Web renderer
+# (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl`) and the
+# shared RenderScene/Engine2D-ready pipeline.
 
 fn render_into(rect_w: i32, rect_h: i32, url: text) -> Framebuffer:
     """Render the given URL into a fresh rect-scoped framebuffer.
 
-    This is the stable entry point Wave 3 wires into the compositor;
-    the body below is deliberately thin while the full DOM integration
-    lands in a follow-up. Callers receive a Framebuffer of the requested
-    size with a chrome band (top) + body (fill) so downstream pixel tests
-    can verify non-background content.
+    This is the stable embedding entry point for web windows.  It delegates to
+    the canonical browser-engine facade and converts its ARGB u32 pixels into
+    this legacy Framebuffer's i64 storage.
     """
     var fb = Framebuffer.new(rect_w, rect_h)
-    val body_color: i64 = 0x00FFFFFF          # opaque white body
-    val chrome_color: i64 = 0x002050A0        # chrome band
-    fb.clear(body_color)
-    val chrome_h = if rect_h < 24: rect_h else: 24
-    fb.fill_rect(0, 0, rect_w, chrome_h, chrome_color)
-    # URL is recorded as a visual marker so the test can distinguish
-    # empty vs populated renders; real text rasterization lands in a
-    # follow-up wiring with the browser engine's DOM pipeline.
-    if url.len() > 0:
-        val marker_h = if rect_h < 8: 0 else: 4
-        if marker_h > 0:
-            fb.fill_rect(0, chrome_h, rect_w, marker_h, chrome_color)
+    if rect_w <= 0 or rect_h <= 0:
+        return fb
+    val pixels = simple_web_render_url_to_pixels(url, rect_w, rect_h)
+    var idx: i32 = 0
+    while idx < pixels.len() and idx < fb.pixels.len():
+        fb.pixels[idx] = pixels[idx].to_i64()
+        idx = idx + 1
     fb

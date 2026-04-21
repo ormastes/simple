@@ -9,7 +9,7 @@
 //   5. Applies server-sent snapshot / patch_batch via RetainedRenderer.
 //
 // Optimistic drag/resize: a separate .wm-ghost overlay is shown during drag.
-// It is removed when the next patch_batch arrives (or after 60 ms TTL).
+// It is removed when the next patch_batch arrives or when the drag completes.
 // The server's patch_batch is the ground truth; the ghost is cosmetic only.
 
 // RetainedRenderer is loaded via dynamic import so this file can remain a
@@ -20,7 +20,6 @@ const PROTOCOL_VERSION = 1;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS  = 16000;
 const ACK_INTERVAL_MS   = 500;
-const GHOST_TTL_MS      = 60;  // optimistic ghost lifetime
 const HOST_NATIVE_EVENT_SOURCE = 'native_event';
 const NATIVE_SUPPRESSION_TTL_MS = 500;
 const NATIVE_BURST_DEBOUNCE_MS = 80;
@@ -53,6 +52,8 @@ class SimpleWindowManager {
     this._nativeWindowEventSuppressions = new Map();
     this._nativeWindowBurstTimers = new Map();
     this._electronWindows = new Map();
+    this._electronActiveWindowId = '';
+    this._electronZCounter = 20;
 
     // Load renderer then begin auth.
     this._init();
@@ -324,6 +325,9 @@ class SimpleWindowManager {
       if (action === 'launch' && el.dataset.appId) {
         this._sendLaunch(el.dataset.appId);
       } else if (action === 'focus' && el.dataset.windowIdHint) {
+        if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
+          this._electronFocusWindow(el.dataset.windowIdHint);
+        }
         this._sendWindowCmd('focus', { window_id_hint: el.dataset.windowIdHint });
       }
     });
@@ -354,6 +358,7 @@ class SimpleWindowManager {
     for (const w of (model.running || [])) {
       const item = document.createElement('div');
       item.className = 'wm-taskbar-item running'
+        + (w.active ? ' active' : '')
         + (w.minimized ? ' minimized' : '');
       item.textContent = (w.minimized ? '[-] ' : '') + (w.title || w.window_id);
       item.dataset.action = 'focus';
@@ -585,7 +590,13 @@ class SimpleWindowManager {
     body.innerHTML = msg.html || '';
     winEl.appendChild(body);
     this.desktop.appendChild(winEl);
-    this._electronWindows.set(windowId, { winEl, body, title });
+    this._electronWindows.set(windowId, {
+      winEl,
+      body,
+      title,
+      titleText: msg.title || windowId,
+      minimized: false
+    });
     this._electronFocusWindow(windowId);
   }
 
@@ -600,6 +611,10 @@ class SimpleWindowManager {
     if (!entry) return;
     entry.winEl.remove();
     this._electronWindows.delete(key);
+    if (this._electronActiveWindowId === key) {
+      this._electronActiveWindowId = '';
+    }
+    this._renderElectronTaskbar();
   }
 
   _electronMoveWindow(windowId, x, y) {
@@ -622,11 +637,39 @@ class SimpleWindowManager {
     for (const item of this._electronWindows.values()) item.winEl.classList.remove('focused');
     entry.winEl.classList.add('focused');
     entry.winEl.style.display = '';
+    entry.winEl.style.zIndex = String(++this._electronZCounter);
+    entry.minimized = false;
+    this._electronActiveWindowId = String(windowId || '');
+    this._renderElectronTaskbar();
   }
 
   _electronMinimizeWindow(windowId) {
     const entry = this._electronWindows.get(String(windowId || ''));
-    if (entry) entry.winEl.style.display = 'none';
+    if (!entry) return;
+    entry.winEl.style.display = 'none';
+    entry.minimized = true;
+    if (this._electronActiveWindowId === String(windowId || '')) {
+      this._electronActiveWindowId = '';
+    }
+    this._renderElectronTaskbar();
+  }
+
+  _renderElectronTaskbar() {
+    if (!this.taskbar) return;
+    if (this._electronWindows.size === 0) {
+      this.taskbar.innerHTML = '';
+      return;
+    }
+    const running = [];
+    for (const [windowId, entry] of this._electronWindows.entries()) {
+      running.push({
+        window_id: windowId,
+        title: entry.titleText || windowId,
+        minimized: !!entry.minimized,
+        active: windowId === this._electronActiveWindowId
+      });
+    }
+    this.renderTaskbarModel({ pinned: [], running, tray: [] });
   }
 
   // -------------------------------------------------------------------------
@@ -652,7 +695,7 @@ class SimpleWindowManager {
   }
 
   // -------------------------------------------------------------------------
-  // Ghost overlay (optimistic drag/resize — 60 ms TTL)
+  // Ghost overlay (optimistic drag/resize)
   // -------------------------------------------------------------------------
 
   _createGhost(winEl) {
@@ -684,15 +727,6 @@ class SimpleWindowManager {
     }
   }
 
-  _scheduleGhostExpiry(state) {
-    clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
-      if (state.ghostEl) state.ghostEl.remove();
-      if (this.dragState === state)   this.dragState = null;
-      if (this.resizeState === state) this.resizeState = null;
-    }, GHOST_TTL_MS);
-  }
-
   // -------------------------------------------------------------------------
   // Input / drag
   // -------------------------------------------------------------------------
@@ -700,12 +734,16 @@ class SimpleWindowManager {
   _onTitlebarMousedown(e, winEl) {
     if (e.target.closest('.wm-traffic-lights')) return;
     const surfaceId = winEl.dataset.surfaceId ?? '';
+    const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId);
+    if (isElectronWindow) {
+      this._electronFocusWindow(surfaceId);
+    }
     // Bring to front request (server decides z-order).
     this._sendWindowCmd('focus', { window_id_hint: surfaceId });
 
-    const ghost = this._createGhost(winEl);
+    const ghost = isElectronWindow ? null : this._createGhost(winEl);
     this.dragState = {
-      surfaceId, ghostEl: ghost, timer: null,
+      surfaceId, ghostEl: ghost, timer: null, isElectronWindow,
       startX: e.clientX, startY: e.clientY,
       origLeft: parseFloat(winEl.style.left || 0),
       origTop:  parseFloat(winEl.style.top  || 0),
@@ -716,12 +754,16 @@ class SimpleWindowManager {
 
   _onResizeMousedown(e, winEl, direction) {
     const surfaceId = winEl.dataset.surfaceId ?? '';
+    const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId);
+    if (isElectronWindow) {
+      this._electronFocusWindow(surfaceId);
+    }
     this._sendWindowCmd('focus', { window_id_hint: surfaceId });
 
-    const ghost = this._createGhost(winEl);
+    const ghost = isElectronWindow ? null : this._createGhost(winEl);
     const r = winEl.getBoundingClientRect();
     this.resizeState = {
-      surfaceId, ghostEl: ghost, timer: null, direction,
+      surfaceId, ghostEl: ghost, timer: null, direction, isElectronWindow,
       startX: e.clientX, startY: e.clientY,
       origW: r.width, origH: r.height,
       winEl
@@ -734,12 +776,15 @@ class SimpleWindowManager {
       const ds = this.dragState;
       const dx = e.clientX - ds.startX;
       const dy = e.clientY - ds.startY;
-      // Move the ghost only — do NOT mutate the actual window element.
-      // Optimistic: ghost is a 60 ms cosmetic preview.
-      const dr = this.desktop.getBoundingClientRect();
-      ds.ghostEl.style.left = (ds.origLeft + dx) + 'px';
-      ds.ghostEl.style.top  = (ds.origTop  + dy) + 'px';
-      this._scheduleGhostExpiry(ds);
+      const nextX = ds.origLeft + dx;
+      const nextY = ds.origTop + dy;
+      if (ds.isElectronWindow) {
+        this._electronMoveWindow(ds.surfaceId, Math.round(nextX), Math.round(nextY));
+      } else if (ds.ghostEl) {
+        // Optimistic: ghost is cosmetic; server patches or mouseup reconcile.
+        ds.ghostEl.style.left = nextX + 'px';
+        ds.ghostEl.style.top  = nextY + 'px';
+      }
     }
     if (this.resizeState) {
       const rs = this.resizeState;
@@ -752,9 +797,12 @@ class SimpleWindowManager {
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
       if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
       if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
-      rs.ghostEl.style.width  = w + 'px';
-      rs.ghostEl.style.height = h + 'px';
-      this._scheduleGhostExpiry(rs);
+      if (rs.isElectronWindow) {
+        this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
+      } else if (rs.ghostEl) {
+        rs.ghostEl.style.width  = w + 'px';
+        rs.ghostEl.style.height = h + 'px';
+      }
     }
   }
 
@@ -765,6 +813,9 @@ class SimpleWindowManager {
       const dy = e.clientY - ds.startY;
       const newX = ds.origLeft + dx;
       const newY = ds.origTop  + dy;
+      if (this.transport === 'electron-ipc' && this._electronWindows.has(ds.surfaceId)) {
+        this._electronMoveWindow(ds.surfaceId, Math.round(newX), Math.round(newY));
+      }
       // Send authoritative move request; server will reconcile and patch back.
       // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
       this._sendWindowCmd('move', {
@@ -787,6 +838,9 @@ class SimpleWindowManager {
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
       if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
       if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      if (this.transport === 'electron-ipc' && this._electronWindows.has(rs.surfaceId)) {
+        this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
+      }
       this._sendWindowCmd('resize', {
         window_id_hint: rs.surfaceId,
         w: Math.round(w),
@@ -821,6 +875,9 @@ class SimpleWindowManager {
       const win = e.target.closest('.wm-window');
       if (win) {
         const surfaceId = win.dataset.surfaceId ?? win.dataset.canonicalId ?? '';
+        if (this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId)) {
+          this._electronFocusWindow(surfaceId);
+        }
         if (surfaceId) this._sendWindowCmd('focus', { window_id_hint: surfaceId });
       }
     });
@@ -833,6 +890,10 @@ class SimpleWindowManager {
       if (!win) return;
       const surfaceId = win.dataset.surfaceId ?? '';
       const action = btn.dataset.action;
+      if (this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId)) {
+        if (action === 'close') this._electronCloseWindow(surfaceId);
+        else if (action === 'minimize') this._electronMinimizeWindow(surfaceId);
+      }
       if      (action === 'close')    this._sendWindowCmd('close',    { window_id_hint: surfaceId });
       else if (action === 'minimize') this._sendWindowCmd('minimize', { window_id_hint: surfaceId });
       else if (action === 'maximize') this._sendWindowCmd('maximize', { window_id_hint: surfaceId });
