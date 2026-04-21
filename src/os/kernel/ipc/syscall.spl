@@ -1009,6 +1009,8 @@ fn _path_bytes_to_text(bytes: [u8]) -> text:
         chars.push((b.to_i64()).to_char())
     chars.join("")
 
+extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
+
 fn _copy_user_bytes(ptr_addr: u64, len: u64) -> Result<[u8], text>:
     if ptr_addr == 0:
         return Err("null path pointer")
@@ -1016,15 +1018,15 @@ fn _copy_user_bytes(ptr_addr: u64, len: u64) -> Result<[u8], text>:
         return Err("empty path")
     if len > MAX_BINARY_PATH_LEN:
         return Err("path too long")
-    unsafe:
-        val ptr = ptr_addr as *const u8
-        var bytes: [u8] = []
-        var i: u64 = 0
-        while i < len:
-            val byte_ptr = (ptr + (i as i64)) as *const u8
-            bytes.push(*byte_ptr)
-            i = i + 1
-        Ok(bytes)
+    # The unsafe pointer-deref loop miscompiles in the baremetal freestanding
+    # build (see rt_copy_user_byte in examples/.../baremetal_stubs.c). Route
+    # through a one-byte-at-a-time C helper instead.
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        bytes.push(rt_copy_user_byte(ptr_addr + i))
+        i = i + 1
+    Ok(bytes)
 
 fn _copy_user_text(ptr_addr: u64, len: u64) -> Result<text, text>:
     serial_println("[syscall13] copy_user_text enter")

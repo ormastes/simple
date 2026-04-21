@@ -101,6 +101,54 @@ void rt_write_msr(uint32_t msr, uint64_t value)
     __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
+/* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
+ * instruction. The Simple-side asm-volatile block in
+ * src/os/userlib/syscall_raw.spl currently lowers to a no-op stub that
+ * simply returns a constant, so posix_spawn → syscall(13, ...) never
+ * traps. Until the Simple compiler lowers `asm volatile` to the real
+ * instruction, route through this extern.
+ *
+ * Register convention matches the x86_64 System V SYSCALL ABI:
+ *   rax = syscall number
+ *   rdi, rsi, rdx, r10, r8 = args 0..4  (r10 for arg3, NOT rcx — rcx
+ *     holds the caller's saved RIP post-SYSCALL)
+ *   rax = int64_t return value
+ */
+/* rt_copy_user_byte — single-byte copy from a user-mode virtual address.
+ * The Simple-side `_copy_user_bytes` loop in src/os/kernel/ipc/syscall.spl
+ * appears to miscompile in the baremetal freestanding build (args.arg1 = 22
+ * is observed at the marker before entry, but _copy_user_bytes returns an
+ * empty Vec for the same arguments). This helper lets the Simple code read
+ * one byte at a time from a raw u64 address via plain C pointer deref,
+ * sidestepping whatever the asm-volatile / unsafe lowering does. */
+uint8_t rt_copy_user_byte(uint64_t ptr_addr) {
+    return *(const uint8_t*)(uintptr_t)ptr_addr;
+}
+
+int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
+                       uint64_t a3, uint64_t a4) {
+    int64_t result;
+    /* Load every register explicitly from memory to avoid register-allocator
+     * reordering between the Sys V C ABI (arg3 in rcx, arg4 in r8, arg5 in
+     * r9) and the SYSCALL ABI (arg3 in r10, arg4 in r8). Memory operands are
+     * slower but unambiguous; the caller is in the kernel-stack path so the
+     * extra spill is negligible. */
+    __asm__ volatile(
+        "movq %1, %%rax\n\t"
+        "movq %2, %%rdi\n\t"
+        "movq %3, %%rsi\n\t"
+        "movq %4, %%rdx\n\t"
+        "movq %5, %%r10\n\t"
+        "movq %6, %%r8\n\t"
+        "syscall\n\t"
+        "movq %%rax, %0"
+        : "=m"(result)
+        : "m"(id), "m"(a0), "m"(a1), "m"(a2), "m"(a3), "m"(a4)
+        : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r10", "r11", "memory"
+    );
+    return result;
+}
+
 #else
 /* Stubs for non-x86 host analysis (never called at runtime) */
 static inline void outb(uint16_t p, uint8_t v) { (void)p; (void)v; }
