@@ -826,10 +826,13 @@ class HostWmHandle:
 
     me run_once():
         """Pump host events and run a single compositor tick."""
+        if not self.wm.is_running():
+            return
+        self.pump_host_events()
         if self.wm.is_running():
-            self.pump_host_events()
-            if self.wm.is_running():
-                self.compositor.tick()
+            self.compositor.tick()
+        else:
+            self.shutdown()
 
     me tick_forever():
         """Block-loop: run compositor ticks until the WM stops.
@@ -865,6 +868,8 @@ class HostWmHandle:
 
     me shutdown():
         """Stop the WM and release host handles owned by this bootstrap."""
+        if not self.wm.is_running() and self.window_id == 0 and self.event_loop_id == 0:
+            return
         self.wm.stop()
         self.compositor.shutdown_apps()
         if self.window_id != 0:
@@ -898,9 +903,15 @@ fn _host_backend_selector(kind: HostBackendKind) -> i64:
     # `src/runtime/hosted/select.rs` dispatcher implementation.
     0
 
+fn host_backend_uses_native_window(kind: HostBackendKind) -> bool:
+    """Return true when this backend should own a host-native window surface."""
+    if kind == HostBackendKind.Tui:
+        return false
+    true
+
 fn host_wm_surface_failure_reason(config: HostWmConfig, event_loop_id: i64, window_id: i64) -> text?:
     """Return the explicit bootstrap boundary that would prevent host startup."""
-    if config.backend == HostBackendKind.Tui:
+    if not host_backend_uses_native_window(config.backend):
         return "tui host compositor bootstrap is not implemented"
     if config.initial_size.width.to_i32() <= 0 or config.initial_size.height.to_i32() <= 0:
         return "host compositor size must be nonzero"
@@ -912,7 +923,7 @@ fn host_wm_surface_failure_reason(config: HostWmConfig, event_loop_id: i64, wind
 
 fn _create_host_surface(config: HostWmConfig) -> HostSurface?:
     """Create the native host event loop/window, using config.title."""
-    if config.backend == HostBackendKind.Tui:
+    if not host_backend_uses_native_window(config.backend):
         return nil
     if config.initial_size.width.to_i32() <= 0 or config.initial_size.height.to_i32() <= 0:
         return nil

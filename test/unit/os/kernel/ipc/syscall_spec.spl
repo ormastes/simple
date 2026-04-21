@@ -13,7 +13,6 @@ use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WR
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH, _set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
-use os.apps.hello_world.hello_world.{hello_world_remote_main}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 
@@ -437,7 +436,7 @@ describe "syscall_handler":
         val found = if spawned == nil: 0 else: 1
         expect(found).to_equal(1)
 
-    it "falls back to the builtin app entry when no executable bytes exist":
+    it "rejects missing executable bytes without resident fallback":
         val path = "/sys/apps/hello_world"
         var scheduler = Scheduler.new()
         val result = syscall_handler(
@@ -454,14 +453,9 @@ describe "syscall_handler":
             IpcManager.new(),
             KernelLog.new(16)
         )
-        expect(result.value).to_be_greater_than(0)
-        val spawned = scheduler.get_task(TaskId(id: result.value as u64))
-        val found = if spawned == nil: 0 else: 1
-        expect(found).to_equal(1)
-        if spawned != nil:
-            val task = spawned
-            expect(task.is_user).to_equal(false)
-            expect(task.entry_point).to_equal(hello_world_remote_main as u64)
+        expect(result.value).to_equal(-2)
+        val spawned = scheduler.get_task(TaskId(id: 1))
+        expect(spawned).to_be_nil()
 
     it "direct sentinel spawn creates process-backed user task for valid filesystem ELF":
         _clear_synthetic_vfs_for_test()

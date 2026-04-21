@@ -3,7 +3,7 @@
 # Usage: sh scripts/make_os_disk.shs [size_mb] [output_path] [seed_dir] [arch]
 #
 # Creates a FAT32-formatted disk image with test fixture files.
-# Required by QEMU scenarios: x64-nvme-fat32, x64-full-stack
+# Required by QEMU scenarios: x64-nvme-fat32, x64-desktop-disk, x64-full-stack
 #
 # Fixture files (used by test/system/os_*_spec.spl):
 #   hello.txt    — "Hello from SimpleOS!\n"  (storage read test)
@@ -12,36 +12,54 @@
 #   config.sdn   — SDN config fixture        (config read test)
 #   testdir/     — empty directory            (readdir/mkdir test)
 #
-# Tool priority: mtools (mcopy/mmd) > loop mount (Linux) > skip
+# Tool priority: qemu-img/dd create, mformat/mkfs.fat format,
+# mtools or Python FAT32 populate, optional loop mount fallback.
 
 SIZE_MB="${1:-64}"
 OUTPUT="${2:-build/os/fat32.img}"
 SEED_DIR="${3:-}"
 ARCH_MODE="${4:-x86_64}"
+SIMPLEOS_IMAGE_VERSION="${SIMPLEOS_IMAGE_VERSION:-0.1.0}"
 POPULATED=0
 ELFSEEDED=0
 
 # Ensure output directory exists
 mkdir -p "$(dirname "$OUTPUT")"
 
-# Create empty disk image
-dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null
-echo "[make_os_disk] Created ${SIZE_MB}MB image: $OUTPUT"
+# Create empty disk image. qemu-img is preferred when installed because it is
+# portable across Linux/macOS CI images and never needs loop privileges.
+if command -v qemu-img >/dev/null 2>&1; then
+    if qemu-img create -f raw "$OUTPUT" "${SIZE_MB}M" >/dev/null; then
+        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with qemu-img: $OUTPUT"
+    else
+        echo "[make_os_disk] ERROR: qemu-img failed to create raw image: $OUTPUT"
+        exit 1
+    fi
+else
+    if dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null; then
+        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with dd: $OUTPUT"
+    else
+        echo "[make_os_disk] ERROR: dd failed to create raw image: $OUTPUT"
+        exit 1
+    fi
+fi
 
-# Format as FAT32 (use mkfs.fat or mformat)
+# Format as FAT32. Prefer mformat when present so the mtools-only path can
+# create and populate media without any mount helper.
 FORMATTED=0
-if command -v mkfs.fat >/dev/null 2>&1; then
-    mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
-    echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
-    FORMATTED=1
-elif command -v mformat >/dev/null 2>&1; then
+if command -v mformat >/dev/null 2>&1; then
     mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
     echo "[make_os_disk] Formatted as FAT32 (mformat)"
     FORMATTED=1
+elif command -v mkfs.fat >/dev/null 2>&1; then
+    mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
+    echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
+    FORMATTED=1
 else
-    echo "[make_os_disk] WARNING: No mkfs.fat or mformat found"
-    echo "[make_os_disk] Image created but not formatted"
-    exit 0
+    echo "[make_os_disk] ERROR: no FAT32 formatter found"
+    echo "[make_os_disk] Install mtools (mformat) or dosfstools (mkfs.fat)."
+    echo "[make_os_disk] Examples: apt install mtools dosfstools; brew install mtools dosfstools"
+    exit 1
 fi
 
 # ============================================================================
@@ -67,6 +85,11 @@ hostname: "simpleos"
 version: "0.1.0"
 boot_mode: "serial"
 SDNEOF
+
+mkdir -p "$TMPDIR/SYS"
+printf "simpleos=%s\nfilesystem=fat32\nnvfs=available\n" "$SIMPLEOS_IMAGE_VERSION" > "$TMPDIR/SYS/VERSION.TXT"
+printf "nvfs-image-version=%s\n" "$SIMPLEOS_IMAGE_VERSION" > "$TMPDIR/SYS/NVFSVER.TXT"
+cp "$TMPDIR/SYS/VERSION.TXT" "$TMPDIR/VERSION.TXT"
 
 cat > "$TMPDIR/BROWSER.APP" << 'APPEOF'
 # SimpleOS transitional disk launch manifest
@@ -536,8 +559,14 @@ if command -v mcopy >/dev/null 2>&1; then
     echo "[make_os_disk] Added filesystem tree (mtools)"
     POPULATED=1
 
-# Method 2: loop mount (Linux only, requires root or sudo)
-elif [ "$(uname -s)" = "Linux" ]; then
+# Method 2: pure userland fallback. It avoids privileged loop mounts and keeps
+# the QEMU disk lanes usable in unprivileged containers where Python exists.
+elif populate_with_python_fat32; then
+    echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
+    POPULATED=1
+
+# Method 3: explicit loop mount fallback for developer machines.
+elif [ "$(uname -s)" = "Linux" ] && [ "${SIMPLEOS_DISK_ALLOW_LOOP:-0}" = "1" ]; then
     MOUNTDIR="$(mktemp -d)"
     if mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
         cp -R "$TMPDIR"/. "$MOUNTDIR"/
@@ -545,32 +574,25 @@ elif [ "$(uname -s)" = "Linux" ]; then
         umount "$MOUNTDIR"
         echo "[make_os_disk] Added filesystem tree (loop mount)"
         POPULATED=1
-    elif sudo mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
+    elif [ "${SIMPLEOS_DISK_ALLOW_SUDO_LOOP:-0}" = "1" ] && command -v sudo >/dev/null 2>&1 && sudo mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
         sudo cp -R "$TMPDIR"/. "$MOUNTDIR"/
         sudo sync
         sudo umount "$MOUNTDIR"
         echo "[make_os_disk] Added filesystem tree (sudo loop mount)"
         POPULATED=1
     else
-        echo "[make_os_disk] WARNING: loop mount failed -- no fixture files added"
-        if populate_with_python_fat32; then
-            echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
-            POPULATED=1
-        fi
+        echo "[make_os_disk] WARNING: loop mount fallback failed"
     fi
     rmdir "$MOUNTDIR" 2>/dev/null || true
 else
-    echo "[make_os_disk] WARNING: No mtools and not Linux -- no fixture files added"
-    echo "[make_os_disk] Install mtools: brew install mtools (macOS) / apt install mtools (Linux)"
-    if populate_with_python_fat32; then
-        echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
-        POPULATED=1
-    fi
+    echo "[make_os_disk] WARNING: no userland FAT32 population tool succeeded"
 fi
 
 if [ "$POPULATED" -ne 1 ]; then
     echo "[make_os_disk] ERROR: FAT32 image was formatted but not populated"
-    echo "[make_os_disk] Install mtools or use Linux loop mount support for this .shs entrypoint"
+    echo "[make_os_disk] Install mtools for mcopy, or python3 for the built-in FAT32 writer."
+    echo "[make_os_disk] As a last resort on Linux, retry with SIMPLEOS_DISK_ALLOW_LOOP=1."
+    echo "[make_os_disk] Sudo loop fallback is opt-in: SIMPLEOS_DISK_ALLOW_SUDO_LOOP=1."
     exit 1
 fi
 

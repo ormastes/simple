@@ -39,8 +39,9 @@ catalog/layout gaps:
   opt-in advisory host smoke.
 - Shared host WM entrypoints have selector/precedence tests across Electron,
   Tauri, TUI, browser, web server, and TUI-web entrypoints.
-- Host compositor bootstrap uses title/config, event pumping, close/resize
-  behavior, and documented Cocoa/Win32 winit-alias boundaries.
+- Host compositor bootstrap uses title/config, event pumping, close-driven
+  teardown, idle sleeping, close/resize behavior, and documented Cocoa/Win32
+  winit-alias boundaries.
 - Manifest-backed host content now comes from app content hooks with a clear
   unsupported page for manifests without hooks.
 - Pinned app order and tray state can be saved and survive runtime reset; tests

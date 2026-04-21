@@ -16,17 +16,18 @@
 | stm32h7_trace32 | arm32 | trace32 | compiled | **host_aware** | yes | debugger_console | register_readback | `test/system/t32_terminal_power_remote_spec.spl` |
 | ghdl_rv32_semihost | riscv32 | ghdl_sim | compiled | **host_aware** | yes | semihost_text | exit_code | `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` |
 | ghdl_rv32_mailbox | riscv32 | ghdl_sim | compiled | **host_aware** | yes | ram_sentinel | register_readback | `test/feature/baremetal/ghdl_riscv32_mailbox_spec.spl` |
-| fpga_jtag_zedboard | arm32 | openocd_gdb | structural | **in_progress** | no | register_readback | — | *(none — quarantined)* |
+| fpga_jtag_zedboard | arm32 | openocd_gdb | structural | **excluded_public** | no | register_readback | — | *(none — quarantined)* |
 | rv32_raw_injected | riscv32 | qemu_gdb | structural | transport_only | no | register_readback | — | `test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl` |
 | baremetal_runtime_check | riscv32 | qemu_gdb | interpreter | transport_only | no | exit_code | — | `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` |
+| riscv_external_formal | riscv32 | external_formal | structural | transport_only | no | exit_code | — | `test/system/hardware/rv32_external_formal_harness_spec.spl` |
 
 ## Classification Summary
 
 - **Authoritative (8):** Stable + host-aware lanes
 - **Stable (3):** QEMU RV32 semihost, QEMU ARM semihost, x86_64 direct boot
 - **Host-aware (5):** CH32V307 via wlink, STM32H7 via OpenOCD, STM32H7 via TRACE32, GHDL RV32 semihost, GHDL RV32 mailbox
-- **Transport-only (2):** RV32 raw injected regression, baremetal runtime check
-- **In-progress (1):** ZedBoard/FPGA JTAG
+- **Transport-only (3):** RV32 raw injected regression, baremetal runtime check, RV32 external formal proof
+- **Publicly excluded (1):** ZedBoard/FPGA JTAG
 
 ## Lane Definitions
 
@@ -54,12 +55,13 @@ Verify debugger plumbing, not authoritative workload execution:
 
 - **rv32_raw_injected**: Raw code injection via QEMU GDB for regression testing.
 - **baremetal_runtime_check**: Runtime environment validation (composite parsing, tool discovery).
+- **riscv_external_formal**: External formal proof harness. Verifies proof integration plumbing, not a compiled target execution result.
 
-### In-Progress Lanes
+### Publicly Excluded Lanes
 
-Not yet promoted to supported status:
+Excluded from the public supported lane set until a later hardware milestone provides a real execution proof:
 
-- **fpga_jtag_zedboard**: ZedBoard Zynq-7020 FPGA via JTAG. **Quarantined** — no authoritative compiled execution proof exists. Will remain in-progress until JTAG chain + upload/run/result proof is established, or will be explicitly excluded.
+- **fpga_jtag_zedboard**: ZedBoard Zynq-7020 FPGA via JTAG. **Quarantined / excluded_public** — no authoritative compiled execution proof exists. Future work may re-open this only after JTAG chain + upload/run/result proof is established.
 
 ## Capability Detection
 

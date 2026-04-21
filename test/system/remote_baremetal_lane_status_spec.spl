@@ -12,7 +12,8 @@ use std.nogc_sync_mut.debug.remote.exec.lane_descriptor.{
     LaneDescriptor, LaneStatus, ProofClass, AdapterKind, ResultChannelKind
 }
 use std.nogc_sync_mut.debug.remote.exec.capability_report.{
-    CapabilityReport, CapabilityStatus, probe_command, probe_external_formal
+    CapabilityReport, CapabilityStatus, probe_command, probe_external_formal,
+    probe_openocd_capability, probe_trace32_capability
 }
 use std.nogc_sync_mut.debug.remote.exec.result_channel.{
     ResultPacket, ResultVerifier
@@ -188,6 +189,7 @@ describe "ResultVerifier":
 # ============================================================================
 
 describe "LaneRegistry":
+    """The default registry is the source of truth for public lane classification."""
     it "contains exactly 12 lanes":
         val registry = LaneRegistry.default()
         expect(registry.all().len()).to_equal(12)
@@ -204,13 +206,58 @@ describe "LaneRegistry":
         val registry = LaneRegistry.default()
         expect(registry.transport_only_lanes().len()).to_equal(3)
 
-    it "has 1 in-progress lanes":
+    it "has no in-progress lanes":
         val registry = LaneRegistry.default()
-        expect(registry.in_progress_lanes().len()).to_equal(1)
+        expect(registry.in_progress_lanes().len()).to_equal(0)
+
+    it "has 1 publicly excluded lane":
+        val registry = LaneRegistry.default()
+        expect(registry.excluded_public_lanes().len()).to_equal(1)
 
     it "has 8 authoritative lanes":
         val registry = LaneRegistry.default()
         expect(registry.authoritative_lanes().len()).to_equal(8)
+
+    it "assigns concrete result channels to every authoritative lane":
+        val registry = LaneRegistry.default()
+        val lanes = registry.authoritative_lanes()
+        for lane in lanes:
+            expect(lane.authoritative_spec_path.len()).to_be_greater_than(0)
+
+        val qemu_rv32 = registry.find("qemu_rv32_semihost")
+        match qemu_rv32:
+            Some(l):
+                expect(l.primary_result_channel).to_equal(ResultChannelKind.semihost_text)
+                expect(l.fallback_result_channel).to_equal(Some(ResultChannelKind.exit_code))
+            nil: expect(false).to_equal(true)
+
+        val direct_boot = registry.find("x86_64_direct_boot")
+        match direct_boot:
+            Some(l):
+                expect(l.primary_result_channel).to_equal(ResultChannelKind.exit_code)
+                expect(l.fallback_result_channel).to_be_nil()
+            nil: expect(false).to_equal(true)
+
+        val openocd = registry.find("stm32h7_openocd")
+        match openocd:
+            Some(l):
+                expect(l.primary_result_channel).to_equal(ResultChannelKind.register_readback)
+                expect(l.fallback_result_channel).to_equal(Some(ResultChannelKind.ram_sentinel))
+            nil: expect(false).to_equal(true)
+
+        val trace32 = registry.find("stm32h7_trace32")
+        match trace32:
+            Some(l):
+                expect(l.primary_result_channel).to_equal(ResultChannelKind.debugger_console)
+                expect(l.fallback_result_channel).to_equal(Some(ResultChannelKind.register_readback))
+            nil: expect(false).to_equal(true)
+
+        val mailbox = registry.find("ghdl_rv32_mailbox")
+        match mailbox:
+            Some(l):
+                expect(l.primary_result_channel).to_equal(ResultChannelKind.ram_sentinel)
+                expect(l.fallback_result_channel).to_equal(Some(ResultChannelKind.register_readback))
+            nil: expect(false).to_equal(true)
 
     it "finds lanes by id":
         val registry = LaneRegistry.default()
@@ -267,6 +314,15 @@ describe "LaneRegistry":
         val lane = registry.find("ghdl_rv32_sim")
         expect(lane).to_be_nil()
 
+    it "looks up fpga_jtag_zedboard as publicly excluded":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("fpga_jtag_zedboard")
+        match lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.excluded_public)
+                expect(l.is_authoritative()).to_equal(false)
+            nil: expect(false).to_equal(true)
+
 
 # ============================================================================
 # LaneStatusReporter
@@ -278,6 +334,7 @@ describe "LaneStatusReporter":
         val report = reporter.report_text()
         expect(report).to_contain("Stable Lanes")
         expect(report).to_contain("Host-Aware")
+        expect(report).to_contain("Publicly Excluded Lanes")
         expect(report).to_contain("stable and host-aware lanes are authoritative")
 
     it "generates markdown report":
@@ -286,6 +343,7 @@ describe "LaneStatusReporter":
         expect(report).to_contain("| Lane ID |")
         expect(report).to_contain("| Authoritative |")
         expect(report).to_contain("- **Authoritative**: 8 lanes (stable + host-aware)")
+        expect(report).to_contain("- **Publicly excluded**: 1 lanes")
 
     it "generates SDN report":
         val reporter = LaneStatusReporter.new()
@@ -312,6 +370,31 @@ describe "Probe infrastructure":
         expect(report.lane_id).to_equal("riscv_external_formal")
         expect(report.is_acceptable()).to_equal(true)
         expect(report.detail.len()).to_be_greater_than(0)
+
+    it "treats missing OpenOCD and TRACE32 tools as acceptable host-aware skips":
+        val registry = LaneRegistry.default()
+
+        val openocd_lane = registry.find("stm32h7_openocd")
+        match openocd_lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.host_aware)
+                val report = probe_openocd_capability(false)
+                expect(report.status).to_equal(CapabilityStatus.skip_missing_tool)
+                expect(report.tool_name).to_equal("openocd")
+                expect(report.is_runnable()).to_equal(false)
+                expect(report.is_acceptable()).to_equal(true)
+            nil: expect(false).to_equal(true)
+
+        val trace32_lane = registry.find("stm32h7_trace32")
+        match trace32_lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.host_aware)
+                val report = probe_trace32_capability(false)
+                expect(report.status).to_equal(CapabilityStatus.skip_missing_tool)
+                expect(report.tool_name).to_equal("t32rem")
+                expect(report.is_runnable()).to_equal(false)
+                expect(report.is_acceptable()).to_equal(true)
+            nil: expect(false).to_equal(true)
 
     slow_it "probes all lanes without crashing":
         val registry = LaneRegistry.default()

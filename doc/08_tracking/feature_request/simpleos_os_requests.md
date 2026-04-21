@@ -214,24 +214,29 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex scheduler/process follow-up
 - **Target:** simpleos-os build/compiler throughput
 - **Priority:** P1
-- **Status:** Requested
+- **Status:** Implemented
 - **Requested-semantics:**
   The x86_64 full OS native-build path should not fail because the unrelated
   `examples/simple_os/arch/x86_64/wm_entry.spl` module exceeds the current
   per-file 60 second compilation timeout.
 - **Acceptance-criteria:**
-  - [ ] Identify whether the timeout is caused by compiler performance,
+  - [x] Identify whether the timeout is caused by compiler performance,
         source inclusion breadth, or `wm_entry.spl` complexity.
-  - [ ] Native-building `examples/simple_os/arch/x86_64/os_entry.spl` either
+  - [x] Native-building `examples/simple_os/arch/x86_64/os_entry.spl` either
         excludes unrelated entry modules or compiles `wm_entry.spl` within the
         configured timeout.
-  - [ ] Add a focused regression check for the selected fix.
+  - [x] Add a focused regression check for the selected fix.
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
 - **Related-design-doc:** none
 - **Related-issue:** none
 - **Notes:** During AP trampoline verification, full native-build progressed
   past C/assembly boot-object checks and parser cleanup, then failed only on
   `wm_entry.spl: timeout (60s)`.
+  Implemented by routing OS native-build argv construction through
+  `os_native_build_args`, which always passes `--entry-closure` for the
+  selected OS entry. Regression coverage:
+  `test/unit/os/qemu_runner_spec.spl` and
+  `test/system/simpleos_native_build_entry_closure_spec.spl`.
 
 ### FR-SOS-024 — Complete syscall 13 direct user-process handoff
 

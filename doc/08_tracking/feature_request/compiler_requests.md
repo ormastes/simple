@@ -37,7 +37,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-001 investigation session
 - **Target:** compiler — import resolver / name-resolution pass
 - **Priority:** P0
-- **Status:** Open (updated 2026-04-18)
+- **Status:** Implemented (updated 2026-04-22)
 - **Requested-semantics:**
   When two structs share the same short name but live in different fully-qualified
   module paths (e.g., `compiler.common.driver_core_types.CompileOptions` vs
@@ -48,16 +48,15 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   must resolve struct names according to the explicitly imported module namespace,
   not by last-seen or alphabetical order among all loaded modules.
 - **Acceptance-criteria:**
-  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+  - [x] `use compiler.common.driver_core_types.{CompileOptions}` followed by
         `val opts = CompileOptions.default(); print(opts.input_files.len().to_text())`
         succeeds in the self-hosted binary without "Function not found".
-  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to the
+  - [x] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to the
         7-field backend struct and does NOT expose `mode` / `low_memory`.
-  - [ ] Both can be used in the same file via aliased imports without collision.
-  - [ ] FR-COMPILER-001 acceptance criteria are met after this fix.
+  - [x] Both can be used in the same file via aliased imports without collision.
+  - [x] FR-COMPILER-001 acceptance criteria are met after this fix.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd — `src/compiler/20.hir/hir_lowering/items.spl` and
-  `src/compiler/20.hir/hir_types.spl`
+- **Related-design-doc:** `doc/05_design/compiler_import_alias_resolution.md`
 - **Related-issue:** FR-COMPILER-001 (upstream symptom)
 - **Notes:**
   Root cause confirmed by discriminator test (2026-04-18):
@@ -69,6 +68,10 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   two structs (e.g., `DriverCompileOptions` vs `BackendCompileOptions`) is a
   valid workaround but requires widespread callers update — prefer fixing the
   resolver so explicit `use` paths take precedence.
+  Implemented 2026-04-22 by making the HIR import pre-pass register named imports
+  under `item.alias` when present. Regression coverage:
+  `test/unit/compiler/hir/resolve_import_symbols_spec.spl` and
+  `test/system/compiler_import_alias_resolution_spec.spl`.
 
 - **Deep-diagnosis (2026-04-18, Claude Sonnet 4.6):**
 
@@ -265,7 +268,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-BENCH-CLOCK-001 verification session
 - **Target:** compiler
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Open (source-level regression fixed; release artifact acceptance blocked)
 - **Requested-semantics:**
   The self-hosted release binary (`bin/release/x86_64-unknown-linux-gnu/simple`)
   fails to resolve `CompileOptions.low_memory` and `CompileOptions.mode` at
@@ -284,7 +287,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [ ] Self-hosted binary output matches Rust-seed bootstrap binary output
         for the same input file.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/05_design/compiler_compile_options_field_access.md`
 - **Related-issue:** none
 - **Investigation (2026-04-18, Claude Sonnet 4.6):**
   Deep investigation performed. Root cause is **wrong-struct name collision**
@@ -308,6 +311,16 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Notes:** Blocks pure-Simple end-to-end testing of any new `extern fn`
   (including `rt_time_now_ns`) via the self-hosted binary. Use
   `src/compiler_rust/target/bootstrap/simple` as workaround until resolved.
+  Source-level field access is now covered by
+  `test/system/compiler_compile_options_field_access_spec.spl`, which imports
+  `compiler.common.driver_core_types.{CompileOptions}` and reads `input_files`,
+  `mode`, `low_memory`, `backend`, and `smf_output_mode`.
+  Exact release-binary acceptance was not closed in this pass:
+  `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl` still exits
+  with a generic `/tmp/t_clock...` runner error in the current checked-in
+  artifact, and `bin/simple /tmp/t_clock.spl` reports
+  `unknown extern function: rt_time_now_ns`. Rebuild/release verification must
+  rerun the original acceptance command after the release artifact is refreshed.
   Repro steps:
   1. `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
   2. Create `/tmp/t_clock.spl`:

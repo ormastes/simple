@@ -1,10 +1,19 @@
+"""
+# Module Loader
+
+Verifies module loading, JIT symbol resolution, and cache cleanup behavior.
+"""
+
 use compiler.loader.module_loader.*
 use compiler.loader.jit_instantiator.{PossibleInstantiation, LoadedMetadata}
 use compiler.loader.compiler_ffi.{make_named_type}
 
 const EXISTING_MODULE_PATH = "test/unit/compiler/loader/module_loader_spec.spl"
+const SECOND_MODULE_PATH = "test/unit/compiler/parser/parser_await_spawn_spec.spl"
 
 describe "Module Loader":
+    """Focused module loader behavior checks."""
+
     it "creates default configuration":
         val config = ModuleLoaderConfig.default()
         expect(config.enable_jit).to_equal(true)
@@ -25,6 +34,61 @@ describe "Module Loader":
         expect(loader.is_loaded(EXISTING_MODULE_PATH)).to_equal(true)
         expect(loader.loaded_modules().len()).to_equal(1)
         expect(loader.stats().module_count).to_equal(1)
+
+    it "loads multiple existing paths and reports module count":
+        var loader = ModuleLoader.with_defaults()
+        val first = loader.load(EXISTING_MODULE_PATH)
+        val second = loader.load(SECOND_MODULE_PATH)
+
+        match first:
+            case LoadResult.Success(module):
+                expect(module.path).to_equal(EXISTING_MODULE_PATH)
+            case _:
+                fail("expected first module load success")
+
+        match second:
+            case LoadResult.Success(module):
+                expect(module.path).to_equal(SECOND_MODULE_PATH)
+            case _:
+                fail("expected second module load success")
+
+        expect(loader.is_loaded(EXISTING_MODULE_PATH)).to_equal(true)
+        expect(loader.is_loaded(SECOND_MODULE_PATH)).to_equal(true)
+        expect(loader.loaded_modules().len()).to_equal(2)
+        expect(loader.stats().module_count).to_equal(2)
+
+    it "loads modules and reports resolved symbol count":
+        var loader = ModuleLoader.with_defaults()
+        _ = loader.load(EXISTING_MODULE_PATH)
+        _ = loader.load(SECOND_MODULE_PATH)
+        val first_entry = PossibleInstantiation(
+            template_name: "Vec",
+            type_args: "i64",
+            mangled_name: "vec_runtime_i64"
+        )
+        val second_entry = PossibleInstantiation(
+            template_name: "Map",
+            type_args: "text_i64",
+            mangled_name: "map_runtime_text_i64"
+        )
+        loader.jit.set_metadata_for_test(EXISTING_MODULE_PATH, LoadedMetadata(possible: [first_entry], instantiations: []))
+        loader.jit.set_metadata_for_test(SECOND_MODULE_PATH, LoadedMetadata(possible: [second_entry], instantiations: []))
+
+        match loader.resolve_symbol("vec_runtime_i64"):
+            case SymbolResult.JitCompiled(symbol, _):
+                expect(symbol.name).to_equal("vec_runtime_i64")
+            case _:
+                fail("expected first JIT symbol")
+
+        match loader.resolve_symbol("map_runtime_text_i64"):
+            case SymbolResult.JitCompiled(symbol, _):
+                expect(symbol.name).to_equal("map_runtime_text_i64")
+            case _:
+                fail("expected second JIT symbol")
+
+        expect(loader.global_symbols.contains_key("vec_runtime_i64")).to_equal(true)
+        expect(loader.global_symbols.contains_key("map_runtime_text_i64")).to_equal(true)
+        expect(loader.stats().symbol_count).to_equal(2)
 
     it "returns an error when the module path does not exist":
         var loader = ModuleLoader.with_defaults()
@@ -53,6 +117,16 @@ describe "Module Loader":
                 expect(code.len()).to_be_greater_than(0)
             case _:
                 fail("expected JIT compiled symbol")
+
+        expect(loader.global_symbols.contains_key("vec_runtime_i64")).to_equal(true)
+        val cached = loader.resolve_symbol("vec_runtime_i64")
+        match cached:
+            case SymbolResult.Found(symbol, code):
+                expect(symbol.name).to_equal("vec_runtime_i64")
+                expect(symbol.is_jit).to_equal(true)
+                expect(code.len()).to_equal(0)
+            case _:
+                fail("expected global symbol cache hit")
 
         expect(loader.stats().symbol_count).to_equal(1)
 

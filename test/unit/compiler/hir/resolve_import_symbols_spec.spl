@@ -1,20 +1,9 @@
-# Unit test: resolve_import_symbols 2-pass import resolver
-#
-# **Feature:** FR-COMPILER-003 (A2) — 2-pass import resolver
-# **Status:** Active
-#
-# Verifies that when a consumer module imports `use a.{CompileOptions}`, the
-# pre-pass registers the correct CompileOptions from module A, not the
-# CompileOptions from module B — even when B is also loaded.
-#
-# Setup mirrors the FR-COMPILER-002 minimum repro:
-#   Module a: struct CompileOptions with `only_in_a: i64` (unique to A)
-#   Module b: struct CompileOptions with `only_in_b: i64` (unique to B)
-#   Consumer: `use a.{CompileOptions}` → must resolve to A's version
-#
-# The test asserts that the resolved symbol for `CompileOptions` in the
-# consumer carries `defining_module = "a"`, confirming the explicit import
-# took precedence over module load order.
+"""
+# Resolve Import Symbols Unit Spec
+
+Verifies that explicit, glob, and aliased imports register symbols from the
+requested source module even when another loaded module exports the same name.
+"""
 
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -24,6 +13,7 @@ fn make_logger() -> Logger:
     Logger(level: 0)
 
 describe "resolve_import_symbols 2-pass import resolver":
+    """The import pre-pass must preserve module identity before HIR lowering resolves symbol uses."""
     it "named import from module A wins over same-named symbol from module B":
         val log = make_logger()
 
@@ -90,3 +80,40 @@ describe "resolve_import_symbols 2-pass import resolver":
         val bar_id = hir2.symbols.lookup("Bar")
         expect(foo_id.?).to_equal(true)
         expect(bar_id.?).to_equal(true)
+
+    it "aliased imports keep same-named structs from different modules distinct":
+        val log = make_logger()
+
+        val src_driver = "struct CompileOptions:\n    input_files: [text]\n    low_memory: bool"
+        val path_driver = "driver_types"
+        val module_driver = parse_full_frontend(src_driver, path_driver, path_driver, log)
+
+        val src_backend = "struct CompileOptions:\n    target: text\n    verify_output: bool"
+        val path_backend = "backend_types"
+        val module_backend = parse_full_frontend(src_backend, path_backend, path_backend, log)
+
+        val open = "{"
+        val close = "}"
+        val src_consumer = "use driver_types." + open + "CompileOptions as DriverOptions" + close + "\n" +
+            "use backend_types." + open + "CompileOptions as BackendOptions" + close
+        val path_consumer = "consumer_aliases"
+        val module_consumer = parse_full_frontend(src_consumer, path_consumer, path_consumer, log)
+
+        var modules_map: Dict<text, any> = {}
+        modules_map[path_driver] = module_driver
+        modules_map[path_backend] = module_backend
+
+        var lowering = HirLowering.with_filename(path_consumer)
+        lowering.modules_by_name = modules_map
+        val hir = lowering.lower_module(module_consumer)
+
+        val driver_id = hir.symbols.lookup("DriverOptions")
+        val backend_id = hir.symbols.lookup("BackendOptions")
+        expect(driver_id.?).to_equal(true)
+        expect(backend_id.?).to_equal(true)
+
+        val driver_sym = hir.symbols.get(driver_id.unwrap())
+        val backend_sym = hir.symbols.get(backend_id.unwrap())
+        expect(driver_sym.unwrap().defining_module.unwrap()).to_equal(path_driver)
+        expect(backend_sym.unwrap().defining_module.unwrap()).to_equal(path_backend)
+        expect(driver_id.unwrap().id).to_be_less_than(backend_id.unwrap().id)

@@ -57,6 +57,60 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
 }
 
 #[test]
+fn native_inline_asm_x86_target_uses_intel_syntax() {
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_x86_intel", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["mov ax, 0x28".to_string(), "ltr ax".to_string()],
+            volatile: true,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("x86_64-unknown-none", "", "")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(c.contains(".intel_syntax noprefix"));
+    assert!(c.contains("\"mov ax, 0x28\\n\""));
+    assert!(c.contains("\"ltr ax\\n\""));
+    assert!(c.contains(".att_syntax prefix"));
+}
+
+#[test]
+fn native_inline_asm_skips_unresolved_simple_operands() {
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_operand_skip", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["mov {out}, cr3".to_string()],
+            volatile: true,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("x86_64-unknown-none", "", "")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(!c.contains("mov {out}, cr3"));
+    assert!(c.contains("skipped Simple asm with unresolved operands"));
+}
+
+#[test]
 fn hir_inline_asm_volatile_flag_is_preserved() {
     let body = lower_body(
         r#"

@@ -20,11 +20,9 @@ use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes, canonical_seeded_path_from_bytes}
-use os.kernel.loader.disk_launch_manifest.{resolve_disk_launch_entry}
+use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
-use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
@@ -44,7 +42,6 @@ use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
-use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
 extern fn serial_println(msg: text)
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
@@ -302,7 +299,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 14:    # EnterUserBlocking — handled fast-path in interrupt.spl; fallback here
             if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
                 return SyscallResult(value: SYSCALL_EPERM)
-            SyscallResult(value: dispatch_enter_user_blocking(args.arg0, scheduler))
+            SyscallResult(value: -38)
 
         # -- Memory ----------------------------------------------------------
         case 10:    # Mmap
@@ -1155,32 +1152,6 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     serial_println("[syscall13] resolve_executable_bytes returned")
     if bytes_result.is_err():
-        val disk_entry = resolve_disk_launch_entry(path)
-        if disk_entry != nil:
-            val priority = _u64_to_priority(args.arg2)
-            val caps = CapabilitySet.full()
-            var sched = scheduler
-            val task_id = sched.create_task(disk_entry.unwrap(), priority, caps)
-            if task_id.id == 0:
-                return SyscallResult(value: -12)
-
-            var dlog = klog
-            dlog.write(6, 1, task_id.id, "spawn_binary launched disk-backed resident {path}")
-            return SyscallResult(value: task_id.id.to_i64())
-
-        val builtin_entry = resolve_builtin_binary(path)
-        if builtin_entry != nil:
-            val priority = _u64_to_priority(args.arg2)
-            val caps = CapabilitySet.full()
-            var sched = scheduler
-            val task_id = sched.create_task(builtin_entry.unwrap(), priority, caps)
-            if task_id.id == 0:
-                return SyscallResult(value: -12)
-
-            var blog = klog
-            blog.write(6, 1, task_id.id, "spawn_binary launched builtin {path}")
-            return SyscallResult(value: task_id.id.to_i64())
-
         var log = klog
         log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return SyscallResult(value: -2)
@@ -1209,39 +1180,6 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     var log = klog
     log.write(3, 1, 0, "spawn_binary rejected invalid executable: {path}")
     SyscallResult(value: -8)
-
-fn _canonical_resident_path_from_bytes(path: text, path_bytes: [u8]) -> text:
-    val canonical = canonical_seeded_path_from_bytes(path_bytes)
-    if canonical != nil:
-        return canonical.unwrap()
-    if path == "/sys/apps/browser_demo":
-        return "/sys/apps/browser_demo"
-    if path == "/sys/apps/browser_demo.smf":
-        return "/sys/apps/browser_demo"
-    if path == "/sys/apps/hello_world":
-        return "/sys/apps/hello_world"
-    if path == "/sys/apps/hello_world.smf":
-        return "/sys/apps/hello_world"
-    if path == "/sys/apps/file_manager":
-        return "/sys/apps/file_manager"
-    if path == "/sys/apps/file_manager.smf":
-        return "/sys/apps/file_manager"
-    if path == "/sys/apps/shell":
-        return "/sys/apps/shell"
-    if path == "/sys/apps/shell.smf":
-        return "/sys/apps/shell"
-    if path == "/sys/apps/editor":
-        return "/sys/apps/editor"
-    if path == "/sys/apps/editor.smf":
-        return "/sys/apps/editor"
-    ""
-
-fn _resolve_validated_resident_entry(path: text, path_bytes: [u8]) -> u64?:
-    """Resolve packaged desktop apps to resident entries after FS validation."""
-    val canonical_path = _canonical_resident_path_from_bytes(path, path_bytes)
-    if canonical_path == "":
-        return nil
-    resolve_builtin_binary(canonical_path)
 
 fn _direct_spawn_app_id_path(app_id: u64) -> text?:
     match app_id:
@@ -1324,94 +1262,12 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     serial_println("[syscall13] dispatch_direct resolve returned")
     if bytes_result.is_err():
-        val disk_entry = resolve_disk_launch_entry(path)
-        if disk_entry != nil:
-            val priority = _u64_to_priority(priority_raw)
-            val caps = CapabilitySet.full()
-            var sched = scheduler
-            val task_id = sched.create_task(disk_entry.unwrap(), priority, caps)
-            if task_id.id == 0:
-                return -12
-
-            var dlog = klog
-            dlog.write(6, 1, task_id.id, "spawn_binary launched disk-backed resident {path}")
-            return task_id.id.to_i64()
-
-        val builtin_entry = resolve_builtin_binary(path)
-        if builtin_entry != nil:
-            val priority = _u64_to_priority(priority_raw)
-            val caps = CapabilitySet.full()
-            var sched = scheduler
-            val task_id = sched.create_task(builtin_entry.unwrap(), priority, caps)
-            if task_id.id == 0:
-                return -12
-
-            var blog = klog
-            blog.write(6, 1, task_id.id, "spawn_binary launched builtin {path}")
-            return task_id.id.to_i64()
-
         var log = klog
         log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return -2
 
     serial_println("[syscall13] vfs bytes ok; exec handoff active")
     _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
-
-# ============================================================================
-# EnterUserBlocking (syscall 14) — direct ring-3 handoff
-# ============================================================================
-
-fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
-    """Syscall 14: EnterUserBlocking — look up the TCB for pid_hint and jump
-    to ring-3 via arch_x86_64_enter_user_task. Never returns on success.
-
-    If pid_hint == 0, selects the most-recently-created user task (highest
-    TCB id among entries where is_user == true and user_context != nil).
-
-    Returns -22 (EINVAL) if no matching user task is found.
-    """
-    serial_println("[syscall14] dispatch_enter_user_blocking enter")
-    var sched = scheduler
-
-    var target_pid: u64 = pid_hint
-    if target_pid == 0:
-        # Find the most-recently-created user task (highest id).
-        var best_pid: u64 = 0
-        var slot: i64 = 0
-        while slot < 256:
-            val tcb = sched.get_task(TaskId(id: (slot + 1).to_u64()))
-            if tcb != nil:
-                val task = tcb
-                if task.is_user and task.user_context != nil:
-                    if task.id.id > best_pid:
-                        best_pid = task.id.id
-            slot = slot + 1
-        if best_pid == 0:
-            serial_println("[syscall14] no user task found for pid_hint=0")
-            return -22
-        target_pid = best_pid
-
-    val tcb = sched.get_task(TaskId(id: target_pid))
-    if tcb == nil:
-        serial_println("[syscall14] task not found pid={target_pid}")
-        return -22
-
-    val task = tcb
-    if not task.is_user:
-        serial_println("[syscall14] task is not a user task pid={target_pid}")
-        return -22
-
-    val uctx = task.user_context
-    if uctx == nil:
-        serial_println("[syscall14] task has no user_context pid={target_pid}")
-        return -22
-
-    val ctx = uctx.unwrap()
-    val cr3 = task.address_space
-    serial_println("[syscall14] entering ring-3 pid={target_pid} rip={ctx.rip} cr3={cr3}")
-    arch_x86_64_enter_user_task(ctx, cr3)
-    # unreachable — arch_x86_64_enter_user_task is noreturn
-    -22
 
 # ============================================================================
 # IPC Syscall Handlers

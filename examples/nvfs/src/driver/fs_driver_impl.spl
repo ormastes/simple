@@ -100,6 +100,7 @@ struct NvfsOpenHandle:
     """
     handle_id: u64
     arena_id:  i64
+    path:      text
     read_only: bool
 
 # ---------------------------------------------------------------------------
@@ -118,11 +119,11 @@ fn _find_handle(id: u64) -> i64:
         i = i + 1
     -1
 
-fn _alloc_handle(arena_id: i64, read_only: bool) -> FileHandle:
+fn _alloc_handle(arena_id: i64, path: text, read_only: bool) -> FileHandle:
     """Allocate a new handle entry and return the opaque FileHandle."""
     val id = _next_handle_id
     _next_handle_id = _next_handle_id + 1
-    val h = NvfsOpenHandle(handle_id: id, arena_id: arena_id, read_only: read_only)
+    val h = NvfsOpenHandle(handle_id: id, arena_id: arena_id, path: path, read_only: read_only)
     _open_handles.push(h)
     FileHandle(id: id)
 
@@ -167,6 +168,43 @@ impl NvfsDriver:
             ns: Namespace.new()
         )
 
+    me fn _update_inode_size_for_arena(arena_id: i64, size: u64):
+        """Update namespace size metadata for the file backed by arena_id."""
+        var i = 0
+        while i < self.ns.inodes.len() as i64:
+            val inode = self.ns.inodes[i]
+            if inode.arena_id == arena_id:
+                self.ns.inodes[i] = NsInode(
+                    ino: inode.ino,
+                    kind: inode.kind,
+                    arena_id: inode.arena_id,
+                    sym_target: inode.sym_target,
+                    size: size,
+                    mode: inode.mode,
+                    ctime: inode.ctime,
+                    mtime: inode.mtime
+                )
+                return
+            i = i + 1
+
+    fn _file_stat_for_inode(n: NsInode) -> FileStat:
+        """Build FileStat from namespace metadata."""
+        val blocks = (n.size + 4095) / 4096
+        FileStat(
+            inode:         n.ino,
+            size:          n.size,
+            blocks:        blocks,
+            block_size:    4096,
+            mode:          n.mode,
+            uid:           0,
+            gid:           0,
+            nlinks:        1,
+            atime_ns:      0,
+            mtime_ns:      n.mtime,
+            ctime_ns:      n.ctime,
+            birth_time_ns: n.ctime
+        )
+
 impl FsDriver for NvfsDriver:
 
     # --- Lifecycle ---
@@ -209,19 +247,26 @@ impl FsDriver for NvfsDriver:
     # --- File I/O ---
 
     fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-        """Open a file by allocating a new arena for it.
-
-        N1: each open() creates a fresh append-only arena. File identity /
-        persistence across unmount is deferred to N2 (B-tree forest).
-        """
+        """Open a file by path, creating it when requested by writable flags."""
         if (not self.mounted):
             return Err(FsError.InvalidArg)
         val writable = flags.is_writable()
         if (writable and self.read_only):
             return Err(FsError.ReadOnly)
+        val existing = self.ns.resolve_path(path.raw)
+        if existing.is_ok():
+            val inode = existing.unwrap()
+            match inode.kind:
+                case NsInodeKind.File:
+                    return Ok(_alloc_handle(inode.arena_id, path.raw, not writable))
+                case _:
+                    return Err(FsError.InvalidArg)
+        if not writable:
+            return Err(FsError.NotFound)
+        val pair = self.ns.resolve_parent(path.raw)?
         val arena_id = arena_create_impl(0, 4096)
-        val handle = _alloc_handle(arena_id, not writable)
-        Ok(handle)
+        val inode = self.ns.create_file(pair.0, pair.1, arena_id, 0o644)?
+        Ok(_alloc_handle(inode.arena_id, path.raw, false))
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
         """Release an open FileHandle."""
@@ -243,6 +288,10 @@ impl FsDriver for NvfsDriver:
             return Err(FsError.InvalidArg)
         val h = _open_handles[idx]
         val data = arena_readv_impl(h.arena_id, offset, buf.len() as i64)
+        var i = 0
+        while i < data.len() as i64 and i < buf.len() as i64:
+            buf[i] = data[i]
+            i = i + 1
         if _verify_on_read and data.len() as i64 > 0:
             val entry_opt = _pmap_sidecar_get(h.arena_id, offset)
             match entry_opt:
@@ -250,7 +299,7 @@ impl FsDriver for NvfsDriver:
                     if not pmap_entry_verify(entry, data):
                         return Err(FsError.Corrupt)
                 case None:
-                    pass_do_nothing
+                    val _verify_skipped_for_untracked_range = true
         Ok(data.len() as i64)
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
@@ -271,6 +320,7 @@ impl FsDriver for NvfsDriver:
         val written = arena_append_impl(h.arena_id, buf, 0)
         if written < 0:
             return Err(FsError.IoError(0))
+        self._update_inode_size_for_arena(h.arena_id, (offset + written) as u64)
         # Record pmap entry for this written range.
         val cksum = pmap_entry_checksum_for(buf)
         val pentry = PmapEntry(
@@ -319,8 +369,15 @@ impl FsDriver for NvfsDriver:
         ))
 
     fn stat(path: Path) -> Result<FileStat, FsError>:
-        """Path-based stat — not yet implemented (requires B-tree in N2)."""
-        Err(FsError.Unsupported)
+        """Path-based stat backed by the in-memory namespace."""
+        val inode = self.ns.resolve_path(path.raw)?
+        match inode.kind:
+            case NsInodeKind.File:
+                Ok(self._file_stat_for_inode(inode))
+            case NsInodeKind.Dir:
+                Ok(self._file_stat_for_inode(inode))
+            case NsInodeKind.Symlink:
+                Ok(self._file_stat_for_inode(inode))
 
     fn truncate(path: Path, length: i64) -> Result<(), FsError>:
         """Truncate not supported on append-only native driver."""

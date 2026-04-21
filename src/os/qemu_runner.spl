@@ -445,20 +445,9 @@ fn arch_display_name(arch: Architecture) -> text:
 fn build_os(target: OsTarget) -> bool:
     build_os_with_backend(target, _os_build_backend_for_target(target))
 
-fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
-    """Builds the OS kernel for the given target.
-
-    Runs the native-build command via rt_process_run_timeout. Returns true on success.
-
-    Phase-level diagnostics are printed so a stalled build identifies which phase
-    ran long rather than surfacing as a generic 'Process timed out'. The timeout
-    defaults to 15 minutes and can be overridden with SIMPLE_OS_BUILD_TIMEOUT_MS.
-    """
-    val arch_label = arch_display_name(target.arch)
-    val timeout_ms = _os_build_timeout_ms()
-
+fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
+    """Build the argv passed to `simple native-build` for an OS target."""
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
-    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name}"
     var args: [text] = ["native-build"]
     for source in _build_sources(target):
         args.push("--source")
@@ -477,6 +466,23 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     args.push(target.output)
     args.push("--linker-script")
     args.push(target.linker_script)
+    args
+
+fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
+    """Builds the OS kernel for the given target.
+
+    Runs the native-build command via rt_process_run_timeout. Returns true on success.
+
+    Phase-level diagnostics are printed so a stalled build identifies which phase
+    ran long rather than surfacing as a generic 'Process timed out'. The timeout
+    defaults to 15 minutes and can be overridden with SIMPLE_OS_BUILD_TIMEOUT_MS.
+    """
+    val arch_label = arch_display_name(target.arch)
+    val timeout_ms = _os_build_timeout_ms()
+
+    val backend_name = if backend == "llvm": "llvm" else: "cranelift"
+    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name}"
+    val args = os_native_build_args(target, backend_name)
     val objcopy_prefix = _objcopy_path_prefix()
     if _needs_elf32_wrap(target) and objcopy_prefix == "":
         print "[build][{arch_label}] phase=tooling FAILED: llvm-objcopy not found for {target.entry}"
@@ -1083,7 +1089,7 @@ fn arm_fs_exec_kernel_bin_path(arch: Architecture) -> text:
 
 fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
     val img = arm_fs_exec_disk_image_path(arch)
-    ["-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
+    ["-global", "virtio-mmio.force-legacy=false", "-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
 
 fn get_all_scenarios() -> [QemuScenario]:
     """Returns all defined QEMU scenarios."""
@@ -1206,6 +1212,9 @@ fn desktop_disk_image_path_in(release_root: text) -> text:
 fn desktop_disk_image_path() -> text:
     desktop_disk_image_path_in("release")
 
+fn desktop_disk_make_script_args(img_path: text) -> [text]:
+    ["scripts/make_os_disk.shs", "64", img_path]
+
 fn fs_test_disk_image_path() -> text:
     simpleos_platform_disk_image_output("x86_64")
 
@@ -1271,15 +1280,17 @@ fn ensure_desktop_disk_image() -> bool:
         return true
     print "[ensure_desktop_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
     val (stdout, stderr, exit_code) = rt_process_run_timeout(
-        "/bin/sh", ["scripts/make_os_disk.shs"], 60000)
+        "/bin/sh", desktop_disk_make_script_args(img_path), 60000)
     if stdout != "":
         print "[ensure_desktop_disk_image] stdout:\n{stdout}"
     if stderr != "":
         print "[ensure_desktop_disk_image] stderr:\n{stderr}"
     if exit_code != 0:
         print "[ensure_desktop_disk_image] make_os_disk.shs exited {exit_code}"
+        print "[ensure_desktop_disk_image] prerequisite: install mtools or python3 for unprivileged FAT32 population; qemu-img is optional but preferred for raw image creation"
         return false
     if not rt_file_exists(img_path):
+        print "[ensure_desktop_disk_image] expected disk image was not created: {img_path}"
         return false
     if not _desktop_disk_image_has_required_manifests(img_path):
         val legacy_img = "build/os/fat32.img"

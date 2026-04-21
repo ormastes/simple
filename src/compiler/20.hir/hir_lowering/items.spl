@@ -34,7 +34,29 @@ fn platform_first_diagnostic_line(platform: PlatformParseResult) -> i64:
         return 0
     platform.diagnostics[0].span().line
 
+fn imported_symbol_local_name(imported_name: text, has_alias: bool, alias: text) -> text:
+    """Return the local symbol name for a named import."""
+    if has_alias:
+        return alias
+    imported_name
+
 impl HirLowering:
+    me register_imported_type_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+        """Register one imported type-level symbol under its local import name."""
+        val as_cls = imported_mod.classes[imported_name]
+        val as_str = imported_mod.structs[imported_name]
+        val as_enum = imported_mod.enums[imported_name]
+        val as_trait = imported_mod.traits[imported_name]
+
+        if as_cls != nil:
+            self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        elif as_str != nil:
+            self.symbols.define(local_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        elif as_enum != nil:
+            self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        elif as_trait != nil:
+            self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+
     me resolve_import_symbols(module: Module):
         """Pass 0: register imported type names before declare_module_symbols.
 
@@ -97,22 +119,9 @@ impl HirLowering:
                     while item_idx < imp.items.len():
                         val item = imp.items[item_idx]
                         val imported_name = item.name
+                        val local_name = imported_symbol_local_name(imported_name, item.has_alias, item.alias)
 
-                        # Try class first, then struct, then enum, then trait
-                        val as_cls = imported_mod.classes[imported_name]
-                        val as_str = imported_mod.structs[imported_name]
-                        val as_enum = imported_mod.enums[imported_name]
-                        val as_trait = imported_mod.traits[imported_name]
-
-                        if as_cls != nil:
-                            self.symbols.define(imported_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        elif as_str != nil:
-                            self.symbols.define(imported_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        elif as_enum != nil:
-                            self.symbols.define(imported_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        elif as_trait != nil:
-                            self.symbols.define(imported_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        # Non-type imports (functions, consts) are not pre-registered here
+                        self.register_imported_type_symbol(imported_mod, imported_mod_name, imported_name, local_name, import_span)
                         item_idx = item_idx + 1
 
             imp_idx = imp_idx + 1

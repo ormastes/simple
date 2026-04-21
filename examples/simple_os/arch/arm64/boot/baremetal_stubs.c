@@ -2013,12 +2013,71 @@ S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_c
  * Simple code passes MMIO addresses as raw u64 values. */
 RuntimeValue rt_mmio_read_u8(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr; }
 RuntimeValue rt_mmio_read_u16(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr; }
-RuntimeValue rt_mmio_read_u32(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr; }
+RuntimeValue rt_mmio_read_u32(RuntimeValue addr) {
+    uint64_t raw = (uint64_t)addr;
+    if ((raw >= 0x0A000000ULL && raw <= 0x0A004000ULL) ||
+        (raw >= 0x14000000ULL && raw <= 0x14008000ULL)) {
+        serial_puts("[mmio32] addr=");
+        serial_put_hex(raw);
+        serial_puts("\r\n");
+    }
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)raw;
+}
 RuntimeValue rt_mmio_read_u64(RuntimeValue addr) { return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr; }
 RuntimeValue rt_mmio_write_u8(RuntimeValue addr, RuntimeValue val) { *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val; return NIL_VALUE; }
 RuntimeValue rt_mmio_write_u16(RuntimeValue addr, RuntimeValue val) { *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val; return NIL_VALUE; }
 RuntimeValue rt_mmio_write_u32(RuntimeValue addr, RuntimeValue val) { *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val; return NIL_VALUE; }
 RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) { *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val; return NIL_VALUE; }
+
+#define SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE 0x0A003E00ULL
+static uint8_t g_arm_virtq_storage[8192] __attribute__((aligned(4096)));
+static uint8_t g_arm_virtio_blk_dma_storage[1024] __attribute__((aligned(512)));
+
+RuntimeValue rt_arm_virtq_base(void)
+{
+    return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtq_storage;
+}
+
+RuntimeValue rt_arm_virtio_blk_queue_base(void)
+{
+    serial_puts("[virtq-base] ");
+    serial_put_hex((uint64_t)(uintptr_t)g_arm_virtq_storage);
+    serial_puts("\r\n");
+    return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtq_storage;
+}
+
+RuntimeValue rt_arm_virtio_blk_dma_base(void)
+{
+    return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
+}
+
+RuntimeValue rt_arm_virtio_blk_mmio_read_u32(RuntimeValue off)
+{
+    uint64_t decoded = (uint64_t)off;
+    serial_puts("[virtio-mmio32] off=");
+    serial_put_hex(decoded);
+    serial_puts("\r\n");
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded);
+}
+RuntimeValue rt_arm_virtio_blk_mmio_read_u64(RuntimeValue off)
+{
+    uint64_t decoded = (uint64_t)off;
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded);
+}
+RuntimeValue rt_arm_virtio_blk_mmio_write_u32(RuntimeValue off, RuntimeValue val)
+{
+    uint64_t decoded = (uint64_t)off;
+    uint32_t raw_val = (uint32_t)(uint64_t)val;
+    if (decoded == 0x38 || decoded == 0x40 || decoded == 0x50 || decoded == 0x70) {
+        serial_puts("[virtio-mmio32w] off=");
+        serial_put_hex(decoded);
+        serial_puts(" val=");
+        serial_put_hex(raw_val);
+        serial_puts("\r\n");
+    }
+    *(volatile uint32_t *)(uintptr_t)(SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded) = raw_val;
+    return NIL_VALUE;
+}
 
 /* ARM64-specific CPU operations */
 RuntimeValue rt_wfe(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
@@ -2090,16 +2149,77 @@ RuntimeValue rt_memory_barrier(void)
     return NIL_VALUE;
 }
 
+static void arm64_clean_dcache_range(uint64_t addr, uint64_t size)
+{
+    uint64_t line = addr & ~63ULL;
+    uint64_t end = (addr + size + 63ULL) & ~63ULL;
+    while (line < end) {
+        __asm__ volatile("dc cvac, %0" :: "r"(line) : "memory");
+        line += 64ULL;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void arm64_invalidate_dcache_range(uint64_t addr, uint64_t size)
+{
+    uint64_t line = addr & ~63ULL;
+    uint64_t end = (addr + size + 63ULL) & ~63ULL;
+    while (line < end) {
+        __asm__ volatile("dc ivac, %0" :: "r"(line) : "memory");
+        line += 64ULL;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void write_le16_volatile(volatile uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xffU);
+    p[1] = (uint8_t)((v >> 8) & 0xffU);
+}
+
+static void write_le32_volatile(volatile uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xffU);
+    p[1] = (uint8_t)((v >> 8) & 0xffU);
+    p[2] = (uint8_t)((v >> 16) & 0xffU);
+    p[3] = (uint8_t)((v >> 24) & 0xffU);
+}
+
 RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
                                  RuntimeValue addr_hi, RuntimeValue len,
                                  RuntimeValue flags, RuntimeValue next)
 {
-    uint8_t *desc = (uint8_t *)(uintptr_t)((uint64_t)base + ((uint64_t)index * 16ULL));
-    *(volatile uint32_t *)(void *)(desc + 0)  = (uint32_t)(uint64_t)addr_lo;
-    *(volatile uint32_t *)(void *)(desc + 4)  = (uint32_t)(uint64_t)addr_hi;
-    *(volatile uint32_t *)(void *)(desc + 8)  = (uint32_t)(uint64_t)len;
-    *(volatile uint16_t *)(void *)(desc + 12) = (uint16_t)(uint64_t)flags;
-    *(volatile uint16_t *)(void *)(desc + 14) = (uint16_t)(uint64_t)next;
+    if ((uint64_t)index < 3) {
+        serial_puts("[virtq-desc] i=");
+        serial_put_hex((uint64_t)index);
+        serial_puts(" addr=");
+        serial_put_hex((uint64_t)addr_lo);
+        serial_puts(" len=");
+        serial_put_hex((uint64_t)len);
+        serial_puts(" flags=");
+        serial_put_hex((uint64_t)flags);
+        serial_puts(" next=");
+        serial_put_hex((uint64_t)next);
+        serial_puts("\r\n");
+    }
+    volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint64_t)base + ((uint64_t)index * 16ULL));
+    write_le32_volatile(desc + 0, (uint32_t)(uint64_t)addr_lo);
+    write_le32_volatile(desc + 4, (uint32_t)(uint64_t)addr_hi);
+    write_le32_volatile(desc + 8, (uint32_t)(uint64_t)len);
+    write_le16_volatile(desc + 12, (uint16_t)(uint64_t)flags);
+    write_le16_volatile(desc + 14, (uint16_t)(uint64_t)next);
+    if ((uint64_t)index < 3ULL) {
+        serial_puts("[virtq-desc-mem] i=");
+        serial_put_hex((uint64_t)index);
+        serial_puts(" desc=");
+        serial_put_hex((uint64_t)(uintptr_t)desc);
+        serial_puts(" len=");
+        serial_put_hex((uint64_t)(((uint32_t)desc[8]) | ((uint32_t)desc[9] << 8) | ((uint32_t)desc[10] << 16) | ((uint32_t)desc[11] << 24)));
+        serial_puts(" flags=");
+        serial_put_hex((uint64_t)(((uint16_t)desc[12]) | ((uint16_t)desc[13] << 8)));
+        serial_puts("\r\n");
+    }
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)desc, 16ULL);
     return NIL_VALUE;
 }
 
@@ -2119,6 +2239,63 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
         a->items[i] = ENCODE_INT(src[i]);
     }
     return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_arm_virtq_used_idx(void)
+{
+    uint64_t used_addr = (uint64_t)(uintptr_t)g_arm_virtq_storage + 4096ULL;
+    arm64_invalidate_dcache_range(used_addr, 64ULL);
+    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(used_addr + 2ULL);
+}
+
+RuntimeValue rt_arm_virtq_reset(void)
+{
+    volatile uint8_t *queue = (volatile uint8_t *)(uintptr_t)g_arm_virtq_storage;
+    for (uint64_t i = 0; i < 8192ULL; i++) {
+        queue[i] = 0;
+    }
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)g_arm_virtq_storage, 8192ULL);
+    __asm__ volatile("dmb sy" ::: "memory");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
+{
+    uint64_t avail_addr = (uint64_t)(uintptr_t)g_arm_virtq_storage + 2048ULL;
+    volatile uint16_t *avail_idx = (volatile uint16_t *)(uintptr_t)(avail_addr + 2ULL);
+    uint16_t idx = *avail_idx;
+    volatile uint16_t *slot = (volatile uint16_t *)(uintptr_t)(avail_addr + 4ULL + ((idx % 128U) * 2U));
+    *slot = (uint16_t)(uint64_t)desc_idx;
+    __asm__ volatile("dmb sy" ::: "memory");
+    *avail_idx = (uint16_t)(idx + 1U);
+    __asm__ volatile("dmb sy" ::: "memory");
+    arm64_clean_dcache_range(avail_addr, 512ULL);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm_virtio_blk_status_u8(void)
+{
+    uint64_t dma_addr = (uint64_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
+    arm64_invalidate_dcache_range(dma_addr + 512ULL, 64ULL);
+    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(dma_addr + 528ULL);
+}
+
+RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
+{
+    uint64_t lba = (uint64_t)lba_val;
+    uint64_t dma_addr = (uint64_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
+    volatile uint8_t *dma = (volatile uint8_t *)(uintptr_t)dma_addr;
+    for (uint64_t i = 0; i < 1024ULL; i++) {
+        dma[i] = 0;
+    }
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 0ULL) = 0U;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 4ULL) = 0U;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 8ULL) = (uint32_t)(lba & 0xffffffffULL);
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 12ULL) = (uint32_t)(lba >> 32);
+    *(volatile uint8_t *)(uintptr_t)(dma_addr + 528ULL) = 0xffU;
+    __asm__ volatile("dmb sy" ::: "memory");
+    arm64_clean_dcache_range(dma_addr, 1024ULL);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)

@@ -441,6 +441,20 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_mmio_write_u16", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_read_u32", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_write_u32", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_read_u32", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_read_u64", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_write_u32", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_memory_barrier", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtq_base", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_queue_base", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_dma_base", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtq_used_idx", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtq_reset", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtq_push_avail", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_status_u8", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_prepare_read", &[I64], &[I64]),
     // =========================================================================
     // Async/concurrency operations
     // =========================================================================

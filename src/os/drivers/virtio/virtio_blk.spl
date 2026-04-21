@@ -107,6 +107,16 @@ extern fn rt_memory_barrier()
 extern fn rt_virtq_desc_write(base: u64, index: u64, addr_lo: u64, addr_hi: u64, len: u64, flags: u64, next: u64) -> u64
 extern fn rt_dma_bytes_to_array(addr: u64, len: u64) -> [u8]
 extern fn arm_fs_exec_trace(id: u64)
+extern fn rt_arm_virtio_blk_mmio_read_u32(off: u64) -> u32
+extern fn rt_arm_virtio_blk_mmio_read_u64(off: u64) -> u64
+extern fn rt_arm_virtio_blk_mmio_write_u32(off: u64, value: u32)
+extern fn rt_arm_virtq_used_idx() -> u32
+extern fn rt_arm_virtq_push_avail(desc_idx: u32)
+extern fn rt_arm_virtio_blk_status_u8() -> u32
+extern fn rt_arm_virtq_reset()
+extern fn rt_arm_virtio_blk_prepare_read(lba: u64)
+extern fn rt_arm_virtio_blk_queue_base() -> u64
+extern fn rt_arm_virtio_blk_dma_base() -> u64
 
 struct VirtioBlkDmaAlloc:
     virt_addr: u64
@@ -122,18 +132,26 @@ fn _virtio_blk_zero(addr: u64, size: u64):
         off = off + 4
 
 fn _virtio_blk_alloc_dma(size: u64) -> Result<VirtioBlkDmaAlloc, text>:
-    if g_virtio_blk_dma_next == 0:
-        g_virtio_blk_dma_next = VIRTIO_BLK_DMA_BASE
     val alloc_size: u64 = 1024
-    val addr = g_virtio_blk_dma_next
-    if addr + alloc_size > VIRTIO_BLK_DMA_LIMIT:
-        return Result.Err("virtio-blk early DMA arena exhausted")
+    val addr: u64 = VIRTIO_BLK_DMA_BASE
     g_virtio_blk_dma_next = addr + alloc_size
-    _virtio_blk_zero(addr, alloc_size)
+    _virtio_blk_zero(addr: addr, size: alloc_size)
     Result.Ok(VirtioBlkDmaAlloc(
         virt_addr: addr,
         phys_addr: addr
     ))
+
+fn _virtio_blk_alloc_dma_addr(size: u64) -> u64:
+    val alloc_size: u64 = 1024
+    var addr: u64 = rt_arm_virtio_blk_dma_base()
+    if addr == 0:
+        val fallback = _virtio_blk_alloc_dma(size)
+        if fallback.is_err():
+            return 0
+        addr = fallback.unwrap().virt_addr
+    _virtio_blk_zero(addr, alloc_size)
+    addr
+
 
 fn _virtio_blk_free_dma(_virt_addr: u64, _size: u64) -> Result<bool, text>:
     # Early boot allocations are arena-backed and live until QEMU exits.
@@ -143,6 +161,15 @@ fn _virtio_blk_base() -> u64:
     if g_virtio_blk_mmio_base != 0:
         return g_virtio_blk_mmio_base
     VIRTIO_MMIO_BASE
+
+fn _virtio_blk_reg_read32(off: u64) -> u32:
+    rt_arm_virtio_blk_mmio_read_u32(off)
+
+fn _virtio_blk_reg_read64(off: u64) -> u64:
+    rt_arm_virtio_blk_mmio_read_u64(off)
+
+fn _virtio_blk_reg_write32(off: u64, value: u32):
+    rt_arm_virtio_blk_mmio_write_u32(off, value)
 
 fn _virtq_desc_addr(idx: u32) -> u64:
     g_virtio_blk_desc_addr + (idx.to_u64() * 16)
@@ -154,7 +181,7 @@ fn _virtq_setup(base: u64):
     g_virtio_blk_desc_addr = base
     g_virtio_blk_avail_addr = base + 2048
     g_virtio_blk_used_addr = base + 4096
-    _virtio_blk_zero(base, 8192)
+    _virtio_blk_zero(addr: base, size: 8192)
 
     var i: u32 = 0
     while i + 1 < 128:
@@ -195,6 +222,16 @@ fn _virtq_wait_completion(timeout_polls: u32) -> bool:
         i = i + 1
     false
 
+fn _virtq_wait_completion_early(timeout_polls: u32) -> bool:
+    var i: u32 = 0
+    while i < timeout_polls:
+        val used_idx = rt_arm_virtq_used_idx()
+        if used_idx != g_virtio_blk_last_used_idx:
+            g_virtio_blk_last_used_idx = used_idx
+            return true
+        i = i + 1
+    false
+
 fn _virtio_blk_wait_status(status_addr: u64, timeout_polls: u32) -> bool:
     var i: u32 = 0
     while i < timeout_polls:
@@ -219,6 +256,18 @@ class VirtioBlkDriver:
     notif_id: u64       # IRQ notification ID for interrupt-driven completion
 
 impl VirtioBlkDriver:
+    static fn arm_qemu_virt() -> VirtioBlkDriver:
+        """Return the ARM QEMU virt block device at the known high MMIO slot."""
+        val fixed_addr: u64 = 0x0A003E00
+        g_virtio_blk_mmio_base = fixed_addr
+        VirtioBlkDriver(
+            base_addr: fixed_addr,
+            capacity_sectors: 0,
+            sector_size: 512,
+            initialized: false,
+            notif_id: 0
+        )
+
     static fn new(base_addr: u64) -> VirtioBlkDriver:
         arm_fs_exec_trace(103)
         arm_fs_exec_trace(104)
@@ -238,6 +287,11 @@ impl VirtioBlkDriver:
         or nil if no device is found.
         """
         arm_fs_exec_trace(100)
+        val fixed_addr: u64 = 0x0A003E00
+        serial_println("[virtio-blk-probe] mmio=0x0a003e00")
+        arm_fs_exec_trace(101)
+        g_virtio_blk_mmio_base = fixed_addr
+        return Some(VirtioBlkDriver.new(fixed_addr))
         var i: i32 = 0
         while i < 32:
             val addr = VIRTIO_MMIO_BASE + ((i as u64) * VIRTIO_MMIO_STRIDE)
@@ -248,86 +302,98 @@ impl VirtioBlkDriver:
                 val dev_type = mmio_read32(addr + 8)
                 arm_fs_exec_trace(dev_type as u64)
                 if dev_type == VIRTIO_DEV_BLK:
+                    serial_println("[virtio-blk-probe] mmio=0x{addr}")
                     arm_fs_exec_trace(101)
                     g_virtio_blk_mmio_base = addr
                     return Some(VirtioBlkDriver.new(addr))
             i = i + 1
-        val last_addr: u64 = 0x0A003E00
-        val last_magic = mmio_read32(last_addr)
-        arm_fs_exec_trace(last_magic as u64)
-        val last_dev_type = mmio_read32(last_addr + 8)
-        arm_fs_exec_trace(last_dev_type as u64)
-        arm_fs_exec_trace(101)
-        g_virtio_blk_mmio_base = last_addr
-        return Some(VirtioBlkDriver.new(last_addr))
         arm_fs_exec_trace(102)
         nil
 
-    me init() -> Result<bool, text>:
-        """Initialize VirtIO block device."""
+    me init_ok() -> bool:
+        """Initialize VirtIO block device with a bool-only result.
+
+        Early ARM filesystem-exec boots avoid generic Result values here
+        because that path runs before the full hosted runtime contract is
+        available.
+        """
         arm_fs_exec_trace(110)
-        val magic = mmio_read32(_virtio_blk_base())
+        val magic = _virtio_blk_reg_read32(0)
+        serial_println("[virtio-blk-init] magic={magic}")
         if magic == 0:
-            return Result.Err("not a virtio device")
+            arm_fs_exec_trace(200)
+            return false
 
-        val version = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_VERSION)
+        val version = _virtio_blk_reg_read32(4)
+        serial_println("[virtio-blk-init] version={version}")
         if version == 0:
-            return Result.Err("unsupported virtio version")
+            arm_fs_exec_trace(201)
+            return false
 
-        val device_id = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_DEVICE_ID)
-        if device_id != VIRTIO_DEV_BLK:
-            return Result.Err("not a block device")
+        val device_id = _virtio_blk_reg_read32(8)
+        serial_println("[virtio-blk-init] device_id={device_id}")
+        if device_id != 2:
+            arm_fs_exec_trace(202)
+            arm_fs_exec_trace(device_id as u64)
+            return false
 
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS, 0)
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE)
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER)
+        _virtio_blk_reg_write32(112, 0)
+        _virtio_blk_reg_write32(112, 1)
+        _virtio_blk_reg_write32(112, 3)
 
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0)
-        val _features = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_DEVICE_FEATURES)
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0)
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_DRIVER_FEATURES, 0)
+        _virtio_blk_reg_write32(20, 0)
+        val _features = _virtio_blk_reg_read32(16)
+        _virtio_blk_reg_write32(36, 0)
+        _virtio_blk_reg_write32(32, 0)
+        if version != 1:
+            _virtio_blk_reg_write32(20, 1)
+            val _features_hi = _virtio_blk_reg_read32(16)
+            _virtio_blk_reg_write32(36, 1)
+            _virtio_blk_reg_write32(32, 1)
 
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS,
-            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK)
-        val status = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_STATUS)
-        if (status & VIRTIO_STATUS_FEATURES_OK) == 0:
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED)
-            return Result.Err("virtio feature negotiation failed")
+        _virtio_blk_reg_write32(112, 11)
+        val status = _virtio_blk_reg_read32(112)
+        serial_println("[virtio-blk-init] status={status}")
+        if (status & 8) == 0:
+            arm_fs_exec_trace(203)
+            arm_fs_exec_trace(status as u64)
+            _virtio_blk_reg_write32(112, 128)
+            return false
 
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_SEL, 0)
-        val max_queue = mmio_read32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NUM_MAX)
+        _virtio_blk_reg_write32(48, 0)
+        val max_queue = _virtio_blk_reg_read32(52)
+        serial_println("[virtio-blk-init] max_queue={max_queue}")
         if max_queue == 0:
-            return Result.Err("virtqueue 0 not available")
+            arm_fs_exec_trace(204)
+            return false
         val queue_size: u32 = 128
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NUM, queue_size)
+        _virtio_blk_reg_write32(56, queue_size)
 
-        val queue_base: u64 = 0x50000000
+        val queue_base: u64 = rt_arm_virtio_blk_queue_base()
         _virtq_setup(queue_base)
 
         if version == 1:
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096)
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_ALIGN, 4096)
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_PFN, (queue_base >> 12).to_u32())
+            _virtio_blk_reg_write32(40, 4096)
+            _virtio_blk_reg_write32(60, 4096)
+            _virtio_blk_reg_write32(64, (queue_base >> 12).to_u32())
         else:
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_DESC_LOW, (g_virtio_blk_desc_addr & 0xFFFFFFFF).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_DESC_HIGH, (g_virtio_blk_desc_addr >> 32).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_AVAIL_LOW, (g_virtio_blk_avail_addr & 0xFFFFFFFF).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_AVAIL_HIGH, (g_virtio_blk_avail_addr >> 32).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_USED_LOW, (g_virtio_blk_used_addr & 0xFFFFFFFF).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_USED_HIGH, (g_virtio_blk_used_addr >> 32).to_u32())
-            mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_READY, 1)
+            _virtio_blk_reg_write32(128, (g_virtio_blk_desc_addr & 0xFFFFFFFF).to_u32())
+            _virtio_blk_reg_write32(132, (g_virtio_blk_desc_addr >> 32).to_u32())
+            _virtio_blk_reg_write32(144, (g_virtio_blk_avail_addr & 0xFFFFFFFF).to_u32())
+            _virtio_blk_reg_write32(148, (g_virtio_blk_avail_addr >> 32).to_u32())
+            _virtio_blk_reg_write32(160, (g_virtio_blk_used_addr & 0xFFFFFFFF).to_u32())
+            _virtio_blk_reg_write32(164, (g_virtio_blk_used_addr >> 32).to_u32())
+            _virtio_blk_reg_write32(68, 1)
 
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_STATUS,
-            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
-            VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK)
+        _virtio_blk_reg_write32(112, 15)
 
         # Read capacity
-        val cap_off = VIRTIO_BLK_CFG_CAPACITY
-        self.capacity_sectors = mmio_read64(_virtio_blk_base() + cap_off)
+        val cap_off: u64 = 256
+        self.capacity_sectors = _virtio_blk_reg_read64(cap_off)
 
         # Read sector size (if feature supported, else default 512)
-        val blk_off = VIRTIO_BLK_CFG_BLK_SIZE
-        val blk_size = mmio_read32(_virtio_blk_base() + blk_off)
+        val blk_off: u64 = 276
+        val blk_size = _virtio_blk_reg_read32(blk_off)
         if blk_size > 0:
             self.sector_size = blk_size
 
@@ -336,7 +402,13 @@ impl VirtioBlkDriver:
         # available; completion falls back to bounded polling.
         self.notif_id = 0
         arm_fs_exec_trace(111)
-        Result.Ok(true)
+        true
+
+    me init() -> Result<bool, text>:
+        """Initialize VirtIO block device."""
+        if self.init_ok():
+            return Result.Ok(true)
+        Result.Err("virtio init failed")
 
     me wait_completion(timeout_polls: u32) -> bool:
         """Wait for a virtqueue completion using interrupt-driven notification.
@@ -354,20 +426,14 @@ impl VirtioBlkDriver:
         """Read one sector and return its bytes for early ARM filesystem boot."""
         arm_fs_exec_trace(120)
         val dma_total: u64 = 529
-        val dma_result = _virtio_blk_alloc_dma(dma_total)
-        if dma_result.is_err():
+        val header_addr = _virtio_blk_alloc_dma_addr(dma_total)
+        if header_addr == 0:
             serial_println("[virtio-blk] direct read DMA allocation failed")
             return []
-        val dma = dma_result.unwrap()
-        val header_addr = dma.virt_addr
         val data_addr = header_addr + 16
         val status_addr = data_addr + 512
-        mmio_write32(status_addr, 0x01010101)
-
-        mmio_write32(header_addr, VIRTIO_BLK_T_IN)
-        mmio_write32(header_addr + 4, 0)
-        mmio_write32(header_addr + 8, (lba & 0xFFFFFFFF).to_u32())
-        mmio_write32(header_addr + 12, (lba >> 32).to_u32())
+        rt_arm_virtq_reset()
+        rt_arm_virtio_blk_prepare_read(lba)
 
         val h_low = header_addr & 0xFFFFFFFF
         val h_high = header_addr >> 32
@@ -379,27 +445,24 @@ impl VirtioBlkDriver:
         rt_virtq_desc_write(g_virtio_blk_desc_addr, 1, d_low, d_high, 512, 3, 2)
         rt_virtq_desc_write(g_virtio_blk_desc_addr, 2, s_low, s_high, 1, 2, 0)
 
-        g_virtio_blk_last_used_idx = mmio_read16(g_virtio_blk_used_addr + 2).to_u32()
+        g_virtio_blk_last_used_idx = rt_arm_virtq_used_idx()
         arm_fs_exec_trace(121)
-        _virtq_push_avail(0)
+        rt_arm_virtq_push_avail(0)
         arm_fs_exec_trace(122)
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        _virtio_blk_reg_write32(80, 0)
         arm_fs_exec_trace(123)
 
-        if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
+        if not _virtq_wait_completion_early(BLK_COMPLETION_TIMEOUT_POLLS):
             serial_println("[virtio-blk] direct read timeout lba={lba}")
-            val _timeout_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return []
         arm_fs_exec_trace(124)
 
-        val status = mmio_read8(status_addr)
-        if status != VIRTIO_BLK_S_OK:
+        val status = rt_arm_virtio_blk_status_u8()
+        if status != 0:
             serial_println("[virtio-blk] direct read status={status} lba={lba}")
-            val _status_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return []
 
         val out = rt_dma_bytes_to_array(data_addr, 512)
-        val _ok_free = _virtio_blk_free_dma(dma.virt_addr, dma_total)
         out
 
     me read_sectors(lba: u64, count: u32, buffer: [u8]) -> Result<bool, text>:
@@ -457,7 +520,7 @@ impl VirtioBlkDriver:
 
         # Submit to available ring
         _virtq_push_avail(desc0.to_u32())
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        _virtio_blk_reg_write32(80, 0)
 
         # Wait for completion: quick poll → NotificationWait (IRQ) → limited spin
         if not _virtio_blk_wait_status(status_addr, BLK_COMPLETION_TIMEOUT_POLLS):
@@ -558,7 +621,7 @@ impl VirtioBlkDriver:
 
         val d0_u16 = desc0.to_u16()
         _virtq_push_avail(d0_u16.to_u32())
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        _virtio_blk_reg_write32(80, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val fd0 = desc0.to_u16()
@@ -659,7 +722,7 @@ impl VirtioBlkDriver:
 
         val d0_u16 = desc0.to_u16()
         _virtq_push_avail(d0_u16.to_u32())
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        _virtio_blk_reg_write32(80, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val fd0 = desc0.to_u16()
@@ -783,7 +846,7 @@ impl BlockDevice for VirtioBlkDriver:
 
         val w_avail_u16 = desc0.to_u16()
         _virtq_push_avail(w_avail_u16.to_u32())
-        mmio_write32(_virtio_blk_base() + VIRTIO_MMIO_QUEUE_NOTIFY, 0)
+        _virtio_blk_reg_write32(80, 0)
 
         if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
             val wfd0 = desc0.to_u16()

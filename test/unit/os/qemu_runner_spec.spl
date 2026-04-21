@@ -4,9 +4,11 @@ use os.qemu_runner.{
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path, scenario_target,
     default_os_build_backend_for_target,
-    desktop_disk_image_candidates, desktop_disk_image_path_in,
+    desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
     desktop_release_installer_iso_path, native_build_prerequisite_hint,
+    os_native_build_args,
+    OsTarget,
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
@@ -89,6 +91,7 @@ describe "Qemu runner serial routing":
         if val resolved_disk = disk:
             val disk_cmd = build_scenario_command(resolved_disk, "build/os/simpleos_desktop_e2e_32.elf")
             expect(disk_cmd).to_contain("drive=nvm")
+            expect(disk_cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
 
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)
@@ -115,6 +118,27 @@ describe "Qemu runner serial routing":
         expect(cmd.contains("-display")).to_equal(false)
 
 describe "Qemu runner native-build prerequisites":
+    it "passes entry closure for the x86_64 OS entry build":
+        val target = OsTarget(
+            arch: Architecture.X86_64,
+            entry: "examples/simple_os/arch/x86_64/os_entry.spl",
+            linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+            target_triple: "x86_64-unknown-none",
+            output: "build/os/simpleos_x86_64.elf",
+            qemu_system: "qemu-system-x86_64",
+            qemu_machine: "q35",
+            qemu_cpu: "qemu64",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val args = os_native_build_args(target, "llvm")
+        expect(args).to_contain("--entry-closure")
+        expect(args).to_contain("--entry")
+        expect(args).to_contain("examples/simple_os/arch/x86_64/os_entry.spl")
+        expect(args.contains("examples/simple_os/arch/x86_64/wm_entry.spl")).to_equal(false)
+
     it "defaults RISC-V OS targets to LLVM native-build backend":
         expect(default_os_build_backend_for_target(get_target(Architecture.Riscv32))).to_equal("llvm")
         expect(default_os_build_backend_for_target(get_target(Architecture.Riscv64))).to_equal("llvm")
@@ -139,6 +163,12 @@ describe "Qemu runner release artifacts":
         expect(candidates[0]).to_start_with("release/")
         expect(candidates[1]).to_equal("build/os/fat32-x86_64.img")
         expect(candidates[2]).to_equal("build/os/fat32.img")
+
+    it "materializes the desktop disk lane at the platform image path":
+        val args = desktop_disk_make_script_args("build/os/fat32-x86_64.img")
+        expect(args[0]).to_equal("scripts/make_os_disk.shs")
+        expect(args[1]).to_equal("64")
+        expect(args[2]).to_equal("build/os/fat32-x86_64.img")
 
     it "resolves the release disk path when the release artifact exists":
         val release_root = "build/test-qemu-release-artifacts"

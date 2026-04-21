@@ -1,0 +1,53 @@
+# x86_64 User Entry Bridge
+#
+# Owns the ring-3 handoff path so the architecture-neutral syscall dispatcher
+# does not pull x86 context-switch code into other kernel targets.
+
+use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId}
+
+extern fn serial_println(msg: text)
+
+fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
+    """Syscall 14: EnterUserBlocking — look up a user TCB and jump to ring-3."""
+    serial_println("[syscall14] dispatch_enter_user_blocking enter")
+    var sched = scheduler
+
+    var target_pid: u64 = pid_hint
+    if target_pid == 0:
+        var best_pid: u64 = 0
+        var slot: i64 = 0
+        while slot < 256:
+            val tcb = sched.get_task(TaskId(id: (slot + 1).to_u64()))
+            if tcb != nil:
+                val task = tcb
+                if task.is_user and task.user_context != nil:
+                    if task.id.id > best_pid:
+                        best_pid = task.id.id
+            slot = slot + 1
+        if best_pid == 0:
+            serial_println("[syscall14] no user task found for pid_hint=0")
+            return -22
+        target_pid = best_pid
+
+    val tcb = sched.get_task(TaskId(id: target_pid))
+    if tcb == nil:
+        serial_println("[syscall14] task not found pid={target_pid}")
+        return -22
+
+    val task = tcb
+    if not task.is_user:
+        serial_println("[syscall14] task is not a user task pid={target_pid}")
+        return -22
+
+    val uctx = task.user_context
+    if uctx == nil:
+        serial_println("[syscall14] task has no user_context pid={target_pid}")
+        return -22
+
+    val ctx = uctx.unwrap()
+    val cr3 = task.address_space
+    serial_println("[syscall14] entering ring-3 pid={target_pid} rip={ctx.rip} cr3={cr3}")
+    arch_x86_64_enter_user_task(ctx, cr3)
+    -22
