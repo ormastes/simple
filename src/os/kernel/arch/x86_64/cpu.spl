@@ -175,7 +175,12 @@ extern fn rt_x86_prepare_ap_startup(cpu_id: u32, sipi_vector: u8) -> bool
 extern fn rt_x86_ap_trampoline_vector() -> u8
 extern fn rt_x86_ap_trampoline_phys() -> u64
 
-var _syscall_entry_installed: bool = false
+# Use u64 sentinel instead of bool — `bool = false` in the baremetal runtime
+# tags as 0x3 (NIL), which is non-zero, so the idempotency guard below would
+# fire on the very first call and skip every wrmsr. arch_init.spl:25 applies
+# the same workaround for its own guard. Once the compiler stops materializing
+# `bool = false` as a NIL-tagged value in .bss, this can flip back to bool.
+var _syscall_entry_installed: u64 = 0
 
 fn install_syscall_entry():
     """Program MSR_EFER.SCE, MSR_STAR, MSR_LSTAR, MSR_SFMASK to enable SYSCALL.
@@ -191,9 +196,9 @@ fn install_syscall_entry():
       3. src/os/kernel/abi/syscall_shim.spl provides @export("C",...) strong
          overrides for 10+ common syscalls.
     """
-    if _syscall_entry_installed:
+    if _syscall_entry_installed != 0:
         return
-    _syscall_entry_installed = true
+    _syscall_entry_installed = 1
     # 1. Enable SYSCALL/SYSRET via EFER.SCE (bit 0).
     val efer = read_msr(MSR_EFER)
     write_msr(MSR_EFER, efer | EFER_SCE)
@@ -213,7 +218,7 @@ fn install_syscall_entry():
 
 fn syscall_entry_installed() -> bool:
     """Test-visible accessor: did `install_syscall_entry` run?"""
-    _syscall_entry_installed
+    _syscall_entry_installed != 0
 
 fn kernel_syscall_entry_addr() -> u64:
     """Return the address of the SYSCALL kernel-entry trampoline.

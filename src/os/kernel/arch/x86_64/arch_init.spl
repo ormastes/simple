@@ -17,6 +17,7 @@ extern fn rt_install_rich_fault_hook()
 
 use os.kernel.arch.x86_64.boot.{X86Boot}
 use os.kernel.arch.x86_64.topology.{x86_install_scheduler_topology_from_cpuid, x86_install_scheduler_topology_from_rsdp}
+use os.kernel.arch.x86_64.cpu.{install_syscall_entry}
 
 extern fn serial_println(msg: text)
 
@@ -54,3 +55,13 @@ fn arch_x86_64_early_init():
     if not topology_installed:
         x86_install_scheduler_topology_from_cpuid()
     serial_println("[arch-init] scheduler topology probed")
+
+    # Program the MSRs (EFER.SCE, STAR, LSTAR, SFMASK) that make the `syscall`
+    # instruction actually trap into the kernel dispatcher. Without this the
+    # raw `syscall` in src/os/userlib/syscall_raw.spl is a no-op (from ring 0)
+    # and posix_spawn → syscall 13 silently returns 0 without reaching
+    # dispatch_spawn_binary_direct. `install_syscall_entry` is idempotent and
+    # cheap (four wrmsrs) so a belt-and-braces call from early-init is safe.
+    serial_println("[arch-init] syscall install begin")
+    install_syscall_entry()
+    serial_println("[arch-init] syscall install returned")

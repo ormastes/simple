@@ -83,6 +83,24 @@ static inline void io_wait(void)
     outb(0x80, 0);
 }
 
+/* rt_read_msr / rt_write_msr — C-ABI helpers for Simple-side MSR programming.
+ * Without these, install_syscall_entry() cannot set EFER.SCE / STAR / LSTAR /
+ * SFMASK, so `syscall` instructions silently #UD and the baremetal syscall
+ * dispatcher is never reached. */
+uint64_t rt_read_msr(uint32_t msr)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void rt_write_msr(uint32_t msr, uint64_t value)
+{
+    uint32_t lo = (uint32_t)(value & 0xFFFFFFFFu);
+    uint32_t hi = (uint32_t)(value >> 32);
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
 #else
 /* Stubs for non-x86 host analysis (never called at runtime) */
 static inline void outb(uint16_t p, uint8_t v) { (void)p; (void)v; }
