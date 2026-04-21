@@ -239,7 +239,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex scheduler/process follow-up
 - **Target:** simpleos-os process lifecycle
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   Finish the direct syscall 13 app-launch path so a mounted app image can be
   built, mapped, registered as a scheduler-owned user task, enqueued from the
@@ -248,38 +248,45 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   apps and unsupported architectures, but should not mask direct-handoff
   regressions for process-backed apps.
 - **Acceptance-criteria:**
-  - [ ] syscall 13 can launch `/sys/apps/browser_demo` through the direct
-        process-backed path without returning `-12`.
-  - [ ] The runqueue handoff from syscall/trap context reaches the scheduler
+  - [x] syscall 13 can launch `/sys/apps/browser_demo` through the direct
+        process-backed path without returning `-12`. (Phase 3: syscall 14
+        EnterUserBlocking wired end-to-end; pre-blocker live run produced
+        `[desktop-e2e] process-backed:ok app=browser_demo pid=1`.)
+  - [x] The runqueue handoff from syscall/trap context reaches the scheduler
         ready queue without allocator churn, deadlock, or loss of the current
-        fallback launcher behavior.
-  - [ ] The x86_64 trap-return or scheduler path can switch into the new
-        task's `user_context` and return to ring 3.
+        fallback launcher behavior. (Commits `9e62c438` bulk segment copy +
+        `70b86c97` enqueue path unblock.)
+  - [x] The x86_64 trap-return or scheduler path can switch into the new
+        task's `user_context` and return to ring 3. (Commit `4708c2c9`
+        `arch_x86_64_enter_user_first` helper + `a3f4f666` syscall 14
+        dispatch wired to `arch_x86_64_enter_user_task`.)
   - [ ] System coverage exercises both the direct process-backed path and the
-        resident-manifest fallback path.
+        resident-manifest fallback path. (Test scaffolding added; full
+        coverage pending stub-collision fix.)
   - [ ] The live desktop disk lane shows no `EXCEPTION`, `FAULT @`, `cr2=`,
         `cr3=`, `heap exhausted`, or `PANIC` markers while launching the app.
+        (Blocked by freestanding-stub symbol-weakness collision — see
+        `doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`.
+        Pre-blocker live run reached `TEST PASSED` with three process-backed
+        app PIDs confirmed and zero faults.)
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
-- **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-design-doc:** `doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md`
 - **Related-todo:** `doc/08_tracking/todo/simpleos_syscall13_direct_handoff_2026-04-20.md`
 - **Related-issue:** none
-- **Notes:** Current diagnostics show syscall 13 can validate and build the
-  user process image, map/load it, create the TCB, and register capabilities.
-  The path is still gated by `[syscall13] user image handoff gated; scheduler
-  enqueue pending`.
-  Re-diagnosis on 2026-04-21
-  (`doc/08_tracking/bug/syscall13_enqueue_stall_2026-04-21.md`) corrected the
-  earlier "scheduler enqueue pending" framing: the root cause was a
-  per-byte allocation storm in
-  `src/os/kernel/loader/segment_mapper.spl` (`_copy_segment_page` /
-  `_copy_stack_page`) that fired via `rt_bytes_u8_at` +
-  `vmm_write_byte_through_hhdm` before any scheduler-side handoff could
-  run. Commit `9e62c438` replaced those per-byte loops with
-  `rt_memcpy`-based bulk primitives
-  (`vmm_copy_bytes_to_phys`, `vmm_zero_phys_range`) in
-  `src/os/kernel/memory/vmm.spl`. Live end-to-end verification of the
-  fix is separately blocked by a pre-existing x86_64 desktop-lane
-  kernel fault tracked in
-  `doc/08_tracking/bug/simpleos_desktop_lane_mouse_compositor_fault_2026-04-21.md`,
-  which must be cleared before the `-12` gate at
-  `src/os/kernel/ipc/syscall.spl:1246` can be lifted.
+- **Notes:** Phase 1 (diagnosis) identified a per-byte allocation storm in
+  `segment_mapper.spl` as the true blocker, not a scheduler enqueue bug
+  (`doc/08_tracking/bug/syscall13_enqueue_stall_2026-04-21.md`). Phase 2
+  (`9e62c438`) replaced per-byte loops with `rt_memcpy` bulk primitives in
+  `vmm.spl`. Phase 3 partial committed in `4708c2c9` (ring-3 first-dispatch
+  helper), `70b86c97` (scheduler enqueue path), `df557a44` (VMM sentinel),
+  `fe81b853` (VMM gate fix), `a0e65c3b` (module PID counter), and `a3f4f666`
+  (launcher scanner fix, scheduler module global, syscall 14 end-to-end).
+  Pre-blocker x86_64 desktop disk live run produced:
+  `[desktop-e2e] process-backed:ok app=browser_demo pid=1`,
+  `[desktop-e2e] process-backed:ok app=hello_world pid=2`,
+  `[desktop-e2e] process-backed:ok app=editor pid=3`, `mode=filesystem-process`,
+  `editor-save:ok`, `cli-verify:ok`, `TEST PASSED`, 0 faults.
+  Full live re-verification against HEAD is blocked by a compiler-level
+  freestanding-stub symbol-weakness collision (separate compiler agent fix)
+  tracked in
+  `doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`.

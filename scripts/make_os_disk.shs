@@ -300,6 +300,41 @@ dst.write_bytes(payload + header)
 PY
 }
 
+build_ring3_smoke_elf() {
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: clang not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: ld.lld not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+
+    RING3_SRC="examples/simpleos_ring3_smoke/ring3_smoke.S"
+    if [ ! -f "$RING3_SRC" ]; then
+        echo "[make_os_disk] WARNING: $RING3_SRC not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+
+    RING3_OBJ="$TMPDIR/ring3_smoke.o"
+    RING3_ELF="$TMPDIR/ring3_smoke.elf"
+
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -c "$RING3_SRC" -o "$RING3_OBJ"; then
+        echo "[make_os_disk] WARNING: clang assemble failed for ring3_smoke -- skipping"
+        return 1
+    fi
+    if ! "$HOST_LLD" -e _start -static "$RING3_OBJ" -o "$RING3_ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed for ring3_smoke -- skipping"
+        return 1
+    fi
+
+    mkdir -p "$TMPDIR/SYS/APPS"
+    cp "$RING3_ELF" "$TMPDIR/SYS/APPS/RING3_SMOKE.SMF"
+    echo "[make_os_disk] Seeded ring3_smoke ELF into /sys/apps/ring3_smoke.smf"
+    return 0
+}
+
 build_arm_minimal_hello_elf() {
     DEST="$TMPDIR/SYS/APPS/hello_world"
     if ! command -v python3 >/dev/null 2>&1; then
@@ -379,6 +414,8 @@ else
         "$TMPDIR/usr/bin/editor" || true
     make_exec_smf "$TMPDIR/SYS/APPS/editor" "$TMPDIR/EDITORSM.SMF" || true
     cp "$TMPDIR/EDITORSM.SMF" "$TMPDIR/SYS/APPS/EDITORSM.SMF" 2>/dev/null || true
+    # FR-SOS-024 Phase 3: ring-3 smoke ELF for the EnterUserBlocking test
+    build_ring3_smoke_elf || true
 fi
 
 # Method 1: mtools (works on macOS and Linux without root)
