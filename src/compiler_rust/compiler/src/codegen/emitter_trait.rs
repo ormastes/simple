@@ -66,6 +66,9 @@ pub trait CodegenEmitter {
         args: &[VReg],
         effect: Effect,
     ) -> Result<(), Self::Error>;
+    fn emit_inline_asm(&mut self, _instructions: &[String], _volatile: bool) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     // =========================================================================
     // Collections

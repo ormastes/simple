@@ -100,10 +100,12 @@ typedef int32_t RuntimeValue;
 typedef struct { uint32_t type; uint32_t size; } HeapHeader;
 typedef struct { HeapHeader header; uint32_t len; char data[]; } RuntimeString;
 typedef struct { HeapHeader header; uint32_t len; uint32_t cap; RuntimeValue data[]; } RuntimeArray;
+typedef struct { HeapHeader header; double value; } RuntimeFloat;
 
 #define HEAP_TYPE_STRING  1
 #define HEAP_TYPE_ARRAY   2
 #define HEAP_TYPE_OBJECT  3
+#define HEAP_TYPE_FLOAT   4
 #define HEAP_TYPE_ENUM    7
 
 #define IS_NIL(v) ((v) == NIL_VALUE)
@@ -156,6 +158,29 @@ RuntimeValue rt_alloc(RuntimeValue size) {
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     return ENCODE_PTR(p);
+}
+
+RuntimeValue rt_box_float(double value) {
+    RuntimeFloat *f = (RuntimeFloat *)malloc(sizeof(RuntimeFloat));
+    if (!f) return NIL_VALUE;
+    f->header.type = HEAP_TYPE_FLOAT;
+    f->header.size = (uint32_t)sizeof(RuntimeFloat);
+    f->value = value;
+    return ENCODE_PTR(f);
+}
+
+double rt_unbox_float(RuntimeValue value) {
+    if (IS_INT(value)) {
+        return (double)DECODE_INT(value);
+    }
+    if (!IS_HEAP(value)) {
+        return 0.0;
+    }
+    RuntimeFloat *f = (RuntimeFloat *)DECODE_PTR(value);
+    if (f->header.type != HEAP_TYPE_FLOAT) {
+        return 0.0;
+    }
+    return f->value;
 }
 
 /* ================================================================

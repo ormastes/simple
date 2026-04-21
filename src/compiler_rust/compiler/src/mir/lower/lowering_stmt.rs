@@ -1034,6 +1034,20 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
+            HirStmt::InlineAsm {
+                instructions,
+                volatile,
+            } => {
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::InlineAsm {
+                        instructions: instructions.clone(),
+                        volatile: *volatile,
+                    });
+                })?;
+                Ok(())
+            }
+
             HirStmt::Defer { body } => {
                 // Defer statement for RAII/cleanup patterns
                 // Push the body onto the defer stack; it will be emitted in LIFO order

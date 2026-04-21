@@ -12,7 +12,10 @@
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="$REPO_ROOT/build/os/simpleos_riscv32.elf"
 SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32.log"
+BUILD_LOG="$REPO_ROOT/build/os/build_riscv32.log"
+SIMPLE_BIN="${SIMPLE_BINARY:-$REPO_ROOT/bin/simple}"
 TIMEOUT_SEC=30
+BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-180}"
 SKIP_BUILD=0
 
 # ---------------------------------------------------------------------------
@@ -47,18 +50,25 @@ fi
 # ---------------------------------------------------------------------------
 # Build kernel (unless --skip-build or compiler absent)
 # ---------------------------------------------------------------------------
-if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$REPO_ROOT/bin/simple" ]; then
-    echo "[build] Building SimpleOS riscv32 kernel..."
+if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
+    echo "[build] Building SimpleOS riscv32 kernel (per-file timeout: ${BUILD_TIMEOUT_SEC}s)..."
     mkdir -p "$REPO_ROOT/build/os"
-    "$REPO_ROOT/bin/simple" native-build \
+    "$SIMPLE_BIN" native-build \
+        --backend llvm \
+        --timeout "$BUILD_TIMEOUT_SEC" \
         --entry examples/simple_os/arch/riscv32/os_entry.spl \
         --target riscv32-unknown-none \
         -o "$KERNEL" \
         --linker-script examples/simple_os/arch/riscv32/linker.ld \
-        --source src/os 2>&1
+        --source src/os >"$BUILD_LOG" 2>&1
     BUILD_RC=$?
     if [ "$BUILD_RC" -ne 0 ]; then
         echo "FAIL: Kernel build failed (exit $BUILD_RC)"
+        if grep -q "LLVM backend requested but 'llvm' feature not enabled" "$BUILD_LOG"; then
+            echo "prerequisite: rebuild the selected Simple compiler with the Rust llvm feature, or set SIMPLE_BINARY to an LLVM-enabled simple binary."
+        fi
+        echo "[build] Log tail ($BUILD_LOG):"
+        tail -n 80 "$BUILD_LOG"
         exit 1
     fi
 fi

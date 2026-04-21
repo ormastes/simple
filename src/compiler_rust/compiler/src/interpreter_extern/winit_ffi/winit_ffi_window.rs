@@ -87,6 +87,9 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
             config.height = get_i64(args, 2, name)?.max(1) as u32;
             config.title = get_string(args, 3, name)?;
 
+            #[cfg(target_os = "macos")]
+            macos_pump(event_loop_id);
+
             let (response_tx, response_rx) = crossbeam::channel::bounded(1);
             {
                 let loops = EVENT_LOOPS.lock();

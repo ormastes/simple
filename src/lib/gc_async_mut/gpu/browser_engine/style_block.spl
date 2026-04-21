@@ -121,6 +121,51 @@ fn parse_declarations(text_val: text) -> [CssDecl]:
                 decls.push(e)
     decls
 
+fn collect_css_vars(rules: [CssRule]) -> [CssDecl]:
+    var vars: [CssDecl] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        if rule.selector == ":root" or rule.selector == "html":
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                di = di + 1
+                if decl.property.starts_with("--"):
+                    vars.push(decl)
+    vars
+
+fn resolve_css_vars_in_value(value: text, vars: [CssDecl]) -> text:
+    var resolved = value
+    var vi = 0
+    while vi < vars.len():
+        val v = vars[vi]
+        vi = vi + 1
+        resolved = resolved.replace("var(" + v.property + ")", v.value)
+        resolved = resolved.replace("var(" + v.property + " )", v.value)
+    resolved
+
+fn resolve_css_vars_in_rules(rules: [CssRule], vars: [CssDecl]) -> [CssRule]:
+    if vars.len() == 0:
+        return rules
+    var out: [CssRule] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        var decls: [CssDecl] = []
+        var di = 0
+        while di < rule.declarations.len():
+            val decl = rule.declarations[di]
+            di = di + 1
+            decls.push(CssDecl(
+                property: decl.property,
+                value: resolve_css_vars_in_value(decl.value, vars)
+            ))
+        out.push(CssRule(selector: rule.selector, declarations: decls))
+    out
+
 # =========================================================================
 # Shorthand expansion
 # =========================================================================
@@ -401,18 +446,25 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
 pub fn process_style_blocks(root: BeDomNode, html: text):
     val blocks = extract_style_blocks(html)
     var all_rules: [CssRule] = []
+    var all_vars: [CssDecl] = []
     var bl_idx = 0
     while bl_idx < blocks.len():
         val block = blocks[bl_idx]
         bl_idx = bl_idx + 1
         val rules = parse_css_rules(block)
+        val vars = collect_css_vars(rules)
+        var vi = 0
+        while vi < vars.len():
+            all_vars.push(vars[vi])
+            vi = vi + 1
         var ri_idx = 0
         while ri_idx < rules.len():
             val r = rules[ri_idx]
             ri_idx = ri_idx + 1
             all_rules.push(r)
     if all_rules.len() > 0:
-        apply_css_rules_to_tree(root, all_rules)
+        val resolved_rules = resolve_css_vars_in_rules(all_rules, all_vars)
+        apply_css_rules_to_tree(root, resolved_rules)
 
 # =========================================================================
 # Helpers

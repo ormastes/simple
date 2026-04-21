@@ -83,6 +83,12 @@ pub enum HirStmt {
     Calc {
         steps: Vec<HirCalcStep>,
     },
+    /// Raw inline assembly block with no operand bindings.
+    /// Backend-specific codegen treats this as an opaque side-effecting statement.
+    InlineAsm {
+        instructions: Vec<String>,
+        volatile: bool,
+    },
     /// Defer statement for RAII/cleanup patterns
     /// defer: body or defer expr
     /// Semantics: LIFO execution at all exit points (return, end-of-block, error)

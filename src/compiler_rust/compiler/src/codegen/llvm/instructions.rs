@@ -645,8 +645,10 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("trunc", &e))?;
                 Ok(cast.into())
             }
-            // float → int (bitcast to preserve tagged-value ABI bit patterns)
-            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it)) if it.get_bit_width() == 64 => {
+            // f64 → i64 (bitcast to preserve tagged-value ABI bit patterns)
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it))
+                if it.get_bit_width() == 64 && fv.get_type() == self.context.f64_type() =>
+            {
                 let cast = builder
                     .build_bit_cast(fv, it, "f2i")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_f2i", &e))?;
@@ -659,8 +661,10 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("float_to_int", &e))?;
                 Ok(cast.into())
             }
-            // int → float (bitcast to preserve tagged-value ABI bit patterns)
-            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft)) if iv.get_type().get_bit_width() == 64 => {
+            // i64 → f64 (bitcast to preserve tagged-value ABI bit patterns)
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft))
+                if iv.get_type().get_bit_width() == 64 && ft == self.context.f64_type() =>
+            {
                 let cast = builder
                     .build_bit_cast(iv, ft, "i2f")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_i2f", &e))?;

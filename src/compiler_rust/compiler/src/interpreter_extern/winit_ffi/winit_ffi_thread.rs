@@ -16,6 +16,8 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 #[allow(deprecated)]
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 #[cfg(target_os = "macos")]
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+#[cfg(target_os = "macos")]
 use std::cell::RefCell;
 
 use crate::error::CompileError;
@@ -115,6 +117,8 @@ pub(super) fn handle_command(
                 .map_err(|err| format!("failed to create window: {err:?}"))
                 .and_then(|window| {
                     let window = Arc::new(window);
+                    window.set_visible(true);
+                    window.focus_window();
                     if let (Some(w), Some(h)) = (config.min_width, config.min_height) {
                         window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
                     }
@@ -373,6 +377,9 @@ pub(super) fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHan
     #[cfg(target_os = "macos")]
     {
         let mut builder = EventLoop::<UserEvent>::with_user_event();
+        builder
+            .with_activation_policy(ActivationPolicy::Regular)
+            .with_activate_ignoring_other_apps(true);
         let event_loop = builder
             .build()
             .map_err(|err| runtime_error(format!("failed to create event loop: {err:?}")))?;

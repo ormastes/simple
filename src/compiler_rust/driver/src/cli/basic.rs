@@ -73,6 +73,7 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
     let code = code.to_string();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let runner = create_runner(gc_log, gc_off);
+        let print_exit_code = should_print_code_result(&code);
 
         // Wrap expression in main if not already a full program
         let full_code = if code.contains("main") || code.contains("fn ") || code.contains("let ") {
@@ -83,7 +84,9 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
 
         match runner.run_source_in_memory(&full_code) {
             Ok(exit_code) => {
-                println!("{}", exit_code);
+                if print_exit_code {
+                    println!("{}", exit_code);
+                }
                 exit_code
             }
             Err(e) => {
@@ -107,6 +110,32 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
             101
         }
     }
+}
+
+fn should_print_code_result(code: &str) -> bool {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return false;
+    }
+    if trimmed.starts_with("main =") || trimmed.starts_with("main=") {
+        return true;
+    }
+    if trimmed.starts_with("print ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("var ")
+        || trimmed.starts_with("val ")
+        || trimmed.starts_with("fn ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("use ")
+        || trimmed.starts_with("extern ")
+    {
+        return false;
+    }
+    true
 }
 
 /// Watch a file for changes and auto-recompile

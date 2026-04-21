@@ -697,6 +697,23 @@ impl Lowerer {
                 Ok(stmts)
             }
 
+            Node::InlineAsm(asm_stmt) => {
+                if asm_stmt.constraints.is_empty() && asm_stmt.target_match.is_empty() && asm_stmt.clobbers.is_empty() {
+                    Ok(vec![HirStmt::InlineAsm {
+                        instructions: asm_stmt.instructions.clone(),
+                        volatile: asm_stmt.volatile,
+                    }])
+                } else {
+                    if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {
+                        eprintln!(
+                            "[asm] skipping operand-bound or target-matched asm block at {:?}",
+                            asm_stmt.span
+                        );
+                    }
+                    Ok(vec![])
+                }
+            }
+
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
             Node::Context(_) if !self.lenient_types => Err(LowerError::Unsupported(

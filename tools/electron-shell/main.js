@@ -568,8 +568,9 @@ function spawnSimpleProcess() {
         }
     }
 
+    const electronAppEntry = path.join(projectRoot, 'src', 'app', 'ui.electron', 'app.spl');
     const commandArgs = entryArgs.length > 0 && entryArgs[0].endsWith('.ui.sdn')
-        ? ['ui', 'electron', ...entryArgs]
+        ? ['run', electronAppEntry, ...entryArgs]
         : ['run', ...entryArgs];
 
     simpleProcess = spawn(bin, commandArgs, {

@@ -393,6 +393,16 @@ LAUNCHER_EOF
   chmod +x "${launcher}"
 }
 
+existing_mcp_binary_is_native() {
+  local target magic
+  target="${mcp_release_dir}/$1"
+  [ -f "${target}" ] && [ -s "${target}" ] || return 1
+
+  # Shell wrappers start with #!. Native Mach-O, ELF, and PE binaries do not.
+  magic="$(head -c 2 "${target}" 2>/dev/null || true)"
+  [ "${magic}" != "#!" ]
+}
+
 sources_newer_than() {
   local target="$1"
   shift
@@ -412,17 +422,21 @@ sources_newer_than() {
 echo ""
 echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 
-# The current native simple MCP/LSP MCP binaries can SIGSEGV before answering
-# initialize, and their SMF caches fail to load due unresolved extern
-# relocations. Keep setup on the interpret launcher path until native MCP
-# smoke and SMF probes are green again.
-generate_mcp_launcher "simple_mcp_server" \
-  "src/app/mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
-echo "  simple_mcp_server (shell wrapper)"
+if existing_mcp_binary_is_native "simple_mcp_server"; then
+  echo "  simple_mcp_server (native binary preserved)"
+else
+  generate_mcp_launcher "simple_mcp_server" \
+    "src/app/mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
+  echo "  simple_mcp_server (shell wrapper)"
+fi
 
-generate_mcp_launcher "simple_lsp_mcp_server" \
-  "src/app/simple_lsp_mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
-echo "  simple_lsp_mcp_server (shell wrapper)"
+if existing_mcp_binary_is_native "simple_lsp_mcp_server"; then
+  echo "  simple_lsp_mcp_server (native binary preserved)"
+else
+  generate_mcp_launcher "simple_lsp_mcp_server" \
+    "src/app/simple_lsp_mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
+  echo "  simple_lsp_mcp_server (shell wrapper)"
+fi
 
 cat > "${mcp_release_dir}/t32_mcp_server" <<'T32_MCP_EOF'
 #!/bin/sh

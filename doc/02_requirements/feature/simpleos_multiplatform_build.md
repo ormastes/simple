@@ -17,3 +17,11 @@ REQ-SMPB-005: Native SimpleOS build helpers must derive supported targets, archi
 REQ-SMPB-006: The example SimpleOS multi-architecture builder must enumerate all first-class QEMU targets instead of a stale hardcoded subset.
 
 REQ-SMPB-007: Documentation must distinguish hosted Simple compiler platform support from SimpleOS guest target support.
+
+REQ-SMPB-008: The platform-build catalog must record RISC-V ISA, ABI, and floating-point ABI policy so RV32 no-FPU support is visible to callers instead of encoded only in compiler flags.
+
+REQ-SMPB-009: The `riscv32imac-simpleos` target must use RV32IMAC, ILP32, and soft-float metadata and C flags.
+
+REQ-SMPB-010: Freestanding native links must resolve compiler-generated soft-float and integer helper symbols from compiler-rt/libgcc rather than weak-stubbing those helpers.
+
+REQ-SMPB-011: RISC-V SimpleOS QEMU build paths must default to an LLVM-enabled native-build backend unless the caller explicitly overrides the backend for diagnostics.

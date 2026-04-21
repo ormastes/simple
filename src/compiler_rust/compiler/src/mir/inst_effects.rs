@@ -174,6 +174,9 @@ impl HasEffects for MirInst {
             // Extern class FFI method calls - treated as IO since they call native code
             MirInst::ExternMethodCall { .. } => Effect::Io,
 
+            // Inline assembly is opaque to analyses and may touch machine state.
+            MirInst::InlineAsm { .. } => Effect::Io,
+
             // Value boxing instructions - pure compute operations
             MirInst::BoxInt { .. } => Effect::Compute,
             MirInst::BoxFloat { .. } => Effect::Compute,

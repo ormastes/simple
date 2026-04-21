@@ -80,6 +80,7 @@ pub mod i18n;
 pub mod native_ffi;
 pub mod package;
 pub mod regex;
+pub mod hosted;
 pub mod ast_ffi;
 pub mod env_ffi;
 pub mod error_ffi;
@@ -1262,6 +1263,9 @@ pub(crate) fn call_extern_function(
         "rt_i18n_context_free" => i18n::rt_i18n_context_free(&evaluated, env),
         "rt_i18n_get_message" => i18n::rt_i18n_get_message(&evaluated, env),
         "rt_i18n_severity_name" => i18n::rt_i18n_severity_name(&evaluated, env),
+
+        "rt_hosted_select_surface" => hosted::select_surface(&evaluated),
+        "rt_hosted_set_surface_override" => hosted::set_surface_override(&evaluated),
 
         #[cfg(feature = "gui")]
         _ if name.starts_with("rt_winit_") => winit_ffi::dispatch(name, &evaluated),

@@ -334,6 +334,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
+    CommandEntry {
+        name: "theme-sync",
+        app_path: "src/app/cli/theme_sync.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: theme-sync app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Direct Tauri entry — lightweight path that outputs JSON IPC to stdout
     CommandEntry {
         name: "tauri-entry",
@@ -953,6 +963,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     // Keep Simple app dispatch narrow. Most compiler/build commands still rely on
     // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"
+        && app_relative_path != "src/app/cli/theme_sync.spl"
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"

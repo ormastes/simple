@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, ModuleImports};
-use super::tools::{find_c_compiler, find_native_all_library, find_runtime_library, is_system_symbol};
+use super::tools::{
+    find_c_compiler, find_native_all_library, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol,
+};
 
 /// Generate a stub object file for a FREESTANDING (cross) target.
 ///
@@ -107,6 +109,7 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| !s.starts_with("_dyld_"))
         .filter(|s| !s.starts_with("_ZSt") && !s.starts_with("_ZNSt"))
         .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_compiler_rt_builtin_symbol(s))
         .filter(|s| s != "main" && s != "_main")
         .collect();
 

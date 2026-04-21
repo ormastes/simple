@@ -9,7 +9,7 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::Module;
+use cranelift_module::{Linkage, Module};
 
 use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
@@ -307,6 +307,26 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::Call { dest, target, args } => {
             compile_call(ctx, builder, dest, target, args)?;
+        }
+
+        MirInst::InlineAsm {
+            instructions,
+            volatile,
+        } => {
+            let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile);
+            let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
+                func_id
+            } else {
+                let sig = Signature::new(super::shared::platform_call_conv());
+                let func_id = ctx
+                    .module
+                    .declare_function(&symbol, Linkage::Import, &sig)
+                    .map_err(|e| e.to_string())?;
+                ctx.func_ids.insert(symbol, func_id);
+                func_id
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            builder.ins().call(func_ref, &[]);
         }
 
         MirInst::GetElementPtr { dest, base, index } => {

@@ -192,7 +192,7 @@ impl<'a> GhostChecker<'a> {
                     self.check_ghost_stmt(stmt, func_name);
                 }
             }
-            HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
+            HirStmt::InlineAsm { .. } | HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
         }
     }
 
@@ -364,7 +364,7 @@ impl<'a> GhostChecker<'a> {
                     self.check_non_ghost_stmt(stmt, func_name, in_contract);
                 }
             }
-            HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
+            HirStmt::InlineAsm { .. } | HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
         }
     }
 

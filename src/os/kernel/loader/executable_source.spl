@@ -13,6 +13,7 @@ use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
 
 extern fn serial_println(msg: text)
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
 val RV32_PROOF_BINARY_PATH: text = "/sys/apps/rv32_user_proof"
@@ -53,10 +54,20 @@ fn _desktop_app_short_alias(path: text) -> text?:
     match path:
         case "/sys/apps/browser_demo":
             Some("/SYS/APPS/BROWSE~1")
+        case "/sys/apps/browser_demo.smf":
+            Some("/SYS/APPS/BROWSMF.SMF")
         case "/sys/apps/hello_world":
             Some("/SYS/APPS/HELLO_~1")
+        case "/sys/apps/hello_world.smf":
+            Some("/SYS/APPS/HELLOSMF.SMF")
         case "/sys/apps/file_manager":
             Some("/SYS/APPS/FILE_M~1")
+        case "/sys/apps/file_manager.smf":
+            Some("/SYS/APPS/FILESMF.SMF")
+        case "/sys/apps/shell.smf":
+            Some("/SYS/APPS/SHELLSMF.SMF")
+        case "/sys/apps/editor.smf":
+            Some("/SYS/APPS/EDITORSM.SMF")
         case _:
             nil
 
@@ -71,22 +82,29 @@ fn _desktop_app_root_elf_alias(path: text) -> text?:
     match path:
         case "/sys/apps/browser_demo":
             Some("/BROWSE~1.ELF")
+        case "/sys/apps/browser_demo.smf":
+            Some("/BROWSMF.SMF")
         case "/sys/apps/hello_world":
             Some("/HELLO_~1.ELF")
+        case "/sys/apps/hello_world.smf":
+            Some("/HELLOSMF.SMF")
         case "/sys/apps/file_manager":
             Some("/FILE_M~1.ELF")
+        case "/sys/apps/file_manager.smf":
+            Some("/FILESMF.SMF")
         case "/sys/apps/shell":
             Some("/TERMIN~1.ELF")
+        case "/sys/apps/shell.smf":
+            Some("/SHELLSMF.SMF")
         case "/sys/apps/editor":
             Some("/EDITOR~1.ELF")
+        case "/sys/apps/editor.smf":
+            Some("/EDITORSM.SMF")
         case _:
             nil
 
 fn _path_bytes_to_text(path_bytes: [u8]) -> text:
-    var chars: [text] = []
-    for b in path_bytes:
-        chars.push((b.to_i64()).to_char())
-    chars.join("")
+    rt_string_from_byte_array(path_bytes)
 
 fn _canonical_seeded_path_from_bytes(path_bytes: [u8]) -> text?:
     match _path_bytes_to_text(path_bytes):
@@ -143,10 +161,7 @@ fn _lookup_synthetic_vfs(path: text) -> Result<[u8], text>:
     Err(ERR_ENOENT)
 
 fn _path_bytes_to_text(bytes: [u8]) -> text:
-    var chars: [text] = []
-    for b in bytes:
-        chars.push((b.to_i64()).to_char())
-    chars.join("")
+    rt_string_from_byte_array(bytes)
 
 # ----------------------------------------------------------------------------
 # In-kernel initramfs reader.
@@ -360,10 +375,10 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
     val synthetic = _lookup_synthetic_vfs(path)
     if synthetic.is_ok():
         return synthetic
-    val bytes = g_vfs_read_file_bytes(path)
-    if bytes.len() > 0:
-        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
-        return Ok(bytes)
+
+    # Desktop app paths are long logical names, but the FAT32 disk fixture is
+    # 8.3. Try the known executable aliases before the generic mount-table
+    # fallback so a long-path miss cannot trap in the legacy retry path.
     val alias = _desktop_app_short_alias(path)
     if alias != nil:
         val alias_path = alias.unwrap()
@@ -380,6 +395,10 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
             serial_println("[exec-source] vfs_root_alias_hit path={path} alias={root_alias_path} bytes={root_alias_bytes.len()}")
             return Ok(root_alias_bytes)
         serial_println("[exec-source] vfs_root_alias_miss path={path} alias={root_alias_path}")
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() > 0:
+        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
+        return Ok(bytes)
     serial_println("[exec-source] vfs_miss path={path}")
     Err(ERR_ENOENT)
 

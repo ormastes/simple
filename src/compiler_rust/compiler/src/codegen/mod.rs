@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod emitter_trait;
 pub mod execution_manager;
 pub mod instr;
+pub mod inline_asm;
 pub mod instr_gpu;
 #[cfg(not(doctest))]
 pub mod local_execution;

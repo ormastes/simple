@@ -1249,7 +1249,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Defer(_)
             | Node::ErrDefer(_)
             | Node::Mixin(_)
-            | Node::InlineAsm(_)
             | Node::Newtype(_)
             | Node::Extend(_) => {
                 // Module system is handled by the module resolver
@@ -1265,6 +1264,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Pass is a no-op statement
                 // Defer at module level is a no-op (only meaningful inside function bodies)
                 // These are no-ops in the interpreter
+            }
+            Node::InlineAsm(asm_stmt) => {
+                if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[asm] interpreter skipped inline asm block with {} instruction(s)",
+                        asm_stmt.instructions.len()
+                    );
+                }
             }
         }
     }

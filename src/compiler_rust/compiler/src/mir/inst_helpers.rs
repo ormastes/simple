@@ -139,7 +139,8 @@ impl MirInst {
             | MirInst::ConstBool { .. }
             | MirInst::ConstString { .. }
             | MirInst::ConstSymbol { .. }
-            | MirInst::GcAlloc { .. } => vec![],
+            | MirInst::GcAlloc { .. }
+            | MirInst::InlineAsm { .. } => vec![],
             MirInst::Copy { src, .. } => vec![*src],
             MirInst::BinOp { left, right, .. } => vec![*left, *right],
             MirInst::UnaryOp { operand, .. } => vec![*operand],

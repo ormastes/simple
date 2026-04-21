@@ -171,6 +171,33 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     None
 }
 
+/// Find the compiler-rt builtins archive for a freestanding target.
+///
+/// Clang reports this through `-print-libgcc-file-name`; on Apple toolchains
+/// the returned RISC-V path is a compiler-rt archive under the clang resource
+/// directory, while ELF cross toolchains may report libgcc instead.
+pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
+    let cc = find_c_compiler();
+    let output = std::process::Command::new(&cc)
+        .arg(format!("--target={}", triple))
+        .arg("-print-libgcc-file-name")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.exists() && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Find an objcopy tool that can handle the host object format.
 pub(crate) fn find_objcopy_tool() -> Option<String> {
     for prefix in &[
@@ -259,6 +286,57 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Return true for libgcc/compiler-rt low-level helper names.
+///
+/// Freestanding links must resolve these from compiler-rt/libgcc, not from the
+/// weak unresolved-symbol stubs. Stubbing these would make RV32 soft-float
+/// programs link while producing incorrect arithmetic at runtime.
+pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
+    let name = sym.strip_prefix('_').unwrap_or(sym);
+    if !sym.starts_with("__") && !name.starts_with("__") {
+        return false;
+    }
+    let builtin_prefixes = [
+        "__add",
+        "__sub",
+        "__mul",
+        "__div",
+        "__mod",
+        "__udiv",
+        "__umod",
+        "__udivmod",
+        "__ashl",
+        "__ashr",
+        "__lshr",
+        "__cmp",
+        "__ucmp",
+        "__neg",
+        "__clz",
+        "__ctz",
+        "__popcount",
+        "__parity",
+        "__bswap",
+        "__fix",
+        "__fixuns",
+        "__float",
+        "__floatun",
+        "__extend",
+        "__trunc",
+        "__eq",
+        "__ne",
+        "__lt",
+        "__le",
+        "__gt",
+        "__ge",
+        "__unord",
+        "__powi",
+        "__multi3",
+    ];
+    builtin_prefixes
+        .iter()
+        .any(|prefix| sym.starts_with(prefix) || name.starts_with(prefix))
 }
 
 #[cfg(target_os = "windows")]
@@ -355,7 +433,9 @@ fn is_macos_system_symbol(sym: &str) -> bool {
         return true;
     }
 
-    if name.starts_with("_ZN")
+    if name.starts_with("_Z")
+        || name.starts_with("__Z")
+        || name.starts_with("_ZN")
         || name.starts_with("_ZT")
         || name.starts_with("_ZS")
         || name.starts_with("__cxa_")
@@ -449,7 +529,7 @@ fn is_macos_system_symbol(sym: &str) -> bool {
 }
 
 fn is_known_system_name(name: &str) -> bool {
-    if name.starts_with("_ZSt") || name.starts_with("_ZNSt") {
+    if name.starts_with("_Z") || name.starts_with("__Z") {
         return true;
     }
     matches!(

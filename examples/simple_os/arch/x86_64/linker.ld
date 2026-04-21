@@ -97,6 +97,7 @@ SECTIONS
      * One entry per spl_handle_* function defined in
      * src/os/kernel/abi/syscall_shim.spl (62 shims, Wave 10D).
      */
+    spl_x86_dispatch_installed_syscall_abi = kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi;
     spl_handle_debug_write = kernel__abi__syscall_shim__spl_handle_debug_write;
     spl_handle_exit = kernel__abi__syscall_shim__spl_handle_exit;
     spl_handle_yield = kernel__abi__syscall_shim__spl_handle_yield;

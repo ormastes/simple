@@ -1897,12 +1897,33 @@ RuntimeValue rt_fat32_write_selected_file_text(RuntimeValue content_rv)
 
 static int _fat32_copy_path_arg(const char *src, int64_t src_len, char *dst, uint32_t dst_cap)
 {
-    if (!src || src_len <= 0 || !dst || dst_cap == 0)
+    if (!src || !dst || dst_cap == 0)
         return -1;
-    uint32_t len = (uint32_t)src_len;
+    const char *data = src;
+    uint32_t len = 0;
+
+    RuntimeValue src_rv = (RuntimeValue)(uintptr_t)src;
+    if (IS_HEAP(src_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(src_rv);
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            data = s->data;
+            len = s->len;
+        }
+    }
+    if (len == 0) {
+        RuntimeString *s = (RuntimeString *)(uintptr_t)src;
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            data = s->data;
+            len = s->len;
+        }
+    }
+    if (len == 0)
+        len = src_len > 0 ? (uint32_t)src_len : (uint32_t)strlen(data);
+    if (len == 0)
+        return -1;
     if (len >= dst_cap)
         len = dst_cap - 1;
-    __builtin_memcpy(dst, src, len);
+    __builtin_memcpy(dst, data, len);
     dst[len] = '\0';
     return (int)len;
 }
@@ -2211,28 +2232,17 @@ static void _fat32_make_8_3_name(const char *name, char out[11]) {
     }
 }
 
-/* Find a file by name in the root directory.
- * Returns 0 on success and fills out_cluster/out_size, -1 if not found. */
-int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size) {
-    if (!_fat32.initialized) {
-        if (_fat32_init() != 0) return -1;
-    }
-
-    const char *root_name = _fat32_root_name(name);
-    if (!root_name || !*root_name) {
-        return -1;
-    }
-
-    /* Build 8.3 name for comparison */
+static int _fat32_find_in_dir(uint32_t dir_cluster, const char *name,
+                              uint32_t *out_cluster, uint32_t *out_size,
+                              uint8_t *out_attr) {
     char name83[11];
-    _fat32_make_8_3_name(root_name, name83);
+    _fat32_make_8_3_name(name, name83);
 
-    /* Allocate a cluster-sized buffer for reading directory entries */
     uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512;
     uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!dir_buf) return -1;
 
-    uint32_t cluster = _fat32.root_cluster;
+    uint32_t cluster = dir_cluster;
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         if (_fat32_read_cluster(cluster, dir_buf) != 0)
@@ -2253,12 +2263,67 @@ int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size)
                 *out_cluster = lo | (hi << 16);
                 *out_size = (uint32_t)entry[28] | ((uint32_t)entry[29] << 8)
                           | ((uint32_t)entry[30] << 16) | ((uint32_t)entry[31] << 24);
+                if (out_attr) *out_attr = entry[11];
                 return 0;
             }
         }
         cluster = _fat32_next_cluster(cluster);
     }
     return -1; /* not found */
+}
+
+static int _fat32_find_path(const char *name, uint32_t *out_cluster,
+                            uint32_t *out_size, uint8_t *out_attr) {
+    const char *root_name = _fat32_root_name(name);
+    if (!root_name || !*root_name) return -1;
+
+    uint32_t dir_cluster = _fat32.root_cluster;
+    const char *p = root_name;
+    char segment[64];
+
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+
+        uint32_t seg_len = 0;
+        while (p[seg_len] && p[seg_len] != '/') {
+            if (seg_len + 1 >= sizeof(segment)) return -1;
+            segment[seg_len] = p[seg_len];
+            seg_len++;
+        }
+        segment[seg_len] = '\0';
+
+        uint32_t found_cluster = 0;
+        uint32_t found_size = 0;
+        uint8_t attr = 0;
+        if (_fat32_find_in_dir(dir_cluster, segment, &found_cluster, &found_size, &attr) != 0)
+            return -1;
+
+        p += seg_len;
+        while (*p == '/') p++;
+        if (!*p) {
+            *out_cluster = found_cluster;
+            *out_size = found_size;
+            if (out_attr) *out_attr = attr;
+            return 0;
+        }
+        if ((attr & 0x10) == 0)
+            return -1;
+        dir_cluster = found_cluster;
+    }
+
+    return -1;
+}
+
+/* Find a file by absolute or root-relative 8.3 path.
+ * Returns 0 on success and fills out_cluster/out_size, -1 if not found. */
+int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size) {
+    if (!_fat32.initialized) {
+        if (_fat32_init() != 0) return -1;
+    }
+
+    uint8_t attr = 0;
+    return _fat32_find_path(name, out_cluster, out_size, &attr);
 }
 
 /* Read an entire file by name into buf (up to max_size bytes).
@@ -2291,6 +2356,8 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 
 static uint8_t simpleos_fat32_read_buf[32768];
 static const uint32_t simpleos_fat32_read_buf_size = 32768;
+static uint8_t simpleos_fat32_path_read_buf[4194304];
+static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
 
 static const char *simpleos_known_app_name(uint64_t app_id)
 {
@@ -2315,6 +2382,11 @@ static const char *simpleos_known_app_name(uint64_t app_id)
 uint64_t simpleos_fat32_read_buffer_addr(void)
 {
     return (uint64_t)(uintptr_t)simpleos_fat32_read_buf;
+}
+
+uint64_t simpleos_fat32_path_read_buffer_addr(void)
+{
+    return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
 }
 
 int64_t simpleos_fat32_read_known_app_size(uint64_t app_id)
@@ -2373,6 +2445,62 @@ RuntimeValue simpleos_fat32_read_known_app_array(uint64_t app_id)
     a->cap = file_size;
     for (uint32_t i = 0; i < file_size; i++)
         a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_read_buf[i]);
+    return ENCODE_PTR(a);
+}
+
+int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0;
+    uint32_t file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return 0;
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return 0;
+    return (int64_t)file_size;
+}
+
+int64_t simpleos_fat32_read_path(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t bytes_read = 0;
+    int64_t file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return -1;
+    file_size = simpleos_fat32_read_path_size(path, path_len);
+    if (file_size <= 0)
+        return -1;
+    if ((uint64_t)file_size > simpleos_fat32_path_read_buf_size)
+        return -2;
+
+    __builtin_memset(simpleos_fat32_path_read_buf, 0, simpleos_fat32_path_read_buf_size);
+    if (fat32_read_file(path_buf, simpleos_fat32_path_read_buf,
+                        simpleos_fat32_path_read_buf_size, &bytes_read) != 0)
+        return -1;
+    if (bytes_read != (uint32_t)file_size)
+        return -3;
+    return 0;
+}
+
+RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
+{
+    int64_t rc = simpleos_fat32_read_path(path, path_len);
+    int64_t file_size = simpleos_fat32_read_path_size(path, path_len);
+
+    if (rc != 0 || file_size <= 0 || (uint64_t)file_size > simpleos_fat32_path_read_buf_size)
+        return rt_array_new((RuntimeValue)0);
+
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    if (!a)
+        return rt_array_new((RuntimeValue)0);
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    a->len = (uint32_t)file_size;
+    a->cap = (uint32_t)file_size;
+    for (uint32_t i = 0; i < (uint32_t)file_size; i++)
+        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
     return ENCODE_PTR(a);
 }
 
@@ -4254,6 +4382,10 @@ extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_a
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
 ) __attribute__((weak));
+extern int64_t spl_x86_dispatch_installed_syscall_abi(
+    uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+    uint64_t arg3, uint64_t arg4, uint64_t arg5
+) __attribute__((weak));
 
 static int simpleos_path_eq_raw(const char *p, uint64_t len, const char *expected)
 {
@@ -4330,8 +4462,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
             uint64_t path_ptr = app_id ? app_id : simpleos_decode_path_data_ptr(a0, a1);
             uint64_t path_len = app_id ? 0 : a1;
-            if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
-                int64_t rc = kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+            if (spl_x86_dispatch_installed_syscall_abi) {
+                int64_t rc = spl_x86_dispatch_installed_syscall_abi(
                     id, path_ptr, path_len, a2, a3, a4, 0
                 );
                 if (rc != -38)
@@ -4403,8 +4535,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return 0;
         case 106: /* Schedule */
         case 107: /* SchedCtl */
-            if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
-                return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+            if (spl_x86_dispatch_installed_syscall_abi) {
+                return spl_x86_dispatch_installed_syscall_abi(
                     id, a0, a1, a2, a3, a4, 0
                 );
             }

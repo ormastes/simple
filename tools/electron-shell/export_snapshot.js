@@ -22,7 +22,9 @@ const { spawn } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const defaultSimpleBin = path.join(repoRoot, 'bin', 'simple');
+const electronAppEntry = path.join(repoRoot, 'src', 'app', 'ui.electron', 'app.spl');
 const defaultTimeoutMs = 20000;
+const defaultPngTimeoutMs = 30000;
 const isWin = process.platform === 'win32';
 const electronBinName = isWin ? 'electron.cmd' : 'electron';
 
@@ -164,7 +166,7 @@ function captureFirstRenderHtml(options) {
             return;
         }
 
-        const child = spawn(simpleBinAbs, ['ui', 'electron', entryAbs], {
+        const child = spawn(simpleBinAbs, ['run', electronAppEntry, entryAbs], {
             cwd: repoRoot,
             env: {
                 ...process.env,
@@ -305,6 +307,29 @@ function capturePng(htmlPath, pngPath, width, height) {
         });
         let stderrBuf = '';
         let stdoutBuf = '';
+        let finished = false;
+
+        const finish = (err, message) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeoutId);
+            if (!child.killed) {
+                child.kill('SIGTERM');
+                setTimeout(() => {
+                    if (!child.killed) child.kill('SIGKILL');
+                }, 400);
+            }
+            if (err) {
+                reject(err);
+                return;
+            }
+            resolve(message);
+        };
+
+        const timeoutId = setTimeout(() => {
+            const details = [compactLog(stdoutBuf), compactLog(stderrBuf)].filter(Boolean).join('\n');
+            finish(new Error(`Electron screenshot timed out after ${defaultPngTimeoutMs}ms.${details ? `\n${details}` : ''}`));
+        }, defaultPngTimeoutMs);
 
         child.stdout.on('data', (chunk) => {
             stdoutBuf += chunk.toString();
@@ -313,14 +338,14 @@ function capturePng(htmlPath, pngPath, width, height) {
             stderrBuf += chunk.toString();
         });
         child.on('error', (err) => {
-            reject(new Error(`Failed to launch Electron screenshot: ${err.message}`));
+            finish(new Error(`Failed to launch Electron screenshot: ${err.message}`));
         });
         child.on('close', (code) => {
             if (code === 0) {
-                resolve(stdoutBuf.trim());
+                finish(null, stdoutBuf.trim());
                 return;
             }
-            reject(new Error(`Electron screenshot failed (code=${code}).\n${stderrBuf || stdoutBuf}`));
+            finish(new Error(`Electron screenshot failed (code=${code}).\n${stderrBuf || stdoutBuf}`));
         });
     });
 }

@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{effective_target, safe_canonicalize, ModuleImports, NativeProjectBuilder};
+use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    find_archive_tool, find_c_compiler, find_cxx_compiler, find_native_all_library, find_runtime_library,
-    strip_llvm_constructors, is_system_symbol,
+    find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
+    find_runtime_library, is_system_symbol, strip_llvm_constructors,
 };
 
 impl NativeProjectBuilder {
@@ -53,6 +53,7 @@ impl NativeProjectBuilder {
         let cxx = find_cxx_compiler();
         let is_msvc = cxx.contains("clang-cl") || simple_common::platform::cc_detect::is_msvc_target(&cxx);
 
+        let has_entry = self.entry_file.is_some();
         let stub_code = if is_msvc {
             r#"
 extern "C" {
@@ -74,6 +75,24 @@ int main(int argc, char** argv) {
     rt_set_args(argc, argv);
     int r = spl_main();
     __simple_runtime_shutdown();
+    return r;
+}
+"#
+        } else if has_entry {
+            r#"
+extern "C" {
+    int spl_main(void);
+    void __attribute__((weak)) rt_set_args(int argc, char** argv);
+    void __attribute__((weak)) __simple_runtime_init(void);
+    void __attribute__((weak)) __simple_runtime_shutdown(void);
+    void __attribute__((weak)) __simple_call_module_inits(void);
+}
+int main(int argc, char** argv) {
+    if (__simple_runtime_init) __simple_runtime_init();
+    if (__simple_call_module_inits) __simple_call_module_inits();
+    if (rt_set_args) rt_set_args(argc, argv);
+    int r = spl_main();
+    if (__simple_runtime_shutdown) __simple_runtime_shutdown();
     return r;
 }
 "#
@@ -233,6 +252,13 @@ int main(int argc, char** argv) {
         if is_freestanding {
             return self.link_objects_freestanding(object_paths, temp_dir, imports);
         }
+
+        let inline_asm_o = inline_asm_emit::compile_inline_asm_c(temp_dir, None)?;
+        let mut link_object_paths: Vec<PathBuf> = object_paths.to_vec();
+        if let Some(obj) = inline_asm_o {
+            link_object_paths.push(obj);
+        }
+        let object_paths = link_object_paths.as_slice();
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
@@ -442,6 +468,11 @@ int main(int argc, char** argv) {
                     cmd.arg("-Wl,--no-whole-archive");
                 }
             } else {
+                #[cfg(target_os = "macos")]
+                {
+                    cmd.arg("-Wl,-force_load").arg(runtime_lib);
+                }
+                #[cfg(not(target_os = "macos"))]
                 cmd.arg(runtime_lib);
             }
         }
@@ -561,9 +592,6 @@ int main(int argc, char** argv) {
         };
 
         let cc = find_c_compiler();
-        let mut symbol_cache = HashMap::new();
-        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
-
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let (march, mabi) = match cross_target.arch {
             simple_common::target::TargetArch::Riscv64 if use_llvm => ("-march=rv64imac", "-mabi=lp64"),
@@ -571,6 +599,16 @@ int main(int argc, char** argv) {
             simple_common::target::TargetArch::Riscv32 => ("-march=rv32imac", "-mabi=ilp32"),
             _ => ("", ""),
         };
+        let inline_asm_o = inline_asm_emit::compile_inline_asm_c(temp_dir, Some((triple, march, mabi)))?;
+        let mut link_object_paths: Vec<PathBuf> = object_paths.to_vec();
+        if let Some(obj) = inline_asm_o {
+            link_object_paths.push(obj);
+        }
+        let object_paths = link_object_paths.as_slice();
+        let mut symbol_cache = HashMap::new();
+        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
+
+        let compiler_rt_builtins = find_compiler_rt_builtins(triple);
 
         let mut boot_objects: Vec<PathBuf> = Vec::new();
         let mut boot_compile_failures: usize = 0;
@@ -830,6 +868,9 @@ int main(int argc, char** argv) {
             if let Some(ref init) = init_o {
                 c.arg(init);
             }
+            if let Some(ref builtins) = compiler_rt_builtins {
+                c.arg(builtins);
+            }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);
             }
@@ -855,6 +896,9 @@ int main(int argc, char** argv) {
             }
             if let Some(ref init) = init_o {
                 c.arg(init);
+            }
+            if let Some(ref builtins) = compiler_rt_builtins {
+                c.arg(builtins);
             }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);

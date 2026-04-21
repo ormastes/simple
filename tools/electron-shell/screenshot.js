@@ -149,8 +149,11 @@ app.whenReady().then(async () => {
         console.error('Screenshot failed:', err.message);
         process.exit(1);
     } finally {
-        win.destroy();
+        if (!win.isDestroyed()) {
+            win.destroy();
+        }
         app.quit();
+        setImmediate(() => app.exit(0));
     }
 });
 

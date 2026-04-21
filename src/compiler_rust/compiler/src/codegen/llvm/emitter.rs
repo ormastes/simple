@@ -10,6 +10,8 @@ use std::collections::HashMap;
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
 #[cfg(feature = "llvm")]
+use inkwell::InlineAsmDialect;
+#[cfg(feature = "llvm")]
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
@@ -460,6 +462,29 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             self.set(dest, ret_val);
         }
+        Ok(())
+    }
+
+    fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool) -> Result<(), String> {
+        if !matches!(
+            self.backend.target.arch,
+            simple_common::target::TargetArch::X86 | simple_common::target::TargetArch::X86_64
+        ) {
+            return Ok(());
+        }
+        let fn_type = self.backend.context.void_type().fn_type(&[], false);
+        let asm = self.backend.context.create_inline_asm(
+            fn_type,
+            instructions.join("\n"),
+            String::new(),
+            volatile,
+            false,
+            Some(InlineAsmDialect::ATT),
+            false,
+        );
+        self.builder
+            .build_indirect_call(fn_type, asm, &[], "")
+            .map_err(|e| format!("LLVM inline asm failed: {}", e))?;
         Ok(())
     }
 
@@ -1586,34 +1611,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_box_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
-        if let BasicValueEnum::FloatValue(_) = val {
-            let i64_type = self.backend.runtime_int_type();
-            let bits = self
-                .builder
-                .build_bit_cast(val, i64_type, "f2i")
-                .map_err(|e| format!("bitcast failed: {}", e))?;
-            if let BasicValueEnum::IntValue(bits_int) = bits {
-                let three = i64_type.const_int(3, false);
-                let shifted = self
-                    .builder
-                    .build_right_shift(bits_int, three, false, "ushr")
-                    .map_err(|e| format!("ushr failed: {}", e))?;
-                let payload = self
-                    .builder
-                    .build_left_shift(shifted, three, "shl")
-                    .map_err(|e| format!("shl failed: {}", e))?;
-                let tag = i64_type.const_int(2, false);
-                let boxed = self
-                    .builder
-                    .build_or(payload, tag, "box_or")
-                    .map_err(|e| format!("or failed: {}", e))?;
-                self.set(dest, boxed.into());
-            } else {
-                self.set(dest, val);
-            }
-        } else {
-            self.set(dest, val);
-        }
+        let boxed = self
+            .backend
+            .build_box_float_value(val, self.builder, self.module)
+            .map_err(|e| e.to_string())?;
+        self.set(dest, boxed.into());
         Ok(())
     }
 
@@ -1635,26 +1637,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_unbox_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
-        if let BasicValueEnum::IntValue(int_val) = val {
-            let i64_type = self.backend.runtime_int_type();
-            let f64_type = self.backend.context.f64_type();
-            let three = i64_type.const_int(3, false);
-            let shifted = self
-                .builder
-                .build_right_shift(int_val, three, false, "ushr")
-                .map_err(|e| format!("ushr failed: {}", e))?;
-            let bits = self
-                .builder
-                .build_left_shift(shifted, three, "shl")
-                .map_err(|e| format!("shl failed: {}", e))?;
-            let unboxed = self
-                .builder
-                .build_bit_cast(bits, f64_type, "i2f")
-                .map_err(|e| format!("bitcast failed: {}", e))?;
-            self.set(dest, unboxed);
-        } else {
-            self.set(dest, val);
-        }
+        let unboxed = self
+            .backend
+            .build_unbox_float_value(val, self.builder, self.module)
+            .map_err(|e| e.to_string())?;
+        self.set(dest, unboxed.into());
         Ok(())
     }
 

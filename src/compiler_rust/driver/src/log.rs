@@ -7,7 +7,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 pub fn init() {
     let env_filter = EnvFilter::try_from_env("SIMPLE_LOG")
         .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
 
     let fmt_layer = fmt::layer()
         .with_target(true)
@@ -35,7 +35,7 @@ pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std
     } else {
         EnvFilter::try_from_env("SIMPLE_LOG")
             .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
-            .unwrap_or_else(|_| EnvFilter::new("info"))
+            .unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
     let stderr = std::io::stderr.with_max_level(tracing::Level::INFO);

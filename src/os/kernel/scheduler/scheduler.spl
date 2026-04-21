@@ -25,6 +25,7 @@ use os.kernel.memory.vmm.{create_user_address_space, destroy_user_address_space,
 use os.kernel.loader.segment_mapper.{map_all, map_stack}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.boot.mmio.{mmio_write64}
 use os.posix.fd_io.{posix_close_task_fds_with_backends}
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.notification.{notification_clear_waiter}
@@ -48,6 +49,20 @@ val DEADLINE_CPU_BANDWIDTH_CAP: u64 = 800000
 val DEFAULT_SCHED_CPUS: u32 = 32u32
 val SCHED_TRACE_CAPACITY: i32 = 128
 val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
+var scheduler_last_user_task_pid_raw: u64 = 0
+var scheduler_user_task_pid_out_ptr: u64 = 0
+
+fn scheduler_last_user_task_pid() -> u64:
+    scheduler_last_user_task_pid_raw
+
+fn scheduler_set_user_task_pid_out_ptr(ptr: u64):
+    scheduler_user_task_pid_out_ptr = ptr
+
+fn _record_user_task_pid(pid: u64):
+    scheduler_last_user_task_pid_raw = pid
+    if scheduler_user_task_pid_out_ptr != 0:
+        mmio_write64(scheduler_user_task_pid_out_ptr, pid)
+        scheduler_user_task_pid_out_ptr = 0
 
 @cfg(riscv64)
 val SCHED_EXEC_ARCH: Architecture = Architecture.Riscv64
@@ -470,8 +485,12 @@ impl Scheduler:
 
         Returns the new task's ID.
         """
-        val id = TaskId(id: self.next_task_id)
-        self.next_task_id = self.next_task_id + 1
+        var next_id = self.next_task_id
+        if next_id == 0 or next_id >= 0x40000000:
+            serial_println("[scheduler] create_user_task: normalized next_task_id")
+            next_id = 1
+        val id = TaskId(id: next_id)
+        self.next_task_id = next_id + 1
 
         # Find an empty slot
         val slot = self._find_empty_slot()
@@ -522,11 +541,13 @@ impl Scheduler:
 
         id
 
-    me create_user_task(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> TaskId:
+    me create_user_task_pid(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> u64:
         """Create a transitional user task from a user process image.
 
         The scheduler keeps the legacy TaskContext slot for compatibility, but
         the x86_64 user-mode handoff is represented explicitly in user_context.
+        Returns the primitive task id for syscall/ABI paths that must not
+        depend on aggregate TaskId return lowering.
         """
         val entry = user_process_image_entry(image)
         val stack_top = user_process_image_stack_top(image)
@@ -537,24 +558,26 @@ impl Scheduler:
         val file_bytes = user_process_image_file_bytes(image)
         if stack_top == 0:
             serial_println("[scheduler] create_user_task: stack_top zero")
-            return TaskId(id: 0)
+            _record_user_task_pid(0)
+            return 0
         if stack_size == 0:
             serial_println("[scheduler] create_user_task: stack_size zero")
-            return TaskId(id: 0)
+            _record_user_task_pid(0)
+            return 0
         if user_sp == 0:
             serial_println("[scheduler] create_user_task: user_sp zero")
-            return TaskId(id: 0)
+            _record_user_task_pid(0)
+            return 0
         if (initial_stack_bytes.len() as u64) > stack_size:
             serial_println("[scheduler] create_user_task: initial stack too large")
-            return TaskId(id: 0)
-
-        val id = TaskId(id: self.next_task_id)
-        self.next_task_id = self.next_task_id + 1
+            _record_user_task_pid(0)
+            return 0
 
         val slot = self._find_empty_slot()
         if slot < 0:
             serial_println("[scheduler] create_user_task: no free slot")
-            return TaskId(id: 0)
+            _record_user_task_pid(0)
+            return 0
 
         val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
         val user_ctx = TaskContext(
@@ -579,7 +602,15 @@ impl Scheduler:
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] create_user_task: map failed")
-            return TaskId(id: 0)
+            _record_user_task_pid(0)
+            return 0
+
+        var user_next_id = self.next_task_id
+        if user_next_id == 0 or user_next_id >= 0x40000000:
+            serial_println("[scheduler] create_user_task: normalized next_task_id")
+            user_next_id = 1
+        val id = TaskId(id: user_next_id)
+        self.next_task_id = user_next_id + 1
 
         val tcb = TaskControlBlock(
             id: id,
@@ -613,7 +644,12 @@ impl Scheduler:
         # the slot in-hand, so pass it in directly.
         self._enqueue_ready_at_slot(id, slot)
 
-        id
+        _record_user_task_pid(user_next_id)
+        user_next_id
+
+    me create_user_task(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> TaskId:
+        """Compatibility wrapper for callers that use the typed task handle."""
+        TaskId(id: self.create_user_task_pid(image, priority, caps))
 
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         """Enqueue a task whose slot is already known. Avoids _find_slot."""

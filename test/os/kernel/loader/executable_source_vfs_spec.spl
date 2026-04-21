@@ -17,6 +17,38 @@ use os.kernel.loader.executable_source.{
 }
 use os.kernel.arch.arch_context.{Architecture}
 
+fn _elf_magic_payload() -> [u8]:
+    var payload: [u8] = []
+    payload.push(0x7F.to_u8())
+    payload.push(0x45.to_u8())
+    payload.push(0x4C.to_u8())
+    payload.push(0x46.to_u8())
+    payload
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _exec_smf_payload(stub: [u8]) -> [u8]:
+    var bytes = stub
+    var header: [u8] = []
+    header.push(0x53.to_u8())
+    header.push(0x4D.to_u8())
+    header.push(0x46.to_u8())
+    header.push(0x00.to_u8())
+    while header.len() < 52:
+        header.push(0.to_u8())
+    header = _push_u32_le(header, stub.len())
+    header = _push_u32_le(header, stub.len())
+    while header.len() < 128:
+        header.push(0.to_u8())
+    for b in header:
+        bytes.push(b)
+    bytes
+
 describe "executable source — VFS-backed loading":
     """Phase 4 coverage: initramfs-first resolution and legacy stub fallback."""
 
@@ -68,14 +100,25 @@ describe "executable source — VFS-backed loading":
         """The mounted filesystem supplies executable bytes for desktop apps."""
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
-        var payload: [u8] = []
-        payload.push(0x7F.to_u8())
-        payload.push(0x45.to_u8())
-        payload.push(0x4C.to_u8())
-        payload.push(0x46.to_u8())
+        val payload = _elf_magic_payload()
         _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", payload)
 
         val result = resolve_executable_bytes("/sys/apps/hello_world", Architecture.X86_64)
+        expect(result.is_ok()).to_equal(true)
+        val bytes = result.unwrap()
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x7F.to_u8())
+        expect(bytes[3]).to_equal(0x46.to_u8())
+        _clear_synthetic_vfs_for_test()
+
+    it "falls back to VFS bytes for arbitrary executable paths":
+        """Executable source resolution is path-based, not limited to seeded apps."""
+        _clear_synthetic_initramfs_for_test()
+        _clear_synthetic_vfs_for_test()
+        val payload = _elf_magic_payload()
+        _set_synthetic_vfs_file_for_test("/home/RUNME.ELF", payload)
+
+        val result = resolve_executable_bytes("/home/RUNME.ELF", Architecture.X86_64)
         expect(result.is_ok()).to_equal(true)
         val bytes = result.unwrap()
         expect(bytes.len()).to_equal(4)
@@ -88,11 +131,7 @@ describe "executable source — VFS-backed loading":
         current FAT32 image stores the ELF under an 8.3 alias."""
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
-        var payload: [u8] = []
-        payload.push(0x7F.to_u8())
-        payload.push(0x45.to_u8())
-        payload.push(0x4C.to_u8())
-        payload.push(0x46.to_u8())
+        val payload = _elf_magic_payload()
         _set_synthetic_vfs_file_for_test("/SYS/APPS/BROWSE~1", payload)
 
         val result = resolve_executable_bytes("/sys/apps/browser_demo", Architecture.X86_64)
@@ -108,11 +147,7 @@ describe "executable source — VFS-backed loading":
         boundary and still recover the canonical seeded app path."""
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
-        var payload: [u8] = []
-        payload.push(0x7F.to_u8())
-        payload.push(0x45.to_u8())
-        payload.push(0x4C.to_u8())
-        payload.push(0x46.to_u8())
+        val payload = _elf_magic_payload()
         _set_synthetic_vfs_file_for_test("/SYS/APPS/BROWSE~1", payload)
 
         val result = resolve_executable_bytes_from_path_bytes("/sys/apps/browser_demo".bytes(), Architecture.X86_64)
@@ -129,11 +164,7 @@ describe "executable source — VFS-backed loading":
         fallback until nested live lookup is fixed."""
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
-        var payload: [u8] = []
-        payload.push(0x7F.to_u8())
-        payload.push(0x45.to_u8())
-        payload.push(0x4C.to_u8())
-        payload.push(0x46.to_u8())
+        val payload = _elf_magic_payload()
         _set_synthetic_vfs_file_for_test("/BROWSE~1.ELF", payload)
 
         val result = resolve_executable_bytes("/sys/apps/browser_demo", Architecture.X86_64)
@@ -142,6 +173,22 @@ describe "executable source — VFS-backed loading":
         expect(bytes.len()).to_equal(4)
         expect(bytes[0]).to_equal(0x7F.to_u8())
         expect(bytes[3]).to_equal(0x46.to_u8())
+        _clear_synthetic_vfs_for_test()
+
+    it "falls back to root-level SMF aliases on seeded disk images":
+        """Seeded GUI apps may now prefer executable SMF packages."""
+        _clear_synthetic_initramfs_for_test()
+        _clear_synthetic_vfs_for_test()
+        val payload = _exec_smf_payload(_elf_magic_payload())
+        _set_synthetic_vfs_file_for_test("/BROWSMF.SMF", payload)
+
+        val result = resolve_executable_bytes("/sys/apps/browser_demo.smf", Architecture.X86_64)
+        expect(result.is_ok()).to_equal(true)
+        val bytes = result.unwrap()
+        expect(bytes.len()).to_equal(132)
+        expect(bytes[0]).to_equal(0x7F.to_u8())
+        expect(bytes[3]).to_equal(0x46.to_u8())
+        expect(bytes[4]).to_equal(0x53.to_u8())
         _clear_synthetic_vfs_for_test()
 
     it "resolve_executable_size matches the synthetic payload length":

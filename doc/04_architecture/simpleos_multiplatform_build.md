@@ -50,3 +50,18 @@ Hosted Simple compiler binaries remain 64-bit host artifacts. SimpleOS guest tar
 ## Follow-Up
 
 The catalog is now ready for a future object pipeline that compiles `boot_c_sources` and `boot_asm_sources` into per-target objects before final native link. The current change exposes the metadata and validates it through unit tests; it does not replace the lower-level linker or native backend.
+
+## RISC-V Soft-Float Update
+
+<!-- codex-design -->
+
+RISC-V target policy is owned in two layers:
+
+- `src/os/port/simpleos_multiplatform_build.spl` owns user-visible SimpleOS platform metadata: ISA, ABI, floating-point ABI, QEMU profile, and freestanding compiler flags.
+- `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs` owns final freestanding ELF linking for the bootstrap native-build path.
+
+`riscv32imac-simpleos` is explicitly RV32IMAC + ILP32 + soft-float. The platform catalog exposes this through helper APIs so tests and callers do not need to parse `-march` or `-mabi` strings.
+
+The freestanding linker must not satisfy compiler-rt/libgcc helper symbols through weak unresolved-symbol stubs. Those helpers are runtime semantics, especially for RV32 float emulation. The linker asks clang for the target builtins archive with `--target=<triple> -print-libgcc-file-name`, adds it to the freestanding link, and filters compiler-rt helper names out of stub generation.
+
+RISC-V SimpleOS QEMU builds default to LLVM native-build because the current Cranelift path cannot initialize the freestanding RISC-V object target. `SIMPLE_OS_BUILD_BACKEND=cranelift` remains available as an explicit diagnostic override.

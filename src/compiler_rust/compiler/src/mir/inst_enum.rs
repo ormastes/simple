@@ -49,6 +49,12 @@ pub enum MirInst {
         args: Vec<VReg>,
     },
 
+    /// Raw inline assembly with no operands.
+    InlineAsm {
+        instructions: Vec<String>,
+        volatile: bool,
+    },
+
     /// Load from memory
     Load { dest: VReg, addr: VReg, ty: TypeId },
 

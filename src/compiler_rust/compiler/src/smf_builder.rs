@@ -26,17 +26,7 @@ pub(crate) fn write_smf_with_return_value(
 
 /// Generate SMF bytes in memory that returns the given value from main.
 pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    // Generate x86-64 code to return the value
-    // mov eax, imm32 = B8 + 4 bytes (little-endian)
-    // ret = C3
-    let code_bytes = {
-        let mut code = Vec::with_capacity(6);
-        code.push(0xB8u8); // mov eax, imm32
-        code.extend_from_slice(&return_value.to_le_bytes());
-        code.push(0xC3); // ret
-        code
-    };
-    build_smf_with_code(&code_bytes, gc)
+    generate_smf_bytes_for_target(return_value, gc, Target::host())
 }
 
 /// Build an SMF module with the given code bytes and a main symbol.

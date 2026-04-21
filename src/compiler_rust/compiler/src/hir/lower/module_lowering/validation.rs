@@ -92,7 +92,11 @@ impl Lowerer {
                     self.check_expr_for_async_calls(&step.expr, caller_name, function_suspension)?;
                 }
             }
-            HirStmt::Let { value: None, .. } | HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            HirStmt::Let { value: None, .. }
+            | HirStmt::Return(None)
+            | HirStmt::InlineAsm { .. }
+            | HirStmt::Break
+            | HirStmt::Continue => {}
             HirStmt::Defer { .. } => {
                 // Defer statements can contain async calls - check the body
                 // TODO: Implement defer body validation for async calls

@@ -286,3 +286,21 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     let selected_runtime = builder.selected_runtime_library(temp.path());
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
+
+#[test]
+fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__adddf3"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__fixunsdfdi"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__muldi3"));
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "examples__simple_os___start"
+    ));
+}
+
+#[test]
+fn test_cxx_abi_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_system_symbol("__Znwm"));
+    assert!(super::tools::is_system_symbol("_Znwm"));
+    assert!(super::tools::is_system_symbol("__ZN4llvm2cl6OptionE"));
+    assert!(!super::tools::is_system_symbol("app__mcp__main"));
+}

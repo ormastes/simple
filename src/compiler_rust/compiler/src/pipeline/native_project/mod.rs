@@ -11,6 +11,7 @@
 mod config;
 mod compiler;
 mod discovery;
+pub(crate) mod inline_asm_emit;
 mod linker;
 mod imports;
 mod mangle;
@@ -329,6 +330,8 @@ impl NativeProjectBuilder {
 
     /// Build the project.
     pub fn build(self) -> Result<NativeBuildResult, String> {
+        crate::codegen::inline_asm::clear_inline_asm_blocks();
+
         // 1. Discover files
         let (files, file_sources) = if self.config.entry_closure {
             let entry_file = self
@@ -406,7 +409,7 @@ impl NativeProjectBuilder {
                 }
                 // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                if !is_entry {
+                if !is_entry && !source.contains("asm") {
                     let per_file_root = self.effective_source_root_for(path);
                     let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let hash = object_cache_key(

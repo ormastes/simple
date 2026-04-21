@@ -15,7 +15,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.notification_types.{Notification}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_SHARED}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
-use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler.{Scheduler, scheduler_set_user_task_pid_out_ptr}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
 use os.kernel.ipc.notif_global.{g_notification_table}
@@ -45,6 +45,8 @@ use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write,
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 extern fn serial_println(msg: text)
+extern fn unsafe_addr_of(ref: any) -> u64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 val MAX_EXEC_ARG_COUNT: u64 = 64
@@ -1004,10 +1006,7 @@ fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
     SyscallResult(value: current.id.to_i64())
 
 fn _path_bytes_to_text(bytes: [u8]) -> text:
-    var chars: [text] = []
-    for b in bytes:
-        chars.push((b.to_i64()).to_char())
-    chars.join("")
+    rt_string_from_byte_array(bytes)
 
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
@@ -1173,13 +1172,16 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val priority = _u64_to_priority(args.arg2)
         val caps = CapabilitySet.full()
         var sched = scheduler
-        val task_id = sched.create_user_task(image_result.unwrap(), priority, caps)
-        if task_id.id == 0:
+        var pid_out: u64 = 0
+        scheduler_set_user_task_pid_out_ptr(unsafe_addr_of(pid_out))
+        val _created_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        val pid = pid_out
+        if pid == 0:
             return SyscallResult(value: -12)
 
         var ulog = klog
-        ulog.write(6, 1, task_id.id, "spawn_binary launched user process {path}")
-        return SyscallResult(value: task_id.id.to_i64())
+        ulog.write(6, 1, pid, "spawn_binary launched user process {path}")
+        return SyscallResult(value: pid.to_i64())
 
     val resident_entry = _resolve_validated_resident_entry(path, path_bytes)
     if resident_entry != nil:
@@ -1254,18 +1256,23 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
         serial_println("[syscall13] build_user_process_image ok")
-        # FR-SOS-024 Phase 3 lifted the -12 gate to this point: the ELF image
-        # is validated and a user task can be constructed via create_user_task
-        # (confirmed working through to _enqueue_ready_at_slot). But the
-        # x86_64 scheduler loop has no ring-3 first-dispatch helper yet — the
-        # next time the scheduler preempts, it tries to context_restore a
-        # task that should go to CPL 3 but the kernel's CR3 is still loaded
-        # and the iretq stub (Simple `asm:` block) lowers to a no-op in
-        # baremetal, so the iretq returns to a stale RIP and traps. Keep the
-        # gate here until the Phase-3 ring-3 entry helper lands (see
-        # doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md §2-3).
-        serial_println("[syscall13] user image handoff gated; ring-3 first-dispatch pending")
-        return -12
+        val priority = _u64_to_priority(priority_raw)
+        val caps = CapabilitySet.full()
+        var sched = scheduler
+        serial_println("[syscall13] create_user_task begin")
+        var pid_out: u64 = 0
+        scheduler_set_user_task_pid_out_ptr(unsafe_addr_of(pid_out))
+        val _created_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        val pid = pid_out
+        if pid == 0:
+            serial_println("[syscall13] create_user_task failed")
+            return -12
+
+        val pid_value = pid as i64
+        var ulog = klog
+        ulog.write(6, 1, pid, "spawn_binary launched filesystem user process {path}")
+        serial_println("[syscall13] user image handoff ok pid={pid_value}")
+        return pid_value
     else:
         serial_println("[syscall13] build_user_process_image failed")
 

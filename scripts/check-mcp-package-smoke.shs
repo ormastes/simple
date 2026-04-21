@@ -49,7 +49,11 @@ probe_command() {
     out_file="$TMP_DIR/${safe_label}.out"
     err_file="$TMP_DIR/${safe_label}.err"
 
-    build_msg "$body" | env SIMPLE_BINARY="$SMOKE_SIMPLE_BINARY" SIMPLE_SOURCE_ROOT="$SMOKE_SOURCE_ROOT" timeout 12s "$cmd" >"$out_file" 2>"$err_file" || true
+    if [ "${SIMPLE_MCP_PACKAGE_SMOKE_USE_SOURCE_OVERRIDE:-0}" = "1" ]; then
+        build_msg "$body" | env SIMPLE_BINARY="$SMOKE_SIMPLE_BINARY" SIMPLE_SOURCE_ROOT="$SMOKE_SOURCE_ROOT" timeout 12s "$cmd" >"$out_file" 2>"$err_file" || true
+    else
+        build_msg "$body" | env -u SIMPLE_BINARY -u SIMPLE_SOURCE_ROOT timeout 12s "$cmd" >"$out_file" 2>"$err_file" || true
+    fi
 
     if ! grep -F "$expect" "$out_file" >/dev/null 2>&1; then
         fail "$label did not return expected response fragment: $expect"
@@ -86,18 +90,21 @@ pack_package() {
 main() {
     INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1.0"}}}'
     TOOLS_BODY='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-    SMOKE_SIMPLE_BINARY="${SIMPLE_BINARY:-$PROJECT_ROOT/src/compiler_rust/target/bootstrap/simple}"
-    if [ ! -x "$SMOKE_SIMPLE_BINARY" ]; then
-        SMOKE_SIMPLE_BINARY="${SIMPLE_BINARY:-$PROJECT_ROOT/bin/simple}"
-    fi
-    if [ ! -x "$SMOKE_SIMPLE_BINARY" ]; then
-        fail "Smoke runtime not executable: $SMOKE_SIMPLE_BINARY"
-        exit 1
-    fi
-    SMOKE_SOURCE_ROOT="${SIMPLE_SOURCE_ROOT:-$PROJECT_ROOT}"
-    if [ ! -f "$SMOKE_SOURCE_ROOT/src/app/mcp/main.spl" ] || [ ! -f "$SMOKE_SOURCE_ROOT/src/app/simple_lsp_mcp/main.spl" ]; then
-        fail "Smoke source root is missing MCP entries: $SMOKE_SOURCE_ROOT"
-        exit 1
+    if [ "${SIMPLE_MCP_PACKAGE_SMOKE_USE_SOURCE_OVERRIDE:-0}" = "1" ]; then
+        SMOKE_SIMPLE_BINARY="${SIMPLE_BINARY:-$PROJECT_ROOT/src/compiler_rust/target/bootstrap/simple}"
+        if [ ! -x "$SMOKE_SIMPLE_BINARY" ]; then
+            SMOKE_SIMPLE_BINARY="${SIMPLE_BINARY:-$PROJECT_ROOT/bin/simple}"
+        fi
+        if [ ! -x "$SMOKE_SIMPLE_BINARY" ]; then
+            fail "Smoke runtime not executable: $SMOKE_SIMPLE_BINARY"
+            exit 1
+        fi
+        SMOKE_SOURCE_ROOT="${SIMPLE_SOURCE_ROOT:-$PROJECT_ROOT}"
+        if [ ! -f "$SMOKE_SOURCE_ROOT/src/app/mcp/main.spl" ] || [ ! -f "$SMOKE_SOURCE_ROOT/src/app/simple_lsp_mcp/main.spl" ]; then
+            fail "Smoke source root is missing MCP entries: $SMOKE_SOURCE_ROOT"
+            exit 1
+        fi
+        info "Using source override for package smoke: $SMOKE_SOURCE_ROOT"
     fi
 
     info "Packing npm tarballs"

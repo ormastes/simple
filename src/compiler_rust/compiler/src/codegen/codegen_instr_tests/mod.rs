@@ -48,3 +48,4 @@ mod collections;
 mod calls;
 mod simd;
 mod gpu;
+mod inline_asm;

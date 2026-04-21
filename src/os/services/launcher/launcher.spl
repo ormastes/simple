@@ -25,7 +25,7 @@ use os.posix.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
 
 extern fn serial_println(msg: text)
-use os.services.vfs.vfs_init.{g_vfs_read_file_text}
+use os.services.vfs.vfs_init.{g_vfs_read_file_text, g_vfs_file_size}
 extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
@@ -85,6 +85,7 @@ var process_active: [bool; 64]
 var process_count: u64 = 0
 var process_sequence: u64 = 1
 var synthetic_pid_next: u64 = 0x40000000
+var launcher_last_launch_pid: u64 = 0
 
 # ============================================================================
 # Modifier Flag Constants
@@ -98,17 +99,42 @@ val MOD_SHIFT: u32 = 8
 # Task priority for launched apps (Normal)
 val APP_PRIORITY: u8 = 2
 
+fn _launcher_path_exists(path: text) -> bool:
+    if path == "":
+        return false
+    if rt_file_exists(path):
+        return true
+    g_vfs_file_size(path) > 0
+
+fn _preferred_app_exec_path(path: text) -> text:
+    val smf_path = "{path}.smf"
+    if path == "/sys/apps/browser_demo" or path == "/sys/apps/hello_world" or path == "/sys/apps/file_manager" or path == "/sys/apps/shell" or path == "/sys/apps/editor":
+        return smf_path
+    if _launcher_path_exists(smf_path):
+        return smf_path
+    path
+
 fn _manifest_name_for_path(path: text) -> text:
     match path:
         case "/sys/apps/browser_demo":
             "BROWSER.APP"
+        case "/sys/apps/browser_demo.smf":
+            "BROWSER.APP"
         case "/sys/apps/hello_world":
+            "HELLO.APP"
+        case "/sys/apps/hello_world.smf":
             "HELLO.APP"
         case "/sys/apps/file_manager":
             "FILEMAN.APP"
+        case "/sys/apps/file_manager.smf":
+            "FILEMAN.APP"
         case "/sys/apps/shell":
             "SHELL.APP"
+        case "/sys/apps/shell.smf":
+            "SHELL.APP"
         case "/sys/apps/editor":
+            "EDITOR.APP"
+        case "/sys/apps/editor.smf":
             "EDITOR.APP"
         case _:
             ""
@@ -117,7 +143,7 @@ fn _manifest_present_for_path(path: text) -> bool:
     val manifest_name = _manifest_name_for_path(path)
     if manifest_name == "":
         return false
-    if manifest_name == "BROWSER.APP" or manifest_name == "FILEMAN.APP" or manifest_name == "HELLO.APP" or manifest_name == "TERMINAL.APP" or manifest_name == "EDITOR.APP":
+    if manifest_name == "BROWSER.APP" or manifest_name == "FILEMAN.APP" or manifest_name == "HELLO.APP" or manifest_name == "SHELL.APP" or manifest_name == "EDITOR.APP":
         serial_println("[launcher] known packaged manifest path={path} file={manifest_name}")
         return true
     val content = g_vfs_read_file_text(manifest_name)
@@ -188,19 +214,29 @@ fn _seeded_app_index_by_path(path: text) -> i64:
     """
     match path:
         "/sys/apps/hello_world": 0
+        "/sys/apps/hello_world.smf": 0
         "/sys/apps/file_manager": 1
+        "/sys/apps/file_manager.smf": 1
         "/sys/apps/shell": 2
+        "/sys/apps/shell.smf": 2
         "/sys/apps/browser_demo": 3
+        "/sys/apps/browser_demo.smf": 3
         "/sys/apps/editor": 4
+        "/sys/apps/editor.smf": 4
         _: -1
 
 fn _seeded_app_name_for_path(path: text) -> text:
     match path:
         "/sys/apps/hello_world": "Hello World"
+        "/sys/apps/hello_world.smf": "Hello World"
         "/sys/apps/file_manager": "File Manager"
+        "/sys/apps/file_manager.smf": "File Manager"
         "/sys/apps/shell": "Terminal"
+        "/sys/apps/shell.smf": "Terminal"
         "/sys/apps/browser_demo": "Browser Demo"
+        "/sys/apps/browser_demo.smf": "Browser Demo"
         "/sys/apps/editor": "Editor"
+        "/sys/apps/editor.smf": "Editor"
         _: ""
 
 fn _path_basename(path: text) -> text:
@@ -261,7 +297,7 @@ fn _looks_like_executable_path(path: text) -> bool:
         return true
     if path.starts_with("/bin/") or path.starts_with("/usr/bin/") or path.starts_with("/usr/local/bin/"):
         return true
-    if path.ends_with(".elf") or path.ends_with(".bin") or path.ends_with(".app"):
+    if path.ends_with(".elf") or path.ends_with(".bin") or path.ends_with(".app") or path.ends_with(".smf"):
         return true
     false
 
@@ -279,7 +315,7 @@ fn launcher_resolve_command_path(command: text, cwd: text, path_env: text) -> te
         return ""
     if command.contains("/"):
         val direct = _resolve_against_cwd(command, cwd)
-        if rt_file_exists(direct):
+        if _launcher_path_exists(direct):
             return direct
         return ""
     val path_parts = path_env.split(":")
@@ -288,12 +324,15 @@ fn launcher_resolve_command_path(command: text, cwd: text, path_env: text) -> te
         val dir = path_parts[i as i64].trim()
         if dir != "":
             val candidate = if dir == "/": "/{command}" else: "{dir}/{command}"
-            if rt_file_exists(candidate):
+            if _launcher_path_exists(candidate):
                 return candidate
         i = i + 1
     val sys_app = "/sys/apps/{command}"
-    if rt_file_exists(sys_app):
+    if _launcher_path_exists(sys_app):
         return sys_app
+    val sys_app_smf = "{sys_app}.smf"
+    if _launcher_path_exists(sys_app_smf):
+        return sys_app_smf
     ""
 
 fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
@@ -312,9 +351,10 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
         serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
         if pid_result < 0:
-            val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
-            if resident_pid >= 0:
-                return resident_pid
+            if pid_result == -38:
+                val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
+                if resident_pid >= 0:
+                    return resident_pid
             app_launch_state[slot] = "failed"
             app_exit_code[slot] = pid_result.to_i32()
             serial_println("[launcher] Failed to launch {name}: {pid_result}")
@@ -558,11 +598,11 @@ fn launcher_init():
     process_sequence = 1
 
     # Register default apps
-    launcher_register("Hello World", "/sys/apps/hello_world", "H", 0x48, MOD_META)    # Meta+H
-    launcher_register("File Manager", "/sys/apps/file_manager", "F", 0x46, MOD_META)  # Meta+F
-    launcher_register("Terminal", "/sys/apps/shell", ">", 0x54, MOD_META)             # Meta+T
-    launcher_register("Browser Demo", "/sys/apps/browser_demo", "B", 0x42, MOD_META)  # Meta+B
-    launcher_register("Editor", "/sys/apps/editor", "E", 0x45, MOD_META)              # Meta+E
+    launcher_register("Hello World", _preferred_app_exec_path("/sys/apps/hello_world"), "H", 0x48, MOD_META)    # Meta+H
+    launcher_register("File Manager", _preferred_app_exec_path("/sys/apps/file_manager"), "F", 0x46, MOD_META)  # Meta+F
+    launcher_register("Terminal", _preferred_app_exec_path("/sys/apps/shell"), ">", 0x54, MOD_META)             # Meta+T
+    launcher_register("Browser Demo", _preferred_app_exec_path("/sys/apps/browser_demo"), "B", 0x42, MOD_META)  # Meta+B
+    launcher_register("Editor", _preferred_app_exec_path("/sys/apps/editor"), "E", 0x45, MOD_META)              # Meta+E
 
     serial_println("[launcher] Registered {app_count} default apps")
 
@@ -659,6 +699,7 @@ fn launcher_launch_by_index(idx: u64) -> i64:
 fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     app_launch_count[slot] = app_launch_count[slot] + 1
     app_last_pid[slot] = pid
+    launcher_last_launch_pid = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
     serial_println("[launcher] Started {name} (PID {pid})")
@@ -720,19 +761,19 @@ fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
         return false
     match key:
         0x48:
-            _launch_seeded_app(0, "Hello World", "/sys/apps/hello_world", "H", 0x48, MOD_META)
+            _launch_seeded_app(0, "Hello World", "/sys/apps/hello_world.smf", "H", 0x48, MOD_META)
             true
         0x46:
-            _launch_seeded_app(1, "File Manager", "/sys/apps/file_manager", "F", 0x46, MOD_META)
+            _launch_seeded_app(1, "File Manager", "/sys/apps/file_manager.smf", "F", 0x46, MOD_META)
             true
         0x54:
-            _launch_seeded_app(2, "Terminal", "/sys/apps/shell", ">", 0x54, MOD_META)
+            _launch_seeded_app(2, "Terminal", "/sys/apps/shell.smf", ">", 0x54, MOD_META)
             true
         0x42:
-            _launch_seeded_app(3, "Browser Demo", "/sys/apps/browser_demo", "B", 0x42, MOD_META)
+            _launch_seeded_app(3, "Browser Demo", "/sys/apps/browser_demo.smf", "B", 0x42, MOD_META)
             true
         0x45:
-            _launch_seeded_app(4, "Editor", "/sys/apps/editor", "E", 0x45, MOD_META)
+            _launch_seeded_app(4, "Editor", "/sys/apps/editor.smf", "E", 0x45, MOD_META)
             true
         _:
             false
@@ -822,6 +863,10 @@ fn launcher_get_pid(idx: u64) -> u64:
     if idx >= app_count:
         return 0
     app_pid[idx]
+
+fn launcher_get_last_launch_pid() -> u64:
+    """Return the most recent launcher PID, including resident-manifest fallback."""
+    launcher_last_launch_pid
 
 fn launcher_get_app_launch_state(idx: u64) -> text:
     if idx >= app_count:
@@ -993,9 +1038,16 @@ fn launcher_find_process_by_pid(pid: u64) -> i64:
 fn launcher_process_uses_resident_manifest(pid: u64) -> bool:
     """Return true for launcher processes using manifest fallback."""
     val idx = _process_index_by_pid(pid)
-    if idx < 0:
-        return false
-    process_state[idx.to_u64()] == "resident-manifest"
+    if idx >= 0 and process_state[idx.to_u64()] == "resident-manifest":
+        return true
+
+    var app_idx: u64 = 0
+    while app_idx < app_count:
+        if (app_pid[app_idx] == pid or app_last_pid[app_idx] == pid) and app_launch_state[app_idx] == "resident-manifest":
+            return true
+        app_idx = app_idx + 1
+
+    _is_synthetic_pid(pid) and pid == launcher_last_launch_pid
 
 fn launcher_process_is_process_backed(pid: u64) -> bool:
     """Return true when a launcher row maps to a scheduler-owned PID."""

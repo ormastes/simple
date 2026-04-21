@@ -12,6 +12,8 @@ use inkwell::builder::Builder;
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
+#[cfg(feature = "llvm")]
+use inkwell::InlineAsmDialect;
 
 mod calls;
 mod casts;
@@ -29,6 +31,115 @@ type VRegMap = std::collections::HashMap<crate::mir::VReg, inkwell::values::Basi
 type VRegMap = std::collections::HashMap<crate::mir::VReg, ()>;
 
 impl LlvmBackend {
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn build_box_float_value(
+        &self,
+        val: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
+        let rv_type = self.runtime_int_type();
+        let rv_width = rv_type.get_bit_width();
+
+        if rv_width == 64 {
+            let bits = if val.is_float_value() {
+                builder
+                    .build_bit_cast(val.into_float_value(), rv_type, "f2i")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+                    .into_int_value()
+            } else {
+                self.coerce_value_to_type(val, Some(rv_type.into()), builder)?
+                    .into_int_value()
+            };
+            let three = rv_type.const_int(3, false);
+            let tag_float = rv_type.const_int(2, false);
+            let shifted = builder
+                .build_right_shift(bits, three, false, "ushr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+            let payload = builder
+                .build_left_shift(shifted, three, "shl")
+                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+            return builder
+                .build_or(payload, tag_float, "box_float")
+                .map_err(|e| crate::error::factory::llvm_build_failed("or", &e));
+        }
+
+        let f64_type = self.context.f64_type();
+        let f64_val = match val {
+            inkwell::values::BasicValueEnum::FloatValue(fv) if fv.get_type() == f64_type => fv,
+            inkwell::values::BasicValueEnum::FloatValue(fv) => builder
+                .build_float_ext(fv, f64_type, "box_fext")
+                .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?,
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_signed_int_to_float(iv, f64_type, "box_sitofp")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?,
+            inkwell::values::BasicValueEnum::PointerValue(pv) => {
+                let iv = builder
+                    .build_ptr_to_int(pv, rv_type, "box_ptrtoint")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+                builder
+                    .build_signed_int_to_float(iv, f64_type, "box_ptr_sitofp")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?
+            }
+            _ => f64_type.const_zero(),
+        };
+
+        let fn_type = rv_type.fn_type(&[f64_type.into()], false);
+        let func = module
+            .get_function("rt_box_float")
+            .unwrap_or_else(|| module.add_function("rt_box_float", fn_type, None));
+        let call = builder
+            .build_call(func, &[f64_val.into()], "rt_box_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_box_float", &e))?;
+        let ret = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::semantic("rt_box_float returned no value".to_string()))?
+            .into_int_value();
+        Ok(ret)
+    }
+
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn build_unbox_float_value(
+        &self,
+        val: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<inkwell::values::FloatValue<'static>, CompileError> {
+        let rv_type = self.runtime_int_type();
+        let f64_type = self.context.f64_type();
+
+        let int_val = self
+            .coerce_value_to_type(val, Some(rv_type.into()), builder)?
+            .into_int_value();
+        if rv_type.get_bit_width() == 64 {
+            let three = rv_type.const_int(3, false);
+            let shifted = builder
+                .build_right_shift(int_val, three, false, "ushr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+            let bits = builder
+                .build_left_shift(shifted, three, "shl")
+                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+            return Ok(builder
+                .build_bit_cast(bits, f64_type, "i2f")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+                .into_float_value());
+        }
+
+        let fn_type = f64_type.fn_type(&[rv_type.into()], false);
+        let func = module
+            .get_function("rt_unbox_float")
+            .unwrap_or_else(|| module.add_function("rt_unbox_float", fn_type, None));
+        let call = builder
+            .build_call(func, &[int_val.into()], "rt_unbox_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_unbox_float", &e))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::semantic("rt_unbox_float returned no value".to_string()))?
+            .into_float_value())
+    }
+
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
@@ -485,6 +596,29 @@ impl LlvmBackend {
             // Calls
             MirInst::Call { dest, target, args } => {
                 self.compile_call(*dest, target, args, vreg_map, builder, module)?;
+            }
+            MirInst::InlineAsm { instructions, .. } => {
+                if !matches!(
+                    self.target.arch,
+                    simple_common::target::TargetArch::X86 | simple_common::target::TargetArch::X86_64
+                ) {
+                    // Inline asm blocks are target-specific. Full-tree OS builds can still
+                    // compile unrelated x86 modules while targeting RISC-V.
+                } else {
+                    let fn_type = self.context.void_type().fn_type(&[], false);
+                    let asm = self.context.create_inline_asm(
+                        fn_type,
+                        instructions.join("\n"),
+                        String::new(),
+                        true,
+                        false,
+                        Some(InlineAsmDialect::ATT),
+                        false,
+                    );
+                    builder
+                        .build_indirect_call(fn_type, asm, &[], "")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+                }
             }
             MirInst::IndirectCall {
                 dest,
@@ -1248,50 +1382,13 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, shifted.into());
             }
             MirInst::BoxFloat { dest, value } => {
-                // Box float: (bits >> 3) << 3 | TAG_FLOAT(2)
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.runtime_int_type();
-                let three = i64_type.const_int(3, false);
-                let tag_float = i64_type.const_int(2, false);
-                // Convert float to bits (i64)
-                let bits = if val.is_float_value() {
-                    builder
-                        .build_bit_cast(val.into_float_value(), i64_type, "f2i")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
-                        .into_int_value()
-                } else {
-                    self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                        .into_int_value()
-                };
-                let shifted = builder
-                    .build_right_shift(bits, three, false, "ushr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-                let payload = builder
-                    .build_left_shift(shifted, three, "shl")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-                let boxed = builder
-                    .build_or(payload, tag_float, "box_float")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("or", &e))?;
+                let boxed = self.build_box_float_value(val, builder, module)?;
                 vreg_map.insert(*dest, boxed.into());
             }
             MirInst::UnboxFloat { dest, value } => {
-                // Unbox float: extract bits and shift back
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.runtime_int_type();
-                let f64_type = self.context.f64_type();
-                let three = i64_type.const_int(3, false);
-                let int_val = self
-                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                    .into_int_value();
-                let shifted = builder
-                    .build_right_shift(int_val, three, false, "ushr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-                let bits = builder
-                    .build_left_shift(shifted, three, "shl")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-                let unboxed = builder
-                    .build_bit_cast(bits, f64_type, "i2f")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?;
+                let unboxed = self.build_unbox_float_value(val, builder, module)?;
                 vreg_map.insert(*dest, unboxed.into());
             }
 
@@ -1479,6 +1576,32 @@ impl LlvmBackend {
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
+                    }
+                    return Ok(());
+                }
+
+                if matches!(
+                    method,
+                    "to_u8"
+                        | "to_i8"
+                        | "to_u16"
+                        | "to_i16"
+                        | "to_u32"
+                        | "to_i32"
+                        | "to_u64"
+                        | "to_i64"
+                        | "to_int"
+                ) {
+                    let recv_val = self.get_vreg(receiver, vreg_map)?;
+                    let int_type = match method {
+                        "to_u8" | "to_i8" => self.context.i8_type(),
+                        "to_u16" | "to_i16" => self.context.i16_type(),
+                        "to_u32" | "to_i32" => self.context.i32_type(),
+                        _ => self.context.i64_type(),
+                    };
+                    let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
+                    if let Some(d) = dest {
+                        vreg_map.insert(*d, converted);
                     }
                     return Ok(());
                 }
@@ -2024,5 +2147,45 @@ impl LlvmBackend {
 impl LlvmBackend {
     pub fn compile_function(&self, _func: &MirFunction) -> Result<(), CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod tests {
+    use super::*;
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[test]
+    fn test_riscv32_float_boxing_uses_runtime_helpers() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_float_boxing").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let fn_type = backend.context.void_type().fn_type(&[], false);
+            let func = module.add_function("test", fn_type, None);
+            let block = backend.context.append_basic_block(func, "entry");
+            builder.position_at_end(block);
+
+            let float_val = backend.context.f64_type().const_float(1.5);
+            let boxed = backend
+                .build_box_float_value(float_val.into(), builder, module)
+                .unwrap();
+            let unboxed = backend
+                .build_unbox_float_value(boxed.into(), builder, module)
+                .unwrap();
+            let _ = unboxed;
+            builder.build_return(None).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i32 @rt_box_float(double"));
+        assert!(ir.contains("call double @rt_unbox_float(i32"));
+        assert!(!ir.contains("bitcast i32"));
+        backend.verify().unwrap();
     }
 }

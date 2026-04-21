@@ -627,13 +627,13 @@ impl ModuleLoader {
 
 fn resolve_builtin_runtime_symbol(name: &str) -> Option<usize> {
     match name.strip_prefix('_').unwrap_or(name) {
-        "rt_decision_probe" => Some(crate::value::rt_decision_probe as usize),
-        "rt_condition_probe" => Some(crate::value::rt_condition_probe as usize),
-        "rt_path_probe" => Some(crate::value::rt_path_probe as usize),
-        "rt_coverage_decision_probe" => Some(crate::coverage::rt_coverage_decision_probe as usize),
-        "rt_coverage_condition_probe" => Some(crate::coverage::rt_coverage_condition_probe as usize),
-        "rt_coverage_path_probe" => Some(crate::coverage::rt_coverage_path_probe as usize),
-        "rt_coverage_path_finalize" => Some(crate::coverage::rt_coverage_path_finalize as usize),
+        "rt_decision_probe" => Some(crate::value::rt_decision_probe as *const () as usize),
+        "rt_condition_probe" => Some(crate::value::rt_condition_probe as *const () as usize),
+        "rt_path_probe" => Some(crate::value::rt_path_probe as *const () as usize),
+        "rt_coverage_decision_probe" => Some(crate::coverage::rt_coverage_decision_probe as *const () as usize),
+        "rt_coverage_condition_probe" => Some(crate::coverage::rt_coverage_condition_probe as *const () as usize),
+        "rt_coverage_path_probe" => Some(crate::coverage::rt_coverage_path_probe as *const () as usize),
+        "rt_coverage_path_finalize" => Some(crate::coverage::rt_coverage_path_finalize as *const () as usize),
         _ => None,
     }
 }

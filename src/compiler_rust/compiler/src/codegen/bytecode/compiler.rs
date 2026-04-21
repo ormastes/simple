@@ -474,7 +474,7 @@ impl BytecodeCompiler {
             // =================================================================
             // No-ops (safe to skip in bytecode)
             // =================================================================
-            MirInst::Drop { .. } | MirInst::EndScope { .. } => {
+            MirInst::Drop { .. } | MirInst::EndScope { .. } | MirInst::InlineAsm { .. } => {
                 // No-op in bytecode (GC handles cleanup)
             }
 
