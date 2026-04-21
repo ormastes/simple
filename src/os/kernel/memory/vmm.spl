@@ -160,7 +160,12 @@ var g_vmm: VirtMemManager = VirtMemManager(
     pml4_phys: 0,
     hhdm_offset: 0
 )
-var g_vmm_initialized: bool = false
+# Initialized-flag workaround: the baremetal freestanding build stores a
+# `bool = false` module-level default as the NIL tag (0x3) rather than 0,
+# which makes `if not g_vmm_initialized` evaluate true *after* `vmm_init`
+# wrote `true`. Use a u64 sentinel (0 = not initialized, 1 = initialized)
+# so the representation is unambiguous.
+var g_vmm_initialized: u64 = 0
 
 # Monotonic address-space id counter. 0 is reserved for the kernel AS;
 # the first user address space created gets id 1. Wraps only after ~2^64
@@ -254,7 +259,7 @@ fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
         return
 
     g_vmm.pml4_phys = pml4_phys
-    g_vmm_initialized = true
+    g_vmm_initialized = 1
 
     serial_println("[VMM] PML4 at physical 0x{pml4_phys}")
 
@@ -757,7 +762,7 @@ fn create_user_address_space() -> AddressSpace:
     `phys_root = 1` (the legacy sentinel) and log a single line so the
     kernel keeps booting instead of panicking.
     """
-    if not g_vmm_initialized or g_vmm.pml4_phys == 0:
+    if g_vmm_initialized == 0 or g_vmm.pml4_phys == 0:
         serial_println("[VMM] create_user_address_space: VMM not initialized — legacy AS=1")
         return AddressSpace(phys_root: 1, id: 0)
 
