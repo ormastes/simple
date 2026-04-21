@@ -63,14 +63,22 @@ class SimpleWindowManager {
   // -------------------------------------------------------------------------
 
   async _init() {
+    if (this.transport === 'electron-ipc') {
+      this._bindGlobalEvents();
+      if (window.simpleUI && window.simpleUI.onNativeWindowEvent) {
+        window.simpleUI.onNativeWindowEvent((msg) => this._handleNativeWindowEvent(msg || {}));
+      }
+      this.sessionId = 'electron-ipc';
+      if (window.simpleUI && typeof window.simpleUI.notifyWmReady === 'function') {
+        window.simpleUI.notifyWmReady();
+      }
+      await this._loadRenderer(false);
+      return;
+    }
     await this._loadRenderer(this.transport !== 'electron-ipc');
     this._bindGlobalEvents();
     if (window.simpleUI && window.simpleUI.onNativeWindowEvent) {
       window.simpleUI.onNativeWindowEvent((msg) => this._handleNativeWindowEvent(msg || {}));
-    }
-    if (this.transport === 'electron-ipc') {
-      this.sessionId = 'electron-ipc';
-      return;
     }
     await this._authenticate();
   }

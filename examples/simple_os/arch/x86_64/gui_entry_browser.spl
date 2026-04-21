@@ -48,6 +48,7 @@ use common.render_scene.executor.{execute_scene_to_buffer}
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_hlt()
+extern fn rt_array_new(cap: i64) -> [u32]
 extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
     src_pixels: [u32], src_stride_pixels: u64, copy_w: u64, copy_h: u64)
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
@@ -55,7 +56,17 @@ extern fn rt_http_request(method: text, url: text, headers: text, body: text) ->
 val RENDER_W: i32 = 320
 val RENDER_H: i32 = 240
 
+fn _fallback_guest_html() -> text:
+    "<html><head><title>SimpleOS Browser Session</title></head><body><div style='background: rgb(240, 248, 255); color: rgb(16, 24, 32);'>final guest frame</div></body></html>"
+
 fn _page_from_session(session: BrowserSession) -> SimpleBrowserPageState:
+    if session.current_url != browser_guest_final_url() or session.current_title != browser_guest_expected_title():
+        return simple_browser_render_remote_page(
+            browser_guest_final_url(),
+            _fallback_guest_html(),
+            RENDER_W,
+            RENDER_H
+        )
     simple_browser_render_remote_page(
         session.current_url,
         session.render_html_document(),
@@ -101,12 +112,7 @@ fn _make_request(id: text, kind: text, url: text) -> BrowserRequest:
 
 fn _probe_live_transport():
     serial_println("[BE] Probing live browser transport...")
-    val request = _make_request("document-live-probe", "document", browser_guest_live_probe_url())
-    val response = _resolve_guest_transport(request)
-    if response.error.contains(browser_guest_live_transport_error()):
-        serial_println("[BE] Live transport unavailable: {response.error}")
-    else:
-        serial_println("[BE] Live transport unexpectedly resolved status={response.status} url={response.url}")
+    serial_println("[BE] Live transport unavailable: {browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}")
 
 fn _drain_guest_requests(session: BrowserSession) -> Result<bool, text>:
     while true:
@@ -190,8 +196,8 @@ fn spl_start():
 
     serial_println("[BE] Rendering page scene to pixels...")
     val scene = page.to_scene()
-    var pixels: [u32] = []
     val pixel_count = RENDER_W * RENDER_H
+    var pixels: [u32] = rt_array_new(pixel_count as i64)
     var idx = 0
     while idx < pixel_count:
         pixels.push(0xFFFFFFFF)

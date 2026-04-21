@@ -412,47 +412,17 @@ sources_newer_than() {
 echo ""
 echo "Generating MCP launcher scripts in ${mcp_release_dir#${repo_root}/}:"
 
-# simple_mcp_server is also a standalone native binary when
-# build/native/simple_mcp_native exists. Build it the same way as
-# simple_lsp_mcp_server: `simple native-build --runtime-bundle auto
-# --runtime-path src/compiler_rust/target/release/deps`.
-mcp_native_src="${repo_root}/build/native/simple_mcp_native"
-mcp_target="${mcp_release_dir}/simple_mcp_server"
-if [ -s "${mcp_target}" ] && ! head -c 2 "${mcp_target}" | grep -q '#!' \
-   && ! sources_newer_than "${mcp_target}" "${repo_root}/src/app/mcp" "${repo_root}/src/lib/nogc_sync_mut/mcp_sdk"; then
-  # Target is already a non-empty native binary (deployed by bootstrap), keep it
-  echo "  simple_mcp_server (native binary — already deployed)"
-elif [ "${os}" = "${host_runtime_os}" ] && [ "${arch}" = "${host_runtime_arch}" ] && [ -f "${mcp_native_src}" ] \
-     && ! sources_newer_than "${mcp_native_src}" "${repo_root}/src/app/mcp" "${repo_root}/src/lib/nogc_sync_mut/mcp_sdk"; then
-  cp "${mcp_native_src}" "${mcp_target}"
-  chmod +x "${mcp_target}"
-  echo "  simple_mcp_server (native binary)"
-else
-  generate_mcp_launcher "simple_mcp_server" \
-    "src/app/mcp/main.spl" "" ""
-  echo "  simple_mcp_server (shell wrapper — run 'simple native-build ...' for a native binary)"
-fi
+# The current native simple MCP/LSP MCP binaries can SIGSEGV before answering
+# initialize, and their SMF caches fail to load due unresolved extern
+# relocations. Keep setup on the interpret launcher path until native MCP
+# smoke and SMF probes are green again.
+generate_mcp_launcher "simple_mcp_server" \
+  "src/app/mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
+echo "  simple_mcp_server (shell wrapper)"
 
-# simple_lsp_mcp_server is now a standalone native binary built via
-# `simple native-build --runtime-bundle auto`. Prefer the prebuilt
-# binary at build/native/simple_lsp_mcp_native if it exists; otherwise
-# fall back to the shell-launcher path.
-lsp_mcp_native_src="${repo_root}/build/native/simple_lsp_mcp_native"
-lsp_mcp_target="${mcp_release_dir}/simple_lsp_mcp_server"
-if [ -s "${lsp_mcp_target}" ] && ! head -c 2 "${lsp_mcp_target}" | grep -q '#!' \
-   && ! sources_newer_than "${lsp_mcp_target}" "${repo_root}/src/app/simple_lsp_mcp"; then
-  # Target is already a non-empty native binary (deployed by bootstrap), keep it
-  echo "  simple_lsp_mcp_server (native binary — already deployed)"
-elif [ "${os}" = "${host_runtime_os}" ] && [ "${arch}" = "${host_runtime_arch}" ] && [ -f "${lsp_mcp_native_src}" ] \
-     && ! sources_newer_than "${lsp_mcp_native_src}" "${repo_root}/src/app/simple_lsp_mcp"; then
-  cp "${lsp_mcp_native_src}" "${lsp_mcp_target}"
-  chmod +x "${lsp_mcp_target}"
-  echo "  simple_lsp_mcp_server (native binary)"
-else
-  generate_mcp_launcher "simple_lsp_mcp_server" \
-    "src/app/simple_lsp_mcp/main.spl" "" ""
-  echo "  simple_lsp_mcp_server (shell wrapper — run 'simple native-build ...' for a native binary)"
-fi
+generate_mcp_launcher "simple_lsp_mcp_server" \
+  "src/app/simple_lsp_mcp/main.spl" 'export SIMPLE_MCP_DISABLE_CACHE="${SIMPLE_MCP_DISABLE_CACHE:-1}"' ""
+echo "  simple_lsp_mcp_server (shell wrapper)"
 
 cat > "${mcp_release_dir}/t32_mcp_server" <<'T32_MCP_EOF'
 #!/bin/sh

@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('simpleUI', {
         ipcRenderer.send('wm-frame-to-simple', frame || {});
     },
 
+    notifyWmReady() {
+        ipcRenderer.send('wm-ready');
+    },
+
     onNativeWindowEvent(callback) {
         ipcRenderer.on('native-window-event', (event, msg) => {
             callback(msg);

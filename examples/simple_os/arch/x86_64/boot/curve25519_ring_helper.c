@@ -147,8 +147,12 @@ int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
     ge_p3 A;
     if (x25519_ge_frombytes_vartime(&A, pk) != 0) return -1;
     ge_p3 negA = A;
-    fe_neg(&negA.X, &A.X);
-    fe_neg(&negA.T, &A.T);
+    fe_loose neg_x;
+    fe_loose neg_t;
+    fe_neg(&neg_x, &A.X);
+    fe_neg(&neg_t, &A.T);
+    fe_carry(&negA.X, &neg_x);
+    fe_carry(&negA.T, &neg_t);
 
     uint32_t total = 32u + 32u + msg_len;
     uint8_t *hram_input = (uint8_t *)malloc(total ? total : 1);

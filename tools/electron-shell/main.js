@@ -18,6 +18,8 @@ let simpleProcess = null;
 let lineBuffer = '';
 let nativeSmokeFrames = [];
 let nativeSmokeStarted = false;
+let wmReady = false;
+let wmReadyResolvers = [];
 // childWindows/webContentsToWindowId were used by the old openWindow
 // handler that spawned separate BrowserWindow instances. The WM now
 // runs in the main renderer (wm.js) so there are no child BrowserWindows.
@@ -176,6 +178,7 @@ function focusNativeWindow(windowId) {
     if (!bw || bw.isDestroyed()) return false;
     bw.show();
     bw.focus();
+    emitNativeWindowEvent('focus', windowId, bw);
     return true;
 }
 
@@ -628,6 +631,17 @@ function waitMs(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForWmReady(timeoutMs) {
+    if (wmReady) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        wmReadyResolvers.push(() => {
+            clearTimeout(timer);
+            resolve(true);
+        });
+    });
+}
+
 function nativeSmokeCommandKinds() {
     return nativeSmokeFrames.map((frame) => {
         const payload = frame && frame.payload ? frame.payload : {};
@@ -639,13 +653,31 @@ function nativeSmokeHasKind(kind) {
     return nativeSmokeCommandKinds().includes(kind);
 }
 
+function finishNativeSmoke(code) {
+    try {
+        for (const bw of BrowserWindow.getAllWindows()) {
+            if (!bw.isDestroyed()) bw.destroy();
+        }
+    } catch (err) {
+        debugLog(`finishNativeSmoke window cleanup failed: ${err.message}`);
+    }
+    app.exit(code);
+    setTimeout(() => process.exit(code), 250);
+}
+
 async function runNativeWindowSmoke() {
     if (nativeSmokeStarted) return;
     nativeSmokeStarted = true;
     const windowId = 'simple-electron-smoke-window';
     nativeSmokeFrames = [];
     try {
-        await waitMs(250);
+        const ready = await waitForWmReady(5000);
+        if (!ready) {
+            console.error('Electron native smoke failed; WM renderer bridge did not become ready');
+            finishNativeSmoke(1);
+            return;
+        }
+        await waitMs(100);
         spawnNativeWindow({
             windowId,
             url: 'data:text/html,<title>Smoke Window</title><body>Simple Electron smoke</body>',
@@ -674,14 +706,14 @@ async function runNativeWindowSmoke() {
         if (missing.length > 0) {
             console.error(`Electron native smoke failed; missing native feedback: ${missing.join(', ')}`);
             console.error(`Observed feedback: ${nativeSmokeCommandKinds().join(', ') || '(none)'}`);
-            app.exit(1);
+            finishNativeSmoke(1);
             return;
         }
         console.log(`Electron native smoke passed: ${nativeSmokeCommandKinds().join(', ')}`);
-        app.exit(0);
+        finishNativeSmoke(0);
     } catch (err) {
         console.error(`Electron native smoke failed: ${err.stack || err.message || err}`);
-        app.exit(1);
+        finishNativeSmoke(1);
     }
 }
 
@@ -707,6 +739,7 @@ app.whenReady().then(() => {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
+            sandbox: false,
             preload: path.join(__dirname, 'preload.js')
         },
         title: 'Simple UI'
@@ -745,8 +778,14 @@ app.whenReady().then(() => {
             runNativeWindowSmoke();
         }
     });
+    mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+        debugLog(`renderer console level=${level} ${sourceId}:${line} ${message}`);
+    });
     mainWindow.webContents.on('render-process-gone', (event, details) => {
         debugLog(`render-process-gone reason=${details.reason}`);
+    });
+    mainWindow.webContents.on('unresponsive', () => {
+        debugLog('window unresponsive');
     });
     mainWindow.webContents.on('did-fail-load', (event, code, desc) => {
         debugLog(`did-fail-load code=${code} desc=${desc}`);
@@ -777,6 +816,13 @@ ipcMain.on('wm-frame-to-simple', (event, frame) => {
         return;
     }
     sendToSimple(frame || {});
+});
+
+ipcMain.on('wm-ready', () => {
+    wmReady = true;
+    debugLog('wm-ready');
+    for (const resolve of wmReadyResolvers) resolve();
+    wmReadyResolvers = [];
 });
 
 ipcMain.on('keypress', (event, key) => {

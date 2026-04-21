@@ -10,6 +10,8 @@
 #   sh scripts/os_gui.shs --input-test     # run deterministic WM input smoke test
 #   sh scripts/os_gui.shs --tablet         # opt-in WM tablet diagnostic path
 #   sh scripts/os_gui.shs --serial         # serial to stdout instead of file
+#   sh scripts/os_gui.shs --wm --capture build/os/wm_320x240.ppm
+#                                             # headless QMP screendump capture
 #   sh scripts/os_gui.shs --clean          # clean rebuild
 #
 # The GUI entry boots into a full desktop shell with:
@@ -43,6 +45,11 @@ BROWSER_MODE=0
 INPUT_TEST_MODE=0
 TABLET_DIAGNOSTIC=0
 SERIAL_STDIO=0
+CAPTURE_PATH=""
+CAPTURE_SIZE="320x240"
+CAPTURE_TIMEOUT=45
+QMP_SOCKET=""
+DISPLAY_MODE=""
 CLEAN_FLAG=""
 TABLET_FLAG=""
 OBJCOPY="/opt/homebrew/opt/llvm/bin/llvm-objcopy"
@@ -69,13 +76,30 @@ while [ $# -gt 0 ]; do
                       OUTPUT_32="build/os/simpleos_wm_input_test_32.elf" ;;
         --tablet)     TABLET_DIAGNOSTIC=1 ;;
         --serial)     SERIAL_STDIO=1 ;;
+        --capture)    shift; CAPTURE_PATH="${1:-}" ;;
+        --capture-size) shift; CAPTURE_SIZE="${1:-320x240}" ;;
+        --capture-timeout) shift; CAPTURE_TIMEOUT="${1:-45}" ;;
+        --qmp)        shift; QMP_SOCKET="${1:-}" ;;
+        --display)    shift; DISPLAY_MODE="${1:-}" ;;
         --clean)      CLEAN_FLAG="--clean" ;;
         --mem)        shift; QEMU_MEM="${1:-2G}" ;;
-        -h|--help)    head -25 "$0" | tail -24; exit 0 ;;
+        -h|--help)    head -32 "$0" | tail -31; exit 0 ;;
         *)            echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
 done
+
+if [ -n "$CAPTURE_PATH" ] && [ -z "$QMP_SOCKET" ]; then
+    QMP_SOCKET="/tmp/simpleos_gui_capture_$$.sock"
+fi
+
+if [ -z "$DISPLAY_MODE" ]; then
+    if [ -n "$CAPTURE_PATH" ]; then
+        DISPLAY_MODE="none"
+    else
+        DISPLAY_MODE="cocoa"
+    fi
+fi
 
 # ─── Locate tools ────────────────────────────────────────────────────────────
 
@@ -131,6 +155,174 @@ fi
 
 OBJCOPY_DIR="$(dirname "$OBJCOPY")"
 BUILD_ENV_PREFIX="env SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$REPO_ROOT/src RUST_LOG=${RUST_LOG:-warn} PATH=$OBJCOPY_DIR:$PATH"
+
+wait_for_path() {
+    _path="$1"
+    _timeout="$2"
+    _elapsed=0
+    while [ "$_elapsed" -lt "$_timeout" ]; do
+        [ -e "$_path" ] && return 0
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+    return 1
+}
+
+wait_for_serial_marker() {
+    _marker="$1"
+    _timeout="$2"
+    _elapsed=0
+    while [ "$_elapsed" -lt "$_timeout" ]; do
+        if [ -f "$SERIAL_LOG" ] && grep -F "$_marker" "$SERIAL_LOG" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+    return 1
+}
+
+capture_ready_marker() {
+    if [ "$WM_MODE" -eq 1 ]; then
+        echo "[WM] Glass desktop rendered!"
+    elif [ "$BROWSER_MODE" -eq 1 ]; then
+        echo "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer"
+    elif [ "$INPUT_TEST_MODE" -eq 1 ]; then
+        echo "TEST PASSED"
+    else
+        echo "[GUI]"
+    fi
+}
+
+qmp_screendump() {
+    _socket="$1"
+    _out="$2"
+    python3 - "$_socket" "$_out" <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+
+sock_path, out_path = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sock_path)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+f.write(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n")
+f.flush()
+f.readline()
+
+def send(cmd):
+    f.write(json.dumps(cmd).encode() + b"\n")
+    f.flush()
+    line = f.readline()
+    try:
+        return json.loads(line.decode() or "{}")
+    except Exception:
+        return {"error": {"desc": line.decode(errors="replace")}}
+
+attempts = [
+    {"execute": "screendump", "arguments": {"filename": out_path, "format": "ppm"}},
+    {"execute": "screendump", "arguments": {"filename": out_path}},
+    {"execute": "human-monitor-command", "arguments": {"command-line": f"screendump {out_path}"}},
+]
+last = None
+for cmd in attempts:
+    last = send(cmd)
+    if "error" not in last:
+        break
+
+for _ in range(80):
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        sys.exit(0)
+    time.sleep(0.1)
+if last:
+    sys.stderr.write(json.dumps(last) + "\n")
+sys.exit(3)
+PY
+}
+
+resize_ppm() {
+    _in="$1"
+    _out="$2"
+    _size="$3"
+    python3 - "$_in" "$_out" "$_size" <<'PY'
+import sys
+
+src, dst, size = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    out_w, out_h = [int(x) for x in size.lower().split("x", 1)]
+except Exception:
+    raise SystemExit("invalid --capture-size, expected WIDTHxHEIGHT")
+
+def token(f):
+    data = bytearray()
+    while True:
+        ch = f.read(1)
+        if not ch:
+            return bytes(data)
+        if ch == b"#":
+            f.readline()
+            continue
+        if ch.isspace():
+            if data:
+                return bytes(data)
+            continue
+        data += ch
+
+with open(src, "rb") as f:
+    if token(f) != b"P6":
+        raise SystemExit("unsupported PPM format")
+    in_w = int(token(f))
+    in_h = int(token(f))
+    maxv = int(token(f))
+    if maxv != 255:
+        raise SystemExit("unsupported PPM max value")
+    pixels = f.read()
+
+if in_w <= 0 or in_h <= 0 or out_w <= 0 or out_h <= 0:
+    raise SystemExit("invalid image dimensions")
+
+row_bytes = in_w * 3
+out = bytearray()
+for y in range(out_h):
+    sy = min(in_h - 1, (y * in_h) // out_h)
+    row = sy * row_bytes
+    for x in range(out_w):
+        sx = min(in_w - 1, (x * in_w) // out_w)
+        idx = row + sx * 3
+        out += pixels[idx:idx + 3]
+
+with open(dst, "wb") as f:
+    f.write(f"P6\n{out_w} {out_h}\n255\n".encode())
+    f.write(out)
+PY
+}
+
+write_low_res_capture() {
+    _raw="$1"
+    _out="$2"
+    _size="$3"
+    mkdir -p "$(dirname "$_out")"
+    case "$_out" in
+        *.png|*.PNG)
+            _tmp="${_out%.*}.ppm"
+            resize_ppm "$_raw" "$_tmp" "$_size"
+            if command -v sips >/dev/null 2>&1; then
+                sips -s format png "$_tmp" --out "$_out" >/dev/null
+                rm -f "$_tmp"
+            else
+                mv "$_tmp" "$_out"
+                echo "WARN: sips not found; wrote PPM data to $_out"
+            fi
+            ;;
+        *)
+            resize_ppm "$_raw" "$_out" "$_size"
+            ;;
+    esac
+}
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
@@ -193,7 +385,11 @@ echo ""
 echo "=== Launching QEMU ==="
 echo "  Kernel: $OUTPUT_32"
 echo "  Memory: $QEMU_MEM"
-echo "  Display: cocoa (GUI window)"
+echo "  Display: $DISPLAY_MODE"
+if [ -n "$CAPTURE_PATH" ]; then
+    echo "  Capture: $CAPTURE_PATH ($CAPTURE_SIZE)"
+    echo "  QMP: $QMP_SOCKET"
+fi
 if [ "$TABLET_DIAGNOSTIC" -eq 1 ]; then
     echo "  Input: PS/2 + usb-tablet diagnostic"
     TABLET_FLAG="-device usb-tablet"
@@ -205,18 +401,69 @@ if [ "$SERIAL_STDIO" -eq 1 ]; then
 fi
 
 rm -f "$SERIAL_LOG"
+[ -n "$QMP_SOCKET" ] && rm -f "$QMP_SOCKET"
 
-qemu-system-x86_64 \
-    -machine q35 \
-    -cpu qemu64 \
-    -m "$QEMU_MEM" \
-    $SERIAL_FLAG \
-    -display cocoa \
-    -no-reboot \
-    -vga std \
-    $TABLET_FLAG \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -kernel "$OUTPUT_32"
+if [ -n "$CAPTURE_PATH" ]; then
+    RAW_CAPTURE="${CAPTURE_PATH%.*}.raw.ppm"
+    mkdir -p "$(dirname "$RAW_CAPTURE")"
+    rm -f "$RAW_CAPTURE"
+
+    qemu-system-x86_64 \
+        -machine q35 \
+        -cpu qemu64 \
+        -m "$QEMU_MEM" \
+        $SERIAL_FLAG \
+        -display "$DISPLAY_MODE" \
+        -no-reboot \
+        -vga std \
+        $TABLET_FLAG \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -qmp "unix:$QMP_SOCKET,server,nowait" \
+        -kernel "$OUTPUT_32" &
+    QEMU_PID=$!
+
+    cleanup_capture_qemu() {
+        if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill "$QEMU_PID" 2>/dev/null || true
+            wait "$QEMU_PID" 2>/dev/null || true
+        fi
+        [ -n "$QMP_SOCKET" ] && rm -f "$QMP_SOCKET"
+    }
+    trap cleanup_capture_qemu EXIT INT TERM
+
+    if ! wait_for_path "$QMP_SOCKET" 10; then
+        echo "ERROR: QMP socket did not appear: $QMP_SOCKET"
+        exit 1
+    fi
+
+    MARKER="$(capture_ready_marker)"
+    if ! wait_for_serial_marker "$MARKER" "$CAPTURE_TIMEOUT"; then
+        echo "WARN: ready marker not seen within ${CAPTURE_TIMEOUT}s: $MARKER"
+        echo "WARN: capturing current framebuffer"
+    fi
+
+    if ! qmp_screendump "$QMP_SOCKET" "$RAW_CAPTURE"; then
+        echo "ERROR: QMP screendump failed"
+        exit 1
+    fi
+
+    write_low_res_capture "$RAW_CAPTURE" "$CAPTURE_PATH" "$CAPTURE_SIZE"
+    echo "Capture written: $CAPTURE_PATH"
+    cleanup_capture_qemu
+    trap - EXIT INT TERM
+else
+    qemu-system-x86_64 \
+        -machine q35 \
+        -cpu qemu64 \
+        -m "$QEMU_MEM" \
+        $SERIAL_FLAG \
+        -display "$DISPLAY_MODE" \
+        -no-reboot \
+        -vga std \
+        $TABLET_FLAG \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -kernel "$OUTPUT_32"
+fi
 
 echo ""
 if [ -f "$SERIAL_LOG" ]; then

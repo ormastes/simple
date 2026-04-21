@@ -86,65 +86,81 @@ static inline void io_wait(void)
 /* rt_read_msr / rt_write_msr — C-ABI helpers for Simple-side MSR programming.
  * Without these, install_syscall_entry() cannot set EFER.SCE / STAR / LSTAR /
  * SFMASK, so `syscall` instructions silently #UD and the baremetal syscall
- * dispatcher is never reached. */
-uint64_t rt_read_msr(uint32_t msr)
-{
-    uint32_t lo, hi;
-    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-void rt_write_msr(uint32_t msr, uint64_t value)
-{
-    uint32_t lo = (uint32_t)(value & 0xFFFFFFFFu);
-    uint32_t hi = (uint32_t)(value >> 32);
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
-}
-
-/* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
- * instruction. The Simple-side asm-volatile block in
- * src/os/userlib/syscall_raw.spl currently lowers to a no-op stub that
- * simply returns a constant, so posix_spawn → syscall(13, ...) never
- * traps. Until the Simple compiler lowers `asm volatile` to the real
- * instruction, route through this extern.
- *
- * Register convention matches the x86_64 System V SYSCALL ABI:
- *   rax = syscall number
+  * dispatcher is never reached. */
+ uint64_t rt_read_msr(uint32_t msr)
+ {
+     uint32_t lo, hi;
+     __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+     return ((uint64_t)hi << 32) | lo;
+ }
+ 
+ void rt_write_msr(uint32_t msr, uint64_t value)
+ {
+     uint32_t lo = (uint32_t)(value & 0xFFFFFFFFu);
+     uint32_t hi = (uint32_t)(value >> 32);
+     __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+ }
+ 
+ /* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
+  * instruction. The Simple-side asm-volatile block in
+  * src/os/userlib/syscall_raw.spl currently lowers to a no-op stub that
+  * simply returns a constant, so posix_spawn → syscall(13, ...) never
+  * traps. Until the Simple compiler lowers `asm volatile` to the real
+  * instruction, route through this extern.
+  *
+  * Register convention matches the x86_64 System V SYSCALL ABI:
+  *   rax = syscall number
  *   rdi, rsi, rdx, r10, r8 = args 0..4  (r10 for arg3, NOT rcx — rcx
  *     holds the caller's saved RIP post-SYSCALL)
  *   rax = int64_t return value
  */
+/* rt_text_from_u8_array — build a Simple text from a [u8] fat-pointer.
+ *
+ * The Simple-side `_path_bytes_to_text` loop in src/os/kernel/ipc/syscall.spl
+ * returns an empty text despite the input [u8] having the expected length,
+ * the same codegen class as _copy_user_bytes (see rt_copy_user_byte below).
+ * This helper takes the address of the [u8] fat-pointer header
+ * ([data_ptr: u64, len: u64]) and calls rt_string_new directly, bypassing
+ * the Simple-level per-byte loop and the `.to_char()`/`chars.join("")` chain.
+ */
+RuntimeValue rt_text_from_u8_array(uint64_t fat_ptr_addr) {
+    const uint64_t *hdr = (const uint64_t *)(uintptr_t)fat_ptr_addr;
+    uint64_t data_ptr = hdr[0];
+    uint64_t len = hdr[1];
+    return rt_string_new((RuntimeValue)data_ptr, (RuntimeValue)len);
+}
+
 /* rt_copy_user_byte — single-byte copy from a user-mode virtual address.
  * The Simple-side `_copy_user_bytes` loop in src/os/kernel/ipc/syscall.spl
  * appears to miscompile in the baremetal freestanding build (args.arg1 = 22
- * is observed at the marker before entry, but _copy_user_bytes returns an
- * empty Vec for the same arguments). This helper lets the Simple code read
- * one byte at a time from a raw u64 address via plain C pointer deref,
- * sidestepping whatever the asm-volatile / unsafe lowering does. */
-uint8_t rt_copy_user_byte(uint64_t ptr_addr) {
-    return *(const uint8_t*)(uintptr_t)ptr_addr;
-}
-
-int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
-                       uint64_t a3, uint64_t a4) {
-    int64_t result;
-    /* Load every register explicitly from memory to avoid register-allocator
-     * reordering between the Sys V C ABI (arg3 in rcx, arg4 in r8, arg5 in
-     * r9) and the SYSCALL ABI (arg3 in r10, arg4 in r8). Memory operands are
-     * slower but unambiguous; the caller is in the kernel-stack path so the
-     * extra spill is negligible. */
-    __asm__ volatile(
-        "movq %1, %%rax\n\t"
-        "movq %2, %%rdi\n\t"
-        "movq %3, %%rsi\n\t"
-        "movq %4, %%rdx\n\t"
-        "movq %5, %%r10\n\t"
-        "movq %6, %%r8\n\t"
-        "syscall\n\t"
-        "movq %%rax, %0"
-        : "=m"(result)
-        : "m"(id), "m"(a0), "m"(a1), "m"(a2), "m"(a3), "m"(a4)
-        : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r10", "r11", "memory"
+  * is observed at the marker before entry, but _copy_user_bytes returns an
+  * empty Vec for the same arguments). This helper lets the Simple code read
+  * one byte at a time from a raw u64 address via plain C pointer deref,
+  * sidestepping whatever the asm-volatile / unsafe lowering does. */
+ uint8_t rt_copy_user_byte(uint64_t ptr_addr) {
+     return *(const uint8_t*)(uintptr_t)ptr_addr;
+ }
+ 
+ int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
+                        uint64_t a3, uint64_t a4) {
+     int64_t result;
+     /* Load every register explicitly from memory to avoid register-allocator
+      * reordering between the Sys V C ABI (arg3 in rcx, arg4 in r8, arg5 in
+      * r9) and the SYSCALL ABI (arg3 in r10, arg4 in r8). Memory operands are
+      * slower but unambiguous; the caller is in the kernel-stack path so the
+      * extra spill is negligible. */
+     __asm__ volatile(
+         "movq %1, %%rax\n\t"
+         "movq %2, %%rdi\n\t"
+         "movq %3, %%rsi\n\t"
+         "movq %4, %%rdx\n\t"
+         "movq %5, %%r10\n\t"
+         "movq %6, %%r8\n\t"
+         "syscall\n\t"
+         "movq %%rax, %0"
+         : "=m"(result)
+         : "m"(id), "m"(a0), "m"(a1), "m"(a2), "m"(a3), "m"(a4)
+         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r10", "r11", "memory"
     );
     return result;
 }
