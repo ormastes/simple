@@ -13,6 +13,12 @@ use app.cli.query_helpers.{_count_indent}
 # Helpers
 # ============================================================================
 
+struct _PositionContext:
+    content: text
+    lines: [text]
+    symbol: text
+    ok: bool
+
 fn _extract_word_at(lines: [text], line_num: i64, col: i64) -> text:
     if line_num < 1 or line_num > lines.len():
         return ""
@@ -104,6 +110,18 @@ fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
     val (stdout, stderr, code) = query_process_run("grep", ["-n", pattern, file])
     (stdout, code)
 
+fn _read_position_context(file: text, line_num: i64, col: i64) -> _PositionContext:
+    val content = query_file_read_rich(file) ?? ""
+    if content == "":
+        print "Could not read file: {file}"
+        return _PositionContext(content: "", lines: [], symbol: "", ok: false)
+    val lines = content.split("\n")
+    val symbol = _extract_word_at(lines, line_num, col)
+    if symbol == "":
+        print "No symbol at position"
+        return _PositionContext(content: content, lines: lines, symbol: "", ok: false)
+    _PositionContext(content: content, lines: lines, symbol: symbol, ok: true)
+
 # ============================================================================
 # Function 1: document-highlight
 # Same-file references with Read/Write classification
@@ -111,15 +129,11 @@ fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
 # ============================================================================
 
 fn query_document_highlight(file: text, line_num: i64, col: i64) -> i64:
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        print "Could not read file: {file}"
+    val ctx = _read_position_context(file, line_num, col)
+    if not ctx.ok:
         return 1
-    val lines = content.split("\n")
-    val symbol = _extract_word_at(lines, line_num, col)
-    if symbol == "":
-        print "No symbol at position"
-        return 1
+    val lines = ctx.lines
+    val symbol = ctx.symbol
 
     var count = 0
     var li = 0
@@ -162,15 +176,11 @@ fn query_document_highlight(file: text, line_num: i64, col: i64) -> i64:
 # ============================================================================
 
 fn query_type_definition(file: text, line_num: i64, col: i64) -> i64:
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        print "Could not read file: {file}"
+    val ctx = _read_position_context(file, line_num, col)
+    if not ctx.ok:
         return 1
-    val lines = content.split("\n")
-    val symbol = _extract_word_at(lines, line_num, col)
-    if symbol == "":
-        print "No symbol at position"
-        return 1
+    val lines = ctx.lines
+    val symbol = ctx.symbol
 
     # Search for the declaration of this symbol to find its type
     var found_type = ""
@@ -258,15 +268,10 @@ fn _find_arrow(s: text) -> i64:
 # ============================================================================
 
 fn query_implementation(file: text, line_num: i64, col: i64) -> i64:
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        print "Could not read file: {file}"
+    val ctx = _read_position_context(file, line_num, col)
+    if not ctx.ok:
         return 1
-    val lines = content.split("\n")
-    val symbol = _extract_word_at(lines, line_num, col)
-    if symbol == "":
-        print "No symbol at position"
-        return 1
+    val symbol = ctx.symbol
 
     # Check if symbol is a trait
     var is_trait = false
