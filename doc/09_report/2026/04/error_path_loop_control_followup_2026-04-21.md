@@ -36,3 +36,9 @@ Investigate generated-test lowering for loop `break` and `continue`, including r
 ## SFFI Driver Import Path
 
 `test/system/sffi_bidirectional_interop_spec.spl` previously loaded broad compiler driver/backend modules and failed before assertions due stale reserved identifiers (`template`, `function`) and a missing `predicate` module on the import path. The system spec is narrowed to pure SFFI fixture and shared-library naming smoke coverage. Restore the full compiler-backed header, C wrapper, layout, and lint assertions after the driver/backend import path parses cleanly in the system runner.
+
+## Slow System Specs Reported As Perf Bugs
+
+`bin/simple test` and `bin/simple test --fail-fast` pass after the network/lib/OS work, but the runner continues to flag cached DAP and GUI/QEMU-oriented specs as perf bugs: `test/system/dap/dap_stack_trace_system_spec.spl`, `test/system/dap/dap_variables_system_spec.spl`, `test/system/dap/dap_breakpoint_system_spec.spl`, `test/system/gui/glass_pixel_compare_spec.spl`, `test/system/engine_2d_spec.spl`, `test/system/llm_dashboard_tui_spec.spl`, `test/system/os_desktop_integration_spec.spl`, `test/system/sys_gui_006_with_apps_spec.spl`, `test/system/sys_gui_001_boot_launcher_spec.spl`, and `test/system/browser_engine_in_qemu_spec.spl`.
+
+These are outside the TCP/HTTP/packet-I/O request path. Treat them as a separate system-test performance task: split live QEMU/browser/DAP coverage from portable contract checks, remove repeated startup work in cached lanes, and add explicit latency budgets before re-enabling them as default uncached gates.
