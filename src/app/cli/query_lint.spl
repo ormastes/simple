@@ -7,6 +7,7 @@
 use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists}
 use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_lint_scan.{lint_scan_line}
 use std.report.emitter.lsp.{LspEmitter}
 
 # AST-based lint pass imports
@@ -50,11 +51,11 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     val emitter = LspEmitter.default_emitter()
 
     # --- Deprecated pattern detection (text-based) ---
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
-        val line_num = li + 1
+    var lint_i = 0
+    while lint_i < lines.len():
+        val scan = lint_scan_line(lines, lint_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
 
         # DEPR001: Type__method() calls — identifier containing __ not at start/end
         count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format, emitter)
@@ -79,7 +80,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
 
         # UNREACH: Statements after return in same block
         if _is_return_statement(trimmed):
-            val next_unreachable = _find_next_statement_in_block(lines, li)
+            val next_unreachable = _find_next_statement_in_block(lines, lint_i)
             if next_unreachable > 0:
                 if format == "json":
                     _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
@@ -87,7 +88,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
                     print "{file}:{next_unreachable}: warning[UNREACH001]: unreachable code after return"
                 count = count + 1
 
-        li = li + 1
+        lint_i = lint_i + 1
 
     # --- Unused variable detection (text-based heuristic) ---
     count = count + _check_unused_vars_text(lines, file, format, emitter)
@@ -184,10 +185,10 @@ fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: Lsp
     and checks if the declared name appears elsewhere in the function body.
     """
     var count = 0
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
+    var unused_i = 0
+    while unused_i < lines.len():
+        val scan = lint_scan_line(lines, unused_i)
+        val trimmed = scan.trimmed
 
         # Look for val/var declarations (not _-prefixed names)
         var decl_name = ""
@@ -198,20 +199,20 @@ fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: Lsp
 
         if decl_name != "" and not decl_name.starts_with("_"):
             # Find the enclosing function boundaries
-            val fn_range = _find_enclosing_fn_range(lines, li)
+            val fn_range = _find_enclosing_fn_range(lines, unused_i)
             if fn_range.0 >= 0:
                 # Check if decl_name is referenced elsewhere in the function
                 var referenced = false
                 var ri = fn_range.0
                 while ri <= fn_range.1 and ri < lines.len():
-                    if ri != li:
+                    if ri != unused_i:
                         val rline = lines[ri]
                         if _word_occurs_in(rline, decl_name):
                             referenced = true
                             break
                     ri = ri + 1
                 if not referenced:
-                    val line_num = li + 1
+                    val line_num = scan.line_num
                     if format == "json":
                         val col = _find_in_line(trimmed, decl_name) + 1
                         val end_col = col + decl_name.len()
@@ -219,7 +220,7 @@ fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: Lsp
                     else:
                         print "{file}:{line_num}: warning[UNUSED001]: variable '{decl_name}' is declared but never used"
                     count = count + 1
-        li = li + 1
+        unused_i = unused_i + 1
     count
 
 fn _find_enclosing_fn_range(lines: [text], target_idx: i64) -> (i64, i64):

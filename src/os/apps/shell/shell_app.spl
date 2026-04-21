@@ -252,6 +252,7 @@ impl ShellApp:
         match command:
             "cd":       self.cmd_cd(args)
             "ls":       self.last_exit_code = tool_ls(self.vfs, self.cwd, args, self.terminal)
+            "list":     self.last_exit_code = tool_ls(self.vfs, self.cwd, args, self.terminal)
             "pwd":      self.cmd_pwd()
             "echo":     self.last_exit_code = tool_echo(args, self.terminal)
             "cat":      self.last_exit_code = tool_cat(self.vfs, self.cwd, args, self.terminal)
@@ -324,6 +325,7 @@ impl ShellApp:
         match command:
             "cd": true
             "ls": true
+            "list": true
             "pwd": true
             "echo": true
             "cat": true
@@ -471,36 +473,7 @@ impl ShellApp:
 
     me cmd_ls(args: [text]):
         """List directory contents."""
-        val path = if args.len() > 0: self._resolve_path(args[0]) else: self.cwd
-        val show_all = args.contains("-a")
-        val show_long = args.contains("-l")
-
-        if self.vfs != nil:
-            val result = self.vfs.readdir(path)
-            if result.is_err():
-                self._write_error("ls: cannot access '{path}': {result.unwrap_err()}")
-                self.last_exit_code = 1
-                return
-            val entries = result.unwrap()
-            for entry in entries:
-                if not show_all and entry.name.starts_with("."):
-                    pass_dn
-                else:
-                    if show_long:
-                        val kind_str = match entry.node.kind:
-                            FsNodeKind.Directory => "d"
-                            FsNodeKind.Symlink => "l"
-                            FsNodeKind.Device => "c"
-                            FsNodeKind.Pipe => "p"
-                            _ => "-"
-                        self._write_line("{kind_str}  {entry.node.size}  {entry.name}")
-                    else:
-                        self._write_inline("{entry.name}  ")
-            if not show_long:
-                self.terminal.write_string("\n")
-        else:
-            self._write_line("(no filesystem mounted)")
-        self.last_exit_code = 0
+        self.last_exit_code = tool_ls(self.vfs, self.cwd, args, self.terminal)
 
     me cmd_pwd():
         """Print working directory."""
@@ -640,28 +613,7 @@ impl ShellApp:
 
     me cmd_find(args: [text]):
         """Find files by name."""
-        val start_path = if args.len() > 0: self._resolve_path(args[0]) else: self.cwd
-        val name_pattern = if args.len() > 2 and args[1] == "-name": args[2] else: "*"
-        if self.vfs != nil:
-            self._find_recursive(start_path, name_pattern)
-        else:
-            self._write_error("find: no filesystem mounted")
-            self.last_exit_code = 1
-
-    me _find_recursive(path: text, pattern: text):
-        """Recursively find files matching a pattern."""
-        if self.vfs == nil:
-            return
-        val result = self.vfs.readdir(path)
-        if result.is_err():
-            return
-        val entries = result.unwrap()
-        for entry in entries:
-            val full_path = if path == "/": "/{entry.name}" else: "{path}/{entry.name}"
-            if pattern == "*" or entry.name.contains(pattern):
-                self._write_line(full_path)
-            if entry.node.kind == FsNodeKind.Directory:
-                self._find_recursive(full_path, pattern)
+        self.last_exit_code = tool_find(self.vfs, self.cwd, args, self.terminal)
 
     me cmd_ps():
         """List running processes from the scheduler."""
@@ -763,7 +715,7 @@ impl ShellApp:
         self._write_line("SimpleOS Shell Built-in Commands:")
         self._write_line("")
         self._write_line("  cd DIR        Change directory")
-        self._write_line("  ls [-a] [-l]  List directory contents")
+        self._write_line("  ls/list [-a] [-l] List directory contents")
         self._write_line("  pwd           Print working directory")
         self._write_line("  echo ARGS     Print arguments")
         self._write_line("  cat FILE      Display file contents")
@@ -772,7 +724,7 @@ impl ShellApp:
         self._write_line("  cp SRC DST    Copy file")
         self._write_line("  mv SRC DST    Move/rename file")
         self._write_line("  grep PAT FILE Search in file")
-        self._write_line("  find DIR      Find files")
+        self._write_line("  find [PATH] [-name PATTERN] Find files")
         self._write_line("  ps            List processes")
         self._write_line("  kill PID      Send signal to process")
         self._write_line("  mount         Show/add mount points")

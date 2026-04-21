@@ -3,29 +3,136 @@
 # MDSOC: feature dimension, shell layer
 
 use os.apps.terminal.terminal.{Terminal}
-use os.kernel.types.fs_types.{FsNodeKind}
+use os.kernel.types.fs_types.{FsNode, FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
 use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
 
-fn tool_find(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
-    """Find files by name pattern."""
-    val start_path = if args.len() > 0: resolve_path(cwd, args[0]) else: cwd
-    val name_pattern = if args.len() > 2 and args[1] == "-name": args[2] else: "*"
-    if vfs == nil:
-        write_error(terminal, "find: no filesystem mounted")
-        return 1
-    _find_recursive(vfs, start_path, name_pattern, terminal)
-    return 0
+struct FindOptions:
+    start_path: text
+    name_pattern: text
+    help_requested: bool
 
-fn _find_recursive(vfs: VfsManager, path: text, pattern: text, terminal: Terminal):
-    """Recursively find files matching a pattern."""
+fn format_find_usage() -> text:
+    """Return find usage text."""
+    "usage: find [PATH] [-name PATTERN]"
+
+fn parse_find_args(cwd: text, args: [text]) -> Result<FindOptions, text>:
+    """Parse find arguments."""
+    var start_path = cwd
+    var name_pattern = "*"
+    var path_set = false
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            return Result.Ok(FindOptions(
+                start_path: cwd,
+                name_pattern: "*",
+                help_requested: true))
+        elif arg == "-name":
+            if i + 1 >= args.len():
+                return Result.Err("missing pattern after -name")
+            name_pattern = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("-"):
+            return Result.Err("unknown option '{arg}'")
+        else:
+            if path_set:
+                return Result.Err("unexpected operand '{arg}'")
+            start_path = resolve_path(cwd, arg)
+            path_set = true
+            i = i + 1
+
+    Result.Ok(FindOptions(
+        start_path: start_path,
+        name_pattern: name_pattern,
+        help_requested: false))
+
+fn find_name_matches(pattern: text, name: text) -> bool:
+    """Match a name against a glob-style pattern."""
+    _find_name_matches_from(pattern, name)
+
+fn _find_name_matches_from(pattern: text, value: text) -> bool:
+    if pattern == "":
+        return value == ""
+    if pattern == "*":
+        return true
+
+    val first = pattern.slice(0, 1)
+    if first == "*":
+        var i = 0
+        while i <= value.len():
+            if _find_name_matches_from(pattern.slice(1, pattern.len()), value.slice(i, value.len())):
+                return true
+            i = i + 1
+        return false
+
+    if value == "":
+        return false
+
+    val head = value.slice(0, 1)
+    if first == "?" or first == head:
+        return _find_name_matches_from(pattern.slice(1, pattern.len()), value.slice(1, value.len()))
+    false
+
+fn _find_leaf(path: text) -> text:
+    """Return the last path component for find matching."""
+    if path == "/":
+        return "/"
+
+    var last_slash = -1
+    var i = 0
+    for ch in path:
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+
+    if last_slash < 0:
+        return path
+    path.slice(last_slash + 1, path.len())
+
+fn _find_walk(vfs: VfsManager, path: text, node: FsNode, pattern: text, terminal: Terminal) -> i32:
+    """Walk a tree rooted at path and print matching entries."""
+    var exit_code: i32 = 0
+    if find_name_matches(pattern, _find_leaf(path)):
+        write_line(terminal, path)
+
+    if node.kind != FsNodeKind.Directory:
+        return 0
+
     val result = vfs.readdir(path)
     if result.is_err():
-        return
+        write_error(terminal, "find: cannot access '{path}': {result.unwrap_err()}")
+        return 1
+
     val entries = result.unwrap()
     for entry in entries:
         val full_path = if path == "/": "/{entry.name}" else: "{path}/{entry.name}"
-        if pattern == "*" or entry.name.contains(pattern):
-            write_line(terminal, full_path)
-        if entry.node.kind == FsNodeKind.Directory:
-            _find_recursive(vfs, full_path, pattern, terminal)
+        val child_exit = _find_walk(vfs, full_path, entry.node, pattern, terminal)
+        if child_exit != 0:
+            exit_code = child_exit
+    exit_code
+
+fn tool_find(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Find files by name pattern."""
+    val parsed = parse_find_args(cwd, args)
+    if parsed.is_err():
+        write_error(terminal, "find: {parsed.unwrap_err()}")
+        return 1
+
+    val options = parsed.unwrap()
+    if options.help_requested:
+        write_line(terminal, format_find_usage())
+        return 0
+
+    if vfs == nil:
+        write_error(terminal, "find: no filesystem mounted")
+        return 1
+
+    val start_result = vfs.stat(options.start_path)
+    if start_result.is_err():
+        write_error(terminal, "find: cannot access '{options.start_path}': {start_result.unwrap_err()}")
+        return 1
+
+    _find_walk(vfs, options.start_path, start_result.unwrap(), options.name_pattern, terminal)

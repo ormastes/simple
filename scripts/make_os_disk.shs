@@ -418,6 +418,118 @@ else
     build_ring3_smoke_elf || true
 fi
 
+populate_with_python_fat32() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+    python3 - "$OUTPUT" "$TMPDIR" <<'PY'
+import os
+import pathlib
+import struct
+import sys
+
+image = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+data = bytearray(image.read_bytes())
+
+bps = struct.unpack_from("<H", data, 11)[0]
+spc = data[13]
+reserved = struct.unpack_from("<H", data, 14)[0]
+fat_count = data[16]
+spf = struct.unpack_from("<I", data, 36)[0]
+root_cluster = struct.unpack_from("<I", data, 44)[0]
+fat0 = reserved * bps
+cluster0 = (reserved + fat_count * spf) * bps
+cluster_size = bps * spc
+next_cluster = 3
+
+def cluster_offset(cluster):
+    return cluster0 + (cluster - 2) * cluster_size
+
+def set_fat(cluster, value):
+    for fat_index in range(fat_count):
+        off = fat0 + fat_index * spf * bps + cluster * 4
+        struct.pack_into("<I", data, off, value)
+
+def alloc_cluster():
+    global next_cluster
+    cluster = next_cluster
+    next_cluster += 1
+    start = cluster_offset(cluster)
+    data[start:start + cluster_size] = b"\0" * cluster_size
+    set_fat(cluster, 0x0FFFFFFF)
+    return cluster
+
+def fat_name(path):
+    name = path.name.upper()
+    if "." in name:
+        base, ext = name.rsplit(".", 1)
+    else:
+        base, ext = name, ""
+    valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$~"
+    base = "".join(ch if ch in valid else "_" for ch in base)[:8]
+    ext = "".join(ch if ch in valid else "_" for ch in ext)[:3]
+    if not base:
+        raise ValueError(f"cannot encode empty FAT name for {path}")
+    return base.ljust(8) + ext.ljust(3)
+
+def write_dir_entry(dir_cluster, index, name11, attr, first_cluster, size):
+    off = cluster_offset(dir_cluster) + index * 32
+    entry = bytearray(32)
+    entry[0:11] = name11.encode("ascii")
+    entry[11] = attr
+    struct.pack_into("<H", entry, 20, (first_cluster >> 16) & 0xFFFF)
+    struct.pack_into("<H", entry, 26, first_cluster & 0xFFFF)
+    struct.pack_into("<I", entry, 28, size)
+    data[off:off + 32] = entry
+
+dir_entries = {root_cluster: 0}
+dirs = {source: root_cluster}
+
+def add_dir(path, parent_cluster):
+    cluster = alloc_cluster()
+    index = dir_entries[parent_cluster]
+    write_dir_entry(parent_cluster, index, fat_name(path), 0x10, cluster, 0)
+    dir_entries[parent_cluster] = index + 1
+    dirs[path] = cluster
+    dir_entries[cluster] = 0
+    return cluster
+
+def add_file(path, parent_cluster):
+    payload = path.read_bytes()
+    if not payload:
+        first = 0
+    else:
+        chunks = [payload[i:i + cluster_size] for i in range(0, len(payload), cluster_size)]
+        clusters = [alloc_cluster() for _ in chunks]
+        for i, (cluster, chunk) in enumerate(zip(clusters, chunks)):
+            start = cluster_offset(cluster)
+            data[start:start + len(chunk)] = chunk
+            if i + 1 < len(clusters):
+                set_fat(cluster, clusters[i + 1])
+        first = clusters[0]
+    index = dir_entries[parent_cluster]
+    write_dir_entry(parent_cluster, index, fat_name(path), 0x20, first, len(payload))
+    dir_entries[parent_cluster] = index + 1
+
+for root, dirnames, filenames in os.walk(source):
+    root_path = pathlib.Path(root)
+    parent_cluster = dirs[root_path]
+    dirnames[:] = sorted(dirnames)
+    for dirname in dirnames:
+        child = root_path / dirname
+        add_dir(child, parent_cluster)
+    for filename in sorted(filenames):
+        path = root_path / filename
+        try:
+            add_file(path, parent_cluster)
+        except ValueError:
+            pass
+
+image.write_bytes(data)
+PY
+}
+
 # Method 1: mtools (works on macOS and Linux without root)
 if command -v mcopy >/dev/null 2>&1; then
     mcopy -s -i "$OUTPUT" "$TMPDIR"/* ::
@@ -441,11 +553,19 @@ elif [ "$(uname -s)" = "Linux" ]; then
         POPULATED=1
     else
         echo "[make_os_disk] WARNING: loop mount failed -- no fixture files added"
+        if populate_with_python_fat32; then
+            echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
+            POPULATED=1
+        fi
     fi
     rmdir "$MOUNTDIR" 2>/dev/null || true
 else
     echo "[make_os_disk] WARNING: No mtools and not Linux -- no fixture files added"
     echo "[make_os_disk] Install mtools: brew install mtools (macOS) / apt install mtools (Linux)"
+    if populate_with_python_fat32; then
+        echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
+        POPULATED=1
+    fi
 fi
 
 if [ "$POPULATED" -ne 1 ]; then

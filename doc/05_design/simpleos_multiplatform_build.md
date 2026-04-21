@@ -47,3 +47,13 @@ New catalog/native-build APIs:
 The Rust freestanding link path now adds a compiler-rt/libgcc builtins archive discovered through clang and prevents helper symbols like `__adddf3` and `__fixunsdfdi` from being emitted as weak stubs.
 
 `src/os/qemu_runner.spl` and `scripts/qemu_riscv32.shs` route RISC-V OS builds to `--backend llvm` by default so the QEMU boot lane does not fail in Cranelift target initialization before reaching the linker. The RV32 script honors `SIMPLE_BINARY` and writes build output to `build/os/build_riscv32.log`.
+
+## RISC-V Simple Runtime Detail
+
+<!-- codex-design -->
+
+RISC-V platform rows intentionally keep `boot_c_sources` and `boot_asm_sources` empty. Unit coverage asserts this for `riscv64gc-simpleos` and `riscv32imac-simpleos`.
+
+RV64 startup and trap mechanics are implemented as Simple `@naked` functions using `asm volatile:` blocks. `_start` preserves OpenSBI `a0/a1`, installs `_stack_top`, clears BSS, and calls the mangled `boot_main` symbol. `_rv64_trap_vector` saves/restores the existing `Riscv64Context` layout and calls `rv64_dispatch_trap_frame_ptr`; `_rv64_enter_user` restores a scheduler-provided context and enters U-mode with `sret`.
+
+The shared `uart16550_mmio` helper owns 16550 register offsets, initialization, blocking TX, and optional RX. RV32 and RV64 console modules keep only readiness state, SBI fallback where applicable, and architecture-specific public names.

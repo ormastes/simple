@@ -6,6 +6,7 @@
 
 use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name}
+use app.cli.query_lint_scan.{lint_scan_line}
 use std.report.emitter.lsp.{LspEmitter}
 
 # ============================================================================
@@ -241,16 +242,17 @@ fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
 fn _check_closure_capture_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
     """Text-based heuristic for closure capture modification detection."""
     var count = 0
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
+    var clos_i = 0
+    while clos_i < lines.len():
+        val scan = lint_scan_line(lines, clos_i)
+        val line = scan.line
+        val trimmed = scan.trimmed
         if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
             val fn_indent = _count_indent(line)
             if fn_indent > 0:
                 var outer_vars: [text] = []
-                _collect_outer_vars_clos(lines, li, fn_indent, outer_vars)
-                var body_start = li + 1
+                _collect_outer_vars_clos(lines, clos_i, fn_indent, outer_vars)
+                var body_start = clos_i + 1
                 while body_start < lines.len():
                     val bline = lines[body_start]
                     val bt = bline.trim()
@@ -269,7 +271,7 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text, emitter:
                                 print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{ovar}'"
                             count = count + 1
                     body_start = body_start + 1
-        li = li + 1
+        clos_i = clos_i + 1
     count
 
 fn _collect_outer_vars_clos(lines: [text], fn_line: i64, fn_indent: i64, vars: [text]):
@@ -323,12 +325,12 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text, emitter: 
         "push_", "init_", "register_", "emit_", "on_", "handle_",
         "log_", "print_", "write_", "assert", "expect", "check_", "_"
     ]
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
-        val line_num = li + 1
-        val indent = _count_indent(line)
+    var ret_i = 0
+    while ret_i < lines.len():
+        val scan = lint_scan_line(lines, ret_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
+        val indent = scan.indent
         if indent > 0 and trimmed.len() > 0:
             val call_name = _extract_call_name_ret(trimmed)
             if call_name != "":
@@ -345,13 +347,13 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text, emitter: 
                                 is_side_effect = true
                                 break
                     if not is_side_effect:
-                        if not _is_last_stmt_ret(lines, li):
+                        if not _is_last_stmt_ret(lines, ret_i):
                             if format == "json":
                                 _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
                             else:
                                 print "{file}:{line_num}: info[RET001]: return value of '{call_name}()' is discarded"
                             count = count + 1
-        li = li + 1
+        ret_i = ret_i + 1
     count
 
 fn _extract_call_name_ret(trimmed: text) -> text:
@@ -412,11 +414,11 @@ fn _is_last_stmt_ret(lines: [text], idx: i64) -> bool:
 fn _check_multiline_bool_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
     """Text-based heuristic for multiline boolean detection."""
     var count = 0
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
-        val line_num = li + 1
+    var bool_i = 0
+    while bool_i < lines.len():
+        val scan = lint_scan_line(lines, bool_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
         var keyword = ""
         var cond_start = ""
         if trimmed.starts_with("if "):
@@ -435,8 +437,8 @@ fn _check_multiline_bool_text(lines: [text], file: text, format: text, emitter: 
                 stripped = stripped.substring(0, stripped.len() - 1).trim()
             val ends_with_bool = (stripped.ends_with(" and") or stripped.ends_with(" or"))
             var next_starts_bool = false
-            if li + 1 < lines.len():
-                val next_t = lines[li + 1].trim()
+            if bool_i + 1 < lines.len():
+                val next_t = lines[bool_i + 1].trim()
                 next_starts_bool = (next_t.starts_with("and ") or next_t.starts_with("or "))
             if ends_with_bool or next_starts_bool:
                 if not cs.starts_with("("):
@@ -445,7 +447,7 @@ fn _check_multiline_bool_text(lines: [text], file: text, format: text, emitter: 
                     else:
                         print "{file}:{line_num}: warning[BOOL001]: multiline boolean in '{keyword}' without parentheses"
                     count = count + 1
-        li = li + 1
+        bool_i = bool_i + 1
     count
 
 # ============================================================================
@@ -457,12 +459,12 @@ fn _check_safety_text(lines: [text], file: text, format: text, emitter: LspEmitt
     var count = 0
     var in_unsafe = false
     var unsafe_indent = -1
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
-        val line_num = li + 1
-        val indent = _count_indent(line)
+    var safe_i = 0
+    while safe_i < lines.len():
+        val scan = lint_scan_line(lines, safe_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
+        val indent = scan.indent
         if trimmed.starts_with("unsafe:") or trimmed.starts_with("unsafe {"):
             in_unsafe = true
             unsafe_indent = indent
@@ -484,7 +486,7 @@ fn _check_safety_text(lines: [text], file: text, format: text, emitter: LspEmitt
                 else:
                     print "{file}:{line_num}: error[SAFE003]: raw pointer operation outside unsafe block"
                 count = count + 1
-        li = li + 1
+        safe_i = safe_i + 1
     count
 
 # ============================================================================
@@ -494,11 +496,11 @@ fn _check_safety_text(lines: [text], file: text, format: text, emitter: LspEmitt
 fn _check_visibility_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
     """Text-based heuristic for visibility checking."""
     var count = 0
-    var li = 0
-    while li < lines.len():
-        val line = lines[li]
-        val trimmed = line.trim()
-        val line_num = li + 1
+    var vis_i = 0
+    while vis_i < lines.len():
+        val scan = lint_scan_line(lines, vis_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
         if trimmed.starts_with("use ") and trimmed.contains(".{"):
             val brace_start = _find_in_line_from(trimmed, "{", 0)
             val brace_end = _find_in_line_from(trimmed, "}", 0)
@@ -515,5 +517,5 @@ fn _check_visibility_text(lines: [text], file: text, format: text, emitter: LspE
                         else:
                             print "{file}:{line_num}: warning[W0401]: importing private symbol '{imp_name}' from another module"
                         count = count + 1
-        li = li + 1
+        vis_i = vis_i + 1
     count

@@ -65,3 +65,13 @@ RISC-V target policy is owned in two layers:
 The freestanding linker must not satisfy compiler-rt/libgcc helper symbols through weak unresolved-symbol stubs. Those helpers are runtime semantics, especially for RV32 float emulation. The linker asks clang for the target builtins archive with `--target=<triple> -print-libgcc-file-name`, adds it to the freestanding link, and filters compiler-rt helper names out of stub generation.
 
 RISC-V SimpleOS QEMU builds default to LLVM native-build because the current Cranelift path cannot initialize the freestanding RISC-V object target. `SIMPLE_OS_BUILD_BACKEND=cranelift` remains available as an explicit diagnostic override.
+
+## RISC-V Simple Runtime Conversion
+
+<!-- codex-design -->
+
+RISC-V boot/runtime code is now owned by Simple modules under `src/os/kernel/arch/riscv32` and `src/os/kernel/arch/riscv64`. The platform catalog keeps `boot_c_sources` and `boot_asm_sources` empty for both RISC-V targets, so native-build cannot silently reintroduce `examples/simple_os/arch/riscv*/boot` C or assembly objects.
+
+RV64 hardware entry and trap entry are `@naked` Simple functions with embedded assembly. `_start` lives with the RV64 boot module; `_rv64_trap_vector` and `_rv64_enter_user` live in `trap_vector.spl` and preserve the existing trap-frame ABI used by `interrupt.spl`.
+
+The duplicated RISC-V 16550 UART setup is factored into `src/os/kernel/boot/uart16550_mmio.spl`. RV32 and RV64 pass their QEMU virt MMIO base address to the shared helper; x86_64 remains separate because it uses port I/O rather than MMIO for its early serial path.

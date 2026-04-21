@@ -1,0 +1,222 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Shared lightweight outline parser for query CLI surfaces.
+
+use app.cli.query_rich_common.{query_file_read_rich}
+use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
+
+struct OutlineSymbol:
+    name: text
+    kind: text
+    line: i64
+    signature: text
+    doc_comment: text
+    parent: text
+    return_type: text
+    params: text
+
+struct OutlineImport:
+    module_path: text
+    items: [text]
+
+struct OutlineOptions:
+    parent_for_types: bool
+    include_import_symbols: bool
+    include_fields: bool
+    extract_binding_types: bool
+
+fn parse_outline_file(file: text, options: OutlineOptions) -> [OutlineSymbol]:
+    val content = query_file_read_rich(file) ?? ""
+    if content == "":
+        return []
+    parse_outline_source(content, options)
+
+fn parse_outline_source(content: text, options: OutlineOptions) -> [OutlineSymbol]:
+    val lines = content.split("\n")
+    var symbols: [OutlineSymbol] = []
+    var doc_lines: [text] = []
+    var current_parent = ""
+    var line_num = 0
+
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+        line_num = line_num + 1
+
+        if trimmed == "":
+            doc_lines = []
+            continue
+        if trimmed.starts_with("#"):
+            doc_lines.push(trimmed.substring(1).trim())
+            continue
+
+        val indent = _count_indent(line)
+        val doc = doc_lines.join("\n")
+        doc_lines = []
+        if indent == 0:
+            current_parent = _append_top_level_symbol(symbols, trimmed, line_num, doc, options)
+        elif indent > 0 and current_parent != "":
+            _append_nested_symbol(symbols, trimmed, line_num, doc, current_parent, options)
+    symbols
+
+fn parse_outline_imports(file: text) -> [OutlineImport]:
+    val content = query_file_read_rich(file) ?? ""
+    if content == "":
+        return []
+    val lines = content.split("\n")
+    var imports: [OutlineImport] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use ") or trimmed.starts_with("import "):
+            imports.push(parse_outline_use_line(trimmed))
+    imports
+
+fn parse_outline_use_line(trimmed: text) -> OutlineImport:
+    var rest = trimmed
+    if rest.starts_with("use "):
+        rest = rest.substring(4)
+    elif rest.starts_with("import "):
+        rest = rest.substring(7)
+    rest = rest.trim()
+    val brace_idx = _find_char(rest, "{")
+    if brace_idx > 0:
+        var mod_path = rest.substring(0, brace_idx).trim()
+        if mod_path.ends_with("."):
+            mod_path = mod_path.substring(0, mod_path.len() - 1)
+        var items_part = rest.substring(brace_idx + 1)
+        val close_idx = _find_char(items_part, "}")
+        if close_idx >= 0:
+            items_part = items_part.substring(0, close_idx)
+        return OutlineImport(module_path: mod_path, items: _split_items(items_part))
+    OutlineImport(module_path: rest, items: [])
+
+fn _append_top_level_symbol(symbols: [OutlineSymbol], trimmed: text, line_num: i64, doc: text, options: OutlineOptions) -> text:
+    if _is_function_decl(trimmed):
+        symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+        return ""
+    if trimmed.starts_with("class "):
+        val name = _extract_ident_from(trimmed.substring(6))
+        symbols.push(_symbol(name, "class", line_num, trimmed, doc, "", "", ""))
+        if options.parent_for_types:
+            return name
+    elif trimmed.starts_with("struct "):
+        val name = _extract_ident_from(trimmed.substring(7))
+        symbols.push(_symbol(name, "struct", line_num, trimmed, doc, "", "", ""))
+        if options.parent_for_types:
+            return name
+    elif trimmed.starts_with("enum "):
+        val name = _extract_ident_from(trimmed.substring(5))
+        symbols.push(_symbol(name, "enum", line_num, trimmed, doc, "", "", ""))
+    elif trimmed.starts_with("trait "):
+        val name = _extract_ident_from(trimmed.substring(6))
+        symbols.push(_symbol(name, "trait", line_num, trimmed, doc, "", "", ""))
+        if options.parent_for_types:
+            return name
+    elif trimmed.starts_with("impl "):
+        val name = _extract_ident_from(trimmed.substring(5))
+        symbols.push(_symbol(name, "impl", line_num, trimmed, doc, "", "", ""))
+        return name
+    elif trimmed.starts_with("val "):
+        val name = _extract_ident_from(trimmed.substring(4))
+        symbols.push(_symbol(name, "val", line_num, trimmed, doc, "", _binding_type(trimmed, options), ""))
+    elif trimmed.starts_with("var "):
+        val name = _extract_ident_from(trimmed.substring(4))
+        symbols.push(_symbol(name, "var", line_num, trimmed, doc, "", _binding_type(trimmed, options), ""))
+    elif options.include_import_symbols and (trimmed.starts_with("use ") or trimmed.starts_with("import ")):
+        val info = parse_outline_use_line(trimmed)
+        symbols.push(_symbol(info.module_path, "import", line_num, trimmed, "", "", "", ""))
+    ""
+
+fn _append_nested_symbol(symbols: [OutlineSymbol], trimmed: text, line_num: i64, doc: text, parent: text, options: OutlineOptions):
+    if _is_function_decl(trimmed):
+        symbols.push(_parse_fn(trimmed, line_num, doc, parent))
+    elif options.include_fields and trimmed.contains(":") and not trimmed.starts_with("#"):
+        val colon_pos = _find_char(trimmed, ":")
+        if colon_pos > 0:
+            val field_name = trimmed.substring(0, colon_pos).trim()
+            if _is_valid_field_name(field_name):
+                val field_type = trimmed.substring(colon_pos + 1).trim()
+                symbols.push(_symbol(field_name, "field", line_num, trimmed, doc, parent, field_type, ""))
+
+fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> OutlineSymbol:
+    var rest = trimmed
+    var kind = "fn"
+    if rest.starts_with("extern fn "):
+        rest = rest.substring(10)
+        kind = "extern_fn"
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+        kind = "static_method"
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+        kind = "method"
+    elif rest.starts_with("fn "):
+        rest = rest.substring(3)
+        if parent != "":
+            kind = "method"
+    val name = _extract_ident_from(rest)
+    _symbol(name, kind, line_num, trimmed, doc, parent, _extract_return_from(rest), _extract_params_from(rest))
+
+fn _symbol(name: text, kind: text, line_num: i64, signature: text, doc: text, parent: text, return_type: text, params: text) -> OutlineSymbol:
+    OutlineSymbol(name: name, kind: kind, line: line_num, signature: signature, doc_comment: doc, parent: parent, return_type: return_type, params: params)
+
+fn _is_function_decl(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ") or trimmed.starts_with("extern fn ")
+
+fn _binding_type(trimmed: text, options: OutlineOptions) -> text:
+    if not options.extract_binding_types:
+        return ""
+    var rest = trimmed
+    if rest.starts_with("val "):
+        rest = rest.substring(4)
+    elif rest.starts_with("var "):
+        rest = rest.substring(4)
+    val name = _extract_ident_from(rest)
+    if name == "":
+        return ""
+    rest = rest.substring(name.len()).trim()
+    if not rest.starts_with(":"):
+        return ""
+    rest = rest.substring(1).trim()
+    if rest.starts_with("="):
+        return ""
+    val end_pos = _find_char_or_end(rest, "=")
+    rest.substring(0, end_pos).trim()
+
+fn _split_items(items_part: text) -> [text]:
+    val item_list = items_part.split(",")
+    var items: [text] = []
+    for item in item_list:
+        val it = item.trim()
+        if it != "":
+            items.push(it)
+    items
+
+fn _find_char(s: text, target: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1
+
+fn _find_char_or_end(s: text, target: text) -> i64:
+    val pos = _find_char(s, target)
+    if pos >= 0:
+        return pos
+    s.len()
+
+fn _is_valid_field_name(s: text) -> bool:
+    _is_valid_ident(s) and s != "if" and s != "elif" and s != "else" and s != "for" and s != "while" and s != "return" and s != "val" and s != "var"
+
+fn _is_valid_ident(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+        i = i + 1
+    true

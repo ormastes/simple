@@ -57,6 +57,28 @@ describe "Qemu runner serial routing":
         expect(get_scenario("arm32-virtio-fat32-smf") != nil).to_equal(true)
         expect(arm_fs_exec_disk_image_path(Architecture.Arm64)).to_equal("build/os/fat32-arm64.img")
         expect(arm_fs_exec_disk_image_path(Architecture.Arm32)).to_equal("build/os/fat32-arm32.img")
+
+    it "uses per-platform x86_64 FAT32 media for filesystem scenarios":
+        val scenario = get_scenario("x64-nvme-fat32")
+        expect(scenario != nil).to_equal(true)
+        if val resolved = scenario:
+            val cmd = build_scenario_command(resolved, "build/os/simpleos_fs_test_32.elf")
+            expect(cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
+
+    it "keeps x64 desktop smoke diskless and leaves storage to the disk lane":
+        val smoke = get_scenario("x64-desktop-test")
+        expect(smoke != nil).to_equal(true)
+        if val resolved_smoke = smoke:
+            val smoke_cmd = build_scenario_command(resolved_smoke, "build/os/simpleos_desktop_e2e_32.elf")
+            expect(smoke_cmd.contains("drive=nvm")).to_equal(false)
+            expect(smoke_cmd.contains("-vga")).to_equal(true)
+
+        val disk = get_scenario("x64-desktop-disk")
+        expect(disk != nil).to_equal(true)
+        if val resolved_disk = disk:
+            val disk_cmd = build_scenario_command(resolved_disk, "build/os/simpleos_desktop_e2e_32.elf")
+            expect(disk_cmd).to_contain("drive=nvm")
+
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)
         val cmd = build_qemu_command(target)
@@ -85,6 +107,8 @@ describe "Qemu runner native-build prerequisites":
     it "defaults RISC-V OS targets to LLVM native-build backend":
         expect(default_os_build_backend_for_target(get_target(Architecture.Riscv32))).to_equal("llvm")
         expect(default_os_build_backend_for_target(get_target(Architecture.Riscv64))).to_equal("llvm")
+        expect(default_os_build_backend_for_target(get_target(Architecture.Arm64))).to_equal("llvm")
+        expect(default_os_build_backend_for_target(get_target(Architecture.Arm32))).to_equal("llvm")
 
     it "explains when the selected compiler lacks the LLVM backend":
         val stderr = "LLVM backend requested but 'llvm' feature not enabled"
@@ -99,10 +123,11 @@ describe "Qemu runner native-build prerequisites":
         expect(hint).to_contain("LLVM-enabled")
 
 describe "Qemu runner release artifacts":
-    it "prefers release disk images before the legacy build fixture":
+    it "prefers release disk images before platform and legacy build fixtures":
         val candidates = desktop_disk_image_candidates()
         expect(candidates[0]).to_start_with("release/")
-        expect(candidates[1]).to_equal("build/os/fat32.img")
+        expect(candidates[1]).to_equal("build/os/fat32-x86_64.img")
+        expect(candidates[2]).to_equal("build/os/fat32.img")
 
     it "resolves the release disk path when the release artifact exists":
         val release_root = "build/test-qemu-release-artifacts"

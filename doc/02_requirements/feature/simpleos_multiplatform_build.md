@@ -25,3 +25,7 @@ REQ-SMPB-009: The `riscv32imac-simpleos` target must use RV32IMAC, ILP32, and so
 REQ-SMPB-010: Freestanding native links must resolve compiler-generated soft-float and integer helper symbols from compiler-rt/libgcc rather than weak-stubbing those helpers.
 
 REQ-SMPB-011: RISC-V SimpleOS QEMU build paths must default to an LLVM-enabled native-build backend unless the caller explicitly overrides the backend for diagnostics.
+
+REQ-SMPB-012: RISC-V SimpleOS boot/runtime support must be implemented in Simple source with embedded assembly, not arch-local C or standalone assembly boot files.
+
+REQ-SMPB-013: RISC-V 32-bit and 64-bit console setup must share common 16550 MMIO logic where the QEMU virt hardware contract is identical.

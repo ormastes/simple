@@ -12,217 +12,27 @@
 
 use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
 use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
+use app.cli.query_outline.{OutlineSymbol, OutlineImport, OutlineOptions, parse_outline_file, parse_outline_imports}
 
 # ============================================================================
 # Internal Types (used within this file only)
 # ============================================================================
 
-struct _SymInfo:
-    name: text
-    kind: text
-    line: i64
-    signature: text
-    doc_comment: text
-    parent: text
-    return_type: text
-    params: text
-
-struct _ImpInfo:
-    module_path: text
-    items: [text]
 
 struct _ImportedSym:
     source_file: text
     module_path: text
-    symbol: _SymInfo
+    symbol: OutlineSymbol
 
 # ============================================================================
 # Lightweight Heuristic Parser
 # ============================================================================
 
-fn _parse_file(file: text) -> [_SymInfo]:
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        return []
-    _parse_source(content)
+fn _parse_file(file: text) -> [OutlineSymbol]:
+    parse_outline_file(file, OutlineOptions(parent_for_types: false, include_import_symbols: false, include_fields: false, extract_binding_types: true))
 
-fn _parse_source(content: text) -> [_SymInfo]:
-    val lines = content.split("\n")
-    var symbols: [_SymInfo] = []
-    var doc_lines: [text] = []
-    var current_impl = ""
-    var line_num = 0
-
-    while line_num < lines.len():
-        val line = lines[line_num]
-        val trimmed = line.trim()
-        line_num = line_num + 1
-
-        if trimmed == "":
-            doc_lines = []
-            continue
-
-        if trimmed.starts_with("#"):
-            doc_lines.push(trimmed.substring(1).trim())
-            continue
-
-        val indent = _count_indent(line)
-        val doc = doc_lines.join("\n")
-        doc_lines = []
-
-        if indent == 0:
-            current_impl = ""
-            if trimmed.starts_with("fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
-            elif trimmed.starts_with("me "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
-            elif trimmed.starts_with("static fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
-            elif trimmed.starts_with("extern fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
-            elif trimmed.starts_with("class "):
-                val name = _extract_ident_from(trimmed.substring(6))
-                symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
-            elif trimmed.starts_with("struct "):
-                val name = _extract_ident_from(trimmed.substring(7))
-                symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
-            elif trimmed.starts_with("enum "):
-                val name = _extract_ident_from(trimmed.substring(5))
-                symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
-            elif trimmed.starts_with("trait "):
-                val name = _extract_ident_from(trimmed.substring(6))
-                symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
-            elif trimmed.starts_with("impl "):
-                current_impl = _extract_ident_from(trimmed.substring(5))
-                symbols.push(_SymInfo(name: current_impl, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
-            elif trimmed.starts_with("val "):
-                val name = _extract_ident_from(trimmed.substring(4))
-                val rtype = _extract_binding_type(trimmed)
-                symbols.push(_SymInfo(name: name, kind: "val", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: rtype, params: ""))
-            elif trimmed.starts_with("var "):
-                val name = _extract_ident_from(trimmed.substring(4))
-                val rtype = _extract_binding_type(trimmed)
-                symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: rtype, params: ""))
-        elif indent > 0 and current_impl != "":
-            if trimmed.starts_with("fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
-            elif trimmed.starts_with("me "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
-            elif trimmed.starts_with("static fn "):
-                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
-
-    symbols
-
-fn _parse_imports(file: text) -> [_ImpInfo]:
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        return []
-    val lines = content.split("\n")
-    var imports: [_ImpInfo] = []
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("use "):
-            imports.push(_parse_use_line(trimmed))
-        elif trimmed.starts_with("import "):
-            imports.push(_parse_use_line(trimmed))
-    imports
-
-fn _parse_use_line(trimmed: text) -> _ImpInfo:
-    var rest = trimmed
-    if rest.starts_with("use "):
-        rest = rest.substring(4)
-    elif rest.starts_with("import "):
-        rest = rest.substring(7)
-    rest = rest.trim()
-    # Check for .{item1, item2} syntax
-    var brace_idx = -1
-    var bi = 0
-    while bi < rest.len():
-        val ch = rest.substring(bi, bi + 1)
-        if ch == "{":
-            brace_idx = bi
-            break
-        bi = bi + 1
-    if brace_idx > 0:
-        val module_part = rest.substring(0, brace_idx)
-        var mod_path = module_part.trim()
-        if mod_path.ends_with("."):
-            mod_path = mod_path.substring(0, mod_path.len() - 1)
-        var items_part = rest.substring(brace_idx + 1)
-        # Remove trailing }
-        var close_idx = -1
-        var ci = 0
-        while ci < items_part.len():
-            if items_part.substring(ci, ci + 1) == "}":
-                close_idx = ci
-                break
-            ci = ci + 1
-        if close_idx >= 0:
-            items_part = items_part.substring(0, close_idx)
-        val item_list = items_part.split(",")
-        var items: [text] = []
-        for item in item_list:
-            val it = item.trim()
-            if it != "":
-                items.push(it)
-        return _ImpInfo(module_path: mod_path, items: items)
-    # No braces — import all or single module
-    _ImpInfo(module_path: rest, items: [])
-
-# ============================================================================
-# Parsing Helpers
-# ============================================================================
-
-fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> _SymInfo:
-    var rest = trimmed
-    var kind = "fn"
-    if rest.starts_with("extern fn "):
-        rest = rest.substring(10)
-        kind = "extern_fn"
-    elif rest.starts_with("static fn "):
-        rest = rest.substring(10)
-        kind = "static_method"
-    elif rest.starts_with("me "):
-        rest = rest.substring(3)
-        kind = "method"
-    elif rest.starts_with("fn "):
-        rest = rest.substring(3)
-        if parent != "":
-            kind = "method"
-    val name = _extract_ident_from(rest)
-    val params = _extract_params(rest)
-    val ret = _extract_return_from(rest)
-    _SymInfo(name: name, kind: kind, line: line_num, signature: trimmed, doc_comment: doc, parent: parent, return_type: ret, params: params)
-
-fn _extract_params(s: text) -> text:
-    _extract_params_from(s)
-
-fn _extract_binding_type(s: text) -> text:
-    # For val/var, extract type annotation after name: type = ...
-    # Pattern: val name: Type = ... or val name = ...
-    var rest = s
-    if rest.starts_with("val "):
-        rest = rest.substring(4)
-    elif rest.starts_with("var "):
-        rest = rest.substring(4)
-    val name = _extract_ident_from(rest)
-    if name == "":
-        return ""
-    rest = rest.substring(name.len()).trim()
-    if rest.starts_with(":"):
-        rest = rest.substring(1).trim()
-        # Check it's not := (walrus)
-        if rest.starts_with("="):
-            return ""
-        # Take until = or end
-        var end_pos = 0
-        while end_pos < rest.len():
-            val ch = rest.substring(end_pos, end_pos + 1)
-            if ch == "=":
-                break
-            end_pos = end_pos + 1
-        return rest.substring(0, end_pos).trim()
-    ""
+fn _parse_imports(file: text) -> [OutlineImport]:
+    parse_outline_imports(file)
 
 # ============================================================================
 # Safe grep wrapper (local copy to avoid import issues)
@@ -357,7 +167,7 @@ fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
                 dc = dc + 1
     0
 
-fn _print_hover_info(sym: _SymInfo, file: text) -> i64:
+fn _print_hover_info(sym: OutlineSymbol, file: text) -> i64:
     print "Symbol: {sym.name}"
     print "Kind: {sym.kind}"
     print "Location: {file}:{sym.line}"
@@ -452,7 +262,7 @@ fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
 
 # Signature help — function params with types, active param index
 fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i64:
-    var fn_sym: _SymInfo = _SymInfo(name: "", kind: "", line: 0, signature: "", doc_comment: "", parent: "", return_type: "", params: "")
+    var fn_sym: OutlineSymbol = OutlineSymbol(name: "", kind: "", line: 0, signature: "", doc_comment: "", parent: "", return_type: "", params: "")
     var found_fn = false
 
     # Search in file

@@ -9,6 +9,7 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.packages.os_packages.{os_version}
 use os.machine_profile.{MachineProfile, get_machine_profile, riscv32_machine_profile, riscv64_machine_profile}
+use os.port.simpleos_multiplatform_build.{simpleos_platform_disk_image_output, simpleos_platform_kernel_output}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -68,6 +69,7 @@ fn _os_build_backend_for_target(target: OsTarget) -> text:
         return "cranelift"
     match target.arch:
         Architecture.X86: "llvm"
+        Architecture.Arm64: "llvm"
         Architecture.Arm32: "llvm"
         Architecture.Riscv64: "llvm"
         Architecture.Riscv32: "llvm"
@@ -179,7 +181,7 @@ fn get_target(arch: Architecture) -> OsTarget:
                 entry: "src/os/kernel/arch/x86_64/boot.spl",
                 linker_script: "src/os/kernel/arch/x86_64/linker.ld",
                 target_triple: "x86_64-unknown-none",
-                output: "build/os/simpleos_x86_64.elf",
+                output: simpleos_platform_kernel_output("x86_64"),
                 qemu_system: "qemu-system-x86_64",
                 qemu_machine: "q35",
                 qemu_cpu: "qemu64",
@@ -204,7 +206,7 @@ fn get_target(arch: Architecture) -> OsTarget:
                 entry: "src/os/kernel/arch/x86_32/boot.spl",
                 linker_script: "src/os/kernel/arch/x86_32/linker.ld",
                 target_triple: "i686-unknown-none",
-                output: "build/os/simpleos_x86_32.elf",
+                output: simpleos_platform_kernel_output("x86_32"),
                 qemu_system: "qemu-system-i386",
                 qemu_machine: "pc",
                 qemu_cpu: "qemu32",
@@ -219,7 +221,7 @@ fn get_target(arch: Architecture) -> OsTarget:
                 entry: "src/os/kernel/arch/arm64/boot.spl",
                 linker_script: "src/os/kernel/arch/arm64/linker.ld",
                 target_triple: "aarch64-unknown-none",
-                output: "build/os/simpleos_aarch64.elf",
+                output: simpleos_platform_kernel_output("arm64"),
                 qemu_system: "qemu-system-aarch64",
                 qemu_machine: "virt",
                 qemu_cpu: "cortex-a72",
@@ -234,7 +236,7 @@ fn get_target(arch: Architecture) -> OsTarget:
                 entry: "src/os/kernel/arch/arm32/boot.spl",
                 linker_script: "src/os/kernel/arch/arm32/linker.ld",
                 target_triple: "armv7-unknown-none-eabihf",
-                output: "build/os/simpleos_arm32.elf",
+                output: simpleos_platform_kernel_output("arm32"),
                 qemu_system: "qemu-system-arm",
                 qemu_machine: "virt",
                 qemu_cpu: "cortex-a15",
@@ -1059,18 +1061,18 @@ fn scenario_x64_desktop_test() -> QemuScenario:
         machine: "q35",
         cpu: "qemu64",
         memory: "512M",
-        qemu_extra: _x64_nvme_disk_args() + [
+        qemu_extra: [
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-vga", "std"
         ],
         gui_mode: false,
-        description: "x86_64 SimpleOS desktop integration with NVMe/FAT32 serial lane"
+        description: "x86_64 SimpleOS desktop integration serial lane"
     )
 
 fn arm_fs_exec_disk_image_path(arch: Architecture) -> text:
     match arch:
-        Architecture.Arm64: "build/os/fat32-arm64.img"
-        Architecture.Arm32: "build/os/fat32-arm32.img"
+        Architecture.Arm64: simpleos_platform_disk_image_output("arm64")
+        Architecture.Arm32: simpleos_platform_disk_image_output("arm32")
         _: "build/os/fat32-arm.img"
 
 fn arm_fs_exec_kernel_bin_path(arch: Architecture) -> text:
@@ -1179,6 +1181,7 @@ fn desktop_release_installer_iso_path() -> text:
 fn desktop_disk_image_candidates_in(release_root: text) -> [text]:
     [
         desktop_release_disk_image_path_in(release_root),
+        simpleos_platform_disk_image_output("x86_64"),
         "build/os/fat32.img"
     ]
 
@@ -1195,13 +1198,16 @@ fn desktop_disk_image_path_in(release_root: text) -> text:
     val release_path = desktop_release_disk_image_path_in(release_root)
     if rt_file_exists(release_path):
         return release_path
+    val platform_path = simpleos_platform_disk_image_output("x86_64")
+    if rt_file_exists(platform_path):
+        return platform_path
     "build/os/fat32.img"
 
 fn desktop_disk_image_path() -> text:
     desktop_disk_image_path_in("release")
 
 fn fs_test_disk_image_path() -> text:
-    "build/os/fat32.img"
+    simpleos_platform_disk_image_output("x86_64")
 
 fn _x64_nvme_fs_test_disk_args() -> [text]:
     val img_path = fs_test_disk_image_path()
@@ -1260,7 +1266,7 @@ fn ensure_desktop_disk_image() -> bool:
     if rt_file_exists(release_img):
         print "[ensure_desktop_disk_image] using release disk image {release_img}"
         return true
-    val img_path = "build/os/fat32.img"
+    val img_path = simpleos_platform_disk_image_output("x86_64")
     if rt_file_exists(img_path) and _desktop_disk_image_has_required_manifests(img_path):
         return true
     print "[ensure_desktop_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs"
@@ -1276,6 +1282,10 @@ fn ensure_desktop_disk_image() -> bool:
     if not rt_file_exists(img_path):
         return false
     if not _desktop_disk_image_has_required_manifests(img_path):
+        val legacy_img = "build/os/fat32.img"
+        if rt_file_exists(legacy_img) and _desktop_disk_image_has_required_manifests(legacy_img):
+            print "[ensure_desktop_disk_image] using legacy disk image {legacy_img}"
+            return true
         print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
         return false
     true
@@ -1519,7 +1529,7 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
     if scenario.name == "x64-nvme-fat32":
         return ensure_fs_test_disk_image()
-    if scenario.name == "x64-desktop-test" or scenario.name == "x64-desktop-disk":
+    if scenario.name == "x64-desktop-disk":
         return ensure_desktop_disk_image()
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
         return ensure_arm_fs_exec_disk_image(scenario.arch)

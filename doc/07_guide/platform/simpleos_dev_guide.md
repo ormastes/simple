@@ -458,10 +458,13 @@ bin/simple os build --scenario=x64-nvme-fat32
 bin/simple os test --scenario=x64-nvme-fat32
 ```
 
-`x64-desktop-disk` automatically ensures `build/os/fat32.img` exists by calling:
+`x64-desktop-disk` first looks for a release disk image, then uses the
+per-platform fixture `build/os/fat32-x86_64.img`, and finally falls back to the
+legacy `build/os/fat32.img` when only the older artifact exists. Missing
+per-platform media is created with:
 
 ```bash
-sh scripts/make_os_disk.shs
+sh scripts/make_os_disk.shs 64 build/os/fat32-x86_64.img
 ```
 
 That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
@@ -470,8 +473,8 @@ Linux loop mount is the fallback.
 
 `x64-nvme-fat32` is the focused filesystem contract lane. It binds to
 `examples/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
-`build/os/fat32.img` so the guest can assert on `HELLO.TXT`, `NUMBERS.TXT`,
-and `HELLO.SPL`. The SSpec wrapper for filesystem variants is:
+`build/os/fat32-x86_64.img` so the guest can assert on `HELLO.TXT`,
+`NUMBERS.TXT`, and `HELLO.SPL`. The SSpec wrapper for filesystem variants is:
 
 ```bash
 bin/simple test test/system/os_filesystem_variants_spec.spl

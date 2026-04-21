@@ -6,35 +6,69 @@ use os.kernel.types.fs_types.{FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
 use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
 
-fn tool_ls(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
-    """List directory contents."""
+struct LsOptions:
+    path: text
+    show_all: bool
+    show_long: bool
+    help_requested: bool
+
+fn format_ls_usage() -> text:
+    """Return ls usage text."""
+    "usage: ls [-a] [-l] [PATH]"
+
+fn parse_ls_args(cwd: text, args: [text]) -> Result<LsOptions, text>:
+    """Parse ls arguments."""
     var path = cwd
     var show_all = false
     var show_long = false
 
     for arg in args:
-        if arg == "-a":
+        if arg == "--help" or arg == "-h":
+            return Result.Ok(LsOptions(
+                path: cwd,
+                show_all: show_all,
+                show_long: show_long,
+                help_requested: true))
+        elif arg == "-a":
             show_all = true
         elif arg == "-l":
             show_long = true
-        elif not arg.starts_with("-"):
+        elif arg.starts_with("-"):
+            return Result.Err("unknown option '{arg}'")
+        else:
             path = resolve_path(cwd, arg)
+
+    Result.Ok(LsOptions(
+        path: path,
+        show_all: show_all,
+        show_long: show_long,
+        help_requested: false))
+
+fn tool_ls(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """List directory contents."""
+    val parsed = parse_ls_args(cwd, args)
+    if parsed.is_err():
+        write_error(terminal, "ls: {parsed.unwrap_err()}")
+        return 1
+
+    val options = parsed.unwrap()
+    if options.help_requested:
+        write_line(terminal, format_ls_usage())
+        return 0
 
     if vfs == nil:
         write_error(terminal, "ls: no filesystem mounted")
         return 1
 
-    val result = vfs.readdir(path)
+    val result = vfs.readdir(options.path)
     if result.is_err():
-        write_error(terminal, "ls: cannot access '{path}': {result.unwrap_err()}")
+        write_error(terminal, "ls: cannot access '{options.path}': {result.unwrap_err()}")
         return 1
 
     val entries = result.unwrap()
     for entry in entries:
-        if not show_all and entry.name.starts_with("."):
-            pass_dn
-        else:
-            if show_long:
+        if options.show_all or not entry.name.starts_with("."):
+            if options.show_long:
                 val kind_str = match entry.node.kind:
                     FsNodeKind.Directory => "d"
                     FsNodeKind.Symlink => "l"
@@ -44,6 +78,6 @@ fn tool_ls(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32
                 write_line(terminal, "{kind_str}  {entry.node.size}  {entry.name}")
             else:
                 terminal.write_string("{entry.name}  ")
-    if not show_long:
+    if not options.show_long:
         terminal.write_string("\n")
     return 0

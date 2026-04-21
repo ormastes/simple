@@ -4,25 +4,13 @@
 # QEMU virt machine (riscv32) maps the UART at 0x10000000 — identical
 # to the riscv64 virt machine. 115200 baud, 8N1 configuration.
 
-use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
+use os.kernel.boot.uart16550_mmio.{uart16550_mmio_init, uart16550_mmio_write_byte}
 
 # ============================================================================
 # UART 16550 MMIO Addresses (QEMU virt riscv32)
 # ============================================================================
 
 val UART_BASE: u64 = 0x10000000
-
-val UART_THR: u64 = 0x10000000        # Transmit Holding Register (write)
-val UART_RBR: u64 = 0x10000000        # Receive Buffer Register (read)
-val UART_IER: u64 = 0x10000001        # Interrupt Enable Register
-val UART_FCR: u64 = 0x10000002        # FIFO Control Register
-val UART_LCR: u64 = 0x10000003        # Line Control Register
-val UART_MCR: u64 = 0x10000004        # Modem Control Register
-val UART_LSR: u64 = 0x10000005        # Line Status Register
-
-# Line Status Register bits
-val LSR_DATA_READY: u8 = 0x01
-val LSR_TX_EMPTY: u8 = 0x20
 
 # ============================================================================
 # Rv32Console
@@ -45,33 +33,12 @@ impl Rv32Console:
         if g_uart_ready:
             return
 
-        # Disable all interrupts
-        mmio_write8(UART_IER, 0x00)
-
-        # Enable DLAB (set baud rate divisor)
-        mmio_write8(UART_LCR, 0x80)
-
-        # Set divisor to 1 (115200 baud) — low byte then high byte
-        mmio_write8(UART_THR, 0x01)
-        mmio_write8(UART_IER, 0x00)
-
-        # 8 bits, no parity, one stop bit (8N1), clear DLAB
-        mmio_write8(UART_LCR, 0x03)
-
-        # Enable FIFO, clear, 14-byte threshold
-        mmio_write8(UART_FCR, 0xC7)
-
-        # RTS/DSR set
-        mmio_write8(UART_MCR, 0x0B)
-
+        uart16550_mmio_init(UART_BASE)
         g_uart_ready = true
 
     fn write_byte(byte: u8):
         """Write one byte to UART, blocking until transmit ready."""
-        # Wait until transmit holding register is empty
-        while (mmio_read8(UART_LSR) & LSR_TX_EMPTY) == 0:
-            pass_do_nothing
-        mmio_write8(UART_THR, byte)
+        uart16550_mmio_write_byte(UART_BASE, byte)
 
     fn write(msg: text):
         """Write string to serial console."""

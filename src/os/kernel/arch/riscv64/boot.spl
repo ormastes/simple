@@ -224,11 +224,43 @@ fn _build_boot_output() -> BootOutputPort:
 # ============================================================================
 
 # ============================================================================
-# Boot Main (called from boot/crt0.S after stack setup)
+# Embedded Startup Entry
+# ============================================================================
+
+@section(".text.entry")
+@naked
+fn _start():
+    """RISC-V 64 S-mode hardware entry, implemented in Simple embedded asm.
+
+    OpenSBI enters here with a0=hart_id and a1=DTB physical address. This
+    preserves those boot arguments, installs the kernel stack, clears BSS, and
+    hands control to boot_main().
+    """
+    asm volatile:
+        "mv      s0, a0"
+        "mv      s1, a1"
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lrv64_bss_loop:"
+        "bgeu    t0, t1, .Lrv64_bss_done"
+        "sd      zero, 0(t0)"
+        "addi    t0, t0, 8"
+        "j       .Lrv64_bss_loop"
+        ".Lrv64_bss_done:"
+        "mv      a0, s0"
+        "mv      a1, s1"
+        "call    os__kernel__arch__riscv64__boot__boot_main"
+        ".Lrv64_boot_halt:"
+        "wfi"
+        "j       .Lrv64_boot_halt"
+
+# ============================================================================
+# Boot Main (called from embedded _start after stack setup)
 # ============================================================================
 
 fn boot_main(hart_id: u64, dtb_addr: u64):
-    """S-mode boot main — called from crt0.S _start after stack setup.
+    """S-mode boot main — called from embedded _start after stack setup.
 
     Args:
         hart_id:  boot hart ID (from OpenSBI a0)
