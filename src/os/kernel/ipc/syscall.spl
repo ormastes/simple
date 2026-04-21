@@ -1204,13 +1204,23 @@ fn _canonical_resident_path_from_bytes(path: text, path_bytes: [u8]) -> text:
         return canonical.unwrap()
     if path == "/sys/apps/browser_demo":
         return "/sys/apps/browser_demo"
+    if path == "/sys/apps/browser_demo.smf":
+        return "/sys/apps/browser_demo"
     if path == "/sys/apps/hello_world":
+        return "/sys/apps/hello_world"
+    if path == "/sys/apps/hello_world.smf":
         return "/sys/apps/hello_world"
     if path == "/sys/apps/file_manager":
         return "/sys/apps/file_manager"
+    if path == "/sys/apps/file_manager.smf":
+        return "/sys/apps/file_manager"
     if path == "/sys/apps/shell":
         return "/sys/apps/shell"
+    if path == "/sys/apps/shell.smf":
+        return "/sys/apps/shell"
     if path == "/sys/apps/editor":
+        return "/sys/apps/editor"
+    if path == "/sys/apps/editor.smf":
         return "/sys/apps/editor"
     ""
 
@@ -1244,24 +1254,18 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
         serial_println("[syscall13] build_user_process_image ok")
-        # FR-SOS-024 Phase 3: remove the -12 gate. Enqueue the task via
-        # create_user_task so the launcher observes a process-backed PID.
-        # The scheduler does not yet dispatch user tasks to ring 3 (Phase 3
-        # ring-3 entry is tracked separately in
-        # doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md), but the
-        # task lives in the TCB table and process-backed:yes markers flow.
-        serial_println("[syscall13] user image handoff begin")
-        val u_priority = _u64_to_priority(priority_raw)
-        val u_caps = CapabilitySet.full()
-        var u_sched = scheduler
-        val u_task_id = u_sched.create_user_task(image_result.unwrap(), u_priority, u_caps)
-        if u_task_id.id != 0:
-            var ulog = klog
-            ulog.write(6, 1, u_task_id.id, "spawn_binary launched user process {path}")
-            serial_println("[syscall13] user image handoff ok")
-            return u_task_id.id.to_i64()
-
-        serial_println("[syscall13] create_user_task returned 0; falling back to resident")
+        # FR-SOS-024 Phase 3 lifted the -12 gate to this point: the ELF image
+        # is validated and a user task can be constructed via create_user_task
+        # (confirmed working through to _enqueue_ready_at_slot). But the
+        # x86_64 scheduler loop has no ring-3 first-dispatch helper yet — the
+        # next time the scheduler preempts, it tries to context_restore a
+        # task that should go to CPL 3 but the kernel's CR3 is still loaded
+        # and the iretq stub (Simple `asm:` block) lowers to a no-op in
+        # baremetal, so the iretq returns to a stale RIP and traps. Keep the
+        # gate here until the Phase-3 ring-3 entry helper lands (see
+        # doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md §2-3).
+        serial_println("[syscall13] user image handoff gated; ring-3 first-dispatch pending")
+        return -12
     else:
         serial_println("[syscall13] build_user_process_image failed")
 

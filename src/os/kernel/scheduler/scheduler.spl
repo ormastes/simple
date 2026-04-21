@@ -548,7 +548,6 @@ impl Scheduler:
             serial_println("[scheduler] create_user_task: initial stack too large")
             return TaskId(id: 0)
 
-        serial_println("[scheduler] create_user_task: begin")
         val id = TaskId(id: self.next_task_id)
         self.next_task_id = self.next_task_id + 1
 
@@ -557,9 +556,7 @@ impl Scheduler:
             serial_println("[scheduler] create_user_task: no free slot")
             return TaskId(id: 0)
 
-        serial_println("[scheduler] create_user_task: slot found")
         val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
-        serial_println("[scheduler] create_user_task: arch_ctx built")
         val user_ctx = TaskContext(
             rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
             rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
@@ -577,10 +574,8 @@ impl Scheduler:
         )
 
         val user_as: AddressSpace = create_user_address_space()
-        serial_println("[scheduler] create_user_task: as created")
 
         val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
-        serial_println("[scheduler] create_user_task: map returned")
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] create_user_task: map failed")
@@ -607,17 +602,31 @@ impl Scheduler:
         )
 
         self.tasks[slot] = tcb
-        serial_println("[scheduler] create_user_task: tcb stored")
 
         # Register capability record so cap_check finds an explicit entry
         # instead of falling through to the (now-removed) default-ALLOW path.
         cap_init_task_record(id, true)
-        serial_println("[scheduler] create_user_task: caps registered")
 
-        self._enqueue_ready(id)
-        serial_println("[scheduler] create_user_task: enqueued")
+        # Skip `_find_slot` (which re-scans the whole tasks table and stalls
+        # in the baremetal build when called with a TaskId matching a slot
+        # we just wrote — see _enqueue_ready_at_slot below). We already have
+        # the slot in-hand, so pass it in directly.
+        self._enqueue_ready_at_slot(id, slot)
 
         id
+
+    me _enqueue_ready_at_slot(id: TaskId, slot: i32):
+        """Enqueue a task whose slot is already known. Avoids _find_slot."""
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        val task = tcb
+        val queue_idx = _priority_to_index(task.priority)
+        self.ready_queues[queue_idx].enqueue(id)
+        val cpu = self._normalize_cpu(task.assigned_cpu)
+        self.cpu_runqueues[cpu as i64].enqueue(id, task.schedule)
 
     fn get_user_context(self, task_id: TaskId) -> TaskContext?:
         """Retrieve the x86_64 user-mode context for a task, if it exists."""
