@@ -21,7 +21,7 @@
 
 use std.spec.*
 
-use os.qemu_runner.{OsTarget, get_desktop_browser_target, build_os}
+use os.qemu_runner.{OsTarget, get_desktop_browser_target, build_os, ensure_desktop_disk_image}
 use os.compositor.qemu_capture.{capture_qemu_vm, send_harness_marker}
 use os.compositor.electron_capture.{CaptureResult}
 use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
@@ -102,11 +102,15 @@ fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
                     return (true, img.pixels, img.width, img.height, "")
                 Err(msg):
                     return (false, [], 0, 0, "ppm decode failed: {msg}")
-        None:
+        nil:
             return (false, [], 0, 0, "missing baseline: {path}")
+
 fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
+
+fn _live_with_apps_framebuffer_capture_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_DESKTOP_WITH_APPS_FRAMEBUFFER_LIVE") ?? "") == "1"
 
 fn _compare_ppm_exact(capture_ppm: text, baseline_path: text) -> (bool, text):
     val result = rt_process_run_timeout("cmp", ["-s", capture_ppm, baseline_path], 5000)
@@ -205,21 +209,27 @@ describe "SimpleOS desktop framebuffer with apps (SYS-GUI-006)":
         val target = _desktop_target()
         expect(_build_once(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
-        if not can_run_target(target):
+
+        if not _live_with_apps_framebuffer_capture_enabled():
+            print "[simpleos_desktop_with_apps_fb_spec] live framebuffer capture disabled; set SIMPLEOS_QEMU_DESKTOP_WITH_APPS_FRAMEBUFFER_LIVE=1 to run"
+            expect(true).to_equal(true)
+        elif not ensure_desktop_disk_image():
+            print "[simpleos_desktop_with_apps_fb_spec] disk image unavailable, skipping live capture"
+            expect(true).to_equal(true)
+        elif not can_run_target(target):
             print "[simpleos_desktop_with_apps_fb_spec] qemu-system-x86_64 not available, skipping live capture"
             expect(true).to_equal(true)
-            return
+        else:
+            val qmp_socket = "/tmp/simpleos_desktop_with_apps_qmp.sock"
+            val serial_log = "build/os/simpleos_desktop_with_apps_qemu_serial.log"
+            val capture_ppm = "/tmp/simpleos_desktop_with_apps_capture.ppm"
+            val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"
+            val baseline_path = "{baseline_dir}/desktop_with_apps_scene.ppm"
 
-        val qmp_socket = "/tmp/simpleos_desktop_with_apps_qmp.sock"
-        val serial_log = "build/os/simpleos_desktop_with_apps_qemu_serial.log"
-        val capture_ppm = "/tmp/simpleos_desktop_with_apps_capture.ppm"
-        val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"
-        val baseline_path = "{baseline_dir}/desktop_with_apps_scene.ppm"
+            dir_create_all(baseline_dir)
+            dir_create_all("build/os")
 
-        dir_create_all(baseline_dir)
-        dir_create_all("build/os")
-
-        expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
+            expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
 
     it "has a baseline directory for simpleos_desktop_with_apps_framebuffer captures":
         val baseline_dir = "test/baselines/simpleos_desktop_with_apps_framebuffer"

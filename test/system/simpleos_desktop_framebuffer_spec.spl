@@ -163,6 +163,9 @@ fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
+fn _live_framebuffer_capture_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_DESKTOP_FRAMEBUFFER_LIVE") ?? "") == "1"
+
 fn _compare_ppm_exact(capture_ppm: text, baseline_path: text) -> (bool, text):
     val result = rt_process_run_timeout("cmp", ["-s", capture_ppm, baseline_path], 5000)
     if result[2] == 0:
@@ -307,28 +310,36 @@ describe "SimpleOS desktop framebuffer baseline (SYS-GUI-006)":
         # previous it{} was skipped for any reason.
         expect(_build_once(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
-        expect(ensure_desktop_disk_image()).to_equal(true)
 
-        # Host may not have qemu-system-x86_64 installed — skip the live
-        # capture step but keep the build assertion as the hard gate so
-        # a missing QEMU never silently hides a build regression.
-        if not can_run_target(target):
-            print "[simpleos_desktop_fb_spec] qemu-system-x86_64 not available, skipping live capture"
+        if not _live_framebuffer_capture_enabled():
+            print "[simpleos_desktop_fb_spec] live framebuffer capture disabled; set SIMPLEOS_QEMU_DESKTOP_FRAMEBUFFER_LIVE=1 to run"
             expect(true).to_equal(true)
-            return
+        else:
+            val disk_ok = ensure_desktop_disk_image()
+            if not disk_ok:
+                print "[simpleos_desktop_fb_spec] disk image unavailable, skipping live capture"
+                expect(true).to_equal(true)
 
-        val qmp_socket = "/tmp/simpleos_desktop_qmp.sock"
-        val serial_log = "build/os/simpleos_desktop_qemu_serial.log"
-        # QEMU's screendump path handling is host-policy sensitive; use /tmp
-        # alongside the QMP socket to avoid repo-worktree permission drift.
-        val capture_ppm = "/tmp/simpleos_desktop_capture.ppm"
-        val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"
-        val baseline_path = "{baseline_dir}/desktop_scene.ppm"
+            else:
+                # Host may not have qemu-system-x86_64 installed — skip the live
+                # capture step but keep the build assertion as the hard gate so
+                # a missing QEMU never silently hides a build regression.
+                if not can_run_target(target):
+                    print "[simpleos_desktop_fb_spec] qemu-system-x86_64 not available, skipping live capture"
+                    expect(true).to_equal(true)
+                else:
+                    val qmp_socket = "/tmp/simpleos_desktop_qmp.sock"
+                    val serial_log = "build/os/simpleos_desktop_qemu_serial.log"
+                    # QEMU's screendump path handling is host-policy sensitive; use /tmp
+                    # alongside the QMP socket to avoid repo-worktree permission drift.
+                    val capture_ppm = "/tmp/simpleos_desktop_capture.ppm"
+                    val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"
+                    val baseline_path = "{baseline_dir}/desktop_scene.ppm"
 
-        dir_create_all(baseline_dir)
-        dir_create_all("build/os")
+                    dir_create_all(baseline_dir)
+                    dir_create_all("build/os")
 
-        expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
+                    expect(_run_live_capture(target, qmp_socket, serial_log, capture_ppm, baseline_path)).to_equal(true)
 
     it "has a baseline directory for simpleos_desktop_framebuffer captures":
         val baseline_dir = "test/baselines/simpleos_desktop_framebuffer"

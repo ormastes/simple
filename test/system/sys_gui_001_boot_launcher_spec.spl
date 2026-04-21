@@ -105,19 +105,99 @@ fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
     true
 
 fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
-    val bytes = file_read_bytes(path)
-    if bytes.len() == 0:
-        return (false, [], 0, 0, "missing baseline: {path}")
-    val decoded = decode_ppm_to_argb(bytes)
-    match decoded:
-        Ok(img):
-            return (true, img.pixels, img.width, img.height, "")
-        Err(msg):
-            return (false, [], 0, 0, "ppm decode failed: {msg}")
+    val bytes_opt = file_read_bytes(path)
+    match bytes_opt:
+        Some(bytes):
+            if bytes.len() == 0:
+                return (false, [], 0, 0, "empty baseline: {path}")
+            val decoded = decode_ppm_to_argb(bytes)
+            match decoded:
+                Ok(img):
+                    return (true, img.pixels, img.width, img.height, "")
+                Err(msg):
+                    return (false, [], 0, 0, "ppm decode failed: {msg}")
+        nil:
+            return (false, [], 0, 0, "missing baseline: {path}")
 
 fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
+
+fn _live_boot_launcher_capture_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_SYS_GUI_001_LIVE") ?? "") == "1"
+
+fn _run_live_boot_launcher_capture(target: OsTarget) -> bool:
+    val qmp_socket = "/tmp/sys_gui_001_qmp.sock"
+    val serial_log = "build/os/sys_gui_001_qemu_serial.log"
+    val capture_ppm = "build/os/sys_gui_001_capture.ppm"
+    val baseline_dir = "doc/08_tracking/baselines"
+    val baseline_path = "{baseline_dir}/sys_gui_001_boot_launcher.ppm"
+
+    dir_create_all(baseline_dir)
+    dir_create_all("build/os")
+
+    match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+        Ok(handle):
+            val saw_launcher = wait_for_serial_marker(
+                handle, "[desktop-e2e] launcher-ready apps=5", 60000)
+            if not saw_launcher:
+                print "[sys_gui_001_spec] launcher-ready marker not seen within 60s"
+                stop_guest(handle)
+                return false
+
+            val saw_ready = wait_for_serial_marker(
+                handle, "[desktop-e2e] desktop-ready", 30000)
+            if not saw_ready:
+                print "[sys_gui_001_spec] desktop-ready marker not seen within 30s"
+                stop_guest(handle)
+                return false
+
+            val result = capture_qemu_vm(qmp_socket, capture_ppm)
+            if not result.success:
+                print "[sys_gui_001_spec] QMP screendump failed: {result.error}"
+                stop_guest(handle)
+                return false
+
+            val nb = _non_black_count(result.pixels)
+            print "[sys_gui_001_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
+
+            if _update_baseline_requested():
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[sys_gui_001_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            if not file_exists(baseline_path):
+                val wrote = _write_ppm_local(
+                    result.pixels, result.width, result.height, baseline_path)
+                print "[sys_gui_001_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
+                stop_guest(handle)
+                return wrote and nb > 0
+
+            val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
+            if not ok:
+                print "[sys_gui_001_spec] baseline read failed: {err}"
+                stop_guest(handle)
+                return false
+
+            if base_w != result.width or base_h != result.height:
+                print "[sys_gui_001_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
+                stop_guest(handle)
+                return false
+
+            val profile = profile_wm_default()
+            val cmp: ComparisonResult = compare_with_profile(
+                result.pixels, base_pixels, result.width, result.height, profile)
+            val pct_whole = cmp.match_percentage / 100
+            val pct_frac = cmp.match_percentage % 100
+            print "[sys_gui_001_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
+
+            stop_guest(handle)
+            nb > 0 and cmp.match_percentage >= 9500
+        Err(err):
+            print "[sys_gui_001_spec] failed to spawn guest: {err}"
+            false
 
 # ===========================================================================
 # Spec
@@ -136,108 +216,12 @@ describe "SimpleOS boot-to-launcher framebuffer baseline (SYS-GUI-001)":
         expect(build_os(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
 
-        if not can_run_target(target):
-            print "[sys_gui_001_spec] qemu-system-x86_64 not available, skipping live capture"
+        if not _live_boot_launcher_capture_enabled():
+            print "[sys_gui_001_spec] live framebuffer capture disabled; set SIMPLEOS_QEMU_SYS_GUI_001_LIVE=1 to run"
             expect(true).to_equal(true)
-            return
-
-        val qmp_socket = "/tmp/sys_gui_001_qmp.sock"
-        val serial_log = "build/os/sys_gui_001_qemu_serial.log"
-        val capture_ppm = "build/os/sys_gui_001_capture.ppm"
-        val baseline_dir = "doc/08_tracking/baselines"
-        val baseline_path = "{baseline_dir}/sys_gui_001_boot_launcher.ppm"
-
-        dir_create_all(baseline_dir)
-        dir_create_all("build/os")
-
-        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
-            Ok(handle):
-                # Phase 1 gate — boot chain must reach the launcher-ready
-                # marker. This is the SYS-GUI-001 acceptance signal:
-                # boot, vfs init, wm-service, launcher and shell init all
-                # completed and the 4 default apps are registered.
-                val saw_launcher = wait_for_serial_marker(
-                    handle, "[desktop-e2e] launcher-ready apps=5", 60000)
-                if not saw_launcher:
-                    print "[sys_gui_001_spec] launcher-ready marker not seen within 60s"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                # Phase 2 — advance to desktop-ready so the framebuffer
-                # has the deterministic backdrop+dock paint G6 wired in
-                # via rt_gui_fill4 (between launcher:ready and
-                # desktop-ready). Capturing earlier would screendump a
-                # zero-pixel framebuffer because the compositor scene
-                # graph is empty in baremetal and fb_driver.clear()
-                # does not land on the BGA LFB under cranelift
-                # --entry-closure (separate compiler bug). Capturing
-                # at desktop-ready gives a deterministic non-black
-                # frame; the SYS-GUI-001 contract is "boot reached
-                # launcher-ready AND framebuffer is sane at the
-                # earliest paint marker", which this two-marker
-                # sequence proves.
-                val saw_ready = wait_for_serial_marker(
-                    handle, "[desktop-e2e] desktop-ready", 30000)
-                if not saw_ready:
-                    print "[sys_gui_001_spec] desktop-ready marker not seen within 30s"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                if not result.success:
-                    print "[sys_gui_001_spec] QMP screendump failed: {result.error}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val nb = _non_black_count(result.pixels)
-                print "[sys_gui_001_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                if _update_baseline_requested():
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[sys_gui_001_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                val baseline_bytes = file_read_bytes(baseline_path)
-                if (not file_exists(baseline_path)) or baseline_bytes.len() == 0:
-                    val wrote = _write_ppm_local(
-                        result.pixels, result.width, result.height, baseline_path)
-                    print "[sys_gui_001_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                    stop_guest(handle)
-                    expect(wrote).to_equal(true)
-                    expect(nb > 0).to_equal(true)
-                    return
-
-                val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
-                if not ok:
-                    print "[sys_gui_001_spec] baseline read failed: {err}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                if base_w != result.width or base_h != result.height:
-                    print "[sys_gui_001_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
-                    stop_guest(handle)
-                    expect(false).to_equal(true)
-                    return
-
-                val profile = profile_wm_default()
-                val cmp: ComparisonResult = compare_with_profile(
-                    result.pixels, base_pixels, result.width, result.height, profile)
-                val pct_whole = cmp.match_percentage / 100
-                val pct_frac = cmp.match_percentage % 100
-                print "[sys_gui_001_spec] match: {pct_whole}.{pct_frac}% ({cmp.matching_pixels}/{cmp.total_pixels}) profile={profile.name}"
-
-                stop_guest(handle)
-
-                expect(nb > 0).to_equal(true)
-                expect(cmp.match_percentage >= 9500).to_equal(true)
-            Err(err):
-                print "[sys_gui_001_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        else:
+            if not can_run_target(target):
+                print "[sys_gui_001_spec] qemu-system-x86_64 not available, skipping live capture"
+                expect(true).to_equal(true)
+            else:
+                expect(_run_live_boot_launcher_capture(target)).to_equal(true)

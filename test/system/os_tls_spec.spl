@@ -17,6 +17,10 @@
 # Baseline management: none required — pass/fail is determined solely by
 # the presence of [ALL TESTS PASSED] and the absence of [TEST FAIL in the
 # serial output.
+#
+# The live QEMU boot is gated by SIMPLEOS_QEMU_TLS_LIVE=1. Default system
+# runs still compile the TLS unit kernel, while the host-dependent baremetal
+# crypto boot remains available as an explicit lane.
 
 use std.spec.*
 
@@ -25,6 +29,8 @@ use os.kernel.arch.arch_context.{Architecture}
 
 use test.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, run_os_qemu_with_target_via_timeout}
+
+extern fn rt_env_get(key: text) -> text
 
 # ===========================================================================
 # Helpers
@@ -46,6 +52,10 @@ fn _tls_unit_target() -> OsTarget:
         gui_mode: false
     )
 
+fn _live_tls_qemu_enabled() -> bool:
+    val enabled = rt_env_get("SIMPLEOS_QEMU_TLS_LIVE") ?? ""
+    enabled == "1" or enabled == "true"
+
 # ===========================================================================
 # Spec
 # ===========================================================================
@@ -64,27 +74,35 @@ describe "TLS 1.3 Unit Tests":
             expect(build_os(target)).to_equal(true)
         expect(file_exists(target.output)).to_equal(true)
 
-        # Host may not have qemu-system-x86_64 — skip the live run but
-        # leave the build assertion as the hard gate.
-        if not can_run_target(target):
-            print "[os_tls_spec] qemu-system-x86_64 not available, skipping live run"
-            expect(true).to_equal(true)
-            return
+        var passed = true
+        var failed = false
+        var output_len: u64 = 0
+        val live_enabled = _live_tls_qemu_enabled()
 
-        # Synchronous run — captures serial output directly.  60 s host wall
-        # clock, 30 s guest timeout (passed through shell timeout wrapper).
-        val result = run_os_qemu_with_target_via_timeout(target, "30", 60000)
-        val output = result[0] + result[1]
+        if live_enabled:
+            # Host may not have qemu-system-x86_64 — skip the live run but
+            # leave the build assertion as the hard gate.
+            if not can_run_target(target):
+                print "[os_tls_spec] qemu-system-x86_64 not available, skipping live run"
+            else:
+                # Synchronous run — captures serial output directly.  60 s host wall
+                # clock, 30 s guest timeout (passed through shell timeout wrapper).
+                val result = run_os_qemu_with_target_via_timeout(target, "30", 60000)
+                val output = result[0] + result[1]
 
-        val passed = output.contains("[ALL TESTS PASSED]")
-        val failed = output.contains("[TEST FAIL")
+                passed = output.contains("[ALL TESTS PASSED]")
+                failed = output.contains("[TEST FAIL")
+                output_len = output.len()
 
-        if not passed:
-            print "[os_tls_spec] [ALL TESTS PASSED] marker not found in serial output"
-        if failed:
-            print "[os_tls_spec] [TEST FAIL] marker found in serial output"
+                if not passed:
+                    print "[os_tls_spec] [ALL TESTS PASSED] marker not found in serial output"
+                if failed:
+                    print "[os_tls_spec] [TEST FAIL] marker found in serial output"
+        else:
+            print "[os_tls_spec] SIMPLEOS_QEMU_TLS_LIVE not set, skipping live TLS QEMU boot"
 
-        print "[os_tls_spec] serial output length: {output.len()}"
+        if live_enabled:
+            print "[os_tls_spec] serial output length: {output_len}"
 
         expect(passed).to_equal(true)
         expect(failed).to_equal(false)

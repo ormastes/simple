@@ -41,15 +41,8 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 extern fn rt_thread_sleep(ms: i64)
-extern fn serial_println(msg: text)
 extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
 extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
-extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
-extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_tls13_serverhello_cipher_suite(body: [u8]) -> i64
 extern fn rt_tls13_serverhello_x25519_pub(body: [u8]) -> [u8]
 extern fn rt_tls13_build_client_hello(host: text) -> [u8]
 extern fn rt_tls13_build_client_hello_record(host: text) -> [u8]
@@ -135,16 +128,17 @@ class Tls13Io:
     host_stream: TcpStream
 
 fn _tls_debug(msg: text):
-    serial_println("[tls13] {msg}")
+    nil
 
 fn _byte_buf(cap: u64) -> [u8]:
-    rt_array_new_with_cap(cap.to_i64())
+    []
 
 fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
-    rt_push_byte(buf, byte_val)
+    buf.push(byte_val.to_u8())
+    buf
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+    buf[idx]
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = _byte_buf(buf.len())
@@ -159,6 +153,14 @@ fn _copy_range(buf: [u8], start: u64, count: u64) -> [u8]:
     var i: u64 = 0
     while i < count:
         out = _push_byte(out, _u8_at(buf, start + i).to_u64().to_i64())
+        i = i + 1
+    out
+
+fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
+    var out = _clone_bytes(a)
+    var i: u64 = 0
+    while i < b.len():
+        out.push(_u8_at(b, i))
         i = i + 1
     out
 
@@ -530,7 +532,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     }
     transcript = transcript_add(transcript, ch_transcript_bytes)
     if fd_mode:
-        fd_transcript = rt_bytes_concat(fd_transcript, ch_transcript_bytes)
+        fd_transcript = _append_bytes(fd_transcript, ch_transcript_bytes)
     _tls_debug("after transcript_add clienthello")
 
     # ------------------------------------------------------------------
@@ -550,10 +552,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("before parse_handshake_header")
     val sh_parsed = parse_handshake_header(sh_hs_bytes)
     _tls_debug("after parse_handshake_header type={sh_parsed.msg_type} body_len={sh_parsed.body.len()}")
-    val sh = ServerHello13(
-        random: [],
-        cipher_suite: rt_tls13_serverhello_cipher_suite(sh_parsed.body).to_u16(),
-        x25519_pub: rt_tls13_serverhello_x25519_pub(sh_parsed.body))
+    val sh = parse_server_hello(sh_parsed.body)
     _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={sh.x25519_pub.len()}")
     if fd_mode:
         _debug_bytes32("server_x25519_pub", sh.x25519_pub)
@@ -561,7 +560,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # Add full ServerHello handshake bytes (including 4-byte header) to transcript
     transcript = transcript_add_with_len(transcript, sh_hs_bytes, sh_pay_len)
     if fd_mode:
-        fd_transcript = rt_bytes_concat(fd_transcript, _copy_range(sh_hs_bytes, 0, sh_pay_len))
+        fd_transcript = _append_bytes(fd_transcript, _copy_range(sh_hs_bytes, 0, sh_pay_len))
     _tls_debug("after transcript_add serverhello")
 
     # ------------------------------------------------------------------
@@ -589,7 +588,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("after tls13_early_secret len={early_secret.len()}")
     if fd_mode:
         _debug_bytes32("early_secret", early_secret)
-    val empty_thash = if fd_mode { _clone_bytes(rt_tls13_sha256(rt_array_new_with_cap(0))) } else { transcript_empty_hash() }
+    val empty_thash = if fd_mode { _clone_bytes(rt_tls13_sha256([])) } else { transcript_empty_hash() }
     _tls_debug("after transcript_empty_hash len={empty_thash.len()}")
     if fd_mode:
         _debug_bytes32("empty_thash", empty_thash)
@@ -679,7 +678,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     var server_seq: u64 = 0
 
     # Accumulate all decrypted handshake bytes across records
-    var hs_buf: [u8] = rt_array_new_with_cap(512)
+    var hs_buf: [u8] = []
 
     # We need to see 4 messages: EE, Cert, CertVerify, Finished
     # Read records until we have all 4 in hs_buf
@@ -700,13 +699,13 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # Saved transcript snapshots for verification
     var transcript_before_cv: Transcript = transcript_new()
     var transcript_before_fin: Transcript = transcript_new()
-    var fd_transcript: [u8] = rt_array_new_with_cap(0)
-    var fd_transcript_before_cv: [u8] = rt_array_new_with_cap(0)
-    var fd_transcript_before_fin: [u8] = rt_array_new_with_cap(0)
-    var fd_msg_ee: [u8] = rt_array_new_with_cap(0)
-    var fd_msg_cr: [u8] = rt_array_new_with_cap(0)
-    var fd_msg_cert: [u8] = rt_array_new_with_cap(0)
-    var fd_msg_cv: [u8] = rt_array_new_with_cap(0)
+    var fd_transcript: [u8] = []
+    var fd_transcript_before_cv: [u8] = []
+    var fd_transcript_before_fin: [u8] = []
+    var fd_msg_ee: [u8] = []
+    var fd_msg_cr: [u8] = []
+    var fd_msg_cert: [u8] = []
+    var fd_msg_cv: [u8] = []
 
     while (not have_ee) or (not have_cert) or (not have_cv) or (not have_fin):
         # Read one TLS record (may be plaintext CCS or encrypted handshake)
@@ -720,7 +719,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
 
         if _u8_at(raw, 0) != 0x14:
             var ct: u8 = 0
-            var dec_data: [u8] = rt_array_new_with_cap(0)
+            var dec_data: [u8] = []
 
             if fd_mode:
                 val inner = record13_decrypt_fd_inner(server_hs_rk, server_seq, raw)
@@ -828,7 +827,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                             keep_walking = false
                         else:
                             # Extract full message bytes (including 4-byte header)
-                            var msg_bytes: [u8] = rt_array_new_with_cap(msg_total.to_i64())
+                            var msg_bytes: [u8] = []
                             var mi: u64 = 0
                             while mi < msg_total:
                                 msg_bytes = _push_byte(msg_bytes, _u8_at(hs_buf, buf_offset + mi).to_u64().to_i64())
@@ -872,7 +871,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
                             consumed = buf_offset
 
                     # Trim only successfully consumed bytes from hs_buf
-                    var new_buf: [u8] = rt_array_new_with_cap((hs_buf.len() - consumed).to_i64())
+                    var new_buf: [u8] = []
                     var ti: u64 = consumed
                     while ti < hs_buf.len():
                         new_buf = _push_byte(new_buf, _u8_at(hs_buf, ti).to_u64().to_i64())
@@ -889,7 +888,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
             fd_msg_cr,
             fd_msg_ee,
             fd_msg_cert,
-            rt_array_new_with_cap(0)
+            []
         ))
     } else { transcript_hash(transcript_before_cv) }
     val sig_scheme = cert_verify_algo

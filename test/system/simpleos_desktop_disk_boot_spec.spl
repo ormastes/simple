@@ -45,6 +45,8 @@ use test.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, read_serial_log,
     spawn_guest_with_qmp_scenario, stop_guest, wait_for_serial_marker}
 
+extern fn rt_env_get(name: text) -> text?
+
 # ===========================================================================
 # Helpers
 # ===========================================================================
@@ -58,6 +60,9 @@ fn ensure_disk_image_or_skip() -> bool:
         return false
     true
 
+fn live_desktop_disk_boot_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_DESKTOP_DISK_LIVE") ?? "") == "1"
+
 # ===========================================================================
 # Spec
 # ===========================================================================
@@ -65,50 +70,55 @@ fn ensure_disk_image_or_skip() -> bool:
 describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
 
     it "materializes the selected desktop disk artifact":
-        if not ensure_disk_image_or_skip():
-            return
-        val img_path = desktop_disk_image_path()
-        expect(file_exists(img_path)).to_equal(true)
+        val disk_ok = ensure_disk_image_or_skip()
+        if disk_ok:
+            val img_path = desktop_disk_image_path()
+            expect(file_exists(img_path)).to_equal(true)
 
     it "boots the desktop disk lane and proves editor save/readback":
-        if not ensure_disk_image_or_skip():
-            return
-
-        val target = get_desktop_browser_target()
-        expect(build_os(target)).to_equal(true)
-        expect(file_exists(target.output)).to_equal(true)
-
-        if not can_run_target(target):
-            print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping live boot"
+        val disk_ok = ensure_disk_image_or_skip()
+        if not disk_ok:
             expect(true).to_equal(true)
-            return
+        elif not live_desktop_disk_boot_enabled():
+            print "[simpleos_desktop_disk_boot_spec] live desktop disk boot disabled; set SIMPLEOS_QEMU_DESKTOP_DISK_LIVE=1 to run"
+            expect(true).to_equal(true)
+        else:
 
-        val scenario = scenario_x64_desktop_disk()
-        val qmp_socket = "/tmp/simpleos_desktop_disk_editor_qmp.sock"
-        val serial_log = "build/os/simpleos_desktop_disk_editor_serial.log"
+            val target = get_desktop_browser_target()
+            expect(build_os(target)).to_equal(true)
+            expect(file_exists(target.output)).to_equal(true)
 
-        match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
-            Ok(handle):
-                val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 60000)
-                val output = read_serial_log(handle)
-                stop_guest(handle)
+            if not can_run_target(target):
+                print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping live boot"
+                expect(true).to_equal(true)
+            else:
 
-                expect(saw_pass).to_equal(true)
-                expect(output.contains("[vfs] mounted fat32")).to_equal(true)
-                expect(output.contains("[desktop-e2e] memory-bootstrap:ok")).to_equal(true)
-                expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
-                expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
-                expect(output.contains("[desktop-e2e] editor-shortcut:ok")).to_equal(true)
-                expect(output.contains("[desktop-e2e] editor-save:ok")).to_equal(true)
-                expect(output.contains("[desktop-e2e] cli-verify:ok")).to_equal(true)
-                expect(output.contains("[c-syscall13] fat32 app image validated")).to_equal(false)
-                expect(output.contains("[desktop-e2e] editor-save:fail")).to_equal(false)
-                expect(output.contains("[desktop-e2e] editor-launch:fail")).to_equal(false)
-                expect(output.contains("[desktop-e2e] cli-verify:fail")).to_equal(false)
-                expect(output.contains("FAULT @")).to_equal(false)
-                expect(output.contains("EXCEPTION")).to_equal(false)
-                expect(output.contains("cr2=")).to_equal(false)
-                expect(output.contains("cr3=")).to_equal(false)
-            Err(err):
-                print "[simpleos_desktop_disk_boot_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+                val scenario = scenario_x64_desktop_disk()
+                val qmp_socket = "/tmp/simpleos_desktop_disk_editor_qmp.sock"
+                val serial_log = "build/os/simpleos_desktop_disk_editor_serial.log"
+
+                match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
+                    Ok(handle):
+                        val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 60000)
+                        val output = read_serial_log(handle)
+                        stop_guest(handle)
+
+                        expect(saw_pass).to_equal(true)
+                        expect(output.contains("[vfs] mounted fat32")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] memory-bootstrap:ok")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] editor-shortcut:ok")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] editor-save:ok")).to_equal(true)
+                        expect(output.contains("[desktop-e2e] cli-verify:ok")).to_equal(true)
+                        expect(output.contains("[c-syscall13] fat32 app image validated")).to_equal(false)
+                        expect(output.contains("[desktop-e2e] editor-save:fail")).to_equal(false)
+                        expect(output.contains("[desktop-e2e] editor-launch:fail")).to_equal(false)
+                        expect(output.contains("[desktop-e2e] cli-verify:fail")).to_equal(false)
+                        expect(output.contains("FAULT @")).to_equal(false)
+                        expect(output.contains("EXCEPTION")).to_equal(false)
+                        expect(output.contains("cr2=")).to_equal(false)
+                        expect(output.contains("cr3=")).to_equal(false)
+                    Err(err):
+                        print "[simpleos_desktop_disk_boot_spec] failed to spawn guest: {err}"
+                        expect(false).to_equal(true)

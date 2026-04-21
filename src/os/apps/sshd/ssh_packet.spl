@@ -17,6 +17,7 @@
 
 val SSH_MAX_PACKET: u64 = 35000   # Max packet size per RFC 4253
 val SSH_MIN_PADDING: u8 = 4       # Minimum 4 bytes of random padding
+val SSH_ASCII_PRINTABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
 # ============================================================================
 # Types
@@ -73,8 +74,36 @@ fn ssh_put_string(buf: [u8], data: [u8]):
 
 fn ssh_put_text(buf: [u8], s: text):
     """Append SSH string from text: uint32 length + UTF-8 bytes."""
-    var bytes: [u8] = rt_string_to_byte_array(s)
+    var bytes: [u8] = ssh_ascii_text_to_bytes(s)
     ssh_put_string(buf, bytes)
+
+fn ssh_ascii_byte_to_text(byte: u8) -> text:
+    val idx = byte.to_i64() - 32
+    if idx < 0 or idx >= SSH_ASCII_PRINTABLE.len():
+        return ""
+    SSH_ASCII_PRINTABLE[idx:idx + 1]
+
+fn ssh_ascii_bytes_to_text(data: [u8]) -> text:
+    var result = ""
+    var i: u64 = 0
+    while i < data.len():
+        result = result + ssh_ascii_byte_to_text(data[i])
+        i = i + 1
+    result
+
+fn ssh_ascii_text_to_bytes(s: text) -> [u8]:
+    var result: [u8] = []
+    val chars = s.split("")
+    for ch in chars:
+        if ch != "":
+            var idx: i64 = 0
+            var found = false
+            while idx < SSH_ASCII_PRINTABLE.len() and not found:
+                if SSH_ASCII_PRINTABLE[idx:idx + 1] == ch:
+                    result.push((idx + 32).to_u8())
+                    found = true
+                idx = idx + 1
+    result
 
 fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
     """Read SSH string at offset. Returns SshStringResult(data, next_offset).
@@ -88,28 +117,24 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
     var start: u64 = offset + 4
     if start + str_len > data.len():
         return Err("ssh_get_string: truncated data")
-    var result: [u8] = rt_array_new_with_cap(str_len.to_i64())
+    var result: [u8] = []
     var i: u64 = 0
     while i < str_len:
         result.push(data[start + i])
         i = i + 1
     Ok(SshStringResult(data: result, next_offset: start + str_len))
 
-extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_string_to_byte_array(s: text) -> [u8]
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-
 fn ssh_get_text(data: [u8], offset: u64) -> Result<SshTextResult, text>:
     """Read SSH string as text at offset. Returns SshTextResult(value, next_offset).
     NOTE: Extracts next_offset into var BEFORE extern call to avoid
-    baremetal Cranelift register-clobber after rt_string_from_byte_array.
+    baremetal Cranelift register-clobber after byte-array text conversion.
     """
     var r = ssh_get_string(data, offset)
     if r.is_ok():
         var sr = r.unwrap()
         var sr_data: [u8] = sr.data
         var sr_next: u64 = sr.next_offset
-        var txt: text = rt_string_from_byte_array(sr_data)
+        var txt: text = ssh_ascii_bytes_to_text(sr_data)
         Ok(SshTextResult(value: txt, next_offset: sr_next))
     else:
         Err("ssh_get_text: string decode failed")
@@ -198,8 +223,7 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
         return Err("ssh_packet_read: padding exceeds packet")
     var payload_length: u64 = packet_length - padding_length - 1
 
-    # Extract payload (pre-allocate to avoid push growth bug)
-    var payload: [u8] = rt_array_new_with_cap(payload_length.to_i64())
+    var payload: [u8] = []
     var i: u64 = 0
     while i < payload_length:
         payload.push(data[offset + 5 + i])
@@ -230,10 +254,7 @@ fn ssh_packet_build(payload: [u8], sequence: u32) -> [u8]:
 
     var packet_length: u64 = 1 + payload_len + padding_len
 
-    # Pre-allocate buffer with enough capacity to avoid push reallocation bug.
-    # Total bytes = 4 (length) + 1 (pad_len) + payload_len + padding_len
-    var total_bytes: u64 = 4 + 1 + payload_len + padding_len
-    var buf: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
+    var buf: [u8] = []
 
     # 4-byte length (big-endian)
     ssh_put_u32(buf, packet_length.to_u32())

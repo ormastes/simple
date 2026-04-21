@@ -14,9 +14,6 @@
 # WORKAROUND: global val arrays not supported in baremetal Cranelift.
 # Keep constants in local lookup helpers so hosted and baremetal builds share
 # the same implementation without depending on runtime-provided tables.
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-extern fn serial_println(msg: text)
-
 fn _sha256_k(index: u64) -> u32:
     if index == 0: 0x428A2F98
     else if index == 1: 0x71374491
@@ -154,7 +151,7 @@ fn sha256_pad(data: [u8]) -> [u8]:
     val bit_len: u64 = data_len.to_u64() * 8
 
     val padded_target = _sha256_compute_padded_len(data_len.to_u64())
-    var padded: [u8] = rt_array_new_with_cap(padded_target.to_i64())
+    var padded: [u8] = []
     var i: u64 = 0
     var padded_count: u64 = 0
     while i < data_len:
@@ -185,7 +182,7 @@ fn sha256_pad_with_len(data: [u8], data_len: u64) -> [u8]:
     val bit_len: u64 = data_len * 8
 
     val padded_target = _sha256_compute_padded_len(data_len)
-    var padded: [u8] = rt_array_new_with_cap(padded_target.to_i64())
+    var padded: [u8] = []
     var i: u64 = 0
     var padded_count: u64 = 0
     while i < data_len:
@@ -279,7 +276,7 @@ fn sha256_process_block(block: [u8], offset: u64, h: [u32]) -> [u32]:
     result
 
 fn _copy_block64(src: [u8], offset: u64) -> [u8]:
-    var block: [u8] = rt_array_new_with_cap(64)
+    var block: [u8] = []
     var i: u64 = 0
     while i < 64:
         block.push(src[offset + i].to_u8())
@@ -304,7 +301,7 @@ fn _array_prefix_to_list(data: [u8], data_len: u64) -> list:
     out
 
 fn _list_to_array(bytes: list) -> [u8]:
-    var out: [u8] = rt_array_new_with_cap(bytes.len())
+    var out: [u8] = []
     var i = 0
     while i < bytes.len():
         out.push(bytes.get(i).to_u8())
@@ -542,7 +539,7 @@ fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
         h = sha256_process_block(block, 0, h)
         offset = offset + 64
 
-    var out: [u8] = rt_array_new_with_cap(32)
+    var out: [u8] = []
     hi = 0
     while hi < 8:
         val word = h[hi]
@@ -555,7 +552,7 @@ fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
 
 fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
     val block_size: u64 = 64
-    var k_prime: [u8] = rt_array_new_with_cap(64)
+    var k_prime: [u8] = []
     if key_len > block_size:
         val hashed_key = sha256_with_len(key, key_len)
         var j: u64 = 0
@@ -575,7 +572,7 @@ fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
 
 fn _sha256_hmac_with_norm_key(k_prime: [u8], data: [u8], data_len: u64) -> [u8]:
     val block_size: u64 = 64
-    var inner_input: [u8] = rt_array_new_with_cap((block_size + data_len).to_i64())
+    var inner_input: [u8] = []
     var i: u64 = 0
     while i < block_size:
         inner_input.push((k_prime[i] ^ 0x36).to_u8())
@@ -587,7 +584,7 @@ fn _sha256_hmac_with_norm_key(k_prime: [u8], data: [u8], data_len: u64) -> [u8]:
 
     val inner_hash = sha256_with_len(inner_input, block_size + data_len)
 
-    var outer_input: [u8] = rt_array_new_with_cap((block_size + 32).to_i64())
+    var outer_input: [u8] = []
     i = 0
     while i < block_size:
         outer_input.push((k_prime[i] ^ 0x5c).to_u8())
@@ -607,10 +604,8 @@ fn sha256_hmac(key: [u8], data: [u8]) -> [u8]:
     sha256_hmac_with_len(key, key.len().to_u64(), data, data.len().to_u64())
 
 fn sha256_hmac_with_len(key: [u8], key_len: u64, data: [u8], data_len: u64) -> [u8]:
-    _list_to_array(_list_hmac_sha256_bytes(
-        _array_prefix_to_list(key, key_len),
-        _array_prefix_to_list(data, data_len)
-    ))
+    val k_prime = _normalize_hmac_key(key, key_len)
+    _sha256_hmac_with_norm_key(k_prime, data, data_len)
 
 fn sha256_hmac_from_list(key: list, data: list) -> [u8]:
     _list_to_array(_list_hmac_sha256_bytes(key, data))

@@ -66,33 +66,32 @@ impl OsFuture<Result<[u8], text>> for VirtioNetRecvFuture:
         val desc_id = mmio_read32(used_entry)
         val total_len = mmio_read32(used_entry + 4)
 
-        var this = self
-        this.rx_last_used = this.rx_last_used + 1
+        self.rx_last_used = self.rx_last_used + 1
 
         val frame_len = total_len.to_u64() - VIRTIO_NET_HDR_SIZE
-        if frame_len == 0 or frame_len > this.max_len:
+        if frame_len == 0 or frame_len > self.max_len:
             # Bad frame -- repost descriptor and report error
             repost_rx_desc(
-                this.rx_avail_virt, this.rx_queue_size,
-                this.bar0_virt, desc_id.to_u16()
+                self.rx_avail_virt, self.rx_queue_size,
+                self.bar0_virt, desc_id.to_u16()
             )
             return OsPoll.Ready(value: Err("Frame too large or empty"))
 
         # Copy frame data from RX buffer (skip virtio-net header)
         var frame: [u8] = []
-        val rx_buf = this.rx_bufs_virt + desc_id.to_u64() * BUFFER_SIZE + VIRTIO_NET_HDR_SIZE
+        val rx_buf = self.rx_bufs_virt + desc_id.to_u64() * BUFFER_SIZE + VIRTIO_NET_HDR_SIZE
         var i: u64 = 0
         while i < frame_len:
             frame.push(mmio_read8(rx_buf + i))
             i = i + 1
 
-        this.completed = true
-        this.frame_data = frame
+        self.completed = true
+        self.frame_data = frame
 
         # Repost the consumed RX descriptor
         repost_rx_desc(
-            this.rx_avail_virt, this.rx_queue_size,
-            this.bar0_virt, desc_id.to_u16()
+            self.rx_avail_virt, self.rx_queue_size,
+            self.bar0_virt, desc_id.to_u16()
         )
 
         OsPoll.Ready(value: Ok(frame))
@@ -129,12 +128,10 @@ impl OsFuture<Result<bool, text>> for VirtioNetSendFuture:
         if self.completed:
             return OsPoll.Ready(value: Ok(true))
 
-        var this = self
-
         # First poll: submit the frame to the TX virtqueue
-        if not this.submitted:
-            val buf_virt = this.tx_bufs_virt + this.slot * BUFFER_SIZE
-            val buf_phys = this.tx_bufs_phys + this.slot * BUFFER_SIZE
+        if not self.submitted:
+            val buf_virt = self.tx_bufs_virt + self.slot * BUFFER_SIZE
+            val buf_phys = self.tx_bufs_phys + self.slot * BUFFER_SIZE
 
             # Write virtio-net header (10 bytes, all zeros = no offload)
             mmio_write32(buf_virt, 0)
@@ -143,14 +140,14 @@ impl OsFuture<Result<bool, text>> for VirtioNetSendFuture:
 
             # Copy frame data after the header
             var i: u64 = 0
-            while i < this.data_len:
-                val byte = mmio_read8(this.data_virt + i)
+            while i < self.data_len:
+                val byte = mmio_read8(self.data_virt + i)
                 mmio_write8(buf_virt + VIRTIO_NET_HDR_SIZE + i, byte)
                 i = i + 1
 
             # Set up TX descriptor
-            val desc_off = this.tx_desc_virt + this.slot * 16
-            val total_len = VIRTIO_NET_HDR_SIZE + this.data_len
+            val desc_off = self.tx_desc_virt + self.slot * 16
+            val total_len = VIRTIO_NET_HDR_SIZE + self.data_len
             val phys_low = (buf_phys & 0xFFFFFFFF).to_u32()
             val phys_high = (buf_phys >> 32).to_u32()
             mmio_write32(desc_off, phys_low)
@@ -159,25 +156,25 @@ impl OsFuture<Result<bool, text>> for VirtioNetSendFuture:
             mmio_write32(desc_off + 12, 0)  # flags=0 (driver-readable), next=0
 
             # Add to TX available ring
-            val avail_idx = mmio_read16(this.tx_avail_virt + 2)
-            val ring_slot = this.tx_avail_virt + 4 + (avail_idx % this.tx_queue_size).to_u64() * 2
-            mmio_write16(ring_slot, this.slot.to_u16())
-            mmio_write16(this.tx_avail_virt + 2, avail_idx + 1)
+            val avail_idx = mmio_read16(self.tx_avail_virt + 2)
+            val ring_slot = self.tx_avail_virt + 4 + (avail_idx % self.tx_queue_size).to_u64() * 2
+            mmio_write16(ring_slot, self.slot.to_u16())
+            mmio_write16(self.tx_avail_virt + 2, avail_idx + 1)
 
             # Notify device (TX queue = 1)
-            mmio_write16(this.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_NET_TX_QUEUE)
+            mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_NET_TX_QUEUE)
 
-            this.submitted = true
+            self.submitted = true
 
         # Check if device has consumed the TX descriptor
-        val used_idx = mmio_read16(this.tx_used_virt + 2)
-        if used_idx == this.tx_last_used:
+        val used_idx = mmio_read16(self.tx_used_virt + 2)
+        if used_idx == self.tx_last_used:
             # Not yet consumed -- return Pending
             return OsPoll.Pending
 
         # TX completed
-        this.tx_last_used = used_idx
-        this.completed = true
+        self.tx_last_used = used_idx
+        self.completed = true
         OsPoll.Ready(value: Ok(true))
 
 # ============================================================================
