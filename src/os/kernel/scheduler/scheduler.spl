@@ -21,6 +21,8 @@ use os.kernel.types.task_types.{
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+use os.kernel.arch.arm64.context.{Arm64ContextSwitch}
+use os.kernel.arch.arm32.context.{Arm32ContextSwitch}
 use os.kernel.memory.vmm.{create_user_address_space, destroy_user_address_space, vmm_cow_clone_pages}
 use os.kernel.loader.segment_mapper.{map_all, map_stack}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
@@ -48,6 +50,13 @@ val DEADLINE_CPU_BANDWIDTH_CAP: u64 = 800000
 val DEFAULT_SCHED_CPUS: u32 = 32u32
 val SCHED_TRACE_CAPACITY: i32 = 128
 val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
+
+# Module-level user-task id counter. The per-instance `Scheduler.next_task_id`
+# field access is compiled as `Scheduler.next_task_id(self)` method call in the
+# baremetal Cranelift build and resolves to a weak stub that returns 0 (emits
+# `[WARN] unresolved fn: Scheduler.next_task_id`). Using an explicit module
+# global gives deterministic unique PIDs for user tasks across spawns.
+var g_user_task_next_pid: u64 = 1
 
 @cfg(riscv64)
 val SCHED_EXEC_ARCH: Architecture = Architecture.Riscv64
@@ -175,6 +184,66 @@ fn _map_user_process_image(
         serial_println("[scheduler] map_user_process_image: stack map failed")
         return -12
     0
+
+fn scheduler_user_context_for_arch(arch: Architecture, entry: u64, user_sp: u64) -> TaskContext:
+    """Create the scheduler's portable user-context record for an architecture."""
+    match arch:
+        case Architecture.Arm64:
+            var ctx_switch = Arm64ContextSwitch()
+            val arm_ctx = ctx_switch.create(entry, user_sp, true)
+            TaskContext(
+                rax: arm_ctx.x0, rbx: arm_ctx.x1,
+                rcx: arm_ctx.x2, rdx: arm_ctx.x3,
+                rsi: arm_ctx.x4, rdi: arm_ctx.x5,
+                rbp: arm_ctx.x29, rsp: arm_ctx.sp,
+                r8: arm_ctx.x8, r9: arm_ctx.x9,
+                r10: arm_ctx.x10, r11: arm_ctx.x11,
+                r12: arm_ctx.x12, r13: arm_ctx.x13,
+                r14: arm_ctx.x14, r15: arm_ctx.x15,
+                rip: arm_ctx.elr_el1,
+                rflags: arm_ctx.spsr_el1,
+                cs: 0,
+                ss: 0,
+                fpu_state: arm_ctx.fpu_state
+            )
+        case Architecture.Arm32:
+            var ctx_switch = Arm32ContextSwitch()
+            val arm_ctx = ctx_switch.create(entry.to_u32(), user_sp.to_u32(), true)
+            TaskContext(
+                rax: arm_ctx.r0 as u64, rbx: arm_ctx.r1 as u64,
+                rcx: arm_ctx.r2 as u64, rdx: arm_ctx.r3 as u64,
+                rsi: arm_ctx.r4 as u64, rdi: arm_ctx.r5 as u64,
+                rbp: arm_ctx.r11 as u64, rsp: arm_ctx.sp as u64,
+                r8: arm_ctx.r8 as u64, r9: arm_ctx.r9 as u64,
+                r10: arm_ctx.r10 as u64, r11: arm_ctx.r11 as u64,
+                r12: arm_ctx.r12 as u64, r13: arm_ctx.sp as u64,
+                r14: arm_ctx.lr as u64, r15: arm_ctx.pc as u64,
+                rip: arm_ctx.pc as u64,
+                rflags: arm_ctx.cpsr as u64,
+                cs: 0,
+                ss: 0,
+                fpu_state: arm_ctx.fpu_state as u64
+            )
+        case _:
+            val x86_ctx = X86ContextSwitch.create(entry, user_sp, true)
+            TaskContext(
+                rax: x86_ctx.rax, rbx: x86_ctx.rbx,
+                rcx: x86_ctx.rcx, rdx: x86_ctx.rdx,
+                rsi: x86_ctx.rsi, rdi: x86_ctx.rdi,
+                rbp: x86_ctx.rbp, rsp: x86_ctx.rsp,
+                r8: x86_ctx.r8, r9: x86_ctx.r9,
+                r10: x86_ctx.r10, r11: x86_ctx.r11,
+                r12: x86_ctx.r12, r13: x86_ctx.r13,
+                r14: x86_ctx.r14, r15: x86_ctx.r15,
+                rip: x86_ctx.rip,
+                rflags: x86_ctx.rflags,
+                cs: x86_ctx.cs,
+                ss: x86_ctx.ss,
+                fpu_state: x86_ctx.fpu_state
+            )
+
+fn _initial_user_task_context(entry: u64, user_sp: u64) -> TaskContext:
+    scheduler_user_context_for_arch(SCHED_EXEC_ARCH, entry, user_sp)
 
 # ============================================================================
 # Ready Queue — Per-Priority FIFO
@@ -559,22 +628,7 @@ impl Scheduler:
             serial_println("[scheduler] create_user_task: no free slot")
             return 0
 
-        val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
-        val user_ctx = TaskContext(
-            rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
-            rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
-            rsi: arch_user_ctx.rsi, rdi: arch_user_ctx.rdi,
-            rbp: arch_user_ctx.rbp, rsp: arch_user_ctx.rsp,
-            r8: arch_user_ctx.r8, r9: arch_user_ctx.r9,
-            r10: arch_user_ctx.r10, r11: arch_user_ctx.r11,
-            r12: arch_user_ctx.r12, r13: arch_user_ctx.r13,
-            r14: arch_user_ctx.r14, r15: arch_user_ctx.r15,
-            rip: arch_user_ctx.rip,
-            rflags: arch_user_ctx.rflags,
-            cs: arch_user_ctx.cs,
-            ss: arch_user_ctx.ss,
-            fpu_state: arch_user_ctx.fpu_state
-        )
+        val user_ctx = _initial_user_task_context(entry, user_sp)
 
         val user_as: AddressSpace = create_user_address_space()
 
@@ -584,12 +638,12 @@ impl Scheduler:
             serial_println("[scheduler] create_user_task: map failed")
             return 0
 
-        var user_next_id = self.next_task_id
-        if user_next_id == 0 or user_next_id >= 0x40000000:
-            serial_println("[scheduler] create_user_task: normalized next_task_id")
-            user_next_id = 1
+        # Dodge the `Scheduler.next_task_id` field-read stub by using a
+        # module-level counter. The `self.next_task_id` read in the baremetal
+        # build resolves to a weak stub that returns 0 and logs a WARN.
+        val user_next_id = g_user_task_next_pid
+        g_user_task_next_pid = g_user_task_next_pid + 1
         val id = TaskId(id: user_next_id)
-        self.next_task_id = user_next_id + 1
 
         val tcb = TaskControlBlock(
             id: id,
@@ -1406,22 +1460,7 @@ impl Scheduler:
                 self._enqueue_ready(task_id)
             return -22
 
-        val arch_user_ctx = X86ContextSwitch.create(entry, user_sp, true)
-        val user_ctx = TaskContext(
-            rax: arch_user_ctx.rax, rbx: arch_user_ctx.rbx,
-            rcx: arch_user_ctx.rcx, rdx: arch_user_ctx.rdx,
-            rsi: arch_user_ctx.rsi, rdi: arch_user_ctx.rdi,
-            rbp: arch_user_ctx.rbp, rsp: arch_user_ctx.rsp,
-            r8: arch_user_ctx.r8, r9: arch_user_ctx.r9,
-            r10: arch_user_ctx.r10, r11: arch_user_ctx.r11,
-            r12: arch_user_ctx.r12, r13: arch_user_ctx.r13,
-            r14: arch_user_ctx.r14, r15: arch_user_ctx.r15,
-            rip: arch_user_ctx.rip,
-            rflags: arch_user_ctx.rflags,
-            cs: arch_user_ctx.cs,
-            ss: arch_user_ctx.ss,
-            fpu_state: arch_user_ctx.fpu_state
-        )
+        val user_ctx = _initial_user_task_context(entry, user_sp)
         val new_as: AddressSpace = create_user_address_space()
         val map_result = _map_user_process_image(new_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         if map_result < 0:
