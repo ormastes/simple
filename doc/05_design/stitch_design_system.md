@@ -349,10 +349,10 @@ When creating a new theme, generate these screens to cover all UI patterns:
 
 | File | Purpose |
 |------|---------|
-| `src/lib/common/ui/glass_tokens.spl` | CSS-text glass token classes (GlassColorTokens, GlassBlurTokens, GlassDesignTokens) |
-| `src/lib/common/ui/glass_numeric_tokens.spl` | u64 hex values for baremetal/compositor rendering |
-| `src/lib/common/ui/glass_css.spl` | Generates CSS custom properties + component styles from tokens |
-| `src/lib/common/ui/glass_theme.spl` | UITheme factory functions (glass_light, glass_dark) |
+| `src/lib/common/ui/glass/tokens.spl` | CSS-text glass token classes (GlassColorTokens, GlassBlurTokens, GlassDesignTokens) |
+| `src/lib/common/ui/glass/numeric_tokens.spl` | u64 hex values for baremetal/compositor rendering |
+| `src/lib/common/ui/glass/css.spl` | Generates CSS custom properties + component styles from tokens |
+| `src/lib/common/ui/glass/theme.spl` | UITheme factory functions (glass_light, glass_dark) |
 | `src/lib/common/ui/glass_test_page.spl` | Test page for glass rendering |
 | `src/lib/common/ui/design_tokens.spl` | Base iOS token classes (typography, radius, shadow, spacing, animation, opacity) |
 | `src/lib/common/ui/ios_theme.spl` | iOS theme presets |
@@ -360,9 +360,9 @@ When creating a new theme, generate these screens to cover all UI patterns:
 
 ### Token Sync Rule
 
-The Stitch `designMd` and local `glass_tokens.spl` / `glass_numeric_tokens.spl` must stay in sync:
+The Stitch `designMd` and local `glass/tokens.spl` / `glass/numeric_tokens.spl` must stay in sync:
 
-| Stitch designMd | glass_tokens.spl | glass_numeric_tokens.spl |
+| Stitch designMd | glass/tokens.spl | glass/numeric_tokens.spl |
 |-----------------|-------------------|--------------------------|
 | CSS rgba values | GlassColorTokens.dark()/light() | GLASS_DARK_SURFACE, etc. |
 | Blur values (CSS px) | GlassBlurTokens.default_blur() | GLASS_BLUR_SURFACE (lower values for 5-pass box blur) |
@@ -372,10 +372,10 @@ The Stitch `designMd` and local `glass_tokens.spl` / `glass_numeric_tokens.spl` 
 ### Import Path
 
 ```simple
-use common.ui.glass_tokens.{GlassDesignTokens, GlassColorTokens, GlassBlurTokens}
-use common.ui.glass_theme.{glass_light, glass_dark, glass_design_tokens, is_glass_theme}
-use common.ui.glass_css.{glass_tokens_to_css, glass_component_css}
-use common.ui.glass_numeric_tokens.{GLASS_DARK_BG_TOP, GLASS_DARK_SURFACE, ...}
+use common.ui.glass.tokens.{GlassDesignTokens, GlassColorTokens, GlassBlurTokens}
+use common.ui.glass.theme.{glass_light, glass_dark, glass_design_tokens, is_glass_theme}
+use common.ui.glass.css.{glass_tokens_to_css, glass_component_css}
+use common.ui.glass.numeric_tokens.{GLASS_DARK_BG_TOP, GLASS_DARK_SURFACE, ...}
 ```
 
 ---
@@ -384,13 +384,14 @@ use common.ui.glass_numeric_tokens.{GLASS_DARK_BG_TOP, GLASS_DARK_SURFACE, ...}
 
 Both the GUI widget library and the window manager compositor consume the same tokens:
 
-- **GUI lib** uses `glass_tokens.spl` (CSS text values) via `glass_css.spl` to generate stylesheets
-- **Window manager** uses `glass_numeric_tokens.spl` (u64 hex values) for direct framebuffer/compositor rendering
+- **GUI lib** uses `glass/tokens.spl` (CSS text values) via `glass/css.spl` to generate stylesheets
+- **Window manager** uses `glass/numeric_tokens.spl` (u64 hex values) for direct framebuffer/compositor rendering
+- **Web WM and Simple Web app windows** use `app.ui.web.html.generate_css()` and embedded `<style>` blocks; the Simple Web renderer applies those style blocks and resolves CSS variables before painting
 - **Stitch** uses `designMd` (markdown) to teach Gemini the visual language
 
 To add a new theme variant:
-1. Define new color values in both `glass_tokens.spl` (CSS) and `glass_numeric_tokens.spl` (u64)
-2. Create a new `UITheme` factory in `glass_theme.spl`
+1. Define new color values in both `glass/tokens.spl` (CSS) and `glass/numeric_tokens.spl` (u64)
+2. Create a new `UITheme` factory in `glass/theme.spl`
 3. Update `designMd` in the Stitch skill or create a new design system via API
 4. Generate screens in Stitch to validate visual consistency
 5. Apply design system to screens and generate light/dark variants

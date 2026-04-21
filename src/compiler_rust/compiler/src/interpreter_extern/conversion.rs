@@ -150,7 +150,7 @@ pub fn rt_gui_get_glyph_8x16_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Array(Arc::new(rows)))
 }
 
-fn glyph_8x16(codepoint: i32) -> [u8; 16] {
+pub(crate) fn glyph_8x16(codepoint: i32) -> [u8; 16] {
     if codepoint <= 0 || codepoint == 32 {
         return [0; 16];
     }

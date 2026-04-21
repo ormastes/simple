@@ -15,7 +15,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.notification_types.{Notification}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_SHARED}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
-use os.kernel.scheduler.scheduler.{Scheduler, scheduler_set_user_task_pid_out_ptr}
+use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
 use os.kernel.ipc.notif_global.{g_notification_table}
@@ -45,7 +45,6 @@ use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write,
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 extern fn serial_println(msg: text)
-extern fn unsafe_addr_of(ref: any) -> u64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val MAX_BINARY_PATH_LEN: u64 = 256
@@ -1172,10 +1171,15 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val priority = _u64_to_priority(args.arg2)
         val caps = CapabilitySet.full()
         var sched = scheduler
-        var pid_out: u64 = 0
-        scheduler_set_user_task_pid_out_ptr(unsafe_addr_of(pid_out))
-        val _created_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        val pid = pid_out
+        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        var pid = raw_pid
+        if raw_pid >= 0x40000000:
+            pid = 0
+            val low16 = raw_pid & 0xFFFF
+            if (low16 & 0xFF00) == 0xFF00:
+                val low8 = low16 & 0x00FF
+                if low8 != 0:
+                    pid = low8
         if pid == 0:
             return SyscallResult(value: -12)
 
@@ -1260,10 +1264,15 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
         val caps = CapabilitySet.full()
         var sched = scheduler
         serial_println("[syscall13] create_user_task begin")
-        var pid_out: u64 = 0
-        scheduler_set_user_task_pid_out_ptr(unsafe_addr_of(pid_out))
-        val _created_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        val pid = pid_out
+        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        var pid = raw_pid
+        if raw_pid >= 0x40000000:
+            pid = 0
+            val low16 = raw_pid & 0xFFFF
+            if (low16 & 0xFF00) == 0xFF00:
+                val low8 = low16 & 0x00FF
+                if low8 != 0:
+                    pid = low8
         if pid == 0:
             serial_println("[syscall13] create_user_task failed")
             return -12

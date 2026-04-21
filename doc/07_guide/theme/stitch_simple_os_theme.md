@@ -22,8 +22,8 @@ registry:
 
 | File | Purpose | Consumers |
 |---|---|---|
-| `src/lib/common/ui/glass_numeric_tokens.spl` | `u64` numeric values (`GLASS_DARK_*`, `GLASS_LIGHT_*`, `GLASS_OBSIDIAN_*`, `GLASS_BTN_*`, `GLASS_ICON_*`, `GLASS_RADIUS_*`, `GLASS_BLUR_*`, surface hierarchy) | compositor (baremetal + hosted), any Simple code that needs ARGB pixels |
-| `src/lib/common/ui/glass_tokens.spl` | CSS/text strings (`GlassColorTokens`, `GlassDesignTokens`, `StitchDesignSystem`) with `light()`, `dark()`, `obsidian()`, `celestial_ether()` factories | web UI (`src/app/ui.web/html.spl`), CSS generator (`glass_css.spl`), `theme_sync` round-trip with Stitch cloud |
+| `src/lib/common/ui/glass/numeric_tokens.spl` | `u64` numeric values (`GLASS_DARK_*`, `GLASS_LIGHT_*`, `GLASS_OBSIDIAN_*`, `GLASS_BTN_*`, `GLASS_ICON_*`, `GLASS_RADIUS_*`, `GLASS_BLUR_*`, surface hierarchy) | compositor (baremetal + hosted), any Simple code that needs ARGB pixels |
+| `src/lib/common/ui/glass/tokens.spl` | CSS/text strings (`GlassColorTokens`, `GlassDesignTokens`, `StitchDesignSystem`) with `light()`, `dark()`, `obsidian()`, `celestial_ether()` factories | web UI (`src/app/ui.web/html.spl`), CSS generator (`glass/css.spl`), `theme_sync` round-trip with Stitch cloud |
 
 The twin-file arrangement exists because the compositor runs without an HTML/CSS
 layer — it needs `u32` ARGB values to pass directly to `CompositorBackend.fill_rect`
@@ -34,7 +34,7 @@ the numeric values from the pulled snapshots.
 
 ### What's in each token family
 
-`glass_numeric_tokens.spl` groups tokens by theme and by semantic role:
+`glass/numeric_tokens.spl` groups tokens by theme and by semantic role:
 
 - **`GLASS_DARK_*`** — legacy macOS-style dark glass (surface, elevated, border, accent, text, bg_top/bg_bottom, shadow alpha).
 - **`GLASS_LIGHT_*`** — light counterpart of the above.
@@ -50,7 +50,7 @@ the numeric values from the pulled snapshots.
 - **`GLASS_SURFACE_0..4_*`** — the 5-level surface hierarchy (alpha + blur) shared
   between the GUI widget layer and the compositor surface stack.
 
-`glass_tokens.spl` exposes:
+`glass/tokens.spl` exposes:
 
 - **`GlassColorTokens`** — `light()`, `dark()` (CSS `rgba(...)` strings).
 - **`GlassDesignTokens`** — wraps `GlassColorTokens` with typography/radius/shadow/spacing/animation/opacity token groups (reuses `IOSTypographyScale`, `IOSRadiusTokens`, etc.).
@@ -67,7 +67,7 @@ the numeric values from the pulled snapshots.
 | **Celestial Ether** | (see snapshots) | MD3 light | — | light theme |
 
 Snapshots live in `doc/05_design/stitch_snapshots/<project-id>/design_systems/*.sdn`.
-Pull the latest from Stitch cloud via `/theme_sync pull`.
+List local snapshots with `bin/simple src/app/cli/theme_sync.spl list`; pull/push flows use the same `theme_sync` implementation.
 
 ---
 
@@ -79,7 +79,7 @@ The real runtime render for both hosted macOS WM and baremetal QEMU WM uses
 **`GlassConfig`** (`src/os/compositor/glass_effects.spl:21`), a `u64`-typed struct
 with three token-driven factories: `GlassConfig.dark()`, `.light()`, and
 `.obsidian_dark()`. Each factory builds its fields by reading directly from
-`glass_numeric_tokens.spl` — there are no literals in those factories.
+`glass/numeric_tokens.spl` — there are no literals in those factories.
 
 `Compositor.glass_config` (`src/os/compositor/compositor.spl`) holds one of these.
 The runtime default is:
@@ -96,7 +96,7 @@ render path (look for `val cfg = GlassPortConfig(...)` near the `_render_glass_*
 functions).
 
 `GlassPortConfig` also has `.dark()`, `.light()`, `.obsidian()` static factories
-built from the same `glass_numeric_tokens.spl` tokens. These are only used for
+built from the same `glass/numeric_tokens.spl` tokens. These are only used for
 contexts that want a token-driven default without threading a live `GlassConfig`
 through — today the only such caller is the **boot splash**
 (`examples/simple_os/hosted/hosted_wm.spl`, `src/os/compositor/boot_splash.spl`).
@@ -126,10 +126,10 @@ colors**, not palette, and are intentionally left as literals.
 
 ### GUI library (widgets, CSS, web)
 
-- **`src/lib/common/ui/glass_theme.spl`** — `UITheme` factory functions
+- **`src/lib/common/ui/glass/theme.spl`** — `UITheme` factory functions
   `glass_light()`, `glass_dark()`, `glass_obsidian_dark()` that build the widget
   layer theme from `GlassColorTokens` / `GlassDesignTokens`.
-- **`src/lib/common/ui/glass_css.spl`** — CSS custom-property generator
+- **`src/lib/common/ui/glass/css.spl`** — CSS custom-property generator
   (`glass_tokens_to_css()`) for the web UI.
 - **`src/app/ui.web/html.spl`** — imports `GlassColorTokens` directly for the web
   surfaces (HTML-rendered UI).
@@ -143,43 +143,48 @@ Current Web WM flow:
 
 - `examples/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
 - `src/app/ui.web/html.spl::generate_wm_html_page()` embeds the WM shell
-- `generate_css(theme)` derives the page chrome from the shared glass token path
+- `generate_css(theme)` derives page chrome and CSS custom properties such as
+  `--ui-bg`, `--ui-text`, and `--glass-accent` from the shared glass token path
 - WM traffic-light colors are defined once in `html.spl` and used by the window
   chrome classes instead of being copied across multiple files
+- `src/os/compositor/simple_web_window_renderer.spl` wraps Simple Web app-window
+  HTML with this stylesheet, so Terminal/Editor/File Manager/Calculator content
+  consumes the same variables as the GUI and Web WM
+- `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` applies embedded
+  `<style>` blocks and resolves `var(--token)` references before pixel rendering
 
 This is why the live Web WM and the Stitch token set now move together. If the
 obsidian theme changes, the Web WM should pick up the new background, borders,
-taskbar, and window chrome through the shared CSS generation path.
+taskbar, app-window content, and window chrome through the shared CSS generation path.
 
 ### Stitch round-trip
 
-- **Pull**: `/theme_sync pull` fetches the active design system from the Stitch
+- **Pull**: the local `theme_sync` pull workflow fetches the active design system from the Stitch
   cloud project, writes a snapshot `.sdn` under
   `doc/05_design/stitch_snapshots/<project-id>/design_systems/`, and (when the
   palette has changed) regenerates the numeric twin in
-  `src/lib/common/ui/glass_numeric_tokens.spl`.
+  `src/lib/common/ui/glass/numeric_tokens.spl`.
 - **Push**: `/theme_sync push` takes the local `StitchDesignSystem` and
   `stitch_design_md.sdn` and updates the Stitch cloud project.
-- The `theme_sync` skill definition is at `.claude/skills/theme_sync.md`.
 
 ---
 
 ## 3. Rules for new components
 
 1. **No new palette literals in compositor code.** If you find yourself typing a
-   hex RGB value, stop and look for an existing token in `glass_numeric_tokens.spl`
+   hex RGB value, stop and look for an existing token in `glass/numeric_tokens.spl`
    first. If one exists, use it. If one doesn't, either (a) add the token to
-   `glass_numeric_tokens.spl` + its CSS twin in `glass_tokens.spl`, or (b) accept
+   `glass/numeric_tokens.spl` + its CSS twin in `glass/tokens.spl`, or (b) accept
    the literal only if it's an **effect tint** (a blending overlay, not a palette
    color) — and comment why.
 
 2. **Never redeclare an existing token.** Before adding `GLASS_FOO = 0x123456`, grep:
    ```
-   Grep -n "0x123456" src/lib/common/ui/glass_numeric_tokens.spl
+   rg -n "0x123456" src/lib/common/ui/glass/numeric_tokens.spl
    ```
    and also
    ```
-   Grep -n "GLASS_FOO" src/lib/common/ui
+   rg -n "GLASS_FOO" src/lib/common/ui
    ```
 
 3. **GUI lib code uses the CSS twin (`GlassColorTokens`).** Compositor code uses the
@@ -195,7 +200,7 @@ taskbar, and window chrome through the shared CSS generation path.
    not colors anyone picks from a design system.
 
 6. **If you need a new theme**, add a new family of `GLASS_<theme>_*` tokens to
-   `glass_numeric_tokens.spl`, mirror in `glass_tokens.spl` via a new
+   `glass/numeric_tokens.spl`, mirror in `glass/tokens.spl` via a new
    `StitchDesignSystem.<theme>()` factory, add `GlassConfig.<theme>()` and
    `GlassPortConfig.<theme>()` factories, and optionally wire into the `T`-key
    toggle. Do **not** fork the WM or GUI lib theme code.
@@ -227,13 +232,13 @@ To change the runtime default:
 **A color looks wrong.** First, grep the compositor code for the literal:
 
 ```
-Grep -n '0xFFAABBCC' src/os/compositor
+rg -n '0xFFAABBCC' src/os/compositor
 ```
 
 If the literal appears anywhere under `src/os/compositor/`, it's almost certainly
 a drifted token that slipped in before this guide. Replace it with the matching
 `GLASS_*` token. If you can't find a matching token, the drift may be bidirectional —
-check the `glass_numeric_tokens.spl` value against the Stitch snapshot:
+check the `glass/numeric_tokens.spl` value against the Stitch snapshot:
 
 ```
 doc/05_design/stitch_snapshots/<project-id>/design_systems/<theme>_active.sdn
@@ -241,10 +246,10 @@ doc/05_design/stitch_snapshots/<project-id>/design_systems/<theme>_active.sdn
 
 The snapshot is the ground truth pulled from Stitch cloud.
 
-**Two tokens drifted from each other.** `glass_numeric_tokens.spl` and
-`glass_tokens.spl` are supposed to stay in sync — `theme_sync` regenerates the
-numeric twin when the CSS twin changes. If they diverge, run `/theme_sync pull`
-to re-sync from Stitch cloud.
+**Two tokens drifted from each other.** `glass/numeric_tokens.spl` and
+`glass/tokens.spl` are supposed to stay in sync — `theme_sync` regenerates the
+numeric twin when the CSS twin changes. If they diverge, run the local
+`theme_sync` workflow to re-sync from Stitch cloud.
 
 **`GlassConfig` vs `GlassPortConfig` confusion.** `GlassConfig` is `u64` and is the
 runtime theme type. `GlassPortConfig` is the `u32`/`u8`/`i32` narrow-type lowering
@@ -260,14 +265,13 @@ need to move together.
 
 ## 6. File index
 
-- Source of truth: `src/lib/common/ui/glass_numeric_tokens.spl`, `src/lib/common/ui/glass_tokens.spl`
+- Source of truth: `src/lib/common/ui/glass/numeric_tokens.spl`, `src/lib/common/ui/glass/tokens.spl`
 - Stitch round-trip: `src/app/cli/theme_sync.spl`, `src/lib/common/ui/theme_sync_sdn.spl`, `src/lib/common/ui/theme_sync_diff.spl`
 - Stitch snapshots: `doc/05_design/stitch_snapshots/<project-id>/design_systems/*.sdn`
 - Stitch reference extract: `doc/05_design/stitch_design_system.md`
 - Compositor runtime theme: `src/os/compositor/glass_effects.spl` (`GlassConfig`), `src/os/compositor/compositor.spl` (holds `glass_config`, sets default)
 - Compositor lowered theme: `src/os/compositor/glass_port.spl` (`GlassPortConfig` + factories)
 - Compositor chrome: `src/os/compositor/decorations.spl`, `src/os/compositor/window_effects.spl`, `src/os/compositor/desktop_chrome.spl`, `src/os/compositor/boot_splash.spl`
-- GUI library consumers: `src/lib/common/ui/glass_theme.spl`, `src/lib/common/ui/glass_css.spl`, `src/lib/common/ui/design_tokens.spl`
-- Web consumer: `src/app/ui.web/html.spl`
-- Theme-sync skill: `.claude/skills/theme_sync.md`
+- GUI library consumers: `src/lib/common/ui/glass/theme.spl`, `src/lib/common/ui/glass/css.spl`, `src/lib/common/ui/design_tokens.spl`
+- Web consumers: `src/app/ui.web/html.spl`, `src/os/compositor/simple_web_window_renderer.spl`, `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl`
 - Stitch skill: `.claude/skills/stitch.md`

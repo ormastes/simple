@@ -29,9 +29,9 @@ The export tooling tries the live Electron render path first.
 
 Primary path:
 
-- `bin/simple ui electron <entry.ui.sdn>`
+- `bin/simple run src/app/ui.electron/app.spl <entry.ui.sdn>`
 - Electron receives the first `render` IPC payload
-- `tools/electron-shell/main.js` writes that HTML to `SIMPLE_UI_DUMP_HTML_PATH`
+- `tools/electron-shell/export_snapshot.js` writes that HTML to the requested output path
 
 Fallback path:
 
@@ -39,7 +39,9 @@ Fallback path:
 - the fallback uses `app.ui.web.html.generate_html_page`
 - this still stays on the shared HTML/CSS output path and produces a single-file document
 
-In practice, the fallback is the safe path when Electron IPC render does not start cleanly on the current branch.
+Use `--no-fallback` when validating the strict Electron IPC path. In normal visual
+work, fallback keeps the output on the shared HTML/CSS path if Electron IPC render
+does not start cleanly.
 
 ## Relevant Files
 
@@ -142,17 +144,9 @@ node tools/electron-shell/screenshot.js input.html output.png 1360 840
 
 This uses headless Electron with `capturePage()`.
 
-Known issue:
-
-- on some macOS runs, the Electron screenshot process can exit with `SIGABRT`
-
-Practical workaround:
-
-1. Generate the HTML snapshot first
-2. Open the local HTML in a browser
-3. Capture a browser screenshot instead
-
-That workaround produced stable PNGs during the WM export session on 2026-04-08 even when the Electron screenshot helper crashed.
+The snapshot driver wraps this helper with a timeout and process cleanup guard.
+If the helper fails, keep the generated HTML and capture from a browser session;
+the HTML is still the source-of-truth artifact.
 
 ## Stitch Usage
 
@@ -185,11 +179,14 @@ If the live Electron path fails, `export_snapshot.js` should fall back automatic
 
 ### Export falls back immediately
 
-This usually means the `bin/simple ui electron` process exited before the first `render` message. The fallback HTML is still valid for visual iteration.
+This usually means the `bin/simple run src/app/ui.electron/app.spl <entry.ui.sdn>`
+process exited before the first `render` message. The fallback HTML is still valid
+for visual iteration.
 
 ### PNG generation fails
 
-If `tools/electron-shell/screenshot.js` crashes, keep the generated HTML and produce the PNG with a normal browser session.
+If `tools/electron-shell/screenshot.js` crashes or times out, keep the generated
+HTML and produce the PNG with a normal browser session.
 
 ### Stitch MCP returns `401`
 

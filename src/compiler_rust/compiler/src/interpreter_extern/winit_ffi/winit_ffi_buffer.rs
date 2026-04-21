@@ -4,10 +4,10 @@ use std::sync::atomic::Ordering;
 use crate::error::CompileError;
 use crate::value::Value;
 
+use super::super::conversion::glyph_8x16;
 use super::{
-    get_i64, get_string, get_pixels, int_value, bool_value, set_last_error,
-    NEXT_BUFFER_ID, PIXEL_BUFFERS, PixelBuffer, EVENT_LOOPS, WINDOW_OWNERS,
-    RuntimeCommand,
+    get_i64, get_string, get_pixels, int_value, bool_value, set_last_error, NEXT_BUFFER_ID, PIXEL_BUFFERS, PixelBuffer,
+    EVENT_LOOPS, WINDOW_OWNERS, RuntimeCommand,
 };
 
 #[cfg(target_os = "macos")]
@@ -54,6 +54,23 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
                         buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
                     }
                 }
+                Ok(bool_value(true))
+            } else {
+                set_last_error(format!("invalid buffer handle: {buf_id}"));
+                Ok(bool_value(false))
+            }
+        }
+        "rt_winit_buffer_draw_text" => {
+            // rt_winit_buffer_draw_text(buffer_id, x, y, text, fg, bg) -> bool
+            let buf_id = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let text = get_string(args, 3, name)?;
+            let fg = get_i64(args, 4, name)? as u32;
+            let bg = get_i64(args, 5, name)? as u32;
+            let mut bufs = PIXEL_BUFFERS.lock();
+            if let Some(buf) = bufs.get_mut(&buf_id) {
+                draw_text_into_buffer(buf, x, y, &text, fg, bg);
                 Ok(bool_value(true))
             } else {
                 set_last_error(format!("invalid buffer handle: {buf_id}"));
@@ -450,5 +467,75 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             }
         }
         _ => unreachable!("dispatch_buffer called with unexpected name: {name}"),
+    }
+}
+
+fn draw_text_into_buffer(buf: &mut PixelBuffer, x: i64, y: i64, text: &str, fg: u32, bg: u32) {
+    let sw = buf.width as i64;
+    let sh = buf.height as i64;
+    let stride = sw as usize;
+    let mut cx = x;
+
+    for ch in text.chars() {
+        if cx < sw && cx + 8 > 0 && y < sh && y + 16 > 0 {
+            let glyph = glyph_8x16(ch as i32);
+            for (row, bits) in glyph.iter().enumerate() {
+                let py = y + row as i64;
+                if py < 0 || py >= sh {
+                    continue;
+                }
+                for col in 0..8 {
+                    let px = cx + col;
+                    if px < 0 || px >= sw {
+                        continue;
+                    }
+                    let mask = 0x80u8 >> col;
+                    let color = if (bits & mask) != 0 { fg } else { bg };
+                    buf.pixels[(py as usize) * stride + (px as usize)] = color;
+                }
+            }
+        }
+        cx = cx.saturating_add(8);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draw_text_extern_writes_glyph_pixels() {
+        let id = match dispatch_buffer(
+            "rt_winit_buffer_create",
+            &[Value::Int(24), Value::Int(16), Value::Int(0)],
+        )
+        .unwrap()
+        {
+            Value::Int(id) => id,
+            other => panic!("expected buffer id, got {other:?}"),
+        };
+
+        let ok = dispatch_buffer(
+            "rt_winit_buffer_draw_text",
+            &[
+                Value::Int(id),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Str("A".to_string()),
+                Value::Int(0xFFFFFFFFu32 as i64),
+                Value::Int(0xFF000000u32 as i64),
+            ],
+        )
+        .unwrap();
+        assert_eq!(ok, Value::Bool(true));
+
+        {
+            let bufs = PIXEL_BUFFERS.lock();
+            let buf = bufs.get(&id).expect("buffer should exist");
+            assert!(buf.pixels.iter().any(|&p| p == 0xFFFFFFFF));
+            assert!(buf.pixels.iter().any(|&p| p == 0xFF000000));
+        }
+
+        let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
     }
 }

@@ -177,7 +177,7 @@ Usage:
   simple                      Start interactive REPL
   simple <file.spl>           Run source file
   simple <file.smf>           Run compiled binary
-  simple -c "code"            Run code string
+  simple -c "code"            Run code string; statement snippets print only program output
   simple compile <src> [-o <out>]  Compile to SMF
   simple watch <file.spl>     Watch and auto-recompile
 

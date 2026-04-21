@@ -81,6 +81,10 @@ Theme flow:
    token path
 3. window chrome, taskbar, borders, and traffic-light buttons are generated
    from the shared theme/token layer
+4. Simple Web app-window HTML is wrapped by
+   `src/os/compositor/simple_web_window_renderer.spl` with the same generated CSS
+5. `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` applies embedded
+   `<style>` blocks and resolves CSS variables before pixel rendering
 
 For the full theme/token architecture, see
 [stitch_simple_os_theme.md](../theme/stitch_simple_os_theme.md).

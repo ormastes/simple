@@ -46,3 +46,6 @@ class SimpleTheme:
 
 - **Simple GUI Library**: Each widget uses `me style() -> text` which references CSS variables from the active `SimpleTheme`.
 - **Simple Window Manager**: Loads `active.simple-theme` at boot and initializes `GlassConfig`.
+- **Web WM**: `app.ui.web.html.generate_css(theme)` emits the shared CSS variables and WM chrome classes directly into the HTML shell.
+- **Simple Web Renderer**: `browser_engine/style_block.spl` parses embedded `<style>` blocks and resolves `var(--token)` values so CSS-only theme changes affect rendered pixels.
+- **Electron Snapshot Export**: `tools/electron-shell/export_snapshot.js --no-fallback` validates the strict IPC path; without `--no-fallback`, the exporter falls back to the shared HTML generator while keeping the same CSS output path.
