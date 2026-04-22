@@ -9,6 +9,13 @@
 # FR-NVFS-N8-001 (skeleton) — Implemented
 # FR-NVFS-N8-002 (full walker impl) — Open
 
+use examples.nvfs.src.core.arena.{arena_readv_impl}
+use examples.nvfs.src.core.checkpoint.{checkpoint_count, checkpoint_latest_valid}
+use examples.nvfs.src.core.intent_log.{intent_log_len, intent_latest_seq, intent_replay_from}
+use examples.nvfs.src.core.pmap.{pmap_entry_verify}
+use examples.nvfs.src.core.superblock.{Superblock, superblock_replica_raw}
+use examples.nvfs.src.driver.fs_driver_impl.{nvfs_pmap_sidecar_snapshot}
+
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
@@ -51,7 +58,7 @@ pub struct CheckReport:
     warn_count  — total WARN-severity entries.
     error_count — total ERROR-severity entries.
     fatal_count — total FATAL-severity entries.
-    issues      — sample problem entries (capped; full set deferred to N8-full).
+    issues      — sample problem entries (future full walker may persist all entries).
     clean       — true iff error_count == 0 and fatal_count == 0.
     """
     info_count:  u64
@@ -130,8 +137,29 @@ pub fn check_report_pretty(report: CheckReport) -> text:
     out = out + "] }"
     out
 
+fn _check_report_print_latest(report: CheckReport, phase_label: text):
+    """Emit the newest issue as a compact verbose progress line."""
+    if report.issues.len() == 0:
+        print "[nvfs-check] {phase_label}: no issues recorded"
+        return
+    val issue = report.issues[report.issues.len() - 1]
+    print "[nvfs-check] {phase_label}: {issue.severity} {issue.message} ({issue.detail})"
+
+fn _superblock_crc(sb: Superblock) -> u32:
+    """Recompute the current in-memory superblock checksum substitute."""
+    val h0 = sb.magic + sb.version
+    val h1 = (sb.uuid_hi + sb.uuid_lo) % 0xFFFFFFFF
+    val h2 = (sb.feature_bits + sb.mount_generation + sb.checkpoint_root) % 0xFFFFFFFF
+    ((h0 + h1 + h2) % 0xFFFFFFFF) as u32
+
+fn _superblock_magic_version_ok(sb: Superblock) -> bool:
+    """Return true for NVFS magic and supported in-memory format versions."""
+    if sb.magic != 0x4E564653:
+        return false
+    sb.version == 1 or sb.version == 2 or sb.version == 3
+
 # ---------------------------------------------------------------------------
-# Phase stubs — each returns an updated CheckReport
+# Check phases — each returns an updated CheckReport
 # ---------------------------------------------------------------------------
 
 fn _check_phase1_superblock(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
@@ -145,16 +173,69 @@ fn _check_phase1_superblock(opts: NvfsCheckOpts, report: CheckReport) -> CheckRe
       - Flag any replica whose generation lags the most-recent by > 1 (WARN) or
         whose checksum is wrong (ERROR).
 
-    TODO (N8-full): open the block device at opts.path, seek to replica offsets
-    (superblock.spl exports SUPERBLOCK_OFFSET_0 / _1 / _2), and invoke
-    superblock_parse + checksum verify.
+    Current implementation audits the two in-memory replica slots exposed by
+    superblock_replica_raw. Raw block-device offsets and third-replica probing
+    remain deferred because the current NVFS core has no disk I/O reader API.
     """
-    check_report_add(report, CheckIssue(
-        severity: "INFO",
-        phase:    1,
-        message:  "phase1: superblock walk — pending disk-IO wiring (FR-NVFS-N8-003)",
-        detail:   opts.path,
-    ))
+    var r = report
+    var seen = 0
+    var good = 0
+    var newest: u64 = 0
+    var replica = 0
+    while replica < 2:
+        val sb = superblock_replica_raw(replica as u8)
+        if sb.valid:
+            seen = seen + 1
+            if not _superblock_magic_version_ok(sb):
+                r = check_report_add(r, CheckIssue(
+                    severity: "ERROR",
+                    phase:    1,
+                    message:  "superblock replica has invalid magic or version",
+                    detail:   "replica={replica}",
+                ))
+            else:
+                val expected = _superblock_crc(sb)
+                if expected != sb.checksum:
+                    r = check_report_add(r, CheckIssue(
+                        severity: "ERROR",
+                        phase:    1,
+                        message:  "superblock replica checksum mismatch",
+                        detail:   "replica={replica}",
+                    ))
+                else:
+                    good = good + 1
+                    if sb.mount_generation > newest:
+                        newest = sb.mount_generation
+        replica = replica + 1
+
+    if seen == 0:
+        return check_report_add(r, CheckIssue(
+            severity: "INFO",
+            phase:    1,
+            message:  "phase1: no initialized superblock replicas in current NVFS state",
+            detail:   opts.path,
+        ))
+    if good == 0:
+        return check_report_add(r, CheckIssue(
+            severity: "FATAL",
+            phase:    1,
+            message:  "no valid superblock replica remains mountable",
+            detail:   opts.path,
+        ))
+
+    replica = 0
+    while replica < 2:
+        val lag_sb = superblock_replica_raw(replica as u8)
+        if lag_sb.valid and _superblock_magic_version_ok(lag_sb) and _superblock_crc(lag_sb) == lag_sb.checksum:
+            if newest > lag_sb.mount_generation + 1:
+                r = check_report_add(r, CheckIssue(
+                    severity: "WARN",
+                    phase:    1,
+                    message:  "superblock replica generation lags newest replica by more than one",
+                    detail:   "replica={replica}",
+                ))
+        replica = replica + 1
+    r
 
 fn _check_phase2_checkpoint_ring(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
     """Phase 2: walk the checkpoint ring.
@@ -167,14 +248,31 @@ fn _check_phase2_checkpoint_ring(opts: NvfsCheckOpts, report: CheckReport) -> Ch
         superblock's last_checkpoint_gen field.
       - Flag slots that reference arena_ids outside the live arena table (ERROR).
 
-    TODO (N8-full): iterate checkpoint ring slots via checkpoint_ring_read_all;
-    compare each slot's arena_list against the live pmap B-tree root.
+    Current implementation checks the exported latest-valid/count view. Full
+    slot-by-slot CRC and arena-list validation is deferred until checkpoint.spl
+    exposes a ring snapshot API.
     """
+    val count = checkpoint_count()
+    if count == 0:
+        return check_report_add(report, CheckIssue(
+            severity: "INFO",
+            phase:    2,
+            message:  "phase2: no checkpoint entries in current NVFS state",
+            detail:   opts.path,
+        ))
+    val latest = checkpoint_latest_valid()
+    if latest.checkpoint_generation == 0:
+        return check_report_add(report, CheckIssue(
+            severity: "ERROR",
+            phase:    2,
+            message:  "checkpoint ring contains entries but no valid latest checkpoint",
+            detail:   "count={count}",
+        ))
     check_report_add(report, CheckIssue(
         severity: "INFO",
         phase:    2,
-        message:  "phase2: checkpoint ring walk — pending disk-IO wiring (FR-NVFS-N8-003)",
-        detail:   opts.path,
+        message:  "phase2: latest checkpoint view is valid; full ring scan deferred",
+        detail:   "count={count}",
     ))
 
 fn _check_phase3_pmap_btree(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
@@ -189,15 +287,64 @@ fn _check_phase3_pmap_btree(opts: NvfsCheckOpts, report: CheckReport) -> CheckRe
       - Detect unreachable pmap entries: logical_page_no not reachable from any
         inode tree → WARN "unreachable pmap entry".
 
-    TODO (N8-full): call nvfs_pmap_sidecar_snapshot to get all entries; cross-
-    reference against arena_list from the most-recent checkpoint slot.
+    Current implementation snapshots the live pmap sidecar, verifies each
+    backing arena range exists, checks key/entry consistency, and optionally
+    re-verifies stored checksums. Inode reachability remains deferred because
+    no namespace snapshot API is exposed to this tool.
     """
-    check_report_add(report, CheckIssue(
-        severity: "INFO",
-        phase:    3,
-        message:  "phase3: pmap B-tree walk — pending disk-IO wiring (FR-NVFS-N8-003)",
-        detail:   opts.path,
-    ))
+    var r = report
+    val entries = nvfs_pmap_sidecar_snapshot()
+    if entries.len() == 0:
+        return check_report_add(r, CheckIssue(
+            severity: "INFO",
+            phase:    3,
+            message:  "phase3: no pmap entries in current NVFS state",
+            detail:   opts.path,
+        ))
+
+    var i = 0
+    while i < entries.len() as i64:
+        val sc = entries[i]
+        if sc.length <= 0:
+            r = check_report_add(r, CheckIssue(
+                severity: "ERROR",
+                phase:    3,
+                message:  "pmap entry has non-positive extent length",
+                detail:   "arena_id={sc.arena_id} offset={sc.offset}",
+            ))
+        else:
+            if sc.entry.phys != sc.arena_id or sc.entry.offset != sc.offset as u64:
+                r = check_report_add(r, CheckIssue(
+                    severity: "ERROR",
+                    phase:    3,
+                    message:  "pmap key does not match embedded entry address",
+                    detail:   "arena_id={sc.arena_id} offset={sc.offset}",
+                ))
+            val data = arena_readv_impl(sc.arena_id, sc.offset, sc.length)
+            if data.len() == 0:
+                r = check_report_add(r, CheckIssue(
+                    severity: "ERROR",
+                    phase:    3,
+                    message:  "orphaned pmap extent",
+                    detail:   "arena_id={sc.arena_id} offset={sc.offset}",
+                ))
+            else:
+                if data.len() < sc.length:
+                    r = check_report_add(r, CheckIssue(
+                        severity: "ERROR",
+                        phase:    3,
+                        message:  "pmap extent extends past backing arena data",
+                        detail:   "arena_id={sc.arena_id} offset={sc.offset}",
+                    ))
+                if opts.check_checksums and not pmap_entry_verify(sc.entry, data):
+                    r = check_report_add(r, CheckIssue(
+                        severity: "ERROR",
+                        phase:    3,
+                        message:  "pmap extent checksum mismatch",
+                        detail:   "arena_id={sc.arena_id} offset={sc.offset}",
+                    ))
+        i = i + 1
+    r
 
 fn _check_phase4_reflink_refcount(opts: NvfsCheckOpts, report: CheckReport) -> CheckReport:
     """Phase 4: walk the reflink refcount table.
@@ -211,13 +358,14 @@ fn _check_phase4_reflink_refcount(opts: NvfsCheckOpts, report: CheckReport) -> C
       - Mismatch by > 1 → ERROR "refcount mismatch: stored N actual M".
       - Stored refcount == 0 but entry not freed → WARN "dangling reflink entry".
 
-    TODO (N8-full): build a (logical_page_no → actual_refs) map via full pmap
-    B-tree walk, then compare against the reflink table's stored refcounts.
+    Deferred: reflink.spl currently exposes arena_id lookup only, not a
+    reflink table snapshot keyed by logical page. The checker reports that
+    limitation instead of guessing from pmap extent counts.
     """
     check_report_add(report, CheckIssue(
         severity: "INFO",
         phase:    4,
-        message:  "phase4: reflink refcount walk — pending disk-IO wiring (FR-NVFS-N8-003)",
+        message:  "phase4: reflink logical refcount audit deferred; no table snapshot API",
         detail:   opts.path,
     ))
 
@@ -234,14 +382,33 @@ fn _check_phase5_intent_log(opts: NvfsCheckOpts, report: CheckReport) -> CheckRe
         checkpoint_lsn from the most-recent checkpoint) → WARN "replayed
         record in intent-log tail".
 
-    TODO (N8-full): call intent_log_recover_tail; compare each record's LSN
-    against the checkpointed LSN from phase 2 output.
+    Current implementation validates the exported log length/latest sequence
+    view and reports replayable tail size. Per-record CRC and arena-reference
+    checks remain deferred until intent_log.spl exposes a record iterator.
     """
+    val log_len = intent_log_len()
+    val latest_seq = intent_latest_seq()
+    if log_len == 0:
+        return check_report_add(report, CheckIssue(
+            severity: "INFO",
+            phase:    5,
+            message:  "phase5: no intent-log records in current NVFS state",
+            detail:   opts.path,
+        ))
+    if latest_seq == 0:
+        return check_report_add(report, CheckIssue(
+            severity: "ERROR",
+            phase:    5,
+            message:  "intent-log has records but latest sequence is zero",
+            detail:   "records={log_len}",
+        ))
+    val cp = checkpoint_latest_valid()
+    val replayable = intent_replay_from(cp.checkpoint_generation as i64)
     check_report_add(report, CheckIssue(
         severity: "INFO",
         phase:    5,
-        message:  "phase5: intent-log walk — pending disk-IO wiring (FR-NVFS-N8-003)",
-        detail:   opts.path,
+        message:  "phase5: intent-log sequence view is valid; record scan deferred",
+        detail:   "records={log_len} latest_seq={latest_seq} replayable={replayable}",
     ))
 
 # ---------------------------------------------------------------------------
@@ -264,24 +431,24 @@ pub fn nvfs_check_main(opts: NvfsCheckOpts) -> i32:
 
     report = _check_phase1_superblock(opts, report)
     if opts.verbose:
-        pass_do_nothing
+        _check_report_print_latest(report, "phase1")
 
     report = _check_phase2_checkpoint_ring(opts, report)
     if opts.verbose:
-        pass_do_nothing
+        _check_report_print_latest(report, "phase2")
 
     report = _check_phase3_pmap_btree(opts, report)
     if opts.verbose:
-        pass_do_nothing
+        _check_report_print_latest(report, "phase3")
 
     if opts.check_refcount:
         report = _check_phase4_reflink_refcount(opts, report)
         if opts.verbose:
-            pass_do_nothing
+            _check_report_print_latest(report, "phase4")
 
     report = _check_phase5_intent_log(opts, report)
     if opts.verbose:
-        pass_do_nothing
+        _check_report_print_latest(report, "phase5")
 
     # Determine exit code from severity counts.
     if report.fatal_count > 0:

@@ -388,3 +388,136 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   2. Module-qualified keys in the flat SymbolTable (`"module::TypeName"` instead of `"TypeName"`)
   3. Push/pop module scope per `lower_module` call with scoped lookup
   Option 1 is the lowest-risk starting point since A2 already wires `modules_by_name`.
+
+---
+
+### FR-COMPILER-005 — Add raw top-level domain block carrier
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler — parser, AST, Tree-sitter outline, HIR metadata
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  Add contextual top-level raw capture for approved domain block names
+  (`schema`, `style`, `ui`, `music`, `bim`, `cad`, `city`, `rtl`) without making
+  those words hard reserved in normal identifier positions. The initial carrier
+  preserves block kind, raw payload, nesting, and source span, and lowers only to
+  metadata until each domain has a dedicated semantic pass.
+- **Acceptance-criteria:**
+  - [ ] `schema{...}` and `style{...}` parse at module scope and appear in outline/LSP metadata.
+  - [ ] Existing identifiers named `schema`, `style`, `music`, `bim`, `cad`, `city`, or `rtl` still parse where no `{` immediately follows.
+  - [ ] Unterminated payloads report block kind and opening source span.
+  - [ ] Nested braces inside payloads are preserved.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/04_architecture/all_regions.md`; `doc/05_design/all_regions.md`
+- **Notes:** This is the enabling layer only; it must not claim CSS, MusicXML,
+  IFC, STEP, or RTL semantics.
+
+---
+
+### FR-COMPILER-006 — Implement schema{} contracts and compatibility checks
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler + std schema tooling
+- **Priority:** P0
+- **Status:** Open
+- **Requested-semantics:**
+  Implement `schema{}` as Simple's cross-domain contract language for validation,
+  versioning, field IDs, defaults, units, identities, ranges, regex constraints,
+  canonical serialization, and compatibility evolution.
+- **Acceptance-criteria:**
+  - [ ] Schema AST supports required/optional fields, defaults, units, identities, and field IDs.
+  - [ ] JSON Schema export covers JSON-like validation.
+  - [ ] Protobuf-style compatibility checks reject unsafe field-number reuse.
+  - [ ] SQP/API schemas can reference the same contract definitions.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/05_design/all_regions.md`
+- **Notes:** External anchors: JSON Schema 2020-12 and Protocol Buffers Editions.
+
+---
+
+### FR-COMPILER-007 — Add style{} and ui{} authoring surfaces
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler + `src/lib/common/ui/` + browser renderer
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  Add typed UI/style authoring surfaces for theme tokens, widget trees, layout,
+  and CSS-like cascade/layout behavior without encoding those semantics as raw SDN.
+- **Acceptance-criteria:**
+  - [ ] `style{}` can define typed tokens and component rules.
+  - [ ] `ui{}` can bind widgets to typed style references.
+  - [ ] Generated CSS/theme output integrates with existing Simple UI/theme code.
+  - [ ] Browser compatibility tests cover margin, line height, flex/grid-relevant behavior selected by design.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/04_architecture/all_regions.md`; `doc/04_architecture/simple_theme_system.md`
+- **Notes:** External anchors: WHATWG HTML and W3C CSS Display/Flex/Grid/Cascade.
+
+---
+
+### FR-COMPILER-008 — Add music{} authoring with MusicXML interchange
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler + domain library
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  Add a `music{}` authoring surface for scores, staves, measures, voices, rhythm,
+  pitch, articulations, and metadata, with MusicXML as the first interchange
+  target and MEI/LilyPond/ABC adapters deferred until the core model is stable.
+- **Acceptance-criteria:**
+  - [ ] Minimal score syntax lowers to a typed music IR.
+  - [ ] Export to MusicXML 4.0 validates against the official schema.
+  - [ ] Import/export round-trip preserves pitch, duration, measure, staff, and title metadata for baseline fixtures.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/05_design/all_regions.md`
+- **Notes:** Do not model full engraving semantics as SDN.
+
+---
+
+### FR-COMPILER-009 — Add bim{} and city{} standards bindings
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler + domain library
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  Add BIM and city-scale authoring surfaces that bind authored objects to IFC,
+  bSDD, gbXML, and CityGML identities/properties before attempting deep geometry
+  or simulation semantics.
+- **Acceptance-criteria:**
+  - [ ] `bim{}` can define building, level, space, wall, material, and property-set bindings.
+  - [ ] `city{}` can define city object identity, level-of-detail metadata, and CityGML target mapping.
+  - [ ] IFC/bSDD identifiers are explicit and validated against cached dictionaries or fixtures.
+  - [ ] gbXML and CityGML exports have conformance fixtures.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/05_design/all_regions.md`
+- **Notes:** External anchors: IFC 4.3 / ISO 16739-1:2024, bSDD, gbXML, CityGML 3.0.
+
+---
+
+### FR-COMPILER-010 — Add cad{} parametric authoring and STEP AP242 export
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex / all-regions research session
+- **Target:** compiler + geometry/domain library
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Add a `cad{}` authoring surface for parametric parts, assemblies, constraints,
+  tolerances/PMI, and manufacturing metadata, with STEP AP242 as the industrial
+  exchange target.
+- **Acceptance-criteria:**
+  - [ ] Minimal parts support primitives, transforms, holes, fillets, and parameters.
+  - [ ] Assemblies can express references and constraints.
+  - [ ] STEP AP242 export validates against representative fixtures.
+  - [ ] OpenSCAD/CadQuery adapter strategy is documented before implementation.
+- **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
+- **Related-design-doc:** `doc/05_design/all_regions.md`
+- **Notes:** CAD requires explicit geometry/topology/kernel design; raw SDN is not sufficient.

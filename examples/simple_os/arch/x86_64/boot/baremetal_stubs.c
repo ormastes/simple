@@ -447,7 +447,7 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 64 MB
+ * 4. Heap allocator — bump allocator, 128 MB
  *
  * NOTE: keep this within the QEMU scenario RAM budget minus a safety
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
@@ -460,10 +460,10 @@ void rt_print_value(RuntimeValue val);
  * keep this arena large enough for those flows.
  * =================================================================== */
 
-static const size_t BAREMETAL_HEAP_SIZE = 256ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 192ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_SIZE = 128ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 96ULL * 1024ULL * 1024ULL;
 
-static char   _heap[256ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[128ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)

@@ -62,12 +62,13 @@ _entry32:
      * PML4[0] -> PDPT
      * PDPT[0..3] -> PD[0..3]  (4 GiB identity map)
      * PD[0..2047] -> 2 MiB identity pages
+     * PML4[1]/PDPT[256] -> high PD for OVMF/q35 MMIO near 0xC000000000
      * Maps full 4 GiB to cover VGA framebuffer at 0xFD000000.
      * ------------------------------------------------------------------ */
 
-    /* Zero the page-table area (PML4 4K + PDPT 4K + PD 16K = 24 KiB) */
+    /* Zero the page-table area (PML4 4K + PDPT 4K + PD 16K + high PDPT/PD 8K = 32 KiB) */
     movl $boot_pml4, %edi
-    movl $6144, %ecx          /* 24576 / 4 = 6144 dwords */
+    movl $8192, %ecx          /* 32768 / 4 = 8192 dwords */
     xorl %eax, %eax
     rep stosl
 
@@ -113,6 +114,31 @@ _entry32:
     addl $8, %edi
     decl %ecx
     jnz .fill_pd
+
+    /* OVMF on q35 can assign PCIe MMIO BARs above 4 GiB. Identity-map
+     * 0xC000000000..0xC03FFFFFFF so the early NVMe C path can touch BAR0
+     * before the full VMM installs dynamic MMIO mappings. */
+    movl $boot_pml4, %edi
+    movl $boot_high_pdpt, %eax
+    orl  $0x03, %eax
+    movl %eax, 8(%edi)         /* PML4[1] */
+
+    movl $boot_high_pdpt, %edi
+    movl $boot_high_pd, %eax
+    orl  $0x03, %eax
+    movl %eax, 2048(%edi)      /* PDPT[256] */
+
+    movl $boot_high_pd, %edi
+    movl $0x00000083, %eax     /* low 32 bits: 0xC000000000 | PS | RW | P */
+    movl $0x000000c0, %edx     /* high 32 bits */
+    movl $512, %ecx
+.fill_high_pd:
+    movl %eax, (%edi)
+    movl %edx, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    decl %ecx
+    jnz .fill_high_pd
 
     /* ------------------------------------------------------------------
      * Enable long mode
@@ -533,3 +559,7 @@ boot_pdpt:
     .space 4096
 boot_pd:
     .space 16384   /* 2048 entries * 8 bytes = 16 KiB for 4 GiB identity map */
+boot_high_pdpt:
+    .space 4096
+boot_high_pd:
+    .space 4096    /* 512 entries * 8 bytes = 4 KiB for 1 GiB high-MMIO map */

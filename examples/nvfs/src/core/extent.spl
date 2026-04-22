@@ -3,14 +3,107 @@
 # CoW tree keyed by (object_id, logical_off). Implements
 # std.fs.nvfs.extent_map.ExtentMap.
 
+struct ExtentRow:
+    """One logical-to-physical extent mapping."""
+    object_id:   i64
+    logical_off: i64
+    arena_id:    i64
+    phys_off:    i64
+    length:      i64
+    generation:  i64
+
+var _extent_rows: [ExtentRow] = []
+
+fn _extent_end(row: ExtentRow) -> i64:
+    row.logical_off + row.length
+
+fn _ranges_overlap(a_start: i64, a_len: i64, b_start: i64, b_len: i64) -> bool:
+    val a_end = a_start + a_len
+    val b_end = b_start + b_len
+    a_start < b_end and b_start < a_end
+
 fn extent_lookup_impl(object_id: i64, logical_off: i64) -> i64:
     """Return extent arena_id, -1 if no mapping."""
-    pass_todo
+    var i = 0
+    while i < _extent_rows.len() as i64:
+        val row = _extent_rows[i]
+        if row.object_id == object_id:
+            if logical_off >= row.logical_off and logical_off < _extent_end(row):
+                return row.arena_id
+        i = i + 1
+    -1
 
 fn extent_insert_impl(object_id: i64, logical_off: i64, arena_id: i64, phys_off: i64, length: i64, generation: i64) -> bool:
     """Insert one extent row."""
-    pass_todo
+    if length <= 0:
+        return false
+
+    val new_end = logical_off + length
+    var next_rows: [ExtentRow] = []
+    var i = 0
+    while i < _extent_rows.len() as i64:
+        val row = _extent_rows[i]
+        val row_end = _extent_end(row)
+        if row.object_id != object_id or not _ranges_overlap(row.logical_off, row.length, logical_off, length):
+            next_rows.push(row)
+        else:
+            if row.logical_off < logical_off:
+                next_rows.push(ExtentRow(
+                    object_id:   row.object_id,
+                    logical_off: row.logical_off,
+                    arena_id:    row.arena_id,
+                    phys_off:    row.phys_off,
+                    length:      logical_off - row.logical_off,
+                    generation:  row.generation
+                ))
+            if row_end > new_end:
+                next_rows.push(ExtentRow(
+                    object_id:   row.object_id,
+                    logical_off: new_end,
+                    arena_id:    row.arena_id,
+                    phys_off:    row.phys_off + (new_end - row.logical_off),
+                    length:      row_end - new_end,
+                    generation:  row.generation
+                ))
+        i = i + 1
+
+    next_rows.push(ExtentRow(
+        object_id:   object_id,
+        logical_off: logical_off,
+        arena_id:    arena_id,
+        phys_off:    phys_off,
+        length:      length,
+        generation:  generation
+    ))
+    _extent_rows = next_rows
+    true
 
 fn extent_truncate_impl(object_id: i64, new_length: i64) -> bool:
     """Truncate the object to `new_length`; CoW the trailing extent."""
-    pass_todo
+    if new_length < 0:
+        return false
+
+    var next_rows: [ExtentRow] = []
+    var i = 0
+    while i < _extent_rows.len() as i64:
+        val row = _extent_rows[i]
+        if row.object_id != object_id:
+            next_rows.push(row)
+        else:
+            val row_end = _extent_end(row)
+            if row.logical_off < new_length:
+                if row_end <= new_length:
+                    next_rows.push(row)
+                else:
+                    next_rows.push(ExtentRow(
+                        object_id:   row.object_id,
+                        logical_off: row.logical_off,
+                        arena_id:    row.arena_id,
+                        phys_off:    row.phys_off,
+                        length:      new_length - row.logical_off,
+                        generation:  row.generation
+                    ))
+        i = i + 1
+
+    _extent_rows = next_rows
+    true

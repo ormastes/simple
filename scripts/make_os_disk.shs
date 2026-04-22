@@ -143,6 +143,62 @@ cat > "$TMPDIR/boot/kernel.elf" << 'EOFBOOT'
 arch = "x86_64"
 EOFBOOT
 
+stage_uefi_boot_media() {
+    if [ -z "${SIMPLEOS_UEFI_KERNEL:-}" ]; then
+        return 0
+    fi
+    if [ ! -f "$SIMPLEOS_UEFI_KERNEL" ]; then
+        echo "[make_os_disk] ERROR: SIMPLEOS_UEFI_KERNEL does not exist: $SIMPLEOS_UEFI_KERNEL"
+        return 1
+    fi
+
+    mkdir -p "$TMPDIR/EFI/BOOT" "$TMPDIR/boot/grub" "build/os/esp/EFI/BOOT"
+    cp "$SIMPLEOS_UEFI_KERNEL" "$TMPDIR/boot/kernel.elf"
+    cat > "$TMPDIR/boot/grub/grub.cfg" << 'EOFGRUB'
+serial --unit=0 --speed=115200
+terminal_input serial console
+terminal_output serial console
+set timeout=0
+set default=0
+
+menuentry "SimpleOS desktop" {
+    search --no-floppy --file --set=root /BOOT/KERNEL.ELF
+    multiboot /BOOT/KERNEL.ELF
+    boot
+}
+EOFGRUB
+
+    if command -v grub-mkstandalone >/dev/null 2>&1; then
+        if grub-mkstandalone -O x86_64-efi \
+            --modules="part_gpt part_msdos fat normal multiboot search search_fs_file serial terminal configfile" \
+            -o "$TMPDIR/EFI/BOOT/BOOTX64.EFI" \
+            "/boot/grub/grub.cfg=$TMPDIR/boot/grub/grub.cfg" >/dev/null 2>&1; then
+            cp "$TMPDIR/EFI/BOOT/BOOTX64.EFI" "build/os/esp/EFI/BOOT/BOOTX64.EFI"
+            echo "[make_os_disk] Seeded GRUB x86_64 UEFI fallback loader"
+            return 0
+        fi
+        echo "[make_os_disk] WARNING: grub-mkstandalone failed -- trying monolithic grubx64.efi fallback"
+    fi
+
+    for candidate in \
+        /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi \
+        /usr/share/grub/x86_64-efi/monolithic/grubx64.efi
+    do
+        if [ -f "$candidate" ]; then
+            cp "$candidate" "$TMPDIR/EFI/BOOT/BOOTX64.EFI"
+            cp "$candidate" "build/os/esp/EFI/BOOT/BOOTX64.EFI"
+            echo "[make_os_disk] Seeded monolithic GRUB x86_64 UEFI fallback loader"
+            return 0
+        fi
+    done
+
+    echo "[make_os_disk] ERROR: no x86_64 UEFI bootloader generator found"
+    echo "[make_os_disk] Install grub-efi-amd64-bin or provide SIMPLEOS_UEFI_BOOTLOADER."
+    return 1
+}
+
+stage_uefi_boot_media || exit 1
+
 cat > "$TMPDIR/etc/fstab" << 'EOFFSTAB'
 # SimpleOS filesystem table
 /dev/root / auto defaults 0 1

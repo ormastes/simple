@@ -1199,15 +1199,20 @@ fn desktop_uefi_bootloader_path() -> text:
             return candidate
     ""
 
+fn desktop_uefi_disk_image_path() -> text:
+    """Generated FAT32 image used by the desktop UEFI acceptance lane."""
+    simpleos_platform_disk_image_output("x86_64")
+
 fn desktop_uefi_boot_media_ready() -> bool:
     """True when the local disk image can be expected to boot under OVMF."""
-    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != ""
+    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != "" and rt_file_exists(desktop_uefi_disk_image_path())
 
 fn _x64_desktop_uefi_args() -> [text]:
     val fw = ovmf_code_path()
-    val img_path = desktop_disk_image_path()
+    val img_path = desktop_uefi_disk_image_path()
     var args: [text] = [
         "-drive", "if=pflash,format=raw,readonly=on,file={fw}",
+        "-global", "q35-pcihost.pci-hole64-size=0",
         "-drive", "file={img_path},if=none,id=uefidisk,format=raw",
         "-device", "nvme,serial=uefi-desktop,drive=uefidisk",
         "-netdev", "user,id=n0",
@@ -1225,7 +1230,7 @@ fn scenario_x64_desktop_uefi() -> QemuScenario:
         arch: Architecture.X86_64,
         machine: "q35",
         cpu: "qemu64",
-        memory: "768M",
+        memory: "2048M",
         qemu_extra: _x64_desktop_uefi_args(),
         gui_mode: false,
         description: "x86_64 SimpleOS desktop UEFI/OVMF disk boot acceptance lane"
@@ -1398,6 +1403,9 @@ fn desktop_disk_image_path() -> text:
 fn desktop_disk_make_script_args(img_path: text) -> [text]:
     ["scripts/make_os_disk.shs", "64", img_path]
 
+fn desktop_uefi_disk_make_script_args(img_path: text, kernel_path: text) -> [text]:
+    ["-c", "SIMPLEOS_UEFI_KERNEL=\"$1\" exec /bin/sh scripts/make_os_disk.shs 64 \"$2\" \"\" x86_64", "simpleos-uefi-disk", kernel_path, img_path]
+
 fn fs_test_disk_image_path() -> text:
     simpleos_platform_disk_image_output("x86_64")
 
@@ -1481,6 +1489,30 @@ fn ensure_desktop_disk_image() -> bool:
             print "[ensure_desktop_disk_image] using legacy disk image {legacy_img}"
             return true
         print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
+        return false
+    true
+
+fn ensure_desktop_uefi_boot_image(kernel_path: text) -> bool:
+    """Rebuild the desktop UEFI FAT32 image with the compiled kernel and EFI fallback loader."""
+    if ovmf_code_path() == "":
+        print "[ensure_desktop_uefi_boot_image] OVMF firmware not found; set SIMPLEOS_OVMF_CODE to an x86_64 OVMF_CODE.fd path"
+        return false
+    if not rt_file_exists(kernel_path):
+        print "[ensure_desktop_uefi_boot_image] kernel image not found: {kernel_path}"
+        return false
+    val img_path = desktop_uefi_disk_image_path()
+    print "[ensure_desktop_uefi_boot_image] rebuilding {img_path} with UEFI kernel {kernel_path}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", desktop_uefi_disk_make_script_args(img_path, kernel_path), 120000)
+    if stdout != "":
+        print "[ensure_desktop_uefi_boot_image] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_desktop_uefi_boot_image] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_desktop_uefi_boot_image] make_os_disk.shs exited {exit_code}"
+        return false
+    if not desktop_uefi_boot_media_ready():
+        print "[ensure_desktop_uefi_boot_image] UEFI boot media was not materialized"
         return false
     true
 
@@ -1778,7 +1810,10 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
         if desktop_uefi_bootloader_path() == "":
             print "[ensure_scenario_media] UEFI desktop bootloader not found; set SIMPLEOS_UEFI_BOOTLOADER to EFI/BOOT/BOOTX64.EFI"
             return false
-        return ensure_desktop_disk_image()
+        if not rt_file_exists(desktop_uefi_disk_image_path()):
+            print "[ensure_scenario_media] UEFI desktop disk image missing; call ensure_desktop_uefi_boot_image(kernel_path) first"
+            return false
+        return true
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
         return ensure_arm_fs_exec_disk_image(scenario.arch)
     if scenario.name == "riscv64-virtio-fat32-smf" or scenario.name == "riscv32-virtio-fat32-smf":

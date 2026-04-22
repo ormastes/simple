@@ -1,7 +1,7 @@
 # bench/spostgre_wal_append.spl — spostgre M2 WAL primitive benchmarks.
 #
 # Measures algorithmic cost of WAL append, group-commit fence, and tail-recover
-# operations via the in-process nvfs_shim (no real NVFS or NVMe involved).
+# operations via the spostgre in-process nvfs_shim (no real NVME involved).
 #
 # DISCLAIMER: These numbers DO NOT reflect real SSD hardware. spostgre M2 WAL
 # runs against an in-process byte-vector arena (nvfs_shim). They measure CPU
@@ -19,66 +19,26 @@
 #   W2: 100  × wal_commit_group (simulated FUA fence)
 #   W3: 10   × wal_recover_tail over 1000 records
 #
-# NOTE: use examples.spostgre.src.engine.wal.* is NOT resolvable from main-repo
-# bench/ runner (separate git submodule). Scenarios run against a local WAL shim
-# that mirrors the M2 WalWriter API exactly (FR-BENCH-WAL-001).
+# The scenarios use the real spostgre M2 WalWriter surface. Durability remains
+# simulated by the in-process NVFS shim, so this is a CPU/framing benchmark.
 #
 # Run: bin/simple run bench/spostgre_wal_append.spl
 
 use bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+use examples.spostgre.src.engine.wal.{WalWriter, wal_writer_append,
+                                      wal_writer_commit_group, wal_recover_tail}
+use std.spostgre_if.types.{Lsn, TxnId}
 
-# ── Local WAL shim ────────────────────────────────────────────────────────────
-# Mirrors examples/spostgre/src/engine/wal.spl M2 WalWriter API.
-# FR-BENCH-WAL-001: replace with real use examples.spostgre.src.engine.wal.*
-#   once submodule import resolution is supported from main-repo bench/ runner.
+# ── WAL helper payload ────────────────────────────────────────────────────────
 
-class WalRecord:
-    # pass_todo: FR-BENCH-WAL-001 — use real WalRecord from spostgre wal.spl.
-    lsn: i64
-    crc32: i64
-    body_len: i64
-
-class WalState:
-    # pass_todo: FR-BENCH-WAL-001 — use real WalState / WalWriter from wal.spl.
-    records: [WalRecord]
-    total_bytes: i64
-    fua_fence_count: i64
-
-fn shim_wal_create() -> WalState:
-    WalState(records: [], total_bytes: 0, fua_fence_count: 0)
-
-fn shim_wal_append(wal: WalState, body_len: i64) -> WalState:
-    # pass_todo: FR-BENCH-WAL-001 — real append writes CRC32C-framed record to
-    #   nvfs arena aligned to preferred_write_granule.
-    # Proxy: bump LSN = total_bytes + header(16) + body_len.
-    val lsn: i64 = wal.total_bytes + 16 + body_len
-    # Cheap CRC32 proxy: XOR of lsn + body_len.
-    val crc: i64 = lsn + body_len
-    var recs: [WalRecord] = wal.records
-    recs.push(WalRecord(lsn: lsn, crc32: crc, body_len: body_len))
-    WalState(records: recs, total_bytes: lsn, fua_fence_count: wal.fua_fence_count)
-
-fn shim_wal_commit_group(wal: WalState) -> WalState:
-    # pass_todo: FR-BENCH-WAL-001 — real group-commit issues NVMe FUA write
-    #   (Write command with FUA bit set) + waits for completion queue entry.
-    #   Latency on real NVMe ≈ 50–200µs; proxy is ~0 ticks.
-    WalState(records: wal.records, total_bytes: wal.total_bytes, fua_fence_count: wal.fua_fence_count + 1)
-
-fn shim_wal_recover_tail(wal: WalState) -> i64:
-    # pass_todo: FR-BENCH-WAL-001 — real recover_tail walks arena sequentially,
-    #   checks CRC32C per record, stops at first bad CRC or torn record.
-    # Proxy: sequential scan of records list, count good records.
-    var good: i64 = 0
-    val n: i64 = wal.records.len() as i64
-    var k: i64 = 0
-    while k < n:
-        val rec: WalRecord = wal.records[k as i32]
-        # Validate proxy CRC: same formula as shim_wal_append.
-        val expected: i64 = rec.lsn + rec.body_len
-        if rec.crc32 == expected:
-            good = good + 1
-        k = k + 1
-    good
+fn wal_payload_256() -> [u8]:
+    """Build the fixed 256-byte record body used by all scenarios."""
+    var payload: [u8] = []
+    var i: i64 = 0
+    while i < 256:
+        payload.push((i and 255) as u8)
+        i = i + 1
+    payload
 
 # ── Inline sort + percentile (mirrors bench/lib/timing.spl) ──────────────────
 
@@ -132,13 +92,15 @@ fn _wresult(label: text, iters: i64, samples: [i64]) -> BenchResult:
 
 fn bench_wal_append() -> BenchResult:
     val iters: i64 = 1000
+    val payload: [u8] = wal_payload_256()
     var samples: [i64] = []
     var i: i64 = 0
     while i < iters:
-        var wal: WalState = shim_wal_create()
+        var writer: WalWriter = WalWriter.new()
         val t0: i64 = bench_now_ns()
-        wal = shim_wal_append(wal, 256)
+        val (_lsn, writer2) = wal_writer_append(writer, TxnId(id: 1), payload)
         val t1: i64 = bench_now_ns()
+        writer = writer2
         samples.push(t1 - t0)
         i = i + 1
     _wresult("wal_append_256B_x1000", iters, samples)
@@ -147,17 +109,21 @@ fn bench_wal_append() -> BenchResult:
 
 fn bench_wal_commit_group() -> BenchResult:
     val iters: i64 = 100
+    val payload: [u8] = wal_payload_256()
     # Pre-populate with 10 records per group.
     var samples: [i64] = []
     var i: i64 = 0
     while i < iters:
-        var wal: WalState = shim_wal_create()
+        var writer: WalWriter = WalWriter.new()
+        var lsn_high: Lsn = Lsn.zero()
         var j: i64 = 0
         while j < 10:
-            wal = shim_wal_append(wal, 256)
+            val (lsn, writer2) = wal_writer_append(writer, TxnId(id: j + 1), payload)
+            lsn_high = lsn
+            writer = writer2
             j = j + 1
         val t0: i64 = bench_now_ns()
-        wal = shim_wal_commit_group(wal)
+        writer = wal_writer_commit_group(writer, lsn_high)
         val t1: i64 = bench_now_ns()
         samples.push(t1 - t0)
         i = i + 1
@@ -167,17 +133,19 @@ fn bench_wal_commit_group() -> BenchResult:
 
 fn bench_wal_recover_tail() -> BenchResult:
     val iters: i64 = 10
+    val payload: [u8] = wal_payload_256()
     # Pre-build a 1000-record WAL.
-    var base_wal: WalState = shim_wal_create()
+    var base_writer: WalWriter = WalWriter.new()
     var fill: i64 = 0
     while fill < 1000:
-        base_wal = shim_wal_append(base_wal, 256)
+        val (_lsn, writer2) = wal_writer_append(base_writer, TxnId(id: fill + 1), payload)
+        base_writer = writer2
         fill = fill + 1
     var samples: [i64] = []
     var i: i64 = 0
     while i < iters:
         val t0: i64 = bench_now_ns()
-        val _good = shim_wal_recover_tail(base_wal)
+        val _records = wal_recover_tail(base_writer.arena_id)
         val t1: i64 = bench_now_ns()
         samples.push(t1 - t0)
         i = i + 1
@@ -187,9 +155,8 @@ fn bench_wal_recover_tail() -> BenchResult:
 
 fn main():
     print "=== spostgre WAL append benchmark ==="
-    print "DISCLAIMER: in-process shim, NOT real NVFS/NVMe/FUA. Ticks = loop-counter proxy."
-    print "Real wal_commit_group latency on NVMe: 50-200us. Shim measures framing cost only."
-    print "FR-BENCH-WAL-001: swap shim for real examples.spostgre.src.engine.wal.* import."
+    print "DISCLAIMER: real spostgre WalWriter over in-process NVFS shim, NOT real NVME/FUA."
+    print "Real wal_commit_group latency on NVME: 50-200us. Shim measures framing cost only."
     print ""
 
     val r1: BenchResult = bench_wal_append()
