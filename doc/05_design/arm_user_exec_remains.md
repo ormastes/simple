@@ -9,6 +9,8 @@ Date: 2026-04-22
 - ARM64 fs-exec uses a direct-load arena root in early boot and stages ELF PT_LOAD bytes into that arena through the ARM runtime helper. This is intentionally a bounded acceptance bridge, not the final user-mode memory design.
 - ARM64 context save/restore/switch methods call runtime ABI hooks so HAL users have a concrete path instead of Simple-level placeholders.
 - ARM64 process-image construction keeps the original VFS byte array in the unchecked freestanding path and records scalar ELF header fields because aggregate `ElfImage`/segment readback is not yet reliable there. The direct-load mapper uses the scalar ELF64 program-header path to stage PT_LOAD contents, creates an ARM64 user page-table image for the PT_LOAD virtual pages, probes TTBR0_EL1 with immediate restore when the MMU is off, resolves the task context entry to the staged physical address, verifies the page-table translation for that entry, and byte-checks that the staged entry matches the file-backed ELF source.
+- ARM64 uses the same high-level user-entry bridge shape as x86: arch code asks the scheduler for a handoff-ready user task and calls one runtime helper with entry, stack, status, and address-space root. In the current ARM64 fs-exec closure the helper is a probe because the loaded proof ELF immediately executes `svc #0` and the ARM64 syscall trap runtime is not ready.
+- x86 and ARM64 share `Scheduler.get_user_handoff_task(pid_hint)` for user-entry task selection.
 - ARM32 keeps the existing VMM/synthetic behavior to avoid regressing the fragile trace-based lane.
 
 ## Acceptance
@@ -21,12 +23,14 @@ Date: 2026-04-22
 - ARM64 QEMU must show the bootstrap user task entry was mapped to the direct-load arena.
 - ARM64 QEMU must show the direct-load entry page-table translation verified.
 - ARM64 QEMU must show the direct-load entry bytes verified against the loaded filesystem image.
+- ARM64 QEMU must show the user-entry handoff probe succeeded.
 - ARM64 QEMU must not show the old `synthetic address space` line for the fs-exec path.
 - ARM32 QEMU must keep the existing trace-marker acceptance passing.
 
 ## Follow-up
 
 - Activate the verified ARM64 user page table while SCTLR_EL1.M is enabled after kernel mappings and rollback/fault behavior are proven, then replace the direct physical task entry with normal ELF virtual entry once exception return is ready.
+- Add the ARM64 SVC/trap runtime needed by the proof ELF before turning the handoff probe into a noreturn `eret` path.
 - Fix freestanding ARM64 aggregate `ElfImage` and `UserLoadSegment` readback so the shared segment mapper can replace the scalar entry/PT_LOAD direct-load bridge.
 - Replace ARM64 runtime context hook fallback with a privileged register restore path that activates the task address space and enters EL0 with `eret`.
 - Stabilize ARM32 text and return ABI before tightening ARM32 acceptance beyond trace markers.
