@@ -359,6 +359,86 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("narrow <= resize(signed(wide), 32);"))
         check(vhdl.contains("result_out <= narrow;"))
 
+    it "compiles typed bool casts and shift counts":
+        val backend = make_backend()
+        val u32 = MirType(kind: MirTypeKind.U32)
+        val u8 = MirType(kind: MirTypeKind.U8)
+
+        val locals = [
+            make_arg_local(0, 0, "data", u32),
+            make_arg_local(1, 1, "shamt_u", u8),
+            make_arg_local(2, 2, "shamt_s", make_i32()),
+            make_arg_local(3, 3, "flag", make_bool()),
+            make_return_local(4, u32),
+            make_temp_local(5, "flag_from_data", make_bool()),
+            make_temp_local(6, "count_from_flag", u8),
+            make_temp_local(7, "shl_const", u32),
+            make_temp_local(8, "shl_signal", u32),
+            make_temp_local(9, "shr_signed", u32)
+        ]
+
+        val int_to_bool = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 5),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                make_bool()
+            ),
+            span: empty_span()
+        )
+        val bool_to_unsigned = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 6),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                u8
+            ),
+            span: empty_span()
+        )
+        val shl_const = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Shl,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(3), u8))
+            ),
+            span: empty_span()
+        )
+        val shl_signal = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 8),
+                MirBinOp.Shl,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val shr_signed = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 9),
+                MirBinOp.Shr,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [int_to_bool, bool_to_unsigned, shl_const, shl_signal, shr_signed],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 9)))))
+        )
+        val func = make_function("typed_ops", [u32, u8, make_i32(), make_bool()], u32, locals, [block])
+        val module = make_module("typed_ops_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for typed casts/shifts")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("flag_from_data <= '1' when data /= to_unsigned(0, 32) else '0';"))
+        check(vhdl.contains("count_from_flag <= to_unsigned(1, 8) when flag = '1' else to_unsigned(0, 8);"))
+        check(vhdl.contains("shl_const <= shift_left(data, 3);"))
+        check(vhdl.contains("shl_signal <= shift_left(data, to_integer(shamt_u));"))
+        check(vhdl.contains("shr_signed <= shift_right(data, to_integer(unsigned(shamt_s)));"))
+
     it "compiles remainder and bitwise not operations":
         val backend = make_backend()
 
