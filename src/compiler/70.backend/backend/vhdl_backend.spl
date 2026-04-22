@@ -569,6 +569,50 @@ class VhdlBackend:
                     return Err(expr_result.unwrap_err())
                 self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
 
+            case Aggregate(dest, kind, operands):
+                val dest_type_result = self.local_type(dest)
+                if dest_type_result.is_err():
+                    return Err(dest_type_result.unwrap_err())
+                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap())
+                if aggregate_result.is_err():
+                    return Err(aggregate_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, aggregate_result.unwrap())
+
+            case GetField(dest, base, field):
+                val base_name_result = self.process_operand_to_vhdl(base)
+                if base_name_result.is_err():
+                    return Err(base_name_result.unwrap_err())
+                val field_name_result = self.field_name_for_operand(base, field)
+                if field_name_result.is_err():
+                    return Err(field_name_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, "{base_name_result.unwrap()}.{field_name_result.unwrap()}")
+
+            case SetField(base, field, value):
+                val field_name_result = self.field_name_for_operand(base, field)
+                if field_name_result.is_err():
+                    return Err(field_name_result.unwrap_err())
+                val value_name_result = self.process_operand_to_vhdl(value)
+                if value_name_result.is_err():
+                    return Err(value_name_result.unwrap_err())
+                match base.kind:
+                    case Copy(local) | Move(local):
+                        val kind_result = self.local_kind(local)
+                        if kind_result.is_err():
+                            return Err(kind_result.unwrap_err())
+                        val base_name_result = self.process_operand_to_vhdl(base)
+                        if base_name_result.is_err():
+                            return Err(base_name_result.unwrap_err())
+                        val target = "{base_name_result.unwrap()}.{field_name_result.unwrap()}"
+                        match kind_result.unwrap():
+                            case Var | Temp:
+                                builder.emit_var_assign(target, value_name_result.unwrap())
+                            case Return:
+                                builder.emit_signal_assign(target, value_name_result.unwrap())
+                            case Arg(_):
+                                return Err(self.backend_error("Synthesizable VHDL process cannot set field on argument local {local.id}"))
+                    case _:
+                        return Err(self.backend_error("Synthesizable VHDL process field set requires local base"))
+
             case UnaryOp(dest, op, operand):
                 val src_name_result = self.process_operand_to_vhdl(operand)
                 if src_name_result.is_err():
@@ -1066,6 +1110,47 @@ class VhdlBackend:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
             case _:
                 Err(self.backend_error("Unsupported VHDL aggregate kind: {kind}"))
+
+    fn aggregate_to_vhdl_process(kind: AggregateKind, operands: [MirOperand], dest_type: MirType) -> Result<text, CompileError>:
+        match kind:
+            case Struct(symbol):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Struct(fields):
+                        if operands.len() != fields.len():
+                            return Err(self.backend_error("Struct aggregate {type_def.name} expects {fields.len()} operands, got {operands.len()}"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.process_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("{fields[idx].name} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Aggregate Struct target {type_def.name} is not a struct type"))
+            case Array(_):
+                match dest_type.kind:
+                    case Array(_, size):
+                        if operands.len() != size:
+                            return Err(self.backend_error("Array aggregate expects {size} operands, got {operands.len()}"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.process_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("{idx} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
+            case _:
+                Err(self.backend_error("Unsupported VHDL process aggregate kind: {kind}"))
 
     fn field_name_for_operand(base: MirOperand, field: i64) -> Result<text, CompileError>:
         val type_result = self.operand_type(base)

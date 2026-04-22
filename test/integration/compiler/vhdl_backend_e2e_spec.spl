@@ -710,6 +710,86 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("point_sig <= (x => a, y => b);"))
         check(vhdl.contains("result_out <= point_sig;"))
 
+    it "compiles branch-local struct aggregates inside combinational process":
+        val backend = make_resolved_backend()
+        val point_symbol = SymbolId(id: 44)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            MirFieldDef(name: "x", type_: make_i32()),
+            MirFieldDef(name: "y", type_: make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = MirTypeDef(name: "BranchPoint", kind: MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, point_type),
+            make_temp_local(4, "then_point", point_type),
+            make_temp_local(5, "else_point", point_type)
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 4),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 5),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+
+        val func = make_function("select_point", [make_bool(), make_i32(), make_i32()], point_type, locals, [entry, then_block, else_block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "branch_point_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for branch-local struct aggregate")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        check(compiled.package_vhdl.unwrap().contains("type BranchPoint is record"))
+        val vhdl = compiled.vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("variable v_then_point : BranchPoint;"))
+        check(vhdl.contains("v_then_point := (x => a, y => b);"))
+        check(vhdl.contains("result_out <= v_then_point;"))
+        check(vhdl.contains("v_else_point := (x => b, y => a);"))
+        check(vhdl.contains("result_out <= v_else_point;"))
+
     it "compiles struct field get and set":
         val backend = make_backend()
         val point_symbol = SymbolId(id: 43)
