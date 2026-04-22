@@ -1,0 +1,71 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, driver-framework, display, dma
+# @cover src/os/drivers/gpu/display_boundary.spl 90%
+# @cover src/os/drivers/framebuffer/fb_driver.spl 30%
+# @cover src/os/drivers/virtio/virtio_gpu.spl 20%
+# @cover src/lib/nogc_sync_mut/io/dma.spl 30%
+
+use std.spec.{describe, context, it, expect}
+use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.gpu.display_boundary.{
+    framebuffer_mmio_summary,
+    virtio_gpu_dma_summary,
+    display_select_summary,
+    virtio_gpu_transfer_buffer_valid
+}
+
+fn dma(policy: DmaCachePolicy, addr: u64) -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: 0x1000,
+        host_phys_addr: addr,
+        device_addr: addr,
+        byte_len: 4096,
+        cache_policy: policy,
+        owner: DmaOwner(task_id: 5u64, bdf_bus: 0, bdf_device: 2, bdf_function: 0),
+        allocation_id: 88u64
+    )
+
+describe "FR-DRIVER-0011 display acceleration boundary":
+
+    context "framebuffer MMIO":
+
+        it "tracks and flushes only dirty framebuffer rectangles":
+            var fb = FramebufferDriver.from_buffer(64, 32)
+            fb.fill_rect(8, 4, 10, 6, Color.red())
+            val dirty = fb.dirty_rect()
+            expect(dirty.valid).to_equal(true)
+            expect(dirty.x1).to_equal(8)
+            expect(dirty.y1).to_equal(4)
+            expect(dirty.x2).to_equal(18)
+            expect(dirty.y2).to_equal(10)
+            fb.flush_dirty_rects()
+            expect(fb.dirty_rect().valid).to_equal(false)
+
+        it "reports framebuffer-mmio as write-combining and non-executable":
+            val summary = framebuffer_mmio_summary(1024u32, 768u32)
+            expect(summary.backend_kind).to_equal("framebuffer-mmio")
+            expect(summary.flush_mode).to_equal("dirty-rect")
+            expect(summary.cache_policy).to_equal("write-combining")
+            expect(summary.dma_accelerated).to_equal(false)
+            expect(summary.executable_mapping).to_equal(false)
+
+    context "VirtIO-GPU DMA":
+
+        it "reports virtio-gpu-dma as the only DMA accelerated display backend":
+            val summary = virtio_gpu_dma_summary(true)
+            expect(summary.backend_kind).to_equal("virtio-gpu-dma")
+            expect(summary.dma_accelerated).to_equal(true)
+            expect(summary.executable_mapping).to_equal(false)
+
+        it "validates canonical shared DMA transfer buffers":
+            expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.Coherent, 0x4000u64))).to_equal(true)
+            expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.FlushRequired, 0x8000u64))).to_equal(true)
+            expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.WriteCombining, 0x8000u64))).to_equal(false)
+            expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.Coherent, 0x4100u64))).to_equal(false)
+
+    context "backend selection":
+
+        it "selects virtio-gpu-dma over framebuffer-mmio when GPU is present":
+            expect(display_select_summary(true).backend_kind).to_equal("virtio-gpu-dma")
+            expect(display_select_summary(false).backend_kind).to_equal("framebuffer-mmio")

@@ -456,7 +456,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
         args.push(source)
     args.push("--backend")
     args.push(backend_name)
-    if _is_arm_fs_exec_target(target):
+    if _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target):
         args.push("--timeout")
         args.push("180")
     args.push("--entry-closure")
@@ -575,6 +575,10 @@ fn _build_sources(target: OsTarget) -> [text]:
         return ["src/os", "src/lib", "examples/simple_os"]
     if _is_fs_wrapper_target(target):
         return ["src/os", "src/lib", "examples/simple_os"]
+    if _is_riscv64_fs_exec_target(target):
+        return ["examples/simple_os/arch/riscv64"]
+    if _is_riscv32_fs_exec_target(target):
+        return ["examples/simple_os/arch/riscv32"]
     ["src", "examples"]
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
@@ -586,6 +590,8 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_BOOT_MINIMAL=1")
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
+    if _is_riscv_fs_exec_target(target):
+        envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _is_desktop_wrapper_target(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
     if objcopy_prefix != "":
@@ -601,6 +607,8 @@ fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
         rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
         rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
         rt_env_set("SIMPLE_LIB", "{cwd}/src")
+    if _is_riscv_fs_exec_target(target):
+        rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
     if _is_desktop_wrapper_target(target):
         rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
     if objcopy_prefix != "":
@@ -632,6 +640,17 @@ fn _is_fs_wrapper_target(target: OsTarget) -> bool:
 fn _is_arm_fs_exec_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/arm64/fs_exec_entry.spl" or
         target.entry == "examples/simple_os/arch/arm32/fs_exec_entry.spl"
+
+fn _is_riscv64_fs_exec_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/riscv64/smoke_entry.spl" and
+        target.output == "build/os/simpleos_riscv64_smf_fs.elf"
+
+fn _is_riscv32_fs_exec_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/riscv32/smoke_entry.spl" and
+        target.output == "build/os/simpleos_riscv32_smf_fs.elf"
+
+fn _is_riscv_fs_exec_target(target: OsTarget) -> bool:
+    _is_riscv64_fs_exec_target(target) or _is_riscv32_fs_exec_target(target)
 
 # ===========================================================================
 # QEMU Command Construction
@@ -1038,6 +1057,32 @@ fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
         description: "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media"
     )
 
+fn scenario_riscv64_virtio_fat32_smf() -> QemuScenario:
+    """RV64 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
+    QemuScenario(
+        name: "riscv64-virtio-fat32-smf",
+        arch: Architecture.Riscv64,
+        machine: "virt",
+        cpu: "rv64",
+        memory: "512M",
+        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64),
+        gui_mode: false,
+        description: "RV64 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media"
+    )
+
+fn scenario_riscv32_virtio_fat32_smf() -> QemuScenario:
+    """RV32 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
+    QemuScenario(
+        name: "riscv32-virtio-fat32-smf",
+        arch: Architecture.Riscv32,
+        machine: "virt",
+        cpu: "rv32",
+        memory: "256M",
+        qemu_extra: ["-bios", "none"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv32),
+        gui_mode: false,
+        description: "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media"
+    )
+
 fn scenario_x64_full_stack() -> QemuScenario:
     """x86_64 NVMe + VirtIO-net + experimental VirtIO-GPU integration lane.
 
@@ -1100,6 +1145,16 @@ fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
     val img = arm_fs_exec_disk_image_path(arch)
     ["-global", "virtio-mmio.force-legacy=false", "-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
 
+fn riscv_fs_exec_disk_image_path(arch: Architecture) -> text:
+    match arch:
+        Architecture.Riscv64: simpleos_platform_disk_image_output("riscv64")
+        Architecture.Riscv32: simpleos_platform_disk_image_output("riscv32")
+        _: "build/os/fat32-riscv.img"
+
+fn _riscv_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
+    val img = riscv_fs_exec_disk_image_path(arch)
+    ["-global", "virtio-mmio.force-legacy=false", "-drive", "file={img},if=none,id=rvdisk,format=raw", "-device", "virtio-blk-device,drive=rvdisk"]
+
 fn get_all_scenarios() -> [QemuScenario]:
     """Returns all defined QEMU scenarios."""
     [
@@ -1115,6 +1170,8 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_x64_nvme_fat32(),
         scenario_arm64_virtio_fat32_smf(),
         scenario_arm32_virtio_fat32_smf(),
+        scenario_riscv64_virtio_fat32_smf(),
+        scenario_riscv32_virtio_fat32_smf(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
         scenario_x64_desktop_disk()
@@ -1135,6 +1192,10 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
         return get_arm64_fs_exec_target()
     if scenario.name == "arm32-virtio-fat32-smf":
         return get_arm32_fs_exec_target()
+    if scenario.name == "riscv64-virtio-fat32-smf":
+        return get_riscv64_fs_exec_target()
+    if scenario.name == "riscv32-virtio-fat32-smf":
+        return get_riscv32_fs_exec_target()
     if scenario.name == "x64-desktop-test":
         return get_desktop_browser_target()
     if scenario.name == "x64-desktop-disk":
@@ -1172,6 +1233,40 @@ fn get_arm32_fs_exec_target() -> OsTarget:
         qemu_memory: "384M",
         qemu_bios: "",
         qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
+        gui_mode: false
+    )
+
+fn get_riscv64_fs_exec_target() -> OsTarget:
+    """RV64 filesystem SMF acceptance target."""
+    OsTarget(
+        arch: Architecture.Riscv64,
+        entry: "examples/simple_os/arch/riscv64/smoke_entry.spl",
+        linker_script: "examples/simple_os/arch/riscv64/linker.ld",
+        target_triple: "riscv64-unknown-none",
+        output: "build/os/simpleos_riscv64_smf_fs.elf",
+        qemu_system: "qemu-system-riscv64",
+        qemu_machine: "virt",
+        qemu_cpu: "rv64",
+        qemu_memory: "512M",
+        qemu_bios: "default",
+        qemu_extra: _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64),
+        gui_mode: false
+    )
+
+fn get_riscv32_fs_exec_target() -> OsTarget:
+    """RV32 filesystem SMF acceptance target."""
+    OsTarget(
+        arch: Architecture.Riscv32,
+        entry: "examples/simple_os/arch/riscv32/smoke_entry.spl",
+        linker_script: "examples/simple_os/arch/riscv32/linker.ld",
+        target_triple: "riscv32-unknown-none",
+        output: "build/os/simpleos_riscv32_smf_fs.elf",
+        qemu_system: "qemu-system-riscv32",
+        qemu_machine: "virt",
+        qemu_cpu: "rv32",
+        qemu_memory: "256M",
+        qemu_bios: "none",
+        qemu_extra: _riscv_virtio_blk_exec_disk_args(Architecture.Riscv32),
         gui_mode: false
     )
 fn _desktop_release_version() -> text:
@@ -1360,6 +1455,29 @@ fn ensure_arm_fs_exec_disk_image(arch: Architecture) -> bool:
         return false
     true
 
+fn ensure_riscv_fs_exec_disk_image(arch: Architecture) -> bool:
+    """Ensure the RISC-V FAT32 image has SMF CLI and WM GUI acceptance fixtures."""
+    val img_path = riscv_fs_exec_disk_image_path(arch)
+    if rt_file_exists(img_path) and _riscv_fs_exec_disk_image_has_required_smf(img_path, arch):
+        return true
+    val arch_label = arch_display_name(arch)
+    print "[ensure_riscv_fs_exec_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs for {arch_label}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
+    if stdout != "":
+        print "[ensure_riscv_fs_exec_disk_image] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_riscv_fs_exec_disk_image] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_riscv_fs_exec_disk_image] make_os_disk.shs exited {exit_code}"
+        return false
+    if not rt_file_exists(img_path):
+        return false
+    if not _riscv_fs_exec_disk_image_has_required_smf(img_path, arch):
+        print "[ensure_riscv_fs_exec_disk_image] image exists but RISC-V SMF markers are missing"
+        return false
+    true
+
 fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
     val cmd =
         "if command -v mtype >/dev/null 2>&1; then " +
@@ -1381,6 +1499,20 @@ fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) 
         "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
         "else " +
         "grep -a -q '{marker}' \"{img_path}\" && grep -a -q 'SMF' \"{img_path}\"; " +
+        "fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn _riscv_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
+    val hello_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_HELLO_ELF" else: "SIMPLEOS_RISCV32_HELLO_ELF"
+    val gui_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_GUI_ELF" else: "SIMPLEOS_RISCV32_GUI_ELF"
+    val cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{hello_marker}' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q '{gui_marker}' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+        "else " +
+        "grep -a -q '{hello_marker}' \"{img_path}\" && grep -a -q '{gui_marker}' \"{img_path}\" && grep -a -q 'SMF' \"{img_path}\"; " +
         "fi"
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
@@ -1539,6 +1671,10 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
         return 60000
     if scenario.name == "arm32-virtio-fat32-smf":
         return 60000
+    if scenario.name == "riscv64-virtio-fat32-smf":
+        return 60000
+    if scenario.name == "riscv32-virtio-fat32-smf":
+        return 60000
     if scenario.name == "x64-desktop-test":
         return 120000
     if scenario.name == "x64-desktop-disk":
@@ -1553,6 +1689,8 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
         return ensure_desktop_disk_image()
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
         return ensure_arm_fs_exec_disk_image(scenario.arch)
+    if scenario.name == "riscv64-virtio-fat32-smf" or scenario.name == "riscv32-virtio-fat32-smf":
+        return ensure_riscv_fs_exec_disk_image(scenario.arch)
     true
 
 fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):

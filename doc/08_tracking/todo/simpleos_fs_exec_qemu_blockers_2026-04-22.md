@@ -18,16 +18,14 @@ Current live status after the NVFS/RISC-V continuation:
 - `scripts/qemu_riscv64.shs --nvfs-image` passes with the same in-guest NVFS
   marker read.
 - `bin/simple os test --scenario=arm64-virtio-fat32-smf` passes; the ARM64
-  acceptance bridge validates filesystem bytes and SMF image construction, then
-  reports the synthetic acceptance pid marker.
-- `bin/simple os test --scenario=arm32-virtio-fat32-smf` passes; ARM32 gates on
-  VFS init plus return from the spawn bridge because its freestanding text and
-  integer-return path remain less reliable than ARM64.
+  bridge validates filesystem bytes, builds the SMF-backed process image, and
+  registers it in the bootstrap scheduler with a real task id.
+- `bin/simple os test --scenario=arm32-virtio-fat32-smf` passes; ARM32 performs
+  scheduler registration inside VFS boot init while the loaded executable bytes
+  are still live, then emits the acceptance marker only after that path returns.
 
-Remaining production caveat: real ARM user-task scheduling from the constructed
-image is still out of scope for these acceptance lanes. A concurrent edit that
-reintroduced scheduler task creation failed with `create_user_task: no free
-slot`; the bridge is intentionally back at filesystem-byte/image acceptance.
+The previous `create_user_task: no free slot` blocker is fixed by the explicit
+bootstrap scheduler slot path `create_bootstrap_user_task_pid`.
 
 ## Fresh Verification Commands
 

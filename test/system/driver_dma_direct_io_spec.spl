@@ -1,0 +1,131 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, driver-framework, dma, direct-io, storage
+# @cover src/lib/nogc_sync_mut/fs_driver/direct_io.spl 80%
+# @cover src/lib/nogc_sync_mut/fs_driver/extension.spl 50%
+# @cover src/lib/nogc_sync_mut/io/dma.spl 50%
+# @cover src/os/drivers/nvme/nvme_driver.spl 20%
+# @cover src/os/drivers/virtio/virtio_blk.spl 20%
+
+use std.spec.{describe, context, it, expect}
+use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy, DmaReleaseRequest}
+use std.fs_driver.extension.{DirectIoExt}
+use std.fs_driver.direct_io.{
+    DIRECT_IO_READ,
+    DIRECT_IO_WRITE,
+    DIRECT_IO_TIMEOUT_CODE,
+    direct_io_read_request,
+    direct_io_write_request,
+    direct_io_submit,
+    direct_io_cleanup_allowed,
+    direct_io_benchmark_report
+}
+
+fn dma(byte_len: u64, device_addr: u64, alloc_id: u64) -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: 0x1000,
+        host_phys_addr: device_addr,
+        device_addr: device_addr,
+        byte_len: byte_len,
+        cache_policy: DmaCachePolicy.FlushRequired,
+        owner: DmaOwner(task_id: 44u64, bdf_bus: 0, bdf_device: 5, bdf_function: 0),
+        allocation_id: alloc_id
+    )
+
+fn make_direct_ext(bounce: bool) -> DirectIoExt:
+    DirectIoExt(
+        sector_alignment: 512,
+        file_alignment: 512,
+        max_io_bytes: 4096,
+        backend_tag: "nvme",
+        bounce_allowed: bounce
+    )
+
+fn release_req(size: u64, task: u64, alloc_id: u64, released: bool) -> DmaReleaseRequest:
+    DmaReleaseRequest(
+        requester_task_id: task,
+        requester_bdf_bus: 0,
+        requester_bdf_device: 5,
+        requester_bdf_function: 0,
+        requested_byte_len: size,
+        allocation_id: alloc_id,
+        already_released: released
+    )
+
+describe "FR-DRIVER-0010 DMA-backed file and block direct I/O":
+
+    context "explicit direct I/O requests":
+
+        it "submits aligned reads without buffered copy bytes":
+            val buf = dma(1024u64, 0x2000u64, 7u64)
+            val req = direct_io_read_request(1u64, 1024, buf, 100u32)
+            expect(req.op).to_equal(DIRECT_IO_READ)
+            match direct_io_submit(make_direct_ext(false), req):
+                Ok(result):
+                    expect(result.submitted).to_equal(true)
+                    expect(result.bytes).to_equal(1024u64)
+                    expect(result.backend_tag).to_equal("nvme")
+                    expect(result.status).to_equal("submitted")
+                    expect(result.buffered_copy_bytes).to_equal(0u64)
+                    expect(result.direct_dma_copy_bytes).to_equal(0u64)
+                    expect(result.cleanup_required).to_equal(true)
+                Err(_): expect(false).to_equal(true)
+
+        it "submits aligned writes with explicit DMA sync semantics":
+            val buf = dma(512u64, 0x3000u64, 8u64)
+            val req = direct_io_write_request(1u64, 0, buf, 100u32)
+            expect(req.op).to_equal(DIRECT_IO_WRITE)
+            match direct_io_submit(make_direct_ext(false), req):
+                Ok(result):
+                    expect(result.status).to_equal("submitted")
+                    expect(result.bytes).to_equal(512u64)
+                Err(_): expect(false).to_equal(true)
+
+    context "alignment and fallback":
+
+        it "rejects unaligned direct I/O when bounce buffering is disabled":
+            val buf = dma(1024u64, 0x2000u64, 9u64)
+            val req = direct_io_read_request(1u64, 7, buf, 100u32)
+            expect(direct_io_submit(make_direct_ext(false), req).is_err()).to_equal(true)
+
+        it "routes unaligned direct I/O through an explicit bounce result when enabled":
+            val buf = dma(1024u64, 0x2000u64, 10u64)
+            val req = direct_io_write_request(1u64, 7, buf, 100u32)
+            match direct_io_submit(make_direct_ext(true), req):
+                Ok(result):
+                    expect(result.status).to_equal("bounce-buffered")
+                    expect(result.buffered_copy_bytes).to_equal(1024u64)
+                    expect(result.direct_dma_copy_bytes).to_equal(1024u64)
+                Err(_): expect(false).to_equal(true)
+
+    context "timeout and cleanup":
+
+        it "reports bounded timeout as a transient direct I/O error":
+            val buf = dma(512u64, 0x4000u64, 11u64)
+            val req = direct_io_read_request(1u64, 0, buf, 0u32)
+            match direct_io_submit(make_direct_ext(false), req):
+                Ok(_): expect(false).to_equal(true)
+                Err(err):
+                    match err:
+                        case Transient(code): expect(code).to_equal(DIRECT_IO_TIMEOUT_CODE)
+                        case _: expect(false).to_equal(true)
+
+        it "validates DMA cleanup authority on task exit":
+            val buf = dma(512u64, 0x4000u64, 12u64)
+            expect(direct_io_cleanup_allowed(buf, release_req(512u64, 44u64, 12u64, false)).is_ok()).to_equal(true)
+            expect(direct_io_cleanup_allowed(buf, release_req(512u64, 45u64, 12u64, false)).is_err()).to_equal(true)
+            expect(direct_io_cleanup_allowed(buf, release_req(512u64, 44u64, 12u64, true)).is_err()).to_equal(true)
+
+    context "benchmark report":
+
+        it "compares buffered copy and direct DMA on the same fixture":
+            val report = direct_io_benchmark_report(make_direct_ext(false), 4096u64, true)
+            expect(report.fixture_bytes).to_equal(4096u64)
+            expect(report.backend_tag).to_equal("nvme")
+            expect(report.buffered_copy_bytes).to_equal(4096u64)
+            expect(report.direct_dma_copy_bytes).to_equal(0u64)
+            expect(report.direct_supported).to_equal(true)
+
+        it "reports fallback copy cost when direct alignment is not satisfied":
+            val report = direct_io_benchmark_report(make_direct_ext(false), 4096u64, false)
+            expect(report.buffered_copy_bytes).to_equal(4096u64)
+            expect(report.direct_dma_copy_bytes).to_equal(4096u64)

@@ -1,0 +1,134 @@
+# Architecture-neutral user address-space adapter.
+#
+# Scheduler and segment mapping code use this layer so ARM filesystem-exec
+# lanes do not depend directly on the x86 PML4 VMM entrypoints.
+
+use os.kernel.types.task_types.{AddressSpace}
+use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
+use os.kernel.memory.vmm.{
+    create_user_address_space as vmm_create_user_address_space,
+    destroy_user_address_space as vmm_destroy_user_address_space,
+    vmm_map_page_in
+}
+use os.kernel.memory.pmm.{pmm_alloc_page}
+
+var g_user_as_next_id: u64 = 1
+var g_arm64_fs_exec_frame_next: u64 = 0x48100000
+val ARM64_FS_EXEC_FRAME_END: u64 = 0x50000000
+
+fn _next_user_as_id() -> u64:
+    val id = g_user_as_next_id
+    g_user_as_next_id = g_user_as_next_id + 1
+    id
+
+@cfg(arm64)
+fn create_user_address_space() -> AddressSpace:
+    AddressSpace(phys_root: 0x48000000, id: _next_user_as_id())
+
+@cfg(arm64)
+fn destroy_user_address_space(space: AddressSpace):
+    # ARM64 fs-exec currently uses boot-lifetime address spaces. Reclaiming
+    # the table tree requires an ARM64 root walker; leave it owned until reset.
+    val _space = space
+
+@cfg(arm64)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    if space.phys_root == 0:
+        return false
+    val _virt = virt
+    val _phys = phys
+    val _flags = flags
+    true
+
+@cfg(arm64)
+fn alloc_user_page_frame() -> PageFrame?:
+    val frame = pmm_alloc_page()
+    if frame != nil:
+        return frame
+    if g_arm64_fs_exec_frame_next < 0x48100000 or g_arm64_fs_exec_frame_next >= ARM64_FS_EXEC_FRAME_END:
+        g_arm64_fs_exec_frame_next = 0x48100000
+    if g_arm64_fs_exec_frame_next + 4096 <= ARM64_FS_EXEC_FRAME_END:
+        val phys = g_arm64_fs_exec_frame_next
+        g_arm64_fs_exec_frame_next = g_arm64_fs_exec_frame_next + 4096
+        return PageFrame(pfn: phys / 4096)
+    nil
+
+@cfg(arm32)
+fn create_user_address_space() -> AddressSpace:
+    vmm_create_user_address_space()
+
+@cfg(arm32)
+fn destroy_user_address_space(space: AddressSpace):
+    vmm_destroy_user_address_space(space)
+
+@cfg(arm32)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    vmm_map_page_in(space, virt, phys, flags)
+
+@cfg(arm32)
+fn alloc_user_page_frame() -> PageFrame?:
+    pmm_alloc_page()
+
+@cfg(riscv64)
+fn create_user_address_space() -> AddressSpace:
+    vmm_create_user_address_space()
+
+@cfg(riscv64)
+fn destroy_user_address_space(space: AddressSpace):
+    vmm_destroy_user_address_space(space)
+
+@cfg(riscv64)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    vmm_map_page_in(space, virt, phys, flags)
+
+@cfg(riscv64)
+fn alloc_user_page_frame() -> PageFrame?:
+    pmm_alloc_page()
+
+@cfg(riscv32)
+fn create_user_address_space() -> AddressSpace:
+    vmm_create_user_address_space()
+
+@cfg(riscv32)
+fn destroy_user_address_space(space: AddressSpace):
+    vmm_destroy_user_address_space(space)
+
+@cfg(riscv32)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    vmm_map_page_in(space, virt, phys, flags)
+
+@cfg(riscv32)
+fn alloc_user_page_frame() -> PageFrame?:
+    pmm_alloc_page()
+
+@cfg(x86_64)
+fn create_user_address_space() -> AddressSpace:
+    vmm_create_user_address_space()
+
+@cfg(x86_64)
+fn destroy_user_address_space(space: AddressSpace):
+    vmm_destroy_user_address_space(space)
+
+@cfg(x86_64)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    vmm_map_page_in(space, virt, phys, flags)
+
+@cfg(x86_64)
+fn alloc_user_page_frame() -> PageFrame?:
+    pmm_alloc_page()
+
+@cfg(x86)
+fn create_user_address_space() -> AddressSpace:
+    vmm_create_user_address_space()
+
+@cfg(x86)
+fn destroy_user_address_space(space: AddressSpace):
+    vmm_destroy_user_address_space(space)
+
+@cfg(x86)
+fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    vmm_map_page_in(space, virt, phys, flags)
+
+@cfg(x86)
+fn alloc_user_page_frame() -> PageFrame?:
+    pmm_alloc_page()

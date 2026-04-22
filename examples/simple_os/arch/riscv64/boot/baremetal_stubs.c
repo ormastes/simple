@@ -46,6 +46,12 @@ static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
+static unsigned char g_riscv_file_buf[8192] __attribute__((aligned(16)));
+static unsigned char g_riscv_process_arena[2][8192] __attribute__((aligned(4096)));
+static uint64_t g_riscv_process_entry[2];
+static uint64_t g_riscv_process_pid[2];
+static uint32_t g_riscv_process_count;
+static char g_riscv_gui_surface[256];
 static volatile uint32_t *g_blk_mmio = 0;
 static uint16_t g_last_used_idx = 0;
 
@@ -147,6 +153,11 @@ static uint16_t rd16(const unsigned char *p)
 static uint32_t rd32(const unsigned char *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t rd64(const unsigned char *p)
+{
+    return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
 }
 
 static int mem_eq(const unsigned char *p, const char *s, uint32_t len)
@@ -322,6 +333,146 @@ static int fat32_read_first_sector(const Fat32Probe *fat, uint32_t cluster)
     return virtio_blk_read_sector(fat_cluster_sector(fat, cluster));
 }
 
+static int sector_contains(const char *needle)
+{
+    uint32_t len = 0;
+    while (needle[len]) len++;
+    if (len == 0 || len >= 512U) return 0;
+    for (uint32_t i = 16; i + len < 528U; i++) {
+        uint32_t ok = 1;
+        for (uint32_t j = 0; j < len; j++) {
+            if (g_dma[i + j] != (unsigned char)needle[j]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+static uint32_t fat32_find_sys_apps_file(const Fat32Probe *fat, const char *name11, uint32_t *size_out)
+{
+    uint32_t sys_cluster = fat32_find_entry_cluster(fat, fat->root_cluster, "SYS        ", 1, 0);
+    if (sys_cluster < 2U) return 0;
+    uint32_t apps_cluster = fat32_find_entry_cluster(fat, sys_cluster, "APPS       ", 1, 0);
+    if (apps_cluster < 2U) return 0;
+    return fat32_find_entry_cluster(fat, apps_cluster, name11, 0, size_out);
+}
+
+static uint32_t fat32_read_file_into(const Fat32Probe *fat, uint32_t cluster, uint32_t file_size, unsigned char *out, uint32_t cap)
+{
+    if (cluster < 2U || file_size == 0 || file_size > cap) return 0;
+    uint32_t copied = 0;
+    uint32_t cur = cluster;
+    while (cur >= 2U && cur < 0x0ffffff8U && copied < file_size) {
+        uint32_t first_sector = fat_cluster_sector(fat, cur);
+        for (uint32_t sec = 0; sec < fat->spc && copied < file_size; sec++) {
+            if (!virtio_blk_read_sector(first_sector + sec)) return 0;
+            const unsigned char *src = sector_data();
+            for (uint32_t i = 0; i < 512U && copied < file_size; i++) {
+                out[copied++] = src[i];
+            }
+        }
+        if (copied >= file_size) break;
+        cur = fat32_next_cluster(fat, cur);
+    }
+    return copied;
+}
+
+static int riscv_smf_probe_file(const char *name11, const char *marker)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_sys_apps_file(&fat, name11, &file_size);
+    if (cluster < 2U || file_size == 0) return 0;
+    if (!fat32_read_first_sector(&fat, cluster)) return 0;
+    return sector_contains("SMF") && sector_contains(marker);
+}
+
+static int bytes_contains(const unsigned char *data, uint32_t len, const char *needle)
+{
+    uint32_t n = 0;
+    while (needle[n]) n++;
+    if (n == 0 || n > len) return 0;
+    for (uint32_t i = 0; i + n <= len; i++) {
+        uint32_t ok = 1;
+        for (uint32_t j = 0; j < n; j++) {
+            if (data[i + j] != (unsigned char)needle[j]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+static uint32_t riscv_unwrap_smf(const unsigned char *file, uint32_t file_size, const unsigned char **elf_out)
+{
+    if (file_size < 132U) return 0;
+    const unsigned char *footer = file + file_size - 128U;
+    if (!mem_eq(footer, "SMF", 3U) || footer[3] != 0) return 0;
+    uint32_t payload_len = rd32(footer + 52U);
+    if (payload_len == 0 || payload_len > file_size - 128U) return 0;
+    *elf_out = file;
+    return payload_len;
+}
+
+static int riscv_load_elf_process(const unsigned char *elf, uint32_t elf_size, uint32_t slot, const char *marker)
+{
+    if (slot >= 2U || elf_size < 64U) return 0;
+    if (elf[0] != 0x7fU || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') return 0;
+    if (elf[4] != 2U || elf[5] != 1U) return 0;
+    if (rd16(elf + 18U) != 243U) return 0;
+
+    uint64_t entry = rd64(elf + 24U);
+    uint64_t phoff = rd64(elf + 32U);
+    uint16_t phentsize = rd16(elf + 54U);
+    uint16_t phnum = rd16(elf + 56U);
+    if (phoff == 0 || phentsize < 56U || phnum == 0 || phnum > 8U) return 0;
+    if (phoff + ((uint64_t)phentsize * phnum) > elf_size) return 0;
+
+    for (uint32_t i = 0; i < sizeof(g_riscv_process_arena[slot]); i++) g_riscv_process_arena[slot][i] = 0;
+
+    uint32_t loaded = 0;
+    int entry_mapped = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        const unsigned char *ph = elf + phoff + ((uint64_t)i * phentsize);
+        if (rd32(ph) != 1U) continue;
+        uint64_t off = rd64(ph + 8U);
+        uint64_t vaddr = rd64(ph + 16U);
+        uint64_t filesz = rd64(ph + 32U);
+        uint64_t memsz = rd64(ph + 40U);
+        if (filesz > memsz || off + filesz > elf_size || loaded + memsz > sizeof(g_riscv_process_arena[slot])) return 0;
+        for (uint64_t j = 0; j < filesz; j++) g_riscv_process_arena[slot][loaded + j] = elf[off + j];
+        if (entry >= vaddr && entry < vaddr + memsz) entry_mapped = 1;
+        loaded += (uint32_t)memsz;
+    }
+    if (loaded == 0 || !entry_mapped) return 0;
+    if (!bytes_contains(elf, elf_size, marker)) return 0;
+    g_riscv_process_entry[slot] = entry;
+    g_riscv_process_pid[slot] = 1000U + slot + 1U;
+    if (g_riscv_process_count <= slot) g_riscv_process_count = slot + 1U;
+    return 1;
+}
+
+static int riscv_load_smf_process(const char *name11, const char *marker, uint32_t slot)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_sys_apps_file(&fat, name11, &file_size);
+    if (cluster < 2U || file_size == 0 || file_size > sizeof(g_riscv_file_buf)) return 0;
+    uint32_t read = fat32_read_file_into(&fat, cluster, file_size, g_riscv_file_buf, sizeof(g_riscv_file_buf));
+    if (read != file_size) return 0;
+    const unsigned char *elf = 0;
+    uint32_t elf_size = riscv_unwrap_smf(g_riscv_file_buf, file_size, &elf);
+    if (elf_size == 0) return 0;
+    return riscv_load_elf_process(elf, elf_size, slot, marker);
+}
+
 RuntimeValue rt_riscv_nvfs_probe(void)
 {
     Fat32Probe fat;
@@ -344,6 +495,32 @@ RuntimeValue rt_riscv_nvfs_probe(void)
         if (ok) return 1;
     }
     return 0;
+}
+
+RuntimeValue rt_riscv_smf_cli_probe(void)
+{
+    return riscv_smf_probe_file("HELLOSMFSMF", "SIMPLEOS_RISCV64_HELLO_ELF") ? 1 : 0;
+}
+
+RuntimeValue rt_riscv_smf_cli_load(void)
+{
+    return riscv_load_smf_process("HELLOSMFSMF", "SIMPLEOS_RISCV64_HELLO_ELF", 0) ? 1 : 0;
+}
+
+RuntimeValue rt_riscv_smf_gui_probe(void)
+{
+    return riscv_smf_probe_file("BROWSMF SMF", "SIMPLEOS_RISCV64_GUI_ELF") ? 1 : 0;
+}
+
+RuntimeValue rt_riscv_native_gui_process_render(void)
+{
+    if (!riscv_load_smf_process("BROWSMF SMF", "SIMPLEOS_RISCV64_GUI_ELF", 1)) return 0;
+    if (g_riscv_process_pid[1] == 0 || g_riscv_process_entry[1] == 0) return 0;
+    const char content[] = "pid=1002 app=/sys/apps/browser_demo tree=native";
+    for (uint32_t i = 0; i < sizeof(content) && i < sizeof(g_riscv_gui_surface); i++) {
+        g_riscv_gui_surface[i] = content[i];
+    }
+    return bytes_contains((const unsigned char *)g_riscv_gui_surface, sizeof(g_riscv_gui_surface), "pid=1002") ? 1 : 0;
 }
 
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)

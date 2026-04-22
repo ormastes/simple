@@ -14,7 +14,7 @@ use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH, _set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
-use os.kernel.boot.mmio.{mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_read64, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 
 """
 Syscall dispatcher tests for process launch and scheduler control paths.
@@ -122,6 +122,54 @@ fn _make_exec_smf(stub: [u8]) -> [u8]:
     bytes
 
 describe "syscall_handler":
+    it "copies active task ids and task info for process diagnostics":
+        var scheduler = Scheduler.new()
+        val first = scheduler.create_task(0x1000, TaskPriority.High, CapabilitySet.full())
+        val second = scheduler.create_task(0x2000, TaskPriority.Low, CapabilitySet.full())
+        val pid_buf = 0x12000000u64
+        val info_buf = 0x12000100u64
+        expect(_map_user_pollfd_page(pid_buf)).to_equal(true)
+
+        val list_result = syscall_handler(
+            SyscallArgs(
+                id: 5,
+                arg0: pid_buf,
+                arg1: 4,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(list_result.value).to_equal(2)
+        expect(mmio_read64(pid_buf)).to_equal(first.id)
+        expect(mmio_read64(pid_buf + 8)).to_equal(second.id)
+
+        val info_result = syscall_handler(
+            SyscallArgs(
+                id: 6,
+                arg0: second.id,
+                arg1: info_buf,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+
+        expect(info_result.value).to_equal(0)
+        expect(mmio_read64(info_buf)).to_equal(second.id)
+        expect(mmio_read64(info_buf + 8)).to_equal(0)
+        expect(mmio_read8(info_buf + 16)).to_equal(0u8)
+        expect(mmio_read8(info_buf + 17)).to_equal(3u8)
+
     it "launches built-in service binaries through spawn_binary":
         val path = "/sys/services/vfs"
         var scheduler = Scheduler.new()

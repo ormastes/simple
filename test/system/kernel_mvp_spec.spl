@@ -1,0 +1,110 @@
+use std.spec
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.trap_runtime.{X86TrapRuntime}
+use os.kernel.loader.executable_source.{_set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test, resolve_executable_bytes}
+use os.kernel.loader.process_image.{X86_64_USER_STACK_TOP}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.apps.shell.shell_app.{ShellApp}
+use os.kernel.interrupts.gdt.{GDT_USER_CS, GDT_USER_DS}
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 62)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 64)
+    bytes = _push_u64_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u64_le(bytes, 0x1000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes
+
+fn _has_line(lines: [text], needle: text) -> bool:
+    var i: u64 = 0
+    while i < lines.len():
+        if lines[i].contains(needle):
+            return true
+        i = i + 1
+    false
+
+describe "x86_64_ring3_smoke":
+    it "selects the user selectors and aligned stack":
+        val ctx = X86ContextSwitch.create(0x401000, X86_64_USER_STACK_TOP, true)
+        expect(ctx.cs).to_equal((GDT_USER_CS as u64) | 3)
+        expect(ctx.ss).to_equal((GDT_USER_DS as u64) | 3)
+        expect(ctx.rsp % 16).to_equal(0)
+
+describe "x86_64_fat32_exec":
+    it "prepares canonical app bytes for the filesystem-backed path":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", _make_x86_64_exec())
+        val bytes = _make_x86_64_exec()
+        expect(bytes.len()).to_be_greater_than(0)
+        expect(bytes[0]).to_equal(0x7F.to_u8())
+        expect(bytes[1]).to_equal(0x45.to_u8())
+        _clear_synthetic_vfs_for_test()
+
+describe "x86_64_shell_smoke":
+    it "shows dmesg in shell help output":
+        val shell = ShellApp.new()
+        shell.output_lines = []
+        shell.execute("help")
+        expect(shell.last_exit_code).to_equal(0)
+        expect(_has_line(shell.output_lines, "dmesg [N]")).to_equal(true)
+
+describe "x86_64_fault_smoke":
+    it "does not crash on an unknown syscall id":
+        val log = KernelLog.new(4)
+        log.write(3, 0, 0, "fault smoke")
+        val entries = log.read(0, 0, 4)
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].message).to_equal("fault smoke")

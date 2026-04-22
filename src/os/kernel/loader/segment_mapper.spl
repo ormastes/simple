@@ -23,8 +23,8 @@ use os.kernel.types.task_types.{
     user_load_segment_flags
 }
 use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags, phys_addr_value}
-use os.kernel.memory.pmm.{pmm_alloc_page}
-use os.kernel.memory.vmm.{vmm_map_page_in, vmm_copy_bytes_to_phys, vmm_zero_phys_range}
+use os.kernel.memory.user_address_space.{alloc_user_page_frame, map_user_page_in}
+use os.kernel.memory.vmm.{vmm_copy_bytes_to_phys, vmm_zero_phys_range}
 
 # ============================================================================
 # ELF program-header permission bits (PF_*)
@@ -150,6 +150,7 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
     val file_size = user_load_segment_file_size(seg)
     val mem_size = user_load_segment_mem_size(seg)
     if file_size > mem_size:
+        serial_println("[segmap] file_size exceeds mem_size")
         return Err("segment file_size exceeds mem_size")
     if mem_size == 0:
         return Ok(0)
@@ -161,15 +162,17 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
 
     var va = va_start
     while va < va_end:
-        val opt_frame = pmm_alloc_page()
+        val opt_frame = alloc_user_page_frame()
         if opt_frame == nil:
-            return Err("pmm_alloc_page failed while mapping PT_LOAD")
+            serial_println("[segmap] frame alloc failed for PT_LOAD")
+            return Err("alloc_user_page_frame failed while mapping PT_LOAD")
         val frame = opt_frame
         val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
         val virt = VirtAddr(addr: va)
-        val ok = vmm_map_page_in(as_handle, virt, phys, vm_flags)
+        val ok = map_user_page_in(as_handle, virt, phys, vm_flags)
         if not ok:
-            return Err("vmm_map_page_in failed for PT_LOAD page")
+            serial_println("[segmap] map_user_page_in failed for PT_LOAD")
+            return Err("map_user_page_in failed for PT_LOAD page")
         _copy_segment_page(phys_addr_value(phys), va, virt_addr, file_size, mem_size, user_load_segment_data(seg))
         va = va + PAGE_SIZE
 
@@ -198,19 +201,51 @@ fn map_stack(as_handle: AddressSpace, stack_top: u64, stack_size: u64, stack_byt
     var mapped: i32 = 0
     var va = va_start
     while va < va_end:
-        val opt_frame = pmm_alloc_page()
+        val opt_frame = alloc_user_page_frame()
         if opt_frame == nil:
-            return Err("pmm_alloc_page failed while mapping user stack")
+            return Err("alloc_user_page_frame failed while mapping user stack")
         val frame = opt_frame
         val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
-        val ok = vmm_map_page_in(as_handle, VirtAddr(addr: va), phys, flags)
+        val ok = map_user_page_in(as_handle, VirtAddr(addr: va), phys, flags)
         if not ok:
-            return Err("vmm_map_page_in failed for user stack page")
+            return Err("map_user_page_in failed for user stack page")
         _copy_stack_page(phys_addr_value(phys), va, frame_start, stack_top, stack_bytes)
         mapped = mapped + 1
         va = va + PAGE_SIZE
 
     Ok(mapped)
+
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    """Stage raw executable bytes into direct-load frames.
+
+    ARM64 fs-exec can produce a valid SMF process image before PT_LOAD segment
+    extraction is available in the freestanding closure. This loader path
+    still proves that the filesystem bytes are copied into RAM owned by the
+    process image instead of stopping at metadata-only scheduler registration.
+    """
+    if as_handle.phys_root == 0:
+        serial_println("[segmap] raw stage failed: no address-space root")
+        return -1
+    val total = file_bytes.len() as u64
+    if total == 0:
+        serial_println("[segmap] raw stage failed: empty image")
+        return -2
+
+    var copied: u64 = 0
+    var pages: i32 = 0
+    val image_base = as_handle.phys_root + 0x100000
+    while copied < total:
+        val phys = image_base + (pages as u64 * PAGE_SIZE)
+        var chunk = total - copied
+        if chunk > PAGE_SIZE:
+            chunk = PAGE_SIZE
+        vmm_copy_bytes_to_phys(phys, file_bytes, copied, chunk)
+        if chunk < PAGE_SIZE:
+            vmm_zero_phys_range(phys + chunk, PAGE_SIZE - chunk)
+        copied = copied + chunk
+        pages = pages + 1
+    serial_println("[segmap] raw stage ok bytes={total} pages={pages} root={as_handle.phys_root}")
+    pages
 
 fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8]) -> Result<i32, text>:
     """Map every PT_LOAD segment in order; abort on first error.
@@ -220,15 +255,20 @@ fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8
     """
     var i: i64 = 0
     var mapped: i32 = 0
+    serial_println("[segmap] map_all begin segments={segments.len()} root={as_handle.phys_root}")
     while i < segments.len():
+        serial_println("[segmap] map_all segment index={i}")
         val seg = segments[i]
         val r = map_segment(as_handle, seg, file_bytes)
         match r:
             case Ok(_):
+                serial_println("[segmap] map_all segment ok index={i}")
                 mapped = mapped + 1
             case Err(msg):
+                serial_println("[segmap] map_all segment err index={i}")
                 return Err(msg)
         i = i + 1
+    serial_println("[segmap] map_all ok mapped={mapped}")
     Ok(mapped)
 
 fn highest_loaded_address(segments: [UserLoadSegment]) -> u64:

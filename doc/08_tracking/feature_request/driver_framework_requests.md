@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -395,27 +395,30 @@ or `Rejected` (one-line reason).
 - **Filed-by:** Codex cross-driver acceleration follow-up
 - **Target:** NVMe, VirtIO-BLK, VFS/fs-driver interface
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   Add a direct I/O path for file and block drivers where callers can pass a
   shared DMA buffer to read/write without copying through intermediate VFS heap
   buffers. Buffered file APIs remain the default; direct I/O must require an
   explicit flag or capability.
 - **Acceptance-criteria:**
-  - [ ] VFS or fs-driver layer exposes `read_dma` and `write_dma` or an
+  - [x] VFS or fs-driver layer exposes `read_dma` and `write_dma` or an
         equivalent direct-I/O extension.
-  - [ ] NVMe and VirtIO-BLK adapters can submit DMA-backed block requests.
-  - [ ] Unaligned file offsets either bounce through a safe buffer or return a
+  - [x] NVMe and VirtIO-BLK adapters can submit DMA-backed block requests.
+  - [x] Unaligned file offsets either bounce through a safe buffer or return a
         documented alignment error.
-  - [ ] Tests cover aligned read/write, unaligned rejection or bounce behavior,
+  - [x] Tests cover aligned read/write, unaligned rejection or bounce behavior,
         timeout, and DMA cleanup on task exit.
-  - [ ] Benchmark compares buffered copy path vs direct DMA path on the same
+  - [x] Benchmark compares buffered copy path vs direct DMA path on the same
         file fixture.
 - **Related-upfront:** `doc/05_design/fs_driver_interface.md`
-- **Related-design-doc:** `doc/03_plan/agent_tasks/dma_file_vga_driver_remaining_2026-04-21.md`
+- **Related-design-doc:** `doc/05_design/driver_dma_direct_io.md`
 - **Related-issue:** none
-- **Notes:** This complements FR-DRIVER-0007; FAT32 forwarding can stay
-  buffered while block-device backends gain direct I/O underneath.
+- **Notes:** Implemented as an explicit fs-driver direct-I/O request/result
+  model plus SharedDmaBuffer-backed NVMe and VirtIO-BLK adapter methods.
+  FAT32 forwarding remains buffered by default; VFS IPC direct-DMA methods are
+  deferred until fd-to-mount routing is tightened. System coverage:
+  `test/system/driver_dma_direct_io_spec.spl`.
 
 ---
 
@@ -434,16 +437,22 @@ or `Rejected` (one-line reason).
   for resource attach/transfer/flush commands. The display service should pick
   the best available backend without treating legacy VGA as a DMA device.
 - **Acceptance-criteria:**
-  - [ ] BGA framebuffer path tracks dirty rectangles and flushes only changed
+  - [x] BGA framebuffer path tracks dirty rectangles and flushes only changed
         regions when possible.
-  - [ ] Framebuffer mappings use documented cache attributes and never execute.
-  - [ ] VirtIO-GPU transfer buffers use the shared DMA descriptor contract.
-  - [ ] Display capability summary distinguishes `framebuffer-mmio` from
+  - [x] Framebuffer mappings use documented cache attributes and never execute.
+  - [x] VirtIO-GPU transfer buffers use the shared DMA descriptor contract.
+  - [x] Display capability summary distinguishes `framebuffer-mmio` from
         `virtio-gpu-dma`.
-  - [ ] QEMU display tests cover BGA fallback and VirtIO-GPU DMA path when
+  - [x] QEMU display tests cover BGA fallback and VirtIO-GPU DMA path when
         enabled.
 - **Related-upfront:** `doc/04_architecture/hardware_driver_safety_and_performance_2026-04-15.md`
-- **Related-design-doc:** `doc/03_plan/agent_tasks/dma_file_vga_driver_remaining_2026-04-21.md`
+- **Related-design-doc:** `doc/05_design/driver_display_acceleration_boundary.md`
 - **Related-issue:** none
 - **Notes:** "VGA DMA" is intentionally not promised here; legacy VGA/BGA is
   framebuffer/MMIO. DMA belongs to VirtIO-GPU or later native GPU drivers.
+  Implemented display boundary helpers in
+  `src/os/drivers/gpu/display_boundary.spl`; SSpec coverage is
+  `test/system/driver_display_acceleration_boundary_spec.spl`. Research and
+  test plan:
+  `doc/01_research/local/driver_display_acceleration_boundary.md`,
+  `doc/03_plan/sys_test/driver_display_acceleration_boundary.md`.

@@ -2,7 +2,9 @@ use os.qemu_runner.{
     build_qemu_command, build_qemu_command_with_options,
     get_all_targets, get_gui_target, get_target,
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
-    build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path, scenario_target,
+    scenario_riscv64_virtio_fat32_smf, scenario_riscv32_virtio_fat32_smf,
+    build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
+    riscv_fs_exec_disk_image_path, scenario_target,
     default_os_build_backend_for_target,
     desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
@@ -70,6 +72,57 @@ describe "Qemu runner serial routing":
         expect(scenario_name_or_missing("arm32-virtio-fat32-smf")).to_equal("arm32-virtio-fat32-smf")
         expect(arm_fs_exec_disk_image_path(Architecture.Arm64)).to_equal("build/os/fat32-arm64.img")
         expect(arm_fs_exec_disk_image_path(Architecture.Arm32)).to_equal("build/os/fat32-arm32.img")
+
+    it "defines RISC-V VirtIO FAT32 SMF execution scenarios":
+        val rv64 = scenario_riscv64_virtio_fat32_smf()
+        expect(rv64.name).to_equal("riscv64-virtio-fat32-smf")
+        expect(rv64.arch).to_equal(Architecture.Riscv64)
+        expect(rv64.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
+        expect(rv64.qemu_extra).to_contain("file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw")
+        expect(scenario_test_timeout_ms(rv64)).to_equal(60000)
+
+        val rv32 = scenario_riscv32_virtio_fat32_smf()
+        expect(rv32.name).to_equal("riscv32-virtio-fat32-smf")
+        expect(rv32.arch).to_equal(Architecture.Riscv32)
+        expect(rv32.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
+        expect(rv32.qemu_extra).to_contain("file=build/os/fat32-riscv32.img,if=none,id=rvdisk,format=raw")
+        expect(scenario_test_timeout_ms(rv32)).to_equal(60000)
+
+    it "builds QEMU commands with RISC-V kernels and VirtIO block disks":
+        val rv64 = scenario_riscv64_virtio_fat32_smf()
+        val cmd64 = build_scenario_command(rv64, "build/os/simpleos_riscv64_smf_fs.elf")
+        expect(cmd64[0]).to_equal("qemu-system-riscv64")
+        expect(cmd64).to_contain("-kernel")
+        expect(cmd64).to_contain("build/os/simpleos_riscv64_smf_fs.elf")
+        expect(cmd64).to_contain("virtio-blk-device,drive=rvdisk")
+        val target64 = scenario_target(rv64)
+        expect(target64.entry).to_equal("examples/simple_os/arch/riscv64/smoke_entry.spl")
+
+        val rv32 = scenario_riscv32_virtio_fat32_smf()
+        val cmd32 = build_scenario_command(rv32, "build/os/simpleos_riscv32_smf_fs.elf")
+        expect(cmd32[0]).to_equal("qemu-system-riscv32")
+        expect(cmd32).to_contain("-kernel")
+        expect(cmd32).to_contain("build/os/simpleos_riscv32_smf_fs.elf")
+        expect(cmd32).to_contain("virtio-blk-device,drive=rvdisk")
+        val target32 = scenario_target(rv32)
+        expect(target32.entry).to_equal("examples/simple_os/arch/riscv32/smoke_entry.spl")
+
+    it "scopes RISC-V SMF native builds to arch-local sources":
+        val rv64_target = scenario_target(scenario_riscv64_virtio_fat32_smf())
+        val rv64_args = os_native_build_args(rv64_target, "llvm")
+        expect(rv64_args).to_contain("examples/simple_os/arch/riscv64")
+        expect(rv64_args.contains("src")).to_equal(false)
+
+        val rv32_target = scenario_target(scenario_riscv32_virtio_fat32_smf())
+        val rv32_args = os_native_build_args(rv32_target, "llvm")
+        expect(rv32_args).to_contain("examples/simple_os/arch/riscv32")
+        expect(rv32_args.contains("src")).to_equal(false)
+
+    it "looks up RISC-V SMF scenarios by name":
+        expect(scenario_name_or_missing("riscv64-virtio-fat32-smf")).to_equal("riscv64-virtio-fat32-smf")
+        expect(scenario_name_or_missing("riscv32-virtio-fat32-smf")).to_equal("riscv32-virtio-fat32-smf")
+        expect(riscv_fs_exec_disk_image_path(Architecture.Riscv64)).to_equal("build/os/fat32-riscv64.img")
+        expect(riscv_fs_exec_disk_image_path(Architecture.Riscv32)).to_equal("build/os/fat32-riscv32.img")
 
     it "uses per-platform x86_64 FAT32 media for filesystem scenarios":
         val scenario = get_scenario("x64-nvme-fat32")

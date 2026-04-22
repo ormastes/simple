@@ -23,7 +23,7 @@ Parent feature ship commits on `origin/main`:
 - **Filed-by:** Claude Code session (SPM follow-up orchestrator)
 - **Target:** os-kernel (src/os/kernel/ipc + src/os/kernel/memory)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   Expose a `pt_walk(space: ProcessVmSpace, vaddr: u64) -> u64?` (or equivalent
   "translate user VA → kernel-readable pointer") helper in
@@ -64,7 +64,7 @@ Parent feature ship commits on `origin/main`:
 - **Target:** os-kernel (src/os/kernel/ipc/syscall.spl +
   src/os/kernel/privilege/privilege_bridge.spl)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   `_handle_spm_priv_check` in syscall.spl currently always returns `0` (deny)
   because it has no path from "the syscall that just arrived" to
@@ -75,18 +75,22 @@ Parent feature ship commits on `origin/main`:
   `scheduler.current_task_id()`, or a global `g_current_task` is added alongside
   the existing `g_current_vmspace`.
 - **Acceptance-criteria:**
-  - [ ] Handler returns `1` when the caller task has a registered privilege
+  - [x] Handler returns `1` when the caller task has a registered privilege
         mirror whose id-path tree covers the requested id-path bytes
-  - [ ] Handler returns `0` for no-mirror, mismatched path, or empty id-path
-  - [ ] Spec: register two tasks with different mirrors, call `sys_priv_check`
+  - [x] Handler returns `0` for no-mirror, mismatched path, or empty id-path
+  - [x] Spec: register two tasks with different mirrors, call `sys_priv_check`
         from each, assert the result matches the respective mirror's coverage
-  - [ ] No regression in `test/os/kernel/ipc/` or privilege_bridge specs
+  - [x] No regression in `test/os/kernel/ipc/` or privilege_bridge specs
 - **Related-upfront:** `doc/04_architecture/privilege_id_system.md`
-- **Related-design-doc:** Extend `privilege_bridge.spl` module docs
+- **Related-design-doc:** `doc/05_design/spm_priv_check_task_mirror.md`
 - **Related-issue:** none
 - **Notes:** Depends on FR-SPM-0001 only insofar as the id-path bytes already
   flow through `_copy_in_bytes`; that path works for small id-paths in the
-  identity-mapped case today. Do this before SPM-0001 for the best test value.
+  identity-mapped case today. Implemented by threading `caller.id` into case
+  110 and exposing `spm_priv_check_for_task` for direct SSpec coverage. Test:
+  `test/system/spm_priv_check_task_mirror_spec.spl`. Research and plan:
+  `doc/01_research/local/spm_priv_check_task_mirror.md`,
+  `doc/03_plan/sys_test/spm_priv_check_task_mirror.md`.
 
 ### FR-SPM-0003 — Rebind syscall for SPM port when real SPM task id is known
 
@@ -95,7 +99,7 @@ Parent feature ship commits on `origin/main`:
 - **Target:** os-kernel (src/os/kernel/ipc/spm_port.spl +
   src/os/kernel/ipc/syscall.spl + src/os/kernel/types/syscall_types.spl)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   Kernel init now registers `SPM_WELL_KNOWN_TASK_ID = 0xfffffff0` via
   `spm_port_register` (see `init_services.spl::init_spm_port` and the
@@ -110,26 +114,31 @@ Parent feature ship commits on `origin/main`:
   (b) extending `SysWinRegister` (111) with an "also claim" flag. Prefer (a);
   it's explicit and auditable.
 - **Acceptance-criteria:**
-  - [ ] New syscall `SysSpmClaim` in `syscall_types.spl` (next free id after
+  - [x] New syscall `SysSpmClaim` in `syscall_types.spl` (next free id after
         114 unless reservations dictate otherwise)
-  - [ ] Handler `_handle_spm_claim` in `syscall.spl` — capability-gated,
+  - [x] Handler `_handle_spm_claim` in `syscall.spl` — capability-gated,
         returns 0 on success, `-1` on capability denial, `-2` on already-claimed
-  - [ ] Spec: unclaimed-at-boot → well-known-id; claim succeeds once; second
+  - [x] Spec: unclaimed-at-boot → well-known-id; claim succeeds once; second
         claim from same task is idempotent; claim from different task is
         rejected unless `spm_port_reset` has been called
-  - [ ] Userland wrapper `sys_spm_claim()` in
+  - [x] Userland wrapper `sys_spm_claim()` in
         `src/os/userlib/syscall_raw.spl`
-  - [ ] SPM service (`src/app/simple_process_manager/main.spl`) calls the
+  - [x] SPM service (`src/app/simple_process_manager/main.spl`) calls the
         wrapper in its startup path
-  - [ ] Update `doc/07_guide/tooling/llm_approval_flow.md` with the rebind step
+  - [x] Update `doc/07_guide/tooling/llm_approval_flow.md` with the rebind step
 - **Related-upfront:** `doc/04_architecture/simple_process_manager.md` §§
   lifecycle + bootstrap
-- **Related-design-doc:** tbd — small addendum to `simple_process_manager.md`
+- **Related-design-doc:** `doc/05_design/spm_claim_rebind.md`
 - **Related-issue:** none
-- **Notes:** The capability that gates this syscall needs to be granted ONLY
-  to the SPM process image. Consider reusing the `WinRegister` capability or
-  introducing a dedicated `SpmClaim` capability kind — pick based on whatever
-  existing capability kinds match in `capability_types.spl`.
+- **Notes:** Implemented with syscall id 115 and an existing privilege-mirror
+  gate: `id.system` covers the required `id.system.spm.claim` path. The claim
+  operation accepts the boot placeholder owner, clears stale placeholder inbox
+  state, assigns the caller task id, is idempotent for the same task, and
+  rejects a second real owner with `-2`. Test:
+  `test/system/spm_claim_rebind_spec.spl`. Research/design/plan:
+  `doc/01_research/local/spm_claim_rebind.md`,
+  `doc/05_design/spm_claim_rebind.md`,
+  `doc/03_plan/sys_test/spm_claim_rebind.md`.
 
 ## Id scheme
 

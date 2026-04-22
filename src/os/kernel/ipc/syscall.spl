@@ -37,8 +37,10 @@ use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vm
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
+use os.kernel.ipc.spm_claim.{spm_claim_for_task}
 use os.kernel.ipc.shared_dataset.{shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
 use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
+use os.kernel.privilege.privilege_bridge.{bridge_lookup, two_gate_check}
 use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
@@ -418,7 +420,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- Process (extended) ----------------------------------------------
         case 5:     # ListTasks (always allowed)
-            _handle_list_tasks(scheduler)
+            _handle_list_tasks(args, scheduler)
         case 6:     # GetTaskInfo (always allowed)
             _handle_get_task_info(args, scheduler)
         case 7:     # Signal
@@ -584,7 +586,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- SPM / Privilege (spm-winfs-llm-suite) ----------------------------
         case 110:   # sys_priv_check
-            _handle_spm_priv_check(args)
+            _handle_spm_priv_check(args, caller.id)
         case 111:   # sys_win_register
             _handle_spm_win_register(args)
         case 112:   # sys_approval_request
@@ -593,6 +595,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_spm_send(args)
         case 114:   # sys_spm_listen
             _handle_spm_listen(args)
+        case 115:   # sys_spm_claim
+            _handle_spm_claim(caller.id)
 
         # -- SOSIX immutable process sharing --------------------------------
         case 120:   # dataset_create
@@ -1512,27 +1516,74 @@ fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
 # Extended Process Handlers
 # ============================================================================
 
-fn _handle_list_tasks(scheduler: Scheduler) -> SyscallResult:
-    """List all tasks. Returns count of active tasks.
+fn _handle_list_tasks(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """List active task IDs and return the active task count.
 
-    The caller retrieves task info via repeated GetTaskInfo calls.
+    If arg0 is non-zero, it points to a u64 PID buffer with arg1 slots. The
+    count return remains the total active task count so callers can retry with
+    a larger buffer without losing the legacy "count only" behavior.
     """
     val count = scheduler.active_task_count()
+    if args.arg0 != 0 and args.arg1 > 0:
+        val max = args.arg1 as i32
+        val write_count = if count < max: count else: max
+        val bytes = (write_count as u64) * 8
+        if write_count > 0:
+            if not _is_userspace_range(args.arg0, bytes):
+                return SyscallResult(value: -14)
+            if not vmm_verify_user_write(args.arg0, bytes):
+                return SyscallResult(value: -14)
+            var i = 0
+            while i < write_count:
+                mmio_write64(args.arg0 + (i as u64) * 8, scheduler.task_id_at_active_index(i))
+                i = i + 1
     SyscallResult(value: count.to_i64())
+
+fn _task_state_code(state: TaskState) -> u8:
+    match state:
+        case TaskState.Ready: 0u8
+        case TaskState.Running: 1u8
+        case TaskState.Blocked(reason): 2u8
+        case TaskState.Zombie: 3u8
+
+fn _task_priority_code(priority: TaskPriority) -> u8:
+    match priority:
+        case TaskPriority.Realtime: 0u8
+        case TaskPriority.High: 1u8
+        case TaskPriority.Normal: 2u8
+        case TaskPriority.Low: 3u8
+        case TaskPriority.Idle: 4u8
 
 fn _handle_get_task_info(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Get info for a specific task by PID.
 
     Args:
       arg0: target task PID
+      arg1: pointer to TaskInfoBuf
     Returns: 0 on success (info written to shared buffer), -1 if not found.
     """
     val target = TaskId(id: args.arg0)
     val tcb = scheduler.get_task(target)
     if tcb == nil:
         return SyscallResult(value: -1)
-    # In a real kernel, we would copy TaskInfoBuf to userspace at arg1 address.
-    # For now, return 0 to indicate success.
+    if args.arg1 != 0:
+        # Fixed prefix of TaskInfoBuf:
+        # pid:u64, parent_pid:u64, state:u8, priority:u8, padding, memory:u64,
+        # cpu_ticks:u64, name_len:u32. The variable name buffer is left empty.
+        if not _is_userspace_range(args.arg1, 44):
+            return SyscallResult(value: -14)
+        if not vmm_verify_user_write(args.arg1, 44):
+            return SyscallResult(value: -14)
+        val task = tcb
+        val parent_pid = if task.parent == nil: 0 else: task.parent.unwrap().id
+        val memory_pages = if task.address_space == 0: 0 else: 1
+        mmio_write64(args.arg1, task.id.id)
+        mmio_write64(args.arg1 + 8, parent_pid)
+        mmio_write8(args.arg1 + 16, _task_state_code(task.state))
+        mmio_write8(args.arg1 + 17, _task_priority_code(task.priority))
+        mmio_write64(args.arg1 + 24, memory_pages)
+        mmio_write64(args.arg1 + 32, task.ticks_remaining)
+        mmio_write32(args.arg1 + 40, 0u32)
     SyscallResult(value: 0)
 
 fn _handle_signal(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -3493,11 +3544,18 @@ fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
             i = i + 1
         bytes
 
-fn _handle_spm_priv_check(args: SyscallArgs) -> SyscallResult:
+fn spm_priv_check_for_task(task_id: u64, id_path: [u8]) -> bool:
+    """Evaluate sys_priv_check for an already-copied id-path."""
+    if id_path.len() == 0:
+        return false
+    val mirror = bridge_lookup(task_id)
+    two_gate_check(mirror, id_path)
+
+fn _handle_spm_priv_check(args: SyscallArgs, caller_task_id: u64) -> SyscallResult:
     """sys_priv_check (110) — hierarchical privilege gate."""
     val id_path = _copy_in_bytes(args.arg0, args.arg1)
-    if id_path.len() == 0:
-        return SyscallResult(value: 0 as i64)
+    if spm_priv_check_for_task(caller_task_id, id_path):
+        return SyscallResult(value: 1 as i64)
     SyscallResult(value: 0 as i64)
 
 fn _handle_spm_win_register(args: SyscallArgs) -> SyscallResult:
@@ -3530,3 +3588,7 @@ fn _handle_spm_listen(args: SyscallArgs) -> SyscallResult:
         return SyscallResult(value: -1 as i64)
     val req = spm_port_listen()
     SyscallResult(value: req.len() as i64)
+
+fn _handle_spm_claim(caller_task_id: u64) -> SyscallResult:
+    """sys_spm_claim (115) — rebind the boot placeholder SPM port."""
+    SyscallResult(value: spm_claim_for_task(caller_task_id))

@@ -2,16 +2,16 @@
 
 ## Status
 - 2026-04-22 continuation: ARM32 and ARM64 `*-virtio-fat32-smf` lanes both
-  boot under QEMU and report `TEST PASSED` again after the spawn bridge was
-  returned to the filesystem-byte/image-probe acceptance scope.
+  boot under QEMU and report `TEST PASSED` with bootstrap scheduler user-task
+  registration enabled.
 - ARM64 `arm64-virtio-fat32-smf` boots under QEMU, reads `/sys/apps/hello_world.smf` from FAT32, creates the user task, and reports `TEST PASSED`.
 - ARM32 `arm32-virtio-fat32-smf` builds with the LLVM backend and reaches `spl_start()` under QEMU.
 - ARM32 now finds the VirtIO block MMIO slot at `0x0A003E00`; serial trace reaches `VirtioBlkDriver.new` completion (`103`, `104`).
 
 ## Remaining Work
-- Replace the ARM32 return-value gate with a stronger image-status check after
-  the freestanding ARM32 runtime reliably preserves the spawn bridge's integer
-  return. Current acceptance gates on VFS init plus return from the spawn bridge.
+- ARM32 still keeps numeric trace markers because text output is sparse in the
+  freestanding runtime, but the acceptance marker is gated on VFS init, SMF
+  image construction, and bootstrap scheduler registration.
 - Remove temporary numeric `arm_fs_exec_trace` instrumentation after the ARM32
   return-value issue is fixed; keeping it for now is intentional because ARM32
   Simple text output is still unreliable.

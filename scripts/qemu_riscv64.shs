@@ -12,7 +12,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="$REPO_ROOT/build/os/simpleos_riscv64.elf"
 SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv64.log"
 BUILD_LOG="$REPO_ROOT/build/os/build_riscv64.log"
-SIMPLE_BIN="${SIMPLE_BINARY:-$REPO_ROOT/bin/simple}"
+if [ -n "$SIMPLE_BINARY" ]; then
+    SIMPLE_BIN="$SIMPLE_BINARY"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/debug/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/debug/simple"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/bootstrap/simple"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/release/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/release/simple"
+else
+    SIMPLE_BIN="$REPO_ROOT/bin/simple"
+fi
 ENTRY_FILE="${RISCV64_ENTRY:-}"
 SOURCE_ARGS="${RISCV64_SOURCE_ARGS:-}"
 TIMEOUT_SEC=30
@@ -126,6 +136,9 @@ if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
     BUILD_RC=$?
     if [ "$BUILD_RC" -ne 0 ]; then
         echo "FAIL: Kernel build failed (exit $BUILD_RC)"
+        if grep -q "LLVM backend requested but 'llvm' feature not enabled" "$BUILD_LOG"; then
+            echo "prerequisite: rebuild the selected Simple compiler with the Rust llvm feature, or set SIMPLE_BINARY to an LLVM-enabled simple binary."
+        fi
         echo "[build] Log tail ($BUILD_LOG):"
         tail -n 80 "$BUILD_LOG"
         exit 1
@@ -160,6 +173,14 @@ validate_fs_image_markers() {
     fi
     if ! grep -a -q "nvfs-image-version=" "$_img"; then
         echo "FAIL: RISC-V filesystem image lacks /SYS/NVFSVER.TXT marker"
+        return 1
+    fi
+    if ! grep -a -q "SIMPLEOS_RISCV64_HELLO_ELF" "$_img"; then
+        echo "FAIL: RISC-V filesystem image lacks RV64 CLI SMF payload marker"
+        return 1
+    fi
+    if ! grep -a -q "SIMPLEOS_RISCV64_GUI_ELF" "$_img"; then
+        echo "FAIL: RISC-V filesystem image lacks RV64 GUI SMF payload marker"
         return 1
     fi
     return 0
@@ -399,6 +420,11 @@ fi
 if [ "$FS_IMAGE" -eq 1 ]; then
     echo "PASS: RISC-V filesystem image attached"
     PASS=$((PASS + 1))
+    check_marker "Filesystem mount marker" "FS_MOUNT_OK"
+    check_marker "SMF discovery marker" "SMF_DISCOVERY_OK"
+    check_marker "SMF CLI launch marker" "SMF_CLI_LAUNCH_OK"
+    check_marker "SMF WM GUI launch marker" "SMF_WM_GUI_LAUNCH_OK"
+    check_marker "RISC-V SMF filesystem pass marker" "SIMPLEOS_RISCV_SMF_FS_PASS"
     if [ "$NVFS_IMAGE" -eq 1 ]; then
         echo "PASS: RISC-V NVFS image markers present"
         PASS=$((PASS + 1))

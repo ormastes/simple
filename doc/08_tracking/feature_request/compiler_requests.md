@@ -268,7 +268,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-BENCH-CLOCK-001 verification session
 - **Target:** compiler
 - **Priority:** P1
-- **Status:** Open (source-level regression fixed; release artifact acceptance blocked)
+- **Status:** Implemented (release artifact refreshed 2026-04-22)
 - **Requested-semantics:**
   The self-hosted release binary (`bin/release/x86_64-unknown-linux-gnu/simple`)
   fails to resolve `CompileOptions.low_memory` and `CompileOptions.mode` at
@@ -279,12 +279,12 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   on `CompileOptions` (and any other struct) identically to the Rust seed,
   without falling through to "no mode matched" warnings.
 - **Acceptance-criteria:**
-  - [ ] `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl` (3-line
+  - [x] `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl` (3-line
         script: `extern fn rt_time_now_ns() -> i64` + `print(rt_time_now_ns().to_string())`)
         runs without "Function 'CompileOptions.*' not found" errors.
-  - [ ] `[WARN] no mode matched, falling through` no longer appears for
+  - [x] `[WARN] no mode matched, falling through` no longer appears for
         `CompileOptions` field reads.
-  - [ ] Self-hosted binary output matches Rust-seed bootstrap binary output
+  - [x] Self-hosted binary output matches Rust-seed bootstrap binary output
         for the same input file.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/compiler_compile_options_field_access.md`
@@ -315,23 +315,15 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   `test/system/compiler_compile_options_field_access_spec.spl`, which imports
   `compiler.common.driver_core_types.{CompileOptions}` and reads `input_files`,
   `mode`, `low_memory`, `backend`, and `smf_output_mode`.
-  Exact release-binary acceptance was not closed in this pass:
-  `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl` still exits
-  with a generic `/tmp/t_clock...` runner error in the current checked-in
-  artifact, and `bin/simple /tmp/t_clock.spl` reports
-  `unknown extern function: rt_time_now_ns`. Rebuild/release verification must
-  rerun the original acceptance command after the release artifact is refreshed.
-  Repro steps:
-  1. `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
-  2. Create `/tmp/t_clock.spl`:
-     ```
-     extern fn rt_time_now_ns() -> i64
-     print(rt_time_now_ns().to_string())
-     ```
-  3. `bin/release/x86_64-unknown-linux-gnu/simple /tmp/t_clock.spl`
-  4. Observe "Runtime error: Function 'CompileOptions.input_files' not found"
-     followed by "Function 'CompileOptions.low_memory' not found" and
-     "Function 'CompileOptions.mode' not found" — wrong-struct collision.
+  Release artifact acceptance closed on 2026-04-22 by refreshing
+  `bin/release/x86_64-unknown-linux-gnu/simple` from the current bootstrap
+  artifact. The original `/tmp/t_clock.spl` acceptance script now produces the
+  same semantic `unknown extern function: rt_time_now_ns` diagnostic from both
+  release and bootstrap binaries, with no `CompileOptions.*` field accessor
+  failures and no `no mode matched` warning. Artifact refresh research and
+  regression plan:
+  `doc/01_research/local/compiler_release_compile_options_artifact.md`,
+  `doc/03_plan/sys_test/compiler_release_compile_options_artifact.md`.
 
 ---
 
@@ -341,7 +333,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-003 A2 session
 - **Target:** compiler — `src/compiler/20.hir/hir_types.spl` + `src/compiler/20.hir/hir_lowering/`
 - **Priority:** P0
-- **Status:** Implemented (source-level, 2026-04-22; release artifact acceptance pending)
+- **Status:** Implemented (source-level and release artifact, 2026-04-22)
 - **Requested-semantics:**
   The driver uses a single shared `HirLowering` instance with a flat global
   `SymbolTable` scope to lower all modules in sequence. When two modules export
@@ -364,7 +356,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to
         the 7-field backend struct and does NOT expose `mode` / `low_memory`.
   - [x] Both coexist in the same compilation unit via aliased imports without collision.
-  - [ ] FR-COMPILER-001 release-binary acceptance criteria are fully met.
+  - [x] FR-COMPILER-001 release-binary acceptance criteria are fully met.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/compiler_module_scoped_hir_lowering.md`
   (implementation design); `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
@@ -376,9 +368,8 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   context without sharing the symbol table. Regression coverage:
   `test/system/compiler_module_scoped_hir_lowering_spec.spl`,
   `test/system/compiler_compile_options_field_access_spec.spl`, and
-  `test/unit/compiler/hir/resolve_import_symbols_spec.spl`. The release-binary
-  acceptance remains pending for the same artifact refresh reason noted in
-  FR-COMPILER-001.
+  `test/unit/compiler/hir/resolve_import_symbols_spec.spl`. Release-binary
+  acceptance is now closed by the FR-COMPILER-001 artifact refresh.
 - **Related-issue:** FR-COMPILER-002, FR-COMPILER-003 (prerequisites and parent)
 - **Notes:**
   FR-COMPILER-003 A2 (`resolve_import_symbols` + first-write-wins guard) partially

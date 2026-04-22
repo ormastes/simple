@@ -1,0 +1,33 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, spm, privilege, syscall
+# @cover src/os/kernel/ipc/syscall.spl 20%
+# @cover src/os/kernel/privilege/privilege_bridge.spl 60%
+
+use std.spec.{describe, context, it, expect}
+use os.kernel.privilege.privilege_bridge.{PrivilegeTokenMirror, bridge_set_mirror}
+use os.kernel.ipc.syscall.{spm_priv_check_for_task}
+
+fn mirror(path: text, authority: u8) -> PrivilegeTokenMirror:
+    PrivilegeTokenMirror(
+        id_path_bytes: path.bytes(),
+        authority: authority,
+        principal_bytes: "task".bytes(),
+        sig: []
+    )
+
+describe "FR-SPM-0002 sys_priv_check task mirror lookup":
+
+    context "caller task routing":
+
+        it "allows the caller whose mirror covers the requested id path":
+            bridge_set_mirror(9101u64, mirror("id.user", 1u8))
+            expect(spm_priv_check_for_task(9101u64, "id.user.banking".bytes())).to_equal(true)
+
+        it "denies a different caller with a mismatched mirror":
+            bridge_set_mirror(9102u64, mirror("id.admin", 1u8))
+            expect(spm_priv_check_for_task(9102u64, "id.user.banking".bytes())).to_equal(false)
+
+        it "denies callers without mirrors and empty id paths":
+            expect(spm_priv_check_for_task(9199u64, "id.user.banking".bytes())).to_equal(false)
+            bridge_set_mirror(9103u64, mirror("id.user", 1u8))
+            expect(spm_priv_check_for_task(9103u64, [])).to_equal(false)

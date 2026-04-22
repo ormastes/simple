@@ -42,6 +42,7 @@ This guide walks a single "banking LLM asks to open a window" request end-to-end
 
 | Component | File | Hook |
 |-----------|------|------|
+| SPM startup | `src/app/simple_process_manager/main.spl` | On SimpleOS, calls `sys_spm_claim()` before listening so the real SPM task replaces the boot placeholder port owner. |
 | LLM dashboard HTTP emit | `src/app/web_dashboard/server.spl` | Body passes through `filter_response_body`. |
 | LLM dashboard main | `src/app/llm_dashboard/main.spl` | `gate_llm_emit(body, token)` helper. |
 | MCP wiki tool | `src/app/mcp/wiki_keyword/wiki_tool.spl` | Returns `Content{body, authority}`. |

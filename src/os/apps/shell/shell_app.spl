@@ -20,7 +20,7 @@ use os.userlib.window.{WindowClient}
 use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
 
 extern fn serial_println(msg: text)
-use os.userlib.system.{sysinfo, uptime, hostname}
+use os.userlib.system.{uptime, hostname, mem_info}
 use os.userlib.log.{read_recent}
 use os.kernel.types.syscall_types.{SignalKind}
 use os.apps.shell.shell_job.{JobTable, JobState, Job}
@@ -264,6 +264,7 @@ impl ShellApp:
             "find":     self.last_exit_code = tool_find(self.vfs, self.cwd, args, self.terminal)
             "ps":       self.cmd_ps()
             "kill":     self.cmd_kill(args)
+            "run":      self.cmd_run(args)
             "mount":    self.cmd_mount(args)
             "clear":    self.cmd_clear()
             "help":     self.cmd_help()
@@ -274,6 +275,8 @@ impl ShellApp:
             "hostname": self.cmd_hostname(args)
             "uptime":   self.cmd_uptime()
             "dmesg":    self.cmd_dmesg(args)
+            "mem":      self.cmd_mem(args)
+            "reboot":   self.cmd_reboot(args)
             "jobs":     self.cmd_jobs()
             "fg":       self.cmd_fg(args)
             "bg":       self.cmd_bg(args)
@@ -337,6 +340,7 @@ impl ShellApp:
             "find": true
             "ps": true
             "kill": true
+            "run": true
             "mount": true
             "clear": true
             "help": true
@@ -347,6 +351,8 @@ impl ShellApp:
             "hostname": true
             "uptime": true
             "dmesg": true
+            "mem": true
+            "reboot": true
             "jobs": true
             "fg": true
             "bg": true
@@ -676,6 +682,33 @@ impl ShellApp:
         else:
             self.last_exit_code = 0
 
+    me cmd_run(args: [text]):
+        """Run an external command through the launcher path."""
+        if args.len() == 0:
+            self._write_error("run: missing command")
+            self.last_exit_code = 1
+            return
+        if args[0] == "--help":
+            self._write_line("usage: run CMD [ARGS...]")
+            self.last_exit_code = 0
+            return
+
+        val command = args[0]
+        var cmd_args: [text] = []
+        var i = 1
+        while i < args.len():
+            cmd_args = cmd_args.push(args[i])
+            i = i + 1
+
+        val result = spawn_command_async(command, cmd_args, self.cwd, self._get_env("PATH"))
+        match result:
+            Ok(future):
+                val status = posix_waitpid(future.pid as i64, 0)
+                self.last_exit_code = status as i32
+            Err(msg):
+                self._write_error("run: {msg}")
+                self.last_exit_code = 1
+
     me cmd_mount(args: [text]):
         """Show or add mount points."""
         if args.len() == 0:
@@ -727,6 +760,9 @@ impl ShellApp:
         self._write_line("  find [PATH] [-name PATTERN] Find files")
         self._write_line("  ps            List processes")
         self._write_line("  kill PID      Send signal to process")
+        self._write_line("  run CMD       Run an external command")
+        self._write_line("  mem           Show memory information")
+        self._write_line("  reboot        Request a system restart")
         self._write_line("  mount         Show/add mount points")
         self._write_line("  env           Show environment variables")
         self._write_line("  export K=V    Set environment variable")
@@ -855,6 +891,30 @@ impl ShellApp:
         for entry in entries:
             self._write_line("[{entry.timestamp_ns}] {entry.message}")
         self.last_exit_code = 0
+
+    me cmd_mem(args: [text]):
+        """Display memory information."""
+        if args.len() > 0 and args[0] == "--help":
+            self._write_line("usage: mem")
+            self.last_exit_code = 0
+            return
+        val result = mem_info()
+        if result.is_err():
+            self._write_error("mem: {result.unwrap_err()}")
+            self.last_exit_code = 1
+            return
+        val info = result.unwrap()
+        self._write_line("Memory: total={info.total_pages} pages free={info.free_pages} pages used={info.used_pages} pages size={info.page_size} bytes")
+        self.last_exit_code = 0
+
+    me cmd_reboot(args: [text]):
+        """Validate a reboot request."""
+        if args.len() > 0 and args[0] == "--help":
+            self._write_line("usage: reboot")
+            self.last_exit_code = 0
+            return
+        self._write_error("reboot: restart is not implemented in this build")
+        self.last_exit_code = 1
 
     # -- Job Control Commands ------------------------------------------------
 
