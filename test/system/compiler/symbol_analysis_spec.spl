@@ -5,7 +5,29 @@
 # Tests symbol visibility, reference tracking, and analysis statistics
 
 use std.spec
+use compiler.backend.linker.symbol_analysis.*
 
 describe "Symbol Analysis":
-    it "placeholder: symbol analysis types are defined":
-        expect(true).to_equal(true)
+    """Reachability and dead-symbol behavior for linker symbol analysis."""
+
+    it "marks entry-point references reachable and reports dead symbols":
+        """Entry points and call references should keep only connected symbols live."""
+        var analyzer = SymbolAnalyzer.create()
+        analyzer.add_symbol("main", SymbolVisibility.Export, 64, ".text")
+        analyzer.add_symbol("helper", SymbolVisibility.Local, 32, ".text")
+        analyzer.add_symbol("unused", SymbolVisibility.Local, 16, ".text")
+        analyzer.add_reference("main", "helper", RefKind.Call)
+        analyzer.set_entry_point("main")
+
+        _ = analyzer.analyze()
+
+        val stats = analyzer.stats()
+        expect(stats.total_symbols).to_equal(3)
+        expect(stats.reachable_symbols).to_equal(2)
+        expect(stats.dead_symbols).to_equal(1)
+        expect(stats.dead_size).to_equal(16)
+        expect(stats.total_size).to_equal(112)
+
+        val removable = analyzer.get_removable_symbols()
+        expect(removable.len()).to_equal(1)
+        expect(removable[0]).to_equal("unused")
