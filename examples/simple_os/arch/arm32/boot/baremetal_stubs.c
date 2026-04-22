@@ -1055,7 +1055,7 @@ RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue version_val)
         mmio[0x0a4U / 4U] = 0U;
         mmio[0x044U / 4U] = 1U;
     }
-    __asm__ volatile("dmb sy" ::: "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     return NIL_VALUE;
 }
 
@@ -1132,7 +1132,7 @@ S1(rt_read_cr3) S1(rt_write_cr3) S1(rt_read_cr2)
 
 RuntimeValue rt_memory_barrier(void)
 {
-    __asm__ volatile("dmb sy" ::: "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     return NIL_VALUE;
 }
 
@@ -1230,9 +1230,9 @@ RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
     uint16_t idx = *avail_idx;
     volatile uint16_t *slot = (volatile uint16_t *)(uintptr_t)(avail_addr + 4U + ((idx % 128U) * 2U));
     *slot = (uint16_t)desc_idx;
-    __asm__ volatile("dmb sy" ::: "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     *avail_idx = (uint16_t)(idx + 1U);
-    __asm__ volatile("dmb sy" ::: "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     arm32_clean_dcache_range(avail_addr, 512U);
     return NIL_VALUE;
 }
@@ -1257,7 +1257,7 @@ RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
     *(volatile uint32_t *)(uintptr_t)(dma_addr + 8U) = lba;
     *(volatile uint32_t *)(uintptr_t)(dma_addr + 12U) = 0U;
     *(volatile uint8_t *)(uintptr_t)(dma_addr + 528U) = 0xffU;
-    __asm__ volatile("dmb sy" ::: "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     arm32_clean_dcache_range(dma_addr, 1024U);
     return NIL_VALUE;
 }
