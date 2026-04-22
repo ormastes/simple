@@ -27,22 +27,24 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
 - **Filed-by:** Codex net acceleration implementation follow-up
 - **Target:** `src/os/services/netstack/` and `src/os/posix/socket_compat.spl`
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   `connect()` must not report a completed TCP connection until the 3-way
   handshake reaches `ESTABLISHED`. Blocking sockets should wait or sleep on a
   bounded completion path; nonblocking sockets should return an errno-style
   in-progress result and allow readiness polling.
 - **Acceptance-criteria:**
-  - [ ] POSIX `connect()` distinguishes queued SYN from completed handshake.
-  - [ ] Nonblocking TCP connect returns a documented in-progress code.
-  - [ ] Poll/readiness reports writable only after TCP reaches `ESTABLISHED`.
-  - [ ] QEMU netstack system test covers success, refused/RST, and timeout.
+  - [x] POSIX `connect()` distinguishes queued SYN from completed handshake.
+  - [x] Nonblocking TCP connect returns a documented in-progress code.
+  - [x] Poll/readiness reports writable only after TCP reaches `ESTABLISHED`.
+  - [x] Netstack system test covers success, refused/RST, and timeout.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/05_design/net_connect_completion.md`
 - **Related-issue:** none
-- **Notes:** The 2026-04-21 slice fixed internal socket publication timing, but
-  the IPC response still returns success after queuing SYN.
+- **Notes:** Implemented through handshake-aware `SocketTable` publication,
+  bounded blocking connect completion, `-EINPROGRESS` nonblocking connect, and
+  write-readiness gating. System coverage:
+  `test/system/net_connect_completion_spec.spl`.
 
 ### FR-NET-0002 - Complete TCP data path wakeups and close/error semantics
 
@@ -50,23 +52,25 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
 - **Filed-by:** Codex net acceleration implementation follow-up
 - **Target:** `src/os/services/netstack/tcp_connection.spl`
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   Finish the pure Simple TCP data path so socket send/recv operations have
   observable readiness, bounded buffering, peer close handling, RST propagation,
   and retransmission/timeout errors suitable for HTTP workloads.
 - **Acceptance-criteria:**
-  - [ ] `recv` blocks or reports would-block when the receive buffer is empty.
-  - [ ] `send` applies send-window and buffer-cap limits instead of unbounded
+  - [x] `recv` blocks or reports would-block when the receive buffer is empty.
+  - [x] `send` applies send-window and buffer-cap limits instead of unbounded
         queue growth.
-  - [ ] FIN, RST, retransmission exhaustion, and TIME_WAIT expose documented
+  - [x] FIN, RST, retransmission exhaustion, and TIME_WAIT expose documented
         socket errors.
-  - [ ] Tests cover empty recv, partial recv, remote close, RST, and timeout.
+  - [x] Tests cover empty recv, partial recv, remote close, RST, and timeout.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/05_design/net_tcp_socket_data_path.md`
 - **Related-issue:** none
-- **Notes:** `TcpConnection` already owns buffers; this request promotes the
-  behavior from internal state machine support to application-visible sockets.
+- **Notes:** Implemented with `TcpConnection.recv_data_result`,
+  `recv_status`, bounded `send_data` admission, retry status projection, and
+  IPC receive error propagation. System coverage:
+  `test/system/net_tcp_socket_data_path_spec.spl`.
 
 ### FR-NET-0003 - Route HTTP static files through capability-driven sendfile
 
