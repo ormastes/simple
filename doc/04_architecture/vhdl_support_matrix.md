@@ -6,7 +6,7 @@
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. The CLI VHDL path is supported for the conservative synthesizable subset, and MIR-to-VHDL lowering supports straight-line logic, computed branch/switch returns through combinational processes, process-local aggregates, and explicit VHDL hardware instructions. Full arbitrary Simple source-to-VHDL compilation remains partial because the public source facade still does not cover the entire MIR surface.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. The CLI VHDL path is supported for the conservative synthesizable subset, and MIR-to-VHDL lowering supports straight-line logic, computed branch/switch returns through combinational processes, process-local aggregates, tuple records, payloadless enum literals, and explicit VHDL hardware instructions. Full arbitrary Simple source-to-VHDL compilation remains partial because the public source facade still does not cover the entire MIR surface.
 
 ## Type Support
 
@@ -23,8 +23,10 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `Bool` (unresolved) | `bit` | stable | stable | stable | supported | **stable** |
 | `Bool` (resolved) | `std_logic` | stable | stable | stable | supported | **stable** |
 | `Array(elem, N)` | `array (0 to N-1) of T` | stable | stable | stable | supported | **stable** |
+| Tuple | generated record type with `fN` fields | supported | stable | stable | supported | **supported** |
 | Struct | `record ... end record` | stable | stable | stable | supported | **stable** |
-| Enum | `type T is (A, B, C)` | stable | stable | stable | supported | **stable** |
+| Payloadless Enum | `type T is (A, B, C)` and variant literal assignments | stable | stable | stable | supported | **stable** |
+| Payload Enum | — | error | — | — | — | **deferred** |
 | `f16/f32/f64` | — | error | — | — | — | **deferred** |
 | `Unit` | — | error | — | — | — | **deferred** |
 | Pointer | — | error | — | — | — | **deferred** |
@@ -60,7 +62,8 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `VhdlResize` | `resize(sig, w)` | **stable** |
 | `VhdlSlice` | `sig(hi downto lo)` | **stable** |
 | `VhdlConcat` | `a & b & c` | **stable** |
-| `Aggregate` (struct/array) | Record/array aggregate expression | **stable** |
+| `Aggregate` (struct/array/tuple) | Record/array/tuple aggregate expression | **stable** |
+| `Aggregate` (payloadless enum) | Variant literal | **supported** |
 | `GetField` | Record field select | **stable** |
 | `SetField` | Record update through aggregate lowering | **supported** |
 | `Nop` | (no output) | **stable** |
@@ -129,7 +132,7 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 |------|----------|--------|
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
-| Pure Simple source fallback | Conservative single-function expression subset | **partial** |
+| Pure Simple source fallback | Conservative single-function scalar expression subset: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, and simple muxes | **supported** |
 | Full Simple source facade | Arbitrary source-to-MIR-to-VHDL path | **partial** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |

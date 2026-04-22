@@ -72,14 +72,14 @@
 ### L012: Full Simple source-to-VHDL facade is still partial
 **Severity:** High
 **Workaround:** Use the CLI VHDL path for the conservative synthesizable subset, MIR-backed VHDL backend tests, or explicit backend APIs.
-**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes the CLI `simple compile --backend=vhdl` path for the conservative synthesizable subset, but arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the public source path covers the full required surface.
+**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes the CLI `simple compile --backend=vhdl` path and the pure Simple fallback for conservative single-function scalar expressions: fixed-width integer and bool ports/results, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, and simple if/mux expressions. Arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the public source path covers the full required surface.
 
 ## MIR Lowering Limitations
 
 ### L013: General stateful MIR is still unsupported
 **Severity:** High
 **Workaround:** Express hardware as statically-shaped combinational logic, explicit VHDL process instructions, records, arrays, ports, and return-oriented branch/switch logic.
-**Details:** Straight-line arithmetic, casts, local load/store-like value movement, aggregates, field access, return chains, computed `if` arms, and computed `switch` targets are supported. Computed branches and switches lower through compiler-generated combinational processes with process variables. Struct and array aggregates are also supported inside those processes. General stateful MIR remains unsupported and should fail with hard compile errors rather than silently generating unsynthesizable VHDL.
+**Details:** Straight-line arithmetic, casts, local load/store-like value movement, aggregates, field access, return chains, computed `if` arms, and computed `switch` targets are supported. Computed branches and switches lower through compiler-generated combinational processes with process variables. Struct, array, tuple, and payloadless enum aggregates are also supported inside those processes. Payload-bearing enum aggregates, general stateful MIR, and dynamic memory remain unsupported and should fail with hard compile errors rather than silently generating unsynthesizable VHDL.
 
 ### L014: Dynamic address and call MIR are still unsupported
 **Severity:** Medium
