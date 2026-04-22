@@ -1505,7 +1505,7 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
 
 RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
-    uint32_t dst_phys = IS_INT(dst_phys_val) ? (uint32_t)DECODE_INT(dst_phys_val) : (uint32_t)dst_phys_val;
+    uint32_t dst_phys = (uint32_t)dst_phys_val;
     RuntimeArray *bytes = (RuntimeArray *)(IS_HEAP(bytes_val) ? DECODE_PTR(bytes_val) : (void *)(uintptr_t)(uint32_t)bytes_val);
     if (!dst_phys || !bytes || bytes->hdr.type != HEAP_ARRAY || bytes->len > bytes->cap) return 0;
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_phys;
