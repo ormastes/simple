@@ -44,6 +44,9 @@ class VhdlBackend:
     active_local_kinds: Dict<i64, LocalKind>
     active_blocks: Dict<i64, MirBlock>
     active_type_defs: Dict<i64, MirTypeDef>
+    active_tuple_type_names: Dict<text, text>
+    active_tuple_type_shapes: Dict<text, [MirType]>
+    active_tuple_type_order: [text]
 
     static fn empty_span() -> Span:
         Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -58,7 +61,10 @@ class VhdlBackend:
             active_local_types: {},
             active_local_kinds: {},
             active_blocks: {},
-            active_type_defs: {}
+            active_type_defs: {},
+            active_tuple_type_names: {},
+            active_tuple_type_shapes: {},
+            active_tuple_type_order: []
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -71,7 +77,10 @@ class VhdlBackend:
             active_local_types: {},
             active_local_kinds: {},
             active_blocks: {},
-            active_type_defs: {}
+            active_type_defs: {},
+            active_tuple_type_names: {},
+            active_tuple_type_shapes: {},
+            active_tuple_type_order: []
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
@@ -80,13 +89,14 @@ class VhdlBackend:
         self.active_type_defs = {}
         for symbol in module.types.keys():
             self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
+        self.prepare_tuple_types_for_module(module)
 
         # Emit library header
         builder.emit_library_header()
 
         # Generate package for types/constants
         var pkg_vhdl = ""
-        if module.types.len() > 0 or module.constants.len() > 0:
+        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0:
             val pkg_builder = VhdlBuilder.create(module.name)
             pkg_builder.emit_library_header()
             val pkg_result = self.compile_package_into(pkg_builder, module)
@@ -121,6 +131,22 @@ class VhdlBackend:
     fn compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
         """Compile type and constant definitions into a VHDL package."""
         builder.emit_package_begin(module.name)
+
+        for tuple_key in self.active_tuple_type_order:
+            val tuple_name = self.active_tuple_type_names[tuple_key]
+            val tuple_elements = self.active_tuple_type_shapes[tuple_key]
+            if tuple_elements.len() == 0:
+                return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
+            var tuple_fields: [(text, text)] = []
+            var tuple_idx = 0
+            for tuple_element in tuple_elements:
+                val tuple_type_result = self.mir_type_to_vhdl(tuple_element)
+                if tuple_type_result.is_err():
+                    return Err(tuple_type_result.unwrap_err())
+                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type_result.unwrap()))
+                tuple_idx = tuple_idx + 1
+            val tuple_def = self.type_mapper.map_record(tuple_fields)
+            builder.emit_type_decl(tuple_name, tuple_def)
 
         # Emit type definitions
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
@@ -166,6 +192,139 @@ class VhdlBackend:
 
         builder.emit_package_end(module.name)
         Ok(())
+
+    fn prepare_tuple_types_for_module(module: MirModule):
+        self.active_tuple_type_names = {}
+        self.active_tuple_type_shapes = {}
+        self.active_tuple_type_order = []
+
+        for symbol in module.types.keys():
+            val type_def = module.types[symbol]
+            self.register_tuple_types_in_type_def(type_def)
+
+        for symbol in module.constants.keys():
+            val constant = module.constants[symbol]
+            self.register_tuple_types_in_type(constant.type_)
+
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            self.register_tuple_types_in_type(func.signature.return_type)
+            for param_type in func.signature.params:
+                self.register_tuple_types_in_type(param_type)
+            for local in func.locals:
+                self.register_tuple_types_in_type(local.type_)
+
+    fn register_tuple_types_in_type_def(type_def: MirTypeDef):
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    self.register_tuple_types_in_type(field.type_)
+            case Enum(variants):
+                for variant in variants:
+                    if variant.payload.?:
+                        self.register_tuple_types_in_type(variant.payload.unwrap())
+            case Union(members):
+                for member in members:
+                    self.register_tuple_types_in_type(member)
+
+    fn register_tuple_types_in_type(ty: MirType):
+        match ty.kind:
+            case Tuple(elements):
+                for element in elements:
+                    self.register_tuple_types_in_type(element)
+                val tuple_key = self.tuple_type_key(ty)
+                if not self.active_tuple_type_names.get(tuple_key).?:
+                    val tuple_name = "tuple_t_{self.active_tuple_type_order.len()}"
+                    self.active_tuple_type_names[tuple_key] = tuple_name
+                    self.active_tuple_type_shapes[tuple_key] = elements
+                    self.active_tuple_type_order = self.active_tuple_type_order.push(tuple_key)
+            case Array(element, _):
+                self.register_tuple_types_in_type(element)
+            case Slice(element):
+                self.register_tuple_types_in_type(element)
+            case Ptr(pointee, _):
+                self.register_tuple_types_in_type(pointee)
+            case Ref(referent, _):
+                self.register_tuple_types_in_type(referent)
+            case FuncPtr(signature):
+                for param_type in signature.params:
+                    self.register_tuple_types_in_type(param_type)
+                self.register_tuple_types_in_type(signature.return_type)
+            case Promise(inner):
+                self.register_tuple_types_in_type(inner)
+            case Generator(yield_ty, return_ty):
+                self.register_tuple_types_in_type(yield_ty)
+                self.register_tuple_types_in_type(return_ty)
+            case ActorType(message):
+                self.register_tuple_types_in_type(message)
+            case Union(members):
+                for member in members:
+                    self.register_tuple_types_in_type(member)
+            case _:
+                ()
+
+    fn tuple_type_key(ty: MirType) -> text:
+        match ty.kind:
+            case Tuple(elements):
+                var element_keys: [text] = []
+                for element in elements:
+                    element_keys = element_keys.push(self.tuple_type_key_or_leaf(element))
+                "tuple({element_keys.join(\",\")})"
+            case _:
+                self.tuple_type_key_or_leaf(ty)
+
+    fn tuple_type_key_or_leaf(ty: MirType) -> text:
+        match ty.kind:
+            case I8: "i8"
+            case I16: "i16"
+            case I32: "i32"
+            case I64: "i64"
+            case U8: "u8"
+            case U16: "u16"
+            case U32: "u32"
+            case U64: "u64"
+            case F32: "f32"
+            case F64: "f64"
+            case Bool: "bool"
+            case Char: "char"
+            case Unit: "unit"
+            case Vec4f: "vec4f"
+            case Vec8f: "vec8f"
+            case Vec4d: "vec4d"
+            case Vec4i: "vec4i"
+            case Vec8i: "vec8i"
+            case Array(element, size): "array({self.tuple_type_key_or_leaf(element)};{size})"
+            case Slice(element): "slice({self.tuple_type_key_or_leaf(element)})"
+            case Tuple(elements):
+                var nested_keys: [text] = []
+                for element in elements:
+                    nested_keys = nested_keys.push(self.tuple_type_key_or_leaf(element))
+                "tuple({nested_keys.join(\",\")})"
+            case Struct(symbol): "struct#{symbol.id}"
+            case Enum(symbol): "enum#{symbol.id}"
+            case Union(members):
+                var member_keys: [text] = []
+                for member in members:
+                    member_keys = member_keys.push(self.tuple_type_key_or_leaf(member))
+                "union({member_keys.join(\",\")})"
+            case Ptr(pointee, mutable):
+                "ptr({self.tuple_type_key_or_leaf(pointee)},{mutable})"
+            case Ref(referent, mutable):
+                "ref({self.tuple_type_key_or_leaf(referent)},{mutable})"
+            case FuncPtr(signature):
+                var param_keys: [text] = []
+                for param_type in signature.params:
+                    param_keys = param_keys.push(self.tuple_type_key_or_leaf(param_type))
+                "fn({param_keys.join(\",\")})->{self.tuple_type_key_or_leaf(signature.return_type)}"
+            case Promise(inner):
+                "promise({self.tuple_type_key_or_leaf(inner)})"
+            case Generator(yield_ty, return_ty):
+                "gen({self.tuple_type_key_or_leaf(yield_ty)}->{self.tuple_type_key_or_leaf(return_ty)})"
+            case ActorType(message):
+                "actor({self.tuple_type_key_or_leaf(message)})"
+            case Never: "never"
+            case Opaque(name): "opaque({name})"
+            case _: "type#{ty.kind}"
 
     fn compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
         """Compile a function as a VHDL entity/architecture pair."""
@@ -1142,6 +1301,15 @@ class VhdlBackend:
                     Err(elem_type_result.unwrap_err())
                 else:
                     Ok("array (0 to {size - 1}) of {elem_type_result.unwrap()}")
+            case Tuple(elements):
+                if elements.len() == 0:
+                    return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
+                val tuple_key = self.tuple_type_key(ty)
+                val tuple_name = self.active_tuple_type_names.get(tuple_key)
+                if tuple_name.?:
+                    Ok(tuple_name.unwrap())
+                else:
+                    Err(self.backend_error("Tuple type {ty.kind} was not registered before VHDL type emission"))
             case Struct(symbol) | Enum(symbol):
                 val type_def_result = self.type_def_by_symbol(symbol)
                 if type_def_result.is_err():
@@ -1155,6 +1323,24 @@ class VhdlBackend:
 
     fn aggregate_to_vhdl(kind: AggregateKind, operands: [MirOperand], dest_type: MirType) -> Result<text, CompileError>:
         match kind:
+            case Tuple:
+                match dest_type.kind:
+                    case Tuple(elements):
+                        if elements.len() != operands.len():
+                            return Err(self.backend_error("Tuple aggregate expects {elements.len()} operands, got {operands.len()}"))
+                        if elements.len() == 0:
+                            return Err(self.backend_error("Empty tuple aggregates are not supported by the VHDL backend"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
             case Struct(symbol):
                 val type_def_result = self.type_def_by_symbol(symbol)
                 if type_def_result.is_err():
@@ -1191,11 +1377,46 @@ class VhdlBackend:
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
+            case Enum(symbol, variant):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Enum(variants):
+                        if variant < 0 or variant >= variants.len():
+                            return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
+                        if variants.len() == 0:
+                            return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
+                        for candidate in variants:
+                            if candidate.payload.?:
+                                return Err(self.backend_error("Enum aggregate lowering only supports payloadless enums; {type_def.name} has payload variants"))
+                        Ok(variants[variant].name)
+                    case _:
+                        Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("Unsupported VHDL aggregate kind: {kind}"))
 
     fn aggregate_to_vhdl_process(kind: AggregateKind, operands: [MirOperand], dest_type: MirType) -> Result<text, CompileError>:
         match kind:
+            case Tuple:
+                match dest_type.kind:
+                    case Tuple(elements):
+                        if elements.len() != operands.len():
+                            return Err(self.backend_error("Tuple aggregate expects {elements.len()} operands, got {operands.len()}"))
+                        if elements.len() == 0:
+                            return Err(self.backend_error("Empty tuple aggregates are not supported by the VHDL backend"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.process_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
             case Struct(symbol):
                 val type_def_result = self.type_def_by_symbol(symbol)
                 if type_def_result.is_err():
@@ -1232,6 +1453,23 @@ class VhdlBackend:
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
+            case Enum(symbol, variant):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Enum(variants):
+                        if variant < 0 or variant >= variants.len():
+                            return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
+                        if variants.len() == 0:
+                            return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
+                        for candidate in variants:
+                            if candidate.payload.?:
+                                return Err(self.backend_error("Enum aggregate lowering only supports payloadless enums; {type_def.name} has payload variants"))
+                        Ok(variants[variant].name)
+                    case _:
+                        Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("Unsupported VHDL process aggregate kind: {kind}"))
 
@@ -1459,6 +1697,10 @@ impl HardwareCodegen for VhdlBackend:
     fn compile_package(module: MirModule) -> Result<text, CompileError>:
         val builder = VhdlBuilder.create(module.name)
         builder.emit_library_header()
+        self.active_type_defs = {}
+        for symbol in module.types.keys():
+            self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
+        self.prepare_tuple_types_for_module(module)
         val result = self.compile_package_into(builder, module)
         if result.is_err():
             return Err(result.unwrap_err())

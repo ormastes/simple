@@ -31,6 +31,9 @@ fn make_i32() -> MirType:
 fn make_bool() -> MirType:
     MirType(kind: MirTypeKind.Bool)
 
+fn make_tuple_i32_bool() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([make_i32(), make_bool()]))
+
 fn make_arg_local(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index))
 
@@ -43,6 +46,20 @@ fn make_temp_local(id: i64, name: text, ty: MirType) -> MirLocal:
 fn make_simple_backend() -> VhdlBackend:
     val options = compileoptions_default_options()
     VhdlBackend.create(CodegenTarget.Riscv32, options)
+
+fn make_payloadless_enum_type_def(symbol: SymbolId, name: text, variant_names: [text]) -> MirTypeDef:
+    var variants: [MirVariantDef] = []
+    var idx = 0
+    for variant_name in variant_names:
+        variants = variants.push(MirVariantDef(name: variant_name, discriminant: idx, payload: nil))
+        idx = idx + 1
+    MirTypeDef(
+        symbol: symbol,
+        name: name,
+        kind: MirTypeDefKind.Enum(variants),
+        is_export_c: false,
+        export_name: ""
+    )
 
 fn single_block_module(name: text, func: MirFunction) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
@@ -405,6 +422,196 @@ describe "VHDL Backend - real backend compilation":
         check(pkg_vhdl.contains("x : signed(31 downto 0);"))
         check(pkg_vhdl.contains("valid : bit;"))
         check(pkg_vhdl.contains("constant MAX_VALUE : signed(31 downto 0) := to_signed(7, 32);"))
+
+    it "compiles tuple aggregates through a generated tuple record type":
+        val tuple_type = make_tuple_i32_bool()
+        val src_local = make_arg_local(1, 0, "a", make_i32())
+        val flag_local = make_arg_local(2, 1, "flag", make_bool())
+        val ret_local = make_return_local(3, tuple_type)
+        val tuple_local = make_temp_local(4, "tuple_sig", tuple_type)
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 4),
+                        AggregateKind.Tuple,
+                        [
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                        ]
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 41),
+            name: "tuple_pack",
+            signature: MirSignature(params: [make_i32(), make_bool()], return_type: tuple_type, is_variadic: false),
+            locals: [src_local, flag_local, ret_local, tuple_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("tuple_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val tuple_pkg = compiled.package_vhdl.unwrap()
+        check(tuple_pkg.contains("type tuple_t_0 is record"))
+        check(tuple_pkg.contains("f0 : signed(31 downto 0);"))
+        check(tuple_pkg.contains("f1 : bit;"))
+        check(compiled.vhdl.contains("result_out : out tuple_t_0"))
+        check(compiled.vhdl.contains("signal tuple_sig : tuple_t_0;"))
+        check(compiled.vhdl.contains("tuple_sig <= (f0 => a, f1 => flag);"))
+        check(compiled.vhdl.contains("result_out <= tuple_sig;"))
+
+    it "compiles payloadless enum aggregates to variant literals":
+        val state_type = make_payloadless_enum_type_def(
+            SymbolId(id: 55),
+            "state_t",
+            ["Idle", "Running", "Done"]
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[state_type.symbol] = state_type
+        val ret_local = make_return_local(1, MirType(kind: MirTypeKind.Enum(state_type.symbol)))
+        val state_local = make_temp_local(2, "state_sig", MirType(kind: MirTypeKind.Enum(state_type.symbol)))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 2),
+                        AggregateKind.Enum(state_type.symbol, 1),
+                        []
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 2)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 56),
+            name: "state_pack",
+            signature: MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Enum(state_type.symbol)), is_variadic: false),
+            locals: [ret_local, state_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "enum_mod", functions: functions, statics: {}, constants: {}, types: types)
+        val backend = make_simple_backend()
+        val result = backend.compile(module)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val enum_pkg = compiled.package_vhdl.unwrap()
+        check(enum_pkg.contains("type state_t is (Idle, Running, Done);"))
+        check(compiled.vhdl.contains("result_out : out state_t"))
+        check(compiled.vhdl.contains("signal state_sig : state_t;"))
+        check(compiled.vhdl.contains("state_sig <= Running;"))
+        check(compiled.vhdl.contains("result_out <= state_sig;"))
+
+    it "keeps generic call lowering and unsupported terminators as hard errors":
+        val ret_local = make_return_local(1, make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Call(
+                        nil,
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32())),
+                        []
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 60),
+            name: "bad_call",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val backend = make_simple_backend()
+        val call_result = backend.compile(single_block_module("bad_call_mod", func))
+        check(call_result.is_err())
+        check(call_result.unwrap_err().message.contains("generic Call lowering"))
+
+        val abort_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Abort("boom")
+        )
+        val abort_func = MirFunction(
+            symbol: SymbolId(id: 61),
+            name: "bad_abort",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [make_return_local(1, make_i32())],
+            blocks: [abort_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val abort_result = backend.compile(single_block_module("bad_abort_mod", abort_func))
+        check(abort_result.is_err())
+        check(abort_result.unwrap_err().message.contains("Unsupported VHDL terminator"))
 
     it "compiles MIR VHDL combinational processes with real block contents":
         val src_local = make_arg_local(1, 0, "src_in", make_i32())
