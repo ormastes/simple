@@ -369,6 +369,95 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("v_else_tmp := b - to_signed(1, 32);"))
         check(vhdl.contains("result_out <= v_else_tmp;"))
 
+    it "compiles branch-local VHDL resize slice and concat inside combinational process":
+        val backend = make_resolved_backend()
+        val u32 = MirType(kind: MirTypeKind.U32)
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_u8()),
+            make_arg_local(2, 2, "b", make_u8()),
+            make_return_local(3, u32),
+            make_temp_local(4, "then_wide", u32),
+            make_temp_local(5, "cat", u32),
+            make_temp_local(6, "low", make_u8()),
+            make_temp_local(7, "else_wide", u32)
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_resize = MirInst(
+            kind: MirInstKind.VhdlResize(
+                LocalId(id: 4),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                32,
+                false
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_resize],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_concat = MirInst(
+            kind: MirInstKind.VhdlConcat(
+                LocalId(id: 5),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val else_slice = MirInst(
+            kind: MirInstKind.VhdlSlice(
+                LocalId(id: 6),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5))),
+                7,
+                0
+            ),
+            span: empty_span()
+        )
+        val else_resize = MirInst(
+            kind: MirInstKind.VhdlResize(
+                LocalId(id: 7),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6))),
+                32,
+                false
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_concat, else_slice, else_resize],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+
+        val func = make_function("select_vhdl_width_ops", [make_bool(), make_u8(), make_u8()], u32, locals, [entry, then_block, else_block])
+        val module = make_module("select_vhdl_width_ops_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for process VHDL width ops")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("variable v_then_wide : unsigned(31 downto 0);"))
+        check(vhdl.contains("v_then_wide := resize(a, 32);"))
+        check(vhdl.contains("v_cat := b & b & b & b;"))
+        check(vhdl.contains("v_low := v_cat(7 downto 0);"))
+        check(vhdl.contains("v_else_wide := resize(v_low, 32);"))
+        check(vhdl.contains("result_out <= v_else_wide;"))
+
     it "compiles checked binary op and integer casts":
         val backend = make_backend()
 

@@ -1,0 +1,44 @@
+# @cover src/compiler/80.driver/driver_public_compile.spl 80%
+# Focused system coverage for the Simple-side VHDL source facade.
+
+use std.spec
+
+use compiler.driver.driver_api.{aot_vhdl_file}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn delete_file(path: text) -> bool:
+    rt_file_delete(path)
+
+fn write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn check_msg(condition: bool, msg: text):
+    if not condition:
+        expect(msg).to_equal("")
+
+describe "VHDL Source Facade":
+
+    it "aot_vhdl_file writes a typed add design unit from minimal source":
+        val src_path = "/tmp/sml_vhdl_source_facade_add.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_add.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn add(a: i32, b: i32) -> i32:\n    a + b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.len() > 0, "VHDL output file was empty")
+        check_msg(output.contains("entity add is"), output)
+        check_msg(output.contains("a : in signed(31 downto 0);"), output)
+        check_msg(output.contains("b : in signed(31 downto 0);"), output)
+        check_msg(output.contains("result_out : out signed(31 downto 0)"), output)
+        check_msg(output.contains("result_out <= a + b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)

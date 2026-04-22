@@ -1,12 +1,12 @@
 # VHDL Backend Support Matrix
 
-**Date:** 2026-04-04
+**Date:** 2026-04-22
 **Status:** Active
 **Canonical reference for VHDL backend support claims.**
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validates generated designs through GHDL analysis, and supports an authoritative simulation-backed proof path for supported targets.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis where available. MIR-to-VHDL lowering supports straight-line logic, computed branch/switch returns through combinational processes, process-local aggregates, explicit VHDL hardware instructions, and a conservative pure Simple source fallback for single-expression VHDL generation. Full arbitrary Simple source-to-VHDL compilation remains limited by the source facade and unsupported stateful/general MIR instructions.
 
 ## Type Support
 
@@ -60,14 +60,37 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `VhdlResize` | `resize(sig, w)` | **stable** |
 | `VhdlSlice` | `sig(hi downto lo)` | **stable** |
 | `VhdlConcat` | `a & b & c` | **stable** |
+| `Aggregate` (struct/array) | Record/array aggregate expression | **stable** |
+| `GetField` | Record field select | **stable** |
+| `SetField` | Record update through aggregate lowering | **supported** |
 | `Nop` | (no output) | **stable** |
-| All other MIR | — (hard error) | **deferred** |
+| `Alloc` | — (hard error) | **deferred** |
+| `GetElementPtr` | — (hard error) | **deferred** |
+| Generic `Call` | — (hard error unless explicitly handled) | **deferred** |
+| `CallIndirect` | — (hard error) | **deferred** |
+| Stateful/general memory MIR | — (hard error) | **deferred** |
+| All other unsupported MIR | — (hard error) | **deferred** |
+
+## Control Flow Support
+
+| MIR Terminator Pattern | VHDL Output | Status |
+|------------------------|-------------|--------|
+| Direct `Return(value)` | Concurrent result assignment | **stable** |
+| Direct `Return()` | Empty entity body / no result assignment | **stable** |
+| `Goto` chain to return | Followed to final return block | **stable** |
+| `If` with return-only arms | Concurrent conditional result expression | **stable** |
+| `If` with computed arms | `comb: process(all)` with process variables and nested `if` | **stable** |
+| `Switch` with return-only targets | Concurrent selected result lowering | **stable** |
+| `Switch` with computed targets | `comb: process(all)` with `if`/`elsif`/`else` chain | **stable** |
+| Cyclic control flow in combinational lowering | Hard error | **supported** |
 
 ## Process Forms
 
 | Process Kind | Sensitivity | Status |
 |-------------|------------|--------|
 | Combinational | Explicit list | **stable** |
+| Compiler-generated combinational branch process | `process(all)` | **stable** |
+| Process-local struct/array aggregates | Variables and aggregate expressions inside process | **stable** |
 | Clocked (rising edge) | Clock signal | **stable** |
 | Clocked (falling edge) | Clock signal | **stable** |
 | Async reset | Clock + reset | **stable** |
@@ -104,8 +127,10 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 
 | Tool | Operation | Status |
 |------|----------|--------|
-| `simple compile --backend=vhdl` | CLI entry point | **supported** |
+| `simple compile --backend=vhdl` | CLI entry point through current runtime bridge | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
+| Pure Simple source fallback | Conservative single-function expression subset | **partial** |
+| Full Simple source facade | Arbitrary source-to-MIR-to-VHDL path | **partial** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **deferred** (follow-on milestone) |

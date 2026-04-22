@@ -1,6 +1,6 @@
 # VHDL Backend Known Limitations
 
-**Date:** 2026-04-04
+**Date:** 2026-04-22
 **Status:** Active
 **Tracks:** Known limitations and workarounds for the VHDL backend
 
@@ -66,6 +66,25 @@
 **Severity:** Medium
 **Workaround:** Constraints must be manually registered via `VhdlConstraintChecker.add_constraint()`
 **Details:** The constraint checker validates registered constraints but does not automatically extract width/CDC/sensitivity constraints from the MIR during compilation. This requires explicit integration in the compilation pipeline.
+
+## Source Facade Limitations
+
+### L012: Full Simple source-to-VHDL facade is still partial
+**Severity:** High
+**Workaround:** Use MIR-backed VHDL backend tests, explicit backend APIs, or the conservative pure Simple source fallback for supported single-expression functions.
+**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes a pure Simple fallback for conservative single-function expression VHDL generation, but arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the pure Simple path covers the full required surface.
+
+## MIR Lowering Limitations
+
+### L013: General stateful MIR is still unsupported
+**Severity:** High
+**Workaround:** Express hardware as statically-shaped combinational logic, explicit VHDL process instructions, records, arrays, ports, and return-oriented branch/switch logic.
+**Details:** Straight-line arithmetic, casts, local load/store-like value movement, aggregates, field access, return chains, computed `if` arms, and computed `switch` targets are supported. Computed branches and switches lower through compiler-generated combinational processes with process variables. Struct and array aggregates are also supported inside those processes. General stateful MIR remains unsupported and should fail with hard compile errors rather than silently generating unsynthesizable VHDL.
+
+### L014: Dynamic address and call MIR are still unsupported
+**Severity:** Medium
+**Workaround:** Inline or specialize hardware logic before VHDL lowering; use explicit component instantiation/port maps for hardware composition.
+**Details:** `Alloc`, `GetElementPtr`, generic `Call`, and `CallIndirect` are not general-purpose VHDL lowering targets. Explicit `VhdlPortMap` component instantiation is supported, but general dynamic calls and pointer/address-style MIR are still outside the synthesizable subset.
 
 ## See Also
 
