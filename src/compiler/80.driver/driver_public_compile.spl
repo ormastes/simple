@@ -315,10 +315,14 @@ fn _simple_strip_return(expr: text) -> text:
 
 fn _simple_type_to_vhdl(type_name: text) -> text:
     match type_name:
+        case "i8": "signed(7 downto 0)"
+        case "i16": "signed(15 downto 0)"
         case "i32": "signed(31 downto 0)"
         case "i64": "signed(63 downto 0)"
         case "u8": "unsigned(7 downto 0)"
+        case "u16": "unsigned(15 downto 0)"
         case "u32": "unsigned(31 downto 0)"
+        case "u64": "unsigned(63 downto 0)"
         case "bool": "std_logic"
         case _: ""
 
@@ -330,19 +334,153 @@ fn _simple_expr_to_vhdl(expr: text, result_type: text, param_names: [text], para
     val cast_result = _simple_cast_to_vhdl(trimmed, result_type, param_names, param_types)
     if not cast_result.is_err():
         return cast_result
+    val comparison_result = _simple_comparison_to_vhdl(trimmed, param_names, param_types)
+    if not comparison_result.is_err():
+        return comparison_result
+    val bool_logic_result = _simple_bool_logic_to_vhdl(trimmed, param_names, param_types)
+    if not bool_logic_result.is_err():
+        return bool_logic_result
+    val unary_result = _simple_unary_to_vhdl(trimmed, result_type, param_names, param_types)
+    if not unary_result.is_err():
+        return unary_result
     if trimmed.contains(" + "):
         val parts = trimmed.split(" + ")
         if parts.len() == 2:
-            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} + {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "+", result_type, param_names, param_types)
     if trimmed.contains(" - "):
         val parts = trimmed.split(" - ")
         if parts.len() == 2:
-            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} - {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "-", result_type, param_names, param_types)
     if trimmed.contains(" * "):
         val parts = trimmed.split(" * ")
         if parts.len() == 2:
-            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} * {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
-    Ok(_simple_operand_to_vhdl(trimmed, result_type))
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "*", result_type, param_names, param_types)
+    if trimmed.contains(" / "):
+        val parts = trimmed.split(" / ")
+        if parts.len() == 2:
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "/", result_type, param_names, param_types)
+    if trimmed.contains(" & "):
+        val parts = trimmed.split(" & ")
+        if parts.len() == 2:
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "and", result_type, param_names, param_types)
+    if trimmed.contains(" | "):
+        val parts = trimmed.split(" | ")
+        if parts.len() == 2:
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "or", result_type, param_names, param_types)
+    if trimmed.contains(" ^ "):
+        val parts = trimmed.split(" ^ ")
+        if parts.len() == 2:
+            return _simple_binary_arith_to_vhdl(parts[0].trim(), parts[1].trim(), "xor", result_type, param_names, param_types)
+    if trimmed.contains(" << "):
+        val parts = trimmed.split(" << ")
+        if parts.len() == 2:
+            return _simple_shift_to_vhdl(parts[0].trim(), parts[1].trim(), "shift_left", result_type, param_names, param_types)
+    if trimmed.contains(" >> "):
+        val parts = trimmed.split(" >> ")
+        if parts.len() == 2:
+            return _simple_shift_to_vhdl(parts[0].trim(), parts[1].trim(), "shift_right", result_type, param_names, param_types)
+    _simple_operand_to_vhdl(trimmed, result_type, param_names, param_types)
+
+fn _simple_binary_arith_to_vhdl(left: text, right: text, op: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    if _simple_integer_width(result_type) == "":
+        return Err("VHDL subset fallback arithmetic requires an integer result type: {result_type}")
+    val left_result = _simple_operand_to_vhdl(left, result_type, param_names, param_types)
+    if left_result.is_err():
+        return Err(left_result.unwrap_err())
+    val right_result = _simple_operand_to_vhdl(right, result_type, param_names, param_types)
+    if right_result.is_err():
+        return Err(right_result.unwrap_err())
+    Ok("{left_result.unwrap()} {op} {right_result.unwrap()}")
+
+fn _simple_shift_to_vhdl(left: text, right: text, op: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    if _simple_integer_width(result_type) == "":
+        return Err("VHDL subset fallback shift requires an integer result type: {result_type}")
+    if not _is_decimal_literal(right):
+        return Err("VHDL subset fallback shift count must be a decimal literal")
+    val left_result = _simple_operand_to_vhdl(left, result_type, param_names, param_types)
+    if left_result.is_err():
+        return Err(left_result.unwrap_err())
+    Ok("{op}({left_result.unwrap()}, {right})")
+
+fn _simple_unary_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    if expr.starts_with("-"):
+        if not result_type.starts_with("i"):
+            return Err("VHDL subset fallback unary negation requires a signed integer result type")
+        val operand = expr.substring(1, expr.len()).trim()
+        if operand == "":
+            return Err("VHDL subset fallback unary negation requires an operand")
+        val operand_result = _simple_operand_to_vhdl(operand, result_type, param_names, param_types)
+        if operand_result.is_err():
+            return Err(operand_result.unwrap_err())
+        return Ok("-({operand_result.unwrap()})")
+    if expr.starts_with("not "):
+        val operand = expr.substring(4, expr.len()).trim()
+        val operand_result = _simple_operand_to_vhdl(operand, "bool", param_names, param_types)
+        if operand_result.is_err():
+            return Err(operand_result.unwrap_err())
+        return Ok("not {operand_result.unwrap()}")
+    Err("not a unary expression")
+
+fn _simple_comparison_to_vhdl(expr: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    val ops = [" == ", " != ", " <= ", " >= ", " < ", " > "]
+    var i = 0
+    while i < ops.len():
+        val op = ops[i]
+        if expr.contains(op):
+            val parts = expr.split(op)
+            if parts.len() != 2:
+                return Err("VHDL subset fallback supports only binary comparisons")
+            val left_text = parts[0].trim()
+            val right_text = parts[1].trim()
+            val left_type = _simple_expr_type(left_text, param_names, param_types)
+            val right_type = _simple_expr_type(right_text, param_names, param_types)
+            var compare_type = left_type
+            if compare_type == "":
+                compare_type = right_type
+            if compare_type == "":
+                return Err("VHDL subset fallback could not infer comparison type")
+            val left_result = _simple_operand_to_vhdl(left_text, compare_type, param_names, param_types)
+            if left_result.is_err():
+                return Err(left_result.unwrap_err())
+            val right_result = _simple_operand_to_vhdl(right_text, compare_type, param_names, param_types)
+            if right_result.is_err():
+                return Err(right_result.unwrap_err())
+            val vhdl_op = _simple_comparison_op_to_vhdl(op.trim())
+            if vhdl_op == "":
+                return Err("VHDL subset fallback unsupported comparison operator: {op}")
+            return Ok("'1' when {left_result.unwrap()} {vhdl_op} {right_result.unwrap()} else '0'")
+        i = i + 1
+    Err("not a comparison")
+
+fn _simple_comparison_op_to_vhdl(op: text) -> text:
+    match op:
+        case "==": "="
+        case "!=": "/="
+        case "<": "<"
+        case "<=": "<="
+        case ">": ">"
+        case ">=": ">="
+        case _: ""
+
+fn _simple_bool_logic_to_vhdl(expr: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    if expr.contains(" and "):
+        val parts = expr.split(" and ")
+        if parts.len() == 2:
+            return _simple_binary_bool_to_vhdl(parts[0].trim(), parts[1].trim(), "and", param_names, param_types)
+    if expr.contains(" or "):
+        val parts = expr.split(" or ")
+        if parts.len() == 2:
+            return _simple_binary_bool_to_vhdl(parts[0].trim(), parts[1].trim(), "or", param_names, param_types)
+    Err("not a boolean logic expression")
+
+fn _simple_binary_bool_to_vhdl(left: text, right: text, op: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    val left_result = _simple_operand_to_vhdl(left, "bool", param_names, param_types)
+    if left_result.is_err():
+        return Err(left_result.unwrap_err())
+    val right_result = _simple_operand_to_vhdl(right, "bool", param_names, param_types)
+    if right_result.is_err():
+        return Err(right_result.unwrap_err())
+    Ok("{left_result.unwrap()} {op} {right_result.unwrap()}")
 
 fn _simple_inline_if_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if not expr.starts_with("if "):
@@ -416,6 +554,9 @@ fn _simple_expr_type(expr: text, param_names: [text], param_types: [text]) -> te
     val trimmed = expr.trim()
     if trimmed == "true" or trimmed == "false":
         return "bool"
+    val comparison_result = _simple_comparison_to_vhdl(trimmed, param_names, param_types)
+    if not comparison_result.is_err():
+        return "bool"
     val name_type = _simple_param_type(trimmed, param_names, param_types)
     if name_type != "":
         return name_type
@@ -433,10 +574,14 @@ fn _simple_param_type(name: text, param_names: [text], param_types: [text]) -> t
 
 fn _simple_integer_width(type_name: text) -> text:
     match type_name:
+        case "i8": "8"
+        case "i16": "16"
         case "i32": "32"
         case "i64": "64"
         case "u8": "8"
+        case "u16": "16"
         case "u32": "32"
+        case "u64": "64"
         case _: ""
 
 fn _is_decimal_literal(value: text) -> bool:
@@ -449,20 +594,27 @@ fn _is_decimal_literal(value: text) -> bool:
         i = i + 1
     true
 
-fn _simple_operand_to_vhdl(value: text, type_name: text) -> text:
+fn _simple_operand_to_vhdl(value: text, type_name: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if value == "true":
-        return "'1'"
+        return Ok("'1'")
     if value == "false":
-        return "'0'"
+        return Ok("'0'")
+    val param_type = _simple_param_type(value, param_names, param_types)
+    if param_type != "":
+        return Ok(value)
     val first = if value.len() > 0: value.substring(0, 1) else: ""
     if _is_decimal_digit(first):
         match type_name:
-            case "i32": return "to_signed({value}, 32)"
-            case "i64": return "to_signed({value}, 64)"
-            case "u8": return "to_unsigned({value}, 8)"
-            case "u32": return "to_unsigned({value}, 32)"
-            case _: return value
-    value
+            case "i8": return Ok("to_signed({value}, 8)")
+            case "i16": return Ok("to_signed({value}, 16)")
+            case "i32": return Ok("to_signed({value}, 32)")
+            case "i64": return Ok("to_signed({value}, 64)")
+            case "u8": return Ok("to_unsigned({value}, 8)")
+            case "u16": return Ok("to_unsigned({value}, 16)")
+            case "u32": return Ok("to_unsigned({value}, 32)")
+            case "u64": return Ok("to_unsigned({value}, 64)")
+            case _: return Err("VHDL subset fallback cannot materialize integer literal for type: {type_name}")
+    Err("VHDL subset fallback unsupported expression: {value}")
 
 fn _is_decimal_digit(ch: text) -> bool:
     ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"

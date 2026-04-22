@@ -9,6 +9,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn delete_file(path: text) -> bool:
     rt_file_delete(path)
@@ -19,6 +20,17 @@ fn write_file(path: text, content: text) -> bool:
 fn check_msg(condition: bool, msg: text):
     if not condition:
         expect(msg).to_equal("")
+
+fn local_ghdl_available() -> bool:
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["--version"])
+    code == 0
+
+fn local_ghdl_analyze_and_elaborate(path: text, entity_name: text) -> bool:
+    val (_analyze_stdout, _analyze_stderr, analyze_code) = rt_process_run("ghdl", ["-a", "--std=08", path])
+    if analyze_code != 0:
+        return false
+    val (_elab_stdout, _elab_stderr, elab_code) = rt_process_run("ghdl", ["-e", "--std=08", entity_name])
+    elab_code == 0
 
 describe "VHDL Source Facade":
 
@@ -151,6 +163,129 @@ describe "VHDL Source Facade":
         check_msg(rt_file_exists(out_path), "VHDL output file was not created")
         val output = rt_file_read_text(out_path) ?? ""
         check_msg(output.contains("result_out <= to_signed(1, 32) when flag = '1' else to_signed(0, 32);"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers integer comparisons to std_logic":
+        val src_path = "/tmp/sml_vhdl_source_facade_compare.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_compare.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn less_than(a: i32, b: i32) -> bool:\n    a < b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("result_out : out std_logic"), output)
+        check_msg(output.contains("result_out <= '1' when a < b else '0';"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers boolean logic expressions":
+        val src_path = "/tmp/sml_vhdl_source_facade_bool_logic.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_bool_logic.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn both(a: bool, b: bool) -> bool:\n    a and b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("a : in std_logic;"), output)
+        check_msg(output.contains("b : in std_logic;"), output)
+        check_msg(output.contains("result_out <= a and b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file supports all fixed-width integer facade port types":
+        val src_path = "/tmp/sml_vhdl_source_facade_widths.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_widths.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn pass_u64(a: u64, b: u16) -> u64:\n    a + 1")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("a : in unsigned(63 downto 0);"), output)
+        check_msg(output.contains("b : in unsigned(15 downto 0);"), output)
+        check_msg(output.contains("result_out <= a + to_unsigned(1, 64);"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers conservative integer operators":
+        val src_path = "/tmp/sml_vhdl_source_facade_integer_ops.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_integer_ops.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn mask(a: u32, b: u32) -> u32:\n    a & b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("result_out <= a and b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers literal shifts":
+        val src_path = "/tmp/sml_vhdl_source_facade_shift.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_shift.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn shl(a: u32) -> u32:\n    a << 2")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("result_out <= shift_left(a, 2);"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers unary operators":
+        val src_path = "/tmp/sml_vhdl_source_facade_unary.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_unary.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn invert(flag: bool) -> bool:\n    not flag")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("result_out <= not flag;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file generated VHDL passes GHDL analysis and elaboration":
+        val src_path = "/tmp/sml_vhdl_source_facade_ghdl.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_ghdl.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn add(a: i32, b: i32) -> i32:\n    a + b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+
+        if not local_ghdl_available():
+            print "SKIP: GHDL not available"
+            delete_file(src_path)
+            delete_file(out_path)
+            return
+
+        check_msg(local_ghdl_analyze_and_elaborate(out_path, "add"), "GHDL rejected source-facade generated add VHDL")
 
         delete_file(src_path)
         delete_file(out_path)
