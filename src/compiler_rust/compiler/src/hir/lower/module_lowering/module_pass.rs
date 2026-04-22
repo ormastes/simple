@@ -5,7 +5,8 @@ use simple_parser::{self as ast, Expr, Module, Node};
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    HirAopAdvice, HirArchRule, HirDiBinding, HirImpl, HirLeanBlock, HirMockDecl, HirModule, HirType, TypeId,
+    HirAopAdvice, HirArchRule, HirDiBinding, HirDomainBlock, HirImpl, HirLeanBlock, HirMockDecl, HirModule, HirType,
+    TypeId,
 };
 
 impl Lowerer {
@@ -269,6 +270,27 @@ impl Lowerer {
                 };
 
                 self.module.lean_blocks.push(hir_lean_block);
+            }
+        }
+    }
+
+    /// Lower raw top-level domain blocks from AST to HIR metadata.
+    ///
+    /// Domain semantics are intentionally not interpreted here. This pass only
+    /// records payloads that were authored at module scope so later schema,
+    /// style, music, BIM, CAD, city, and RTL passes can validate them.
+    fn lower_domain_blocks(&mut self, ast_module: &Module) {
+        let module_name = ast_module.name.clone().unwrap_or_else(|| "module".to_string());
+
+        for item in &ast_module.items {
+            if let Node::Expression(Expr::BlockExpr { kind, payload }) = item {
+                if is_domain_block_kind(kind) {
+                    self.module.domain_blocks.push(HirDomainBlock::new(
+                        kind.clone(),
+                        payload.clone(),
+                        module_name.clone(),
+                    ));
+                }
             }
         }
     }
@@ -631,6 +653,9 @@ impl Lowerer {
         // New pass: collect Lean 4 blocks for verification
         self.lower_lean_blocks(ast_module);
 
+        // New pass: collect raw top-level domain blocks for future semantic passes
+        self.lower_domain_blocks(ast_module);
+
         // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
@@ -828,6 +853,9 @@ impl Lowerer {
 
         // Lean pass: collect Lean 4 blocks for verification
         self.lower_lean_blocks(ast_module);
+
+        // Domain pass: collect raw top-level domain blocks for future semantic passes
+        self.lower_domain_blocks(ast_module);
 
         // Fourth pass: lower imports
         for item in &ast_module.items {

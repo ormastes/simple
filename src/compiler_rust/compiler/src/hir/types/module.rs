@@ -109,6 +109,24 @@ pub struct HirImpl {
     pub methods: HashMap<String, String>,
 }
 
+/// HIR metadata for a raw top-level domain block.
+///
+/// Domain blocks are captured before domain-specific semantic passes exist, so
+/// later tooling can see the authored payload without pretending it has been
+/// validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirDomainBlock {
+    pub kind: String,
+    pub payload: String,
+    pub context: String,
+}
+
+impl HirDomainBlock {
+    pub fn new(kind: String, payload: String, context: String) -> Self {
+        Self { kind, payload, context }
+    }
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -143,6 +161,8 @@ pub struct HirModule {
     pub trait_infos: HashMap<String, HirTraitInfo>,
     /// Lean 4 verification blocks for embedding formal proofs
     pub lean_blocks: Vec<HirLeanBlock>,
+    /// Raw top-level domain blocks (`schema{}`, `style{}`, `music{}`, etc.)
+    pub domain_blocks: Vec<HirDomainBlock>,
     /// Impl blocks
     pub impls: Vec<HirImpl>,
     /// Names of extern function declarations (e.g., `rt_getpid`, `aot_c_file`).
@@ -174,6 +194,7 @@ impl HirModule {
             imports: Vec::new(),
             trait_infos: HashMap::new(),
             lean_blocks: Vec::new(),
+            domain_blocks: Vec::new(),
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
