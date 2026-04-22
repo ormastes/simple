@@ -388,15 +388,16 @@ alice.greet()
 Type-safe units prevent mixing incompatible values:
 
 ```simple
-# Define unit types with postfix syntax
+# Define measurement unit families with postfix syntax
 unit length(base: f64):
     mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
 
 unit velocity(base: f64) = length / time:
-    mps = 1.0, kmph = 0.277778, mph = 0.44704
+    mps = 1.0, kmph = exact(5/18), mph = 0.44704
 
-unit UserId: i64 as uid
-unit OrderId: i64 as oid
+# Define nominal wrappers with postfix syntax
+newunit UserId: i64 as uid
+newunit OrderId: i64 as oid
 
 # Usage with postfix literals
 height = 175_cm              # Length type

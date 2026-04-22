@@ -214,7 +214,7 @@ impl<'a> super::Lexer<'a> {
             }
             "lazy" => TokenKind::Lazy,
             "type" => TokenKind::Type,
-            "unit" => TokenKind::Unit,
+            "unit" | "newunit" => TokenKind::Unit,
             "extern" => TokenKind::Extern,
             "context" => TokenKind::Context,
             "with" => TokenKind::With,

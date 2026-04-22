@@ -438,7 +438,7 @@ test "unit_types_and_literal_suffixes_7":
     """
     unit velocity(base: f64) = length / time:
         mps = 1.0         # meters per second (base)
-        kmph = 0.277778   # km/hr in m/s
+        kmph = exact(5/18) # km/hr in m/s
         mph = 0.44704     # miles/hr in m/s
 
     unit area(base: f64) = length * length:
@@ -512,8 +512,8 @@ test "unit_types_and_literal_suffixes_9":
     """
     Unit Types and Literal Suffixes
     """
-    # Syntax: unit Name: BaseType as suffix [= factor]
-    unit UserId: i64 as uid
+    # Syntax: newunit Name: BaseType as suffix for nominal wrappers
+    newunit UserId: i64 as uid
     unit Percentage: f64 as pct = 0.01        # 50_pct = 0.5 internally
     unit Celsius: f64 as c
     unit Fahrenheit: f64 as f

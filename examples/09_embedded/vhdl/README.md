@@ -14,6 +14,7 @@ See: `doc/03_plan/vhdl_backend_completion_plan_2026-04-04.md` (Phase 6)
 vhdl/
   backend/                 # Backend-generated examples (--backend=vhdl)
     golden/                # Expected VHDL output from backend compilation
+      adder.vhd            # Real VhdlBackend MIR-to-VHDL golden
   builder/                 # VhdlBuilder API demos (programmatic generation)
     counter.spl            # 8-bit counter with async reset
     alu.spl                # Simple ALU (add, sub, and, or)
@@ -30,16 +31,19 @@ vhdl/
 
 ### backend/ -- Backend-Generated Examples
 
-Source `.spl` files compiled via `simple compile --backend=vhdl`.
-These are **proof-bearing artifacts** that demonstrate the compiler's
-MIR-to-VHDL lowering for the supported hardware subset.
+Source `.spl` files compiled via `simple compile --backend=vhdl` once
+source-to-hardware lowering is complete. Golden files here are
+**proof-bearing artifacts** for compiler-owned VHDL output, not hand-written
+simulation fixtures.
 
 Golden `.vhd` files in `backend/golden/` are the expected output of
-backend compilation and are validated by GHDL analysis/elaboration.
+backend compilation and are intended for GHDL analysis/elaboration.
 
-**Status:** Pending. Backend-generated examples require completion of
-Phases 3-4 (codegen closure and CLI authority) from the VHDL backend
-completion plan. The `backend/` directory is currently empty.
+**Status:** MIR backend proof started. `backend/golden/adder.vhd` is matched
+by `test/unit/compiler/backend/vhdl_backend_spec.spl` against output from the
+real `VhdlBackend.compile` path. Full `.spl` source examples still require
+completion of Phases 3-4 (source lowering and CLI authority) from the VHDL
+backend completion plan.
 
 How to run (once Phases 3-4 are complete):
 ```bash

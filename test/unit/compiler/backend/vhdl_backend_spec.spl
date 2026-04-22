@@ -9,12 +9,15 @@
 
 use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
 use compiler.backend.backend.vhdl_backend.VhdlBackend
-use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.backend.backend_helpers.{available_backends, backend_for_name}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, compileoptions_default_options}
 use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.backend.common.type_mapper.PrimitiveType
 use compiler.mir.mir_data.*
 from hir_types import {SymbolId}
 from lexer import {Span}
+
+extern fn rt_file_read_text(path: text) -> text
 
 fn check(condition: bool):
     expect(condition).to_equal(true)
@@ -45,6 +48,77 @@ fn single_block_module(name: text, func: MirFunction) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[func.symbol] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn normalize_vhdl(vhdl: text) -> text:
+    var lines = vhdl.split("\n")
+    var result: [text] = []
+    for line in lines:
+        result = result.push(line.trim_end())
+    result.join("\n").trim()
+
+fn make_adder_function() -> MirFunction:
+    val a_local = make_arg_local(1, 0, "a", make_i32())
+    val b_local = make_arg_local(2, 1, "b", make_i32())
+    val ret_local = make_return_local(3, make_i32())
+    val sum_local = make_temp_local(4, "sum_sig", make_i32())
+
+    val block = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(
+                kind: MirInstKind.BinOp(
+                    LocalId(id: 4),
+                    MirBinOp.Add,
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ),
+                span: nil
+            ),
+            MirInst(
+                kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
+                span: nil
+            )
+        ],
+        terminator: MirTerminator.Return(nil)
+    )
+
+    MirFunction(
+        symbol: SymbolId(id: 10),
+        name: "adder",
+        signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+        locals: [a_local, b_local, ret_local, sum_local],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil
+    )
+
+# ============================================================================
+# Backend Registration
+# ============================================================================
+
+describe "VHDL Backend - registration":
+    it "resolves vhdl by backend name":
+        val kind = backend_for_name("vhdl")
+        expect(kind.?).to_equal(true)
+        expect(kind.unwrap()).to_equal(BackendKind.Vhdl)
+
+    it "lists VHDL as an available backend":
+        val backends = available_backends()
+        var found = false
+        for backend in backends:
+            if backend == BackendKind.Vhdl:
+                found = true
+        expect(found).to_equal(true)
 
 # ============================================================================
 # Simple Function (Entity + Architecture)
@@ -278,53 +352,8 @@ describe "VHDL Backend - complete module compilation":
 
 describe "VHDL Backend - real backend compilation":
     it "compiles MIR locals to ports and result output":
-        val a_local = make_arg_local(1, 0, "a", make_i32())
-        val b_local = make_arg_local(2, 1, "b", make_i32())
-        val ret_local = make_return_local(3, make_i32())
-        val sum_local = make_temp_local(4, "sum_sig", make_i32())
-
-        val block = MirBlock(
-            id: BlockId(id: 0),
-            label: Some("entry"),
-            instructions: [
-                MirInst(
-                    kind: MirInstKind.BinOp(
-                        LocalId(id: 4),
-                        MirBinOp.Add,
-                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
-                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
-                    ),
-                    span: nil
-                ),
-                MirInst(
-                    kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
-                    span: nil
-                )
-            ],
-            terminator: MirTerminator.Return(nil)
-        )
-
-        val func = MirFunction(
-            symbol: SymbolId(id: 10),
-            name: "adder",
-            signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
-            locals: [a_local, b_local, ret_local, sum_local],
-            blocks: [block],
-            entry_block: BlockId.entry(),
-            span: empty_span(),
-            generic_params: [],
-            is_generic_template: false,
-            specialization_of: nil,
-            type_bindings: {},
-            layout_phase: nil,
-            is_kernel: false,
-            is_export_c: false,
-            export_name: "",
-            driver_manifest_attr: nil
-        )
-
         val backend = make_simple_backend()
-        val result = backend.compile(single_block_module("adder_mod", func))
+        val result = backend.compile(single_block_module("adder_mod", make_adder_function()))
         check(result.is_ok())
         val compiled = result.unwrap()
 
@@ -334,6 +363,14 @@ describe "VHDL Backend - real backend compilation":
         check(compiled.vhdl.contains("signal sum_sig : signed(31 downto 0);"))
         check(compiled.vhdl.contains("sum_sig <= a + b;"))
         check(compiled.vhdl.contains("result_out <= sum_sig;"))
+
+    it "matches checked backend-generated adder golden":
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("adder_mod", make_adder_function()))
+        check(result.is_ok())
+        val generated = normalize_vhdl(result.unwrap().vhdl)
+        val expected = normalize_vhdl(rt_file_read_text("examples/09_embedded/vhdl/backend/golden/adder.vhd") ?? "")
+        expect(generated).to_equal(expected)
 
     it "compiles package declarations through the backend trait path":
         val point_type = MirTypeDef(

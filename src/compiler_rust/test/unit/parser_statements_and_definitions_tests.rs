@@ -664,6 +664,32 @@ fn test_parse_macro_def() {
     }
 }
 
+// === Newunit Parsing ===
+
+#[test]
+fn test_parse_newunit_nominal_wrapper() {
+    let module = parse("newunit UserId: i64 as uid").unwrap();
+    if let Node::Unit(unit) = &module.items[0] {
+        assert_eq!(unit.name, "UserId");
+        assert_eq!(unit.suffix, "uid");
+        assert_eq!(unit.base_types.len(), 1);
+    } else {
+        panic!("Expected newunit to parse as standalone UnitDef");
+    }
+}
+
+#[test]
+fn test_newunit_rejects_measurement_family() {
+    let result = parse("newunit length(base: f64): m = 1.0");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_newunit_rejects_derived_expression() {
+    let result = parse("newunit velocity = length / time");
+    assert!(result.is_err());
+}
+
 // === Error Handling Tests ===
 
 #[test]

@@ -3,8 +3,8 @@
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitDef {
     pub span: Span,
-    pub name: String,          // e.g., "UserId" or "IpAddr"
-    pub base_types: Vec<Type>, // e.g., [i64] or [str, u32] for multi-base units
+    pub name: String,          // e.g., "UserId", "IpAddr", or newunit-declared nominal wrappers
+    pub base_types: Vec<Type>, // e.g., [i64] or [str, u32] for multi-base wrappers
     pub suffix: String,        // e.g., "uid" or "ip" (for literals like 42_uid or "127.0.0.1"_ip)
     pub visibility: Visibility,
 }

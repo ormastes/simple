@@ -636,6 +636,7 @@ impl Parser<'_> {
 
     /// Parse unit definition: standalone, family, or compound
     /// Standalone: `unit UserId: i64 as uid`
+    /// Nominal standalone: `newunit UserId: i64 as uid`
     /// Family: `unit length(base: f64): m = 1.0, km = 1000.0`
     /// Family with arithmetic: `unit length(base: f64): m = 1.0, km = 1000.0: allow add(length) -> length`
     /// Compound: `unit velocity = length / time`
@@ -643,12 +644,22 @@ impl Parser<'_> {
         use crate::ast::{CompoundUnitDef, UnitFamilyDef};
 
         let start_span = self.current.span;
+        let is_newunit = self.current.lexeme == "newunit";
         self.expect(&TokenKind::Unit)?;
 
         let name = self.expect_identifier()?;
 
         // Check if this is a compound unit: unit name = unit_expr
         if self.check(&TokenKind::Assign) {
+            if is_newunit {
+                return Err(ParseError::contextual_error_with_help(
+                    "newunit declaration",
+                    "newunit declarations must wrap an explicit primitive type",
+                    self.current.span,
+                    Some("use `newunit Name: Base as suffix` for nominal wrappers, or `unit Name = ...` for derived measurement units".to_string()),
+                    "`newunit` is reserved for nominal ABI-transparent wrappers such as IDs and handles",
+                ));
+            }
             self.advance(); // consume '='
             let expr = self.parse_unit_expr()?;
 
@@ -676,6 +687,15 @@ impl Parser<'_> {
 
         // Check if this is a unit family: unit name(base: Type): ...
         if self.check(&TokenKind::LParen) {
+            if is_newunit {
+                return Err(ParseError::contextual_error_with_help(
+                    "newunit declaration",
+                    "newunit declarations cannot define measurement unit families",
+                    self.current.span,
+                    Some("use `unit name(base: Type): ...` for measurement families".to_string()),
+                    "`newunit` is for nominal wrappers; measurement catalogs stay under `unit`",
+                ));
+            }
             // Unit family syntax
             self.advance(); // consume '('
 

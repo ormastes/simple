@@ -170,6 +170,27 @@ fn extract_string_array(arr: RuntimeValue) -> Vec<String> {
 
 /// Resolve the current Simple binary (this process) for subprocess calls.
 fn simple_binary_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("SIMPLE_BOOTSTRAP_DRIVER") {
+        if !path.is_empty() {
+            return std::path::PathBuf::from(path);
+        }
+    }
+
+    let bootstrap = std::path::PathBuf::from("src/compiler_rust/target/bootstrap/simple");
+    if bootstrap.is_file() {
+        return bootstrap;
+    }
+
+    let release = std::path::PathBuf::from("src/compiler_rust/target/release/simple");
+    if release.is_file() {
+        return release;
+    }
+
+    let bin = std::path::PathBuf::from("bin/simple");
+    if bin.is_file() {
+        return bin;
+    }
+
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simple"))
 }
 
