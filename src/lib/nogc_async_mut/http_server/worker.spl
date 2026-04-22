@@ -43,7 +43,7 @@ use std.thread_sffi.{spl_thread_sleep}
 
 use std.http_server.types.{
     ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
-    ServerConfig, LocationConfig, PhaseResult
+    ServerConfig, LocationConfig, PhaseResult, default_response_data
 }
 use std.http_server.connection.{Connection}
 use std.http_server.parser.{HttpRequestParser}
@@ -320,8 +320,15 @@ class Worker:
             ConnectionAction.Error(status, msg):
                 self.send_error(fd, status, msg, now)
 
-            _:
-                pass_do_nothing
+            ConnectionAction.WriteResponse(body):
+                self.send_response(fd, default_response_data(200, "OK", body), now)
+
+            ConnectionAction.SendFile(path, offset, length):
+                var resp = default_response_data(200, "OK", "")
+                resp.body_file = path
+                resp.body_offset = offset
+                resp.body_length = length
+                self.send_response(fd, resp, now)
 
     me handle_send_complete(fd: i64, now: i64):
         """Handle write completion on a connection."""
@@ -342,8 +349,24 @@ class Worker:
             ConnectionAction.Close:
                 self.close_connection(fd)
 
-            _:
-                pass_do_nothing
+            ConnectionAction.ContinueReading:
+                return
+
+            ConnectionAction.RequestReady:
+                self.process_request(fd, now)
+
+            ConnectionAction.WriteResponse(body):
+                self.send_response(fd, default_response_data(200, "OK", body), now)
+
+            ConnectionAction.SendFile(path, offset, length):
+                var resp = default_response_data(200, "OK", "")
+                resp.body_file = path
+                resp.body_offset = offset
+                resp.body_length = length
+                self.send_response(fd, resp, now)
+
+            ConnectionAction.Error(status, msg):
+                self.send_error(fd, status, msg, now)
 
     # ========================================================================
     # Request Processing
@@ -374,8 +397,10 @@ class Worker:
             PhaseResult.Error(status, msg):
                 self.send_error(fd, status, msg, now)
                 return
-            _:
-                pass_do_nothing
+            PhaseResult.Continue:
+                val phase_allowed = true
+            PhaseResult.Skip:
+                val phase_allowed = true
 
         # Route request
         val route_result = self.router.route(request)

@@ -6,8 +6,8 @@
 # - try_send on overflow: drops oldest (advances head), increments dropped,
 #   returns Err(OverflowError) — NOT Ok.
 # - recv() returns Option<T>: None when empty.
-# - close() is pass_do_nothing — no closed-state tracking.
-#   "try_send after close fails" is NOT testable; documented below.
+# - close() marks the channel closed; buffered items remain drainable and
+#   later sends are rejected.
 # - dropped counter is cumulative across all overflows.
 
 use std.sspec.*
@@ -233,31 +233,33 @@ describe "BoundedChannel close":
     """
     ## Close semantics
 
-    BoundedChannel.close() is pass_do_nothing — there is no closed-state
-    tracking. After close(), try_send succeeds as if close were never called.
-    This is a documented v1 limitation: the async_server uses the dropped
-    counter to detect lagging clients and closes the WebSocket externally.
-
-    NOTE: "try_send fails after close" is intentionally NOT tested because
-    the implementation has no closed state — any such assertion would always
-    fail as a test bug, not an implementation bug.
+    BoundedChannel.close() prevents new sends while preserving already
+    buffered items for drain. This is the shutdown contract used by async
+    web servers before closing WebSocket clients.
     """
 
-    it "close does not crash":
+    it "close marks the channel closed":
         var ch: BoundedChannel<text> = BoundedChannel.new(4i64)
         ch.close()
+        expect(ch.is_closed()).to_equal(true)
         expect(ch.size).to_equal(0i64)
         expect(ch.dropped).to_equal(0u64)
         expect(ch.recv()).to_be_nil()
 
-    it "try_send after close still works (no closed-state in v1)":
+    it "try_send after close returns Err and does not enqueue":
         var ch: BoundedChannel<text> = BoundedChannel.new(4i64)
         ch.close()
         val result = ch.try_send("after-close")
-        # close() is pass_do_nothing — channel still accepts items
         match result:
             Ok(_):
-                expect(ch.size).to_equal(1i64)
-                expect(ch.recv()).to_equal(Some("after-close"))
+                expect(ch.size).to_equal(-1i64)
             Err(_):
-                expect(ch.dropped).to_equal(99u64)
+                expect(ch.size).to_equal(0i64)
+                expect(ch.recv()).to_be_nil()
+
+    it "close preserves buffered items for drain":
+        var ch: BoundedChannel<text> = BoundedChannel.new(4i64)
+        ch.try_send("before-close")
+        ch.close()
+        expect(ch.recv()).to_equal(Some("before-close"))
+        expect(ch.recv()).to_be_nil()

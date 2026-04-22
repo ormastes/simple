@@ -19,6 +19,7 @@ class BoundedChannel<T>:
     tail: i64         # index of next write slot
     size: i64         # current number of items
     dropped: u64      # cumulative drop count
+    closed: bool      # true after close(); sends are rejected
 
     static fn new(capacity: i64) -> BoundedChannel<T>:
         """Create a new BoundedChannel with the given capacity."""
@@ -28,13 +29,16 @@ class BoundedChannel<T>:
             head: 0,
             tail: 0,
             size: 0,
-            dropped: 0u64
+            dropped: 0u64,
+            closed: false
         )
 
     fn try_send(self, item: T) -> Result<Unit, OverflowError>:
         """Send an item. If full, drops the oldest item (head) and records it.
-        Always succeeds from caller's perspective — returns Err only to signal
-        that a drop occurred so caller can react (e.g. close lagging client)."""
+        Returns Err when the channel is closed or when a drop occurred so
+        callers can react (e.g. close lagging client)."""
+        if self.closed:
+            return Err(OverflowError(dropped_count: self.dropped))
         if self.size >= self.capacity:
             # Drop oldest: advance head, decrement size
             self.head = (self.head + 1) % self.capacity
@@ -73,8 +77,11 @@ class BoundedChannel<T>:
         val _ = self.try_send(item as T)
 
     fn close(self):
-        """No-op: BoundedChannel has no OS resources to release."""
-        pass_do_nothing
+        """Close the channel. Existing buffered items remain drainable."""
+        self.closed = true
+
+    fn is_closed(self) -> bool:
+        return self.closed
 
     fn is_empty(self) -> bool:
         return self.size == 0
