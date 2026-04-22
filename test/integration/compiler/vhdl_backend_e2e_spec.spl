@@ -16,9 +16,9 @@ use compiler.backend.backend.vhdl_backend.{VhdlBackend, VhdlCompiledModule}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, compileoptions_default_options, BackendKind}
 use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.mir.mir_data.*
-from hir_types import {SymbolId}
-from lexer import {Span}
-use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_analyze_and_elaborate, vhdl_write_file, vhdl_read_file}
+use hir_types.{SymbolId}
+use lexer.{Span}
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_run, ghdl_synth, ghdl_analyze_and_elaborate, vhdl_write_file, vhdl_read_file}
 
 # ============================================================================
 # Test Utilities
@@ -87,6 +87,42 @@ fn make_module(name: text, func: MirFunction) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[func.symbol] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn make_add_module() -> MirModule:
+    val locals = [
+        make_arg_local(0, 0, "a", make_i32()),
+        make_arg_local(1, 1, "b", make_i32()),
+        make_return_local(2, make_i32()),
+        make_temp_local(3, "sum", make_i32())
+    ]
+
+    val add_inst = MirInst(
+        kind: MirInstKind.BinOp(
+            LocalId(id: 3),
+            MirBinOp.Add,
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+        ),
+        span: empty_span()
+    )
+    val assign_inst = MirInst(
+        kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)),
+        span: empty_span()
+    )
+
+    val block = MirBlock(id: BlockId(id: 0), instructions: [add_inst, assign_inst], terminator: nil)
+    val func = make_function("add", [make_i32(), make_i32()], make_i32(), locals, [block])
+    make_module("add_module", func)
+
+fn make_add_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity add_tb is\nend entity add_tb;\n\narchitecture tb of add_tb is\n    signal a : signed(31 downto 0) := to_signed(2, 32);\n    signal b : signed(31 downto 0) := to_signed(3, 32);\n    signal result_out : signed(31 downto 0);\nbegin\n    dut: entity work.add\n        port map (\n            a => a,\n            b => b,\n            result_out => result_out\n        );\n\n    stim: process\n    begin\n        wait for 1 ns;\n        assert to_integer(result_out) = 5\n            report \"expected 2 + 3 = 5\"\n            severity failure;\n        report \"add_tb PASS\";\n        wait;\n    end process;\nend architecture tb;\n"
+
+fn compile_add_vhdl() -> text:
+    val backend = make_backend()
+    val module = make_add_module()
+    val result = backend.compile(module)
+    check_msg(result.is_ok(), "Backend compilation failed for add")
+    result.unwrap().vhdl
 
 fn write_and_analyze(vhdl_code: text, filename: text) -> bool:
     """Write VHDL to temp file and run GHDL analysis."""
@@ -1426,38 +1462,49 @@ describe "VHDL Backend E2E - GHDL Validation", tag: ["only-compiled", "slow"]:
             print "SKIP: GHDL not available"
             return
 
-        val backend = make_backend()
-        val locals = [
-            make_arg_local(0, 0, "a", make_i32()),
-            make_arg_local(1, 1, "b", make_i32()),
-            make_return_local(2, make_i32()),
-            make_temp_local(3, "sum", make_i32())
-        ]
+        val valid = write_and_analyze(compile_add_vhdl(), "adder")
+        check_msg(valid, "GHDL rejected backend-generated add VHDL")
 
-        val add_inst = MirInst(
-            kind: MirInstKind.BinOp(
-                LocalId(id: 3),
-                MirBinOp.Add,
-                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
-                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
-            ),
-            span: empty_span()
-        )
-        val assign_inst = MirInst(
-            kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)),
-            span: empty_span()
-        )
+    slow_it "backend-generated add passes GHDL elaboration and synthesis":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
 
-        val block = MirBlock(id: BlockId(id: 0), instructions: [add_inst, assign_inst], terminator: nil)
-        val func = make_function("adder", [make_i32(), make_i32()], make_i32(), locals, [block])
-        val module = make_module("adder_ghdl", func)
+        val add_vhdl = compile_add_vhdl()
+        val path = "/tmp/simple_vhdl_e2e_add_roundtrip.vhd"
+        check(vhdl_write_file(path, add_vhdl))
 
-        val result = backend.compile(module)
-        check_msg(result.is_ok(), "Backend compilation failed")
+        val analyze = ghdl_analyze(path)
+        check_msg(analyze.success, "GHDL analysis failed for generated add VHDL")
 
-        val compiled = result.unwrap()
-        val valid = write_and_analyze(compiled.vhdl, "adder")
-        check_msg(valid, "GHDL rejected backend-generated adder VHDL")
+        val elaborate = ghdl_elaborate("add")
+        check_msg(elaborate.success, "GHDL elaboration failed for generated add entity")
+
+        val synth = ghdl_synth("add")
+        check_msg(synth.success, "GHDL synthesis failed for generated add entity")
+
+    slow_it "backend-generated add testbench simulates 2 plus 3 equals 5":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val add_vhdl = compile_add_vhdl()
+        val add_path = "/tmp/simple_vhdl_e2e_add_tb_dut.vhd"
+        check(vhdl_write_file(add_path, add_vhdl))
+        val add_analyze = ghdl_analyze(add_path)
+        check_msg(add_analyze.success, "GHDL analysis failed for generated add DUT")
+
+        val tb_path = "/tmp/simple_vhdl_e2e_add_tb.vhd"
+        val tb_vhdl = make_add_testbench()
+        check(vhdl_write_file(tb_path, tb_vhdl))
+        val tb_analyze = ghdl_analyze(tb_path)
+        check_msg(tb_analyze.success, "GHDL analysis failed for generated add testbench")
+
+        val elaborate = ghdl_elaborate("add_tb")
+        check_msg(elaborate.success, "GHDL elaboration failed for generated add testbench")
+
+        val run_result = ghdl_run("add_tb", Some("10ns"))
+        check_msg(run_result.success, "GHDL simulation failed for generated add testbench")
 
     slow_it "backend-generated package passes GHDL analysis":
         if not ghdl_available():
