@@ -2320,7 +2320,8 @@ RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
 RuntimeValue rt_arm_virtio_blk_wait_completion(RuntimeValue timeout_val)
 {
     uint64_t used_addr = (uint64_t)(uintptr_t)g_arm_virtq_storage + 4096ULL;
-    uint64_t timeout = (uint64_t)timeout_val;
+    uint64_t timeout = IS_INT(timeout_val) ? (uint64_t)DECODE_INT(timeout_val) : (uint64_t)timeout_val;
+    if (timeout < 50000000ULL) timeout = 50000000ULL;
     for (uint64_t i = 0; i < timeout; i++) {
         arm64_invalidate_dcache_range(used_addr, 64ULL);
         uint16_t used_idx = *(volatile uint16_t *)(uintptr_t)(used_addr + 2ULL);
