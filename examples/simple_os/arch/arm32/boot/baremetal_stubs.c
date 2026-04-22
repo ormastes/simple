@@ -1253,7 +1253,8 @@ RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
 RuntimeValue rt_arm_virtio_blk_wait_completion(RuntimeValue timeout_val)
 {
     uint32_t used_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage + 4096U;
-    uint32_t timeout = (uint32_t)timeout_val;
+    uint32_t timeout = IS_INT(timeout_val) ? (uint32_t)DECODE_INT(timeout_val) : (uint32_t)timeout_val;
+    if (timeout < 50000000U) timeout = 50000000U;
     for (uint32_t i = 0; i < timeout; i++) {
         arm32_invalidate_dcache_range(used_addr, 64U);
         uint16_t used_idx = *(volatile uint16_t *)(uintptr_t)(used_addr + 2U);
@@ -1298,8 +1299,7 @@ RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
 
 RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 {
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    RuntimeArray *a = (RuntimeArray *)(IS_HEAP(arr) ? DECODE_PTR(arr) : (void *)(uintptr_t)(uint32_t)arr);
     uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
     if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
     RuntimeValue v = a->items[idx];

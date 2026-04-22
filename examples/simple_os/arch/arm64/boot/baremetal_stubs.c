@@ -2371,8 +2371,7 @@ RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
 
 RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 {
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    RuntimeArray *a = (RuntimeArray *)(IS_HEAP(arr) ? DECODE_PTR(arr) : (void *)(uintptr_t)(uint64_t)arr);
     uint64_t idx = IS_INT(idx_val) ? (uint64_t)DECODE_INT(idx_val) : (uint64_t)idx_val;
     if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
     RuntimeValue v = a->items[idx];
