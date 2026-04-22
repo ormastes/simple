@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use simple_common::target::Target;
 use simple_compiler::linker::NativeLinker;
-use crate::cli::compile::{compile_file, compile_file_native, compile_file_to_ptx, list_linkers, list_targets};
+use crate::cli::compile::{
+    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, list_linkers, list_targets,
+};
 use crate::CompileOptions;
 
 /// Handle 'compile' command - compile source to SMF or native binary
@@ -27,6 +29,13 @@ pub fn handle_compile(args: &[String]) -> i32 {
     // Parse flags
     let native = args.iter().any(|a| a == "--native");
     let snapshot = args.iter().any(|a| a == "--snapshot");
+    let driver_mode = match parse_driver_mode_flag(args) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("error: {}", err);
+            return 1;
+        }
+    };
 
     // Parse backend
     let backend = args
@@ -75,7 +84,14 @@ pub fn handle_compile(args: &[String]) -> i32 {
         }
     }
 
-    if native {
+    if let Some(mode) = driver_mode {
+        if mode != "dynamic" {
+            eprintln!("error: unknown driver mode '{}'; supported: dynamic", mode);
+            return 1;
+        }
+        let options = CompileOptions::from_args(args);
+        compile_dynamic_driver_library(&source, output, target, snapshot, options)
+    } else if native {
         // Parse native binary options
         let layout_optimize = args.iter().any(|a| a == "--layout-optimize");
         let strip = args.iter().any(|a| a == "--strip");
@@ -150,11 +166,17 @@ fn parse_linker_flag(args: &[String]) -> Result<Option<NativeLinker>, String> {
 }
 
 fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
-    args.iter().skip(1).enumerate().find_map(|(idx, arg)| {
-        if arg == "-o" {
+    let mut skip_next = false;
+    args.iter().skip(1).find_map(|arg| {
+        if skip_next {
+            skip_next = false;
             return None;
         }
-        if idx > 0 && args[idx] == "-o" {
+        if matches!(
+            arg.as_str(),
+            "-o" | "--output" | "--target" | "--linker" | "--driver-mode"
+        ) {
+            skip_next = true;
             return None;
         }
         if arg.starts_with('-') {
@@ -164,17 +186,34 @@ fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
     })
 }
 
+fn parse_driver_mode_flag(args: &[String]) -> Result<Option<String>, String> {
+    for (idx, arg) in args.iter().enumerate() {
+        if arg == "--driver-mode" {
+            return args
+                .get(idx + 1)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| "--driver-mode requires a value".to_string());
+        }
+        if let Some(value) = arg.strip_prefix("--driver-mode=") {
+            return Ok(Some(value.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn print_compile_help(show_error: bool) {
     if show_error {
         eprintln!("error: compile requires a source file");
     }
     eprintln!(
-        "Usage: simple compile <source.spl> [-o <output>] [--native] [--backend=<name>] [--target <target>] [--linker <name>] [--snapshot]"
+        "Usage: simple compile <source.spl> [-o <output>] [--native] [--driver-mode=dynamic] [--backend=<name>] [--target <target>] [--linker <name>] [--snapshot]"
     );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
+    eprintln!("  --driver-mode=dynamic  Package the compiled driver SMF as a loadable .lsm archive");
     eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output), vhdl (Simple frontend only)");
     eprintln!("  --target <target>   Target triple or arch (x86_64, aarch64, wasm32-wasi, etc.)");
     eprintln!("  --target=<target>   Same as above");

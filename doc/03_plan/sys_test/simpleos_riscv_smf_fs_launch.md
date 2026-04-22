@@ -3,5 +3,8 @@
 
 - Unit: `test/unit/os/qemu_runner_spec.spl` checks RV32/RV64 scenario registration, disk paths, QEMU args, target entries, and timeouts.
 - Image: `scripts/make_os_disk.shs 64 build/os/fat32-riscv64.img "" riscv64` and `riscv32` must include CLI and GUI payload markers.
-- Live boot: `scripts/qemu_riscv64.shs --fs-image` and `scripts/qemu_riscv32.shs --fs-image` must find all stable serial markers when an LLVM-enabled compiler and QEMU are available.
-- Verified locally on 2026-04-22: both script live boots reported `=== Results: 9 passed, 0 failed ===` and `TEST PASSED`.
+- Live boot: `scripts/qemu_riscv64.shs --fs-image` must find all stable serial markers plus the x86_64 desktop-shell process-backed marker for `/sys/apps/browser_demo.smf`.
+- Shared-service boot: `scripts/qemu_riscv64.shs --fs-image --shared-service` uses the real launcher and WM ownership APIs; this currently requires an LLVM-enabled Simple compiler that can build the wider `src` source graph.
+- Follow-up boot: `scripts/qemu_riscv32.shs --fs-image` must keep the existing RV32 filesystem SMF smoke markers passing.
+- Verified locally on 2026-04-22: RV64 and RV32 runtime checks passed with `--skip-build` against existing kernels after rebuilding the FAT32 images. RV64 reported `=== Results: 12 passed, 0 failed ===`; RV32 reported `=== Results: 11 passed, 0 failed ===`; both ended with `TEST PASSED`.
+- Attempted locally on 2026-04-22: `scripts/qemu_riscv64.shs --fs-image --shared-service` reached the shared-service entry but the selected Simple compiler failed with `LLVM backend requested but 'llvm' feature not enabled`.

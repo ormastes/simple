@@ -32,6 +32,52 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 
 ## Open Requests
 
+### FR-SOS-025 — Bring x86_32 from boot-probe target to full OS parity
+
+- **Filed-on:** 2026-04-22
+- **Filed-by:** Codex x86_32 parity follow-up
+- **Target:** simpleos-os x86_32
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Treat x86_32 as a documented boot/probe target until it has the same
+  observable OS surface as the x86_64 lane. Do not mark x86_32 as a full OS
+  target until it can boot, enter protected/user execution paths, run the
+  syscall/process/shell/storage smoke matrix, and pass QEMU acceptance tests
+  comparable to the x86_64 MVP lane.
+- **Acceptance-criteria:**
+  - [x] x86_32 QEMU target metadata remains covered as `qemu-system-i386`,
+        `i686-unknown-none`, `pc`, and `qemu32`.
+  - [ ] x86_32 has a live boot-probe system test that reaches serial output and
+        exits through `isa-debug-exit`:
+        `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl`.
+  - [ ] x86_32 paging, interrupt, timer, context, and syscall entry paths have
+        parity tests against the common HAL contracts.
+  - [ ] x86_32 process creation, `brk`, reboot, process diagnostics, and shell
+        smoke tests pass without relying on x86_64-only helpers.
+  - [ ] x86_32 filesystem-backed app execution has a FAT32/NVMe or equivalent
+        QEMU lane with the same acceptance level as x86_64.
+  - [ ] Documentation clearly distinguishes x86_64 as the full OS lane until
+        the above x86_32 criteria pass.
+- **Related-upfront:** none
+- **Related-design-doc:** tbd
+- **Related-issue:** none
+- **Notes:** As of 2026-04-22, `examples/simple_os/arch/x86_32` contains only
+  a minimal entry, linker/runtime stubs, and a browser probe, while x86_64 owns
+  the full desktop/shell/process/syscall/reboot live lanes. x86_32 must remain
+  described as a boot/probe lane until the parity criteria above are complete.
+  `test/system/os/boot_smoke_spec.spl` covers the x86_32 target metadata and
+  alias parsing. The live boot-probe lane is intentionally gated because it
+  requires QEMU i386 and a successful i686 freestanding native build. The
+  current bootstrap compiler in this workspace cannot complete that build:
+  `--backend llvm` reports that LLVM is not enabled, while `--backend cranelift`
+  reports that i686 freestanding support is not implemented. Keep the live
+  acceptance box unchecked until an i686-capable native-build binary is
+  available and the gated spec observes `[probe browser-x86] spl_start`.
+  x86_32 context construction now has unit coverage for kernel/user selector
+  setup and stack alignment, but the assembly context switch and FPU save/restore
+  hooks remain open in `src/os/kernel/arch/x86_32/context.spl`.
+
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 
 - **Filed-on:** 2026-04-20

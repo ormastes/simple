@@ -9,7 +9,8 @@ use std.driver.registry.{DriverOps}
 use std.driver.static_table.{register_static_driver}
 use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
                       IoctlCmd, PowerState, ProbeResult}
-use std.fs_driver.fat32_core.{fat32_test_device_probe}
+use std.fs_driver.fat32_core.{fat32_test_device_mount, fat32_test_device_probe,
+                              fat32_test_device_unmount}
 
 var __fat32_handle_slots: [i64] = []
 
@@ -53,11 +54,23 @@ fn fat32_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
     val probe = fat32_test_device_probe(dev)
     if probe.is_err() or not probe.unwrap():
         return Result.Err(DriverError.NoDevice)
+    val mount_rc = fat32_test_device_mount(dev)
+    if mount_rc.is_err():
+        return Result.Err(DriverError.BadConfig)
     val slot = __fat32_alloc_handle(dev.value)
     return Result.Ok(DriverHandle(value: slot as i64))
 
 fn fat32_detach(h: DriverHandle) -> Result<(), DriverError>:
-    val ok: bool = __fat32_free_handle(h.value as i32)
+    val idx = h.value as i32
+    if idx < 0 or idx >= __fat32_handle_slots.len().to_i32():
+        return Result.Err(DriverError.BadArg)
+    val device_slot = __fat32_handle_slots[idx]
+    if device_slot < 0:
+        return Result.Err(DriverError.BadArg)
+    val unmount_rc = fat32_test_device_unmount(DeviceId(value: device_slot, dclass: DriverClass.Block))
+    if unmount_rc.is_err():
+        return Result.Err(DriverError.BadConfig)
+    val ok: bool = __fat32_free_handle(idx)
     if not ok:
         return Result.Err(DriverError.BadArg)
     return Result.Ok(())

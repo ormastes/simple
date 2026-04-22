@@ -1099,6 +1099,60 @@ RuntimeValue rt_write_cr3(RuntimeValue)
 RuntimeValue rt_read_cr2(RuntimeValue)
     __attribute__((alias("rt_read_cr2_real")));
 
+typedef struct {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t esi;
+    uint32_t edi;
+    uint32_t ebp;
+    uint32_t esp;
+    uint32_t eip;
+    uint32_t eflags;
+    uint32_t cs;
+    uint32_t ss;
+    uint32_t ds;
+    uint32_t es;
+    uint32_t fpu_state;
+} X86_32SavedContext;
+
+RuntimeValue rt_x86_32_context_switch(RuntimeValue from_ptr_val, RuntimeValue to_ptr_val)
+{
+    X86_32SavedContext *from = (X86_32SavedContext *)(uintptr_t)(uint32_t)from_ptr_val;
+    X86_32SavedContext *to = (X86_32SavedContext *)(uintptr_t)(uint32_t)to_ptr_val;
+    if (from) {
+        from->eax = 0;
+        from->ebx = 0;
+        from->ecx = 0;
+        from->edx = 0;
+        from->esi = 0;
+        from->edi = 0;
+        from->ebp = (uint32_t)(uintptr_t)&from;
+        from->esp = (uint32_t)(uintptr_t)&from;
+        from->eip = (uint32_t)(uintptr_t)__builtin_return_address(0);
+        from->eflags = 0x202U;
+    }
+    (void)to;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_x86_32_fpu_save(RuntimeValue ctx_ptr_val)
+{
+    X86_32SavedContext *ctx = (X86_32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
+    if (!ctx || !ctx->fpu_state) return NIL_VALUE;
+    __asm__ volatile("fnsave (%0)" : : "r"((uintptr_t)ctx->fpu_state) : "memory");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_x86_32_fpu_restore(RuntimeValue ctx_ptr_val)
+{
+    X86_32SavedContext *ctx = (X86_32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
+    if (!ctx || !ctx->fpu_state) return NIL_VALUE;
+    __asm__ volatile("frstor (%0)" : : "r"((uintptr_t)ctx->fpu_state) : "memory");
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */

@@ -94,9 +94,15 @@ fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
         ],
     );
 
-    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src"))));
-    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src/os"))));
-    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src/lib"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src/os"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src/lib"))));
     assert!(roots
         .iter()
         .any(|root| root == &safe_canonicalize(&project_root.join("examples/simple_os"))));

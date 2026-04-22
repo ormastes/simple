@@ -2599,6 +2599,17 @@ static uint64_t arm64_recorded_user_root = 0;
 static uint64_t arm64_last_elf_virtual_entry = 0;
 static uint64_t arm64_last_elf_direct_entry = 0;
 
+extern char _vectors[];
+extern char _stack_top[];
+extern void _lower_el_aarch64_sync_handler(void);
+
+RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_val, RuntimeValue phys_val, RuntimeValue flags_val);
+RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt_val);
+uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
+                                  uint64_t a2, uint64_t a3, uint64_t a4,
+                                  uint64_t elr, uint64_t esr);
+RuntimeValue rt_arm64_enter_recorded_user_live(void);
+
 static Arm64UserAsArena *arm64_user_as_find(uint64_t root)
 {
     for (uint32_t i = 0; i < arm64_user_as_count; i++) {
@@ -2638,9 +2649,92 @@ static uint64_t arm64_user_as_pte_bits(uint32_t flags)
     uint64_t bits = ARM64_PTE_VALID | ARM64_PTE_TABLE | ARM64_PTE_AF | ARM64_PTE_SH_INNER;
     if (flags & ARM64_VM_USER) {
         bits |= (flags & ARM64_VM_WRITABLE) ? ARM64_PTE_AP_RW_ALL : ARM64_PTE_AP_RO_ALL;
+        if (!(flags & ARM64_VM_NO_EXECUTE)) bits |= ARM64_PTE_PXN;
     }
     if (flags & ARM64_VM_NO_EXECUTE) bits |= ARM64_PTE_PXN | ARM64_PTE_UXN;
     return bits;
+}
+
+static int arm64_user_as_map_identity_el1(uint64_t root, uint64_t addr, uint32_t flags)
+{
+    uint64_t page = addr & ~4095ULL;
+    return (int)(uint64_t)rt_arm64_user_as_map_page(
+        (RuntimeValue)root,
+        (RuntimeValue)page,
+        (RuntimeValue)page,
+        (RuntimeValue)flags
+    );
+}
+
+static int arm64_user_as_kernel_window_prepare(uint64_t root)
+{
+    uint32_t rx_el1 = 0U;
+    uint32_t rw_el1_nx = ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE;
+    uint64_t vector = (uint64_t)(uintptr_t)_vectors;
+    uint64_t sync_handler = (uint64_t)(uintptr_t)_lower_el_aarch64_sync_handler;
+    uint64_t svc_handler = (uint64_t)(uintptr_t)rt_arm64_handle_user_svc;
+    uint64_t live_handoff = (uint64_t)(uintptr_t)rt_arm64_enter_recorded_user_live;
+    uint64_t uart = 0x09000000ULL;
+    uint64_t stack_top = (uint64_t)(uintptr_t)_stack_top;
+    uint64_t current_sp = 0;
+    __asm__ volatile("mov %0, sp" : "=r"(current_sp));
+
+    if (!arm64_user_as_map_identity_el1(root, vector, rx_el1)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, sync_handler, rx_el1)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, svc_handler, rx_el1)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, live_handoff, rx_el1)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, uart, rw_el1_nx)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, stack_top - 1ULL, rw_el1_nx)) return 0;
+    if (!arm64_user_as_map_identity_el1(root, current_sp, rw_el1_nx)) return 0;
+    return 1;
+}
+
+static int arm64_user_as_virtual_entry_preflight(uint64_t root, uint64_t entry, uint64_t sp)
+{
+    uint64_t virtual_entry = arm64_last_elf_virtual_entry ? arm64_last_elf_virtual_entry : entry;
+    uint64_t stack_page = sp & ~4095ULL;
+    if (!arm64_user_as_kernel_window_prepare(root)) {
+        serial_puts("[arm64-user] preflight kernel window failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)virtual_entry) == 0) {
+        serial_puts("[arm64-user] preflight entry failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)sp) == 0) {
+        uint64_t proof_stack_phys = root + ARM64_UAS_REGION_SIZE - 4096ULL;
+        rt_arm64_user_as_map_page(
+            (RuntimeValue)root,
+            (RuntimeValue)stack_page,
+            (RuntimeValue)proof_stack_phys,
+            (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE)
+        );
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)sp) == 0) {
+        serial_puts("[arm64-user] preflight stack failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)_vectors) == 0) {
+        serial_puts("[arm64-user] preflight vectors failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)_lower_el_aarch64_sync_handler) == 0) {
+        serial_puts("[arm64-user] preflight lower-el failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)rt_arm64_handle_user_svc) == 0) {
+        serial_puts("[arm64-user] preflight svc failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)(uintptr_t)rt_arm64_enter_recorded_user_live) == 0) {
+        serial_puts("[arm64-user] preflight handoff failed\r\n");
+        return 0;
+    }
+    if ((uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)0x09000000ULL) == 0) {
+        serial_puts("[arm64-user] preflight uart failed\r\n");
+        return 0;
+    }
+    return 1;
 }
 
 RuntimeValue rt_arm64_user_as_create(void)
@@ -2754,17 +2848,28 @@ RuntimeValue rt_arm64_record_user_handoff(RuntimeValue entry_val, RuntimeValue s
 RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
 {
     if (!arm64_recorded_user_entry || !arm64_recorded_user_sp || !arm64_recorded_user_root) return 0;
-    return rt_arm64_enter_user_first_probe(
+    RuntimeValue handoff_ok = rt_arm64_enter_user_first_probe(
         (RuntimeValue)arm64_recorded_user_entry,
         (RuntimeValue)arm64_recorded_user_sp,
         (RuntimeValue)0,
         (RuntimeValue)arm64_recorded_user_root
     );
+    if ((uint64_t)handoff_ok != 1ULL) return 0;
+    if (!arm64_user_as_virtual_entry_preflight(
+            arm64_recorded_user_root,
+            arm64_recorded_user_entry,
+            arm64_recorded_user_sp)) {
+        serial_puts("[arm64-user] virtual entry preflight failed\r\n");
+        return 0;
+    }
+    serial_puts("[arm64-user] virtual entry preflight ok\r\n");
+    return 1;
 }
 
-void rt_arm64_handle_user_svc(uint64_t id, uint64_t arg0, uint64_t elr, uint64_t esr)
+uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
+                                  uint64_t a2, uint64_t a3, uint64_t a4,
+                                  uint64_t elr, uint64_t esr)
 {
-    (void)arg0;
     (void)elr;
     (void)esr;
     if (id == 0) {
@@ -2775,8 +2880,7 @@ void rt_arm64_handle_user_svc(uint64_t id, uint64_t arg0, uint64_t elr, uint64_t
         serial_puts("TEST PASSED\r\n");
         rt_qemu_exit_success();
     }
-    serial_puts("[arm64-user] unsupported svc\r\n");
-    for (;;) __asm__ volatile("wfe");
+    return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
 RuntimeValue rt_arm64_enter_recorded_user_live(void)

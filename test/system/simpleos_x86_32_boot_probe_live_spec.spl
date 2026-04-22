@@ -1,0 +1,73 @@
+# @tag:system
+#
+# Opt-in live QEMU validation for the SimpleOS x86_32 boot/probe lane.
+
+use std.spec
+
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+val SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
+val LINKER_SCRIPT: text = "examples/simple_os/arch/x86_32/linker.ld"
+val BUILD_SOURCES: text = "--source src/lib --source examples/simple_os"
+val BUILD_PREFIX: text =
+    "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {SIMPLE_BIN} native-build"
+val QEMU_BASE: text =
+    "qemu-system-i386 -machine pc -cpu qemu32 -serial stdio -display none -no-reboot"
+val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
+val PROBE_MARKER: text = "[probe browser-x86] spl_start"
+
+fn _enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_X86_32_BOOT_LIVE") ?? "") == "1"
+
+fn _run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _qemu_available() -> bool:
+    val result = _run_shell("command -v qemu-system-i386 >/dev/null 2>&1")
+    result[2] == 0
+
+fn _build_probe(output: text) -> (bool, text):
+    val command = "{BUILD_PREFIX} {BUILD_SOURCES} --backend llvm --entry-closure --entry examples/simple_os/arch/x86_32/browser_probe_entry.spl --target i686-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
+    val result = _run_shell(command)
+    val log = result[0] + result[1]
+    if result[2] != 0:
+        print "[simpleos_x86_32_boot_probe_live_spec] build failed exit={result[2]}"
+        print log
+        return (false, log)
+    if not rt_file_exists(output):
+        print "[simpleos_x86_32_boot_probe_live_spec] build output missing: {output}"
+        return (false, log)
+    (true, log)
+
+fn _build_prerequisite_missing(log: text) -> bool:
+    log.contains("LLVM backend requested but 'llvm' feature not enabled") or
+        log.contains("Support for this target has not been implemented yet")
+
+fn _run_probe(kernel: text) -> (text, i64):
+    val command = "timeout 10s {QEMU_BASE} -m 128M -kernel {kernel} {DEBUG_EXIT} 2>&1 | tr -d '\\000'"
+    val result = _run_shell(command)
+    (result[0] + result[1], result[2])
+
+describe "SimpleOS x86_32 boot-probe live QEMU lane":
+    """Live x86_32 validation, disabled unless SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1."""
+
+    it "boots the x86_32 browser probe to spl_start":
+        """When enabled, QEMU serial output must show the x86_32 probe marker."""
+        if not _enabled():
+            expect(_enabled()).to_equal(false)
+        elif not _qemu_available():
+            expect(_qemu_available()).to_equal(false)
+        else:
+            val output_path = "build/os/simpleos_x86_32_browser_probe.elf"
+            val build = _build_probe(output_path)
+            if not build[0]:
+                expect(_build_prerequisite_missing(build[1])).to_equal(true)
+            else:
+                val result = _run_probe(output_path)
+                val serial = result[0]
+                if not serial.contains(PROBE_MARKER):
+                    print "[simpleos_x86_32_boot_probe_live_spec] qemu exit={result[1]}"
+                    print serial
+                expect(serial.contains(PROBE_MARKER)).to_equal(true)

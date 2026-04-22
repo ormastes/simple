@@ -423,6 +423,11 @@ impl Lowerer {
                 | Node::Mixin(_)
                 | Node::TypeAlias(_)
                 | Node::Trait(_) => {}
+                Node::Bitfield(bf) => {
+                    let bitfield_type_id = self.register_bitfield(bf)?;
+                    self.globals.insert(bf.name.clone(), bitfield_type_id);
+                    self.local_globals.insert(bf.name.clone());
+                }
                 // Other node types
                 Node::Actor(_)
                 | Node::Impl(_)
@@ -431,7 +436,6 @@ impl Lowerer {
                 | Node::Macro(_)
                 | Node::Unit(_)
                 | Node::UnitFamily(_)
-                | Node::Bitfield(_)
                 | Node::InterfaceBinding(_) => {}
                 Node::Let(_)
                 | Node::Const(_)

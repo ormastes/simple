@@ -7,6 +7,7 @@
 #   sh scripts/qemu_riscv64.shs --skip-build # use prebuilt kernel
 #   sh scripts/qemu_riscv64.shs --interactive --net --display
 #   sh scripts/qemu_riscv64.shs --fs-image   # attach generated FAT/NVFS-marked image
+#   sh scripts/qemu_riscv64.shs --fs-image --shared-service
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="$REPO_ROOT/build/os/simpleos_riscv64.elf"
@@ -34,6 +35,7 @@ NET=0
 DISPLAY=0
 FS_IMAGE=0
 NVFS_IMAGE=0
+FS_SHARED_SERVICE=0
 DISK_IMAGE="${RISCV64_DISK_IMAGE:-$REPO_ROOT/build/os/fat32-riscv64.img}"
 QMP_SOCKET=""
 CAPTURE_PPM=""
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
         --net) NET=1 ;;
         --display) DISPLAY=1 ;;
         --fs-image) FS_IMAGE=1 ;;
+        --shared-service) FS_SHARED_SERVICE=1; SMOKE=1 ;;
         --nvfs-image) FS_IMAGE=1; NVFS_IMAGE=1 ;;
         --disk-image=*) DISK_IMAGE="${1#--disk-image=}" ;;
         --disk-image)
@@ -78,7 +81,9 @@ if [ "$DISPLAY" -eq 1 ]; then
 fi
 
 if [ -z "$ENTRY_FILE" ]; then
-    if [ "$SMOKE" -eq 1 ]; then
+    if [ "$FS_SHARED_SERVICE" -eq 1 ]; then
+        ENTRY_FILE="examples/simple_os/arch/riscv64/shared_service_smoke_entry.spl"
+    elif [ "$SMOKE" -eq 1 ]; then
         ENTRY_FILE="examples/simple_os/arch/riscv64/smoke_entry.spl"
     elif [ "$NET" -eq 1 ]; then
         ENTRY_FILE="examples/simple_os/arch/riscv64/net_entry.spl"
@@ -90,6 +95,8 @@ fi
 if [ -z "$SOURCE_ARGS" ]; then
     if [ -n "$RISCV64_SOURCE" ]; then
         SOURCE_ARGS="--source $RISCV64_SOURCE"
+    elif [ "$FS_SHARED_SERVICE" -eq 1 ]; then
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv64 --source src"
     elif [ "$SMOKE" -eq 1 ]; then
         SOURCE_ARGS="--source examples/simple_os/arch/riscv64"
     else
@@ -424,7 +431,8 @@ if [ "$FS_IMAGE" -eq 1 ]; then
     check_marker "SMF discovery marker" "SMF_DISCOVERY_OK"
     check_marker "ELF load marker" "ELF_LOAD_OK arch=riscv64"
     check_marker "SMF CLI launch marker" "SMF_CLI_LAUNCH_OK"
-    check_marker "SMF WM GUI launch marker" "SMF_WM_GUI_LAUNCH_OK"
+    check_marker "SMF WM GUI launch marker" "SMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_demo[.]smf pid=1002 wm=x86_64_desktop_shell_contract"
+    check_marker "x86_64 process-backed contract marker" "\\[desktop-e2e\\] process-backed:ok app=/sys/apps/browser_demo[.]smf pid=1002"
     check_marker "Native GUI process render marker" "NATIVE_GUI_PROCESS_RENDER_OK"
     check_marker "RISC-V SMF filesystem pass marker" "SIMPLEOS_RISCV_SMF_FS_PASS"
     if [ "$NVFS_IMAGE" -eq 1 ]; then

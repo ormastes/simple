@@ -194,6 +194,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    // Bitfields are module declarations; clear stale definitions before registration.
+    super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
@@ -269,6 +271,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     },
                 );
                 classes.insert(c.name.clone(), Arc::new(c.clone()));
+            }
+            Node::Bitfield(bitfield) => {
+                super::register_bitfield(bitfield);
             }
             _ => {}
         }
@@ -1213,6 +1218,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                     module_dict.insert(c.name.clone(), val);
                                 }
                             }
+                            Node::Bitfield(bitfield) => {
+                                super::register_bitfield(bitfield);
+                            }
                             _ => {
                                 // Other items are not yet supported in inline modules
                             }
@@ -1231,7 +1239,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
-            | Node::Bitfield(_)
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
@@ -1253,7 +1260,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Extend(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
-                // Bitfield is processed at compile time for bit-level field access
                 // AOP nodes are declarative configuration handled at compile time
                 // Mixin composition is handled at compile time
                 // LeanBlock is embedded Lean code for verification (not runtime)
@@ -1264,6 +1270,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Pass is a no-op statement
                 // Defer at module level is a no-op (only meaningful inside function bodies)
                 // These are no-ops in the interpreter
+            }
+            Node::Bitfield(bitfield) => {
+                super::register_bitfield(bitfield);
             }
             Node::InlineAsm(asm_stmt) => {
                 if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {

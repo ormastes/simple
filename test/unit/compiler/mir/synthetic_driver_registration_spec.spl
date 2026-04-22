@@ -2,7 +2,7 @@ use compiler.mir.synthetic_driver_registration.{
     SyntheticDriverRegistrationStatus,
     plan_synthetic_driver_registration
 }
-from hir_definitions import {HirFunction, HirParam, HirBlock, HirExpr, HirExprKind}
+from hir_definitions import {HirFunction, HirParam, HirBlock, HirExpr, HirExprKind, HirCallArg}
 from hir_types import {HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
 from lexer import {Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
@@ -20,7 +20,18 @@ fn unit_expr() -> HirExpr:
 fn var_expr(sym: SymbolId) -> HirExpr:
     HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: unit_type(), span: empty_span())
 
-fn call_expr(sym: SymbolId) -> HirExpr:
+fn call_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: empty_span())
+
+fn call_expr(sym: SymbolId, manifest: SymbolId, ops: SymbolId) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Call(var_expr(sym), [call_arg(var_expr(manifest)), call_arg(var_expr(ops))], []),
+        has_type_: false,
+        type_: unit_type(),
+        span: empty_span()
+    )
+
+fn empty_call_expr(sym: SymbolId) -> HirExpr:
     HirExpr(
         kind: HirExprKind.Call(var_expr(sym), [], []),
         has_type_: false,
@@ -28,12 +39,25 @@ fn call_expr(sym: SymbolId) -> HirExpr:
         span: empty_span()
     )
 
-fn return_call_block(sym: SymbolId) -> HirBlock:
+fn return_call_block(sym: SymbolId, manifest: SymbolId, ops: SymbolId) -> HirBlock:
     HirBlock(
         stmts: [],
         has: true,
         value: HirExpr(
-            kind: HirExprKind.Return(Some(call_expr(sym))),
+            kind: HirExprKind.Return(Some(call_expr(sym, manifest, ops))),
+            has_type_: false,
+            type_: unit_type(),
+            span: empty_span()
+        ),
+        span: empty_span()
+    )
+
+fn return_empty_call_block(sym: SymbolId) -> HirBlock:
+    HirBlock(
+        stmts: [],
+        has: true,
+        value: HirExpr(
+            kind: HirExprKind.Return(Some(empty_call_expr(sym))),
             has_type_: false,
             type_: unit_type(),
             span: empty_span()
@@ -104,15 +128,72 @@ fn make_symbols_with_register() -> (SymbolTable, SymbolId):
     )
     (symbols, reg)
 
+fn define_driver_ops_value(symbols: SymbolTable, name: text) -> SymbolId:
+    val ops_type_symbol = symbols.define(
+        "DriverOps",
+        SymbolKind.Struct,
+        nil,
+        empty_span(),
+        Visibility.Public,
+        false,
+        nil
+    )
+    val ops_type = HirType(kind: HirTypeKind.Named(ops_type_symbol, []), span: empty_span())
+    symbols.define(
+        name,
+        SymbolKind.Variable,
+        Some(ops_type),
+        empty_span(),
+        Visibility.Public,
+        false,
+        nil
+    )
+
+fn define_manifest_value(symbols: SymbolTable) -> SymbolId:
+    symbols.define(
+        "manifest",
+        SymbolKind.Variable,
+        Some(unit_type()),
+        empty_span(),
+        Visibility.Public,
+        false,
+        nil
+    )
+
 describe "synthetic driver registration planner":
-    it "recognizes an existing handwritten register_static_driver call":
+    it "recognizes an existing handwritten register_static_driver call with typed DriverOps":
         val (symbols, reg) = make_symbols_with_register()
-        val fn_ = make_function("register_null_block_driver", return_call_block(reg), true, driver_attr())
+        val manifest = define_manifest_value(symbols)
+        val ops = define_driver_ops_value(symbols, "ops")
+        val fn_ = make_function("register_null_block_driver", return_call_block(reg, manifest, ops), true, driver_attr())
 
         val plan = plan_synthetic_driver_registration(fn_, symbols)
 
         expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.AlreadyHandwritten)
         expect(plan.reason).to_contain("already calls register_static_driver")
+        expect(plan.has_ops_value).to_equal(true)
+        expect(plan.ops_value_name).to_equal("ops")
+
+    it "does not treat a register_static_driver call without DriverOps as complete":
+        val (symbols, reg) = make_symbols_with_register()
+        val fn_ = make_function("register_null_block_driver", return_empty_call_block(reg), true, driver_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.BlockedMissingDriverOps)
+        expect(plan.reason).to_contain("DriverOps argument is not identifiable")
+        expect(plan.has_ops_value).to_equal(false)
+
+    it "is ready to synthesize when @driver has a typed DriverOps value in scope":
+        var symbols = SymbolTable.new()
+        define_driver_ops_value(symbols, "null_block_ops")
+        val fn_ = make_function("register_null_block_driver", plain_block(), true, driver_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.ReadyToSynthesize)
+        expect(plan.has_ops_value).to_equal(true)
+        expect(plan.ops_value_name).to_equal("null_block_ops")
 
     it "blocks @driver synthesis when DriverOps source is absent":
         val symbols = SymbolTable.new()

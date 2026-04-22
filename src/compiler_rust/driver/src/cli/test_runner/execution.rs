@@ -687,15 +687,13 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         // whole signature as the key so two `impl Trait for Foo` don't
         // false-positive collide with two distinct `impl Foo` blocks; the
         // detector is best-effort.
-        let rest = trimmed
-            .split_once(' ')
-            .map(|(_, r)| r)
-            .unwrap_or(trimmed);
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if name.is_empty() { None } else { Some(name) }
+        let rest = trimmed.split_once(' ').map(|(_, r)| r).unwrap_or(trimmed);
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
     }
     fn is_hoistable_keyword(trimmed: &str) -> bool {
         trimmed.starts_with("class ")
@@ -704,27 +702,26 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             || trimmed.starts_with("type ")
     }
 
-    let flush_hoisted =
-        |buf: &mut Vec<String>, top: &mut Vec<String>, indent: usize| {
-            if buf.is_empty() {
-                return;
+    let flush_hoisted = |buf: &mut Vec<String>, top: &mut Vec<String>, indent: usize| {
+        if buf.is_empty() {
+            return;
+        }
+        for raw in buf.drain(..) {
+            if raw.trim().is_empty() {
+                top.push(String::new());
+                continue;
             }
-            for raw in buf.drain(..) {
-                if raw.trim().is_empty() {
-                    top.push(String::new());
-                    continue;
-                }
-                // Strip up to `indent` leading spaces so the hoisted block
-                // sits at column 0 at module scope.
-                let mut stripped = 0usize;
-                let bytes = raw.as_bytes();
-                while stripped < indent && stripped < bytes.len() && bytes[stripped] == b' ' {
-                    stripped += 1;
-                }
-                top.push(raw[stripped..].to_string());
+            // Strip up to `indent` leading spaces so the hoisted block
+            // sits at column 0 at module scope.
+            let mut stripped = 0usize;
+            let bytes = raw.as_bytes();
+            while stripped < indent && stripped < bytes.len() && bytes[stripped] == b' ' {
+                stripped += 1;
             }
-            top.push(String::new());
-        };
+            top.push(raw[stripped..].to_string());
+        }
+        top.push(String::new());
+    };
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -829,10 +826,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
                 hoisted_buf.push(line.to_string());
                 // Leave a placeholder comment in the body so the reader can
                 // still see where the class was defined originally.
-                body_parts.push(format!(
-                    "    # (hoisted nested def `{}` to module scope)",
-                    trimmed
-                ));
+                body_parts.push(format!("    # (hoisted nested def `{}` to module scope)", trimmed));
                 continue;
             } else {
                 body_parts.push(format!(
@@ -1326,11 +1320,7 @@ pub fn run_test_file_native_mode(
                 skipped: 0,
                 ignored: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!(
-                    "Failed to spawn native test ELF {}: {}",
-                    elf_path.display(),
-                    e
-                )),
+                error: Some(format!("Failed to spawn native test ELF {}: {}", elf_path.display(), e)),
                 individual_results: vec![],
             };
         }

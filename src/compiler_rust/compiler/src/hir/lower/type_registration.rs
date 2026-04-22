@@ -148,10 +148,7 @@ impl Lowerer {
     pub(crate) fn register_bitfield(&mut self, bf: &ast::BitfieldDef) -> LowerResult<TypeId> {
         let backing = self.resolve_bitfield_backing_type(bf)?;
         let backing_bits = self.bit_width_for_type(backing).ok_or_else(|| {
-            LowerError::Unsupported(format!(
-                "bitfield '{}' must use an integer backing type",
-                bf.name
-            ))
+            LowerError::Unsupported(format!("bitfield '{}' must use an integer backing type", bf.name))
         })?;
 
         let mut offset = 0u32;

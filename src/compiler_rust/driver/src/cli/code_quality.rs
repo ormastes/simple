@@ -13,8 +13,8 @@ use super::commands::arg_parsing::FixFlags;
 use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
-    "STUB001", "STUB003", "SSPEC001", "SSPEC002", "SSPEC003", "SSPEC004", "SSPEC005", "SSPEC006",
-    "UI001", "UI002", "UI003",
+    "STUB001", "STUB003", "SSPEC001", "SSPEC002", "SSPEC003", "SSPEC004", "SSPEC005", "SSPEC006", "UI001", "UI002",
+    "UI003",
 ];
 
 fn is_test_like_path(path: &Path) -> bool {
@@ -517,8 +517,13 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
     }
 
     let theme_names = [
-        "ios_light", "ios_dark", "glass_light", "glass_dark",
-        "glass_obsidian_dark", "simple_dark", "simple_light",
+        "ios_light",
+        "ios_dark",
+        "glass_light",
+        "glass_dark",
+        "glass_obsidian_dark",
+        "simple_dark",
+        "simple_light",
     ];
 
     let mut diagnostics = Vec::new();
@@ -569,8 +574,8 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                 // Only flag "toast(" not "show_toast(" etc.
                 let before = &trimmed[..call_pos];
                 let is_method_call = before.ends_with('.') || before.ends_with("self.");
-                let is_standalone = call_pos == 0
-                    || !before.chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_');
+                let is_standalone =
+                    call_pos == 0 || !before.chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_');
                 if is_method_call || is_standalone {
                     let after_paren = &trimmed[call_pos + 6..];
                     // Find third arg (skip two commas)
@@ -603,7 +608,10 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                         "UI003",
                         idx,
                         format!("Raw theme-name string \"{}\" — use ThemeId enum variant", theme_name),
-                        format!("Replace \"{}\" with the ThemeId variant, e.g. ThemeId.IOSLight", theme_name),
+                        format!(
+                            "Replace \"{}\" with the ThemeId variant, e.g. ThemeId.IOSLight",
+                            theme_name
+                        ),
                     ));
                     break; // one diagnostic per line
                 }

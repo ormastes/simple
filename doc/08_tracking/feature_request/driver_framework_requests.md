@@ -71,6 +71,14 @@ or `Rejected` (one-line reason).
   does not identify the `DriverOps` value or native-lib adapter functions
   required to emit a valid `register_static_driver(m, ops)` call. Coverage:
   `test/unit/compiler/mir/synthetic_driver_registration_spec.spl`.
+  Worker 1 update 2026-04-22: the planner now has an explicit
+  `ReadyToSynthesize` state gated on a typed `DriverOps` value in scope, and
+  handwritten `register_static_driver(...)` detection only counts as complete
+  when the second argument is an identifiable `DriverOps` value. Calls without
+  that argument are blocked with a targeted diagnostic reason instead of being
+  accepted as synthetic-registration-ready. Native-lib synthesis remains
+  blocked until the attribute/design identifies adapter functions. Coverage:
+  `test/unit/compiler/mir/synthetic_driver_registration_spec.spl`.
 
 ---
 
@@ -135,6 +143,12 @@ or `Rejected` (one-line reason).
   - `src/compiler_rust/compiler/src/interpreter_eval.rs:1234` — aspirational "processed at compile time" comment, no code
   - `src/compiler_rust/type/src/checker_check.rs:214` — only registers the bitfield name, no field-access type-checking
   - Empirical: `bitfield Flags(u32): a:4; b:28` parses; `Flags(a:3, b:5)` → `semantic: function Flags not found`; `f.a` → `variable f not found`.
+  - Progress 2026-04-22 (Worker 2): the Rust seed parser now recognizes
+    the FR-DRIVER-0003 surface area as unsupported syntax and emits targeted
+    diagnostics for post-name `struct Foo @packed ...` and struct fields like
+    `a: u16:4`, instead of falling through to a generic unexpected-colon
+    error. This is diagnostic-only; no AST, HIR, layout, or codegen support
+    landed.
   FR-DRIVER-0003 stays Open; real work lives in FR-DRIVER-0008 below.
 - **Requested-semantics:**
   Drivers and FFI shims frequently need packed bit-level layouts —
@@ -171,7 +185,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B follow-up)
 - **Target:** `src/compiler/70.backend/linker/lib_smf.spl` + codegen
 - **Priority:** P1
-- **Status:** Partial (section writer and SMF build-option emission implemented 2026-04-22; dynamic CLI proof remains)
+- **Status:** Implemented (section writer, SMF build-option emission, and dynamic CLI `.lsm` proof completed 2026-04-22)
 - **Requested-semantics:**
   The runtime decoder already exists
   (`src/lib/nogc_sync_mut/driver/loader.spl::decode_manifest` reads the
@@ -192,7 +206,7 @@ or `Rejected` (one-line reason).
         device-ids).
   - [x] Round-trip test: build a dummy driver `.lsm`, mmap it, call
         `decode_manifest`, confirm all fields match.
-  - [ ] Builds with `--driver-mode=dynamic` produce a `.lsm` whose
+  - [x] Builds with `--driver-mode=dynamic` produce a `.lsm` whose
         DRVS section matches the driver's `@driver(...)` literal.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §4` (static vs dynamic one pipeline)
 - **Related-design-doc:** `doc/04_architecture/driver_architecture.md §4`
@@ -209,18 +223,13 @@ or `Rejected` (one-line reason).
   metadata and emits concatenated DRVS records into a wire-type 14
   `.drv_manifest` section through `SmfBuildOptions`; coverage:
   `test/unit/compiler/linker/smf_driver_manifest_build_spec.spl`.
-  Remaining dynamic-mode `.lsm` acceptance needs an end-to-end
-  `--driver-mode=dynamic` CLI/library packaging proof. Codex update
-  2026-04-22: the Simple-side `cli_compile` path now has a narrow
-  `--driver-mode=dynamic` branch that compiles SMF and packages it with
-  `LibSmfBuilder`; coverage was added for preserving an SMF containing
-  `.drv_manifest` bytes inside `.lsm`. The acceptance box remains open
-  because the binary-facing `bin/simple compile --driver-mode=dynamic`
-  path still routes through the Rust/native CLI and produced an `SMF\0`
-  file at the `.lsm` path rather than an `LSMF` archive in smoke testing.
-  The `bin/simple run src/app/cli/compile_entry.spl ...` proof is also
-  blocked by an existing nil-args failure in `compile_entry.spl` before
-  packaging runs.
+  Dynamic CLI proof update 2026-04-22: the binary-facing
+  `bin/simple compile --driver-mode=dynamic` path now compiles a temporary
+  SMF, injects a `.drv_manifest` DRVS section for literal `@driver(...)`
+  metadata when needed, and writes an `LSMF` archive at the requested
+  `.lsm` output path. Coverage:
+  `src/compiler_rust/driver/tests/dynamic_driver_lsm_packaging.rs` and
+  `test/system/compiler/dynamic_driver_lsm_packaging_spec.spl`.
 
 ---
 
@@ -338,6 +347,10 @@ or `Rejected` (one-line reason).
         returns `Ok(ProbeResult.Reject)`.
   - [x] `registry.attach_at(fs_idx, real_fat32_dev)` returns a
         non-negative `DriverHandle`.
+  - [x] `registry.attach_at(...)` forwards into the stdlib-local
+        `Fat32Core.mount()` path and `detach_at(...)` forwards into
+        `Fat32Core.unmount()`; focused tests assert the registered core's
+        mounted state changes across attach/detach.
   - [ ] Gap list from `fat32_stub.spl` lines 25–29 remains intentionally
         slim in the stdlib-local port (`open`, `read`, `write`, `readdir`,
         `truncate` family are follow-up work).
@@ -353,6 +366,9 @@ or `Rejected` (one-line reason).
   FAT32-like block devices and returns a local non-negative handle on
   attach, and focused unit tests cover the accept/reject and attach
   cases. The full filesystem I/O surface is intentionally left slim.
+  Update 2026-04-22 (Worker 4): adapter attach now mounts the registered
+  stdlib-local `Fat32Core`, detach unmounts it, and focused tests cover the
+  lifecycle forwarding state. File I/O operations remain unsupported.
 
 ---
 
@@ -365,7 +381,7 @@ or `Rejected` (one-line reason).
   `src/compiler_rust/compiler/src/interpreter_eval.rs`,
   `src/compiler_rust/parser/src/types_def/mod.rs`
 - **Priority:** P2 (blocks FR-DRIVER-0003)
-- **Status:** Open
+- **Status:** Implemented (Rust-seed bitfield HIR/MIR/sema/codegen path completed 2026-04-22; `@packed struct` sugar remains FR-DRIVER-0003)
 - **Requested-semantics:**
   The Rust seed parses `bitfield Name(T): a:4; b:28` today but has no
   lowering or codegen — every HIR/interpreter pass skips
@@ -385,7 +401,7 @@ or `Rejected` (one-line reason).
   - [x] `bitfield Flags(u32): a:4; b:28` + `var f: Flags = Flags.new(0); f.a = 3; expect(f.a).to_equal(3)` round-trips under `bin/simple test`.
   - [x] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
   - [x] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
-  - [ ] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
+  - [x] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -409,6 +425,10 @@ or `Rejected` (one-line reason).
   `Flags.new(0); f.a = 3; f.b = 5; print(f.a)` path with the freshly built
   Rust seed (`src/compiler_rust/target/debug/simple compile ... && ...`),
   printing `3` instead of failing relocation on `Flags_dot_new`.
+  Update 2026-04-22: Rust-seed bitfield skip-pattern cleanup completed.
+  `module_pass`, interpreter registration, and HIR/type registration now
+  register bitfield definitions instead of silently skipping them; no wildcard
+  `Node::Bitfield(_)` skip arm remains in the Rust seed.
 
 ---
 

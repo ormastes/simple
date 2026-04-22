@@ -572,11 +572,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
             let fn_ptr_slot = builder
-                .build_pointer_cast(
-                    fn_ptr_slot,
-                    ptr_slot_type,
-                    "fn_ptr_slot_cast",
-                )
+                .build_pointer_cast(fn_ptr_slot, ptr_slot_type, "fn_ptr_slot_cast")
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot ptr", &e))?;
 
             let func_ptr = builder

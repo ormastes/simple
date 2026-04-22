@@ -46,6 +46,18 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
 
+        if self.check(&TokenKind::At)
+            && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "packed")
+        {
+            return Err(ParseError::contextual_error_with_help(
+                "packed struct declaration",
+                "post-name @packed struct syntax is recognized but not implemented yet",
+                self.current.span,
+                Some("use prefix @packed before struct for byte-packed layout; keep bitfield fields as manual shift/mask until FR-DRIVER-0003 lands".to_string()),
+                "FR-DRIVER-0003 tracks native `struct Foo @packed { a: u16:4 }` support in parser, HIR, and layout",
+            ));
+        }
+
         // Check for trait implementation syntax: struct Name(Trait):
         // This means the struct implements the given trait
         let implements_trait = if self.check(&TokenKind::LParen) {
@@ -317,6 +329,16 @@ impl<'a> Parser<'a> {
         } else {
             crate::ast::Type::Simple("any".to_string())
         };
+
+        if self.check(&TokenKind::Colon) {
+            return Err(ParseError::contextual_error_with_help(
+                "struct field bit width",
+                "packed struct bitfield syntax `field: Type:bits` is recognized but not implemented yet",
+                self.current.span,
+                Some("use a standalone `bitfield Name(uN): field: bits` declaration or explicit shift/mask helpers until FR-DRIVER-0003 lands".to_string()),
+                "the Rust seed parser has bitfield declarations, but struct-field bit widths still need AST/HIR/layout support",
+            ));
+        }
 
         let default = if self.check(&TokenKind::Assign) {
             self.advance();

@@ -5,7 +5,15 @@
 
 use std.spec
 use os.services.wm.wm_service.{WmService}
-use os.services.launcher.launcher.{launcher_init, launcher_register, launcher_record_process}
+use os.services.launcher.launcher.{
+    launcher_init,
+    launcher_register,
+    launcher_record_process,
+    launcher_get_process_app_id_for_pid,
+    launcher_get_process_window_count,
+    launcher_note_window_opened,
+    launcher_process_is_process_backed,
+}
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
@@ -81,3 +89,20 @@ describe "WmService ownership metadata":
         val action = wm.parse_create_window(77, unsafe_addr_of(payload), payload.len().to_u32())
         expect(action.process_id).to_equal(4321)
         expect(action.app_id).to_equal("/sys/apps/browser_demo")
+
+    it "reuses launcher and WM ownership contract for RISC-V SMF GUI apps":
+        launcher_init()
+        launcher_register("Browser Demo", "/sys/apps/browser_demo.smf", "B", 0x42, 1)
+        val pid: u64 = 1002
+        val recorded = launcher_record_process(pid, 3, "running", 0, 0, true)
+        expect(recorded).to_be(true)
+
+        val wm = WmService.new()
+        wm.register_window_owner_with_identity(1, 0, pid, "/sys/apps/browser_demo.smf")
+        launcher_note_window_opened(pid)
+
+        expect(launcher_process_is_process_backed(pid)).to_equal(true)
+        expect(launcher_get_process_app_id_for_pid(pid)).to_equal("/sys/apps/browser_demo.smf")
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+        expect(wm.window_owner_process_id(1)).to_equal(pid)
+        expect(wm.window_owner_app_id(1)).to_equal("/sys/apps/browser_demo.smf")

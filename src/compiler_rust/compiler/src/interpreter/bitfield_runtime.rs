@@ -46,12 +46,14 @@ pub(crate) fn update_bitfield_field(object: &Value, field: &str, value: Value) -
 }
 
 fn lookup_bitfield(class_name: &str) -> Result<Arc<BitfieldDef>, CompileError> {
-    BITFIELDS.with(|cell| cell.borrow().get(class_name).cloned()).ok_or_else(|| {
-        let ctx = ErrorContext::new()
-            .with_code(codes::UNKNOWN_CLASS)
-            .with_help("check that the bitfield is defined in this scope");
-        CompileError::semantic_with_context(format!("bitfield `{}` not found", class_name), ctx)
-    })
+    BITFIELDS
+        .with(|cell| cell.borrow().get(class_name).cloned())
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNKNOWN_CLASS)
+                .with_help("check that the bitfield is defined in this scope");
+            CompileError::semantic_with_context(format!("bitfield `{}` not found", class_name), ctx)
+        })
 }
 
 fn value_as_u128(value: &Value) -> Result<u128, CompileError> {
