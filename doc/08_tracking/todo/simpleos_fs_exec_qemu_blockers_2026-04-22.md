@@ -125,19 +125,20 @@ Passing markers:
 - `[arm-fs-exec] user-process pid=1`
 - `TEST PASSED`
 
-Remaining production caveat: the ARM filesystem-exec scenarios now prove
-filesystem byte loading and SMF process-image construction. They still report a
-synthetic PID and do not yet schedule the constructed image as a real ARM user
-task.
+Remaining production caveat: ARM64 proves filesystem byte loading and SMF
+process-image probing. Real ARM user-task scheduling is still follow-up work;
+an attempted scheduler path reached the bootstrap slot fallback and synthetic
+address-space mapping, but the stable acceptance lane currently stops after
+`spawn:image-ok`.
 
 ## Current Status: ARM32 VirtIO-BLK FAT32 SMF Lane
 
 The ARM32 image builds, boots in QEMU, reads the FAT32-backed SMF bytes through
-the same direct VirtIO-BLK lane, builds the SMF process image, and reports the
-filesystem-exec acceptance marker. The ARM spawn bridge uses a C-side success
-marker because Simple text printing is still unreliable in the freestanding
-ARM32 runtime and because the current acceptance lane exits immediately after
-image construction.
+the direct VirtIO-BLK lane during VFS boot, and reports the filesystem-exec
+acceptance marker. The ARM32 entrypoint uses a C-side success marker because
+Simple text printing is still unreliable in the freestanding ARM32 runtime.
+The ARM32 spawn re-read/image-probe path is still unstable and is not part of
+the green acceptance lane.
 
 Observed command:
 
@@ -148,17 +149,13 @@ SIMPLE_TEST_DISABLE_CACHE=1 bin/simple os test --scenario arm32-virtio-fat32-smf
 Passing markers:
 
 - `[vfs-init] VirtIO FAT32 direct reader ready`
-- `[arm-fs-exec] spawn:fs-bytes=4264`
-- `[arm-fs-exec] spawn:image`
-- `[arm-fs-exec] spawn:image-ok`
 - `[arm-fs-exec] vfs:ok`
 - `[arm-fs-exec] smf:/sys/apps/hello_world.smf`
 - `[arm-fs-exec] user-process pid=1`
 - `TEST PASSED`
 
-Remaining production caveat: ARM32 shares the synthetic pid completion marker
-with ARM64 and should move to real ARM user-task scheduling after the image
-build succeeds.
+Remaining production caveat: ARM32 should regain a stable spawn re-read and
+image-probe path before moving on to real ARM user-task scheduling.
 
 ## 2026-04-22 Update: ARM FAT32 SMF Acceptance Passing
 
@@ -171,9 +168,10 @@ VirtIO/FAT read path:
 Verified follow-up update:
 
 - ARM32 `native-build` returned to normal timing in the current tree
-  (`elapsed_ms=3222`); ARM64 was similarly fast (`elapsed_ms=3210`).
-- Both ARM lanes now call the shared unchecked SMF process-image builder and
-  reach `spawn:image-ok` before reporting `TEST PASSED`.
+  (`elapsed_ms=3148`); ARM64 was similarly fast (`elapsed_ms=3174`).
+- ARM64 reaches `spawn:image-ok` before reporting `TEST PASSED`.
+- ARM32 currently reports `TEST PASSED` after the VFS byte-load gate; its
+  redundant spawn re-read/image-probe path remains blocked.
 - ARM32 Simple text arguments to `serial_println` still print as `nil`; the
   final acceptance marker uses a raw UART helper after the byte-load and
   image-build gates.
