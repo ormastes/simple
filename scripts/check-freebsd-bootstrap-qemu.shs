@@ -1,0 +1,231 @@
+#!/bin/sh
+# Linux-host wrapper for checking the FreeBSD bootstrap path in QEMU.
+#
+# Usage:
+#   sh scripts/check-freebsd-bootstrap-qemu.shs [--smoke|--full] [--keep-going]
+#
+# Defaults to --smoke:
+#   1. Provision/check the FreeBSD QEMU image and SSH transport.
+#   2. Sync the workspace into the guest.
+#   3. Run the FreeBSD bootstrap once and a compiler smoke transpilation.
+#
+# --full also runs the repeated bootstrap verification pass in the guest.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MODE="smoke"
+KEEP_GOING=0
+VM_DIR="build/freebsd/vm"
+SEED_DIR="${VM_DIR}/cloudinit-seed"
+SEED_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
+FREEBSD_IMAGE_URL="https://download.freebsd.org/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+BASE_VM="${QEMU_BASE_VM_PATH:-${VM_DIR}/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs-base.qcow2}"
+WORK_VM="${QEMU_VM_PATH:-${VM_DIR}/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs-work.qcow2}"
+
+usage() {
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --smoke)
+            MODE="smoke"
+            ;;
+        --full)
+            MODE="full"
+            ;;
+        --keep-going)
+            KEEP_GOING=1
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "error: unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+cd "$REPO_ROOT"
+
+info() {
+    printf '[freebsd-qemu-bootstrap] %s\n' "$1"
+}
+
+run_step() {
+    label="$1"
+    shift
+    info "$label"
+    if "$@"; then
+        info "$label: PASS"
+        return 0
+    fi
+    info "$label: FAIL"
+    if [ "$KEEP_GOING" -eq 1 ]; then
+        return 1
+    fi
+    exit 1
+}
+
+if [ "$(uname -s 2>/dev/null || echo unknown)" = "FreeBSD" ]; then
+    info "Host is already FreeBSD; run the native bootstrap verifier directly."
+    exec scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --output=bootstrap-bsd-check
+fi
+
+find_public_key() {
+    if [ "${QEMU_SSH_PUBLIC_KEY:-}" ]; then
+        printf '%s\n' "$QEMU_SSH_PUBLIC_KEY"
+        return 0
+    fi
+    for key in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_rsa.pub" "$HOME/.ssh/id_ed25519_this_mac.pub"; do
+        if [ -s "$key" ]; then
+            sed -n '1p' "$key"
+            return 0
+        fi
+    done
+    return 1
+}
+
+create_cloudinit_seed() {
+    if ! command -v genisoimage >/dev/null 2>&1 && ! command -v mkisofs >/dev/null 2>&1; then
+        echo "error: genisoimage or mkisofs is required to create FreeBSD cloud-init seed ISO" >&2
+        return 1
+    fi
+
+    public_key="$(find_public_key)" || {
+        echo "error: no SSH public key found; set QEMU_SSH_PUBLIC_KEY or create ~/.ssh/id_ed25519.pub" >&2
+        return 1
+    }
+
+    rm -rf "$SEED_DIR"
+    mkdir -p "$SEED_DIR"
+    cat >"${SEED_DIR}/meta-data" <<'EOF'
+instance-id: simple-freebsd-qemu
+local-hostname: simple-freebsd-qemu
+EOF
+    cat >"${SEED_DIR}/network-config" <<'EOF'
+version: 2
+ethernets:
+  vtnet0:
+    dhcp4: true
+EOF
+    {
+        printf '#!cloud-config\n'
+        printf 'hostname: simple-freebsd-qemu\n'
+        printf 'ssh_pwauth: false\n'
+        printf 'ssh_authorized_keys:\n'
+        printf '  - %s\n' "$public_key"
+        printf 'users:\n'
+        printf '  - default\n'
+        printf 'network:\n'
+        printf '  ethernets:\n'
+        printf '    vtnet0:\n'
+        printf '      dhcp4: true\n'
+        printf 'runcmd:\n'
+        printf '  - service sshd restart || true\n'
+    } >"${SEED_DIR}/user-data"
+    cp "${SEED_DIR}/user-data" "${SEED_DIR}/user_data"
+
+    rm -f "$SEED_ISO"
+    iso_tool="genisoimage"
+    if ! command -v genisoimage >/dev/null 2>&1; then
+        iso_tool="mkisofs"
+    fi
+    "$iso_tool" -quiet -iso-level 3 -full-iso9660-filenames \
+        -output "$SEED_ISO" -volid cidata -joliet -rock \
+        "${SEED_DIR}/user-data" "${SEED_DIR}/user_data" \
+        "${SEED_DIR}/meta-data" "${SEED_DIR}/network-config"
+}
+
+download_base_image() {
+    if [ -s "$BASE_VM" ]; then
+        return 0
+    fi
+
+    mkdir -p "$VM_DIR"
+    tmp_xz="${BASE_VM}.xz"
+    rm -f "$tmp_xz" "$BASE_VM"
+
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -O "$tmp_xz" "$FREEBSD_IMAGE_URL"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$tmp_xz" "$FREEBSD_IMAGE_URL"
+    else
+        echo "error: wget or curl is required to download the FreeBSD cloud image" >&2
+        return 1
+    fi
+
+    if [ ! -s "$tmp_xz" ]; then
+        echo "error: FreeBSD image download produced an empty archive" >&2
+        rm -f "$tmp_xz"
+        return 1
+    fi
+    if ! xz -t "$tmp_xz"; then
+        echo "error: FreeBSD image download is not a valid xz archive" >&2
+        rm -f "$tmp_xz"
+        return 1
+    fi
+
+    xz -d "$tmp_xz"
+}
+
+create_work_overlay() {
+    if ! command -v qemu-img >/dev/null 2>&1; then
+        echo "error: qemu-img is required to create the FreeBSD working overlay" >&2
+        return 1
+    fi
+    base_abs="$(cd "$(dirname "$BASE_VM")" && pwd)/$(basename "$BASE_VM")"
+    rm -f "$WORK_VM"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$base_abs" "$WORK_VM"
+}
+
+FAILED=0
+
+if ! run_step "Create FreeBSD cloud-init seed ISO" create_cloudinit_seed; then
+    FAILED=$((FAILED + 1))
+fi
+
+if ! run_step "Download FreeBSD cloud-init base image" download_base_image; then
+    FAILED=$((FAILED + 1))
+fi
+
+if ! run_step "Create fresh FreeBSD working overlay" create_work_overlay; then
+    FAILED=$((FAILED + 1))
+fi
+
+export QEMU_VM_PATH="$WORK_VM"
+export QEMU_CLOUDINIT_ISO="$SEED_ISO"
+export QEMU_USER="${QEMU_USER:-freebsd}"
+
+if ! run_step "Provision FreeBSD QEMU VM and verify SSH/rsync/toolchain" \
+    bin/simple run src/app/test/freebsd_qemu_setup.spl --quick; then
+    FAILED=$((FAILED + 1))
+fi
+
+case "$MODE" in
+    smoke)
+        if ! run_step "Run FreeBSD bootstrap smoke in QEMU" \
+            bin/simple run src/app/test/freebsd_basic.spl --core-only; then
+            FAILED=$((FAILED + 1))
+        fi
+        ;;
+    full)
+        if ! run_step "Run full FreeBSD bootstrap verification in QEMU" \
+            bin/simple run src/app/test/freebsd_basic.spl --verbose; then
+            FAILED=$((FAILED + 1))
+        fi
+        ;;
+esac
+
+if [ "$FAILED" -ne 0 ]; then
+    info "FAILED steps: $FAILED"
+    exit 1
+fi
+
+info "FreeBSD QEMU bootstrap check complete"

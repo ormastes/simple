@@ -58,6 +58,35 @@ Before starting any step, **check if prerequisite artifacts exist**:
 
 ---
 
+## FreeBSD QEMU Bootstrap Check
+
+When asked to check BSD/FreeBSD bootstrap from a Linux host, do **not** stop at
+`scripts/bootstrap/bootstrap-freebsd-seed.sh` failing with "must run on
+FreeBSD". The canonical automated entrypoint is:
+
+```bash
+sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
+```
+
+Use `--full` for the repeated bootstrap verification pass. The wrapper creates
+`build/freebsd/vm/freebsd-cloudinit-seed.iso` from the host SSH public key,
+downloads a pristine FreeBSD `BASIC-CLOUDINIT-ufs` base qcow2, creates a fresh
+working overlay for the run, starts QEMU with SSH forwarded to localhost port
+`2222`, logs in as the default `freebsd` cloud user, verifies
+prerequisites/SSH/rsync/toolchain, syncs the repo into the guest, and runs the
+bootstrap verifier inside FreeBSD. If you need to debug manually, the lower-level
+VM setup command is:
+
+```bash
+bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
+```
+
+Environment knobs: `QEMU_VM_PATH`, `QEMU_CLOUDINIT_ISO`,
+`QEMU_BASE_VM_PATH`, `QEMU_SSH_PUBLIC_KEY`, `QEMU_PORT`, `QEMU_USER`,
+`QEMU_MEM`, `QEMU_CPUS`.
+
+---
+
 ## Step 1: Research
 
 Check: `doc/01_research/local/<feature>.md` and `doc/01_research/domain/<feature>.md` exist?

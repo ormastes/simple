@@ -23,7 +23,13 @@ fn get_config_vm_path() -> text:
     val env_val = env_get("QEMU_VM_PATH")
     if env_val != nil and env_val != "":
         return env_val
-    return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
+    return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+
+fn get_config_cloudinit_iso() -> text:
+    val env_val = env_get("QEMU_CLOUDINIT_ISO")
+    if env_val != nil and env_val != "":
+        return env_val
+    return "build/freebsd/vm/freebsd-cloudinit-seed.iso"
 
 fn get_config_port() -> text:
     val env_val = env_get("QEMU_PORT")
@@ -35,7 +41,7 @@ fn get_config_user() -> text:
     val env_val = env_get("QEMU_USER")
     if env_val != nil and env_val != "":
         return env_val
-    return "root"
+    return "freebsd"
 
 fn get_config_mem() -> text:
     val env_val = env_get("QEMU_MEM")
@@ -68,7 +74,7 @@ fn fail_msg(msg: text):
 fn run_in_vm(remote_cmd: text) -> text:
     val port = get_config_port()
     val user = get_config_user()
-    return "SSH_AUTH_SOCK= ssh -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -p {port} {user}@localhost \"{remote_cmd}\""
+    return "SSH_AUTH_SOCK= ssh -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {port} {user}@localhost \"{remote_cmd}\""
 
 fn path_exists(path: text) -> bool:
     shell_bool("test -e '{path}'")
@@ -80,6 +86,7 @@ fn path_exists(path: text) -> bool:
 fn step1_check_vm():
     val port = get_config_port()
     val vm_path = get_config_vm_path()
+    val cloudinit_iso = get_config_cloudinit_iso()
     val mem = get_config_mem()
     val cpus = get_config_cpus()
 
@@ -110,20 +117,30 @@ fn step1_check_vm():
         val pid_file = "build/freebsd/vm/qemu.pid"
         dir_create_all("build/freebsd/vm")
 
-        val start_cmd = "qemu-system-x86_64 -machine accel={accel} -cpu host -m {mem} -smp {cpus} -drive file={vm_path},format=qcow2,if=virtio -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -nographic -daemonize -pidfile {pid_file}"
+        var cloudinit_drive = ""
+        if path_exists(cloudinit_iso):
+            cloudinit_drive = " -drive file={cloudinit_iso},format=raw,if=virtio,media=cdrom"
+            pass_msg("Cloud-init seed attached: {cloudinit_iso}")
+        else:
+            log("WARNING: cloud-init seed not found: {cloudinit_iso}")
+
+        val serial_log = "build/freebsd/vm/qemu-serial.log"
+        val start_cmd = "qemu-system-x86_64 -machine accel={accel} -cpu host -m {mem} -smp {cpus} -drive file={vm_path},format=qcow2,if=virtio{cloudinit_drive} -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -display none -serial file:{serial_log} -daemonize -pidfile {pid_file}"
         shell(start_cmd)
 
-        log("Waiting for SSH (60 seconds)...")
+        log("Waiting for SSH (600 seconds)...")
         var connected = false
-        for i in 30:
+        var attempts = 0
+        while attempts < 300:
             val ssh_check = run_in_vm("echo SSH ready")
             val ssh_ok = shell_bool("{ssh_check} >/dev/null 2>&1")
             if ssh_ok:
                 connected = true
                 pass_msg("SSH connection established")
-                # break not available, use flag
-            if connected == false:
+                attempts = 300
+            else:
                 shell("sleep 2")
+            attempts = attempts + 1
 
         if connected == false:
             fail_msg("SSH connection timeout")
@@ -150,7 +167,7 @@ fn step2_sync_project():
     print ""
 
     log("Syncing files (excludes .git, build, .jj)...")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='*.o' --exclude='*.a' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
+    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='*.o' --exclude='*.a' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
     if sync_result.exit_code == 0:
         pass_msg("Project files synced to VM")
     else:
@@ -290,7 +307,7 @@ fn step5_retrieve_binary():
 
     log("Syncing bin/simple from VM...")
     dir_create_all("bin")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" {user}@localhost:~/simple/bin/simple bin/simple.freebsd 2>&1")
+    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/simple/bin/simple bin/simple.freebsd 2>&1")
 
     if sync_result.exit_code == 0:
         if path_exists("bin/simple.freebsd"):

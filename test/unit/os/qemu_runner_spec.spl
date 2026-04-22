@@ -4,6 +4,7 @@ use os.qemu_runner.{
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
     scenario_riscv64_virtio_fat32_smf, scenario_riscv32_virtio_fat32_smf,
     scenario_x64_desktop_uefi,
+    scenario_x64_net_user, scenario_x64_ssh,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
     riscv_fs_exec_disk_image_path, scenario_target,
     default_os_build_backend_for_target,
@@ -182,14 +183,44 @@ describe "Qemu runner serial routing":
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)
         val cmd = build_qemu_command(target)
+        expect(cmd).to_contain("-no-user-config")
+        expect(cmd).to_contain("-monitor")
+        expect(cmd).to_contain("none")
+        expect(cmd).to_contain("-net")
         expect(cmd).to_contain("-serial")
         expect(cmd).to_contain("stdio")
         expect(cmd).to_contain("-display")
         expect(cmd).to_contain("none")
 
+    it "hardens x86_64 scenario launches without disabling explicit network scenarios":
+        val desktop = get_scenario("x64-desktop-test")
+        if val resolved_desktop = desktop:
+            val desktop_cmd = build_scenario_command(resolved_desktop, "build/os/simpleos_desktop_e2e_32.elf")
+            expect(desktop_cmd).to_contain("-no-user-config")
+            expect(desktop_cmd).to_contain("-monitor")
+            expect(desktop_cmd).to_contain("-net")
+            expect(desktop_cmd).to_contain("none")
+        else:
+            expect("missing").to_equal("x64-desktop-test")
+
+        val net_user = scenario_x64_net_user()
+        val net_cmd = build_scenario_command(net_user, "build/os/simpleos_x86_64.elf")
+        expect(net_cmd).to_contain("-no-user-config")
+        expect(net_cmd).to_contain("-monitor")
+        expect(net_cmd).to_contain("-netdev")
+        expect(net_cmd.contains("-net")).to_equal(false)
+
+        val ssh = scenario_x64_ssh()
+        val ssh_cmd = build_scenario_command(ssh, "build/os/simpleos_x86_64.elf")
+        expect(ssh_cmd).to_contain("user,id=n0,hostfwd=tcp::2222-:22")
+        expect(ssh_cmd.contains("-net")).to_equal(false)
+
     it "keeps gui targets quiet by default":
         val target = get_gui_target()
         val cmd = build_qemu_command(target)
+        expect(cmd).to_contain("-no-user-config")
+        expect(cmd).to_contain("-monitor")
+        expect(cmd).to_contain("-net")
         expect(cmd).to_contain("-serial")
         expect(cmd).to_contain("none")
         expect(cmd.contains("stdio")).to_equal(false)

@@ -662,6 +662,9 @@ fn build_qemu_command_with_options(target: OsTarget, options: QemuRunOptions) ->
     # QEMU system binary
     args.push(target.qemu_system)
 
+    for hardening_arg in qemu_target_hardening_args(target):
+        args.push(hardening_arg)
+
     # Machine and CPU
     args.push("-machine")
     args.push(target.qemu_machine)
@@ -706,6 +709,49 @@ fn build_qemu_command_with_options(target: OsTarget, options: QemuRunOptions) ->
         args.push(extra)
 
     args
+
+fn qemu_target_hardening_args(target: OsTarget) -> [text]:
+    """Return host-side QEMU hardening flags for a target launch.
+
+    These flags avoid ambient host/user QEMU configuration and disable the
+    interactive HMP monitor. x86_64 lanes that do not intentionally attach a
+    netdev also disable networking explicitly so future QEMU defaults cannot
+    add a host-facing device by accident.
+    """
+    var args: [text] = []
+    if _target_uses_qemu_x86_64(target):
+        args.push("-no-user-config")
+        args.push("-monitor")
+        args.push("none")
+        if not _qemu_extra_enables_network(target.qemu_extra):
+            args.push("-net")
+            args.push("none")
+    args
+
+fn qemu_scenario_hardening_args(scenario: QemuScenario) -> [text]:
+    """Return host-side QEMU hardening flags for a named scenario."""
+    var args: [text] = []
+    if scenario.arch == Architecture.X86_64:
+        args.push("-no-user-config")
+        args.push("-monitor")
+        args.push("none")
+        if not _qemu_extra_enables_network(scenario.qemu_extra):
+            args.push("-net")
+            args.push("none")
+    args
+
+fn _target_uses_qemu_x86_64(target: OsTarget) -> bool:
+    target.arch == Architecture.X86_64 and target.qemu_system == "qemu-system-x86_64"
+
+fn _qemu_extra_enables_network(qemu_extra: [text]) -> bool:
+    for arg in qemu_extra:
+        if arg == "-netdev" or arg == "-nic" or arg == "-net":
+            return true
+        if arg.contains("virtio-net") or arg.contains("e1000") or arg.contains("rtl8139"):
+            return true
+        if arg.contains("hostfwd="):
+            return true
+    false
 
 # ===========================================================================
 # Run
@@ -1675,6 +1721,8 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
         _: "qemu-system-x86_64"
 
     var args: [text] = [qemu_bin]
+    for hardening_arg in qemu_scenario_hardening_args(scenario):
+        args.push(hardening_arg)
     args.push("-machine")
     args.push(scenario.machine)
     args.push("-cpu")
@@ -1808,11 +1856,14 @@ fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):
     No -kernel flag — the firmware boots directly from the disk image.
     """
     val args = [
+        "-no-user-config",
+        "-monitor", "none",
         "-machine", "q35",
         "-cpu", "qemu64",
         "-m", "512M",
         "-serial", "stdio",
         "-display", "none",
+        "-net", "none",
         "-no-reboot",
         "-drive", "file=" + image + ",format=raw,if=virtio",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"

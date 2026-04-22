@@ -10,6 +10,26 @@ bin/simple test                   # Run all tests (or: test path/to/spec.spl)
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy  # Full bootstrap
 ```
 
+## FreeBSD QEMU Bootstrap Check
+From Linux, do not stop at `bootstrap-freebsd-seed.sh` saying it must run on
+FreeBSD. Use the repo-managed automated wrapper:
+
+```bash
+sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
+```
+
+Use `--full` for the repeated bootstrap verification pass. The wrapper creates
+`build/freebsd/vm/freebsd-cloudinit-seed.iso` from the host SSH public key,
+downloads a pristine FreeBSD `BASIC-CLOUDINIT-ufs` base qcow2, creates a fresh
+working overlay for the run, starts QEMU with SSH forwarding on port `2222`, and
+logs in as the default `freebsd` cloud user. Env knobs: `QEMU_VM_PATH`,
+`QEMU_BASE_VM_PATH`, `QEMU_CLOUDINIT_ISO`, `QEMU_SSH_PUBLIC_KEY`, `QEMU_PORT`,
+`QEMU_USER`, `QEMU_MEM`, `QEMU_CPUS`. For manual VM debugging:
+
+```bash
+bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
+```
+
 ## Critical Rules
 - **jj** for VCS — `jj commit -m "msg"` / push: `jj bookmark set main -r @- && jj git push --bookmark main`
 - **NEVER create branches** — work directly on `main`

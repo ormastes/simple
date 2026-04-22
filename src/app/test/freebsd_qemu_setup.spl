@@ -8,6 +8,9 @@
 #
 # Usage:
 #   bin/simple run src/app/test/freebsd_qemu_setup.spl [--download] [--quick] [--full]
+#
+# Top-level Linux-host automation:
+#   sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
 
 use std.nogc_sync_mut.io.process_ops.{shell, shell_bool, shell_output}
 use std.nogc_sync_mut.io.env_ops.{env_get}
@@ -23,7 +26,13 @@ fn get_config_vm_path() -> text:
     val env_val = env_get("QEMU_VM_PATH")
     if env_val != nil and env_val != "":
         return env_val
-    return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
+    return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+
+fn get_config_cloudinit_iso() -> text:
+    val env_val = env_get("QEMU_CLOUDINIT_ISO")
+    if env_val != nil and env_val != "":
+        return env_val
+    return "build/freebsd/vm/freebsd-cloudinit-seed.iso"
 
 fn get_config_port() -> text:
     val env_val = env_get("QEMU_PORT")
@@ -35,7 +44,7 @@ fn get_config_user() -> text:
     val env_val = env_get("QEMU_USER")
     if env_val != nil and env_val != "":
         return env_val
-    return "root"
+    return "freebsd"
 
 fn get_config_mem() -> text:
     val env_val = env_get("QEMU_MEM")
@@ -73,10 +82,13 @@ fn check_command(cmd: text, desc: text) -> bool:
     return true
 
 fn ssh_cmd(port: text, user: text, remote_cmd: text) -> text:
-    return "SSH_AUTH_SOCK= ssh -o ConnectTimeout=5 -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -p {port} {user}@localhost \"{remote_cmd}\""
+    return "SSH_AUTH_SOCK= ssh -o ConnectTimeout=5 -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {port} {user}@localhost \"{remote_cmd}\""
 
 fn path_exists(path: text) -> bool:
     shell_bool("test -e '{path}'")
+
+fn path_nonempty(path: text) -> bool:
+    shell_bool("test -s '{path}'")
 
 # ============================================================================
 # Test 0: Prerequisites
@@ -132,21 +144,46 @@ fn test_vm_image(download_vm: bool) -> bool:
         val size = shell_output("du -h '{vm_path}' | cut -f1", "").trim()
         pass_msg("VM image exists: {vm_path} ({size})")
     elif download_vm:
-        log("Downloading FreeBSD 14.3 VM image...")
+        log("Downloading FreeBSD 14.3 cloud-init VM image...")
         val vm_dir = shell_output("dirname '{vm_path}'", "").trim()
         dir_create_all(vm_dir)
 
-        val url = "https://download.freebsd.org/releases/amd64/14.3-RELEASE/FreeBSD-14.3-RELEASE-amd64.qcow2.xz"
+        val url = "https://download.freebsd.org/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
         val compressed = "{vm_path}.xz"
+
+        if path_exists(compressed):
+            if path_nonempty(compressed):
+                log("Removing existing compressed VM image before fresh download: {compressed}")
+            else:
+                log("Removing empty compressed VM image left by an interrupted download: {compressed}")
+            shell("rm -f '{compressed}'")
 
         val has_wget = shell_bool("command -v wget >/dev/null 2>&1")
         val has_curl = shell_bool("command -v curl >/dev/null 2>&1")
+        var download_exit_code = 0
         if has_wget:
-            shell("wget -O '{compressed}' '{url}'")
+            val download_result = shell("wget -q -O '{compressed}' '{url}'")
+            download_exit_code = download_result.exit_code
         elif has_curl:
-            shell("curl -L -o '{compressed}' '{url}'")
+            val download_result = shell("curl -fsSL -o '{compressed}' '{url}'")
+            download_exit_code = download_result.exit_code
         else:
             fail_msg("wget or curl not found for downloading VM")
+            return false
+
+        if download_exit_code != 0:
+            fail_msg("VM image download failed from {url}")
+            shell("rm -f '{compressed}'")
+            return false
+
+        if path_nonempty(compressed) == false:
+            fail_msg("VM image download produced an empty file: {compressed}")
+            shell("rm -f '{compressed}'")
+            return false
+
+        if shell_bool("xz -t '{compressed}' >/dev/null 2>&1") == false:
+            fail_msg("VM image download is not a valid xz archive: {compressed}")
+            shell("rm -f '{compressed}'")
             return false
 
         log("Extracting VM image (this may take 5-10 minutes)...")
@@ -170,7 +207,7 @@ fn test_vm_image(download_vm: bool) -> bool:
     # Verify qcow2 format
     val has_qemu_img = shell_bool("command -v qemu-img >/dev/null 2>&1")
     if has_qemu_img and path_exists(vm_path):
-        val format = shell_output("qemu-img info '{vm_path}' | grep 'file format' | awk '{{print $3}}'", "").trim()
+        val format = shell_output("qemu-img info '{vm_path}' | awk -F': ' '/file format/ {{print $2; exit}}'", "").trim()
         if format == "qcow2":
             pass_msg("VM image format: qcow2")
         else:
@@ -190,6 +227,7 @@ fn test_start_vm() -> bool:
     val mem = get_config_mem()
     val cpus = get_config_cpus()
     val vm_path = get_config_vm_path()
+    val cloudinit_iso = get_config_cloudinit_iso()
 
     log("================================================================")
     log("Test 2: Starting FreeBSD VM")
@@ -213,7 +251,15 @@ fn test_start_vm() -> bool:
     val pid_file = "build/freebsd/vm/qemu.pid"
     dir_create_all("build/freebsd/vm")
 
-    val start_cmd = "qemu-system-x86_64 -machine accel={accel} -cpu host -m {mem} -smp {cpus} -drive file={vm_path},format=qcow2,if=virtio -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -nographic -daemonize -pidfile {pid_file}"
+    var cloudinit_drive = ""
+    if path_exists(cloudinit_iso):
+        cloudinit_drive = " -drive file={cloudinit_iso},format=raw,if=virtio,media=cdrom"
+        pass_msg("Cloud-init seed attached: {cloudinit_iso}")
+    else:
+        log("WARNING: cloud-init seed not found: {cloudinit_iso}")
+
+    val serial_log = "build/freebsd/vm/qemu-serial.log"
+    val start_cmd = "qemu-system-x86_64 -machine accel={accel} -cpu host -m {mem} -smp {cpus} -drive file={vm_path},format=qcow2,if=virtio{cloudinit_drive} -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -display none -serial file:{serial_log} -daemonize -pidfile {pid_file}"
     val start_result = shell(start_cmd)
 
     if start_result.exit_code == 0:
@@ -224,10 +270,10 @@ fn test_start_vm() -> bool:
         return false
 
     # Wait for SSH
-    log("Waiting for SSH connection (timeout: 60 seconds)...")
-    var retries = 30
+    log("Waiting for SSH connection (timeout: 600 seconds)...")
     var connected = false
-    for i in retries:
+    var attempts = 0
+    while attempts < 300:
         val ssh_check = ssh_cmd(port, user, "echo SSH ready")
         val ssh_ok = shell_bool("{ssh_check} >/dev/null 2>&1")
         if ssh_ok:
@@ -236,10 +282,10 @@ fn test_start_vm() -> bool:
             print ""
             return true
         shell("sleep 2")
-        retries = retries - 1
+        attempts = attempts + 1
 
     if connected == false:
-        fail_msg("SSH connection timeout after 60 seconds")
+        fail_msg("SSH connection timeout after 600 seconds")
         return false
     return true
 
@@ -302,7 +348,7 @@ fn test_rsync() -> bool:
 
     # Sync to VM
     log("Testing rsync to VM...")
-    val sync_to = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" '{test_file}' {user}@localhost:~/ 2>&1")
+    val sync_to = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" '{test_file}' {user}@localhost:~/ 2>&1")
     if sync_to.exit_code != 0:
         fail_msg("Rsync to VM failed")
         shell("rm -f '{test_file}'")
@@ -322,7 +368,7 @@ fn test_rsync() -> bool:
     # Sync back from VM
     shell("rm -f '{test_file}'")
     log("Testing rsync from VM...")
-    val sync_from = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" {user}@localhost:~/{test_file} . 2>&1")
+    val sync_from = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/{test_file} . 2>&1")
     if sync_from.exit_code != 0:
         fail_msg("Rsync from VM failed")
         return false
@@ -395,7 +441,7 @@ fn test_bootstrap_dry_run() -> bool:
 
     # Sync project to VM
     log("Syncing project files to VM...")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
+    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
     if sync_result.exit_code == 0:
         pass_msg("Project files synced to VM")
     else:
@@ -451,7 +497,7 @@ fn test_full_bootstrap() -> bool:
     # Retrieve binary
     log("Retrieving compiled binary from VM...")
     dir_create_all("bin")
-    val retrieve_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no\" {user}@localhost:~/simple/bin/simple bin/simple 2>&1")
+    val retrieve_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/simple/bin/simple bin/simple 2>&1")
     if retrieve_result.exit_code != 0:
         fail_msg("Binary retrieval failed")
         return false
@@ -597,6 +643,7 @@ fn main():
         log("  2. FreeBSD VM image is downloaded (--download)")
         log("  3. SSH port {port} is not in use")
         log("  4. VM has enough memory/disk space")
+        log("  5. For cloud images, {get_config_cloudinit_iso()} exists and contains your SSH key")
         print ""
         exit(1)
 

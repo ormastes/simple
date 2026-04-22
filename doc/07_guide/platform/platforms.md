@@ -210,18 +210,25 @@ text_file_write("output.txt", "line1\nline2\n", win_cfg)  # Forces CRLF
 ### Quick Setup (from Linux Host)
 
 ```bash
-# 1. Install QEMU
-sudo apt install qemu-system-x86 qemu-utils rsync openssh-client wget xz-utils
+# 1. Install QEMU and seed ISO tooling
+sudo apt install qemu-system-x86 qemu-utils rsync openssh-client wget xz-utils genisoimage
 
-# 2. Set up FreeBSD VM
-bin/simple run scripts/setup_freebsd_vm.spl
+# 2. Run the repo-managed FreeBSD bootstrap smoke in QEMU
+sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
 
-# 3. Start VM
-~/vms/freebsd/start-freebsd-daemon.sh
-
-# 4. SSH access
-ssh -p 2222 root@localhost
+# 3. SSH access for manual debugging
+ssh -p 2222 freebsd@localhost
 ```
+
+The wrapper creates `build/freebsd/vm/freebsd-cloudinit-seed.iso` from the host
+SSH public key, provisions/checks the FreeBSD `BASIC-CLOUDINIT-ufs` qcow2 image,
+keeps that downloaded base pristine, creates a fresh working overlay for each
+run, starts QEMU with SSH forwarded to localhost port `2222`, syncs the repo
+into the guest, and runs the FreeBSD bootstrap smoke as the default cloud user
+`freebsd`. Use `--full` for the repeated bootstrap verification pass.
+Configuration environment variables: `QEMU_VM_PATH`, `QEMU_BASE_VM_PATH`,
+`QEMU_CLOUDINIT_ISO`, `QEMU_SSH_PUBLIC_KEY`, `QEMU_PORT`, `QEMU_USER`,
+`QEMU_MEM`, `QEMU_CPUS`.
 
 ### Native Bootstrap on FreeBSD
 
@@ -246,8 +253,8 @@ bin/simple --version && bin/simple test
 sudo apt-get install clang lld
 
 # Extract sysroot from FreeBSD VM
-ssh -p 2222 root@localhost 'tar -czf /tmp/freebsd-sysroot.tar.gz /usr/include /usr/lib /lib'
-scp -P 2222 root@localhost:/tmp/freebsd-sysroot.tar.gz ~/
+ssh -p 2222 freebsd@localhost 'tar -czf /tmp/freebsd-sysroot.tar.gz /usr/include /usr/lib /lib'
+scp -P 2222 freebsd@localhost:/tmp/freebsd-sysroot.tar.gz ~/
 
 # Build with FreeBSD toolchain
 cmake ../seed -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freebsd-x86_64.cmake
@@ -256,10 +263,18 @@ cmake ../seed -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freeb
 ### FreeBSD Testing from Linux
 
 ```bash
-bin/simple run scripts/test_freebsd_qemu.spl
+sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
 ```
 
-This starts the VM, copies bootstrap binary and test sources, runs native compilation inside the VM, and verifies output.
+This checks prerequisites, downloads/validates the VM image when needed, starts
+QEMU, verifies SSH connectivity, verifies rsync/toolchain access, syncs the
+workspace into the guest, and runs the FreeBSD bootstrap smoke inside the
+FreeBSD guest. Use `--full` when you need the repeated bootstrap verification
+pass. For manual VM setup debugging, run:
+
+```bash
+bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
+```
 
 ### FreeBSD-Specific Notes
 
