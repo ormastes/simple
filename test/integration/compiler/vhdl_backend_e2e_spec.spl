@@ -458,6 +458,64 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("v_else_wide := resize(v_low, 32);"))
         check(vhdl.contains("result_out <= v_else_wide;"))
 
+    it "compiles branch-local VHDL signal and variable assignments inside combinational process":
+        val backend = make_resolved_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "tmp", make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_assign = MirInst(
+            kind: MirInstKind.VhdlVarAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_assign],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_assign = MirInst(
+            kind: MirInstKind.VhdlSignalAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                nil
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_assign],
+            terminator: MirTerminator.Return(nil)
+        )
+
+        val func = make_function("select_vhdl_assigns", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_vhdl_assigns_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for process VHDL assigns")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("v_tmp := a;"))
+        check(vhdl.contains("result_out <= v_tmp;"))
+        check(vhdl.contains("result_out <= b;"))
+
     it "compiles checked binary op and integer casts":
         val backend = make_backend()
 
