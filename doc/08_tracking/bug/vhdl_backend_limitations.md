@@ -38,10 +38,10 @@
 **Workaround:** Use the main `VhdlBackend.compile()` path instead of `HardwareCodegen.compile_process()`
 **Details:** The `compile_process()` method on the HardwareCodegen trait returns `text` (not `Result`), so instruction compilation failures produce inline error comments rather than hard compile errors. The main `compile()` path correctly returns `Result` with hard errors.
 
-### L007: Simulation-backed proof is deferred
+### L007: GHDL proof covers analysis, elaboration, synthesis, and simulation
 **Severity:** Low (scoping decision)
-**Workaround:** Use GHDL analysis/elaboration for validation
-**Details:** The `riscv32_sim_vhdl` target lane is quarantined. Simulation-backed execution proof is a follow-on milestone. See `doc/04_architecture/vhdl_simulation_milestone_decision.md`.
+**Workaround:** Use the supported GHDL validation flow for backend proof
+**Details:** GHDL proof exists for `-a --std=08` analysis, `-e --std=08` elaboration, `--synth` synthesis checking, and `-r` simulation on the supported VHDL subset. The `riscv32_sim_vhdl` target lane remains quarantined as a separate milestone. See `doc/04_architecture/vhdl_simulation_milestone_decision.md`.
 
 ### L008: Builder API examples are not backend-generated
 **Severity:** Documentation clarity
@@ -71,8 +71,8 @@
 
 ### L012: Full Simple source-to-VHDL facade is still partial
 **Severity:** High
-**Workaround:** Use MIR-backed VHDL backend tests, explicit backend APIs, or the conservative pure Simple source fallback for supported single-expression functions.
-**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes a pure Simple fallback for conservative single-function expression VHDL generation, but arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the pure Simple path covers the full required surface.
+**Workaround:** Use the CLI VHDL path for the conservative synthesizable subset, MIR-backed VHDL backend tests, or explicit backend APIs.
+**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes the CLI `simple compile --backend=vhdl` path for the conservative synthesizable subset, but arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the public source path covers the full required surface.
 
 ## MIR Lowering Limitations
 
@@ -84,7 +84,7 @@
 ### L014: Dynamic address and call MIR are still unsupported
 **Severity:** Medium
 **Workaround:** Inline or specialize hardware logic before VHDL lowering; use explicit component instantiation/port maps for hardware composition.
-**Details:** `Alloc`, `GetElementPtr`, generic `Call`, and `CallIndirect` are not general-purpose VHDL lowering targets. Explicit `VhdlPortMap` component instantiation is supported, but general dynamic calls and pointer/address-style MIR are still outside the synthesizable subset.
+**Details:** `Alloc`, `GetElementPtr`, generic `Call`, and `CallIndirect` are hard-error deferred items and are not general-purpose VHDL lowering targets. Explicit `VhdlPortMap` component instantiation is supported, but general dynamic calls and pointer/address-style MIR are still outside the synthesizable subset.
 
 ## See Also
 
