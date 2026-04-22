@@ -87,6 +87,17 @@ fn test_array_literal() {
     }
 }
 
+#[test]
+fn test_region_domain_custom_block_expression() {
+    let module = parse("schema{Building: id Uuid}").unwrap();
+    if let Node::Expression(Expr::BlockExpr { kind, payload }) = &module.items[0] {
+        assert_eq!(kind, "schema");
+        assert_eq!(payload, "Building: id Uuid");
+    } else {
+        panic!("Expected schema block expression");
+    }
+}
+
 // === Infix Keyword Tests (to, not_to) ===
 
 #[test]

@@ -333,3 +333,28 @@ fn test_mock_declaration() {
         ]
     );
 }
+
+#[test]
+fn test_region_domain_custom_blocks() {
+    let result = tokenize("schema{Building: id Uuid} style{Button.primary: padding 8px}");
+
+    assert!(matches!(
+        &result[0],
+        TokenKind::CustomBlock { kind, payload, .. }
+            if kind == "schema" && payload == "Building: id Uuid"
+    ));
+    assert!(matches!(
+        &result[1],
+        TokenKind::CustomBlock { kind, payload, .. }
+            if kind == "style" && payload == "Button.primary: padding 8px"
+    ));
+}
+
+#[test]
+fn test_region_domain_names_stay_identifiers_without_block_brace() {
+    let result = tokenize("schema style music bim cad city rtl ui");
+
+    for token in result.iter().take(8) {
+        assert!(matches!(token, TokenKind::Identifier { .. }));
+    }
+}
