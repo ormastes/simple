@@ -8,10 +8,71 @@
 
 use std.tooling.easy_fix.*
 
+struct PrimitiveApiAuditEntry:
+    file: text
+    line: i64
+    item_name: text
+    position: text
+    primitive_type: text
+    reason_code: text
+    suggested_wrapper: text
+
 fn primitive_api_types() -> [text]:
     ["i64", "i32", "i16", "i8",
      "u64", "u32", "u16", "u8",
      "f64", "f32"]
+
+fn primitive_api_audit_types() -> [text]:
+    ["i64", "i32", "i16", "i8",
+     "u64", "u32", "u16", "u8",
+     "f64", "f32", "bool", "text", "str", "String"]
+
+fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEntry]:
+    var entries: [PrimitiveApiAuditEntry] = []
+    val lines = source.split("\n")
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn "):
+            val item_name = _extract_public_function_name(trimmed)
+            val params = _extract_params(trimmed)
+            for param in params:
+                val param_type = _extract_param_type(param)
+                if _is_audited_primitive_type(param_type):
+                    val param_name = _extract_param_name(param)
+                    entries.push(PrimitiveApiAuditEntry(
+                        file: file,
+                        line: line_num,
+                        item_name: item_name,
+                        position: "param '{param_name}'",
+                        primitive_type: param_type,
+                        reason_code: _primitive_reason_code(param_type),
+                        suggested_wrapper: _suggest_wrapper_name(param_name, param_type)
+                    ))
+
+            val return_type = _extract_return_type(trimmed)
+            if _is_audited_primitive_type(return_type):
+                entries.push(PrimitiveApiAuditEntry(
+                    file: file,
+                    line: line_num,
+                    item_name: item_name,
+                    position: "return type",
+                    primitive_type: return_type,
+                    reason_code: _primitive_reason_code(return_type),
+                    suggested_wrapper: _suggest_wrapper_name(item_name, return_type)
+                ))
+
+    entries
+
+fn primitive_api_audit_report(source: text, file: text) -> text:
+    val entries = primitive_api_audit_source(source, file)
+    var out = "primitive_api_audit file={file} count={entries.len()}\n"
+    for entry in entries:
+        out = out + "{entry.file}:{entry.line}: {entry.item_name} {entry.position} uses {entry.primitive_type} reason={entry.reason_code} suggest={entry.suggested_wrapper}\n"
+    out
 
 fn check_primitive_api(source: text, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
@@ -102,3 +163,49 @@ fn _is_bare_primitive_type(ty: text) -> bool:
         if ty == primitive:
             return true
     false
+
+fn _is_audited_primitive_type(ty: text) -> bool:
+    for primitive in primitive_api_audit_types():
+        if ty == primitive:
+            return true
+    false
+
+fn _primitive_reason_code(ty: text) -> text:
+    match ty:
+        case "bool": "needs_bool_wrapper_or_enum"
+        case "text" | "str" | "String": "needs_domain_text_type"
+        case _: "needs_newunit"
+
+fn _suggest_wrapper_name(name: text, ty: text) -> text:
+    if ty == "bool":
+        return "{_title_token(name)}Flag"
+    if ty == "text" or ty == "str" or ty == "String":
+        return "{_title_token(name)}Text"
+    "{_title_token(name)}Value"
+
+fn _extract_public_function_name(line: text) -> text:
+    var rest = line
+    if rest.starts_with("pub static fn "):
+        rest = rest.slice(14)
+    elif rest.starts_with("pub fn "):
+        rest = rest.slice(7)
+    elif rest.starts_with("pub me "):
+        rest = rest.slice(7)
+    val paren_pos = rest.find("(")
+    if paren_pos < 0:
+        return rest.trim()
+    rest.slice(0, paren_pos).trim()
+
+fn _title_token(name: text) -> text:
+    val cleaned = name.replace("'", "").replace("_", " ").trim()
+    if cleaned == "":
+        return "Semantic"
+    val parts = cleaned.split(" ")
+    var result = ""
+    for part in parts:
+        if part == "":
+            continue
+        val first = part.slice(0, 1).to_upper()
+        val rest = if part.len() > 1: part.slice(1) else: ""
+        result = result + first + rest
+    result

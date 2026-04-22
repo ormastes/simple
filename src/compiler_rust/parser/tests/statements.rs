@@ -85,3 +85,28 @@ fn parse_augmented_assignment() {
 fn parse_context_statement() {
     parse_ok("context obj:\n    x = 1");
 }
+
+#[test]
+fn parse_newunit_statement() {
+    let items = parse("newunit UserId: i64 as uid");
+    match &items[0] {
+        Node::Unit(unit) => {
+            assert_eq!(unit.name, "UserId");
+            assert_eq!(unit.suffix, "uid");
+            assert_eq!(unit.base_types.len(), 1);
+        }
+        other => panic!("expected UnitDef for newunit, got {other:?}"),
+    }
+}
+
+#[test]
+fn reject_newunit_measurement_family() {
+    let mut parser = Parser::new("newunit length(base: f64): m = 1.0");
+    assert!(parser.parse().is_err());
+}
+
+#[test]
+fn reject_newunit_derived_expression() {
+    let mut parser = Parser::new("newunit velocity = length / time");
+    assert!(parser.parse().is_err());
+}
