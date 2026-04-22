@@ -75,8 +75,13 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   acceptance box unchecked until an i686-capable native-build binary is
   available and the gated spec observes `[probe browser-x86] spl_start`.
   x86_32 context construction now has unit coverage for kernel/user selector
-  setup and stack alignment, but the assembly context switch and FPU save/restore
-  hooks remain open in `src/os/kernel/arch/x86_32/context.spl`.
+  setup and stack alignment. The context switch/FPU methods now route through
+  explicit x86_32 runtime hooks, with C-side freestanding helpers in
+  `examples/simple_os/arch/x86_32/boot/baremetal_stubs.c`; live preemptive
+  switching is still not proven because the i686 boot build is blocked. The
+  pure `int 0x80` syscall register contract is captured in
+  `src/os/kernel/arch/x86_32/trap_model.spl`; trap-entry assembly and runtime
+  dispatch remain open.
 
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 
