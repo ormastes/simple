@@ -18,48 +18,13 @@
 # Note: QEMU virt PL011 doesn't require baud rate configuration
 # (it's virtualized), but we include it for hardware correctness.
 
-use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read32, mmio_write32}
+use os.kernel.arch.arm.pl011_common.{ARM_VIRT_PL011_BASE, pl011_init, pl011_write_byte, pl011_write, pl011_writeln}
 
 # ============================================================================
 # PL011 Base Address (QEMU virt machine)
 # ============================================================================
 
-val PL011_BASE: u64 = 0x09000000
-
-# ============================================================================
-# PL011 Register Offsets
-# ============================================================================
-
-val UARTDR: u64 = 0x000       # Data register
-val UARTFR: u64 = 0x018       # Flag register
-val UARTIBRD: u64 = 0x024     # Integer baud rate divisor
-val UARTFBRD: u64 = 0x028     # Fractional baud rate divisor
-val UARTLCR_H: u64 = 0x02C   # Line control register
-val UARTCR: u64 = 0x030       # Control register
-val UARTIMSC: u64 = 0x038     # Interrupt mask set/clear
-
-# ============================================================================
-# PL011 Flag Register Bits
-# ============================================================================
-
-val FR_TXFF: u32 = 1 << 5     # Transmit FIFO full
-val FR_RXFE: u32 = 1 << 4     # Receive FIFO empty
-val FR_BUSY: u32 = 1 << 3     # UART busy
-
-# ============================================================================
-# PL011 Control Register Bits
-# ============================================================================
-
-val CR_UARTEN: u32 = 1 << 0   # UART enable
-val CR_TXE: u32 = 1 << 8      # Transmit enable
-val CR_RXE: u32 = 1 << 9      # Receive enable
-
-# ============================================================================
-# PL011 Line Control Register Bits
-# ============================================================================
-
-val LCR_FEN: u32 = 1 << 4     # Enable FIFOs
-val LCR_WLEN_8: u32 = 3 << 5  # Word length 8 bits
+val PL011_BASE: u64 = ARM_VIRT_PL011_BASE
 
 # ============================================================================
 # Arm64Console
@@ -92,51 +57,23 @@ impl Arm64Console:
         if g_uart_ready:
             return
 
-        # Step 1: Disable UART
-        mmio_write32(PL011_BASE + UARTCR, 0)
-
-        # Step 2: Wait for any in-progress transmission to complete
-        while (mmio_read32(PL011_BASE + UARTFR) & FR_BUSY) != 0:
-            pass_do_nothing
-
-        # Step 3: Set baud rate — 115200 baud at 24MHz UARTCLK
-        # Baud divisor = UARTCLK / (16 * BaudRate) = 24000000 / 1843200 = 13.0208
-        # IBRD = 13, FBRD = round(0.0208 * 64) = 1
-        mmio_write32(PL011_BASE + UARTIBRD, 13)
-        mmio_write32(PL011_BASE + UARTFBRD, 1)
-
-        # Step 4: 8 data bits, no parity, 1 stop bit, enable FIFO
-        mmio_write32(PL011_BASE + UARTLCR_H, LCR_WLEN_8 | LCR_FEN)
-
-        # Step 5: Mask all interrupts (we poll, not interrupt-driven for early console)
-        mmio_write32(PL011_BASE + UARTIMSC, 0)
-
-        # Step 6: Enable UART, TX, and RX
-        mmio_write32(PL011_BASE + UARTCR, CR_UARTEN | CR_TXE | CR_RXE)
-
-        g_uart_ready = true
+        g_uart_ready = pl011_init(PL011_BASE, g_uart_ready)
 
     fn write_byte(byte: u8):
         """Write one byte to PL011 UART, blocking until transmit FIFO has space."""
-        # Wait until transmit FIFO is not full (TXFF = 0 in FR)
-        while (mmio_read32(PL011_BASE + UARTFR) & FR_TXFF) != 0:
-            pass_do_nothing
-        # Write byte to data register
-        mmio_write32(PL011_BASE + UARTDR, byte as u32)
+        pl011_write_byte(PL011_BASE, byte)
 
     fn write(msg: text):
         """Write string to PL011 UART console."""
         if not g_uart_ready:
             self.init()
-        for i in 0..msg.len():
-            val ch = msg.char_at(i)
-            self.write_byte(ch as u8)
+        pl011_write(PL011_BASE, msg)
 
     fn writeln(msg: text):
         """Write string followed by CR+LF to PL011 UART console."""
-        self.write(msg)
-        self.write_byte(0x0D)  # CR
-        self.write_byte(0x0A)  # LF
+        if not g_uart_ready:
+            self.init()
+        pl011_writeln(PL011_BASE, msg)
 
     fn base_addr() -> u64:
         """Return the MMIO base address for this console."""

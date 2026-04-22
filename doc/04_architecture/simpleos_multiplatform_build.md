@@ -75,3 +75,15 @@ RISC-V boot/runtime code is now owned by Simple modules under `src/os/kernel/arc
 RV64 hardware entry and trap entry are `@naked` Simple functions with embedded assembly. `_start` lives with the RV64 boot module; `_rv64_trap_vector` and `_rv64_enter_user` live in `trap_vector.spl` and preserve the existing trap-frame ABI used by `interrupt.spl`.
 
 The duplicated RISC-V 16550 UART setup is factored into `src/os/kernel/boot/uart16550_mmio.spl`. RV32 and RV64 pass their QEMU virt MMIO base address to the shared helper; x86_64 remains separate because it uses port I/O rather than MMIO for its early serial path.
+
+## Shared Pure-Simple Console Adapters
+
+<!-- codex-design -->
+
+The architecture tree now prefers family-level Simple helpers for MMIO peripherals that are identical across 32-bit and 64-bit variants:
+
+- RISC-V: `src/os/kernel/arch/riscv/console_common.spl` centralizes QEMU virt 16550 init, read, and write behavior.
+- ARM: `src/os/kernel/arch/arm/pl011_common.spl` centralizes QEMU virt PL011 register programming and blocking writes.
+- x86: `src/os/kernel/arch/x86/com1_common.spl` centralizes COM1 port setup and blocking writes for x86_32 and x86_64.
+
+Leaf modules under `riscv32`, `riscv64`, `arm32`, `arm64`, `x86_32`, and `x86_64` are HAL adapters. They preserve public symbol names and target-specific compatibility behavior while delegating duplicate register logic to the shared Simple helpers.

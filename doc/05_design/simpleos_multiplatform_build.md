@@ -57,3 +57,15 @@ RISC-V platform rows intentionally keep `boot_c_sources` and `boot_asm_sources` 
 RV64 startup and trap mechanics are implemented as Simple `@naked` functions using `asm volatile:` blocks. `_start` preserves OpenSBI `a0/a1`, installs `_stack_top`, clears BSS, and calls the mangled `boot_main` symbol. `_rv64_trap_vector` saves/restores the existing `Riscv64Context` layout and calls `rv64_dispatch_trap_frame_ptr`; `_rv64_enter_user` restores a scheduler-provided context and enters U-mode with `sret`.
 
 The shared `uart16550_mmio` helper owns 16550 register offsets, initialization, blocking TX, and optional RX. RV32 and RV64 console modules keep only readiness state, SBI fallback where applicable, and architecture-specific public names.
+
+## Shared Console Adapter Detail
+
+<!-- codex-design -->
+
+RISC-V and ARM now use shared family-level Simple console helpers:
+
+- `src/os/kernel/arch/riscv/console_common.spl` owns the QEMU virt 16550 base address and read/write/init operations used by both RV32 and RV64.
+- `src/os/kernel/arch/arm/pl011_common.spl` owns the QEMU virt PL011 base address, register offsets, baud setup, FIFO setup, and blocking TX operations used by ARM32 and ARM64.
+- `src/os/kernel/arch/x86/com1_common.spl` owns the COM1 port map, serial setup sequence, and blocking TX operations used by x86_32 and x86_64.
+
+The per-architecture console modules remain as the public HAL adapters. They keep only architecture-specific public names, readiness state, and compatibility differences such as the RV64 SBI pre-UART fallback, ARM32's `u32` base-address return shape, and x86 family type names.
