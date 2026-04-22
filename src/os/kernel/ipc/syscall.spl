@@ -21,6 +21,7 @@ use os.kernel.ipc.notification.{NotificationTable, notification_create, notifica
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
+use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.arch.arch_context.{Architecture}
@@ -1184,19 +1185,17 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
 fn _direct_spawn_app_id_path(app_id: u64) -> text?:
     match app_id:
         case 1:
-            Some("/sys/apps/browser_demo")
+            Some("/sys/apps/browser_demo.smf")
         case 2:
-            Some("/sys/apps/file_manager")
+            Some("/sys/apps/file_manager.smf")
         case 3:
-            Some("/sys/apps/hello_world")
+            Some("/sys/apps/hello_world.smf")
         case 103:
             Some("/sys/apps/hello_world.smf")
         case 4:
-            Some("/sys/apps/shell")
+            Some("/sys/apps/shell.smf")
         case 5:
-            Some("/sys/apps/editor")
-        case 103:
-            Some("/sys/apps/hello_world.smf")
+            Some("/sys/apps/editor.smf")
         case _:
             nil
 
@@ -1237,6 +1236,14 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     serial_println("[syscall13] rejected invalid filesystem executable")
     -8
 
+fn _builtin_binary_path_for_spawn(path: text) -> text:
+    if path.ends_with(".smf") and path.len() > 4:
+        return path.substring(0, path.len() - 4)
+    path
+
+fn _is_builtin_binary_path(path: text) -> bool:
+    resolve_builtin_binary(_builtin_binary_path_for_spawn(path)) != nil
+
 fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
     """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
     serial_println("[syscall13] dispatch_direct enter")
@@ -1244,18 +1251,28 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
         val sentinel_path = _direct_spawn_app_id_path(path_ptr)
         if sentinel_path != nil:
             val path = sentinel_path.unwrap()
+            if _is_builtin_binary_path(path):
+                serial_println("[syscall13] builtin resident fallback path={path}")
+                return -2
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
                 return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
         return -14
 
+    if path_len > MAX_BINARY_PATH_LEN:
+        serial_println("[syscall13] dispatch_direct path too long")
+        return -14
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)
     if path_bytes_result.is_err():
+        serial_println("[syscall13] dispatch_direct path copy failed")
         return -14
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     serial_println("[syscall13] dispatch_direct path-ready")
+    if _is_builtin_binary_path(path):
+        serial_println("[syscall13] builtin resident fallback path={path}")
+        return -2
     val arch = CURRENT_EXEC_ARCH
     serial_println("[syscall13] dispatch_direct arch-ready")
 

@@ -59,7 +59,14 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
 
     match status {
         Ok(exit_status) => Ok((stdout, stderr, exit_status.code().unwrap_or(-1) as i64)),
-        Err(()) => Err(()),
+        Err(()) => {
+            let stderr = if stderr.is_empty() {
+                "Process timed out".to_string()
+            } else {
+                format!("{stderr}\nProcess timed out")
+            };
+            Ok((stdout, stderr, -1))
+        }
     }
 }
 use crate::value_bridge::runtime_to_value;
