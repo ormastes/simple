@@ -430,6 +430,144 @@ describe "VHDL Backend E2E - Entity Generation":
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("result_out <= a;"))
 
+    it "compiles struct aggregate to named record assignment":
+        val backend = make_backend()
+        val point_symbol = SymbolId(id: 42)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            MirFieldDef(name: "x", type_: make_i32()),
+            MirFieldDef(name: "y", type_: make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = MirTypeDef(name: "Point", kind: MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, point_type),
+            make_temp_local(3, "point_sig", point_type)
+        ]
+        val aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 3),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("make_point", [make_i32(), make_i32()], point_type, locals, [block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "point_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for struct aggregate")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        check(compiled.package_vhdl.unwrap().contains("type Point is record"))
+        val vhdl = compiled.vhdl
+        check(vhdl.contains("result_out : out Point"))
+        check(vhdl.contains("signal point_sig : Point;"))
+        check(vhdl.contains("point_sig <= (x => a, y => b);"))
+        check(vhdl.contains("result_out <= point_sig;"))
+
+    it "compiles struct field get and set":
+        val backend = make_backend()
+        val point_symbol = SymbolId(id: 43)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            MirFieldDef(name: "x", type_: make_i32()),
+            MirFieldDef(name: "y", type_: make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = MirTypeDef(name: "Point2", kind: MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "new_y", make_i32()),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "point_sig", point_type),
+            make_temp_local(3, "x_out", make_i32())
+        ]
+        val set_y = MirInst(
+            kind: MirInstKind.SetField(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                1,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+            ),
+            span: empty_span()
+        )
+        val get_x = MirInst(
+            kind: MirInstKind.GetField(
+                LocalId(id: 3),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                0
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [set_y, get_x],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("point_fields", [make_i32()], make_i32(), locals, [block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "point_fields_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for struct fields")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal point_sig : Point2;"))
+        check(vhdl.contains("point_sig.y <= new_y;"))
+        check(vhdl.contains("x_out <= point_sig.x;"))
+        check(vhdl.contains("result_out <= x_out;"))
+
+    it "compiles array aggregate assignment":
+        val backend = make_backend()
+        val array_type = MirType(kind: MirTypeKind.Array(make_i32(), 2))
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, array_type),
+            make_temp_local(3, "arr_sig", array_type)
+        ]
+        val aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 3),
+                AggregateKind.Array(make_i32()),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("make_pair_array", [make_i32(), make_i32()], array_type, locals, [block])
+        val module = make_module("array_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for array aggregate")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal arr_sig : array (0 to 1) of signed(31 downto 0);"))
+        check(vhdl.contains("arr_sig <= (0 => a, 1 => b);"))
+        check(vhdl.contains("result_out <= arr_sig;"))
+
     it "rejects unsupported MIR instruction with hard error":
         val backend = make_backend()
 
