@@ -69,8 +69,8 @@ Platform columns use `impl/verified`.
 | OS-DRV-001 | PCI device enumeration | Platform + shared drivers | x86_64 PCI lanes | I/P | N | NA | NA | NA | NA | x86_32 would need PCI init proof before NVMe/GUI parity. |
 | OS-DRV-002 | Framebuffer/graphics driver | Platform | BGA/VirtIO GPU lanes | I/V | N | P | P | P | P | x86_32 no graphics acceptance lane. |
 | OS-DRV-003 | Network device scenario | Platform QEMU + driver | x86_64 scenarios | I/P | N | N | N | N | N | Not part of x86_32 MVP parity unless promoted. |
-| OS-REBOOT-001 | Reboot syscall dispatch | Shared syscall + platform reset | `syscall id=16` | I/P | P | P | P | P | P | Shared handler exists; x86_32 reset path and live QEMU proof missing. |
-| OS-REBOOT-002 | Platform reset primitive | Platform | CPU/reboot primitive | I/P | N | N | N | N | N | Current import in syscall is x86_64-specific; must be abstracted. |
+| OS-REBOOT-001 | Reboot syscall dispatch | Shared syscall + platform reset | `syscall id=16` | I/V | P | P | P | P | P | Shared handler now routes through HAL reset facade and has hosted regression coverage; non-x86 live QEMU reset proof still missing. |
+| OS-REBOOT-002 | Platform reset primitive | Platform | HAL reset facade + CPU/SBI primitive | I/V | I/P | NA/P | NA/P | I/P | I/P | Syscall no longer imports x86_64 directly; x86_64 is verified, x86_32 uses CF9 reset, RISC-V uses SBI SRST, ARM awaits PSCI/platform firmware reset. |
 | OS-TEST-001 | Hosted unit tests for pure contracts | Shared | `test/unit/os/kernel` | I/V | I/V | I/V | I/V | I/V | I/V | Covers many pieces but does not replace live QEMU. |
 | OS-TEST-002 | Gated live QEMU test | Platform | `test/system/*live*` | I/V | P/B | P | P | P | P | x86_32 gated test reports toolchain block, not successful boot. |
 | OS-TEST-003 | Full OS acceptance matrix | Cross-platform | QEMU scenarios + serial markers | I/V | N | P | P | P | P | x86_64 is the only full lane in this matrix. |
@@ -79,7 +79,7 @@ Platform columns use `impl/verified`.
 
 | Platform | Evidence Files | What They Prove | Remaining Proof Gap |
 |----------|----------------|-----------------|---------------------|
-| x86_64 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_desktop_disk_boot_spec.spl`, `test/system/simpleos_reboot_live_spec.spl`, `examples/simple_os/arch/x86_64/*` | Baseline boot, desktop, disk, syscall, reboot, and app lanes exist. | Keep as regression baseline and move x86-specific reboot behind shared facade. |
+| x86_64 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_desktop_disk_boot_spec.spl`, `test/system/simpleos_reboot_live_spec.spl`, `test/unit/os/kernel/ipc/syscall_reboot_spec.spl`, `examples/simple_os/arch/x86_64/*` | Baseline boot, desktop, disk, syscall, reboot, app lanes, and reset-facade dispatch exist. | Keep as regression baseline while other platforms catch up. |
 | x86_32 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_x86_32_boot_probe_live_spec.spl`, `test/unit/os/kernel/arch/x86_32_*_spec.spl`, `examples/simple_os/arch/x86_32/*` | Target metadata, pure context, int 0x80 register model, hosted trap dispatch, ELF/process-image handoff. | True i386 live boot, live int 0x80 entry, storage, shell, and process diagnostics. |
 | arm64 | `examples/simple_os/arch/arm64/fs_exec_entry.spl`, `src/os/kernel/arch/arm64/*`, `test/qemu/os/boot/arm64_boot_qemu_spec.spl`, `test/os/kernel/arch/hal_arm64_phase_a_spec.spl` | ARM64 boot/HAL source and fs-exec entry exist; QEMU boot and HAL tests are present. | First-class acceptance markers for SVC, EL0 handoff, SMF bytes to process image, shell. |
 | arm32 | `examples/simple_os/arch/arm32/fs_exec_entry.spl`, `examples/simple_os/arch/arm32/os_entry.spl`, `src/os/kernel/arch/arm32/*`, `test/qemu/os/boot/arm32_boot_qemu_spec.spl` | ARM32 boot entry, fs-exec entry, HAL source, and QEMU boot spec exist. | Clean current live proof, SVC model, user-mode handoff, SMF process image, shell. |
@@ -128,7 +128,7 @@ one platform-specific milestone.
 ### x86_64
 
 1. Keep x86_64 as the baseline full OS lane while other platforms catch up.
-2. Move the generic reboot syscall away from direct x86_64 imports behind a shared reset facade.
+2. Maintain the shared HAL reset facade as the syscall reset boundary.
 3. Preserve desktop, shell, NVMe/FAT32, and process diagnostics live smoke coverage as regression gates.
 
 ### x86_32
