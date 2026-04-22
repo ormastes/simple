@@ -359,6 +359,50 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("narrow <= resize(signed(wide), 32);"))
         check(vhdl.contains("result_out <= narrow;"))
 
+    it "compiles remainder and bitwise not operations":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "rem_value", make_i32()),
+            make_temp_local(4, "inverted", make_i32())
+        ]
+
+        val rem_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 3),
+                MirBinOp.Rem,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val bitnot_inst = MirInst(
+            kind: MirInstKind.UnaryOp(
+                LocalId(id: 4),
+                MirUnaryOp.BitNot,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [rem_inst, bitnot_inst],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val func = make_function("rem_not", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("rem_not_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for rem/bitnot")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("rem_value <= a mod b;"))
+        check(vhdl.contains("inverted <= not rem_value;"))
+        check(vhdl.contains("result_out <= inverted;"))
+
     it "compiles goto terminator to return block":
         val backend = make_backend()
 
