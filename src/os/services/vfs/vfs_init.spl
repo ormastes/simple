@@ -23,6 +23,8 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mm
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use std.fs_driver.ops.{FsDriver}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
 use os.kernel.types.fs_types.{FileFlags}
 use common.string_core.{str_char_at}
 
@@ -415,6 +417,26 @@ fn vfs_is_ready() -> bool:
 fn vfs_get_manager() -> VfsManager:
     """Return the global VFS manager instance."""
     g_vfs
+
+pub fn g_vfs_reset_mount_table_for_test():
+    """Reset service-layer mount state for focused VFS connector tests."""
+    g_mount_table = MountTable.new()
+    g_root_fat32 = nil
+
+pub fn g_vfs_mount_nvfs_posix(mount_path: text, name: text, read_only: bool) -> bool:
+    """Mount the POSIX-compatible NVFS shim into the service mount table.
+
+    This connects the NVFS FsDriver surface to the SimpleOS `g_vfs_*` helpers
+    without making NVFS the boot-time root filesystem.
+    """
+    var driver = NvfsPosixDriver.new(name)
+    val opts = MountOptions(read_only: read_only, want_caps: 0, require_caps: 0)
+    val mounted = driver.mount(opts)
+    if mounted.is_err():
+        return false
+    val path = if mount_path == "": "/" else: mount_path
+    val result = g_mount_table.mount(Path(raw: path), DriverInstance.NvfsPosix(driver), opts)
+    result.is_ok()
 
 # ============================================================================
 # VFS Public Helpers (M2 retrofit) — route callers through g_mount_table
@@ -853,8 +875,34 @@ fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
                 result = result + buf[j].to_char()
                 j = j + 1
             result
-        case NvfsPosix(_):
-            ""
+        case NvfsPosix(d):
+            val stat_r = d.stat(relpath)
+            if stat_r.is_err():
+                return ""
+            val size = stat_r.unwrap().size.to_i64()
+            if size <= 0:
+                return ""
+            val flags = OpenFlags.read_only()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return ""
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i64 = 0
+            while i < size:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return ""
+            val n = read_r.unwrap()
+            var result: text = ""
+            var j: i32 = 0
+            while j < n.to_i32():
+                result = result + buf[j].to_char()
+                j = j + 1
+            result
         case RamFs(_):
             ""
 
@@ -930,8 +978,38 @@ fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> [u8]
                 out.push(buf[j])
                 j = j + 1
             out
-        case NvfsPosix(_):
-            []
+        case NvfsPosix(d):
+            val stat_r = d.stat(relpath)
+            if stat_r.is_err():
+                return []
+            val size = stat_r.unwrap().size.to_i64()
+            if size <= 0:
+                return []
+            val flags = OpenFlags.read_only()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return []
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i64 = 0
+            while i < size:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return []
+            val n = read_r.unwrap()
+            if n <= 0:
+                return []
+            if n.to_i32() == buf.len():
+                return _clone_bytes(buf)
+            var out: [u8] = []
+            var j: i32 = 0
+            while j < n.to_i32():
+                out.push(buf[j])
+                j = j + 1
+            out
         case RamFs(_):
             []
 
@@ -948,8 +1026,11 @@ fn g_vfs_dispatch_file_size(driver: DriverInstance, relpath: Path) -> i64:
             if r.is_err():
                 return -1
             r.unwrap().size.to_i64()
-        case NvfsPosix(_):
-            -1
+        case NvfsPosix(d):
+            val r = d.stat(relpath)
+            if r.is_err():
+                return -1
+            r.unwrap().size.to_i64()
         case RamFs(_):
             -1
 
@@ -960,8 +1041,8 @@ fn g_vfs_dispatch_file_exists(driver: DriverInstance, relpath: Path) -> bool:
             d.stat(relpath).is_ok()
         case Nvfs(d):
             d.stat(relpath).is_ok()
-        case NvfsPosix(_):
-            false
+        case NvfsPosix(d):
+            d.stat(relpath).is_ok()
         case RamFs(_):
             false
 
@@ -1240,8 +1321,24 @@ fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content
             val write_r = d.write(handle, 0, buf)
             d.close(handle)
             write_r.is_ok()
-        case NvfsPosix(_):
-            false
+        case NvfsPosix(d):
+            val flags = OpenFlags.read_write().with_create()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return false
+            val handle = open_r.unwrap()
+            val truncate_r = d.ftruncate(handle, 0)
+            if truncate_r.is_err():
+                d.close(handle)
+                return false
+            var buf: [u8] = []
+            var i: i32 = 0
+            while i < content.len():
+                buf.push(str_char_at(content, i.to_i64()).to_u8())
+                i = i + 1
+            val write_r = d.write(handle, 0, buf)
+            d.close(handle)
+            write_r.is_ok()
         case RamFs(_):
             false
 
