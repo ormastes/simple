@@ -350,6 +350,12 @@ class VhdlBackend:
         match entry.unwrap().terminator:
             case If(_, then_, else_):
                 self.block_chain_has_instructions(then_, []) or self.block_chain_has_instructions(else_, [])
+            case Switch(_, targets, default):
+                var has_target_instructions = self.block_chain_has_instructions(default, [])
+                for target in targets:
+                    if self.block_chain_has_instructions(target.target, []):
+                        has_target_instructions = true
+                has_target_instructions
             case _:
                 false
 
@@ -492,6 +498,40 @@ class VhdlBackend:
                     if else_result.is_err():
                         return Err(else_result.unwrap_err())
                     builder.emit_if_end()
+                    Ok(())
+                case Switch(value, targets, default):
+                    val value_expr_result = self.process_operand_to_vhdl(value)
+                    if value_expr_result.is_err():
+                        return Err(value_expr_result.unwrap_err())
+                    val value_type_result = self.operand_type(value)
+                    if value_type_result.is_err():
+                        return Err(value_type_result.unwrap_err())
+                    val value_expr = value_expr_result.unwrap()
+                    val value_type = value_type_result.unwrap()
+                    var emitted_case = false
+                    for target in targets:
+                        val literal_result = self.switch_case_value_to_vhdl(target.value, value_type)
+                        if literal_result.is_err():
+                            return Err(literal_result.unwrap_err())
+                        val condition = "{value_expr} = {literal_result.unwrap()}"
+                        if emitted_case:
+                            builder.emit_elsif(condition)
+                        else:
+                            builder.emit_if_begin(condition)
+                            emitted_case = true
+                        val target_result = self.compile_control_block(builder, target.target, next_seen)
+                        if target_result.is_err():
+                            return Err(target_result.unwrap_err())
+                    if emitted_case:
+                        builder.emit_else()
+                        val default_result = self.compile_control_block(builder, default, next_seen)
+                        if default_result.is_err():
+                            return Err(default_result.unwrap_err())
+                        builder.emit_if_end()
+                    else:
+                        val default_only_result = self.compile_control_block(builder, default, next_seen)
+                        if default_only_result.is_err():
+                            return Err(default_only_result.unwrap_err())
                     Ok(())
                 case Unreachable:
                     Ok(())

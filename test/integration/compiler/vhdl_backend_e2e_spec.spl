@@ -660,6 +660,88 @@ describe "VHDL Backend E2E - Entity Generation":
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("result_out <= a when sel = to_unsigned(0, 8) else b when sel = to_unsigned(1, 8) else c;"))
 
+    it "compiles switch targets with computations inside combinational process":
+        val backend = make_resolved_backend()
+        val u8 = make_u8()
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32()),
+            make_temp_local(5, "case_zero_tmp", make_i32()),
+            make_temp_local(6, "case_one_tmp", make_i32()),
+            make_temp_local(7, "default_tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [case_zero_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val case_one_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 6),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [case_one_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+        )
+        val default_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(2), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [default_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+        val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed switch terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("if sel = to_unsigned(0, 8) then"))
+        check(vhdl.contains("elsif sel = to_unsigned(1, 8) then"))
+        check(vhdl.contains("v_case_zero_tmp := a + to_signed(1, 32);"))
+        check(vhdl.contains("v_case_one_tmp := b - to_signed(1, 32);"))
+        check(vhdl.contains("v_default_tmp := c + to_signed(2, 32);"))
+        check(vhdl.contains("result_out <= v_default_tmp;"))
+
     it "compiles struct aggregate to named record assignment":
         val backend = make_backend()
         val point_symbol = SymbolId(id: 42)
