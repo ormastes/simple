@@ -26,7 +26,7 @@ fn main() -> i64:
 fn ignores_non_region_custom_blocks_as_domain_metadata() {
     let module = parse_and_lower(
         r#"
-md{# Title}
+html{p}
 
 fn main() -> i64:
     return 0

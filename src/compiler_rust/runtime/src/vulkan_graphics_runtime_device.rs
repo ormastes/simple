@@ -5,9 +5,7 @@
 use std::os::raw::c_char;
 
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{
-    empty_cstr, leaked_cstr, vk, VulkanDevice, VulkanInstance, STATE,
-};
+use super::vulkan_graphics_runtime_core::{empty_cstr, leaked_cstr, vk, VulkanDevice, VulkanInstance, STATE};
 #[cfg(not(feature = "vulkan"))]
 use super::vulkan_graphics_runtime_core::{empty_cstr, leaked_cstr};
 
@@ -38,9 +36,7 @@ pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
     let idx = id as usize;
     let dev_count = state.physical_devices.len();
     if idx >= dev_count {
-        state.set_error(format!(
-            "Device index {id} out of range (count={dev_count})"
-        ));
+        state.set_error(format!("Device index {id} out of range (count={dev_count})"));
         return 0;
     }
 
@@ -92,7 +88,11 @@ pub extern "C" fn rt_vulkan_select_device(_id: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_get_device() -> i64 {
     let state = STATE.lock();
-    if state.device.is_some() { 1 } else { 0 }
+    if state.device.is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

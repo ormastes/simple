@@ -686,39 +686,62 @@ impl I8086Decoder:
 
             JLE:
                 # JLE: ZF=1 OR SF!=OF
-                pass_todo  # JLE: compound condition ZF=1 OR SF!=OF
-                Err(DecoderError.Unimplemented(opcode: "JLE", pc: pc))
+                val flags = self._read_flags()
+                val zf_set = self._flag_is_set(flags, X86_FLAG_ZF)
+                val sf_set = self._flag_is_set(flags, X86_FLAG_SF)
+                val of_set = self._flag_is_set(flags, X86_FLAG_OF)
+                val sf_ne_of = self.builder.cmp(IrTcCond.Ne, sf_set, of_set)
+                val cond = self.builder.or_(zf_set, sf_ne_of)
+                self._emit_jcc_condition(inst, pc, total_bytes, cond, "jle")
+                Ok(total_bytes)
 
             JG:
                 # JG: ZF=0 AND SF==OF
-                pass_todo  # JG: compound condition ZF=0 AND SF==OF
-                Err(DecoderError.Unimplemented(opcode: "JG", pc: pc))
+                val flags = self._read_flags()
+                val zf_set = self._flag_is_set(flags, X86_FLAG_ZF)
+                val sf_set = self._flag_is_set(flags, X86_FLAG_SF)
+                val of_set = self._flag_is_set(flags, X86_FLAG_OF)
+                val zf_clear = self.builder.cmp(IrTcCond.Eq, zf_set, self._const_i1(false))
+                val sf_eq_of = self.builder.cmp(IrTcCond.Eq, sf_set, of_set)
+                val cond = self.builder.and_(zf_clear, sf_eq_of)
+                self._emit_jcc_condition(inst, pc, total_bytes, cond, "jg")
+                Ok(total_bytes)
 
             JBE:
                 # JBE: CF=1 OR ZF=1
-                pass_todo  # JBE: compound condition CF=1 OR ZF=1
-                Err(DecoderError.Unimplemented(opcode: "JBE", pc: pc))
+                val flags = self._read_flags()
+                val cf_set = self._flag_is_set(flags, X86_FLAG_CF)
+                val zf_set = self._flag_is_set(flags, X86_FLAG_ZF)
+                val cond = self.builder.or_(cf_set, zf_set)
+                self._emit_jcc_condition(inst, pc, total_bytes, cond, "jbe")
+                Ok(total_bytes)
 
             JA:
                 # JA: CF=0 AND ZF=0
-                pass_todo  # JA: compound condition CF=0 AND ZF=0
-                Err(DecoderError.Unimplemented(opcode: "JA", pc: pc))
+                val flags = self._read_flags()
+                val cf_set = self._flag_is_set(flags, X86_FLAG_CF)
+                val zf_set = self._flag_is_set(flags, X86_FLAG_ZF)
+                val cf_clear = self.builder.cmp(IrTcCond.Eq, cf_set, self._const_i1(false))
+                val zf_clear = self.builder.cmp(IrTcCond.Eq, zf_set, self._const_i1(false))
+                val cond = self.builder.and_(cf_clear, zf_clear)
+                self._emit_jcc_condition(inst, pc, total_bytes, cond, "ja")
+                Ok(total_bytes)
 
             LOOP:
                 self._emit_loop(inst, pc, total_bytes, false, false)
                 Ok(total_bytes)
 
             LOOPE:
-                pass_todo  # LOOPE: decrement CX, jump if CX!=0 AND ZF=1
-                Err(DecoderError.Unimplemented(opcode: "LOOPE", pc: pc))
+                self._emit_loop(inst, pc, total_bytes, true, true)
+                Ok(total_bytes)
 
             LOOPNE:
-                pass_todo  # LOOPNE: decrement CX, jump if CX!=0 AND ZF=0
-                Err(DecoderError.Unimplemented(opcode: "LOOPNE", pc: pc))
+                self._emit_loop(inst, pc, total_bytes, true, false)
+                Ok(total_bytes)
 
             JCXZ:
-                pass_todo  # JCXZ: jump if CX==0
-                Err(DecoderError.Unimplemented(opcode: "JCXZ", pc: pc))
+                self._emit_jcxz(inst, pc, total_bytes)
+                Ok(total_bytes)
 
             # ── Software Interrupt ──
             INT:
@@ -794,12 +817,19 @@ impl I8086Decoder:
 
             # ── BCD / Misc ──
             CBW:
-                pass_todo  # CBW: sign-extend AL into AX
-                Err(DecoderError.Unimplemented(opcode: "CBW", pc: pc))
+                val al = self._read_reg8(0)
+                val ax = self.builder.ext(al, IrTcTypeKind.I16, true)
+                self._write_reg16(X86_REG_AX, ax)
+                Ok(total_bytes)
 
             CWD:
-                pass_todo  # CWD: sign-extend AX into DX:AX
-                Err(DecoderError.Unimplemented(opcode: "CWD", pc: pc))
+                val ax = self._read_reg16(X86_REG_AX)
+                val zero16 = self._const_i16(0)
+                val ax_negative = self.builder.cmp(IrTcCond.Lt, ax, zero16)
+                val dx_bit = self.builder.ext(ax_negative, IrTcTypeKind.I16, false)
+                val dx = self.builder.neg(dx_bit)
+                self._write_reg16(X86_REG_DX, dx)
+                Ok(total_bytes)
 
             DAA:
                 pass_todo  # DAA: decimal adjust AL after addition
@@ -819,12 +849,12 @@ impl I8086Decoder:
 
             # ── Multiply / Divide ──
             MUL:
-                pass_todo  # MUL: unsigned multiply AX = AL * r/m8 or DX:AX = AX * r/m16
-                Err(DecoderError.Unimplemented(opcode: "MUL", pc: pc))
+                self._emit_mul(inst, false)
+                Ok(total_bytes)
 
             IMUL:
-                pass_todo  # IMUL: signed multiply
-                Err(DecoderError.Unimplemented(opcode: "IMUL", pc: pc))
+                self._emit_mul(inst, true)
+                Ok(total_bytes)
 
             DIV:
                 pass_todo  # DIV: unsigned divide AX/r/m8 -> AL,AH or DX:AX/r/m16 -> AX,DX
@@ -929,7 +959,83 @@ impl I8086Decoder:
         self._store_operand(inst.dst, result)
         self._update_flags_arithmetic(a, b, result, is_sub, is_word)
 
+    me _set_cf_of(value: IrTcValue):
+        """Set CF and OF to the same i1 value, preserving other flags."""
+        var flags = self._read_flags()
+        flags = self._set_flag_bit(flags, X86_FLAG_CF, value)
+        flags = self._set_flag_bit(flags, X86_FLAG_OF, value)
+        self._write_flags(flags)
+
+    me _emit_mul(inst: DecodedInst, signed: bool):
+        """Emit 8086 one-operand MUL/IMUL."""
+        val operand = self._load_operand(inst.dst)
+        val is_word = self._operand_is_word(inst.dst)
+
+        if is_word:
+            val ax = self._read_reg16(X86_REG_AX)
+            val ax32 = self.builder.ext(ax, IrTcTypeKind.I32, signed)
+            val op32 = self.builder.ext(operand, IrTcTypeKind.I32, signed)
+            val product = self.builder.mul(ax32, op32)
+            val low16 = self.builder.trunc(product, IrTcTypeKind.I16)
+            val high32 = self.builder.shr(product, self._const_i32(16))
+            val high16 = self.builder.trunc(high32, IrTcTypeKind.I16)
+            self._write_reg16(X86_REG_AX, low16)
+            self._write_reg16(X86_REG_DX, high16)
+
+            val overflow = if signed:
+                val sign_extended_low = self.builder.ext(low16, IrTcTypeKind.I32, true)
+                self.builder.cmp(IrTcCond.Ne, product, sign_extended_low)
+            else:
+                self.builder.cmp(IrTcCond.Ne, high16, self._const_i16(0))
+            self._set_cf_of(overflow)
+        else:
+            val al = self._read_reg8(0)
+            val al16 = self.builder.ext(al, IrTcTypeKind.I16, signed)
+            val op16 = self.builder.ext(operand, IrTcTypeKind.I16, signed)
+            val product = self.builder.mul(al16, op16)
+            self._write_reg16(X86_REG_AX, product)
+
+            val overflow = if signed:
+                val low8 = self.builder.trunc(product, IrTcTypeKind.I8)
+                val sign_extended_low = self.builder.ext(low8, IrTcTypeKind.I16, true)
+                self.builder.cmp(IrTcCond.Ne, product, sign_extended_low)
+            else:
+                val high16 = self.builder.shr(product, self._const_i16(8))
+                self.builder.cmp(IrTcCond.Ne, high16, self._const_i16(0))
+            self._set_cf_of(overflow)
+
     # ── Control Flow Helpers ──
+
+    me _flag_is_set(flags: IrTcValue, bit: i64) -> IrTcValue:
+        val mask = self._const_i16(1 << bit)
+        val masked = self.builder.and_(flags, mask)
+        self.builder.cmp(IrTcCond.Ne, masked, self._const_i16(0))
+
+    me _emit_jcc_condition(inst: DecodedInst, pc: i64, total_bytes: i64, cond: IrTcValue, label: text):
+        """Emit a conditional jump from a precomputed i1 condition."""
+        match inst.dst:
+            Imm16(rel):
+                val taken_ip = (pc + total_bytes + rel) & 0xFFFF
+                val fallthru_ip = (pc + total_bytes) & 0xFFFF
+
+                val taken_block = self.builder.new_block("{label}_taken")
+                val fallthru_block = self.builder.new_block("{label}_fallthru")
+
+                self.builder.br_cond(cond, taken_block, fallthru_block)
+
+                self.builder.set_block(taken_block)
+                val taken_val = self._const_i16(taken_ip)
+                self._write_reg16(X86_REG_IP, taken_val)
+                self.builder.sync_guest_pc(taken_val)
+                self.builder.lookup_goto_tb(taken_val)
+
+                self.builder.set_block(fallthru_block)
+                val fallthru_val = self._const_i16(fallthru_ip)
+                self._write_reg16(X86_REG_IP, fallthru_val)
+                self.builder.sync_guest_pc(fallthru_val)
+                self.builder.lookup_goto_tb(fallthru_val)
+            _:
+                pass_do_nothing
 
     me _emit_jmp(inst: DecodedInst, pc: i64, total_bytes: i64):
         """Emit JMP — update IP and exit translation block."""
@@ -1082,7 +1188,7 @@ impl I8086Decoder:
                 pass_do_nothing
 
     me _emit_loop(inst: DecodedInst, pc: i64, total_bytes: i64, check_zf: bool, zf_value: bool):
-        """Emit LOOP: decrement CX, jump if CX != 0."""
+        """Emit LOOP/LOOPE/LOOPNE: decrement CX, then test CX and optionally ZF."""
         val cx = self._read_reg16(X86_REG_CX)
         val one = self._const_i16(1)
         val new_cx = self.builder.sub(cx, one)
@@ -1090,6 +1196,16 @@ impl I8086Decoder:
 
         val zero16 = self._const_i16(0)
         val cx_not_zero = self.builder.cmp(IrTcCond.Ne, new_cx, zero16)
+        val cond = if check_zf:
+            val flags = self._read_flags()
+            val zf_set = self._flag_is_set(flags, X86_FLAG_ZF)
+            val zf_cond = if zf_value:
+                zf_set
+            else:
+                self.builder.cmp(IrTcCond.Eq, zf_set, self._const_i1(false))
+            self.builder.and_(cx_not_zero, zf_cond)
+        else:
+            cx_not_zero
 
         match inst.dst:
             Imm16(rel):
@@ -1099,7 +1215,7 @@ impl I8086Decoder:
                 val taken_block = self.builder.new_block("loop_taken")
                 val fallthru_block = self.builder.new_block("loop_done")
 
-                self.builder.br_cond(cx_not_zero, taken_block, fallthru_block)
+                self.builder.br_cond(cond, taken_block, fallthru_block)
 
                 self.builder.set_block(taken_block)
                 val taken_val = self._const_i16(taken_ip)
@@ -1114,6 +1230,12 @@ impl I8086Decoder:
                 self.builder.lookup_goto_tb(fallthru_val)
             _:
                 pass_do_nothing
+
+    me _emit_jcxz(inst: DecodedInst, pc: i64, total_bytes: i64):
+        """Emit JCXZ: jump if CX is zero without modifying FLAGS."""
+        val cx = self._read_reg16(X86_REG_CX)
+        val cond = self.builder.cmp(IrTcCond.Eq, cx, self._const_i16(0))
+        self._emit_jcc_condition(inst, pc, total_bytes, cond, "jcxz")
 
     me _emit_int(inst: DecodedInst, pc: i64, total_bytes: i64):
         """Emit INT n: push FLAGS, CS, return IP, then call interrupt helper."""

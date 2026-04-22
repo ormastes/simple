@@ -336,12 +336,12 @@ fn test_mock_declaration() {
 
 #[test]
 fn test_region_domain_custom_blocks() {
-    let result = tokenize("schema{Building: id Uuid} style{Button.primary: padding 8px}");
+    let result = tokenize("schema{Building: id { value Uuid }} style{Button.primary: padding 8px}");
 
     assert!(matches!(
         &result[0],
         TokenKind::CustomBlock { kind, payload, .. }
-            if kind == "schema" && payload == "Building: id Uuid"
+            if kind == "schema" && payload == "Building: id { value Uuid }"
     ));
     assert!(matches!(
         &result[1],
@@ -357,4 +357,14 @@ fn test_region_domain_names_stay_identifiers_without_block_brace() {
     for token in result.iter().take(8) {
         assert!(matches!(token, TokenKind::Identifier { .. }));
     }
+}
+
+#[test]
+fn test_region_domain_unclosed_block_reports_kind() {
+    let result = tokenize("schema{Building: id Uuid");
+
+    assert!(matches!(
+        &result[0],
+        TokenKind::Error(message) if message.contains("Unclosed schema block")
+    ));
 }

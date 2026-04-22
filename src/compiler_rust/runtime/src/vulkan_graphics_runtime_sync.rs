@@ -45,7 +45,11 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_fence(fence: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.fences.remove(&fence).is_some() { 1 } else { 0 }
+    if state.fences.remove(&fence).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

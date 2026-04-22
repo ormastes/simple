@@ -66,10 +66,7 @@ pub extern "C" fn rt_vulkan_compile_spirv(_spirv: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_compile_glsl(_source: i64) -> i64 {
     let mut state = STATE.lock();
-    state.set_error(
-        "GLSL compilation not supported. Use pre-compiled SPIR-V via rt_vulkan_compile_spirv."
-            .to_string(),
-    );
+    state.set_error("GLSL compilation not supported. Use pre-compiled SPIR-V via rt_vulkan_compile_spirv.".to_string());
     0
 }
 
@@ -85,7 +82,11 @@ pub extern "C" fn rt_vulkan_compile_glsl(_source: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_shader(module: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.shader_modules.remove(&module).is_some() { 1 } else { 0 }
+    if state.shader_modules.remove(&module).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -163,7 +164,11 @@ pub extern "C" fn rt_vulkan_destroy_pipeline(pipe: i64) -> i64 {
     let mut state = STATE.lock();
     let removed_compute = state.compute_pipelines.remove(&pipe).is_some();
     let removed_graphics = state.graphics_pipelines.remove(&pipe).is_some();
-    if removed_compute || removed_graphics { 1 } else { 0 }
+    if removed_compute || removed_graphics {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

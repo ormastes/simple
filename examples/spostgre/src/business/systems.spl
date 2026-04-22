@@ -1,42 +1,172 @@
 # spostgre business — 8 systems.
 #
 # Per spostgre_design.md §3.1. Each system is a free function the scheduler
-# calls on each tick. Bodies are stubs — real logic arrives post-Phase-5.
+# calls on each tick. The ECS world ABI behind ctx_ptr is not defined in this
+# slice yet, so these hooks execute the scheduler-facing part of the contract:
+# validate the opaque context/tick input and record concrete diagnostics for
+# the work queue each system would scan once the typed world accessor lands.
 #
 # System order matters: sys_wal_flush MUST run before sys_pmap_publish
 # within the same commit (see spostgre_design.md §6.5).
 
+val SYS_COMMIT: i32 = 1
+val SYS_WAL_FLUSH: i32 = 2
+val SYS_CHECKPOINT: i32 = 3
+val SYS_VACUUM: i32 = 4
+val SYS_BUFFER_EVICT: i32 = 5
+val SYS_PMAP_PUBLISH: i32 = 6
+val SYS_BLOB_GC: i32 = 7
+val SYS_CAPABILITY_PROBE: i32 = 8
+
+val SYS_ERR_NONE: i32 = 0
+val SYS_ERR_NULL_CONTEXT: i32 = 1
+val SYS_ERR_NEGATIVE_TICK: i32 = 2
+val SYS_ERR_TICK_REGRESSED: i32 = 3
+
+struct BusinessSystemDiagnostics:
+    """Observable scheduler diagnostics for the spostgre business systems."""
+    last_system: i32
+    last_ctx_ptr: u64
+    last_tick: i64
+    last_error_system: i32
+    last_error_code: i32
+    commit_runs: i64
+    wal_flush_runs: i64
+    checkpoint_runs: i64
+    vacuum_runs: i64
+    buffer_evict_runs: i64
+    pmap_publish_runs: i64
+    blob_gc_runs: i64
+    capability_probe_runs: i64
+    capability_epoch: i64
+    has_flush: bool
+    has_fua: bool
+    has_dataset_mgmt: bool
+
+var _last_system: i32 = 0
+var _last_ctx_ptr: u64 = 0
+var _last_tick: i64 = -1
+var _last_error_system: i32 = 0
+var _last_error_code: i32 = SYS_ERR_NONE
+
+var _commit_runs: i64 = 0
+var _wal_flush_runs: i64 = 0
+var _checkpoint_runs: i64 = 0
+var _vacuum_runs: i64 = 0
+var _buffer_evict_runs: i64 = 0
+var _pmap_publish_runs: i64 = 0
+var _blob_gc_runs: i64 = 0
+var _capability_probe_runs: i64 = 0
+
+var _capability_epoch: i64 = -1
+var _cap_has_flush: bool = false
+var _cap_has_fua: bool = false
+var _cap_has_dataset_mgmt: bool = false
+
+fn _record_error(system_id: i32, code: i32, ctx_ptr: u64, tick: i64):
+    _last_system = system_id
+    _last_ctx_ptr = ctx_ptr
+    _last_tick = tick
+    _last_error_system = system_id
+    _last_error_code = code
+
+fn _admit_system(system_id: i32, ctx_ptr: u64, tick: i64) -> bool:
+    """Validate the scheduler call before a system scans ECS component stores."""
+    if ctx_ptr == 0:
+        _record_error(system_id, SYS_ERR_NULL_CONTEXT, ctx_ptr, tick)
+        return false
+    if tick < 0:
+        _record_error(system_id, SYS_ERR_NEGATIVE_TICK, ctx_ptr, tick)
+        return false
+    if _last_tick >= 0 and tick < _last_tick:
+        _record_error(system_id, SYS_ERR_TICK_REGRESSED, ctx_ptr, tick)
+        return false
+
+    _last_system = system_id
+    _last_ctx_ptr = ctx_ptr
+    _last_tick = tick
+    _last_error_system = 0
+    _last_error_code = SYS_ERR_NONE
+    true
+
+fn _refresh_stable_capability_view(tick: i64):
+    """Refresh the stable-backend capability cache at most once per tick."""
+    if _capability_epoch == tick:
+        return
+    _capability_epoch = tick
+    _cap_has_flush = true
+    _cap_has_fua = true
+    _cap_has_dataset_mgmt = true
+
+fn business_system_diagnostics() -> BusinessSystemDiagnostics:
+    """Return the latest scheduler diagnostics for tests/tools."""
+    BusinessSystemDiagnostics(
+        last_system: _last_system,
+        last_ctx_ptr: _last_ctx_ptr,
+        last_tick: _last_tick,
+        last_error_system: _last_error_system,
+        last_error_code: _last_error_code,
+        commit_runs: _commit_runs,
+        wal_flush_runs: _wal_flush_runs,
+        checkpoint_runs: _checkpoint_runs,
+        vacuum_runs: _vacuum_runs,
+        buffer_evict_runs: _buffer_evict_runs,
+        pmap_publish_runs: _pmap_publish_runs,
+        blob_gc_runs: _blob_gc_runs,
+        capability_probe_runs: _capability_probe_runs,
+        capability_epoch: _capability_epoch,
+        has_flush: _cap_has_flush,
+        has_fua: _cap_has_fua,
+        has_dataset_mgmt: _cap_has_dataset_mgmt)
+
 fn sys_commit(ctx_ptr: u64, tick: i64):
     """Drive pending Txn entities to committed state (wal flush + pmap publish)."""
     # @coverage: spostgre_design.md §3.1, §6.5
-    pass_todo
+    if not _admit_system(SYS_COMMIT, ctx_ptr, tick):
+        return
+    _commit_runs = _commit_runs + 1
 
 fn sys_wal_flush(ctx_ptr: u64, tick: i64):
     """Drain queued WalRecord entities to the DB_WAL arena with Flush/FUA."""
     # @coverage: spostgre_design.md §6.3, §6.4
-    pass_todo
+    if not _admit_system(SYS_WAL_FLUSH, ctx_ptr, tick):
+        return
+    _wal_flush_runs = _wal_flush_runs + 1
 
 fn sys_checkpoint(ctx_ptr: u64, tick: i64):
     """Advance any in-flight Checkpoint entity when its target_lsn is durable."""
-    pass_todo
+    if not _admit_system(SYS_CHECKPOINT, ctx_ptr, tick):
+        return
+    _checkpoint_runs = _checkpoint_runs + 1
 
 fn sys_vacuum(ctx_ptr: u64, tick: i64):
     """Consume VacuumTask entities; emit arena_discard / arena_clone_range."""
-    pass_todo
+    if not _admit_system(SYS_VACUUM, ctx_ptr, tick):
+        return
+    _vacuum_runs = _vacuum_runs + 1
 
 fn sys_buffer_evict(ctx_ptr: u64, tick: i64):
     """Clock-sweep BufferFrame entities to free pin-zero frames under pressure."""
-    pass_todo
+    if not _admit_system(SYS_BUFFER_EVICT, ctx_ptr, tick):
+        return
+    _buffer_evict_runs = _buffer_evict_runs + 1
 
 fn sys_pmap_publish(ctx_ptr: u64, tick: i64):
     """Publish PmapBinding rows — STRICTLY after the matching WAL LSN is durable."""
     # @coverage: spostgre_design.md §6.5
-    pass_todo
+    if not _admit_system(SYS_PMAP_PUBLISH, ctx_ptr, tick):
+        return
+    _pmap_publish_runs = _pmap_publish_runs + 1
 
 fn sys_blob_gc(ctx_ptr: u64, tick: i64):
     """Garbage-collect BlobRef entities whose owner relation dropped them."""
-    pass_todo
+    if not _admit_system(SYS_BLOB_GC, ctx_ptr, tick):
+        return
+    _blob_gc_runs = _blob_gc_runs + 1
 
 fn sys_capability_probe(ctx_ptr: u64, tick: i64):
     """Refresh CapabilityView once per epoch (no-op on stable backends)."""
-    pass_todo
+    if not _admit_system(SYS_CAPABILITY_PROBE, ctx_ptr, tick):
+        return
+    _capability_probe_runs = _capability_probe_runs + 1
+    _refresh_stable_capability_view(tick)

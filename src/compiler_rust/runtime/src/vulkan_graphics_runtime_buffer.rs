@@ -62,7 +62,11 @@ pub extern "C" fn rt_vulkan_alloc_buffer(_size: i64, _usage: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_free_buffer(handle: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.buffers.remove(&handle).is_some() { 1 } else { 0 }
+    if state.buffers.remove(&handle).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -78,7 +82,11 @@ pub extern "C" fn rt_vulkan_free_buffer(_handle: i64) -> i64 {
 pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
     // VulkanBuffer uses gpu-allocator staged transfers; explicit map not exposed.
     let state = STATE.lock();
-    if state.buffers.contains_key(&_handle) { 1 } else { 0 }
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -93,7 +101,11 @@ pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
     let state = STATE.lock();
-    if state.buffers.contains_key(&_handle) { 1 } else { 0 }
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

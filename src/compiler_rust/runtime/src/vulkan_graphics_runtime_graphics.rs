@@ -4,8 +4,8 @@
 
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{
-    alloc_handle, AddressMode, FilterMode, GraphicsPipeline, ImageUsage, RenderPass, Sampler,
-    ShaderModule, VulkanImage, vk, STATE,
+    alloc_handle, AddressMode, FilterMode, GraphicsPipeline, ImageUsage, RenderPass, Sampler, ShaderModule,
+    VulkanImage, vk, STATE,
 };
 
 // ============================================================================
@@ -70,7 +70,11 @@ pub extern "C" fn rt_vulkan_create_render_pass(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_render_pass(rp: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.render_passes.remove(&rp).is_some() { 1 } else { 0 }
+    if state.render_passes.remove(&rp).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -172,7 +176,11 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_graphics_pipeline(pipeline: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.graphics_pipelines.remove(&pipeline).is_some() { 1 } else { 0 }
+    if state.graphics_pipelines.remove(&pipeline).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -240,7 +248,11 @@ pub extern "C" fn rt_vulkan_create_image(_device: i64, _w: i64, _h: i64, _fmt: i
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_image(image: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.images.remove(&image).is_some() { 1 } else { 0 }
+    if state.images.remove(&image).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -288,7 +300,11 @@ pub extern "C" fn rt_vulkan_create_sampler(_device: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_sampler(sampler: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.samplers.remove(&sampler).is_some() { 1 } else { 0 }
+    if state.samplers.remove(&sampler).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

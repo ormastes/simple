@@ -62,7 +62,11 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, _rp: i64, _image: i
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_framebuffer(fb: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.framebuffers.remove(&fb).is_some() { 1 } else { 0 }
+    if state.framebuffers.remove(&fb).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -128,7 +132,11 @@ pub extern "C" fn rt_vulkan_create_swapchain(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_swapchain(sc: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.swapchains.remove(&sc).is_some() { 1 } else { 0 }
+    if state.swapchains.remove(&sc).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

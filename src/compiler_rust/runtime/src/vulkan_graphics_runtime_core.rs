@@ -233,7 +233,11 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
-    if VulkanInstance::is_available() { 1 } else { 0 }
+    if VulkanInstance::is_available() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

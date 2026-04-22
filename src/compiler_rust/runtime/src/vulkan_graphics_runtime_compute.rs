@@ -3,9 +3,7 @@
 #![allow(unused_imports)]
 
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{
-    alloc_handle, DescriptorPool, DescriptorSet, DescriptorSetLayout, vk, STATE,
-};
+use super::vulkan_graphics_runtime_core::{alloc_handle, DescriptorPool, DescriptorSet, DescriptorSetLayout, vk, STATE};
 #[cfg(feature = "vulkan")]
 use ash::vk::Handle;
 
@@ -101,7 +99,11 @@ pub extern "C" fn rt_vulkan_bind_buffer(_desc_set: i64, _binding: i64, _buf: i64
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_descriptor_set(desc_set: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.descriptor_sets.remove(&desc_set).is_some() { 1 } else { 0 }
+    if state.descriptor_sets.remove(&desc_set).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

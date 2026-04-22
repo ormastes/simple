@@ -397,7 +397,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler — parser, AST, Tree-sitter outline, HIR metadata
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Accepted / partial implementation (Rust parser + HIR metadata, 2026-04-22)
 - **Requested-semantics:**
   Add contextual top-level raw capture for approved domain block names
   (`schema`, `style`, `ui`, `music`, `bim`, `cad`, `city`, `rtl`) without making
@@ -405,14 +405,18 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   preserves block kind, raw payload, nesting, and source span, and lowers only to
   metadata until each domain has a dedicated semantic pass.
 - **Acceptance-criteria:**
-  - [ ] `schema{...}` and `style{...}` parse at module scope and appear in outline/LSP metadata.
-  - [ ] Existing identifiers named `schema`, `style`, `music`, `bim`, `cad`, `city`, or `rtl` still parse where no `{` immediately follows.
-  - [ ] Unterminated payloads report block kind and opening source span.
-  - [ ] Nested braces inside payloads are preserved.
+  - [x] `schema{...}` and `style{...}` parse at module scope in the Rust parser and lower to HIR metadata.
+  - [x] Existing identifiers named `schema`, `style`, `music`, `bim`, `cad`, `city`, or `rtl` still parse where no `{` immediately follows.
+  - [x] Unterminated payloads report block kind in the Rust parser diagnostic.
+  - [ ] Unterminated payloads report opening source span in every parser/outline surface.
+  - [x] Nested braces inside payloads are preserved.
+  - [ ] Domain blocks appear in Tree-sitter outline/LSP metadata.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/04_architecture/all_regions.md`; `doc/05_design/all_regions.md`
 - **Notes:** This is the enabling layer only; it must not claim CSS, MusicXML,
-  IFC, STEP, or RTL semantics.
+  IFC, STEP, or RTL semantics. Partial implementation added Rust parser raw
+  capture and `HirModule.domain_blocks`; Tree-sitter/LSP surfacing and the
+  self-hosted Simple parser parity path remain open.
 
 ---
 
