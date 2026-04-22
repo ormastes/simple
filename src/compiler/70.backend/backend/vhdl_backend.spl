@@ -420,7 +420,13 @@ class VhdlBackend:
                 val right_name_result = self.operand_to_vhdl(right)
                 if right_name_result.is_err():
                     return Err(right_name_result.unwrap_err())
-                val expr_result = self.binop_to_vhdl(op, left_name_result.unwrap(), right_name_result.unwrap())
+                val left_type_result = self.operand_type(left)
+                if left_type_result.is_err():
+                    return Err(left_type_result.unwrap_err())
+                val right_type_result = self.operand_type(right)
+                if right_type_result.is_err():
+                    return Err(right_type_result.unwrap_err())
+                val expr_result = self.binop_to_vhdl(op, left_name_result.unwrap(), left_type_result.unwrap(), right_name_result.unwrap(), right_type_result.unwrap(), right)
                 if expr_result.is_err():
                     return Err(expr_result.unwrap_err())
                 val dest_name = dest_name_result.unwrap()
@@ -434,7 +440,10 @@ class VhdlBackend:
                 val src_name_result = self.operand_to_vhdl(operand)
                 if src_name_result.is_err():
                     return Err(src_name_result.unwrap_err())
-                val expr_result = self.cast_to_vhdl(src_name_result.unwrap(), target)
+                val src_type_result = self.operand_type(operand)
+                if src_type_result.is_err():
+                    return Err(src_type_result.unwrap_err())
+                val expr_result = self.cast_to_vhdl(src_name_result.unwrap(), src_type_result.unwrap(), target)
                 if expr_result.is_err():
                     return Err(expr_result.unwrap_err())
                 builder.emit_signal_assign(dest_name_result.unwrap(), expr_result.unwrap())
@@ -762,7 +771,7 @@ class VhdlBackend:
             case _:
                 Err(self.backend_error("Unsupported VHDL constant: {value}"))
 
-    fn binop_to_vhdl(op: MirBinOp, left: text, right: text) -> Result<text, CompileError>:
+    fn binop_to_vhdl(op: MirBinOp, left: text, left_ty: MirType, right: text, right_ty: MirType, right_operand: MirOperand) -> Result<text, CompileError>:
         """Convert binary operation to VHDL expression."""
         match op:
             case Add: Ok("{left} + {right}")
@@ -779,26 +788,75 @@ class VhdlBackend:
             case BitAnd: Ok("{left} and {right}")
             case BitOr: Ok("{left} or {right}")
             case BitXor: Ok("{left} xor {right}")
-            case Shl: Ok("shift_left({left}, to_integer({right}))")
-            case Shr: Ok("shift_right({left}, to_integer({right}))")
+            case Shl:
+                val shift_count_result = self.shift_count_to_vhdl(right, right_ty, right_operand)
+                if shift_count_result.is_err():
+                    Err(shift_count_result.unwrap_err())
+                else:
+                    Ok("shift_left({left}, {shift_count_result.unwrap()})")
+            case Shr:
+                val shift_count_result = self.shift_count_to_vhdl(right, right_ty, right_operand)
+                if shift_count_result.is_err():
+                    Err(shift_count_result.unwrap_err())
+                else:
+                    Ok("shift_right({left}, {shift_count_result.unwrap()})")
             case _:
                 Err(self.backend_error("Unsupported VHDL binary operator: {op}"))
 
-    fn cast_to_vhdl(operand: text, target: MirType) -> Result<text, CompileError>:
+    fn shift_count_to_vhdl(expr: text, ty: MirType, operand: MirOperand) -> Result<text, CompileError>:
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Int(v):
+                        Ok("{v}")
+                    case _:
+                        Err(self.backend_error("VHDL shift count must be an integer value"))
+            case _:
+                match ty.kind:
+                    case U64 | U32 | U16 | U8:
+                        Ok("to_integer({expr})")
+                    case I64 | I32 | I16 | I8:
+                        Ok("to_integer(unsigned({expr}))")
+                    case _:
+                        Err(self.backend_error("Unsupported VHDL shift count type: {ty.kind}"))
+
+    fn cast_to_vhdl(operand: text, source: MirType, target: MirType) -> Result<text, CompileError>:
         """Convert a MIR cast/bitcast to a synthesizable VHDL expression."""
-        val width = self.integer_width(target)
-        if width.?:
+        val source_width = self.integer_width(source)
+        val target_width = self.integer_width(target)
+        if target_width.?:
             match target.kind:
                 case I64 | I32 | I16 | I8:
-                    Ok("resize(signed({operand}), {width.unwrap()})")
+                    match source.kind:
+                        case Bool:
+                            Ok("to_signed(1, {target_width.unwrap()}) when {operand} = '1' else to_signed(0, {target_width.unwrap()})")
+                        case _:
+                            Ok("resize(signed({operand}), {target_width.unwrap()})")
                 case U64 | U32 | U16 | U8:
-                    Ok("resize(unsigned({operand}), {width.unwrap()})")
+                    match source.kind:
+                        case Bool:
+                            Ok("to_unsigned(1, {target_width.unwrap()}) when {operand} = '1' else to_unsigned(0, {target_width.unwrap()})")
+                        case _:
+                            Ok("resize(unsigned({operand}), {target_width.unwrap()})")
                 case _:
                     Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
         else:
             match target.kind:
                 case Bool:
-                    Ok(operand)
+                    if source_width.?:
+                        match source.kind:
+                            case U64 | U32 | U16 | U8:
+                                Ok("'1' when {operand} /= to_unsigned(0, {source_width.unwrap()}) else '0'")
+                            case I64 | I32 | I16 | I8:
+                                Ok("'1' when {operand} /= to_signed(0, {source_width.unwrap()}) else '0'")
+                            case _:
+                                Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
+                    else:
+                        match source.kind:
+                            case Bool:
+                                Ok(operand)
+                            case _:
+                                Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
                 case _:
                     Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
 
