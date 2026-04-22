@@ -717,6 +717,71 @@ impl Scheduler:
         """Compatibility wrapper for callers that use the typed task handle."""
         TaskId(id: self.create_user_task_pid(image, priority, caps))
 
+    me create_bootstrap_user_task_pid(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> u64:
+        """Create the first user task in slot 0 for early baremetal boot lanes.
+
+        This path is intentionally separate from create_user_task_pid: normal
+        schedulers must still fail closed when the task table is full, while
+        bootstrap-only lanes sometimes run before aggregate slot scans are
+        reliable in freestanding ARM builds.
+        """
+        if self.tasks[0] != nil:
+            serial_println("[scheduler] bootstrap_user_task: slot busy")
+            return 0
+
+        val entry = user_process_image_entry(image)
+        val stack_top = user_process_image_stack_top(image)
+        val stack_size = user_process_image_stack_size(image)
+        val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0
+        val initial_stack_bytes = user_process_image_initial_stack_bytes(image)
+        val segments = user_process_image_segments(image)
+        val file_bytes = user_process_image_file_bytes(image)
+        if stack_top == 0 or stack_size == 0 or user_sp == 0:
+            serial_println("[scheduler] bootstrap_user_task: invalid image")
+            return 0
+        if (initial_stack_bytes.len() as u64) > stack_size:
+            serial_println("[scheduler] bootstrap_user_task: initial stack too large")
+            return 0
+
+        val user_ctx = _initial_user_task_context(entry, user_sp)
+        val user_as: AddressSpace = create_user_address_space()
+        val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        if map_result < 0:
+            destroy_user_address_space(user_as)
+            serial_println("[scheduler] bootstrap_user_task: map failed")
+            return 0
+
+        var user_next_id = g_scheduler_next_task_id
+        if user_next_id == 0 or user_next_id >= 0x40000000:
+            user_next_id = 1
+        g_scheduler_next_task_id = user_next_id + 1
+        val id = TaskId(id: user_next_id)
+
+        val tcb = TaskControlBlock(
+            id: id,
+            state: TaskState.Ready,
+            priority: priority,
+            is_user: true,
+            entry_point: entry,
+            context: user_ctx,
+            user_context: Some(user_ctx),
+            address_space: user_as.phys_root,
+            kernel_stack: 0,
+            user_stack: stack_top,
+            capabilities: caps,
+            parent: nil,
+            schedule: default_task_schedule(priority),
+            isolation: default_task_isolation(user_as.id),
+            assigned_cpu: 0u32,
+            exit_code: 0,
+            ticks_remaining: TIME_SLICE_TICKS
+        )
+
+        self.tasks[0] = tcb
+        cap_init_task_record(id, true)
+        self._enqueue_ready_at_slot(id, 0)
+        user_next_id
+
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         """Enqueue a task whose slot is already known. Avoids _find_slot."""
         if slot < 0:
