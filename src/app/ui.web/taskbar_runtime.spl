@@ -1,9 +1,12 @@
 # Host Taskbar Runtime — authoritative taskbar + launch/runtime state
 #
-# Supports three host shell modes:
-#   * desktop_embedded: taskbar + in-shell SimpleWeb surfaces
-#   * taskbar_only:     taskbar shell + native Electron BrowserWindows
-#   * headless:         no local shell window; remote UI still gets taskbar state
+# Supports host shell modes:
+#   * embedded:        taskbar + in-shell SimpleWeb surfaces
+#   * native:          taskbar shell + native Electron BrowserWindows
+#   * hidden_taskbar:  native Electron BrowserWindows with Simple taskbar hidden
+#   * headless:        no local shell window; remote UI still gets taskbar state
+#
+# Legacy names `desktop_embedded` and `taskbar_only` remain accepted.
 
 use common.ui.session.{UISession}
 use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS, ui_surface_kind_is_native_host}
@@ -34,6 +37,9 @@ struct HostTaskbarAdapterCapabilities:
 enum HostShellMode:
     DesktopEmbedded
     TaskbarOnly
+    Embedded
+    Native
+    HiddenTaskbar
     Headless
 
 class HostTaskbarRuntime:
@@ -597,6 +603,27 @@ fn _adapter_capabilities_for(mode: HostShellMode, electron_available: bool) -> H
                 supports_headless_session: false,
                 requires_js_host_bridge: true
             )
+        HostShellMode.Embedded:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: false,
+                supports_embedded_surfaces: true,
+                supports_headless_session: false,
+                requires_js_host_bridge: true
+            )
+        HostShellMode.Native:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: electron_available,
+                supports_embedded_surfaces: false,
+                supports_headless_session: false,
+                requires_js_host_bridge: true
+            )
+        HostShellMode.HiddenTaskbar:
+            HostTaskbarAdapterCapabilities(
+                supports_native_windows: electron_available,
+                supports_embedded_surfaces: false,
+                supports_headless_session: false,
+                requires_js_host_bridge: true
+            )
         HostShellMode.Headless:
             HostTaskbarAdapterCapabilities(
                 supports_native_windows: false,
@@ -689,21 +716,34 @@ fn _layout_has_duplicate_tray_items(tray: [TrayItem]) -> bool:
 
 fn _parse_mode(mode_name: text) -> HostShellMode:
     val m = mode_name.to_lower()
+    if m == "embedded":
+        return HostShellMode.Embedded
+    if m == "native":
+        return HostShellMode.Native
+    if m == "hidden_taskbar" or m == "hidden-taskbar":
+        return HostShellMode.HiddenTaskbar
+    if m == "desktop_embedded" or m == "desktop-embedded":
+        return HostShellMode.DesktopEmbedded
     if m == "taskbar_only" or m == "taskbar-only":
         return HostShellMode.TaskbarOnly
     if m == "headless":
         return HostShellMode.Headless
-    return HostShellMode.DesktopEmbedded
+    return HostShellMode.Embedded
 
 fn _mode_name(mode: HostShellMode) -> text:
     match mode:
         HostShellMode.DesktopEmbedded: "desktop_embedded"
         HostShellMode.TaskbarOnly: "taskbar_only"
+        HostShellMode.Embedded: "embedded"
+        HostShellMode.Native: "native"
+        HostShellMode.HiddenTaskbar: "hidden_taskbar"
         HostShellMode.Headless: "headless"
 
 fn _mode_is_taskbar_only(mode: HostShellMode) -> bool:
     match mode:
         HostShellMode.TaskbarOnly: true
+        HostShellMode.Native: true
+        HostShellMode.HiddenTaskbar: true
         _: false
 
 fn _mode_is_headless(mode: HostShellMode) -> bool:
