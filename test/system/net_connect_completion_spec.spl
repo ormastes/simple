@@ -1,0 +1,124 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, tcp, socket
+# @cover src/os/services/netstack/socket.spl 45%
+# @cover src/os/services/netstack/tcp_connection.spl 35%
+
+use std.spec.{describe, context, it, expect}
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.socket.{SocketTable, SocketProtocol, SockAddr, socket_state_name}
+use os.services.netstack.tcp.{
+    TcpHeader,
+    TcpSegment,
+    TCP_DEFAULT_WINDOW,
+    TCP_FLAG_ACK,
+    TCP_FLAG_RST,
+    TCP_FLAG_SYN,
+    tcp_state_name
+}
+use os.services.netstack.tcp_connection.{TcpConnection}
+
+extern fn serial_println(msg: text)
+
+fn ok_bool(result: Result<bool, text>):
+    match result:
+        Ok(_): return
+        Err(msg): expect(msg.len()).to_equal(0u64)
+
+describe "FR-NET-0001 TCP connect completion":
+
+    context "socket readiness":
+
+        it "keeps a queued SYN non-writable until TCP reaches ESTABLISHED":
+            var table = SocketTable.new()
+            val fd = table.create(SocketProtocol.Tcp)
+            val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
+            val local = SockAddr(ip: Ipv4Address.from_u32(0x0A00020Fu32), port: 49152u16)
+
+            ok_bool(table.connect(fd, remote))
+            table.attach_connecting(fd, local, 101u64)
+
+            expect(table.connect_status(fd)).to_equal("in-progress")
+            expect(table.is_write_ready(fd)).to_equal(false)
+            val connecting = table.get_socket(fd)
+            if connecting.?:
+                expect(socket_state_name(connecting.state)).to_equal("CONNECTING")
+            else:
+                expect(false).to_equal(true)
+
+            expect(table.mark_connected_by_conn(101u64)).to_equal(true)
+            expect(table.connect_status(fd)).to_equal("established")
+            expect(table.is_write_ready(fd)).to_equal(true)
+
+        it "surfaces refused and timeout completion separately":
+            var table = SocketTable.new()
+            val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
+            val local = SockAddr(ip: Ipv4Address.from_u32(0x0A00020Fu32), port: 49152u16)
+            val fd_refused = table.create(SocketProtocol.Tcp)
+            val fd_timeout = table.create(SocketProtocol.Tcp)
+
+            ok_bool(table.connect(fd_refused, remote))
+            table.attach_connecting(fd_refused, local, 102u64)
+            expect(table.mark_connect_failed_by_conn(102u64, "refused")).to_equal(true)
+            expect(table.connect_status(fd_refused)).to_equal("refused")
+            expect(table.is_write_ready(fd_refused)).to_equal(false)
+
+            ok_bool(table.connect(fd_timeout, remote))
+            table.attach_connecting(fd_timeout, local, 103u64)
+            expect(table.mark_connect_failed_by_conn(103u64, "timeout")).to_equal(true)
+            expect(table.connect_status(fd_timeout)).to_equal("timeout")
+            expect(table.is_write_ready(fd_timeout)).to_equal(false)
+
+    context "TCP handshake":
+
+        it "publishes completion only after a valid SYN ACK":
+            val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
+            val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+            var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
+
+            val syn = conn.connect()
+            expect(syn.len()).to_equal(1u64)
+            expect(tcp_state_name(conn.state)).to_equal("SYN_SENT")
+
+            val syn_ack = TcpSegment(
+                header: TcpHeader(
+                    src_port: 80u16,
+                    dst_port: 49152u16,
+                    seq_num: 2000u32,
+                    ack_num: conn.snd_nxt,
+                    data_offset: 5u8,
+                    flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    window: TCP_DEFAULT_WINDOW,
+                    checksum: 0u16,
+                    urgent_ptr: 0u16
+                ),
+                data: []
+            )
+            val replies = conn.process_segment(syn_ack, remote_ip)
+            expect(tcp_state_name(conn.state)).to_equal("ESTABLISHED")
+            expect(replies.len()).to_equal(1u64)
+
+        it "treats a reset during active open as connection reset":
+            val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
+            val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+            var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
+            val syn = conn.connect()
+            expect(syn.len()).to_equal(1u64)
+
+            val rst = TcpSegment(
+                header: TcpHeader(
+                    src_port: 80u16,
+                    dst_port: 49152u16,
+                    seq_num: 2000u32,
+                    ack_num: conn.snd_nxt,
+                    data_offset: 5u8,
+                    flags: TCP_FLAG_RST | TCP_FLAG_ACK,
+                    window: 0u16,
+                    checksum: 0u16,
+                    urgent_ptr: 0u16
+                ),
+                data: []
+            )
+            val replies = conn.process_segment(rst, remote_ip)
+            expect(replies.len()).to_equal(0u64)
+            expect(tcp_state_name(conn.state)).to_equal("CLOSED")
+            expect(conn.recv_status()).to_equal("connection-reset")

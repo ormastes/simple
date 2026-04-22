@@ -7,7 +7,10 @@
 # Reference: RFC 8446 §5.2 (TLSInnerPlaintext, TLSCiphertext)
 
 use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_tls13_aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
+extern fn rt_tls13_record_payload_len(record: [u8]) -> i64
 
 # ============================================================================
 # Constants
@@ -32,13 +35,13 @@ enum RecordResult:
     Err(msg: text)
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
-    buf[idx]
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
 fn _rec_debug(msg: text):
-    pass
+    val _unused = msg.len()
 
 fn _copy_range(src: [u8], start: u64, count: u64) -> [u8]:
-    var out: [u8] = []
+    var out: [u8] = rt_array_new_with_cap(count.to_i64())
     var i: u64 = 0
     while i < count:
         out.push(_u8_at(src, start + i))
@@ -47,7 +50,7 @@ fn _copy_range(src: [u8], start: u64, count: u64) -> [u8]:
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays without relying on array concatenation."""
-    var out: [u8] = []
+    var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
     var i: u64 = 0
     while i < a.len():
         out.push(_u8_at(a, i))
@@ -184,7 +187,10 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
         return RecordResult.Err("record header: expected legacy_version_lo 0x03")
 
     # Read payload_length from header[3..4] big-endian
-    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    val payload_length_i = rt_tls13_record_payload_len(raw_record)
+    if payload_length_i <= 0:
+        return RecordResult.Err("record header: invalid payload length")
+    val payload_length = payload_length_i.to_u64()
     _rec_debug("payload_length={payload_length}")
 
     val header_len: u64 = 5
@@ -254,7 +260,10 @@ fn record13_decrypt_fd(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordR
     if _u8_at(raw_record, 2) != 0x03:
         return RecordResult.Err("record header: expected legacy_version_lo 0x03")
 
-    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    val payload_length_i = rt_tls13_record_payload_len(raw_record)
+    if payload_length_i <= 0:
+        return RecordResult.Err("record header: invalid payload length")
+    val payload_length = payload_length_i.to_u64()
     val header_len: u64 = 5
     val available_payload = raw_record.len() - header_len
     if available_payload < payload_length:
@@ -303,7 +312,10 @@ fn record13_decrypt_fd_inner(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> [
     if _u8_at(raw_record, 2) != 0x03:
         return []
 
-    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    val payload_length_i = rt_tls13_record_payload_len(raw_record)
+    if payload_length_i <= 0:
+        return []
+    val payload_length = payload_length_i.to_u64()
     val header_len: u64 = 5
     val available_payload = raw_record.len() - header_len
     if available_payload < payload_length:

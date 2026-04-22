@@ -650,10 +650,14 @@ impl Scheduler:
             serial_println("[scheduler] create_user_task: initial stack too large")
             return 0
 
-        val slot = self._find_empty_slot()
+        var slot = self._find_empty_slot()
         if slot < 0:
-            serial_println("[scheduler] create_user_task: no free slot")
-            return 0
+            if self.current.id == 0:
+                serial_println("[scheduler] create_user_task: bootstrap slot fallback")
+                slot = 0
+            else:
+                serial_println("[scheduler] create_user_task: no free slot")
+                return 0
 
         val user_ctx = _initial_user_task_context(entry, user_sp)
 
@@ -668,8 +672,11 @@ impl Scheduler:
         # Dodge the `Scheduler.next_task_id` field-read stub by using a
         # module-level counter. The `self.next_task_id` read in the baremetal
         # build resolves to a weak stub that returns 0 and logs a WARN.
-        val user_next_id = g_scheduler_next_task_id
-        g_scheduler_next_task_id = g_scheduler_next_task_id + 1
+        var user_next_id = g_scheduler_next_task_id
+        if user_next_id == 0 or user_next_id >= 0x40000000:
+            serial_println("[scheduler] create_user_task: normalized next_task_id")
+            user_next_id = 1
+        g_scheduler_next_task_id = user_next_id + 1
         val id = TaskId(id: user_next_id)
 
         val tcb = TaskControlBlock(

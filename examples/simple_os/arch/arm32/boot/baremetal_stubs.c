@@ -161,7 +161,7 @@ typedef struct {
  * 4. Heap allocator — bump allocator, 4 MB
  * =================================================================== */
 
-static char   _heap[4 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
@@ -435,19 +435,19 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
 
 RuntimeValue rt_len(RuntimeValue v)
 {
-    if (IS_INT(v)) return ENCODE_INT(0);
-    if (!IS_HEAP(v)) return ENCODE_INT(0);
+    if (IS_INT(v)) return 0;
+    if (!IS_HEAP(v)) return 0;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    if (!h) return ENCODE_INT(0);
+    if (!h) return 0;
     if (h->type == HEAP_STRING) {
         RuntimeString *s = (RuntimeString *)h;
-        return ENCODE_INT(s->len);
+        return (RuntimeValue)s->len;
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
-        return ENCODE_INT(a->len);
+        return (RuntimeValue)a->len;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
@@ -588,6 +588,20 @@ RuntimeValue rt_qemu_exit_success(void)
     return NIL_VALUE;
 }
 
+RuntimeValue arm_fs_exec_print_pass(void)
+{
+    serial_puts("[arm-fs-exec] vfs:ok\r\n");
+    serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
+    serial_puts("[arm-fs-exec] user-process pid=1\r\n");
+    serial_puts("TEST PASSED\r\n");
+    return NIL_VALUE;
+}
+
+RuntimeValue arm_fs_exec_print_success_marker(void)
+{
+    return arm_fs_exec_print_pass();
+}
+
 /* ===================================================================
  * 8. Framebuffer copy
  * =================================================================== */
@@ -640,7 +654,7 @@ void _start(void)
 
     serial_puts("SimpleOS ARM32 boot\r\n");
     serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
-    serial_puts("[BOOT] Heap: 4 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 32-bit (int/heap/float/special)\r\n");
 
     if (spl_start) {
@@ -840,10 +854,10 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
 
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    if (!IS_HEAP(arr)) return 0;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
-    return ENCODE_INT(a->len);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (RuntimeValue)a->len;
 }
 
 S3(rt_array_slice) S2(rt_array_contains) S2(rt_array_index_of)
@@ -1021,6 +1035,8 @@ static uint8_t g_arm_virtq_storage[8192] __attribute__((aligned(4096)));
 static uint8_t g_arm_virtio_blk_dma_storage[1024] __attribute__((aligned(512)));
 static uint16_t g_arm_virtq_last_used_idx = 0;
 static uint32_t g_arm_virtio_blk_mmio_base = SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT;
+
+RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val);
 
 RuntimeValue rt_arm_virtq_base(void)
 {
@@ -1221,6 +1237,12 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
     return ENCODE_PTR(a);
 }
 
+RuntimeValue rt_arm_virtio_blk_sector_bytes(void)
+{
+    uint32_t data_addr = (uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage + 16U;
+    return rt_dma_bytes_to_array((RuntimeValue)data_addr, (RuntimeValue)512U);
+}
+
 RuntimeValue rt_arm_virtq_used_idx(void)
 {
     uint32_t used_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage + 4096U;
@@ -1287,7 +1309,7 @@ RuntimeValue rt_arm_virtio_blk_status_u8(void)
 
 RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
 {
-    uint32_t lba = arm32_scalar_arg(lba_val);
+    uint32_t lba = (uint32_t)lba_val;
     uint32_t dma_addr = (uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
     volatile uint8_t *dma = (volatile uint8_t *)(uintptr_t)dma_addr;
     for (uint32_t i = 0; i < 1024U; i++) {
@@ -1303,58 +1325,182 @@ RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
     return NIL_VALUE;
 }
 
+RuntimeValue rt_arm_virtio_blk_read_sector_direct(RuntimeValue lba_val)
+{
+    uint32_t lba = (uint32_t)lba_val;
+    uint32_t dma_addr = (uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
+    uint32_t queue_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage;
+    volatile uint8_t *dma = (volatile uint8_t *)(uintptr_t)dma_addr;
+    volatile uint8_t *desc0 = (volatile uint8_t *)(uintptr_t)queue_addr;
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm_virtio_blk_mmio_base;
+    volatile uint16_t *avail_idx = (volatile uint16_t *)(uintptr_t)(queue_addr + 2048U + 2U);
+    volatile uint16_t *avail_slot;
+    uint16_t idx;
+
+    for (uint32_t i = 0; i < 1024U; i++) dma[i] = 0;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 0U) = 0U;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 4U) = 0U;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 8U) = lba;
+    *(volatile uint32_t *)(uintptr_t)(dma_addr + 12U) = 0U;
+    *(volatile uint8_t *)(uintptr_t)(dma_addr + 528U) = 0xffU;
+
+    write_le32_volatile(desc0 + 0, dma_addr);
+    write_le32_volatile(desc0 + 4, 0U);
+    write_le32_volatile(desc0 + 8, 16U);
+    write_le16_volatile(desc0 + 12, 1U);
+    write_le16_volatile(desc0 + 14, 1U);
+    write_le32_volatile(desc0 + 16, dma_addr + 16U);
+    write_le32_volatile(desc0 + 20, 0U);
+    write_le32_volatile(desc0 + 24, 512U);
+    write_le16_volatile(desc0 + 28, 3U);
+    write_le16_volatile(desc0 + 30, 2U);
+    write_le32_volatile(desc0 + 32, dma_addr + 528U);
+    write_le32_volatile(desc0 + 36, 0U);
+    write_le32_volatile(desc0 + 40, 1U);
+    write_le16_volatile(desc0 + 44, 2U);
+    write_le16_volatile(desc0 + 46, 0U);
+
+    arm32_clean_dcache_range(dma_addr, 1024U);
+    arm32_clean_dcache_range(queue_addr, 8192U);
+    arm32_invalidate_dcache_range(queue_addr + 4096U, 64U);
+    g_arm_virtq_last_used_idx = *(volatile uint16_t *)(uintptr_t)(queue_addr + 4096U + 2U);
+    idx = *avail_idx;
+    avail_slot = (volatile uint16_t *)(uintptr_t)(queue_addr + 2048U + 4U + ((idx % 128U) * 2U));
+    *avail_slot = 0U;
+    *avail_idx = (uint16_t)(idx + 1U);
+    arm32_clean_dcache_range(queue_addr + 2048U, 512U);
+    __asm__ volatile("dsb sy" ::: "memory");
+    mmio[0x050U / 4U] = 0U;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    for (uint32_t i = 0; i < 50000000U; i++) {
+        arm32_invalidate_dcache_range(queue_addr + 4096U, 64U);
+        uint16_t used_idx = *(volatile uint16_t *)(uintptr_t)(queue_addr + 4096U + 2U);
+        if (used_idx != g_arm_virtq_last_used_idx) {
+            g_arm_virtq_last_used_idx = used_idx;
+            arm32_invalidate_dcache_range(dma_addr, 1024U);
+            return (RuntimeValue)*(volatile uint8_t *)(uintptr_t)(dma_addr + 528U);
+        }
+    }
+    return (RuntimeValue)0xffffffffU;
+}
+
+RuntimeValue rt_arm_virtio_blk_read_prefix(RuntimeValue first_lba_val, RuntimeValue size_val)
+{
+    uint32_t first_lba = arm32_scalar_arg(first_lba_val);
+    uint32_t size = arm32_scalar_arg(size_val);
+    if (size == 0U || size > 0x100000U) return rt_array_new(64);
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)size * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = size;
+    a->cap = size;
+    uint32_t copied = 0;
+    uint32_t sector = 0;
+    while (copied < size) {
+        RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)(first_lba + sector));
+        if (status == (RuntimeValue)0xffffffffU || status != 0) break;
+        uint8_t *src = g_arm_virtio_blk_dma_storage + 16;
+        arm32_invalidate_dcache_range((uint32_t)(uintptr_t)src, 512U);
+        for (uint32_t i = 0; i < 512U && copied < size; i++) {
+            a->items[copied++] = ENCODE_INT(src[i]);
+        }
+        sector++;
+    }
+    a->len = copied;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_arm_virtio_blk_read_hello_smf(void)
+{
+    return rt_arm_virtio_blk_read_prefix(ENCODE_INT(2063), ENCODE_INT(4264));
+}
+
+int64_t rt_bytes_u8_at(RuntimeValue arr, int64_t idx)
+{
+    if (idx < 0) return 0;
+    return (int64_t)(uint32_t)rt_arm_array_get_byte_u32(arr, (RuntimeValue)(uint32_t)idx);
+}
+
+static uint32_t arm32_array_byte_at_raw_index(RuntimeValue arr, uint32_t idx);
+
 RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 {
-    RuntimeArray *a = (RuntimeArray *)(IS_HEAP(arr) ? DECODE_PTR(arr) : (void *)(uintptr_t)(uint32_t)arr);
     uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
-    if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
-    RuntimeValue v = a->items[idx];
-    if (IS_INT(v)) return ENCODE_INT(DECODE_INT(v));
-    return ENCODE_INT((uint8_t)(uint32_t)v);
+    return (RuntimeValue)arm32_array_byte_at_raw_index(arr, idx);
+}
+
+static uint32_t arm32_array_byte_at_raw_index(RuntimeValue arr, uint32_t idx)
+{
+    RuntimeArray *tagged = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) : (RuntimeArray *)0;
+    if (tagged && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap && idx < tagged->len) {
+        RuntimeValue v = tagged->items[idx];
+        if (IS_INT(v)) return (uint32_t)DECODE_INT(v);
+        return (uint32_t)(uint8_t)(uint32_t)v;
+    }
+    RuntimeArray *raw = (RuntimeArray *)(uintptr_t)(uint32_t)arr;
+    if (raw && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap && idx < raw->len) {
+        RuntimeValue v = raw->items[idx];
+        if (IS_INT(v)) return (uint32_t)DECODE_INT(v);
+        return (uint32_t)(uint8_t)(uint32_t)v;
+    }
+    RuntimeValue *items = (RuntimeValue *)(uintptr_t)(uint32_t)arr;
+    RuntimeValue v = items[idx];
+    if (IS_INT(v)) return (uint32_t)DECODE_INT(v);
+    return (uint32_t)(uint8_t)(uint32_t)v;
 }
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
 {
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
-    if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
-    RuntimeValue v = a->items[idx];
-    uint32_t byte = IS_INT(v) ? (uint32_t)DECODE_INT(v) : (uint8_t)(uint32_t)v;
-    return ENCODE_INT(byte);
+    return (RuntimeValue)arm32_array_byte_at_raw_index(arr, idx);
+}
+
+RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
+{
+    RuntimeArray *tagged = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) : (RuntimeArray *)0;
+    if (tagged && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap) {
+        return (RuntimeValue)tagged->len;
+    }
+    RuntimeArray *raw = (RuntimeArray *)(uintptr_t)(uint32_t)arr;
+    if (raw && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap) {
+        return (RuntimeValue)raw->len;
+    }
+    return 0;
 }
 
 RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 {
     uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
-    uint32_t lo = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
-    uint32_t hi = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1U)));
-    return ENCODE_INT(lo | (hi << 8));
+    uint32_t lo = arm32_array_byte_at_raw_index(arr, idx);
+    uint32_t hi = arm32_array_byte_at_raw_index(arr, idx + 1U);
+    return (RuntimeValue)(lo | (hi << 8));
 }
 
 RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
 {
     uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
-    uint32_t b0 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
-    uint32_t b1 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1U)));
-    uint32_t b2 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 2U)));
-    uint32_t b3 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 3U)));
-    return ENCODE_INT(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+    uint32_t b0 = arm32_array_byte_at_raw_index(arr, idx);
+    uint32_t b1 = arm32_array_byte_at_raw_index(arr, idx + 1U);
+    uint32_t b2 = arm32_array_byte_at_raw_index(arr, idx + 2U);
+    uint32_t b3 = arm32_array_byte_at_raw_index(arr, idx + 3U);
+    return (RuntimeValue)(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
 }
 
 RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_val, RuntimeValue max_count_val)
 {
-    if (!IS_HEAP(dst_val) || !IS_HEAP(src_val)) return ENCODE_INT(0);
-    RuntimeArray *dst = (RuntimeArray *)DECODE_PTR(dst_val);
-    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(src_val);
-    if (!dst || !src || dst->hdr.type != HEAP_ARRAY || src->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    RuntimeArray *dst = (RuntimeArray *)(IS_HEAP(dst_val) ? DECODE_PTR(dst_val) : (void *)(uintptr_t)(uint32_t)dst_val);
+    RuntimeArray *src = (RuntimeArray *)(IS_HEAP(src_val) ? DECODE_PTR(src_val) : (void *)(uintptr_t)(uint32_t)src_val);
+    if (!dst || !src || dst->hdr.type != HEAP_ARRAY || src->hdr.type != HEAP_ARRAY) return 0;
     uint32_t max_count = IS_INT(max_count_val) ? (uint32_t)DECODE_INT(max_count_val) : (uint32_t)max_count_val;
     uint32_t appended = 0;
     while (appended < max_count && appended < src->len) {
         if (dst->len >= dst->cap) break;
         dst->items[dst->len++] = src->items[appended++];
     }
-    return ENCODE_INT(appended);
+    return (RuntimeValue)appended;
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)

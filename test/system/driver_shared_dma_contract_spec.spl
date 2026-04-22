@@ -1,0 +1,93 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, driver-framework, dma
+# @cover src/lib/nogc_sync_mut/io/dma.spl 80%
+# @cover src/lib/nogc_sync_mut/fs_driver/extension.spl 40%
+# @cover src/os/userlib/device.spl 20%
+
+use std.spec.{describe, context, it, expect}
+use std.io.dma.{
+    SharedDmaBuffer,
+    DmaOwner,
+    DmaCachePolicy,
+    DmaReleaseRequest,
+    validate_shared_dma_release,
+    dma_shared_sync_cpu_to_device,
+    dma_shared_sync_device_to_cpu
+}
+use std.fs_driver.extension.{DirectIoExt}
+
+fn make_desc(policy: DmaCachePolicy, device: u8, alloc_id: u64) -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: 0x1000,
+        host_phys_addr: 0x2000,
+        device_addr: 0x2000,
+        byte_len: 1024,
+        cache_policy: policy,
+        owner: DmaOwner(task_id: 7, bdf_bus: 0, bdf_device: device, bdf_function: 0),
+        allocation_id: alloc_id
+    )
+
+fn make_release(size: u64, task: u64, device: u8, alloc_id: u64, released: bool) -> DmaReleaseRequest:
+    DmaReleaseRequest(
+        requester_task_id: task,
+        requester_bdf_bus: 0,
+        requester_bdf_device: device,
+        requester_bdf_function: 0,
+        requested_byte_len: size,
+        allocation_id: alloc_id,
+        already_released: released
+    )
+
+describe "FR-DRIVER-0009 shared DMA descriptor contract":
+
+    context "canonical descriptor fields":
+
+        it "network, file, and display consumers use the same descriptor shape":
+            val network_rx = make_desc(DmaCachePolicy.FlushRequired, 1, 11)
+            val file_direct = make_desc(DmaCachePolicy.Uncached, 2, 12)
+            val display_transfer = make_desc(DmaCachePolicy.WriteCombining, 3, 13)
+            expect(network_rx.cpu_addr()).to_equal(file_direct.cpu_addr())
+            expect(network_rx.phys_addr()).to_equal(file_direct.phys_addr())
+            expect(display_transfer.device_visible_addr()).to_equal(0x2000)
+            expect(network_rx.matches_bdf(0, 1, 0)).to_equal(true)
+            expect(file_direct.matches_bdf(0, 2, 0)).to_equal(true)
+            expect(display_transfer.matches_bdf(0, 3, 0)).to_equal(true)
+
+        it "all explicit cache policy variants remain representable":
+            val coherent = make_desc(DmaCachePolicy.Coherent, 4, 20)
+            val flush_required = make_desc(DmaCachePolicy.FlushRequired, 4, 21)
+            val uncached = make_desc(DmaCachePolicy.Uncached, 4, 22)
+            val write_combining = make_desc(DmaCachePolicy.WriteCombining, 4, 23)
+            dma_shared_sync_cpu_to_device(coherent)
+            dma_shared_sync_device_to_cpu(flush_required)
+            expect(coherent.is_valid()).to_equal(true)
+            expect(flush_required.is_valid()).to_equal(true)
+            expect(uncached.is_valid()).to_equal(true)
+            expect(write_combining.is_valid()).to_equal(true)
+
+    context "release authority":
+
+        it "accepts release only for matching task, BDF, size, and allocation id":
+            val desc = make_desc(DmaCachePolicy.Coherent, 5, 30)
+            val req = make_release(1024, 7, 5, 30, false)
+            expect(validate_shared_dma_release(desc, req).is_ok()).to_equal(true)
+
+        it "rejects double-free, wrong-size free, and wrong-owner free":
+            val desc = make_desc(DmaCachePolicy.Coherent, 5, 30)
+            expect(validate_shared_dma_release(desc, make_release(1024, 7, 5, 30, true)).is_err()).to_equal(true)
+            expect(validate_shared_dma_release(desc, make_release(512, 7, 5, 30, false)).is_err()).to_equal(true)
+            expect(validate_shared_dma_release(desc, make_release(1024, 8, 5, 30, false)).is_err()).to_equal(true)
+            expect(validate_shared_dma_release(desc, make_release(1024, 7, 6, 30, false)).is_err()).to_equal(true)
+
+    context "file direct I/O":
+
+        it "validates std.io.dma.SharedDmaBuffer directly for block/file DMA":
+            val ext = DirectIoExt(
+                sector_alignment: 512,
+                file_alignment: 512,
+                max_io_bytes: 4096,
+                backend_tag: "virtio-blk",
+                bounce_allowed: false)
+            val desc = make_desc(DmaCachePolicy.Uncached, 2, 40)
+            expect(ext.validate_shared_buffer(1024, desc).is_ok()).to_equal(true)
+            expect(ext.validate_shared_buffer(7, desc).is_err()).to_equal(true)

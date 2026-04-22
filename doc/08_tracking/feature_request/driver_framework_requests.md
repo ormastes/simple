@@ -359,7 +359,7 @@ or `Rejected` (one-line reason).
 - **Target:** `src/os/userlib/device.spl`, `src/os/kernel/ipc/syscall.spl`,
   driver framework capability surfaces
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   Define one shared DMA descriptor contract for all high-throughput drivers:
   network RX/TX rings, storage direct I/O, and display/GPU transfer buffers.
@@ -368,20 +368,24 @@ or `Rejected` (one-line reason).
   and release authority. Drivers must not invent private DMA ownership shapes
   when this common descriptor can represent the transfer.
 - **Acceptance-criteria:**
-  - [ ] `SharedDmaBuffer` or its successor is the canonical cross-driver DMA
+  - [x] `SharedDmaBuffer` or its successor is the canonical cross-driver DMA
         descriptor.
-  - [ ] DMA allocation records owner task and owner device/function.
-  - [ ] Release rejects double-free, wrong-size free, and wrong-owner free.
-  - [ ] Cache policy is explicit: coherent, write-combining, uncached, or
+  - [x] DMA allocation records owner task and owner device/function.
+  - [x] Release rejects double-free, wrong-size free, and wrong-owner free.
+  - [x] Cache policy is explicit: coherent, write-combining, uncached, or
         flush-required.
-  - [ ] Network, block/file, and VirtIO-GPU tests each exercise the same
+  - [x] Network, block/file, and VirtIO-GPU tests each exercise the same
         descriptor shape.
 - **Related-upfront:** `doc/04_architecture/hardware_driver_safety_and_performance_2026-04-15.md`
-- **Related-design-doc:** `doc/03_plan/agent_tasks/dma_file_vga_driver_remaining_2026-04-21.md`
+- **Related-design-doc:** `doc/05_design/driver_shared_dma_contract.md`
 - **Related-issue:** none
 - **Notes:** Existing `alloc_dma`/`free_dma` syscalls and
   `alloc_shared_dma()` are the starting point; this request closes the
   ownership and isolation gaps before zero-copy is widened.
+  Implemented by `std.io.dma.SharedDmaBuffer`, `DmaReleaseRequest`,
+  `validate_shared_dma_release`, `DirectIoExt.validate_shared_buffer`,
+  and owner-device-aware `free_device_dma()`. System coverage:
+  `test/system/driver_shared_dma_contract_spec.spl`.
 
 ---
 

@@ -9,18 +9,21 @@
 
 val TLS13_ASCII_PRINTABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
 fn _tls_hs_debug(msg: text):
-    nil
+    val _unused = msg.len()
 
 fn _byte_buf(cap: u64) -> [u8]:
-    []
+    rt_array_new_with_cap(cap.to_i64())
 
 fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
     buf.push(byte_val.to_u8())
     buf
 
 fn _u8_at(data: [u8], offset: u64) -> u8:
-    data[offset]
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
 
 # ============================================================================
 # Handshake Message Types
@@ -83,13 +86,13 @@ class CertificateRequest13:
 
 fn _u16_be(data: [u8], offset: u64) -> u16:
     """Read a big-endian u16 from data at offset."""
-    ((data[offset].to_u16() << 8) | data[offset + 1].to_u16()).to_u16()
+    ((_u8_at(data, offset).to_u16() << 8) | _u8_at(data, offset + 1).to_u16()).to_u16()
 
 fn _u24_be(data: [u8], offset: u64) -> u64:
     """Read a big-endian 24-bit value from data at offset."""
-    (data[offset].to_u64() << 16) |
-        (data[offset + 1].to_u64() << 8) |
-        data[offset + 2].to_u64()
+    (_u8_at(data, offset).to_u64() << 16) |
+        (_u8_at(data, offset + 1).to_u64() << 8) |
+        _u8_at(data, offset + 2).to_u64()
 
 fn _put_u16_be(val: u16) -> [u8]:
     """Encode a u16 as 2 big-endian bytes."""
@@ -144,10 +147,10 @@ fn _serverhello_x25519_pub(data: [u8]) -> [u8]:
             val key_len = _u16_be(data, offset + 2).to_u64()
             val key_start = offset + 4
             if group == GROUP_X25519 and key_len == 32 and key_start + key_len <= data.len():
-                var out: [u8] = []
+                var out: [u8] = _byte_buf(key_len)
                 var i: u64 = 0
                 while i < key_len:
-                    out.push(data[key_start + i])
+                    out = _push_byte(out, _u8_at(data, key_start + i).to_u64().to_i64())
                     i = i + 1
                 return out
         offset = offset + ext_len
@@ -449,13 +452,13 @@ fn parse_certificate_body(body: [u8]) -> [u8]:
     var cert: [u8] = _byte_buf(cert_len)
     var i: u64 = 0
     while i < cert_len:
-        cert = _push_byte(cert, body[offset + i].to_u64().to_i64())
+        cert = _push_byte(cert, _u8_at(body, offset + i).to_u64().to_i64())
         i = i + 1
     cert
 
 fn parse_certificate_chain_body(body: [u8]) -> [[u8]]:
     """Extract the full certificate chain from a Certificate message body."""
-    val ctx_len = body[0].to_u64()
+    val ctx_len = _u8_at(body, 0).to_u64()
     var offset: u64 = 1 + ctx_len
     val cert_list_len = _u24_be(body, offset)
     offset = offset + 3
@@ -469,7 +472,7 @@ fn parse_certificate_chain_body(body: [u8]) -> [[u8]]:
         var cert: [u8] = _byte_buf(cert_len)
         var i: u64 = 0
         while i < cert_len:
-            cert = _push_byte(cert, body[offset + i].to_u64().to_i64())
+            cert = _push_byte(cert, _u8_at(body, offset + i).to_u64().to_i64())
             i = i + 1
         chain.push(cert)
         offset = offset + cert_len
@@ -486,11 +489,11 @@ fn parse_certificate_request(body: [u8]) -> CertificateRequest13:
     Extracts the request context and any signature_algorithms extension values.
     Unknown extensions are ignored.
     """
-    val ctx_len = body[0].to_u64()
+    val ctx_len = _u8_at(body, 0).to_u64()
     var request_context: [u8] = _byte_buf(ctx_len)
     var i: u64 = 0
     while i < ctx_len:
-        request_context = _push_byte(request_context, body[1 + i].to_u64().to_i64())
+        request_context = _push_byte(request_context, _u8_at(body, 1 + i).to_u64().to_i64())
         i = i + 1
 
     var sig_algs: [u16] = []
@@ -537,7 +540,7 @@ fn parse_certificate_verify(body: [u8]) -> CertVerifyFields:
     var signature: [u8] = _byte_buf(sig_len)
     var i: u64 = 0
     while i < sig_len:
-        signature = _push_byte(signature, body[4 + i].to_u64().to_i64())
+        signature = _push_byte(signature, _u8_at(body, 4 + i).to_u64().to_i64())
         i = i + 1
     CertVerifyFields(algorithm: algorithm, signature: signature)
 
@@ -558,7 +561,7 @@ fn parse_finished_body(body: [u8]) -> [u8]:
     var out: [u8] = _byte_buf(body.len())
     var i: u64 = 0
     while i < body.len():
-        out = _push_byte(out, body[i].to_u64().to_i64())
+        out = _push_byte(out, _u8_at(body, i).to_u64().to_i64())
         i = i + 1
     out
 

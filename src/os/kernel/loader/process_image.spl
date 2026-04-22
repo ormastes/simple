@@ -10,10 +10,11 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.elf_loader.{
-    load_user_executable,
+    load_user_executable, load_user_executable_unchecked,
     elf_image_entry, elf_image_segments,
     elf_segment_file_offset, elf_segment_file_size, elf_segment_virt_addr,
-    elf_segment_mem_size, elf_segment_flags, elf_segment_align
+    elf_segment_mem_size, elf_segment_flags, elf_segment_align,
+    ElfLoadSegment
 }
 use os.kernel.loader.smf.{smf_has_header, smf_extract_executable_stub}
 use os.kernel.loader.stack_builder.{
@@ -24,7 +25,6 @@ use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-extern fn serial_println(msg: text)
 
 val X86_64_USER_STACK_TOP: u64 = 0x00007FFFFFFFF000
 val ARM64_USER_STACK_TOP: u64 = 0x0000004000000000
@@ -39,9 +39,9 @@ fn _has_elf_magic(data: [u8]) -> bool:
     if data.len() < 4:
         return false
     _byte_at(data, 0) == 0x7F.to_u8() and
-    _byte_at(data, 1) == 0x45.to_u8() and
-    _byte_at(data, 2) == 0x4C.to_u8() and
-    _byte_at(data, 3) == 0x46.to_u8()
+        _byte_at(data, 1) == 0x45.to_u8() and
+        _byte_at(data, 2) == 0x4C.to_u8() and
+        _byte_at(data, 3) == 0x46.to_u8()
 
 fn _slice_bytes(data: [u8], offset: u64, size: u64) -> [u8]:
     var out: [u8] = rt_array_new_with_cap(size.to_i64())
@@ -72,11 +72,67 @@ fn _default_stack_top(arch: Architecture) -> Result<u64, text>:
 
 fn _normalise_executable_bytes(data: [u8]) -> Result<[u8], text>:
     """Unwrap supported executable containers to the native image bytes."""
-    if _has_elf_magic(data):
-        return Ok(data)
     if smf_has_header(data):
         return smf_extract_executable_stub(data)
-    Ok(data)
+    if _has_elf_magic(data):
+        return Ok(data)
+    Err("unsupported executable format")
+
+fn _normalise_executable_bytes_unchecked(data: [u8]) -> [u8]:
+    """Unchecked ARM bridge variant used where Result predicates are unreliable."""
+    if smf_has_header(data):
+        return smf_extract_executable_stub(data).unwrap()
+    data
+
+fn _build_user_process_image_from_elf(
+    path: text,
+    native_data: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text],
+    elf_entry: u64,
+    elf_segments: [ElfLoadSegment],
+    source_len: u64
+) -> UserProcessImage:
+    val stack_top = _default_stack_top(arch).unwrap()
+    var stack_size = compute_stack_size(source_len)
+    if stack_size == 0:
+        stack_size = 8388608
+
+    var effective_argv: [text] = argv
+    if effective_argv.len() == 0:
+        effective_argv = [path]
+
+    var segments: [UserLoadSegment] = []
+    for seg in elf_segments:
+        val file_offset = elf_segment_file_offset(seg)
+        val file_size = elf_segment_file_size(seg)
+        segments.push(UserLoadSegment(
+            virt_addr: elf_segment_virt_addr(seg),
+            mem_size: elf_segment_mem_size(seg),
+            file_size: file_size,
+            flags: elf_segment_flags(seg),
+            align: elf_segment_align(seg),
+            data: _slice_bytes(native_data, file_offset, file_size)
+        ))
+
+    val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: elf_entry)]  # AT_ENTRY
+    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
+    val initial_sp = stack_build_result_sp(stack_frame)
+    val initial_stack_bytes = stack_build_result_bytes(stack_frame)
+
+    UserProcessImage(
+        binary_path: path,
+        entry: elf_entry,
+        stack_top: stack_top,
+        stack_size: stack_size,
+        argv: effective_argv,
+        envp: envp,
+        segments: segments,
+        file_bytes: native_data,
+        initial_sp: initial_sp,
+        initial_stack_bytes: initial_stack_bytes
+    )
 
 fn build_user_process_image(
     path: text,
@@ -97,42 +153,58 @@ fn build_user_process_image(
     val native_data = _normalise_executable_bytes(owned_input)?
     val elf = load_user_executable(native_data, arch)?
     val entry = elf_image_entry(elf)
-    val stack_top = _default_stack_top(arch)?
-    val stack_size = compute_stack_size(data.len().to_u64())
+    Ok(_build_user_process_image_from_elf(
+        path, native_data, arch, argv, envp, entry, elf_image_segments(elf), data.len().to_u64()
+    ))
+
+fn build_user_process_image_unchecked(
+    path: text,
+    data: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text]
+) -> UserProcessImage:
+    """Build a process image without Result predicates for ARM freestanding tests."""
+    val owned_input = _owned_bytes(data)
+    val native_data = _normalise_executable_bytes_unchecked(owned_input)
+    val elf = load_user_executable_unchecked(native_data, arch)
+    val entry = elf_image_entry(elf)
+    _build_user_process_image_from_elf(
+        path, native_data, arch, argv, envp, entry, elf_image_segments(elf), data.len().to_u64()
+    )
+
+fn probe_user_process_image_unchecked(
+    path: text,
+    data: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text]
+) -> i64:
+    """Exercise the process-image build path and return a scalar ARM-safe status."""
+    val owned_input = _owned_bytes(data)
+    val native_data = _normalise_executable_bytes_unchecked(owned_input)
+    val elf = load_user_executable_unchecked(native_data, arch)
+    val entry = elf_image_entry(elf)
+    val stack_top = _default_stack_top(arch).unwrap()
+    var stack_size = compute_stack_size(data.len().to_u64())
     if stack_size == 0:
-        serial_println("[process-image] computed stack_size zero")
+        stack_size = 8388608
 
     var effective_argv: [text] = argv
     if effective_argv.len() == 0:
         effective_argv = [path]
 
-    var segments: [UserLoadSegment] = []
+    var segment_count: i64 = 0
+    var copied_bytes: u64 = 0
     for seg in elf_image_segments(elf):
-        val file_offset = elf_segment_file_offset(seg)
         val file_size = elf_segment_file_size(seg)
-        segments.push(UserLoadSegment(
-            virt_addr: elf_segment_virt_addr(seg),
-            mem_size: elf_segment_mem_size(seg),
-            file_size: file_size,
-            flags: elf_segment_flags(seg),
-            align: elf_segment_align(seg),
-            data: _slice_bytes(native_data, file_offset, file_size)
-        ))
+        copied_bytes = copied_bytes + file_size
+        segment_count = segment_count + 1
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: entry)]  # AT_ENTRY
-    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
-    val initial_sp = stack_build_result_sp(stack_frame)
-    val initial_stack_bytes = stack_build_result_bytes(stack_frame)
-
-    Ok(UserProcessImage(
-        binary_path: path,
-        entry: entry,
-        stack_top: stack_top,
-        stack_size: stack_size,
-        argv: effective_argv,
-        envp: envp,
-        segments: segments,
-        file_bytes: native_data,
-        initial_sp: initial_sp,
-        initial_stack_bytes: initial_stack_bytes
-    ))
+    val _probe_aux = extra_aux
+    val _probe_argv = effective_argv
+    val _probe_stack_size = stack_size
+    val _probe_segments = segment_count
+    val _probe_copied = copied_bytes
+    1

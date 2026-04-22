@@ -1,0 +1,53 @@
+# ARM64 filesystem-exec scheduler bridge.
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskPriority, user_process_image_entry}
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+extern fn serial_println(msg: text)
+extern fn arm_fs_exec_trace(id: u64)
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+
+val ARM64_FS_EXEC_ARCH: Architecture = Architecture.Arm64
+
+fn arm64_fs_exec_spawn_hello_world_smf() -> i64:
+    """Build and register the filesystem-backed `/sys/apps/hello_world.smf` image."""
+    val path = "/sys/apps/hello_world.smf"
+    arm_fs_exec_trace(40)
+    serial_println("[arm-fs-exec] spawn:resolve")
+    val bytes = arm_fs_exec_read_file_bytes(path)
+    val byte_len = rt_arm_array_len_u32(bytes)
+    if byte_len <= 4:
+        arm_fs_exec_trace(92)
+        serial_println("[arm-fs-exec] spawn:resolve-fail")
+        return -2
+
+    arm_fs_exec_trace(41)
+    serial_println("[arm-fs-exec] spawn:fs-bytes={byte_len}")
+
+    val argv: [text] = []
+    val envp: [text] = []
+    arm_fs_exec_trace(42)
+    serial_println("[arm-fs-exec] spawn:image")
+    val image = build_user_process_image_unchecked(path, bytes, ARM64_FS_EXEC_ARCH, argv, envp)
+    if user_process_image_entry(image) == 0:
+        arm_fs_exec_trace(93)
+        serial_println("[arm-fs-exec] spawn:image-fail")
+        return -8
+    arm_fs_exec_trace(43)
+    serial_println("[arm-fs-exec] spawn:image-ok")
+
+    arm_fs_exec_trace(44)
+    var scheduler = Scheduler.new_bootstrap()
+    arm_fs_exec_trace(45)
+    val pid = scheduler.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+    if pid == 0:
+        arm_fs_exec_trace(94)
+        serial_println("[arm-fs-exec] spawn:scheduler-fail")
+        return -12
+    arm_fs_exec_trace(46)
+    serial_println("[arm-fs-exec] spawn:pid={pid}")
+    return pid as i64

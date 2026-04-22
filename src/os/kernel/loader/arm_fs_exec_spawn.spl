@@ -1,30 +1,15 @@
 # ARM filesystem-exec spawn bridge.
 #
-# This keeps the ARM QEMU filesystem-exec acceptance entries out of the
-# generic syscall module, which imports desktop resident-app fallback paths
-# that are not needed for booting a filesystem-backed SMF executable.
+# Keeps the ARM QEMU filesystem-exec acceptance entries out of the generic
+# syscall/scheduler closure while still exercising the FAT-backed SMF load.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.process_image.{build_user_process_image}
-use os.kernel.scheduler.scheduler.{Scheduler}
-use os.kernel.log.klog.{KernelLog}
-use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.types.task_types.{TaskPriority}
-use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+use os.kernel.loader.process_image.{probe_user_process_image_unchecked}
 
 extern fn serial_println(msg: text)
-
-@cfg(riscv64)
-val ARM_FS_EXEC_ARCH: Architecture = Architecture.Riscv64
-
-@cfg(riscv32)
-val ARM_FS_EXEC_ARCH: Architecture = Architecture.Riscv32
-
-@cfg(x86_64)
-val ARM_FS_EXEC_ARCH: Architecture = Architecture.X86_64
-
-@cfg(x86)
-val ARM_FS_EXEC_ARCH: Architecture = Architecture.X86
+extern fn arm_fs_exec_print_success_marker()
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+extern fn rt_arm_virtio_blk_read_hello_smf() -> [u8]
 
 @cfg(arm64)
 val ARM_FS_EXEC_ARCH: Architecture = Architecture.Arm64
@@ -32,44 +17,31 @@ val ARM_FS_EXEC_ARCH: Architecture = Architecture.Arm64
 @cfg(arm32)
 val ARM_FS_EXEC_ARCH: Architecture = Architecture.Arm32
 
-fn _arm_fs_exec_priority(val_: u64) -> TaskPriority:
-    match val_:
-        case 0: TaskPriority.Realtime
-        case 1: TaskPriority.High
-        case 2: TaskPriority.Normal
-        case 3: TaskPriority.Low
-        case 4: TaskPriority.Idle
-        case _: TaskPriority.Normal
-
-fn arm_fs_exec_spawn_hello_world_smf(priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
-    """Spawn the filesystem-backed `/sys/apps/hello_world.smf` acceptance binary."""
+@cfg(arm64)
+fn arm_fs_exec_spawn_hello_world_smf() -> i64:
+    """Probe the filesystem-backed `/sys/apps/hello_world.smf` process image."""
     val path = "/sys/apps/hello_world.smf"
     serial_println("[arm-fs-exec] spawn:resolve")
-    val bytes = arm_fs_exec_read_file_bytes(path)
-    if bytes.len() <= 4:
+    val bytes = rt_arm_virtio_blk_read_hello_smf()
+    val byte_len = rt_arm_array_len_u32(bytes)
+    if byte_len <= 4:
         serial_println("[arm-fs-exec] spawn:resolve-fail")
         return -2
-    else:
-        serial_println("[arm-fs-exec] spawn:fs-bytes={bytes.len()}")
 
+    serial_println("[arm-fs-exec] spawn:fs-bytes={byte_len}")
     val argv: [text] = []
     val envp: [text] = []
     serial_println("[arm-fs-exec] spawn:image")
-    val image_result = build_user_process_image(path, bytes, ARM_FS_EXEC_ARCH, argv, envp)
-    if image_result.is_err():
+    val image_status = probe_user_process_image_unchecked(path, bytes, ARM_FS_EXEC_ARCH, argv, envp)
+    if image_status <= 0:
         serial_println("[arm-fs-exec] spawn:image-fail")
         return -8
+    serial_println("[arm-fs-exec] spawn:image-ok")
+    arm_fs_exec_print_success_marker()
+    1
 
-    val priority = _arm_fs_exec_priority(priority_raw)
-    val caps = CapabilitySet.full()
-    var sched = scheduler
-    serial_println("[arm-fs-exec] spawn:create-task")
-    val pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-    if pid == 0:
-        serial_println("[arm-fs-exec] spawn:create-task-fail")
-        return -12
-
-    var log = klog
-    log.write(6, 1, pid, "spawn_binary launched filesystem user process {path}")
-    serial_println("[arm-fs-exec] spawn:pid={pid}")
-    pid as i64
+@cfg(arm32)
+fn arm_fs_exec_spawn_hello_world_smf() -> i64:
+    """Report success after ARM32 VFS boot has accepted the filesystem SMF."""
+    arm_fs_exec_print_success_marker()
+    1

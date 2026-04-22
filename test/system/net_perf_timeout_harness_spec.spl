@@ -1,0 +1,45 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, performance, timeout
+# @cover src/lib/nogc_async_mut/io/net_perf.spl 90%
+# @cover src/lib/nogc_async_mut/io/net_backend.spl 20%
+
+use std.spec.{describe, context, it, expect}
+use std.io.net_backend.{portable_net_backend_capabilities, net_backend_summary}
+use std.io.net_perf.{net_timeout_report, http_benchmark_report, http_benchmark_line}
+
+describe "FR-NET-0007 network performance and timeout harness":
+
+    context "bounded timeout reporting":
+
+        it "reports QEMU network timeout with a clear phase message":
+            val report = net_timeout_report("qemu-net-smoke", 30000u64, 30000u64)
+            expect(report.timed_out).to_equal(true)
+            expect(report.message).to_contain("qemu-net-smoke timed out")
+            expect(report.message).to_contain("limit 30000ms")
+
+        it "reports long native link or probe phases with elapsed and limit":
+            val report = net_timeout_report("native-link", 120000u64, 464000u64)
+            expect(report.timed_out).to_equal(true)
+            expect(report.message).to_contain("native-link")
+            expect(report.message).to_contain("464000ms")
+
+    context "HTTP benchmark reporting":
+
+        it "includes p50, p95, throughput, RSS, and backend summary":
+            val caps = portable_net_backend_capabilities()
+            val backend = net_backend_summary(caps)
+            val report = http_benchmark_report(
+                "static-64k",
+                backend,
+                12u64,
+                800u64,
+                1600u64,
+                2500u64,
+                65536u64
+            )
+            val line = http_benchmark_line(report)
+            expect(line).to_contain("backend=portable-socket:portable")
+            expect(line).to_contain("p50_us=800")
+            expect(line).to_contain("p95_us=1600")
+            expect(line).to_contain("rps=2500")
+            expect(line).to_contain("max_rss_kib=65536")

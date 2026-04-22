@@ -446,6 +446,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_write_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtq_base", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_queue_base", &[], &[I64]),
@@ -457,11 +458,17 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_wait_completion", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_status_u8", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_prepare_read", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_read_sector_direct", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_read_prefix", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_read_hello_smf", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_sector_bytes", &[], &[I64]),
     RuntimeFuncSpec::new("rt_array_get_byte_raw", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_array_len_u32", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_byte_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_u16_le", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_u32_le", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_append_bytes", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("arm_fs_exec_print_success_marker", &[], &[I64]),
     // =========================================================================
     // Async/concurrency operations
     // =========================================================================

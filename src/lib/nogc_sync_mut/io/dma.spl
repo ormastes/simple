@@ -92,8 +92,18 @@ impl SharedDmaBuffer:
     fn is_owned_by(task_id: u64) -> bool:
         self.owner.task_id == task_id
 
-    fn matches_bdf(bus: u8, device: u8, function: u8) -> bool:
-        self.owner.bdf_bus == bus and self.owner.bdf_device == device and self.owner.bdf_function == function
+    fn matches_bdf(bus: u8, device: u8, func: u8) -> bool:
+        self.owner.bdf_bus == bus and self.owner.bdf_device == device and self.owner.bdf_function == func
+
+struct DmaReleaseRequest:
+    """Authority tuple supplied when releasing a shared DMA descriptor."""
+    requester_task_id: u64
+    requester_bdf_bus: u8
+    requester_bdf_device: u8
+    requester_bdf_function: u8
+    requested_byte_len: u64
+    allocation_id: u64
+    already_released: bool
 
 # --- Runtime hooks (per-arch impls live in src/runtime/baremetal) ---
 
@@ -109,10 +119,24 @@ extern fn rt_dma_cache_line_size() -> i64
 
 # Interpreter fallback stubs (ignored in compiled mode where externs are provided).
 # Same extern+fallback pattern as src/lib/nogc_sync_mut/io/volatile_ops.spl.
-fn rt_dma_alloc__fallback(size: i64, dir_raw: i32) -> i64: -1
-fn rt_dma_free__fallback(handle: i64): ()
-fn rt_dma_virt_of__fallback(handle: i64) -> i64: 0
-fn rt_dma_phys_of__fallback(handle: i64) -> i64: 0
+fn rt_dma_alloc__fallback(size: i64, dir_raw: i32) -> i64:
+    val _dir = dir_raw
+    if size <= 0:
+        return -1
+    return -1
+
+fn rt_dma_free__fallback(handle: i64):
+    val _handle = handle
+
+fn rt_dma_virt_of__fallback(handle: i64) -> i64:
+    if handle <= 0:
+        return 0
+    return handle
+
+fn rt_dma_phys_of__fallback(handle: i64) -> i64:
+    if handle <= 0:
+        return 0
+    return handle
 fn rt_dma_sync_for_device__fallback(handle: i64, dir_raw: i32): memory_barrier()
 fn rt_dma_sync_for_cpu__fallback(handle: i64, dir_raw: i32): memory_barrier()
 # 64 B is safe floor — correct on x86/arm64, over-aligns elsewhere.
@@ -140,6 +164,22 @@ fn dma_buffer_to_shared(buf: DmaBuffer, owner: DmaOwner, policy: DmaCachePolicy,
         owner: owner,
         allocation_id: allocation_id
     )
+
+fn validate_shared_dma_release(buf: SharedDmaBuffer, req: DmaReleaseRequest) -> Result<bool, DriverError>:
+    """Validate release authority before the backing allocator is called."""
+    if not buf.is_valid():
+        return Result.Err(DriverError.BadArg)
+    if req.already_released:
+        return Result.Err(DriverError.BadArg)
+    if buf.byte_len != req.requested_byte_len:
+        return Result.Err(DriverError.BadArg)
+    if buf.allocation_id != req.allocation_id:
+        return Result.Err(DriverError.BadArg)
+    if not buf.is_owned_by(req.requester_task_id):
+        return Result.Err(DriverError.Busy)
+    if not buf.matches_bdf(bus: req.requester_bdf_bus, device: req.requester_bdf_device, func: req.requester_bdf_function):
+        return Result.Err(DriverError.Busy)
+    Result.Ok(true)
 
 fn dma_free(buf: DmaBuffer):
     rt_dma_free(buf.handle)

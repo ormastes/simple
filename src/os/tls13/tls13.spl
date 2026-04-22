@@ -41,12 +41,18 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_tls13_recv_record(sock_fd: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
 extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
 extern fn rt_tls13_serverhello_x25519_pub(body: [u8]) -> [u8]
+extern fn rt_tls13_record_serverhello_x25519_pub(record: [u8]) -> [u8]
+extern fn rt_tls13_transcript_hash_record_payloads(a_record: [u8], b_record: [u8]) -> [u8]
 extern fn rt_tls13_build_client_hello(host: text) -> [u8]
 extern fn rt_tls13_build_client_hello_record(host: text) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
+extern fn rt_tls13_handshake_secret_from_record(derived: [u8], scalar: [u8], serverhello_record: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_expand_label(secret: [u8], label: [u8], context: [u8], length: i64) -> [u8]
 extern fn rt_tls13_hkdf_expand_label_derived(secret: [u8], context: [u8]) -> [u8]
@@ -55,15 +61,27 @@ extern fn rt_tls13_hkdf_expand_label_iv(secret: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_expand_label_finished(secret: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_expand_label_client_hs(secret: [u8], context: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_expand_label_server_hs(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_tls13_prepare_app_secrets_7(handshake_secret: [u8], a: [u8], b: [u8], c: [u8], d: [u8], e: [u8], f: [u8], g: [u8]) -> i64
+extern fn rt_tls13_take_cached_client_app_secret() -> [u8]
+extern fn rt_tls13_take_cached_server_app_secret() -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 extern fn rt_tls13_transcript_hash_2(a: [u8], b: [u8]) -> [u8]
 extern fn rt_tls13_transcript_hash_6(a: [u8], b: [u8], c: [u8], d: [u8], e: [u8], f: [u8]) -> [u8]
+extern fn rt_tls13_transcript_hash_finished_fd(ch_record: [u8], sh_record: [u8], cr_msg: [u8], ee_msg: [u8], cert_msg: [u8], cv_msg: [u8]) -> [u8]
 extern fn rt_tls13_find_handshake_message(buf: [u8], msg_type: i64) -> [u8]
 extern fn rt_tls13_record_find_handshake_message(raw: [u8], key: [u8], iv: [u8], seq_num: i64, msg_type: i64) -> [u8]
+extern fn rt_tls13_record_find_handshake_message_fd(ch_record: [u8], sh_record: [u8], raw: [u8], scalar: [u8], seq_num: i64, msg_type: i64) -> [u8]
+extern fn rt_tls13_record_payload_len(record: [u8]) -> i64
+extern fn rt_tls13_record_content_type(record: [u8]) -> i64
 extern fn rt_tls13_verify_data_hmac(finished_key: [u8], transcript_hash: [u8]) -> [u8]
+extern fn rt_tls13_bytes_equal(a: [u8], b: [u8]) -> i64
+extern fn rt_tls13_finished_msg_verify_data(msg: [u8]) -> [u8]
+extern fn rt_tls13_server_finished_verify_data_fd(ch_record: [u8], sh_record: [u8], scalar: [u8], cr_msg: [u8], ee_msg: [u8], cert_msg: [u8], cv_msg: [u8]) -> [u8]
 extern fn rt_tls13_certificate_body_ed25519_pubkey(body: [u8]) -> [u8]
 extern fn rt_tls13_certificate_verify_algorithm(body: [u8]) -> i64
 extern fn rt_tls13_certificate_verify_signature(body: [u8]) -> [u8]
+extern fn rt_tls13_certificate_verify_msg_algorithm(msg: [u8]) -> i64
+extern fn rt_tls13_certificate_verify_msg_signature(msg: [u8]) -> [u8]
 extern fn rt_tls13_inner_plaintext_type(inner: [u8]) -> i64
 extern fn rt_tls13_inner_plaintext_content(inner: [u8]) -> [u8]
 extern fn rt_ed25519_verify(msg: [u8], pk: [u8], sig: [u8]) -> i64
@@ -128,17 +146,17 @@ class Tls13Io:
     host_stream: TcpStream
 
 fn _tls_debug(msg: text):
-    nil
+    val _unused = msg.len()
 
 fn _byte_buf(cap: u64) -> [u8]:
-    []
+    rt_array_new_with_cap(cap.to_i64())
 
 fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
     buf.push(byte_val.to_u8())
     buf
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
-    buf[idx]
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = _byte_buf(buf.len())
@@ -157,10 +175,14 @@ fn _copy_range(buf: [u8], start: u64, count: u64) -> [u8]:
     out
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
-    var out = _clone_bytes(a)
+    var out: [u8] = _byte_buf(a.len() + b.len())
+    var ai: u64 = 0
+    while ai < a.len():
+        out = _push_byte(out, _u8_at(a, ai).to_u64().to_i64())
+        ai = ai + 1
     var i: u64 = 0
     while i < b.len():
-        out.push(_u8_at(b, i))
+        out = _push_byte(out, _u8_at(b, i).to_u64().to_i64())
         i = i + 1
     out
 
@@ -368,6 +390,8 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
 fn _io_recv_record(io: Tls13Io) -> [u8]:
     """Read one complete TLS record: 5-byte header + payload."""
     _tls_debug("_io_recv_record start")
+    if io.kind == "fd":
+        return rt_tls13_recv_record(io.tcp_fd)
     val header = _io_recv(io, 5)
     if header.len() < 5:
         _tls_debug("_io_recv_record short_header={header.len()}")
@@ -375,7 +399,10 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
     val h0 = _u8_at(header, 0)
     val h3 = _u8_at(header, 3)
     val h4 = _u8_at(header, 4)
-    val pay_len = (h3.to_u64() << 8) | h4.to_u64()
+    val pay_len_i = rt_tls13_record_payload_len(header)
+    if pay_len_i <= 0:
+        return []
+    val pay_len = pay_len_i.to_u64()
     _tls_debug("_io_recv_record header type={h0} pay_len={pay_len}")
     if pay_len == 0 or pay_len > _TLS_MAX_RECORD_PAYLOAD:
         return []
@@ -525,6 +552,9 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         return Tls13ConnectResult.Failed(reason: "ClientHello send failed")
 
     var transcript = transcript_new()
+    var fd_transcript: [u8] = []
+    var fd_transcript_before_cv: [u8] = []
+    var fd_transcript_before_fin: [u8] = []
     val ch_transcript_bytes = if fd_mode {
         _copy_range(ch_record, 5, ch_record.len() - 5)
     } else {
@@ -543,7 +573,10 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         return Tls13ConnectResult.Failed(reason: "ServerHello: short read")
 
     # Extract the handshake-layer bytes (the record payload)
-    val sh_pay_len = (_u8_at(sh_raw, 3).to_u64() << 8) | _u8_at(sh_raw, 4).to_u64()
+    val sh_pay_len_i = rt_tls13_record_payload_len(sh_raw)
+    if sh_pay_len_i <= 0:
+        return Tls13ConnectResult.Failed(reason: "ServerHello: invalid record length")
+    val sh_pay_len = sh_pay_len_i.to_u64()
     _tls_debug("before sh slice pay_len={sh_pay_len} raw_len={sh_raw.len()}")
     val sh_hs_bytes = _copy_range(sh_raw, 5, sh_pay_len)
     _tls_debug("after sh slice hs_len={sh_hs_bytes.len()}")
@@ -552,10 +585,16 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("before parse_handshake_header")
     val sh_parsed = parse_handshake_header(sh_hs_bytes)
     _tls_debug("after parse_handshake_header type={sh_parsed.msg_type} body_len={sh_parsed.body.len()}")
-    val sh = parse_server_hello(sh_parsed.body)
-    _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={sh.x25519_pub.len()}")
+    val sh_body_bytes = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
+    val sh = parse_server_hello(sh_body_bytes)
+    val server_x25519_pub = if fd_mode {
+        _clone_bytes(rt_tls13_record_serverhello_x25519_pub(sh_raw))
+    } else {
+        sh.x25519_pub
+    }
+    _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={server_x25519_pub.len()}")
     if fd_mode:
-        _debug_bytes32("server_x25519_pub", sh.x25519_pub)
+        _debug_bytes32("server_x25519_pub", server_x25519_pub)
 
     # Add full ServerHello handshake bytes (including 4-byte header) to transcript
     transcript = transcript_add_with_len(transcript, sh_hs_bytes, sh_pay_len)
@@ -566,11 +605,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # ------------------------------------------------------------------
     # Step 4: X25519 DH + handshake secrets
     # ------------------------------------------------------------------
-    val dhe_shared = if fd_mode {
-        rt_tls13_x25519_shared_secret(priv_key, sh.x25519_pub)
-    } else {
-        x25519(priv_key, sh.x25519_pub)
-    }
+    val dhe_shared = if fd_mode { [] } else { x25519(priv_key, server_x25519_pub) }
     _tls_debug("after x25519 shared_len={dhe_shared.len()}")
     if fd_mode:
         _debug_bytes32("dhe_shared", dhe_shared)
@@ -601,7 +636,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if fd_mode:
         _debug_bytes32("hs_derived", hs_derived)
     val handshake_secret = if fd_mode {
-        _clone_bytes(rt_tls13_hkdf_extract(hs_derived, dhe_shared))
+        _clone_bytes(rt_tls13_handshake_secret_from_record(hs_derived, priv_key, sh_raw))
     } else {
         hkdf_extract(hs_derived, dhe_shared)
     }
@@ -609,7 +644,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if fd_mode:
         _debug_bytes32("handshake_secret", handshake_secret)
     val transcript_sh_hash = if fd_mode {
-        _clone_bytes(rt_tls13_transcript_hash_2(ch_transcript_bytes, sh_hs_bytes))
+        _clone_bytes(rt_tls13_transcript_hash_record_payloads(ch_record, sh_raw))
     } else {
         transcript_hash(transcript)
     }
@@ -617,9 +652,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if fd_mode:
         _debug_bytes32("transcript_sh_hash", transcript_sh_hash)
     val client_hs_secret = if fd_mode {
-        _clone_bytes(rt_tls13_hkdf_expand_label(handshake_secret, [
-            0x63, 0x20, 0x68, 0x73, 0x20, 0x74, 0x72, 0x61, 0x66, 0x66, 0x69, 0x63
-        ], transcript_sh_hash, 32))
+        _clone_bytes(rt_tls13_hkdf_expand_label_client_hs(handshake_secret, transcript_sh_hash))
     } else {
         derive_secret(handshake_secret, "c hs traffic", transcript)
     }
@@ -627,9 +660,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if fd_mode:
         _debug_bytes32("client_hs_secret", client_hs_secret)
     val server_hs_secret = if fd_mode {
-        _clone_bytes(rt_tls13_hkdf_expand_label(handshake_secret, [
-            0x73, 0x20, 0x68, 0x73, 0x20, 0x74, 0x72, 0x61, 0x66, 0x66, 0x69, 0x63
-        ], transcript_sh_hash, 32))
+        _clone_bytes(rt_tls13_hkdf_expand_label_server_hs(handshake_secret, transcript_sh_hash))
     } else {
         derive_secret(handshake_secret, "s hs traffic", transcript)
     }
@@ -699,13 +730,11 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # Saved transcript snapshots for verification
     var transcript_before_cv: Transcript = transcript_new()
     var transcript_before_fin: Transcript = transcript_new()
-    var fd_transcript: [u8] = []
-    var fd_transcript_before_cv: [u8] = []
-    var fd_transcript_before_fin: [u8] = []
     var fd_msg_ee: [u8] = []
     var fd_msg_cr: [u8] = []
     var fd_msg_cert: [u8] = []
     var fd_msg_cv: [u8] = []
+    var fd_msg_fin: [u8] = []
 
     while (not have_ee) or (not have_cert) or (not have_cv) or (not have_fin):
         # Read one TLS record (may be plaintext CCS or encrypted handshake)
@@ -714,25 +743,49 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
             return Tls13ConnectResult.Failed(reason: "encrypted record: short read")
 
         # Skip plaintext ChangeCipherSpec (0x14) — middlebox compat per RFC 8446 §D.4
-        if _u8_at(raw, 0) == 0x14:
+        val raw_ct = rt_tls13_record_content_type(raw)
+        if raw_ct == 0x14:
             pass_dn
 
-        if _u8_at(raw, 0) != 0x14:
+        if raw_ct != 0x14:
             var ct: u8 = 0
             var dec_data: [u8] = []
 
             if fd_mode:
-                val inner = record13_decrypt_fd_inner(server_hs_rk, server_seq, raw)
+                val raw_seq = server_seq.to_i64()
                 server_seq = server_seq + 1
-                if inner.len() == 0:
-                    return Tls13ConnectResult.Failed(reason: "authentication tag mismatch")
-                val fd_ct = rt_tls13_inner_plaintext_type(inner)
-                if fd_ct < 0:
-                    return Tls13ConnectResult.Failed(reason: "decrypted inner plaintext missing content type")
-                ct = fd_ct.to_u8()
-                dec_data = _clone_bytes(rt_tls13_inner_plaintext_content(inner))
-                if ct == 0x16 and dec_data.len() == 0:
-                    return Tls13ConnectResult.Failed(reason: "decrypted handshake content empty")
+                var found_fd_msg = false
+                if not have_ee:
+                    val ee_msg = rt_tls13_record_find_handshake_message_fd(ch_record, sh_raw, raw, priv_key, raw_seq, _HS_ENCRYPTED_EXTENSIONS.to_i64())
+                    if ee_msg.len() > 0:
+                        fd_msg_ee = ee_msg
+                        have_ee = true
+                        found_fd_msg = true
+                if not have_cert:
+                    val cert_msg = rt_tls13_record_find_handshake_message_fd(ch_record, sh_raw, raw, priv_key, raw_seq, _HS_CERTIFICATE.to_i64())
+                    if cert_msg.len() > 0:
+                        fd_msg_cert = cert_msg
+                        val cert_body = _copy_range(cert_msg, 4, cert_msg.len() - 4)
+                        pubkey_for_verify = _clone_bytes(rt_tls13_certificate_body_ed25519_pubkey(cert_body))
+                        have_cert = true
+                        found_fd_msg = true
+                if not have_cv:
+                    val cv_msg = rt_tls13_record_find_handshake_message_fd(ch_record, sh_raw, raw, priv_key, raw_seq, _HS_CERTIFICATE_VERIFY.to_i64())
+                    if cv_msg.len() > 0:
+                        fd_msg_cv = cv_msg
+                        cert_verify_algo = rt_tls13_certificate_verify_msg_algorithm(cv_msg).to_u16()
+                        cert_verify_sig = rt_tls13_certificate_verify_msg_signature(cv_msg)
+                        have_cv = true
+                        found_fd_msg = true
+                if not have_fin:
+                    val fin_msg = rt_tls13_record_find_handshake_message_fd(ch_record, sh_raw, raw, priv_key, raw_seq, _HS_FINISHED.to_i64())
+                    if fin_msg.len() > 0:
+                        fd_msg_fin = fin_msg
+                        server_verify_data = rt_tls13_finished_msg_verify_data(fin_msg)
+                        have_fin = true
+                        found_fd_msg = true
+                if not found_fd_msg:
+                    return Tls13ConnectResult.Failed(reason: "encrypted handshake messages not found")
             else:
                 val dec_result = record13_decrypt(server_hs_rk, server_seq, raw)
                 server_seq = server_seq + 1
@@ -938,14 +991,15 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     }
     _tls_debug("after server_fin_key len={server_fin_key.len()}")
     val expected_fin = if io.kind == "fd" {
-        rt_tls13_verify_data_hmac(server_fin_key, _clone_bytes(rt_tls13_transcript_hash_6(
-            ch_transcript_bytes,
-            _copy_range(sh_hs_bytes, 0, sh_pay_len),
+        rt_tls13_server_finished_verify_data_fd(
+            ch_record,
+            sh_raw,
+            priv_key,
             fd_msg_cr,
             fd_msg_ee,
             fd_msg_cert,
             fd_msg_cv
-        )))
+        )
     } else {
         tls13_verify_data(server_fin_key, transcript_before_fin)
     }
@@ -955,28 +1009,74 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if expected_fin.len() != server_verify_data.len():
         return Tls13ConnectResult.Failed(reason: "server Finished: length mismatch")
 
-    var fin_ok: bool = true
-    var fi: u64 = 0
-    while fi < expected_fin.len():
-        if expected_fin[fi] != server_verify_data[fi]:
-            fin_ok = false
-        fi = fi + 1
+    if io.kind == "fd":
+        if rt_tls13_bytes_equal(expected_fin, server_verify_data) != 1:
+            return Tls13ConnectResult.Failed(reason: "server Finished: verify_data mismatch")
+    else:
+        var fin_ok: bool = true
+        var fi: u64 = 0
+        while fi < expected_fin.len():
+            if expected_fin[fi] != server_verify_data[fi]:
+                fin_ok = false
+            fi = fi + 1
 
-    if not fin_ok:
-        return Tls13ConnectResult.Failed(reason: "server Finished: verify_data mismatch")
+        if not fin_ok:
+            return Tls13ConnectResult.Failed(reason: "server Finished: verify_data mismatch")
     _tls_debug("after server finished verify")
 
     # ------------------------------------------------------------------
     # Step 11: Compute application secrets (transcript after server Finished)
     # ------------------------------------------------------------------
-    val app_secrets = tls13_compute_app_secrets(secrets, transcript)
+    var app_secrets = Tls13Secrets(
+        early_secret: secrets.early_secret,
+        handshake_secret: secrets.handshake_secret,
+        master_secret: [],
+        client_hs_traffic: secrets.client_hs_traffic,
+        server_hs_traffic: secrets.server_hs_traffic,
+        client_app_traffic: [],
+        server_app_traffic: [],
+    )
+    if io.kind == "fd":
+        val app_ok = rt_tls13_prepare_app_secrets_7(
+            secrets.handshake_secret,
+            ch_transcript_bytes,
+            _copy_range(sh_hs_bytes, 0, sh_pay_len),
+            fd_msg_cr,
+            fd_msg_ee,
+            fd_msg_cert,
+            fd_msg_cv,
+            fd_msg_fin
+        )
+        if app_ok != 0x200020:
+            return Tls13ConnectResult.Failed(reason: "application secret derivation failed")
+        app_secrets = Tls13Secrets(
+            early_secret: secrets.early_secret,
+            handshake_secret: secrets.handshake_secret,
+            master_secret: [],
+            client_hs_traffic: secrets.client_hs_traffic,
+            server_hs_traffic: secrets.server_hs_traffic,
+            client_app_traffic: rt_tls13_take_cached_client_app_secret(),
+            server_app_traffic: rt_tls13_take_cached_server_app_secret(),
+        )
+    else:
+        app_secrets = tls13_compute_app_secrets(secrets, transcript)
     _tls_debug("after app_secrets server_len={app_secrets.server_app_traffic.len()} client_len={app_secrets.client_app_traffic.len()}")
 
     # ------------------------------------------------------------------
     # Step 12: Derive application traffic RecordKeys
     # ------------------------------------------------------------------
-    val server_app_tk = tls13_traffic_keys(app_secrets.server_app_traffic)
-    val client_app_tk = tls13_traffic_keys(app_secrets.client_app_traffic)
+    val server_app_tk = if io.kind == "fd" {
+        TrafficKeys(
+            key: rt_tls13_hkdf_expand_label_key(app_secrets.server_app_traffic),
+            iv: rt_tls13_hkdf_expand_label_iv(app_secrets.server_app_traffic),
+        )
+    } else { tls13_traffic_keys(app_secrets.server_app_traffic) }
+    val client_app_tk = if io.kind == "fd" {
+        TrafficKeys(
+            key: rt_tls13_hkdf_expand_label_key(app_secrets.client_app_traffic),
+            iv: rt_tls13_hkdf_expand_label_iv(app_secrets.client_app_traffic),
+        )
+    } else { tls13_traffic_keys(app_secrets.client_app_traffic) }
     _tls_debug("after app traffic keys")
     val server_app_rk = RecordKey(key: server_app_tk.key, iv: server_app_tk.iv)
     val client_app_rk = RecordKey(key: client_app_tk.key, iv: client_app_tk.iv)

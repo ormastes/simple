@@ -6,6 +6,9 @@ socket libraries use this to choose portable paths first and opt into kernel or
 hardware acceleration only when a backend explicitly reports support.
 """
 
+use std.io.sriov.{SriovVfAssignment}
+use std.io.rdma.{RdmaTransportConfig, rdma_is_enabled}
+
 struct NetBackendCapabilities:
     """Feature flags for a network I/O backend."""
     backend_name: text
@@ -69,6 +72,32 @@ fn packet_io_net_backend_capabilities(backend_name: text,
     """Declare an explicitly configured packet-ring network backend."""
     accelerated_net_backend_capabilities(backend_name, true, sriov, rdma)
 
+fn sriov_net_backend_capabilities(backend_name: text, assignment: SriovVfAssignment) -> NetBackendCapabilities:
+    """Declare SR-IOV support only for assigned and isolated virtual functions."""
+    accelerated_net_backend_capabilities(
+        backend_name,
+        true,
+        assignment.assigned and assignment.isolated,
+        false
+    )
+
+fn net_backend_sriov_isolation_state(sriov_available: bool, caps: NetBackendCapabilities) -> text:
+    """Distinguish available-but-unisolated SR-IOV from isolated SR-IOV."""
+    if caps.supports_sriov:
+        return "sriov-isolated"
+    if sriov_available:
+        return "sriov-available"
+    "sriov-unavailable"
+
+fn rdma_net_backend_capabilities(config: RdmaTransportConfig) -> NetBackendCapabilities:
+    """Declare RDMA only when explicitly enabled by configuration."""
+    accelerated_net_backend_capabilities(
+        config.backend_name,
+        true,
+        false,
+        rdma_is_enabled(config)
+    )
+
 fn net_backend_acceleration_tier(caps: NetBackendCapabilities) -> text:
     """Return the strongest acceleration tier available for routing decisions."""
     if caps.supports_rdma:
@@ -86,6 +115,14 @@ fn net_backend_acceleration_tier(caps: NetBackendCapabilities) -> text:
 fn net_backend_can_accelerate_static_files(caps: NetBackendCapabilities) -> bool:
     """Static file responses can accelerate when sendfile or zero-copy exists."""
     caps.supports_sendfile or caps.supports_zero_copy
+
+fn net_backend_static_file_route(caps: NetBackendCapabilities, has_body_file: bool) -> text:
+    """Return the safe static-file route for backend capabilities."""
+    if not has_body_file:
+        return "body"
+    if caps.supports_sendfile:
+        return "sendfile"
+    "portable-read"
 
 fn net_backend_summary(caps: NetBackendCapabilities) -> text:
     """Compact human-readable capability summary."""

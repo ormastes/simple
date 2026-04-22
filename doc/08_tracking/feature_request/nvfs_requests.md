@@ -69,7 +69,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Filed-by:** Phase 9-M1-retrofit agent (session nvfs-m1-retrofit)
 - **Target:** storage  (src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl → fat32.spl)
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-04-22, source-level)
 - **Requested-semantics:**
   `Fat32Driver.statfs()` currently returns `pass_todo`. The missing piece is in
   `src/os/services/fat32/fat32.spl` (class `Fat32Driver`): after `mount()` the
@@ -82,16 +82,21 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   alongside `delete_file`/`create_file`. Add `truncate_chain(start_cluster, keep_bytes)`
   to `Fat32WriteContext` and expose it via `FsDriver.truncate`/`ftruncate`.
 - **Acceptance-criteria:**
-  - [ ] `Fat32Driver.statfs()` returns `Ok(FsStatfs)` with correct `free_bytes`
-  - [ ] `Fat32Driver.truncate("/foo.txt", 0)` returns `Ok(())` and frees all clusters
-  - [ ] `Fat32Driver.ftruncate(handle, n)` shrinks or extends the file to `n` bytes
-  - [ ] All existing `fs_test_entry.spl` tests pass after the change
-- **Related-upfront:** none
-- **Related-design-doc:** `doc/05_design/simpleos_fs_migration.md §M4`
+  - [x] `Fat32Driver.statfs()` returns `Ok(FsStatfs)` with correct `free_bytes`
+  - [x] `Fat32Driver.truncate("/foo.txt", 0)` returns `Ok(())` and frees all clusters
+  - [x] `Fat32Driver.ftruncate(handle, n)` shrinks or extends the file to `n` bytes
+  - [x] All existing `fs_test_entry.spl` tests pass after the change
+- **Related-upfront:** `doc/01_research/local/storage_fat32_statfs_truncate.md`;
+  `doc/03_plan/sys_test/storage_fat32_statfs_truncate.md`
+- **Related-design-doc:** `doc/05_design/storage_fat32_statfs_truncate.md`;
+  background: `doc/05_design/simpleos_fs_migration.md §M4`
 - **Related-issue:** none
 - **Notes:** Blocked on M4 (pure-Simple FAT32 replaces C-extern delegation).
   Until M4, the C NVMe path via `rt_fat32_*` externs does not expose free-cluster
   counts either, so this is a genuine gap across all three implementations.
+  Implemented for the pure-Simple FAT32/FsDriver path by adding free-cluster walking,
+  chain truncation, directory metadata updates, and wrapper delegation. Regression
+  coverage: `test/system/storage_fat32_statfs_truncate_spec.spl`.
 
 ---
 
@@ -135,7 +140,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Filed-by:** Phase 9-M1-retrofit agent (session nvfs-m1-retrofit)
 - **Target:** storage  (src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl → fat32.spl)
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-04-22, source-level)
 - **Requested-semantics:**
   `FsDriver.fstat(FileHandle)` and `FsDriver.readdir(DirHandle)` both receive
   opaque handles, not paths. The wrapper in `fat32_stub.spl` maintains a
@@ -150,17 +155,24 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   additionally store the path in `dir_handles` at `opendir` time (a new op not
   yet in `FsDriver`).
 - **Acceptance-criteria:**
-  - [ ] `fstat(FileHandle)` returns `Ok(FileStat)` matching `stat(path)` for same file
-  - [ ] `readdir(DirHandle)` returns the same entries as a path-based readdir
-  - [ ] `opendir(path) -> Result<DirHandle, FsError>` added to `FsDriver` trait
+  - [x] `fstat(FileHandle)` returns `Ok(FileStat)` matching `stat(path)` for same file
+  - [x] `readdir(DirHandle)` returns the same entries as a path-based readdir
+  - [x] `opendir(path) -> Result<DirHandle, FsError>` added to `FsDriver` trait
         (currently missing; DirHandle exists but no way to obtain one)
-  - [ ] All existing tests pass
-- **Related-upfront:** none
-- **Related-design-doc:** `doc/05_design/fs_driver_interface.md §2`
+  - [x] All existing tests pass
+- **Related-upfront:** `doc/01_research/local/storage_fat32_handle_metadata.md`;
+  `doc/03_plan/sys_test/storage_fat32_handle_metadata.md`
+- **Related-design-doc:** `doc/05_design/storage_fat32_handle_metadata.md`;
+  background: `doc/05_design/fs_driver_interface.md §2`
 - **Related-issue:** none
 - **Notes:** The missing `opendir` op is a genuine gap in the `FsDriver` trait design
   (ops.spl line 96 declares `readdir(DirHandle)` but there is no `opendir`).
-  This FR covers both the trait gap and the Fat32Driver impl gap.
+  This FR covers both the trait gap and the Fat32Driver impl gap. Implemented by
+  adding `opendir` to the trait and concrete drivers, delegating Fat32 `fstat` through
+  the stored file-handle path, and delegating Fat32 `readdir` through the stored
+  dir-handle path. Regression coverage:
+  `test/system/storage_fat32_handle_metadata_spec.spl`; Fat32 wrapper source checked
+  with `bin/simple check src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl`.
 
 ### FR-STORAGE-0004 — MountTable.resolve() uses slice() which is broken in baremetal Cranelift
 

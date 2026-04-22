@@ -1,0 +1,83 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, dma, ownership
+# @cover src/lib/nogc_sync_mut/io/dma.spl 60%
+# @cover src/lib/nogc_async_mut/io/packet_io.spl 50%
+# @cover src/lib/nogc_sync_mut/fs_driver/extension.spl 30%
+# @cover src/os/userlib/device.spl 20%
+
+use std.spec.{describe, context, it, expect}
+use std.io.dma.{
+    SharedDmaBuffer,
+    DmaOwner,
+    DmaCachePolicy,
+    DmaReleaseRequest,
+    validate_shared_dma_release,
+    dma_shared_sync_cpu_to_device,
+    dma_shared_sync_device_to_cpu
+}
+use std.io.packet_io.{packet_rx_dma_lease, packet_tx_dma_lease, packet_dma_complete}
+use std.fs_driver.extension.{DirectIoExt}
+
+fn make_dma(device: u8, policy: DmaCachePolicy, alloc_id: u64) -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: 0x1000,
+        host_phys_addr: 0x2000,
+        device_addr: 0x2000,
+        byte_len: 1024,
+        cache_policy: policy,
+        owner: DmaOwner(task_id: 9, bdf_bus: 0, bdf_device: device, bdf_function: 0),
+        allocation_id: alloc_id
+    )
+
+fn release_req(device: u8, size: u64, released: bool) -> DmaReleaseRequest:
+    DmaReleaseRequest(
+        requester_task_id: 9,
+        requester_bdf_bus: 0,
+        requester_bdf_device: device,
+        requester_bdf_function: 0,
+        requested_byte_len: size,
+        allocation_id: 77,
+        already_released: released
+    )
+
+describe "FR-NET-0008 shared DMA buffer ownership":
+
+    context "driver handoff":
+
+        it "uses SharedDmaBuffer for network packet leases and file direct I/O":
+            val dma = make_dma(4, DmaCachePolicy.FlushRequired, 77)
+            val rx = packet_rx_dma_lease(1u64, dma)
+            val tx = packet_tx_dma_lease(1u64, dma)
+            val ext = DirectIoExt(
+                sector_alignment: 512,
+                file_alignment: 512,
+                max_io_bytes: 4096,
+                backend_tag: "virtio-blk",
+                bounce_allowed: false)
+            expect(rx.buffer.allocation_id).to_equal(77)
+            expect(tx.buffer.len()).to_equal(1024)
+            expect(ext.validate_shared_buffer(1024, dma).is_ok()).to_equal(true)
+
+        it "represents display transfer buffers with the same shared descriptor":
+            val display = make_dma(2, DmaCachePolicy.WriteCombining, 77)
+            expect(display.cpu_addr()).to_equal(0x1000)
+            expect(display.phys_addr()).to_equal(0x2000)
+            expect(display.device_visible_addr()).to_equal(0x2000)
+            expect(display.matches_bdf(0, 2, 0)).to_equal(true)
+
+    context "release and cache policy":
+
+        it "rejects double-free and wrong-size release through the shared contract":
+            val dma = make_dma(4, DmaCachePolicy.Coherent, 77)
+            expect(validate_shared_dma_release(dma, release_req(4, 1024, false)).is_ok()).to_equal(true)
+            expect(validate_shared_dma_release(dma, release_req(4, 1024, true)).is_err()).to_equal(true)
+            expect(validate_shared_dma_release(dma, release_req(4, 512, false)).is_err()).to_equal(true)
+
+        it "keeps cache maintenance explicit during packet completion":
+            val dma = make_dma(4, DmaCachePolicy.FlushRequired, 77)
+            val rx = packet_rx_dma_lease(1u64, dma)
+            dma_shared_sync_cpu_to_device(rx.buffer)
+            dma_shared_sync_device_to_cpu(rx.buffer)
+            val done = packet_dma_complete(rx)
+            expect(done.owner).to_equal("driver")
+            expect(done.completed).to_equal(true)

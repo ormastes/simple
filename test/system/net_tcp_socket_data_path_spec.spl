@@ -1,0 +1,173 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, tcp, socket
+# @cover src/os/services/netstack/tcp_connection.spl 55%
+# @cover src/os/services/netstack/netstack_service.spl 15%
+
+use std.spec.{describe, context, it, expect}
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.tcp.{
+    TcpHeader,
+    TcpSegment,
+    TcpState,
+    TCP_DEFAULT_WINDOW,
+    TCP_FLAG_ACK,
+    TCP_FLAG_FIN,
+    TCP_FLAG_PSH,
+    TCP_FLAG_RST,
+    TCP_FLAG_SYN,
+    TCP_INITIAL_RTO,
+    tcp_state_name
+}
+use os.services.netstack.tcp_connection.{TcpConnection}
+
+extern fn serial_println(msg: text)
+
+fn established(window: u16) -> TcpConnection:
+    val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
+    val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+    var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
+    val syn = conn.connect()
+    expect(syn.len()).to_equal(1u64)
+    val syn_ack = TcpSegment(
+        header: TcpHeader(
+            src_port: 80u16,
+            dst_port: 49152u16,
+            seq_num: 1000u32,
+            ack_num: conn.snd_nxt,
+            data_offset: 5u8,
+            flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+            window: window,
+            checksum: 0u16,
+            urgent_ptr: 0u16
+        ),
+        data: []
+    )
+    val replies = conn.process_segment(syn_ack, remote_ip)
+    expect(replies.len()).to_equal(1u64)
+    expect(tcp_state_name(conn.state)).to_equal("ESTABLISHED")
+    conn
+
+fn data_segment(conn: TcpConnection, data: [u8]) -> TcpSegment:
+    TcpSegment(
+        header: TcpHeader(
+            src_port: 80u16,
+            dst_port: 49152u16,
+            seq_num: conn.rcv_nxt,
+            ack_num: conn.snd_nxt,
+            data_offset: 5u8,
+            flags: TCP_FLAG_PSH | TCP_FLAG_ACK,
+            window: TCP_DEFAULT_WINDOW,
+            checksum: 0u16,
+            urgent_ptr: 0u16
+        ),
+        data: data
+    )
+
+describe "FR-NET-0002 TCP socket data path semantics":
+
+    context "recv readiness":
+
+        it "reports would-block when no receive data is available":
+            var conn = established(TCP_DEFAULT_WINDOW)
+            match conn.recv_data_result(16u64):
+                Ok(_): expect(false).to_equal(true)
+                Err(msg): expect(msg).to_equal("would-block")
+            expect(conn.recv_status()).to_equal("would-block")
+
+        it "returns partial receive chunks in order":
+            val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+            var conn = established(TCP_DEFAULT_WINDOW)
+            val replies = conn.process_segment(data_segment(conn, [1u8, 2u8, 3u8]), remote_ip)
+            expect(replies.len()).to_equal(1u64)
+            expect(conn.recv_status()).to_equal("ready")
+
+            match conn.recv_data_result(2u64):
+                Ok(data):
+                    expect(data.len()).to_equal(2u64)
+                    expect(data[0]).to_equal(1u8)
+                    expect(data[1]).to_equal(2u8)
+                Err(msg): expect(msg.len()).to_equal(0u64)
+
+            match conn.recv_data_result(8u64):
+                Ok(data):
+                    expect(data.len()).to_equal(1u64)
+                    expect(data[0]).to_equal(3u8)
+                Err(msg): expect(msg.len()).to_equal(0u64)
+
+    context "send readiness":
+
+        it "caps queued sends by the advertised window":
+            var conn = established(4u16)
+            match conn.send_data([1u8, 2u8, 3u8, 4u8, 5u8, 6u8]):
+                Ok(n): expect(n).to_equal(4u64)
+                Err(msg): expect(msg.len()).to_equal(0u64)
+            expect(conn.send_buf.len()).to_equal(4u64)
+
+            match conn.send_data([7u8]):
+                Ok(n): expect(n).to_equal(0u64)
+                Err(msg): expect(msg).to_contain("would-block")
+
+    context "close and error propagation":
+
+        it "exposes peer close after FIN":
+            val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+            var conn = established(TCP_DEFAULT_WINDOW)
+            val fin = TcpSegment(
+                header: TcpHeader(
+                    src_port: 80u16,
+                    dst_port: 49152u16,
+                    seq_num: conn.rcv_nxt,
+                    ack_num: conn.snd_nxt,
+                    data_offset: 5u8,
+                    flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                    window: TCP_DEFAULT_WINDOW,
+                    checksum: 0u16,
+                    urgent_ptr: 0u16
+                ),
+                data: []
+            )
+            val replies = conn.process_segment(fin, remote_ip)
+            expect(replies.len()).to_equal(1u64)
+            expect(conn.recv_status()).to_equal("peer-closed")
+            match conn.recv_data_result(16u64):
+                Ok(data): expect(data.len()).to_equal(0u64)
+                Err(msg): expect(msg.len()).to_equal(0u64)
+
+        it "propagates reset as a receive and send error":
+            val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
+            var conn = established(TCP_DEFAULT_WINDOW)
+            val rst = TcpSegment(
+                header: TcpHeader(
+                    src_port: 80u16,
+                    dst_port: 49152u16,
+                    seq_num: conn.rcv_nxt,
+                    ack_num: conn.snd_nxt,
+                    data_offset: 5u8,
+                    flags: TCP_FLAG_RST | TCP_FLAG_ACK,
+                    window: 0u16,
+                    checksum: 0u16,
+                    urgent_ptr: 0u16
+                ),
+                data: []
+            )
+            val replies = conn.process_segment(rst, remote_ip)
+            expect(replies.len()).to_equal(0u64)
+            expect(conn.recv_status()).to_equal("connection-reset")
+            match conn.recv_data_result(16u64):
+                Ok(_): expect(false).to_equal(true)
+                Err(msg): expect(msg).to_equal("connection-reset")
+            match conn.send_data([1u8]):
+                Ok(_): expect(false).to_equal(true)
+                Err(msg): expect(msg).to_equal("connection-reset")
+
+        it "reports retransmission timeout after retry exhaustion":
+            var conn = TcpConnection.new_client(
+                Ipv4Address.from_u32(0x0A00020Fu32),
+                49152u16,
+                Ipv4Address.from_u32(0x0A000202u32),
+                80u16
+            )
+            val syn = conn.connect()
+            expect(syn.len()).to_equal(1u64)
+
+            expect(conn.retransmit_status_at(10000000000u64)).to_equal("timeout")

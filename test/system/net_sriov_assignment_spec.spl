@@ -1,0 +1,72 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, sriov
+# @cover src/lib/nogc_async_mut/io/sriov.spl 80%
+# @cover src/lib/nogc_async_mut/io/net_backend.spl 40%
+
+use std.spec.{describe, context, it, expect}
+use std.io.sriov.{
+    PCI_CAP_ID_SRIOV,
+    SriovCapabilityRecord,
+    sriov_scan_physical_functions,
+    sriov_assign_vf
+}
+use std.io.net_backend.{sriov_net_backend_capabilities, net_backend_summary}
+
+fn sriov_record(total_vfs: u16, iommu_domain_id: u32) -> SriovCapabilityRecord:
+    SriovCapabilityRecord(
+        bdf_bus: 0,
+        bdf_device: 5,
+        bdf_function: 0,
+        capability_id: PCI_CAP_ID_SRIOV,
+        total_vfs: total_vfs,
+        first_vf_offset: 2u16,
+        vf_stride: 1u16,
+        iommu_domain_id: iommu_domain_id
+    )
+
+describe "FR-NET-0005 SR-IOV discovery and assignment":
+
+    context "PCI capability scan":
+
+        it "identifies SR-IOV physical functions":
+            val records = [
+                sriov_record(8u16, 11u32),
+                SriovCapabilityRecord(
+                    bdf_bus: 0,
+                    bdf_device: 6,
+                    bdf_function: 0,
+                    capability_id: 0x05u16,
+                    total_vfs: 0u16,
+                    first_vf_offset: 0u16,
+                    vf_stride: 0u16,
+                    iommu_domain_id: 0u32
+                )
+            ]
+            val found = sriov_scan_physical_functions(records)
+            expect(found.len()).to_equal(1)
+            expect(found[0].total_vfs).to_equal(8u16)
+            expect(found[0].iommu_domain_id).to_equal(11u32)
+
+    context "VF assignment":
+
+        it "fails closed without explicit opt-in":
+            val pf = sriov_scan_physical_functions([sriov_record(8u16, 11u32)])[0]
+            val assignment = sriov_assign_vf(pf, 0u16, false)
+            expect(assignment.assigned).to_equal(false)
+            expect(assignment.error).to_contain("opt-in")
+
+        it "fails closed without IOMMU isolation":
+            val pf = sriov_scan_physical_functions([sriov_record(8u16, 0u32)])[0]
+            val assignment = sriov_assign_vf(pf, 0u16, true)
+            expect(assignment.assigned).to_equal(false)
+            expect(assignment.isolated).to_equal(false)
+            expect(assignment.error).to_contain("iommu")
+
+        it "reports supports_sriov only after VF assignment and isolation":
+            val pf = sriov_scan_physical_functions([sriov_record(8u16, 11u32)])[0]
+            val assignment = sriov_assign_vf(pf, 1u16, true)
+            val caps = sriov_net_backend_capabilities("sriov-vf", assignment)
+            expect(assignment.assigned).to_equal(true)
+            expect(assignment.isolated).to_equal(true)
+            expect(caps.supports_sriov).to_equal(true)
+            expect(net_backend_summary(caps)).to_equal("sriov-vf:sriov-packet")

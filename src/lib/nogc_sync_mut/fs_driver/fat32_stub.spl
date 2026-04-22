@@ -1,6 +1,4 @@
-#![allow(stub_impl)]
-
-# Fat32Driver — FsDriver wrapper delegating to the pure-Simple FAT32 implementation.
+# FsFat32Driver — FsDriver wrapper delegating to the pure-Simple FAT32 implementation.
 #
 # TODO(rename): rename this file to fat32.spl once M2 entry-point migration is done.
 #
@@ -23,13 +21,6 @@
 #     pread, pwrite*, stat, fstat*, mkdir, rmdir, unlink, rename, readdir*,
 #     fsync, fdatasync, capabilities, probe,
 #     symlink, readlink, link  (return Err(Unsupported) — FAT32 has none)
-#   pass_todo (underlying impl missing the required piece):
-#     statfs      — Fat32Core has no free-cluster count; needs M4 BPB re-read
-#     pwrite      — Fat32Core has no positional write; needs offset-seek logic
-#     fstat       — Fat32Core has no handle→path map; needs open_files exposure
-#     readdir     — Fat32Core uses path, not DirHandle; needs DirHandle→path map
-#     ftruncate   — Fat32Core has no truncate; needs M4 cluster-free logic
-#     truncate    — same as above
 #   remount: delegates to unmount+re-mount (best effort)
 #   fsync/fdatasync: Fat32Core writes are synchronous through BlockDevice;
 #                    returning Ok(()) is correct for M1.
@@ -60,10 +51,10 @@ struct Fat32DirHandleEntry:
     path:   text
 
 # ============================================================================
-# Fat32Driver — FsDriver implementation wrapping Fat32Core
+# FsFat32Driver — FsDriver implementation wrapping Fat32Core
 # ============================================================================
 
-class Fat32Driver:
+struct FsFat32Driver:
     """FsDriver wrapper around the pure-Simple FAT32 implementation (os.services.fat32.fat32).
 
     Holds an instance of Fat32Core (the real FAT32 driver) and translates
@@ -79,16 +70,16 @@ class Fat32Driver:
     next_fsd_id:  u64
     mounted:      bool
 
-impl Fat32Driver:
-    static fn new(name: text, device: BlockDevice) -> Fat32Driver:
-        Fat32Driver(
+impl FsFat32Driver:
+    static fn new(name: text, device: BlockDevice) -> FsFat32Driver:
+        FsFat32Driver {
             name: name,
             inner: Fat32Core.new(device),
             file_handles: [],
             dir_handles: [],
             next_fsd_id: 1,
             mounted: false
-        )
+        }
 
     me fn alloc_fsd_id() -> u64:
         val id = self.next_fsd_id
@@ -110,11 +101,22 @@ impl Fat32Driver:
     fn text_err(msg: text) -> FsError:
         FsError.Io(msg)
 
+fn fat32_driver_new(name: text, device: BlockDevice) -> FsFat32Driver:
+    """Construct the FsDriver FAT32 wrapper without exposing the core class name."""
+    FsFat32Driver(
+        name: name,
+        inner: Fat32Core.new(device),
+        file_handles: [],
+        dir_handles: [],
+        next_fsd_id: 1,
+        mounted: false
+    )
+
 # ============================================================================
 # FsDriver trait implementation
 # ============================================================================
 
-impl FsDriver for Fat32Driver:
+impl FsDriver for FsFat32Driver:
 
     # --- Lifecycle ---
 
@@ -142,11 +144,22 @@ impl FsDriver for Fat32Driver:
         self.mount(opts)
 
     fn statfs() -> Result<FsStatfs, FsError>:
-        # pass_todo: Fat32Core exposes no free-cluster count from BPB.
-        # The missing piece is in src/os/services/fat32/fat32.spl —
-        # Fat32Driver would need a get_free_clusters() method that walks the
-        # FAT table (expensive but correct). Tracked as FR-STORAGE-0001.
-        pass_todo
+        if not self.mounted:
+            return Err(FsError.NotMounted)
+        val free_result = self.inner.count_free_clusters()
+        if free_result.is_err():
+            return Err(FsError.Io(free_result.unwrap_err()))
+        val cluster_bytes = (self.inner.sectors_per_cluster * self.inner.bytes_per_sector).to_u64()
+        val total_bytes = self.inner.total_clusters.to_u64() * cluster_bytes
+        val free_bytes = free_result.unwrap().to_u64() * cluster_bytes
+        Ok(FsStatfs(
+            total_bytes: total_bytes,
+            free_bytes: free_bytes,
+            avail_bytes: free_bytes,
+            files_total: 0,
+            files_free: 0,
+            block_size: self.inner.bytes_per_sector
+        ))
 
     # --- Root ---
 
@@ -296,11 +309,11 @@ impl FsDriver for Fat32Driver:
             case Result.Err(msg): Err(FsError.Io(msg))
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
-        # pass_todo: Fat32Core exposes no handle→stat; needs open_files exposure
-        # or a handle→path map. Tracked as FR-STORAGE-0003.
-        # Workaround available once the handle table stores path (it does),
-        # but calling stat(path) requires a me fn — left as pass_todo for now.
-        pass_todo
+        val entry = self.find_file_entry(handle.id)
+        if not entry.?:
+            return Err(FsError.BadHandle)
+        val e = entry.unwrap()
+        self.stat(Path(raw: e.path))
 
     fn stat(path: Path) -> Result<FileStat, FsError>:
         val r = self.inner.stat(path.raw)
@@ -323,15 +336,35 @@ impl FsDriver for Fat32Driver:
             case Result.Err(msg):
                 Err(FsError.Io(msg))
 
+    me fn opendir(path: Path) -> Result<DirHandle, FsError>:
+        if not self.mounted:
+            return Err(FsError.NotMounted)
+        val probe = self.inner.readdir(path.raw)
+        if probe.is_err():
+            return Err(FsError.Io(probe.unwrap_err()))
+        val fsd_id = self.alloc_fsd_id()
+        self.dir_handles.push(Fat32DirHandleEntry(fsd_id: fsd_id, path: path.raw))
+        Ok(DirHandle(id: fsd_id))
+
     fn truncate(path: Path, length: i64) -> Result<(), FsError>:
-        # pass_todo: Fat32Core has no truncate operation.
-        # Needs cluster-free logic in src/os/services/fat32/fat32_write.spl.
-        # Tracked as FR-STORAGE-0001.
-        pass_todo
+        if length < 0:
+            return Err(FsError.InvalidArg)
+        val r = self.inner.truncate_path(path.raw, length.to_u64())
+        match r:
+            case Result.Ok(_): Ok(())
+            case Result.Err(msg): Err(FsError.Io(msg))
 
     me fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
-        # pass_todo: same as truncate. Tracked as FR-STORAGE-0001.
-        pass_todo
+        if length < 0:
+            return Err(FsError.InvalidArg)
+        val entry = self.find_file_entry(handle.id)
+        if not entry.?:
+            return Err(FsError.BadHandle)
+        val e = entry.unwrap()
+        val r = self.inner.truncate_open_file(e.core_id, length.to_u64())
+        match r:
+            case Result.Ok(_): Ok(())
+            case Result.Err(msg): Err(FsError.Io(msg))
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
         # Fat32Core writes are synchronous through BlockDevice (no write-back cache).
@@ -344,10 +377,23 @@ impl FsDriver for Fat32Driver:
     # --- Namespace ---
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        # pass_todo: Fat32Core.readdir() is path-based, not handle-based.
-        # This wrapper stores path in dir_handles but needs a me fn to call inner.readdir().
-        # Tracked as FR-STORAGE-0003.
-        pass_todo
+        val entry = self.find_dir_entry(handle.id)
+        if not entry.?:
+            return Err(FsError.BadHandle)
+        val e = entry.unwrap()
+        val r = self.inner.readdir(e.path)
+        match r:
+            case Result.Ok(core_entries):
+                var entries: [DirEntry] = []
+                for core in core_entries:
+                    entries.push(DirEntry(
+                        name: core.name,
+                        inode: Inode(id: core.node.id),
+                        is_dir: core.node.kind == FsNodeKind.Directory
+                    ))
+                Ok(entries)
+            case Result.Err(msg):
+                Err(FsError.Io(msg))
 
     me fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         val r = self.inner.mkdir(path.raw)

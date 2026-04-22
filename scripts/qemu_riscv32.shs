@@ -55,6 +55,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+if [ "$FS_IMAGE" -eq 1 ] && [ "$NET" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DISPLAY" -eq 0 ] && [ -z "$RISCV32_ENTRY" ]; then
+    SMOKE=1
+fi
+
 if [ "$NET" -eq 1 ]; then
     KERNEL="$REPO_ROOT/build/os/simpleos_riscv32_net.elf"
     SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv32_net.log"
@@ -114,15 +118,27 @@ fi
 if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
     echo "[build] Building SimpleOS riscv32 kernel (per-file timeout: ${BUILD_TIMEOUT_SEC}s)..."
     mkdir -p "$REPO_ROOT/build/os"
-    "$SIMPLE_BIN" native-build \
-        --backend llvm \
-        --timeout "$BUILD_TIMEOUT_SEC" \
-        $SOURCE_ARGS \
-        --entry "$ENTRY_FILE" \
-        --entry-closure \
-        --target riscv32-unknown-none \
-        -o "$KERNEL" \
-        --linker-script examples/simple_os/arch/riscv32/linker.ld >"$BUILD_LOG" 2>&1
+    if [ "$SMOKE" -eq 1 ]; then
+        "$SIMPLE_BIN" native-build \
+            --backend llvm \
+            --timeout "$BUILD_TIMEOUT_SEC" \
+            $SOURCE_ARGS \
+            --entry "$ENTRY_FILE" \
+            --entry-closure \
+            --target riscv32-unknown-none \
+            -o "$KERNEL" \
+            --linker-script examples/simple_os/arch/riscv32/linker.ld >"$BUILD_LOG" 2>&1
+    else
+        "$SIMPLE_BIN" native-build \
+            --backend llvm \
+            --timeout "$BUILD_TIMEOUT_SEC" \
+            $SOURCE_ARGS \
+            --entry "$ENTRY_FILE" \
+            --entry-closure \
+            --target riscv32-unknown-none \
+            -o "$KERNEL" \
+            --linker-script examples/simple_os/arch/riscv32/linker.ld >"$BUILD_LOG" 2>&1
+    fi
     BUILD_RC=$?
     if [ "$BUILD_RC" -ne 0 ]; then
         echo "FAIL: Kernel build failed (exit $BUILD_RC)"
@@ -212,6 +228,7 @@ QEMU_ARGS="-nodefaults \
     -kernel $KERNEL \
     -serial file:$SERIAL_LOG \
     -display none \
+    -global virtio-mmio.force-legacy=false \
     $QEMU_DEVICE_ARGS \
     $QMP_ARGS \
     -no-reboot"
@@ -386,7 +403,7 @@ check_marker() {
 }
 
 check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
-check_marker "UART / SBI console" "UART|SBI|serial"
+check_marker "UART / SBI console" "UART|SBI|serial|RV32 boot OK|RV64 boot OK"
 check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
 
 if [ "$INTERACTIVE" -eq 1 ]; then

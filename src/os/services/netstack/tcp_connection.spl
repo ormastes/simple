@@ -30,7 +30,10 @@ use os.services.netstack.tcp.{
     seq_lt, seq_lte, seq_gt, seq_gte, seq_between
 }
 
-extern fn serial_println(msg: text)
+fn tcp_trace(msg: text):
+    val _unused = msg.len()
+
+val TCP_SEND_BUFFER_CAP: u64 = 65535
 
 # ============================================================================
 # Retransmission Entry
@@ -72,9 +75,12 @@ struct TcpConnection:
     # Buffers
     send_buf: [u8]      # Application data queued for sending
     recv_buf: [u8]      # Received data (ordered, ready for app)
+    peer_closed: bool   # FIN observed after all queued receive data is drained
+    last_error: text    # Application-visible terminal error, empty when healthy
 
     # Retransmission
     retransmit_queue: [TcpRetransmitEntry]
+    retransmit_attempts: u32
     rto: u64            # Current retransmission timeout (ms)
     srtt: u64           # Smoothed round-trip time (ms)
 
@@ -101,7 +107,9 @@ impl TcpConnection:
             rcv_nxt: 0, rcv_wnd: TCP_DEFAULT_WINDOW,
             iss: iss, irs: 0,
             send_buf: [], recv_buf: [],
+            peer_closed: false, last_error: "",
             retransmit_queue: [],
+            retransmit_attempts: 0u32,
             rto: TCP_INITIAL_RTO, srtt: 0,
             notif_id: 0, task_id: 0, conn_id: 0,
             time_wait_start: 0
@@ -117,7 +125,9 @@ impl TcpConnection:
             rcv_nxt: 0, rcv_wnd: TCP_DEFAULT_WINDOW,
             iss: 0, irs: 0,
             send_buf: [], recv_buf: [],
+            peer_closed: false, last_error: "",
             retransmit_queue: [],
+            retransmit_attempts: 0u32,
             rto: TCP_INITIAL_RTO, srtt: 0,
             notif_id: 0, task_id: 0, conn_id: 0,
             time_wait_start: 0
@@ -173,6 +183,7 @@ impl TcpConnection:
                 TcpState.SynSent:
                     if tcp_has_flag(flags, TCP_FLAG_ACK) and seg_ack == self.snd_nxt:
                         self.state = TcpState.Closed
+                        self.last_error = "connection-reset"
                     return []
                 TcpState.Listen:
                     return []
@@ -183,6 +194,8 @@ impl TcpConnection:
                     self.state = TcpState.Closed
                     self.send_buf = []
                     self.recv_buf = []
+                    self.peer_closed = true
+                    self.last_error = "connection-reset"
                     self.retransmit_queue = []
                     return []
 
@@ -257,7 +270,7 @@ impl TcpConnection:
             ))
 
             self.state = TcpState.SynReceived
-            serial_println("[tcp] LISTEN -> SYN_RECEIVED (remote={src_ip.to_text()}:{segment.header.src_port})")
+            tcp_trace("[tcp] LISTEN -> SYN_RECEIVED (remote={src_ip.to_text()}:{segment.header.src_port})")
 
         out
 
@@ -289,7 +302,7 @@ impl TcpConnection:
             # Send ACK
             out.push(self._build_ack())
             self.state = TcpState.Established
-            serial_println("[tcp] SYN_SENT -> ESTABLISHED")
+            tcp_trace("[tcp] SYN_SENT -> ESTABLISHED")
 
         else if tcp_has_flag(flags, TCP_FLAG_SYN):
             # Simultaneous open: received bare SYN
@@ -300,7 +313,7 @@ impl TcpConnection:
             # Send SYN+ACK
             out.push(self._build_syn_ack(self.irs))
             self.state = TcpState.SynReceived
-            serial_println("[tcp] SYN_SENT -> SYN_RECEIVED (simultaneous open)")
+            tcp_trace("[tcp] SYN_SENT -> SYN_RECEIVED (simultaneous open)")
 
         out
 
@@ -321,7 +334,7 @@ impl TcpConnection:
                 self.retransmit_queue = []
 
                 self.state = TcpState.Established
-                serial_println("[tcp] SYN_RECEIVED -> ESTABLISHED")
+                tcp_trace("[tcp] SYN_RECEIVED -> ESTABLISHED")
 
                 # Process any data in this segment
                 if segment.data.len() > 0:
@@ -362,8 +375,9 @@ impl TcpConnection:
         if tcp_has_flag(flags, TCP_FLAG_FIN):
             self.rcv_nxt = self.rcv_nxt + 1  # FIN consumes one sequence
             out.push(self._build_ack())
+            self.peer_closed = true
             self.state = TcpState.CloseWait
-            serial_println("[tcp] ESTABLISHED -> CLOSE_WAIT")
+            tcp_trace("[tcp] ESTABLISHED -> CLOSE_WAIT")
         else if segment.data.len() > 0:
             # Send ACK for received data (if not already sent via _process_data)
             if out.len() == 0:
@@ -403,20 +417,21 @@ impl TcpConnection:
         if tcp_has_flag(flags, TCP_FLAG_FIN):
             self.rcv_nxt = self.rcv_nxt + 1
             out.push(self._build_ack())
+            self.peer_closed = true
 
             if our_fin_acked:
                 # Both FINs exchanged and our FIN acked -> TIME_WAIT
                 self.state = TcpState.TimeWait
                 self.time_wait_start = 0  # Caller sets actual timestamp
-                serial_println("[tcp] FIN_WAIT_1 -> TIME_WAIT")
+                tcp_trace("[tcp] FIN_WAIT_1 -> TIME_WAIT")
             else:
                 # Simultaneous close: FIN received but our FIN not yet acked
                 self.state = TcpState.Closing
-                serial_println("[tcp] FIN_WAIT_1 -> CLOSING")
+                tcp_trace("[tcp] FIN_WAIT_1 -> CLOSING")
         else if our_fin_acked:
             # Our FIN acked but no FIN from remote yet
             self.state = TcpState.FinWait2
-            serial_println("[tcp] FIN_WAIT_1 -> FIN_WAIT_2")
+            tcp_trace("[tcp] FIN_WAIT_1 -> FIN_WAIT_2")
 
         out
 
@@ -444,9 +459,10 @@ impl TcpConnection:
         if tcp_has_flag(flags, TCP_FLAG_FIN):
             self.rcv_nxt = self.rcv_nxt + 1
             out.push(self._build_ack())
+            self.peer_closed = true
             self.state = TcpState.TimeWait
             self.time_wait_start = 0
-            serial_println("[tcp] FIN_WAIT_2 -> TIME_WAIT")
+            tcp_trace("[tcp] FIN_WAIT_2 -> TIME_WAIT")
 
         out
 
@@ -477,7 +493,7 @@ impl TcpConnection:
                 self.retransmit_queue = []
                 self.state = TcpState.TimeWait
                 self.time_wait_start = 0
-                serial_println("[tcp] CLOSING -> TIME_WAIT")
+                tcp_trace("[tcp] CLOSING -> TIME_WAIT")
 
         out
 
@@ -493,7 +509,7 @@ impl TcpConnection:
             if seq_gte(segment.header.ack_num, self.snd_nxt):
                 self.retransmit_queue = []
                 self.state = TcpState.Closed
-                serial_println("[tcp] LAST_ACK -> CLOSED")
+                tcp_trace("[tcp] LAST_ACK -> CLOSED")
 
         out
 
@@ -510,7 +526,7 @@ impl TcpConnection:
             # Retransmitted FIN -- re-send ACK and restart 2MSL timer
             out.push(self._build_ack())
             self.time_wait_start = 0  # Caller resets
-            serial_println("[tcp] TIME_WAIT: re-ACK retransmitted FIN")
+            tcp_trace("[tcp] TIME_WAIT: re-ACK retransmitted FIN")
 
         out
 
@@ -558,6 +574,8 @@ impl TcpConnection:
                     new_queue.push(entry)
                 i = i + 1
             self.retransmit_queue = new_queue
+            if self.retransmit_queue.len() == 0:
+                self.retransmit_attempts = 0u32
 
     # ========================================================================
     # Application Interface
@@ -567,18 +585,40 @@ impl TcpConnection:
         """Queue application data for sending.
 
         Only valid in ESTABLISHED or CLOSE_WAIT states.
-        Returns the number of bytes queued.
+        Returns the number of bytes queued. Admission is bounded by both the
+        send-buffer cap and the currently advertised peer window.
         """
+        if self.last_error.len() > 0:
+            return Err(self.last_error)
+
         if not (_is_state(self.state, TcpState.Established) or
                 _is_state(self.state, TcpState.CloseWait)):
             return Err("cannot send in state {tcp_state_name(self.state)}")
 
+        if data.len() == 0:
+            return Ok(0u64)
+
+        val cap_remaining = if self.send_buf.len() < TCP_SEND_BUFFER_CAP:
+            TCP_SEND_BUFFER_CAP - self.send_buf.len()
+        else:
+            0u64
+        val in_flight = (self.snd_nxt - self.snd_una).to_u64()
+        val reserved = in_flight + self.send_buf.len()
+        val window_remaining = if self.snd_wnd.to_u64() > reserved:
+            self.snd_wnd.to_u64() - reserved
+        else:
+            0u64
+        val max_queue = if cap_remaining < window_remaining: cap_remaining else: window_remaining
+        if max_queue == 0:
+            return Err("would-block: send buffer full or window closed")
+
+        val count = if data.len() < max_queue: data.len() else: max_queue
         var i: u64 = 0
-        while i < data.len():
+        while i < count:
             self.send_buf.push(data[i])
             i = i + 1
 
-        Ok(data.len())
+        Ok(count)
 
     me recv_data(max: u64) -> [u8]:
         """Read received data from buffer.
@@ -603,6 +643,46 @@ impl TcpConnection:
             self.recv_buf = new_buf
 
         result
+
+    me recv_data_result(max: u64) -> Result<[u8], text>:
+        """Read data, EOF, or a documented would-block/error status."""
+        if self.recv_buf.len() > 0:
+            return Ok(self.recv_data(max))
+
+        val status = self.recv_status()
+        if status == "peer-closed":
+            return Ok([])
+
+        Err(status)
+
+    fn recv_status() -> text:
+        """Return application-visible receive readiness or terminal status."""
+        if self.recv_buf.len() > 0:
+            return "ready"
+        if self.retransmit_attempts >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.last_error.len() > 0:
+            return self.last_error
+        if self.retransmit_attempts >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.retransmit_queue.len() > 0 and self.retransmit_queue[0].retries >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.peer_closed:
+            return "peer-closed"
+        if _is_state(self.state, TcpState.TimeWait):
+            return "time-wait"
+        "would-block"
+
+    fn retransmit_status_at(current_time: u64) -> text:
+        """Project whether pending retransmissions have exceeded retry budget."""
+        if self.last_error.len() > 0:
+            return self.last_error
+        if self.retransmit_queue.len() == 0:
+            return "idle"
+        val budget = self.rto * TCP_MAX_RETRIES.to_u64()
+        if current_time >= budget:
+            return "timeout"
+        "pending"
 
     fn has_recv_data() -> bool:
         """Check if there is data available to read."""
@@ -631,7 +711,7 @@ impl TcpConnection:
             ))
             self.snd_nxt = self.snd_nxt + 1  # FIN consumes one sequence
             self.state = TcpState.FinWait1
-            serial_println("[tcp] ESTABLISHED -> FIN_WAIT_1 (close)")
+            tcp_trace("[tcp] ESTABLISHED -> FIN_WAIT_1 (close)")
 
         else if _is_state(self.state, TcpState.CloseWait):
             val fin = self._build_fin()
@@ -643,7 +723,7 @@ impl TcpConnection:
             ))
             self.snd_nxt = self.snd_nxt + 1
             self.state = TcpState.LastAck
-            serial_println("[tcp] CLOSE_WAIT -> LAST_ACK (close)")
+            tcp_trace("[tcp] CLOSE_WAIT -> LAST_ACK (close)")
 
         else if _is_state(self.state, TcpState.Listen):
             self.state = TcpState.Closed
@@ -734,6 +814,25 @@ impl TcpConnection:
         """
         var out: [TcpSegment] = []
 
+        if self.retransmit_queue.len() == 0 and _is_state(self.state, TcpState.SynSent):
+            self.retransmit_attempts = self.retransmit_attempts + 1
+            if self.retransmit_attempts >= TCP_MAX_RETRIES:
+                self.last_error = "timeout"
+                self.retransmit_queue = [TcpRetransmitEntry(
+                    seq_num: self.iss, data: [], flags: TCP_FLAG_SYN,
+                    send_time: current_time, retries: TCP_MAX_RETRIES
+                )]
+                self.time_wait_start = current_time
+                self.state = TcpState.Closed
+                return []
+            out.push(self._build_syn())
+            self.retransmit_queue = [TcpRetransmitEntry(
+                seq_num: self.iss, data: [], flags: TCP_FLAG_SYN,
+                send_time: current_time, retries: self.retransmit_attempts
+            )]
+            return out
+
+        var new_queue: [TcpRetransmitEntry] = []
         var i: u64 = 0
         while i < self.retransmit_queue.len():
             val entry = self.retransmit_queue[i]
@@ -741,12 +840,21 @@ impl TcpConnection:
             val timeout = self.rto * (1 << entry.retries)
 
             if elapsed >= timeout:
-                if entry.retries >= TCP_MAX_RETRIES:
-                    # Too many retries -- abort connection
-                    serial_println("[tcp] max retries exceeded, aborting connection")
+                self.retransmit_attempts = self.retransmit_attempts + 1
+                if self.retransmit_attempts >= TCP_MAX_RETRIES:
+                    tcp_trace("[tcp] max retries exceeded, aborting connection")
+                    self.last_error = "timeout"
+                    self.peer_closed = true
                     self.state = TcpState.Closed
-                    self.retransmit_queue = []
-                    return []
+                    self.send_buf = []
+                    self.recv_buf = []
+                    self.retransmit_queue = [TcpRetransmitEntry(
+                        seq_num: entry.seq_num, data: entry.data,
+                        flags: entry.flags, send_time: current_time,
+                        retries: TCP_MAX_RETRIES
+                    )]
+                    self.time_wait_start = current_time
+                    return out
 
                 # Retransmit
                 val seg_flags = entry.flags
@@ -759,15 +867,19 @@ impl TcpConnection:
                 else:
                     out.push(self._build_data_segment(entry.data, seg_flags))
 
-                # Update entry with new retry count and send time
-                self.retransmit_queue[i] = TcpRetransmitEntry(
+                # Preserve updated retry state explicitly; in-place array
+                # mutation is not reliable across all interpreter paths.
+                new_queue.push(TcpRetransmitEntry(
                     seq_num: entry.seq_num, data: entry.data,
                     flags: entry.flags, send_time: current_time,
                     retries: entry.retries + 1
-                )
+                ))
+            else:
+                new_queue.push(entry)
 
             i = i + 1
 
+        self.retransmit_queue = new_queue
         out
 
     me check_time_wait(current_time: u64) -> bool:
@@ -778,7 +890,7 @@ impl TcpConnection:
         if _is_state(self.state, TcpState.TimeWait):
             if self.time_wait_start > 0 and (current_time - self.time_wait_start) >= TCP_TIME_WAIT_MS:
                 self.state = TcpState.Closed
-                serial_println("[tcp] TIME_WAIT -> CLOSED (2MSL expired)")
+                tcp_trace("[tcp] TIME_WAIT -> CLOSED (2MSL expired)")
                 return true
         false
 

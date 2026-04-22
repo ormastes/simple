@@ -11,7 +11,8 @@
 # This module provides Fat32WriteContext which operates on a Fat32Driver's
 # block device. The Fat32Driver delegates write/mkdir/unlink to this context.
 
-use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry, BlockDevice, FAT32_ATTR_DIRECTORY, FAT32_ATTR_ARCHIVE, FAT32_ATTR_LFN}
+use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry, FAT32_ATTR_DIRECTORY, FAT32_ATTR_ARCHIVE, FAT32_ATTR_LFN}
+use os.services.block_device.{BlockDevice}
 
 # FAT32 special values
 val FAT32_FREE: u32 = 0x00000000
@@ -205,12 +206,12 @@ impl Fat32WriteContext:
         var current = start_cluster
         var max_iter: u32 = 1000000  # Safety limit
         while current >= 2 and current < (self.total_clusters + 2) and max_iter > 0:
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
 
-            val free_result = me write_fat_entry(current, FAT32_FREE)
+            val free_result = self.write_fat_entry(current, FAT32_FREE)
             if free_result.is_err():
                 return Result.Err(free_result.unwrap_err())
 
@@ -220,6 +221,73 @@ impl Fat32WriteContext:
             max_iter = max_iter - 1
 
         Result.Ok(true)
+
+    me truncate_chain(first_cluster: u32, keep_bytes: u64) -> Result<u32, text>:
+        """Shrink a cluster chain to keep_bytes and return the new first cluster.
+
+        A return value of 0 means the file has no allocated clusters.
+        """
+        if first_cluster < 2:
+            if keep_bytes == 0:
+                return Result.Ok(0)
+            val allocated = self.allocate_cluster()
+            if allocated.is_err():
+                return Result.Err(allocated.unwrap_err())
+            return allocated
+
+        val cluster_size = (self.sectors_per_cluster * self.bytes_per_sector).to_u64()
+        if keep_bytes == 0:
+            val freed = self.free_chain(first_cluster)
+            if freed.is_err():
+                return Result.Err(freed.unwrap_err())
+            return Result.Ok(0)
+
+        var clusters_to_keep = keep_bytes / cluster_size
+        if keep_bytes % cluster_size != 0:
+            clusters_to_keep = clusters_to_keep + 1
+
+        var current = first_cluster
+        var kept: u64 = 1
+        while kept < clusters_to_keep:
+            val next_result = self.read_fat_entry(current)
+            if next_result.is_err():
+                return Result.Err(next_result.unwrap_err())
+            val next = next_result.unwrap()
+            if next >= FAT32_EOC or next < 2:
+                val ext = self.extend_chain(current)
+                if ext.is_err():
+                    return Result.Err(ext.unwrap_err())
+                current = ext.unwrap()
+            else:
+                current = next
+            kept = kept + 1
+
+        val tail_result = self.read_fat_entry(current)
+        if tail_result.is_err():
+            return Result.Err(tail_result.unwrap_err())
+        val tail = tail_result.unwrap()
+        if tail >= 2 and tail < FAT32_EOC:
+            val freed_tail = self.free_chain(tail)
+            if freed_tail.is_err():
+                return Result.Err(freed_tail.unwrap_err())
+
+        val mark_eoc = self.write_fat_entry(current, FAT32_EOC)
+        if mark_eoc.is_err():
+            return Result.Err(mark_eoc.unwrap_err())
+
+        if keep_bytes % cluster_size != 0:
+            val data_result = self.read_cluster(current)
+            if data_result.is_err():
+                return Result.Err(data_result.unwrap_err())
+            var data = data_result.unwrap()
+            var zero_at = (keep_bytes % cluster_size).to_i32()
+            while zero_at < data.len():
+                data[zero_at] = 0
+                zero_at = zero_at + 1
+            val write_result = self.write_cluster_data(current, data)
+            if write_result.is_err():
+                return Result.Err(write_result.unwrap_err())
+        Result.Ok(first_cluster)
 
     # ========================================================================
     # Cluster Data I/O
@@ -515,6 +583,52 @@ impl Fat32WriteContext:
                 val entry_name = _parse_8_3_name(data, off)
                 if entry_name.to_upper() == upper_name:
                     # Update file size (bytes 28-31)
+                    data[off + 28] = (new_size & 0xFF).to_u8()
+                    data[off + 29] = ((new_size >> 8) & 0xFF).to_u8()
+                    data[off + 30] = ((new_size >> 16) & 0xFF).to_u8()
+                    data[off + 31] = ((new_size >> 24) & 0xFF).to_u8()
+                    return me write_cluster_data(current, data)
+                idx = idx + 1
+
+            val next_result = me read_fat_entry(current)
+            if next_result.is_err():
+                return Result.Err(next_result.unwrap_err())
+            val next = next_result.unwrap()
+            if next >= FAT32_EOC or next < 2:
+                break
+            current = next
+            max_iter = max_iter - 1
+
+        Result.Err("file not found: {name}")
+
+    me update_file_metadata(dir_cluster: u32, name: text, first_cluster: u32, new_size: u32) -> Result<bool, text>:
+        """Update first-cluster and size fields in a directory entry."""
+        val upper_name = name.to_upper()
+        var current = dir_cluster
+        var max_iter: u32 = 100000
+        while current >= 2 and max_iter > 0:
+            val data_result = me read_cluster(current)
+            if data_result.is_err():
+                return Result.Err(data_result.unwrap_err())
+            var data = data_result.unwrap()
+
+            val entries_per_cluster = (self.sectors_per_cluster * self.bytes_per_sector) / DIR_ENTRY_SIZE
+            var idx: u32 = 0
+            while idx < entries_per_cluster:
+                val off = (idx * DIR_ENTRY_SIZE).to_i32()
+                val first_byte = data[off]
+                if first_byte == END_MARKER:
+                    return Result.Err("file not found: {name}")
+                if first_byte == DELETED_MARKER or data[off + 11] == FAT32_ATTR_LFN:
+                    idx = idx + 1
+                    continue
+
+                val entry_name = _parse_8_3_name(data, off)
+                if entry_name.to_upper() == upper_name:
+                    data[off + 20] = ((first_cluster >> 16) & 0xFF).to_u8()
+                    data[off + 21] = ((first_cluster >> 24) & 0xFF).to_u8()
+                    data[off + 26] = (first_cluster & 0xFF).to_u8()
+                    data[off + 27] = ((first_cluster >> 8) & 0xFF).to_u8()
                     data[off + 28] = (new_size & 0xFF).to_u8()
                     data[off + 29] = ((new_size >> 8) & 0xFF).to_u8()
                     data[off + 30] = ((new_size >> 16) & 0xFF).to_u8()

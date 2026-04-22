@@ -1,0 +1,46 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, http, sendfile
+# @cover src/lib/nogc_async_mut/http_server/worker.spl 40%
+# @cover src/lib/nogc_async_mut/io/net_backend.spl 60%
+
+use std.spec.{describe, context, it, expect}
+use std.io.net_backend.{
+    portable_net_backend_capabilities,
+    net_backend_capabilities,
+    net_backend_summary,
+    net_backend_can_accelerate_static_files,
+    net_backend_static_file_route
+}
+
+describe "FR-NET-0003 HTTP static-file capability routing":
+
+    context "worker startup capability model":
+
+        it "summarizes portable backend capabilities for worker records":
+            val caps = portable_net_backend_capabilities()
+            expect(net_backend_summary(caps)).to_equal("portable-socket:portable")
+            expect(net_backend_can_accelerate_static_files(caps)).to_equal(false)
+
+        it "summarizes sendfile-capable backends as static-file accelerators":
+            val caps = net_backend_capabilities("sendfile-test", true, true, true, false)
+            expect(net_backend_summary(caps)).to_equal("sendfile-test:sendfile")
+            expect(net_backend_can_accelerate_static_files(caps)).to_equal(true)
+
+    context "static file route selection":
+
+        it "keeps ordinary response bodies on the portable body path":
+            val caps = net_backend_capabilities("sendfile-test", true, true, true, false)
+            expect(net_backend_static_file_route(caps, false)).to_equal("body")
+
+        it "uses portable read plus send when sendfile is unavailable":
+            val caps = portable_net_backend_capabilities()
+            expect(net_backend_static_file_route(caps, true)).to_equal("portable-read")
+
+        it "uses sendfile only when the backend explicitly supports sendfile":
+            val caps = net_backend_capabilities("sendfile-test", true, true, true, false)
+            expect(net_backend_static_file_route(caps, true)).to_equal("sendfile")
+
+        it "does not treat zero-copy-only as a file-to-socket sendfile path":
+            val caps = net_backend_capabilities("zero-copy-only", true, true, false, true)
+            expect(net_backend_can_accelerate_static_files(caps)).to_equal(true)
+            expect(net_backend_static_file_route(caps, true)).to_equal("portable-read")

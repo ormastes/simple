@@ -15,6 +15,8 @@ use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contrac
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
 extern fn rt_time_now_unix_micros() -> i64
 
 # Default native-build timeout for `os build` lane.
@@ -490,26 +492,13 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
 
     val simple_bin = _find_simple_binary()
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
+    _apply_build_env(target, objcopy_prefix)
     val started_ms = _now_ms()
     print "[build][{arch_label}] phase=spawn timeout_ms={timeout_ms}"
-    if env_prefix == "":
-        print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
-        val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
-        val elapsed_ms = _now_ms() - started_ms
-        if exit_code != 0:
-            print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
-            _print_native_build_failure_hint(arch_label, backend_name, stderr)
-            if stdout != "":
-                print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
-            if stderr != "":
-                print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
-            return false
-        print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-        return true
-
-    val shell_cmd = "{env_prefix} {simple_bin} {args.join(" ")}"
-    print "[build][{arch_label}] cmd: {shell_cmd}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
+    if env_prefix != "":
+        print "[build][{arch_label}] env: {env_prefix}"
+    print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
         print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
@@ -602,6 +591,24 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     if objcopy_prefix != "":
         envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
     envs.join(" ")
+
+fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
+    val cwd = rt_env_cwd()
+    if _uses_baremetal_wrapper_profile(target):
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        rt_env_set("SIMPLE_LIB", "{cwd}/src")
+    if _is_arm_fs_exec_target(target):
+        rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
+        rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
+        rt_env_set("SIMPLE_LIB", "{cwd}/src")
+    if _is_desktop_wrapper_target(target):
+        rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
+    if objcopy_prefix != "":
+        val old_path = rt_env_get("PATH") ?? ""
+        if old_path == "":
+            rt_env_set("PATH", objcopy_prefix)
+        else:
+            rt_env_set("PATH", "{objcopy_prefix}:{old_path}")
 
 fn _needs_elf32_wrap(target: OsTarget) -> bool:
     _uses_baremetal_wrapper_profile(target)

@@ -1,0 +1,99 @@
+#![allow(unnamed_duplicate_typed_args)]
+# @tag: system, net, sriov, dma, iommu
+# @cover src/os/kernel/types/device_mem_types.spl 50%
+# @cover src/lib/nogc_async_mut/io/net_backend.spl 30%
+# @cover src/lib/nogc_async_mut/io/sriov.spl 30%
+
+use std.spec.{describe, context, it, expect}
+use os.kernel.types.device_mem_types.{
+    DeviceGrant,
+    DmaDescriptor,
+    device_grant_is_isolated,
+    device_grant_is_no_isolation,
+    dma_descriptor_matches_owner
+}
+use std.io.sriov.{
+    SriovPhysicalFunction,
+    sriov_assign_vf
+}
+use std.io.net_backend.{
+    sriov_net_backend_capabilities,
+    net_backend_sriov_isolation_state
+}
+
+fn grant_with_iommu(domain_id: u32, cap: u64) -> DeviceGrant:
+    DeviceGrant(
+        pci_vendor: 0x1AF4u16,
+        pci_device: 0x1000u16,
+        pci_bus: 0,
+        pci_dev: 5,
+        pci_func: 0,
+        pci_class: 0x02,
+        pci_subclass: 0,
+        bar0_phys: 0x100000u64,
+        bar0_size: 4096u64,
+        bar0_cap: 1u64,
+        irq_vector: 32u32,
+        irq_notification_id: 1u64,
+        irq_notification_bit: 1u64,
+        irq_cap: 2u64,
+        dma_device_addr: 0x200000u64,
+        dma_host_addr: 0x200000u64,
+        dma_size: 4096u64,
+        dma_cap: 3u64,
+        iommu_domain_id: domain_id,
+        iommu_cap: cap
+    )
+
+fn pf(domain_id: u32) -> SriovPhysicalFunction:
+    SriovPhysicalFunction(
+        bdf_bus: 0,
+        bdf_device: 5,
+        bdf_function: 0,
+        total_vfs: 4u16,
+        iommu_domain_id: domain_id
+    )
+
+describe "FR-NET-0009 IOMMU isolation gate":
+
+    context "device grants":
+
+        it "distinguishes isolated grants from explicit no-isolation grants":
+            val isolated = grant_with_iommu(12u32, 44u64)
+            val no_iommu = grant_with_iommu(0u32, 0u64)
+            expect(device_grant_is_isolated(isolated)).to_equal(true)
+            expect(device_grant_is_no_isolation(isolated)).to_equal(false)
+            expect(device_grant_is_isolated(no_iommu)).to_equal(false)
+            expect(device_grant_is_no_isolation(no_iommu)).to_equal(true)
+
+        it "validates DMA descriptor owner task and BDF":
+            val desc = DmaDescriptor(
+                cpu_virt_addr: 0x1000u64,
+                host_phys_addr: 0x2000u64,
+                device_addr: 0x2000u64,
+                byte_len: 4096u64,
+                cache_policy: 0,
+                owner_task: 9u64,
+                owner_bdf_bus: 0,
+                owner_bdf_device: 5,
+                owner_bdf_function: 0,
+                allocation_id: 77u64
+            )
+            expect(dma_descriptor_matches_owner(desc, 9u64, 0, 5, 0)).to_equal(true)
+            expect(dma_descriptor_matches_owner(desc, 9u64, 0, 6, 0)).to_equal(false)
+
+    context "SR-IOV and net capability reporting":
+
+        it "fails SR-IOV VF assignment without isolation":
+            val assignment = sriov_assign_vf(pf(0u32), 0u16, true)
+            val caps = sriov_net_backend_capabilities("sriov-vf", assignment)
+            expect(assignment.assigned).to_equal(false)
+            expect(caps.supports_sriov).to_equal(false)
+            expect(net_backend_sriov_isolation_state(true, caps)).to_equal("sriov-available")
+
+        it "reports sriov-isolated only after isolated VF assignment":
+            val assignment = sriov_assign_vf(pf(12u32), 0u16, true)
+            val caps = sriov_net_backend_capabilities("sriov-vf", assignment)
+            expect(assignment.assigned).to_equal(true)
+            expect(caps.supports_sriov).to_equal(true)
+            expect(net_backend_sriov_isolation_state(true, caps)).to_equal("sriov-isolated")
