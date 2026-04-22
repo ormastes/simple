@@ -379,7 +379,7 @@ class VhdlBackend:
                     return Err(value_name_result.unwrap_err())
                 builder.emit_signal_assign(ptr_name_result.unwrap(), value_name_result.unwrap())
 
-            case BinOp(dest, op, left, right):
+            case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val dest_name_result = self.local_to_vhdl(dest)
                 if dest_name_result.is_err():
                     return Err(dest_name_result.unwrap_err())
@@ -395,6 +395,18 @@ class VhdlBackend:
                 val dest_name = dest_name_result.unwrap()
                 val expr = expr_result.unwrap()
                 builder.emit_signal_assign(dest_name, expr)
+
+            case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val src_name_result = self.operand_to_vhdl(operand)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val expr_result = self.cast_to_vhdl(src_name_result.unwrap(), target)
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                builder.emit_signal_assign(dest_name_result.unwrap(), expr_result.unwrap())
 
             case UnaryOp(dest, op, operand):
                 val dest_name_result = self.local_to_vhdl(dest)
@@ -630,6 +642,24 @@ class VhdlBackend:
             case Shr: Ok("shift_right({left}, to_integer({right}))")
             case _:
                 Err(self.backend_error("Unsupported VHDL binary operator: {op}"))
+
+    fn cast_to_vhdl(operand: text, target: MirType) -> Result<text, CompileError>:
+        """Convert a MIR cast/bitcast to a synthesizable VHDL expression."""
+        val width = self.integer_width(target)
+        if width.?:
+            match target.kind:
+                case I64 | I32 | I16 | I8:
+                    Ok("resize(signed({operand}), {width.unwrap()})")
+                case U64 | U32 | U16 | U8:
+                    Ok("resize(unsigned({operand}), {width.unwrap()})")
+                case _:
+                    Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
+        else:
+            match target.kind:
+                case Bool:
+                    Ok(operand)
+                case _:
+                    Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
 
     fn unaryop_to_vhdl(op: MirUnaryOp, operand: text) -> Result<text, CompileError>:
         """Convert unary operation to VHDL expression."""

@@ -304,6 +304,61 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("flag : in std_logic"))
         check(vhdl.contains("result_out <= a when flag = '1' else b;"))
 
+    it "compiles checked binary op and integer casts":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "sum", make_i32()),
+            make_temp_local(4, "wide", MirType(kind: MirTypeKind.I64)),
+            make_temp_local(5, "narrow", make_i32())
+        ]
+
+        val checked_add = MirInst(
+            kind: MirInstKind.CheckedBinOp(
+                LocalId(id: 3),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val widen = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 4),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirType(kind: MirTypeKind.I64)
+            ),
+            span: empty_span()
+        )
+        val narrow = MirInst(
+            kind: MirInstKind.Bitcast(
+                LocalId(id: 5),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4))),
+                make_i32()
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [checked_add, widen, narrow],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val func = make_function("cast_checked", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("cast_checked_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for checked op/cast")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("sum <= a + b;"))
+        check(vhdl.contains("wide <= resize(signed(sum), 64);"))
+        check(vhdl.contains("narrow <= resize(signed(wide), 32);"))
+        check(vhdl.contains("result_out <= narrow;"))
+
     it "rejects unsupported MIR instruction with hard error":
         val backend = make_backend()
 
