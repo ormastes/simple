@@ -6,6 +6,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 fn compile_file(path: text) -> CompileResult:
     val simple_bin = _find_simple_binary()
@@ -81,7 +82,13 @@ fn aot_cuda_file(path: text, output: text) -> CompileResult:
     _run_compile_to_path(path, output, ["--backend=cuda"])
 
 fn aot_vhdl_file(path: text, output: text) -> CompileResult:
-    _run_compile_to_path(path, output, ["--backend=vhdl"])
+    val fallback_result = _compile_simple_vhdl_subset(path, output)
+    if fallback_result.is_success():
+        return fallback_result
+    val external_result = _run_compile_to_path(path, output, ["--backend=vhdl"])
+    if external_result.is_success() and _file_contains_vhdl_design(output):
+        return external_result
+    external_result
 
 fn check_file(path: text) -> CompileResult:
     val simple_bin = _find_simple_binary()
@@ -139,6 +146,139 @@ fn _default_smf_output(path: text) -> text:
     if path.ends_with(".spl"):
         return path.substring(0, path.len() - 4) + ".smf"
     path + ".smf"
+
+fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
+    val source = rt_file_read_text(path) ?? ""
+    val vhdl_result = _simple_vhdl_source_to_text(source)
+    if vhdl_result.is_err():
+        return CompileResult.RuntimeError(vhdl_result.unwrap_err())
+    if rt_file_write_text(output, vhdl_result.unwrap()):
+        CompileResult.Success(output)
+    else:
+        CompileResult.RuntimeError("failed to write VHDL output: {output}")
+
+fn _file_contains_vhdl_design(path: text) -> bool:
+    val content = rt_file_read_text(path) ?? ""
+    val trimmed = content.trim()
+    val has_design_unit = trimmed.starts_with("library ") or trimmed.starts_with("use ") or trimmed.starts_with("package ") or trimmed.starts_with("entity ") or trimmed.contains("\nentity ")
+    has_design_unit and trimmed.contains("<=")
+
+fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
+    val lines = source.split("\n")
+    var header = ""
+    var body = ""
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "":
+            if header == "":
+                header = line
+            else:
+                body = line
+                break
+        i = i + 1
+    if not header.starts_with("fn "):
+        return Err("VHDL subset fallback requires a single function declaration")
+    if body == "":
+        return Err("VHDL subset fallback requires a single expression body")
+
+    val after_fn = header.substring(3).trim()
+    val name_end_opt = after_fn.find("(")
+    val params_end_opt = after_fn.find(")")
+    val ret_start_opt = after_fn.find("->")
+    val colon_opt = after_fn.find(":")
+    if not name_end_opt.? or not params_end_opt.? or not ret_start_opt.? or not colon_opt.?:
+        return Err("VHDL subset fallback could not parse function signature")
+    val name_end = name_end_opt.unwrap()
+    val params_end = params_end_opt.unwrap()
+    val ret_start = ret_start_opt.unwrap()
+    val colon = colon_opt.unwrap()
+
+    val fn_name = after_fn.substring(0, name_end).trim()
+    val params_text = after_fn.substring(name_end + 1, params_end).trim()
+    val return_type = after_fn.substring(ret_start + 2, colon).trim()
+    val return_vhdl_type = _simple_type_to_vhdl(return_type)
+    if return_vhdl_type == "":
+        return Err("VHDL subset fallback unsupported return type: {return_type}")
+
+    var ports: [text] = []
+    if params_text != "":
+        val parts = params_text.split(",")
+        for part in parts:
+            val param = part.trim()
+            val type_sep_opt = param.find(":")
+            if not type_sep_opt.?:
+                return Err("VHDL subset fallback could not parse parameter: {param}")
+            val type_sep = type_sep_opt.unwrap()
+            val param_name = param.substring(0, type_sep).trim()
+            val param_type = param.substring(type_sep + 1, param.len()).trim()
+            val vhdl_type = _simple_type_to_vhdl(param_type)
+            if vhdl_type == "":
+                return Err("VHDL subset fallback unsupported parameter type: {param_type}")
+            ports = ports.push("        {param_name} : in {vhdl_type};")
+    ports = ports.push("        result_out : out {return_vhdl_type}")
+
+    val expr_result = _simple_expr_to_vhdl(body, return_type)
+    if expr_result.is_err():
+        return Err(expr_result.unwrap_err())
+    val expr = expr_result.unwrap()
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    out = out + "entity {fn_name} is\n"
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    out = out + "begin\n"
+    out = out + "    result_out <= {expr};\n"
+    out = out + "end architecture rtl;\n"
+    Ok(out)
+
+fn _simple_type_to_vhdl(type_name: text) -> text:
+    match type_name:
+        case "i32": "signed(31 downto 0)"
+        case "i64": "signed(63 downto 0)"
+        case "u8": "unsigned(7 downto 0)"
+        case "u32": "unsigned(31 downto 0)"
+        case "bool": "std_logic"
+        case _: ""
+
+fn _simple_expr_to_vhdl(expr: text, result_type: text) -> Result<text, text>:
+    val trimmed = expr.trim()
+    if trimmed.contains(" + "):
+        val parts = trimmed.split(" + ")
+        if parts.len() == 2:
+            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} + {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
+    if trimmed.contains(" - "):
+        val parts = trimmed.split(" - ")
+        if parts.len() == 2:
+            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} - {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
+    if trimmed.contains(" * "):
+        val parts = trimmed.split(" * ")
+        if parts.len() == 2:
+            return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} * {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
+    Ok(_simple_operand_to_vhdl(trimmed, result_type))
+
+fn _simple_operand_to_vhdl(value: text, type_name: text) -> text:
+    if value == "true":
+        return "'1'"
+    if value == "false":
+        return "'0'"
+    val first = if value.len() > 0: value.substring(0, 1) else: ""
+    if _is_decimal_digit(first):
+        match type_name:
+            case "i32": return "to_signed({value}, 32)"
+            case "i64": return "to_signed({value}, 64)"
+            case "u8": return "to_unsigned({value}, 8)"
+            case "u32": return "to_unsigned({value}, 32)"
+            case _: return value
+    value
+
+fn _is_decimal_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
 
 fn _run_compile_to_path(path: text, output: text, extra_args: [text]) -> CompileResult:
     val simple_bin = _find_simple_binary()
