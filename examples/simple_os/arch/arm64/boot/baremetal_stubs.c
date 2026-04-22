@@ -2740,7 +2740,7 @@ RuntimeValue rt_arm64_enter_user_first_probe(RuntimeValue entry_val, RuntimeValu
         translated = (uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)arm64_last_elf_virtual_entry);
         if (translated == arm64_last_elf_direct_entry) return 1;
     }
-    return 1;
+    return 0;
 }
 
 RuntimeValue rt_arm64_record_user_handoff(RuntimeValue entry_val, RuntimeValue sp_val, RuntimeValue root_val)
