@@ -4,6 +4,11 @@
 # service closure while still mounting real VirtIO-BLK FAT32 media.
 
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_last_read_bytes}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskPriority}
 
 extern fn serial_println(msg: text)
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
@@ -20,6 +25,7 @@ var g_arm_vfs_initialized: bool = false
 var g_arm_hello_smf_bytes: [u8] = []
 var g_arm_version_bytes: [u8] = []
 var g_arm_hello_smf_len: u32 = 0
+var g_arm_boot_user_pid: i64 = 0
 var g_arm_bps: u64 = 512
 var g_arm_spc: u64 = 1
 var g_arm_reserved: u64 = 0
@@ -64,6 +70,9 @@ fn arm_fs_exec_vfs_boot_init() -> bool:
     g_arm_version_bytes = []
     g_arm_blk = Some(dev)
     g_arm_vfs_initialized = true
+    if not _arm_schedule_loaded_hello_smf(hello_smf_bytes):
+        serial_println("[vfs-init] executable scheduler registration failed")
+        return false
     serial_println("[vfs-init] VirtIO FAT32 direct reader ready")
     val probe = hello_smf_bytes
     if rt_arm_array_len_u32(probe) <= 4:
@@ -105,6 +114,30 @@ pub fn arm_fs_exec_loaded_hello_len() -> u32:
     if not g_arm_vfs_initialized:
         return 0
     g_arm_hello_smf_len
+
+pub fn arm_fs_exec_boot_user_pid() -> i64:
+    g_arm_boot_user_pid
+
+@cfg(arm64)
+fn _arm_schedule_loaded_hello_smf(_bytes: [u8]) -> bool:
+    true
+
+@cfg(arm32)
+fn _arm_schedule_loaded_hello_smf(bytes: [u8]) -> bool:
+    val path = "/sys/apps/hello_world.smf"
+    val argv: [text] = []
+    val envp: [text] = []
+    serial_println("[arm-fs-exec] spawn:image")
+    val image = build_user_process_image_unchecked(path, bytes, Architecture.Arm32, argv, envp)
+    serial_println("[arm-fs-exec] spawn:image-ok")
+    var scheduler = Scheduler.new_bootstrap()
+    val pid = scheduler.create_bootstrap_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+    if pid == 0:
+        serial_println("[arm-fs-exec] spawn:scheduler-fail")
+        return false
+    g_arm_boot_user_pid = pid as i64
+    serial_println("[arm-fs-exec] spawn:pid={pid}")
+    true
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = []
