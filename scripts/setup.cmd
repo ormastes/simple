@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM Simple Language — Windows setup (CMD/PowerShell)
 REM
 REM Creates runtime entries:
@@ -135,17 +135,9 @@ for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_s
     if exist "%RELEASE_DIR%\%%M.cmd" del "%RELEASE_DIR%\%%M.cmd"
 )
 
-REM Create bin\ symlinks/copies for platform-specific MCP launchers
-for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_server) do (
-    if exist "%REPO_ROOT%\bin\%%M.cmd" del "%REPO_ROOT%\bin\%%M.cmd"
-    mklink "%REPO_ROOT%\bin\%%M.cmd" "release\%ACTIVE_MCP_TRIPLE%\%%M.cmd" >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo error: failed to create symlink bin\%%M.cmd -^> release\%ACTIVE_MCP_TRIPLE%\%%M.cmd >&2
-        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
-        exit /b 1
-    )
-)
-echo   Linked bin\*_mcp_server.cmd to release\%ACTIVE_MCP_TRIPLE%\
+REM Generate bin\ MCP wrappers with absolute exe paths (not symlinks — %~dp0 breaks with symlinks)
+call :generate_bin_mcp_wrappers "%ACTIVE_MCP_TRIPLE%"
+echo   Generated bin\*_mcp_server.cmd for %ACTIVE_MCP_TRIPLE%
 
 REM === Copy hand-authored simple wrappers ===
 if exist "%REPO_ROOT%\scripts\setup\bin_scripts\simple" (
@@ -259,15 +251,19 @@ echo   %~1\
 echo @echo off
 echo setlocal
 echo set "SCRIPT_DIR=%%~dp0"
-echo set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\release\simple.exe"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo if exist "%%SCRIPT_DIR%%simple_mcp_server.exe" ^(
+echo     "%%SCRIPT_DIR%%simple_mcp_server.exe" %%*
+echo     exit /b %%ERRORLEVEL%%
+echo ^)
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\release\simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\bootstrap\simple.exe"
-echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\release\simple.exe"
 echo set "ENTRY=%%SCRIPT_DIR%%..\..\..\src\app\mcp\main.spl"
 echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\..\src"
-echo set "SIMPLE_LOG=error"
-echo set "RUST_LOG=error"
 echo "%%RUNTIME%%" run "%%ENTRY%%" %%* 2^>nul
 ) > "%MCP_RELEASE_DIR%\simple_mcp_server.cmd"
 
@@ -275,16 +271,20 @@ echo "%%RUNTIME%%" run "%%ENTRY%%" %%* 2^>nul
 echo @echo off
 echo setlocal
 echo set "SCRIPT_DIR=%%~dp0"
-echo set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\release\simple.exe"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo if exist "%%SCRIPT_DIR%%simple_lsp_mcp_server.exe" ^(
+echo     "%%SCRIPT_DIR%%simple_lsp_mcp_server.exe" %%*
+echo     exit /b %%ERRORLEVEL%%
+echo ^)
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\release\simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\..\src\compiler_rust\target\bootstrap\simple.exe"
-echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%..\..\release\simple.exe"
 echo set "ENTRY=%%SCRIPT_DIR%%..\..\..\src\app\simple_lsp_mcp\main.spl"
 echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\..\src"
 echo set "SIMPLE_BINARY=%%RUNTIME%%"
-echo set "SIMPLE_LOG=error"
-echo set "RUST_LOG=error"
 echo "%%RUNTIME%%" run "%%ENTRY%%" %%* 2^>nul
 ) > "%MCP_RELEASE_DIR%\simple_lsp_mcp_server.cmd"
 
@@ -328,4 +328,33 @@ echo set "RUST_LOG=error"
 echo pushd "%%REPO_ROOT%%"
 echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
 ) > "%MCP_RELEASE_DIR%\t32_lsp_mcp_server.cmd"
+exit /b 0
+
+:generate_bin_mcp_wrappers
+REM Generate bin\ level .cmd wrappers using %~dp0-relative paths to the triple exe.
+REM Symlinks don't work here: %~dp0 in a symlinked .cmd resolves to the symlink's dir (bin\),
+REM not the target dir, so the exe lookup must navigate from bin\ to release\<triple>\.
+call :write_bin_mcp_wrapper simple_mcp_server "%~1"
+call :write_bin_mcp_wrapper simple_lsp_mcp_server "%~1"
+call :write_bin_mcp_wrapper t32_mcp_server "%~1"
+call :write_bin_mcp_wrapper t32_lsp_mcp_server "%~1"
+exit /b 0
+
+:write_bin_mcp_wrapper
+REM %~1 = server name (e.g. simple_mcp_server)
+REM %~2 = triple (e.g. x86_64-pc-windows-msvc) — embedded into generated path
+REM Generated wrapper uses %%~dp0 so it resolves correctly relative to bin\ at runtime.
+set "BMW_NAME=%~1"
+set "BMW_TRIPLE=%~2"
+if exist "%REPO_ROOT%\bin\%BMW_NAME%.cmd" del "%REPO_ROOT%\bin\%BMW_NAME%.cmd"
+(
+echo @echo off
+echo setlocal
+echo set "EXE=%%~dp0release\%BMW_TRIPLE%\%BMW_NAME%.exe"
+echo if exist "%%EXE%%" ^(
+echo     "%%EXE%%" %%*
+echo     exit /b %%ERRORLEVEL%%
+echo ^)
+echo call "%%~dp0release\%BMW_TRIPLE%\%BMW_NAME%.cmd" %%*
+) > "%REPO_ROOT%\bin\%BMW_NAME%.cmd"
 exit /b 0
