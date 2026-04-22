@@ -10,7 +10,12 @@ Feature: spm-winfs-llm-suite AC-3.
 """
 
 use lib.nogc_sync_mut.io.env_ops.{env_get}
-use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_response}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_request, spm_decode_response}
+
+extern fn rt_unix_socket_connect(path: text) -> i64
+extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
+extern fn rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text
+extern fn rt_fd_close(fd: i64) -> bool
 
 # ---------------------------------------------------------------------------
 # Production impl
@@ -46,19 +51,30 @@ impl SpmTransport for SpmTransportHost:
             # In-process parity round trip — run the full wire encode/decode
             # so the spec sees the same bytes the kernel transport would.
             val wire_req = spm_encode_request(req)
-            val resp = self.handler(req)
+            val decoded_req = spm_decode_request(wire_req)
+            val resp = self.handler(decoded_req)
             # Encode+decode the response to exercise the wire layer.
             val wire_resp = lib.common.spm.spm_rpc.spm_encode_response(resp)
             return spm_decode_response(wire_resp)
-        # TODO: real socket send (Linux/mac unix socket, Windows named pipe)
-        SpmResponse(
-            ok: false,
-            body: [],
-            error: "host socket transport not wired (I/O stub)")
+        val fd = rt_unix_socket_connect(self.sock_path)
+        if fd < 0:
+            return SpmResponse(ok: false, body: [], error: "host socket connect failed: {self.sock_path}")
+        val wire = spm_encode_request(req)
+        val wire_text = text.from_bytes(wire)
+        val wrote = rt_fd_write(fd, wire_text, wire_text.len())
+        if wrote < 0:
+            rt_fd_close(fd)
+            return SpmResponse(ok: false, body: [], error: "host socket write failed: {self.sock_path}")
+        val reply_text = rt_fd_read_until(fd, 0, 1048576)
+        rt_fd_close(fd)
+        if reply_text.len() == 0:
+            return SpmResponse(ok: false, body: [], error: "host socket returned empty response: {self.sock_path}")
+        spm_decode_response(reply_text.bytes())
 
     fn listen(bind: text) -> TransportStatus:
-        # TODO: bind+accept loop on `self.sock_path` using nogc_sync_mut.net
-        TransportStatus.failure("host listen not wired")
+        if self.sock_path == ":memory:":
+            return TransportStatus.success()
+        TransportStatus.failure("host listen requires a host socket server runtime binding: {bind}")
 
 # ---------------------------------------------------------------------------
 # Helpers
