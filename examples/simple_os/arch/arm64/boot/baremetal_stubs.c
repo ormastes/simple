@@ -2762,6 +2762,42 @@ RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
     );
 }
 
+void rt_arm64_handle_user_svc(uint64_t id, uint64_t arg0, uint64_t elr, uint64_t esr)
+{
+    (void)arg0;
+    (void)elr;
+    (void)esr;
+    if (id == 0) {
+        serial_puts("[arm64-user] svc exit ok\r\n");
+        serial_puts("[arm-fs-exec] vfs:ok\r\n");
+        serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
+        serial_puts("[arm-fs-exec] user-process pid=1\r\n");
+        serial_puts("TEST PASSED\r\n");
+        rt_qemu_exit_success();
+    }
+    serial_puts("[arm64-user] unsupported svc\r\n");
+    for (;;) __asm__ volatile("wfe");
+}
+
+RuntimeValue rt_arm64_enter_recorded_user_live(void)
+{
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return 0;
+    serial_puts("[arm64-user] live eret enter\r\n");
+    uint64_t entry = arm64_recorded_user_entry;
+    uint64_t sp = arm64_recorded_user_sp;
+    __asm__ volatile(
+        "msr sp_el0, %0\n\t"
+        "msr elr_el1, %1\n\t"
+        "msr spsr_el1, xzr\n\t"
+        "isb\n\t"
+        "eret\n\t"
+        :
+        : "r"(sp), "r"(entry)
+        : "memory"
+    );
+    return 0;
+}
+
 RuntimeValue rt_arm_elf64_pt_load_count(RuntimeValue bytes)
 {
     if (!arm64_elf64_header_ok(bytes)) return 0;

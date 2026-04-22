@@ -32,6 +32,14 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
+            if let Some((type_name, "new")) = name.rsplit_once('.') {
+                if let Some(type_id) = self.module.types.lookup(type_name) {
+                    if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) {
+                        return self.lower_bitfield_constructor(type_id, args, ctx);
+                    }
+                }
+            }
+
             // Short enum-constructor grammar: Some(x), None(), Ok(x), Err(x).
             // Lower these as regular calls to the bare constructor symbol so MIR
             // can canonicalize them into Option*/Result* instructions.
@@ -174,8 +182,7 @@ impl Lowerer {
         if let Expr::Path(segments) = callee {
             if segments.len() == 2 {
                 if let Some(type_id) = self.module.types.lookup(&segments[0]) {
-                    if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. }))
-                        && segments[1] == "new"
+                    if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && segments[1] == "new"
                     {
                         return self.lower_bitfield_constructor(type_id, args, ctx);
                     }

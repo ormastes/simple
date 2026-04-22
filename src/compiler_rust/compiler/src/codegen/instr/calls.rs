@@ -678,6 +678,14 @@ pub fn compile_call<M: Module>(
         };
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        if let Some((type_name, "new")) = func_name.rsplit_once('.') {
+            if arg_vals.len() == 1 && type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, arg_vals[0]);
+                }
+                return Ok(());
+            }
+        }
         let func_id: Result<cranelift_module::FuncId, cranelift_module::ModuleError> = if let Some(&existing) =
             ctx.func_ids.get(resolved_name.as_ref())
         {

@@ -170,6 +170,57 @@ impl<'a> MirLowerer<'a> {
             .and_then(|tr| tr.get(receiver_ty))
             .is_some_and(|t| matches!(t, HirType::Tuple(_)));
 
+        if let Some(HirType::Bitfield { fields, .. }) = self.type_registry.and_then(|tr| tr.get(receiver_ty)) {
+            if let Some(field) = fields.get(field_index) {
+                let mask = if field.bit_width >= 64 {
+                    -1i64
+                } else {
+                    ((1u64 << field.bit_width) - 1) as i64
+                };
+                let shifted = if field.bit_offset == 0 {
+                    receiver_reg
+                } else {
+                    let shift_reg = self.with_func(|func, current_block| {
+                        let r = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ConstInt {
+                            dest: r,
+                            value: field.bit_offset as i64,
+                        });
+                        r
+                    })?;
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::BinOp {
+                            dest,
+                            op: crate::hir::BinOp::ShiftRight,
+                            left: receiver_reg,
+                            right: shift_reg,
+                        });
+                        dest
+                    })?
+                };
+                let mask_reg = self.with_func(|func, current_block| {
+                    let r = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest: r, value: mask });
+                    r
+                })?;
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BinOp {
+                        dest,
+                        op: crate::hir::BinOp::BitAnd,
+                        left: shifted,
+                        right: mask_reg,
+                    });
+                    dest
+                });
+            }
+        }
+
         if is_tuple {
             // Emit: index_reg = ConstInt(field_index)
             //        dest     = Call rt_tuple_get(receiver_reg, index_reg)

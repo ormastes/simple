@@ -384,7 +384,7 @@ or `Rejected` (one-line reason).
 - **Acceptance-criteria:**
   - [x] `bitfield Flags(u32): a:4; b:28` + `var f: Flags = Flags.new(0); f.a = 3; expect(f.a).to_equal(3)` round-trips under `bin/simple test`.
   - [x] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
-  - [ ] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
+  - [x] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
   - [ ] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
 - **Related-design-doc:** tbd
@@ -404,10 +404,11 @@ or `Rejected` (one-line reason).
   `Flags.new(raw)` packed-value construction, and bitfield field-assignment
   recomputation path with an exact `Flags(u32)` acceptance spec. `bin/simple test
   test/feature/usage/bitfield_runtime_compat_spec.spl` now covers the
-  requested `Flags(u32)` round-trip and adjacent-field preservation. Compiled
-  `.smf` execution remains open: `/tmp/fr_driver_0008_bitfield.smf` failed to
-  load with unresolved `Flags_dot_new`, so native constructor/lowering/codegen
-  still needs completion.
+  requested `Flags(u32)` round-trip and adjacent-field preservation.
+  Update 2026-04-22: compiled `.smf` execution now covers the same
+  `Flags.new(0); f.a = 3; f.b = 5; print(f.a)` path with the freshly built
+  Rust seed (`src/compiler_rust/target/debug/simple compile ... && ...`),
+  printing `3` instead of failing relocation on `Flags_dot_new`.
 
 ---
 

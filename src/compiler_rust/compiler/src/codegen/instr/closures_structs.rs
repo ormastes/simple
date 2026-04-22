@@ -530,6 +530,21 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     ctx.vreg_values.insert(*d, results[0]);
                 }
             }
+        } else if let Some((type_name, "new")) = lookup_name.rsplit_once('.') {
+            if args.is_empty() && type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, get_vreg_or_default(ctx, builder, &receiver));
+                }
+            } else {
+                let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
+                let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
+                let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+                let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+                if let Some(d) = dest {
+                    let result = builder.inst_results(call)[0];
+                    ctx.vreg_values.insert(*d, result);
+                }
+            }
         } else {
             let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
             let not_found_id = ctx.runtime_funcs["rt_function_not_found"];

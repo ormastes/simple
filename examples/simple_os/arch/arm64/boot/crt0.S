@@ -152,7 +152,7 @@ _vectors:
     .balign 128
 
     /* Lower EL using AArch64 — Synchronous */
-    b       _fault_handler
+    b       _lower_el_aarch64_sync_handler
     .balign 128
     /* Lower EL using AArch64 — IRQ */
     b       _fault_handler
@@ -369,6 +369,25 @@ _alignment_handler:
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
     /* Fall through to print FAULT */
+
+/* ===================================================================
+ * Lower EL AArch64 synchronous handler
+ *
+ * Handles the filesystem-exec proof ELF's `svc #0` exit path. Other lower-EL
+ * synchronous exceptions still fall through to the fatal diagnostic handler.
+ * =================================================================== */
+
+_lower_el_aarch64_sync_handler:
+    mrs     x3, esr_el1
+    lsr     x4, x3, #26
+    cmp     x4, #0x15              /* EC=0x15: SVC from AArch64 */
+    b.ne    _fault_handler
+
+    mrs     x2, elr_el1
+    mov     x1, x0                 /* user arg0 */
+    mov     x0, x8                 /* syscall id */
+    bl      rt_arm64_handle_user_svc
+    b       _fault_handler
 
 /* ===================================================================
  * Fault handler — prints "FAULT @ 0x<ELR_EL1>" to PL011 then halts

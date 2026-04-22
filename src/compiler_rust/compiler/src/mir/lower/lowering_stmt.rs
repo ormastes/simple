@@ -4,7 +4,7 @@
 //! including control flow (if, while, loop, break, continue) and assignments.
 
 use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
-use crate::hir::{HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
+use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::MirInst;
@@ -66,6 +66,86 @@ impl<'a> MirLowerer<'a> {
                         let receiver_reg = self.lower_expr(receiver)?;
                         let field_index = *field_index;
                         let receiver_ty = receiver.ty;
+
+                        if let Some(HirType::Bitfield { fields, .. }) =
+                            self.type_registry.and_then(|tr| tr.get(receiver_ty))
+                        {
+                            if let (Some(field), HirExprKind::Local(local_idx)) =
+                                (fields.get(field_index), &receiver.kind)
+                            {
+                                let field_mask = if field.bit_width >= 64 {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << field.bit_width) - 1
+                                };
+                                let shifted_mask = field_mask << field.bit_offset;
+                                let keep_mask = !(shifted_mask as i64);
+
+                                let updated = self.with_func(|func, current_block| {
+                                    let keep_mask_reg = func.new_vreg();
+                                    let value_mask_reg = func.new_vreg();
+                                    let shift_reg = func.new_vreg();
+                                    let kept = func.new_vreg();
+                                    let masked_value = func.new_vreg();
+                                    let shifted_value = func.new_vreg();
+                                    let combined = func.new_vreg();
+                                    let addr = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::ConstInt {
+                                        dest: keep_mask_reg,
+                                        value: keep_mask,
+                                    });
+                                    block.instructions.push(MirInst::BinOp {
+                                        dest: kept,
+                                        op: BinOp::BitAnd,
+                                        left: receiver_reg,
+                                        right: keep_mask_reg,
+                                    });
+                                    block.instructions.push(MirInst::ConstInt {
+                                        dest: value_mask_reg,
+                                        value: field_mask as i64,
+                                    });
+                                    block.instructions.push(MirInst::BinOp {
+                                        dest: masked_value,
+                                        op: BinOp::BitAnd,
+                                        left: val_reg,
+                                        right: value_mask_reg,
+                                    });
+                                    block.instructions.push(MirInst::ConstInt {
+                                        dest: shift_reg,
+                                        value: field.bit_offset as i64,
+                                    });
+                                    block.instructions.push(MirInst::BinOp {
+                                        dest: shifted_value,
+                                        op: BinOp::ShiftLeft,
+                                        left: masked_value,
+                                        right: shift_reg,
+                                    });
+                                    block.instructions.push(MirInst::BinOp {
+                                        dest: combined,
+                                        op: BinOp::BitOr,
+                                        left: kept,
+                                        right: shifted_value,
+                                    });
+                                    block.instructions.push(MirInst::LocalAddr {
+                                        dest: addr,
+                                        local_index: *local_idx,
+                                    });
+                                    block.instructions.push(MirInst::Store {
+                                        addr,
+                                        value: combined,
+                                        ty: receiver_ty,
+                                    });
+                                    combined
+                                })?;
+                                if self.tagged_vregs.contains(&updated) {
+                                    self.tagged_locals.insert(*local_idx);
+                                } else {
+                                    self.tagged_locals.remove(local_idx);
+                                }
+                                return Ok(());
+                            }
+                        }
 
                         // Check if the receiver is a tuple type — tuples use
                         // rt_tuple_set, not raw memory stores.
