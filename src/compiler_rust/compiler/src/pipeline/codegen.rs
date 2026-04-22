@@ -94,6 +94,285 @@ impl CompilerPipeline {
         std::fs::write(output, ptx).map_err(|e| CompileError::Io(format!("{e}")))?;
         Ok(())
     }
+
+    /// Compile a source file to VHDL-2008 for the supported combinational subset.
+    ///
+    /// This is intentionally conservative: unsupported MIR instructions fail
+    /// instead of being silently dropped.
+    pub fn compile_file_to_vhdl(&mut self, source: &Path, output: &Path) -> Result<(), CompileError> {
+        let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
+        let ast_module = monomorphize_module(&ast_module);
+        let mir_module = self.type_check_and_lower_with_context(&ast_module, source)?;
+        let vhdl = generate_vhdl(&mir_module)?;
+        std::fs::write(output, vhdl).map_err(|e| CompileError::Io(format!("{e}")))?;
+        Ok(())
+    }
+}
+
+// =============================================================================
+// VHDL code generation from MIR
+// =============================================================================
+
+fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
+    let mut out = String::new();
+    for func in &module.functions {
+        if func.name == "main" || func.name.starts_with("__") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        emit_vhdl_function(&mut out, func)?;
+    }
+    if out.trim().is_empty() {
+        return Err(CompileError::Codegen(
+            "VHDL backend found no hardware functions to emit".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), CompileError> {
+    use std::collections::{BTreeSet, HashMap};
+
+    let entity = sanitize_vhdl_ident(&func.name);
+    let mut reg_expr: HashMap<u32, String> = HashMap::new();
+    let mut reg_ty: HashMap<u32, crate::hir::TypeId> = HashMap::new();
+    let mut reg_int_const: HashMap<u32, i64> = HashMap::new();
+    let mut addr_local: HashMap<u32, usize> = HashMap::new();
+    let mut signals: BTreeSet<(String, crate::hir::TypeId)> = BTreeSet::new();
+    let mut assigns: Vec<String> = Vec::new();
+    let mut result_expr: Option<String> = None;
+
+    out.push_str("library ieee;\n");
+    out.push_str("use ieee.std_logic_1164.all;\n");
+    out.push_str("use ieee.numeric_std.all;\n\n");
+    out.push_str(&format!("entity {} is\n", entity));
+    out.push_str("    port (\n");
+    for param in &func.params {
+        out.push_str(&format!(
+            "        {} : in {};\n",
+            sanitize_vhdl_ident(&param.name),
+            vhdl_type(param.ty)?
+        ));
+    }
+    out.push_str(&format!("        result_out : out {}\n", vhdl_type(func.return_type)?));
+    out.push_str("    );\n");
+    out.push_str(&format!("end entity {};\n\n", entity));
+    out.push_str(&format!("architecture rtl of {} is\n", entity));
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::LocalAddr { dest, local_index } => {
+                    addr_local.insert(dest.0, *local_index);
+                }
+                MirInst::Load { dest, addr, ty } => {
+                    let local_index = addr_local.get(&addr.0).ok_or_else(|| {
+                        CompileError::Codegen(format!("VHDL unsupported load from non-local address v{}", addr.0))
+                    })?;
+                    let name = local_name(func, *local_index)?;
+                    reg_expr.insert(dest.0, sanitize_vhdl_ident(name));
+                    reg_ty.insert(dest.0, *ty);
+                }
+                MirInst::ConstInt { dest, value } => {
+                    reg_int_const.insert(dest.0, *value);
+                    reg_expr.insert(dest.0, value.to_string());
+                }
+                MirInst::ConstBool { dest, value } => {
+                    reg_expr.insert(dest.0, if *value { "'1'".to_string() } else { "'0'".to_string() });
+                    reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
+                }
+                MirInst::Copy { dest, src } => {
+                    let expr = reg_expr_for(&reg_expr, *src)?;
+                    reg_expr.insert(dest.0, expr);
+                    if let Some(value) = reg_int_const.get(&src.0).copied() {
+                        reg_int_const.insert(dest.0, value);
+                    }
+                    if let Some(ty) = reg_ty.get(&src.0).copied() {
+                        reg_ty.insert(dest.0, ty);
+                    }
+                }
+                MirInst::BinOp { dest, op, left, right } => {
+                    let left_ty = reg_ty
+                        .get(&left.0)
+                        .copied()
+                        .or_else(|| reg_ty.get(&right.0).copied())
+                        .unwrap_or(func.return_type);
+                    let right_ty = reg_ty
+                        .get(&right.0)
+                        .copied()
+                        .or_else(|| reg_ty.get(&left.0).copied())
+                        .unwrap_or(func.return_type);
+                    let left_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *left, left_ty)?;
+                    let right_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *right, right_ty)?;
+                    let expr = vhdl_binop(op, &left_expr, &right_expr)?;
+                    let ty = binop_result_type(*op, left_ty);
+                    let sig = format!("tmp_{}", dest.0);
+                    signals.insert((sig.clone(), ty));
+                    assigns.push(format!("    {} <= {};", sig, expr));
+                    reg_expr.insert(dest.0, sig);
+                    reg_ty.insert(dest.0, ty);
+                }
+                MirInst::UnaryOp { dest, op, operand } => {
+                    let operand_ty = reg_ty.get(&operand.0).copied().unwrap_or(func.return_type);
+                    let operand_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *operand, operand_ty)?;
+                    let expr = vhdl_unaryop(op, &operand_expr)?;
+                    let sig = format!("tmp_{}", dest.0);
+                    signals.insert((sig.clone(), operand_ty));
+                    assigns.push(format!("    {} <= {};", sig, expr));
+                    reg_expr.insert(dest.0, sig);
+                    reg_ty.insert(dest.0, operand_ty);
+                }
+                other => {
+                    return Err(CompileError::Codegen(format!(
+                        "VHDL backend unsupported MIR instruction in {}: {:?}",
+                        func.name, other
+                    )));
+                }
+            }
+        }
+        match &block.terminator {
+            Terminator::Return(Some(reg)) => {
+                result_expr = Some(reg_expr_for_type(&reg_expr, &reg_int_const, *reg, func.return_type)?);
+            }
+            Terminator::Return(None) => {}
+            Terminator::Unreachable if block.instructions.is_empty() => {}
+            other => {
+                return Err(CompileError::Codegen(format!(
+                    "VHDL backend unsupported terminator in {}: {:?}",
+                    func.name, other
+                )));
+            }
+        }
+    }
+
+    for (name, ty) in &signals {
+        out.push_str(&format!("    signal {} : {};\n", name, vhdl_type(*ty)?));
+    }
+    out.push_str("begin\n");
+    for assign in assigns {
+        out.push_str(&assign);
+        out.push('\n');
+    }
+    if let Some(expr) = result_expr {
+        out.push_str(&format!("    result_out <= {};\n", expr));
+    }
+    out.push_str("end architecture rtl;\n");
+    Ok(())
+}
+
+fn local_name(func: &MirFunction, index: usize) -> Result<&str, CompileError> {
+    if index < func.params.len() {
+        return Ok(&func.params[index].name);
+    }
+    let local_index = index - func.params.len();
+    func.locals
+        .get(local_index)
+        .map(|local| local.name.as_str())
+        .ok_or_else(|| CompileError::Codegen(format!("VHDL backend local index out of range: {}", index)))
+}
+
+fn reg_expr_for(reg_expr: &std::collections::HashMap<u32, String>, reg: mir::VReg) -> Result<String, CompileError> {
+    reg_expr
+        .get(&reg.0)
+        .cloned()
+        .ok_or_else(|| CompileError::Codegen(format!("VHDL backend has no expression for v{}", reg.0)))
+}
+
+fn reg_expr_for_type(
+    reg_expr: &std::collections::HashMap<u32, String>,
+    reg_int_const: &std::collections::HashMap<u32, i64>,
+    reg: mir::VReg,
+    ty: crate::hir::TypeId,
+) -> Result<String, CompileError> {
+    if let Some(value) = reg_int_const.get(&reg.0) {
+        return vhdl_int_literal(*value, ty);
+    }
+    reg_expr_for(reg_expr, reg)
+}
+
+fn vhdl_type(ty: crate::hir::TypeId) -> Result<&'static str, CompileError> {
+    if ty == crate::hir::TypeId::I32 {
+        Ok("signed(31 downto 0)")
+    } else if ty == crate::hir::TypeId::I64 {
+        Ok("signed(63 downto 0)")
+    } else if ty == crate::hir::TypeId::BOOL {
+        Ok("std_logic")
+    } else {
+        Err(CompileError::Codegen(format!(
+            "VHDL backend unsupported type id: {:?}",
+            ty
+        )))
+    }
+}
+
+fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId) -> Result<String, CompileError> {
+    if ty == crate::hir::TypeId::I32 {
+        Ok(format!("to_signed({}, 32)", value))
+    } else if ty == crate::hir::TypeId::I64 {
+        Ok(format!("to_signed({}, 64)", value))
+    } else {
+        Err(CompileError::Codegen(format!(
+            "VHDL backend cannot materialize integer literal for type id: {:?}",
+            ty
+        )))
+    }
+}
+
+fn binop_result_type(op: BinOp, int_ty: crate::hir::TypeId) -> crate::hir::TypeId {
+    match op {
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => crate::hir::TypeId::BOOL,
+        _ => int_ty,
+    }
+}
+
+fn vhdl_unaryop(op: &UnaryOp, operand: &str) -> Result<String, CompileError> {
+    let expr = match op {
+        UnaryOp::Neg => format!("-({})", operand),
+        UnaryOp::Not | UnaryOp::BitNot => format!("not {}", operand),
+    };
+    Ok(expr)
+}
+
+fn vhdl_binop(op: &BinOp, left: &str, right: &str) -> Result<String, CompileError> {
+    let expr = match op {
+        BinOp::Add => format!("{} + {}", left, right),
+        BinOp::Sub => format!("{} - {}", left, right),
+        BinOp::Mul => format!("{} * {}", left, right),
+        BinOp::BitAnd | BinOp::And => format!("{} and {}", left, right),
+        BinOp::BitOr | BinOp::Or => format!("{} or {}", left, right),
+        BinOp::BitXor => format!("{} xor {}", left, right),
+        BinOp::Eq => format!("'1' when {} = {} else '0'", left, right),
+        BinOp::NotEq => format!("'1' when {} /= {} else '0'", left, right),
+        BinOp::Lt => format!("'1' when {} < {} else '0'", left, right),
+        BinOp::Gt => format!("'1' when {} > {} else '0'", left, right),
+        BinOp::LtEq => format!("'1' when {} <= {} else '0'", left, right),
+        BinOp::GtEq => format!("'1' when {} >= {} else '0'", left, right),
+        _ => {
+            return Err(CompileError::Codegen(format!(
+                "VHDL backend unsupported binary operator: {:?}",
+                op
+            )))
+        }
+    };
+    Ok(expr)
+}
+
+fn sanitize_vhdl_ident(name: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in name.chars().enumerate() {
+        if (idx == 0 && ch.is_ascii_alphabetic()) || (idx > 0 && (ch.is_ascii_alphanumeric() || ch == '_')) {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unnamed".to_string()
+    } else {
+        out
+    }
 }
 
 // =============================================================================
@@ -858,7 +1137,6 @@ mod tests {
     use simple_parser::Parser;
     #[cfg(feature = "cuda")]
     use std::ffi::CString;
-    #[cfg(feature = "cuda")]
     use tempfile::NamedTempFile;
 
     #[test]
@@ -932,6 +1210,83 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
             !ptx.contains("call.uni (%rd0), gpu_thread_id_x;"),
             "gpu_thread_id_x should not remain as a call target:\n{ptx}"
         );
+    }
+
+    #[test]
+    fn vhdl_emits_combinational_adder_from_simple_source() {
+        let source = "fn add(a: i32, b: i32) -> i32:\n    return a + b\n";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(vhdl.contains("entity add is"), "expected add entity:\n{vhdl}");
+        assert!(
+            vhdl.contains("a : in signed(31 downto 0);"),
+            "expected i32 input a:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("b : in signed(31 downto 0);"),
+            "expected i32 input b:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("result_out : out signed(31 downto 0)"),
+            "expected i32 result:\n{vhdl}"
+        );
+        assert!(vhdl.contains("<= a + b;"), "expected combinational add:\n{vhdl}");
+    }
+
+    #[test]
+    fn vhdl_emits_typed_constants_unary_ops_and_const_compare() {
+        let source = "\
+fn one() -> i32:
+    return 1
+
+fn neg(a: i32) -> i32:
+    return -a
+
+fn inv(a: bool) -> bool:
+    return not a
+
+fn is_one(a: i32) -> bool:
+    return a == 1
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("result_out <= to_signed(1, 32);"),
+            "expected typed signed constant:\n{vhdl}"
+        );
+        assert!(vhdl.contains("<= -(a);"), "expected unary negation:\n{vhdl}");
+        assert!(vhdl.contains("<= not a;"), "expected boolean not:\n{vhdl}");
+        assert!(
+            vhdl.contains("<= '1' when a = to_signed(1, 32) else '0';"),
+            "expected typed constant comparison:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn compile_file_to_vhdl_writes_vhdl_output() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(source_file.path(), "fn add(a: i32, b: i32) -> i32:\n    return a + b\n").expect("write source");
+        let output_file = NamedTempFile::new().expect("temp vhdl");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        pipeline
+            .compile_file_to_vhdl(source_file.path(), output_file.path())
+            .expect("compile VHDL");
+
+        let vhdl = std::fs::read_to_string(output_file.path()).expect("read VHDL");
+        assert!(
+            vhdl.starts_with("library ieee;"),
+            "expected VHDL library header:\n{vhdl}"
+        );
+        assert!(vhdl.contains("entity add is"), "expected add entity:\n{vhdl}");
     }
 
     #[test]

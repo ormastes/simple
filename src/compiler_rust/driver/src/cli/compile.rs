@@ -40,12 +40,11 @@ pub fn compile_file(
     }
 }
 
-/// Generate VHDL by running a Simple VHDL generator source and capturing stdout.
+/// Generate VHDL from Simple source.
 ///
-/// The current VHDL CLI surface is builder-oriented: source files use the
-/// VhdlBuilder APIs and print VHDL text. The self-hosted MIR-to-VHDL compile app
-/// is not stable enough to own this command path, so the Rust CLI captures the
-/// supported generator output directly.
+/// Builder-oriented sources that print complete VHDL are still supported for
+/// compatibility. Ordinary Simple functions fall back to the compiler pipeline's
+/// conservative MIR-to-VHDL subset.
 pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
     let out_path = output.unwrap_or_else(|| source.with_extension("vhd"));
     let interpreter = Interpreter::new();
@@ -54,32 +53,41 @@ pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
         ..RunConfig::default()
     };
 
-    let result = match interpreter.run_file(source, config) {
-        Ok(result) => result,
+    if let Ok(result) = interpreter.run_file(source, config) {
+        if result.exit_code == 0 && looks_like_vhdl(&result.stdout) {
+            return write_vhdl_output(&out_path, &result.stdout);
+        }
+    }
+
+    let mut pipeline = match simple_compiler::pipeline::CompilerPipeline::new() {
+        Ok(pipeline) => pipeline,
         Err(err) => {
-            eprintln!("error: VHDL generator failed: {err}");
+            eprintln!("error: failed to initialize VHDL compiler pipeline: {err:?}");
             return 1;
         }
     };
 
-    if result.exit_code != 0 {
-        eprintln!("error: VHDL generator exited with status {}", result.exit_code);
-        if !result.stderr.trim().is_empty() {
-            eprintln!("{}", result.stderr.trim());
+    match pipeline.compile_file_to_vhdl(source, &out_path) {
+        Ok(()) => {
+            println!("Output: {}", out_path.display());
+            0
         }
-        return 1;
+        Err(err) => {
+            eprintln!("error: VHDL compilation failed: {err}");
+            1
+        }
     }
+}
 
-    let vhdl = result.stdout.trim_start();
-    if !(vhdl.starts_with("library ")
+fn looks_like_vhdl(text: &str) -> bool {
+    let vhdl = text.trim_start();
+    vhdl.starts_with("library ")
         || vhdl.starts_with("use ")
         || vhdl.starts_with("package ")
-        || vhdl.starts_with("entity "))
-    {
-        eprintln!("error: --backend=vhdl expected the source to print VHDL text, but no VHDL design unit was emitted");
-        return 1;
-    }
+        || vhdl.starts_with("entity ")
+}
 
+fn write_vhdl_output(out_path: &Path, vhdl: &str) -> i32 {
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(err) = fs::create_dir_all(parent) {
@@ -89,7 +97,7 @@ pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
         }
     }
 
-    if let Err(err) = fs::write(&out_path, result.stdout) {
+    if let Err(err) = fs::write(out_path, vhdl) {
         eprintln!("error: failed to write VHDL output {}: {err}", out_path.display());
         return 1;
     }
