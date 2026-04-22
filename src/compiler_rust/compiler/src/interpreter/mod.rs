@@ -58,7 +58,8 @@ pub use interpreter_state::{
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,
-    BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, COMPOUND_UNIT_DIMENSIONS,
+    BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS,
+    COMPOUND_UNIT_DIMENSIONS,
     CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE,
     EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD,
     INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS,
@@ -119,6 +120,9 @@ pub(crate) use interpreter_control::exec_with;
 
 mod expr;
 pub(crate) use expr::evaluate_expr;
+
+mod bitfield_runtime;
+pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, update_bitfield_field};
 
 // Helper functions (method dispatch, array/dict ops, pattern binding, slicing)
 #[path = "../interpreter_helpers/mod.rs"]

@@ -255,6 +255,15 @@ pub(crate) fn evaluate_call(
             }
             // Check for static method call on a type: Type.method()
             // This handles calls like Set.new() or Set.from_array()
+            if field == "new" {
+                let mut values = Vec::new();
+                for arg in args {
+                    values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                }
+                if let Ok(value) = crate::interpreter::instantiate_bitfield(module_name, &values) {
+                    return Ok(value);
+                }
+            }
             // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
             let impl_methods_for_type = impl_methods
                 .get(module_name)

@@ -2,6 +2,7 @@
 
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -42,6 +43,36 @@ describe "Lib Smf Writer":
         expect(restored_obj).to_equal(obj_data)
         expect(reader.module_count()).to_equal(1)
         expect(reader.has_object("std/io/mod")).to_equal(true)
+
+        reader.close()
+        delete_if_exists(lib_path)
+
+    it "packages an SMF with a driver manifest section without changing DRVS bytes":
+        val lib_path = "/tmp/unit_lib_smf_writer_driver_manifest.lsm"
+        delete_if_exists(lib_path)
+
+        var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        opts.driver_manifest_bytes = [
+            0x53, 0x56, 0x52, 0x44,
+            0, 3, 1, 0,
+            0x86, 0x80, 0, 0,
+            1, 0, 0, 0,
+            0x22, 0x29, 0, 0
+        ]
+        val smf_data = generate_smf_with_options([0xC3], opts)
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data("drivers/ahci", smf_data).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        val reader = LibSmfReader.open(lib_path).unwrap()
+        val restored_smf = reader.get_module("drivers/ahci").unwrap()
+
+        expect(restored_smf).to_equal(smf_data)
+        expect(restored_smf.contains(0x53)).to_equal(true)
+        expect(restored_smf.contains(0x56)).to_equal(true)
+        expect(restored_smf.contains(0x52)).to_equal(true)
+        expect(restored_smf.contains(0x44)).to_equal(true)
 
         reader.close()
         delete_if_exists(lib_path)

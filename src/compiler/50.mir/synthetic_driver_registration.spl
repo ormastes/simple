@@ -1,0 +1,134 @@
+# FR-DRIVER-0001 synthetic static-registration planning.
+#
+# Full lowering to `register_static_driver(manifest, ops)` needs two inputs:
+# manifest fields from @driver/@native_lib and a concrete DriverOps value. The
+# manifest is available on HIR today; the DriverOps source is not represented by
+# the attribute, so this planner keeps the compiler decision explicit until the
+# attribute grows an ops binding or impl-to-ops derivation rule.
+
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.common.attributes.{DriverManifestAttrKind}
+
+enum SyntheticDriverRegistrationStatus:
+    NoManifest
+    AlreadyHandwritten
+    BlockedMissingDriverOps
+    BlockedNativeLibOps
+
+struct SyntheticDriverRegistrationPlan:
+    function_name: text
+    status: SyntheticDriverRegistrationStatus
+    reason: text
+
+fn plan_synthetic_driver_registration(fn_: HirFunction, symbols: SymbolTable) -> SyntheticDriverRegistrationPlan:
+    """Return the FR-DRIVER-0001 static-registration synthesis decision."""
+    if not fn_.has_driver_manifest_attr:
+        return SyntheticDriverRegistrationPlan(
+            function_name: fn_.name,
+            status: SyntheticDriverRegistrationStatus.NoManifest,
+            reason: "function has no @driver/@native_lib manifest metadata"
+        )
+
+    if block_calls_register_static_driver(fn_.body, symbols):
+        return SyntheticDriverRegistrationPlan(
+            function_name: fn_.name,
+            status: SyntheticDriverRegistrationStatus.AlreadyHandwritten,
+            reason: "function body already calls register_static_driver(manifest, ops)"
+        )
+
+    match fn_.driver_manifest_attr.kind:
+        case NativeLib:
+            return SyntheticDriverRegistrationPlan(
+                function_name: fn_.name,
+                status: SyntheticDriverRegistrationStatus.BlockedNativeLibOps,
+                reason: "@native_lib supplies manifest fields but not the init/probe/attach DriverOps adapter functions"
+            )
+        case Driver:
+            return SyntheticDriverRegistrationPlan(
+                function_name: fn_.name,
+                status: SyntheticDriverRegistrationStatus.BlockedMissingDriverOps,
+                reason: "@driver supplies manifest fields but not the DriverOps value required by register_static_driver"
+            )
+
+fn block_calls_register_static_driver(block: HirBlock, symbols: SymbolTable) -> bool:
+    var i = 0
+    while i < block.stmts.len():
+        if stmt_calls_register_static_driver(block.stmts[i], symbols):
+            return true
+        i = i + 1
+    if block.has:
+        return expr_calls_register_static_driver(block.value, symbols)
+    return false
+
+fn stmt_calls_register_static_driver(stmt: HirStmt, symbols: SymbolTable) -> bool:
+    match stmt.kind:
+        case Expr(expr):
+            expr_calls_register_static_driver(expr, symbols)
+        case Let(_, _, init):
+            expr_calls_register_static_driver(init, symbols)
+        case Assign(target, _, value):
+            expr_calls_register_static_driver(target, symbols) or expr_calls_register_static_driver(value, symbols)
+        case Block(block):
+            block_calls_register_static_driver(block, symbols)
+        case _:
+            false
+
+fn expr_calls_register_static_driver(expr: HirExpr, symbols: SymbolTable) -> bool:
+    match expr.kind:
+        case Call(callee, args, _):
+            if expr_is_symbol_named(callee, symbols, "register_static_driver"):
+                return true
+            var i = 0
+            while i < args.len():
+                if expr_calls_register_static_driver(args[i].value, symbols):
+                    return true
+                i = i + 1
+            false
+        case Return(value):
+            if value.?:
+                expr_calls_register_static_driver(value.unwrap(), symbols)
+            else:
+                false
+        case Block(block):
+            block_calls_register_static_driver(block, symbols)
+        case If(cond, then_, else_):
+            if expr_calls_register_static_driver(cond, symbols):
+                return true
+            if block_calls_register_static_driver(then_, symbols):
+                return true
+            if else_.?:
+                return block_calls_register_static_driver(else_.unwrap(), symbols)
+            false
+        case Binary(_, left, right):
+            expr_calls_register_static_driver(left, symbols) or expr_calls_register_static_driver(right, symbols)
+        case Unary(_, operand):
+            expr_calls_register_static_driver(operand, symbols)
+        case Field(base, _, _):
+            expr_calls_register_static_driver(base, symbols)
+        case Index(base, index):
+            expr_calls_register_static_driver(base, symbols) or expr_calls_register_static_driver(index, symbols)
+        case TupleLit(elements):
+            expr_list_calls_register_static_driver(elements, symbols)
+        case ArrayLit(elements, _):
+            expr_list_calls_register_static_driver(elements, symbols)
+        case _:
+            false
+
+fn expr_list_calls_register_static_driver(exprs: [HirExpr], symbols: SymbolTable) -> bool:
+    var i = 0
+    while i < exprs.len():
+        if expr_calls_register_static_driver(exprs[i], symbols):
+            return true
+        i = i + 1
+    false
+
+fn expr_is_symbol_named(expr: HirExpr, symbols: SymbolTable, expected: text) -> bool:
+    match expr.kind:
+        case Var(symbol):
+            val sym = symbols.get(symbol)
+            if sym.?:
+                return sym.unwrap().name == expected
+            false
+        case _:
+            false

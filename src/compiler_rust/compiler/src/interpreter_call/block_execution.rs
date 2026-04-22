@@ -230,6 +230,17 @@ pub(super) fn exec_block_closure(
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
+                            let object = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            if let Some(updated) =
+                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
+                            {
+                                local_env.insert(obj_name.clone(), updated);
+                                last_value = Value::Nil;
+                                continue;
+                            }
                             let mut fields = fields;
                             Arc::make_mut(&mut fields).insert(field.clone(), val);
                             local_env.insert(obj_name.clone(), Value::Object { class, fields });
@@ -886,6 +897,17 @@ fn exec_block_closure_mut(
                     // Handle field assignment: obj.field = value
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
+                            let object = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            if let Some(updated) =
+                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
+                            {
+                                local_env.insert(obj_name.clone(), updated);
+                                last_value = Value::Nil;
+                                continue;
+                            }
                             let mut fields = fields;
                             Arc::make_mut(&mut fields).insert(field.clone(), val);
                             local_env.insert(obj_name.clone(), Value::Object { class, fields });

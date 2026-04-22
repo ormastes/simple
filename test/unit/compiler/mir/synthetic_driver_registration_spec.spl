@@ -1,0 +1,141 @@
+use compiler.mir.synthetic_driver_registration.{
+    SyntheticDriverRegistrationStatus,
+    plan_synthetic_driver_registration
+}
+from hir_definitions import {HirFunction, HirParam, HirBlock, HirExpr, HirExprKind}
+from hir_types import {HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+from lexer import {Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: empty_span())
+
+fn unit_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type(), span: empty_span())
+
+fn var_expr(sym: SymbolId) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: unit_type(), span: empty_span())
+
+fn call_expr(sym: SymbolId) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Call(var_expr(sym), [], []),
+        has_type_: false,
+        type_: unit_type(),
+        span: empty_span()
+    )
+
+fn return_call_block(sym: SymbolId) -> HirBlock:
+    HirBlock(
+        stmts: [],
+        has: true,
+        value: HirExpr(
+            kind: HirExprKind.Return(Some(call_expr(sym))),
+            has_type_: false,
+            type_: unit_type(),
+            span: empty_span()
+        ),
+        span: empty_span()
+    )
+
+fn plain_block() -> HirBlock:
+    HirBlock(stmts: [], has: true, value: unit_expr(), span: empty_span())
+
+fn driver_attr() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor: 0,
+        device_ids: [0],
+        version: "0.1",
+        abi: ""
+    )
+
+fn native_attr() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind: DriverManifestAttrKind.NativeLib,
+        driver_class: 15,
+        vendor: 0,
+        device_ids: [],
+        version: "1.0",
+        abi: "simple"
+    )
+
+fn make_function(name: text, body: HirBlock, has_manifest: bool, attr: DriverManifestAttr) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 10),
+        name: name,
+        type_params: [],
+        params: [],
+        return_type: unit_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: nil,
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: has_manifest,
+        driver_manifest_attr: attr,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span()
+    )
+
+fn make_symbols_with_register() -> (SymbolTable, SymbolId):
+    var symbols = SymbolTable.new()
+    val reg = symbols.define(
+        "register_static_driver",
+        SymbolKind.Function,
+        nil,
+        empty_span(),
+        Visibility.Public,
+        false,
+        nil
+    )
+    (symbols, reg)
+
+describe "synthetic driver registration planner":
+    it "recognizes an existing handwritten register_static_driver call":
+        val (symbols, reg) = make_symbols_with_register()
+        val fn_ = make_function("register_null_block_driver", return_call_block(reg), true, driver_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.AlreadyHandwritten)
+        expect(plan.reason).to_contain("already calls register_static_driver")
+
+    it "blocks @driver synthesis when DriverOps source is absent":
+        val symbols = SymbolTable.new()
+        val fn_ = make_function("register_null_block_driver", plain_block(), true, driver_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.BlockedMissingDriverOps)
+        expect(plan.reason).to_contain("DriverOps value")
+
+    it "blocks @native_lib synthesis when adapter functions are absent":
+        val symbols = SymbolTable.new()
+        val fn_ = make_function("register_cuda_ffi_native_lib", plain_block(), true, native_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.BlockedNativeLibOps)
+        expect(plan.reason).to_contain("adapter functions")
+
+    it "ignores functions without driver manifest metadata":
+        val symbols = SymbolTable.new()
+        val fn_ = make_function("helper", plain_block(), false, driver_attr())
+
+        val plan = plan_synthetic_driver_registration(fn_, symbols)
+
+        expect(plan.status).to_equal(SyntheticDriverRegistrationStatus.NoManifest)

@@ -1,0 +1,78 @@
+# @tag:system
+#
+# Opt-in live QEMU validation for FR-SOS-017 AP startup proof.
+
+use std.spec
+
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+val SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
+val LINKER_SCRIPT: text = "examples/simple_os/arch/x86_64/linker.ld"
+val BUILD_SOURCES: text = "--source src/os --source src/lib --source examples/simple_os"
+val BUILD_PREFIX: text =
+    "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {SIMPLE_BIN} native-build"
+val SMP_QEMU_BASE: text =
+    "qemu-system-x86_64 -machine q35 -cpu qemu64 -smp 2 -serial stdio -display none -no-reboot"
+val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
+val AP_ONLINE_MARKER: text = "[smp] AP reached 64-bit entry"
+
+fn _enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_SMP_AP_LIVE") ?? "") == "1"
+
+fn _run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _qemu_available() -> bool:
+    val result = _run_shell("command -v qemu-system-x86_64 >/dev/null 2>&1")
+    result[2] == 0
+
+fn _build_smp_probe(output: text) -> bool:
+    val command = "{BUILD_PREFIX} {BUILD_SOURCES} --backend cranelift --entry-closure --entry examples/simple_os/arch/x86_64/os_entry.spl --target x86_64-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
+    val result = _run_shell(command)
+    if result[2] != 0:
+        print "[simpleos_smp_ap_live_spec] build failed exit={result[2]}"
+        print result[0] + result[1]
+        return false
+    if not rt_file_exists(output):
+        print "[simpleos_smp_ap_live_spec] build output missing: {output}"
+        return false
+    true
+
+fn _build_smp_probe_with_llvm(output: text) -> bool:
+    val command = "{BUILD_PREFIX} {BUILD_SOURCES} --backend llvm --entry-closure --entry examples/simple_os/arch/x86_64/os_entry.spl --target x86_64-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
+    val result = _run_shell(command)
+    if result[2] != 0:
+        print "[simpleos_smp_ap_live_spec] llvm build failed exit={result[2]}"
+        print result[0] + result[1]
+        return false
+    if not rt_file_exists(output):
+        print "[simpleos_smp_ap_live_spec] llvm build output missing: {output}"
+        return false
+    true
+
+fn _run_smp_probe(kernel: text) -> (text, i64):
+    val command = "timeout 15s {SMP_QEMU_BASE} -m 512M -kernel {kernel} {DEBUG_EXIT} 2>&1 | tr -d '\\000'"
+    val result = _run_shell(command)
+    (result[0] + result[1], result[2])
+
+describe "SimpleOS x86 SMP AP live QEMU proof":
+    """Live FR-SOS-017 validation, disabled unless SIMPLEOS_QEMU_SMP_AP_LIVE=1."""
+
+    it "boots with two CPUs and observes an AP reaching the 64-bit online hook":
+        """When enabled, QEMU serial output must show the AP entry marker."""
+        if not _enabled():
+            expect(_enabled()).to_equal(false)
+        elif not _qemu_available():
+            expect(_qemu_available()).to_equal(false)
+        else:
+            val output_path = "build/os/simpleos_smp_ap_probe_32.elf"
+            val built = _build_smp_probe(output_path) or _build_smp_probe_with_llvm(output_path)
+            expect(built).to_equal(true)
+            val result = _run_smp_probe(output_path)
+            val serial = result[0]
+            if not serial.contains(AP_ONLINE_MARKER):
+                print "[simpleos_smp_ap_live_spec] qemu exit={result[1]}"
+                print serial
+            expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)

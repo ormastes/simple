@@ -79,9 +79,11 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   AP startup/online state hooks, and the low-memory x86_64 AP trampoline are
   implemented. Automatic AP startup is wired after BSP IDT/APIC init through an
   idempotent x86_64 interrupt-init hook. Live proof that an AP reaches the
-  AP-side online hook remains open; run an x86_64 SMP QEMU lane with at least
-  two CPUs and assert serial output contains `[smp] AP reached 64-bit entry`
-  without regressing BSP-only boot.
+  AP-side online hook remains open until
+  `SIMPLEOS_QEMU_SMP_AP_LIVE=1 bin/simple test test/system/simpleos_smp_ap_live_spec.spl`
+  passes in an environment that can build and run x86_64 QEMU. The gated lane
+  boots with `-smp 2` and asserts serial output contains
+  `[smp] AP reached 64-bit entry` without regressing BSP-only boot.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{Message, ThreadSpawner};
-use simple_parser::ast::{Block, EnumDef, MacroDef, Type};
+use simple_parser::ast::{BitfieldDef, Block, EnumDef, MacroDef, Type};
 
 use crate::aop_config::AopConfig;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
@@ -123,6 +123,8 @@ thread_local! {
     pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Block-scoped enums (for enums defined inside closures like `it` blocks)
     pub(crate) static BLOCK_SCOPED_ENUMS: RefCell<HashMap<String, Arc<EnumDef>>> = RefCell::new(HashMap::new());
+    /// Bitfield definitions visible to the interpreter.
+    pub(crate) static BITFIELDS: RefCell<HashMap<String, Arc<BitfieldDef>>> = RefCell::new(HashMap::new());
     /// Type-safe execution mode (new, replaces Option fields above)
     pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = const { RefCell::new(ExecutionMode::Normal) };
     /// Maps unit suffix -> family name (for looking up which family a unit belongs to)

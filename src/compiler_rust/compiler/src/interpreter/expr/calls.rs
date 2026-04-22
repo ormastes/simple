@@ -138,6 +138,13 @@ pub(super) fn eval_call_expr(
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
+                    if field == "new" {
+                        let class_name = module_name.clone();
+                        return Ok(Some(Value::NativeFunction(crate::value::NativeFunction {
+                            name: format!("{}.new", class_name),
+                            func: Arc::new(move |args| super::super::instantiate_bitfield(&class_name, args)),
+                        })));
+                    }
                     // Special handling for built-in Option and Result enum variants
                     if module_name == "Option" && (field == "Some" || field == "None") {
                         // Return a constructor function for the variant

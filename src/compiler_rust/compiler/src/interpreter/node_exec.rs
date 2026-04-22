@@ -61,6 +61,10 @@ pub(crate) fn exec_node(
     }
 
     match node {
+        Node::Bitfield(bitfield) => {
+            super::register_bitfield(bitfield);
+            Ok(Control::Next)
+        }
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
                 // Handle method calls on objects - need to persist mutations to self
@@ -651,6 +655,14 @@ fn exec_assignment(
             if let Some(obj_val) = env.get(obj_name).cloned() {
                 match obj_val {
                     Value::Object { class, fields } => {
+                        let object = Value::Object {
+                            class: class.clone(),
+                            fields: fields.clone(),
+                        };
+                        if let Some(updated) = super::update_bitfield_field(&object, field, value.clone()) {
+                            env.insert(obj_name.clone(), updated);
+                            return Ok(Control::Next);
+                        }
                         let mut fields = fields;
                         Arc::make_mut(&mut fields).insert(field.clone(), value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
