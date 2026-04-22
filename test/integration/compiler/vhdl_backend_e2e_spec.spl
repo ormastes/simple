@@ -510,6 +510,45 @@ describe "VHDL Backend E2E - Entity Generation":
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("result_out <= a;"))
 
+    it "compiles goto chains and if arms that jump to returns":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_jump = MirBlock(id: BlockId(id: 1), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 3)))
+        val else_jump = MirBlock(id: BlockId(id: 2), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 4)))
+        val then_ret = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val else_ret = MirBlock(
+            id: BlockId(id: 4),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+
+        val func = make_function("select_jump", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_jump, else_jump, then_ret, else_ret])
+        val module = make_module("select_jump_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for if/goto return chain")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a when flag = '1' else b;"))
+
     it "compiles struct aggregate to named record assignment":
         val backend = make_backend()
         val point_symbol = SymbolId(id: 42)

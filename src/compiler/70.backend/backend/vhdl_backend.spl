@@ -245,8 +245,13 @@ class VhdlBackend:
                         val if_result = self.compile_if_return_terminator(builder, cond, then_, else_)
                         if if_result.is_err():
                             return Err(if_result.unwrap_err())
-                        handled_branch_blocks = handled_branch_blocks.set(then_.id, true)
-                        handled_branch_blocks = handled_branch_blocks.set(else_.id, true)
+                        handled_branch_blocks = self.mark_return_chain_handled(then_, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(else_, handled_branch_blocks)
+                    case Goto(target):
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
+                        handled_branch_blocks = self.mark_return_chain_handled(target, handled_branch_blocks)
                     case _:
                         val term_result = self.compile_terminator(builder, block.terminator)
                         if term_result.is_err():
@@ -315,6 +320,18 @@ class VhdlBackend:
             Ok(found.unwrap())
         else:
             Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
+
+    fn mark_return_chain_handled(id: BlockId, handled: Dict<i64, bool>) -> Dict<i64, bool>:
+        var next_handled = handled.set(id.id, true)
+        val block = self.active_blocks.get(id.id)
+        if block.?:
+            match block.unwrap().terminator:
+                case Goto(target):
+                    if not next_handled.get(target.id).?:
+                        next_handled = self.mark_return_chain_handled(target, next_handled)
+                case _:
+                    ()
+        next_handled
 
     fn compile_block_instructions(builder: VhdlBuilder, block: MirBlock) -> Result<(), CompileError>:
         for inst in block.instructions:
@@ -643,6 +660,12 @@ class VhdlBackend:
         Ok(())
 
     fn compile_return_block(builder: VhdlBuilder, block_id: BlockId) -> Result<text, CompileError>:
+        self.compile_return_block_seen(builder, block_id, [])
+
+    fn compile_return_block_seen(builder: VhdlBuilder, block_id: BlockId, seen: [i64]) -> Result<text, CompileError>:
+        for prior in seen:
+            if prior == block_id.id:
+                return Err(self.backend_error("VHDL backend does not support cyclic control flow"))
         val block_result = self.block_by_id(block_id)
         if block_result.is_err():
             return Err(block_result.unwrap_err())
@@ -656,6 +679,10 @@ class VhdlBackend:
                     self.operand_to_vhdl(value.unwrap())
                 else:
                     Err(self.backend_error("VHDL if/else return block BB{block_id.id} returns no value"))
+            case Goto(target):
+                var next_seen = seen
+                next_seen = next_seen.push(block_id.id)
+                self.compile_return_block_seen(builder, target, next_seen)
             case _:
                 Err(self.backend_error("VHDL if/else branch BB{block_id.id} must terminate with return"))
 
