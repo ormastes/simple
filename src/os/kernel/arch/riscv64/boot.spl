@@ -1,236 +1,16 @@
 #![allow(unnamed_duplicate_typed_args)]
-# RISC-V 64 Boot — S-Mode via OpenSBI
+# RISC-V 64 Boot Entry — S-Mode via OpenSBI
 #
-# Handles boot initialization for RISC-V 64-bit in S-mode.
-# OpenSBI runs in M-mode and loads the kernel as an S-mode payload
-# at 0x80200000 on QEMU virt machine.
-#
-# Boot state (S-mode via OpenSBI):
-#   a0 = hart ID
-#   a1 = DTB (Device Tree Blob) physical address
-#   sp = undefined (must set up our own stack)
-#   satp = 0 (MMU disabled, physical addressing)
-#   interrupts disabled
-#
-# QEMU virt memory map (fallback when DTB parse fails):
-#   0x00000000 - 0x0BFFFFFF: I/O space
-#   0x0C000000 - 0x0FFFFFFF: PLIC
-#   0x10000000 - 0x10000FFF: UART0
-#   0x10001000 - 0x10001FFF: Virtio
-#   0x02000000 - 0x0200FFFF: CLINT
-#   0x80000000 - 0x87FFFFFF: RAM (128MB)
-#   0x80200000: Kernel load address (OpenSBI payload offset)
-#
-# Device discovery: the DTB passed by OpenSBI in a1 is parsed via
-# dtb_parser.spl to extract actual device addresses. Hardcoded
-# constants are used as fallback if parsing fails.
+# First-stage hardware entry for RV64 native-build. Keep this module minimal:
+# no text formatting, arrays, DTB parsing, or HAL construction. Higher-level
+# boot metadata lives in boot_info.spl.
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
-use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
-use os.kernel.boot.dtb_parser.{parse_dtb, DtbDeviceInfo}
-use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.arch.riscv64.console.{serial_writeln}
-
-# ============================================================================
-# QEMU Virt Memory Map Constants
-# ============================================================================
-
-val QEMU_RAM_BASE: u64 = 0x80000000
-val QEMU_RAM_SIZE: u64 = 128 * 1024 * 1024     # 128MB
-val QEMU_KERNEL_BASE: u64 = 0x80200000         # OpenSBI payload offset
-val QEMU_UART_BASE: u64 = 0x10000000
-val QEMU_PLIC_BASE: u64 = 0x0C000000
-val QEMU_CLINT_BASE: u64 = 0x02000000
-
-# Estimated kernel size (2MB default, refined later from linker symbols)
-val DEFAULT_KERNEL_SIZE: u64 = 2 * 1024 * 1024
-# ============================================================================
-# Rv64Boot
-# ============================================================================
-
-struct Rv64Boot:
-    """RISC-V 64-bit S-mode boot handler via OpenSBI.
-
-    Parses boot information from the Device Tree Blob (DTB) passed by
-    OpenSBI in a1. Falls back to hardcoded QEMU virt constants if DTB
-    parsing fails or returns incomplete data.
-    """
-    pass_dn
-
-# ============================================================================
-# Global Boot State
-# ============================================================================
-
-var g_hart_id: u64 = 0
-var g_dtb_addr: u64 = 0
-var g_dtb_info: DtbDeviceInfo = DtbDeviceInfo(
-    uart_base: 0, uart_size: 0,
-    plic_base: 0, plic_size: 0,
-    clint_base: 0, clint_size: 0,
-    ram_base: 0, ram_size: 0,
-    hart_count: 0, valid: false
-)
-
-# ============================================================================
-# DTB-Aware Address Getters (with hardcoded fallback)
-# ============================================================================
-
-fn _uart_base() -> u64:
-    """Return UART base address from DTB, or QEMU virt default."""
-    if g_dtb_info.valid and g_dtb_info.uart_base != 0:
-        return g_dtb_info.uart_base
-    QEMU_UART_BASE
-
-fn _plic_base() -> u64:
-    """Return PLIC base address from DTB, or QEMU virt default."""
-    if g_dtb_info.valid and g_dtb_info.plic_base != 0:
-        return g_dtb_info.plic_base
-    QEMU_PLIC_BASE
-
-fn _clint_base() -> u64:
-    """Return CLINT base address from DTB, or QEMU virt default."""
-    if g_dtb_info.valid and g_dtb_info.clint_base != 0:
-        return g_dtb_info.clint_base
-    QEMU_CLINT_BASE
-
-fn _ram_base() -> u64:
-    """Return RAM base address from DTB, or QEMU virt default."""
-    if g_dtb_info.valid and g_dtb_info.ram_base != 0:
-        return g_dtb_info.ram_base
-    QEMU_RAM_BASE
-
-fn _ram_size() -> u64:
-    """Return RAM size from DTB, or QEMU virt default."""
-    if g_dtb_info.valid and g_dtb_info.ram_size != 0:
-        return g_dtb_info.ram_size
-    QEMU_RAM_SIZE
-
-fn _save_boot_args(hart_id: u64, dtb_addr: u64):
-    """Save boot arguments passed by OpenSBI in a0/a1 and parse DTB."""
-    g_hart_id = hart_id
-    g_dtb_addr = dtb_addr
-
-    # Parse the Device Tree Blob
-    g_dtb_info = parse_dtb(dtb_addr)
-    if g_dtb_info.valid:
-        serial_writeln("[BOOT] DTB parsed successfully")
-        if g_dtb_info.uart_base != 0:
-            serial_writeln("[BOOT]   UART:  0x{g_dtb_info.uart_base} size=0x{g_dtb_info.uart_size}")
-        if g_dtb_info.plic_base != 0:
-            serial_writeln("[BOOT]   PLIC:  0x{g_dtb_info.plic_base} size=0x{g_dtb_info.plic_size}")
-        if g_dtb_info.clint_base != 0:
-            serial_writeln("[BOOT]   CLINT: 0x{g_dtb_info.clint_base} size=0x{g_dtb_info.clint_size}")
-        serial_writeln("[BOOT]   RAM:   0x{g_dtb_info.ram_base} size=0x{g_dtb_info.ram_size}")
-        if g_dtb_info.hart_count > 0:
-            serial_writeln("[BOOT]   Harts: {g_dtb_info.hart_count}")
-    else:
-        serial_writeln("[BOOT] DTB parse failed at 0x{dtb_addr}, using hardcoded QEMU virt map")
-
-# ============================================================================
-# Memory Map Construction
-# ============================================================================
-
-fn _build_memory_map() -> [BootMemoryRegion]:
-    """Build memory map from DTB-parsed values with QEMU virt fallback.
-
-    Uses DTB-discovered RAM base/size when available, otherwise falls
-    back to hardcoded QEMU virt constants.
-    """
-    var regions: [BootMemoryRegion] = []
-
-    val ram_base = _ram_base()
-    val ram_size = _ram_size()
-    val kernel_base = QEMU_KERNEL_BASE  # Kernel load address is always OpenSBI payload offset
-    val source = if g_dtb_info.valid: "DTB" else: "hardcoded"
-
-    # OpenSBI occupies RAM base to kernel load address (typically 2MB)
-    val opensbi_region = BootMemoryRegion(
-        base: PhysAddr(addr: ram_base),
-        size: kernel_base - ram_base,
-        kind: MemoryRegionKind.Reserved
-    )
-    regions.push(opensbi_region)
-
-    # Kernel region at 0x80200000
-    val kernel_region = BootMemoryRegion(
-        base: PhysAddr(addr: kernel_base),
-        size: DEFAULT_KERNEL_SIZE,
-        kind: MemoryRegionKind.Kernel
-    )
-    regions.push(kernel_region)
-
-    # Usable RAM after kernel
-    val usable_start = kernel_base + DEFAULT_KERNEL_SIZE
-    val usable_size = (ram_base + ram_size) - usable_start
-    val usable_region = BootMemoryRegion(
-        base: PhysAddr(addr: usable_start),
-        size: usable_size,
-        kind: MemoryRegionKind.Usable
-    )
-    regions.push(usable_region)
-
-    serial_writeln("[BOOT] Memory map: 3 regions ({source})")
-    serial_writeln("[BOOT]   OpenSBI: 0x{ram_base} size=0x{kernel_base - ram_base}")
-    serial_writeln("[BOOT]   Kernel:  0x{kernel_base} size=0x{DEFAULT_KERNEL_SIZE}")
-    serial_writeln("[BOOT]   Usable:  0x{usable_start} size=0x{usable_size}")
-
-    regions
-
-# ============================================================================
-# Boot Output Assembly
-# ============================================================================
-
-fn _build_boot_output() -> BootOutputPort:
-    """Assemble BootOutputPort from DTB-parsed info with QEMU virt fallback.
-
-    RISC-V uses MMIO for serial (not port I/O).
-    No HHDM — the kernel runs with identity mapping initially.
-    No framebuffer on QEMU virt (serial-only console).
-    """
-    val memory_map = _build_memory_map()
-
-    # No framebuffer on QEMU virt — zero-initialized
-    val framebuffer = FramebufferInfo(
-        addr: PhysAddr(addr: 0),
-        width: 0,
-        height: 0,
-        pitch: 0,
-        bpp: 0
-    )
-
-    serial_writeln("[BOOT] Hart ID: {g_hart_id}")
-    serial_writeln("[BOOT] DTB at: 0x{g_dtb_addr}")
-
-    BootOutputPort(
-        memory_map: memory_map,
-        framebuffer: framebuffer,
-        rsdp_addr: nil,
-        kernel_phys_base: PhysAddr(addr: QEMU_KERNEL_BASE),
-        kernel_virt_base: VirtAddr(addr: QEMU_KERNEL_BASE),
-        kernel_size: DEFAULT_KERNEL_SIZE,
-        serial_base: _uart_base(),
-        serial_is_mmio: true,
-        arch: Architecture.Riscv64,
-        hhdm_offset: 0
-    )
-
-# ============================================================================
-# Rv64Boot Implementation
-# ============================================================================
-
-# ============================================================================
-# Embedded Startup Entry
-# ============================================================================
+val UART_BASE: u64 = 0x10000000
 
 @section(".text.entry")
 @naked
 fn _start():
-    """RISC-V 64 S-mode hardware entry, implemented in Simple embedded asm.
-
-    OpenSBI enters here with a0=hart_id and a1=DTB physical address. This
-    preserves those boot arguments, installs the kernel stack, clears BSS, and
-    hands control to boot_main().
-    """
+    """RISC-V 64 S-mode hardware entry, implemented in Simple embedded asm."""
     asm volatile:
         "mv      s0, a0"
         "mv      s1, a1"
@@ -250,67 +30,29 @@ fn _start():
         "wfi"
         "j       .Lrv64_boot_halt"
 
-# ============================================================================
-# Boot Main (called from embedded _start after stack setup)
-# ============================================================================
+fn _uart_put(byte: u8):
+    val value = byte as u64
+    asm volatile:
+        "li      t0, 0x10000000"
+        "sb      a0, 0(t0)"
+
+fn _boot_banner():
+    _uart_put(0x53u8)
+    _uart_put(0x69u8)
+    _uart_put(0x6Du8)
+    _uart_put(0x70u8)
+    _uart_put(0x6Cu8)
+    _uart_put(0x65u8)
+    _uart_put(0x4Fu8)
+    _uart_put(0x53u8)
+    _uart_put(0x20u8)
+    _uart_put(0x52u8)
+    _uart_put(0x56u8)
+    _uart_put(0x36u8)
+    _uart_put(0x34u8)
+    _uart_put(0x0Du8)
+    _uart_put(0x0Au8)
 
 fn boot_main(hart_id: u64, dtb_addr: u64):
-    """S-mode boot main — called from embedded _start after stack setup.
-
-    Args:
-        hart_id:  boot hart ID (from OpenSBI a0)
-        dtb_addr: DTB physical address (from OpenSBI a1)
-    """
-    _save_boot_args(hart_id, dtb_addr)
-    serial_writeln("[BOOT] SimpleOS RISC-V 64 (S-mode via OpenSBI)")
-    val boot_output = _build_boot_output()
-    serial_writeln("[BOOT] Boot complete. Halting.")
-
-impl Rv64Boot:
-    fn save_boot_args(hart_id: u64, dtb_addr: u64):
-        """Save OpenSBI boot arguments (a0=hart_id, a1=dtb_addr) and parse DTB."""
-        _save_boot_args(hart_id, dtb_addr)
-
-    fn parse_boot_info() -> BootOutputPort:
-        """Parse boot info and build BootOutputPort."""
-        _build_boot_output()
-
-    fn hart_id() -> u64:
-        """Return the boot hart ID."""
-        g_hart_id
-
-    fn dtb_address() -> u64:
-        """Return the DTB physical address."""
-        g_dtb_addr
-
-    fn dtb_info() -> DtbDeviceInfo:
-        """Return parsed DTB device info (valid=false if parse failed)."""
-        g_dtb_info
-
-    fn dtb_valid() -> bool:
-        """Return whether DTB was successfully parsed."""
-        g_dtb_info.valid
-
-    fn kernel_load_address() -> u64:
-        """Return the kernel physical load address."""
-        QEMU_KERNEL_BASE
-
-    fn uart_base() -> u64:
-        """Return UART base (from DTB or fallback)."""
-        _uart_base()
-
-    fn plic_base() -> u64:
-        """Return PLIC base (from DTB or fallback)."""
-        _plic_base()
-
-    fn clint_base() -> u64:
-        """Return CLINT base (from DTB or fallback)."""
-        _clint_base()
-
-    fn ram_base() -> u64:
-        """Return RAM base (from DTB or fallback)."""
-        _ram_base()
-
-    fn ram_size() -> u64:
-        """Return RAM size (from DTB or fallback)."""
-        _ram_size()
+    """Minimal S-mode boot main called from embedded _start."""
+    _boot_banner()
