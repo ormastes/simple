@@ -112,6 +112,24 @@ struct ExportAttr:
     is_export_c: bool
     export_name: text
 
+enum DriverManifestAttrKind:
+    Driver
+    NativeLib
+
+struct DriverManifestAttr:
+    """Parsed @driver(...) / @native_lib(...) manifest attribute.
+
+    `driver_class` stores the DriverClass ordinal to keep this compiler-common
+    type independent from std.driver. `device_ids` stores the device id list
+    exactly as it will be encoded into the DRVS record.
+    """
+    kind: DriverManifestAttrKind
+    driver_class: i64
+    vendor: i64
+    device_ids: [i64]
+    version: text
+    abi: text
+
 # ============================================================================
 # Export Attribute Parsing
 # ============================================================================
@@ -162,6 +180,92 @@ fn parse_export_attrs(attrs: [Attribute]) -> ExportAttr?:
         is_export_c: is_export_c,
         export_name: export_name
     )
+
+fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
+    """Extract @driver(...) or @native_lib(...) from declaration attributes.
+
+    Supports both the design's named form and the current positional form:
+      @driver(class = 0, vendor = 0x8086, device = [0x2922], version = "1.0")
+      @driver(0, 0x8086, [0x2922], "1.0")
+      @native_lib(abi = "simple", version = "1.0")
+      @native_lib("simple", "1.0")
+    """
+    for attr in attrs:
+        if attr.name == "driver":
+            var driver_class: i64 = 0
+            var vendor: i64 = 0
+            var device_ids: [i64] = []
+            var version = ""
+
+            if attr.args.len() >= 4:
+                driver_class = extract_int_arg(attr.args[0]) ?? 0
+                vendor = extract_int_arg(attr.args[1]) ?? 0
+                device_ids = extract_int_array_arg(attr.args[2])
+                version = extract_string_arg(attr.args[3])
+
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "class" or name == "dclass":
+                                    driver_class = extract_int_arg(right) ?? driver_class
+                                elif name == "vendor":
+                                    vendor = extract_int_arg(right) ?? vendor
+                                elif name == "device" or name == "devices":
+                                    device_ids = extract_int_array_arg(right)
+                                elif name == "version":
+                                    val v = extract_string_arg(right)
+                                    if v.len() > 0:
+                                        version = v
+                            case _: ()
+                    case _: ()
+
+            return DriverManifestAttr(
+                kind: DriverManifestAttrKind.Driver,
+                driver_class: driver_class,
+                vendor: vendor,
+                device_ids: device_ids,
+                version: version,
+                abi: ""
+            )
+
+        elif attr.name == "native_lib":
+            var abi = "simple"
+            var version = ""
+            if attr.args.len() >= 1:
+                val a = extract_string_arg(attr.args[0])
+                if a.len() > 0:
+                    abi = a
+            if attr.args.len() >= 2:
+                version = extract_string_arg(attr.args[1])
+
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "abi":
+                                    val a = extract_string_arg(right)
+                                    if a.len() > 0:
+                                        abi = a
+                                elif name == "version":
+                                    val v = extract_string_arg(right)
+                                    if v.len() > 0:
+                                        version = v
+                            case _: ()
+                    case _: ()
+
+            return DriverManifestAttr(
+                kind: DriverManifestAttrKind.NativeLib,
+                driver_class: 15,
+                vendor: 0,
+                device_ids: [],
+                version: version,
+                abi: abi
+            )
+
+    nil
 
 # ============================================================================
 # Function Attribute Types
@@ -703,6 +807,20 @@ fn extract_text_arg(expr: Expr) -> text:
             if value: "true" else: "false"
         case _:
             ""
+
+fn extract_int_array_arg(expr: Expr) -> [i64]:
+    var out: [i64] = []
+    match expr.kind:
+        case ArrayLit(items):
+            for item in items:
+                val v = extract_int_arg(item)
+                if v.?:
+                    out.push(v.unwrap())
+        case IntLit(value):
+            out.push(value)
+        case _:
+            pass_dn
+    out
 
 # Extract barriers option from attribute args
 # Handles: @volatile(true), @volatile(barriers: true)

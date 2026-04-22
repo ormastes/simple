@@ -145,6 +145,88 @@ impl Lowerer {
         Ok(type_id)
     }
 
+    pub(crate) fn register_bitfield(&mut self, bf: &ast::BitfieldDef) -> LowerResult<TypeId> {
+        let backing = self.resolve_bitfield_backing_type(bf)?;
+        let backing_bits = self.bit_width_for_type(backing).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "bitfield '{}' must use an integer backing type",
+                bf.name
+            ))
+        })?;
+
+        let mut offset = 0u32;
+        let mut fields = Vec::new();
+        for field in &bf.fields {
+            let width = field.bits as u32;
+            if offset + width > backing_bits {
+                return Err(LowerError::Unsupported(format!(
+                    "bitfield '{}' uses {} bits but backing type only has {} bits",
+                    bf.name,
+                    offset + width,
+                    backing_bits
+                )));
+            }
+
+            fields.push(HirBitfieldField {
+                name: field.name.clone(),
+                bit_offset: offset,
+                bit_width: width,
+                is_reserved: field.is_reserved,
+                ty: backing,
+            });
+            offset += width;
+        }
+
+        let hir_type = HirType::Bitfield {
+            name: bf.name.clone(),
+            backing,
+            fields,
+            generic_params: Vec::new(),
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
+        };
+
+        let type_id = self.module.types.update_named(bf.name.clone(), hir_type);
+        Ok(type_id)
+    }
+
+    fn resolve_bitfield_backing_type(&mut self, bf: &ast::BitfieldDef) -> LowerResult<TypeId> {
+        if let Some(base_type) = &bf.base_type {
+            let ty = self.resolve_type(base_type)?;
+            if self.bit_width_for_type(ty).is_some() {
+                return Ok(ty);
+            }
+            return Err(LowerError::Unsupported(format!(
+                "bitfield '{}' backing type must be an integer type",
+                bf.name
+            )));
+        }
+
+        let total_bits: u32 = bf.fields.iter().map(|f| f.bits as u32).sum();
+        Ok(match total_bits {
+            0..=8 => TypeId::U8,
+            9..=16 => TypeId::U16,
+            17..=32 => TypeId::U32,
+            33..=64 => TypeId::U64,
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "bitfield '{}' exceeds 64 bits; Rust seed bitfields currently cap at u64 backing storage",
+                    bf.name
+                )))
+            }
+        })
+    }
+
+    fn bit_width_for_type(&self, ty: TypeId) -> Option<u32> {
+        match ty {
+            TypeId::I8 | TypeId::U8 => Some(8),
+            TypeId::I16 | TypeId::U16 => Some(16),
+            TypeId::I32 | TypeId::U32 | TypeId::CHAR => Some(32),
+            TypeId::I64 | TypeId::U64 => Some(64),
+            _ => None,
+        }
+    }
+
     pub(crate) fn register_mixin(&mut self, m: &ast::MixinDef) -> LowerResult<TypeId> {
         // Lower fields
         let mut fields = Vec::new();

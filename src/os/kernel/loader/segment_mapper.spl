@@ -241,11 +241,89 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     serial_println("[segmap] raw stage ok bytes={total} root={as_handle.phys_root}")
     staged
 
+@cfg(arm64)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    """Stage ELF64 PT_LOAD contents into the ARM64 direct-load arena."""
+    extern fn rt_arm_stage_elf64_load_image(dst_phys: u64, bytes: [u8]) -> i32
+    extern fn rt_arm64_user_as_map_elf64(root: u64, dst_phys: u64, bytes: [u8]) -> i32
+    extern fn rt_arm64_user_as_ttbr0_probe(root: u64) -> i32
+    if as_handle.phys_root == 0:
+        serial_println("[segmap] elf stage failed: no address-space root")
+        return -1
+    val image_base = as_handle.phys_root + 0x100000
+    val staged = rt_arm_stage_elf64_load_image(image_base, file_bytes)
+    if staged <= 0:
+        return staged
+    val mapped = rt_arm64_user_as_map_elf64(as_handle.phys_root, image_base, file_bytes)
+    if mapped <= 0:
+        serial_println("[segmap] arm64 user page table failed root={as_handle.phys_root}")
+        return -13
+    serial_println("[segmap] arm64 user page table ok root={as_handle.phys_root}")
+    val ttbr0_probe = rt_arm64_user_as_ttbr0_probe(as_handle.phys_root)
+    if ttbr0_probe == 1:
+        serial_println("[segmap] arm64 ttbr0 probe ok")
+    else:
+        if ttbr0_probe == 2:
+            serial_println("[segmap] arm64 ttbr0 probe deferred mmu-on")
+        else:
+            serial_println("[segmap] arm64 ttbr0 probe failed")
+            return -14
+    serial_println("[segmap] elf stage ok root={as_handle.phys_root}")
+    staged
+
+@cfg(arm64)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    """Return the physical entry address for the ARM64 direct-load arena."""
+    extern fn rt_arm_elf64_direct_entry(dst_phys: u64, bytes: [u8], entry: u64) -> u64
+    val resolved = rt_arm_elf64_direct_entry(as_handle.phys_root + 0x100000, file_bytes, entry)
+    if resolved == 0:
+        return entry
+    resolved
+
+@cfg(arm64)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    """Check that the staged direct-load entry bytes match the ELF source."""
+    extern fn rt_arm_elf64_direct_entry(dst_phys: u64, bytes: [u8], entry: u64) -> u64
+    extern fn rt_arm_elf64_direct_entry_bytes_ok(dst_phys: u64, bytes: [u8], entry: u64) -> i32
+    extern fn rt_arm64_user_as_translate(root: u64, virt: u64) -> u64
+    val image_base = as_handle.phys_root + 0x100000
+    val direct_entry = rt_arm_elf64_direct_entry(image_base, file_bytes, entry)
+    val table_entry = rt_arm64_user_as_translate(as_handle.phys_root, entry)
+    if direct_entry == 0 or table_entry != direct_entry:
+        serial_println("[segmap] direct entry page table mismatch")
+        return false
+    serial_println("[segmap] direct entry page table ok")
+    val ok = rt_arm_elf64_direct_entry_bytes_ok(image_base, file_bytes, entry)
+    if ok == 1:
+        serial_println("[segmap] direct entry bytes ok")
+        return true
+    serial_println("[segmap] direct entry bytes mismatch")
+    false
+
 @cfg(arm32)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     val _as_handle = as_handle
     val _file_bytes = file_bytes
     -1
+
+@cfg(arm32)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(arm32)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    entry
+
+@cfg(arm32)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    val _entry = entry
+    true
 
 @cfg(riscv64)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
@@ -253,11 +331,49 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     val _file_bytes = file_bytes
     -1
 
+@cfg(riscv64)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(riscv64)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    entry
+
+@cfg(riscv64)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    val _entry = entry
+    true
+
 @cfg(riscv32)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     val _as_handle = as_handle
     val _file_bytes = file_bytes
     -1
+
+@cfg(riscv32)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(riscv32)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    entry
+
+@cfg(riscv32)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    val _entry = entry
+    true
 
 @cfg(x86_64)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
@@ -265,11 +381,49 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     val _file_bytes = file_bytes
     -1
 
+@cfg(x86_64)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(x86_64)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    entry
+
+@cfg(x86_64)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    val _entry = entry
+    true
+
 @cfg(x86)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     val _as_handle = as_handle
     val _file_bytes = file_bytes
     -1
+
+@cfg(x86)
+fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(x86)
+fn direct_load_entry_point(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    entry
+
+@cfg(x86)
+fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u64) -> bool:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    val _entry = entry
+    true
 
 fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8]) -> Result<i32, text>:
     """Map every PT_LOAD segment in order; abort on first error.

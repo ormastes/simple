@@ -181,6 +181,8 @@ extern fn rt_x86_ap_trampoline_phys() -> u64
 # the same workaround for its own guard. Once the compiler stops materializing
 # `bool = false` as a NIL-tagged value in .bss, this can flip back to bool.
 var _syscall_entry_installed: u64 = 0
+var _registered_ap_boot_startup_sent: u64 = 0
+var _registered_ap_boot_started_count: u32 = 0u32
 
 fn install_syscall_entry():
     """Program MSR_EFER.SCE, MSR_STAR, MSR_LSTAR, MSR_SFMASK to enable SYSCALL.
@@ -304,6 +306,26 @@ fn x86_start_registered_aps() -> u32:
             started = started + 1u32
         cpu_id = cpu_id + 1u32
     started
+
+fn x86_registered_ap_boot_startup_needed() -> bool:
+    """Return true when firmware registered APs still need boot-path startup."""
+    _registered_ap_boot_startup_sent == 0 and smp_num_cpus() > 1u32
+
+fn x86_start_registered_aps_once() -> u32:
+    """Boot-path AP startup hook. Safe to call after IDT and Local APIC init."""
+    if not x86_registered_ap_boot_startup_needed():
+        return 0u32
+    _registered_ap_boot_startup_sent = 1
+    _registered_ap_boot_started_count = x86_start_registered_aps()
+    _registered_ap_boot_started_count
+
+fn x86_registered_ap_boot_startup_sent() -> bool:
+    """Test-visible boot-path latch for automatic registered-AP startup."""
+    _registered_ap_boot_startup_sent != 0
+
+fn x86_registered_ap_boot_started_count() -> u32:
+    """Return how many AP startup IPIs the automatic boot hook sent."""
+    _registered_ap_boot_started_count
 
 fn x86_mark_current_ap_online() -> bool:
     """Called by the AP trampoline once the current CPU reaches kernel code."""

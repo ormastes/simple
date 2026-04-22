@@ -1,0 +1,67 @@
+use compiler.common.attributes.{parse_driver_manifest_attrs, DriverManifestAttrKind}
+use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
+from lexer import {Span}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn int_expr(value: i64) -> Expr:
+    Expr(kind: ExprKind.IntLit(value), span: empty_span())
+
+fn string_expr(value: text) -> Expr:
+    Expr(kind: ExprKind.StringLit(value, nil), span: empty_span())
+
+fn ident_expr(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: empty_span())
+
+fn array_expr(items: [Expr]) -> Expr:
+    Expr(kind: ExprKind.ArrayLit(items), span: empty_span())
+
+fn assign_expr(name: text, value: Expr) -> Expr:
+    Expr(kind: ExprKind.Assign(ident_expr(name), nil, value), span: empty_span())
+
+fn attr(name: text, args: [Expr]) -> Attribute:
+    Attribute(name: name, args: args, span: empty_span())
+
+describe "driver manifest attributes":
+    it "parses positional @driver manifest fields":
+        val parsed = parse_driver_manifest_attrs([
+            attr("driver", [int_expr(0), int_expr(0x8086), array_expr([int_expr(0x2922), int_expr(0x2829)]), string_expr("1.0")])
+        ]).unwrap()
+        expect(parsed.kind).to_equal(DriverManifestAttrKind.Driver)
+        expect(parsed.driver_class).to_equal(0)
+        expect(parsed.vendor).to_equal(0x8086)
+        expect(parsed.device_ids.len()).to_equal(2)
+        expect(parsed.device_ids[0]).to_equal(0x2922)
+        expect(parsed.version).to_equal("1.0")
+
+    it "parses named @driver manifest fields":
+        val parsed = parse_driver_manifest_attrs([
+            attr("driver", [
+                assign_expr("class", int_expr(8)),
+                assign_expr("vendor", int_expr(0x1234)),
+                assign_expr("device", array_expr([int_expr(1), int_expr(2)])),
+                assign_expr("version", string_expr("2.0"))
+            ])
+        ]).unwrap()
+        expect(parsed.kind).to_equal(DriverManifestAttrKind.Driver)
+        expect(parsed.driver_class).to_equal(8)
+        expect(parsed.vendor).to_equal(0x1234)
+        expect(parsed.device_ids[1]).to_equal(2)
+        expect(parsed.version).to_equal("2.0")
+
+    it "parses named @native_lib manifest fields":
+        val parsed = parse_driver_manifest_attrs([
+            attr("native_lib", [
+                assign_expr("abi", string_expr("simple")),
+                assign_expr("version", string_expr("12.3"))
+            ])
+        ]).unwrap()
+        expect(parsed.kind).to_equal(DriverManifestAttrKind.NativeLib)
+        expect(parsed.driver_class).to_equal(15)
+        expect(parsed.abi).to_equal("simple")
+        expect(parsed.version).to_equal("12.3")
+        expect(parsed.device_ids.len()).to_equal(0)
+
+    it "returns nil when no driver manifest attribute exists":
+        expect(parse_driver_manifest_attrs([attr("repr", [string_expr("C")])])).to_be_nil()

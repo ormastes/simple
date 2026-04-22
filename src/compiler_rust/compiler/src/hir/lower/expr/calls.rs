@@ -59,6 +59,9 @@ impl Lowerer {
             // Check if this is a class/struct constructor call: ClassName(args)
             // Python-style construction: Service() calls the class constructor
             if let Some(struct_ty) = self.module.types.lookup(name) {
+                if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
+                    return self.lower_bitfield_constructor(struct_ty, args, ctx);
+                }
                 // Lower arguments as positional field initializers
                 let mut fields_hir = Vec::new();
                 for arg in args {
@@ -170,6 +173,13 @@ impl Lowerer {
         // This handles Expr::Path with 2 segments like Container.with_profile()
         if let Expr::Path(segments) = callee {
             if segments.len() == 2 {
+                if let Some(type_id) = self.module.types.lookup(&segments[0]) {
+                    if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. }))
+                        && segments[1] == "new"
+                    {
+                        return self.lower_bitfield_constructor(type_id, args, ctx);
+                    }
+                }
                 return self.lower_static_method_call(&segments[0], &segments[1], args, ctx);
             }
         }
@@ -190,6 +200,28 @@ impl Lowerer {
                 args: args_hir,
             },
             ty: ret_ty,
+        })
+    }
+
+    pub(super) fn lower_bitfield_constructor(
+        &mut self,
+        bitfield_ty: TypeId,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if args.len() != 1 || args[0].name.is_some() {
+            return Err(LowerError::Unsupported(
+                "bitfield constructors currently accept exactly one positional raw value".to_string(),
+            ));
+        }
+
+        let value_hir = self.lower_expr(&args[0].value, ctx)?;
+        Ok(HirExpr {
+            kind: HirExprKind::Cast {
+                expr: Box::new(value_hir),
+                target: bitfield_ty,
+            },
+            ty: bitfield_ty,
         })
     }
 

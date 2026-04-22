@@ -1,0 +1,103 @@
+use std.sspec.*
+use std.driver.static_table.{static_registry}
+use std.driver.types.{DriverClass, DriverContext, DriverHandle, ProbeResult}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.driver_adapter.{register_fat32_driver, fat32_probe}
+use std.fs_driver.fat32_core.{fat32_register_test_device}
+
+class AdapterMockBlockDevice:
+    sector: [u8]
+
+impl AdapterMockBlockDevice:
+    static fn new(valid: bool) -> AdapterMockBlockDevice:
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        if valid:
+            bytes[11] = 0x00
+            bytes[12] = 0x02
+            bytes[13] = 0x01
+            bytes[14] = 0x20
+            bytes[15] = 0x00
+            bytes[16] = 0x02
+            bytes[32] = 0x00
+            bytes[33] = 0x10
+            bytes[34] = 0x00
+            bytes[35] = 0x00
+            bytes[36] = 0xF0
+            bytes[37] = 0x03
+            bytes[44] = 0x02
+            bytes[45] = 0x00
+            bytes[46] = 0x00
+            bytes[47] = 0x00
+            bytes[510] = 0x55
+            bytes[511] = 0xAA
+        AdapterMockBlockDevice(sector: bytes)
+
+impl BlockDevice for AdapterMockBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        var i = 0
+        while i < self.sector.len() and i < buffer.len():
+            if lba == 0:
+                buffer[i] = self.sector[i]
+            else:
+                buffer[i] = 0
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+describe "fat32 driver adapter":
+    it "probe accepts a registered FAT32-like block device":
+        val fat_dev = fat32_register_test_device(AdapterMockBlockDevice.new(true))
+        val bad_dev = fat32_register_test_device(AdapterMockBlockDevice.new(false))
+
+        var fat_probe = ProbeResult.Reject
+        match fat32_probe(fat_dev):
+            Result.Ok(r) -> fat_probe = r
+            Result.Err(_) -> fat_probe = ProbeResult.Reject
+
+        var bad_probe = ProbeResult.Accept
+        match fat32_probe(bad_dev):
+            Result.Ok(r) -> bad_probe = r
+            Result.Err(_) -> bad_probe = ProbeResult.Accept
+
+        expect(fat_probe).to_equal(ProbeResult.Accept)
+        expect(bad_probe).to_equal(ProbeResult.Reject)
+
+    it "registry.attach_at returns a non-negative DriverHandle":
+        val fat_dev = fat32_register_test_device(AdapterMockBlockDevice.new(true))
+
+        var idx = -1
+        match register_fat32_driver():
+            Result.Ok(i) -> idx = i
+            Result.Err(_) -> idx = -2
+        expect(idx).to_be_greater_than(-1)
+
+        var reg = static_registry()
+        val lookup_idx = reg.find_for_device(0, 0, DriverClass.Fs)
+        expect(lookup_idx).to_be_greater_than(-1)
+
+        var init_count = -1
+        match reg.init_all(DriverContext(opaque: 0)):
+            Result.Ok(n) -> init_count = n
+            Result.Err(_) -> init_count = -2
+        expect(init_count).to_be_greater_than(-1)
+
+        var handle_value = -1
+        match reg.attach_at(lookup_idx, fat_dev):
+            Result.Ok(h) -> handle_value = h.value
+            Result.Err(_) -> handle_value = -2
+        expect(handle_value).to_be_greater_than(-1)
+
+        var detached = false
+        match reg.detach_at(lookup_idx, DriverHandle(value: handle_value)):
+            Result.Ok(_) -> detached = true
+            Result.Err(_) -> detached = false
+        expect(detached).to_equal(true)

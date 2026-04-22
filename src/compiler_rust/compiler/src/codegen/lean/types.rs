@@ -315,6 +315,11 @@ impl<'a> TypeTranslator<'a> {
                 let inner = self.translate(*element)?;
                 Ok(LeanType::List(Box::new(inner)))
             }
+            HirType::Bitfield { backing, .. } => {
+                // Bitfields verify as their packed backing integer until
+                // field-level proof generation is implemented.
+                self.translate(*backing)
+            }
             HirType::UnitType { name, repr, .. } => {
                 // Unit types become their representation type with a wrapper
                 let inner = self.translate(*repr)?;

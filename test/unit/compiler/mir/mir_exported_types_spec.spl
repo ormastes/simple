@@ -13,11 +13,12 @@ including export metadata, field offsets, and explicit bit-width metadata.
 """
 
 use compiler.mir.mir_lowering.{MirLowering}
-from hir_definitions import {HirClass, HirStruct, HirField, HirExpr, HirExprKind}
+from hir_definitions import {HirClass, HirStruct, HirField, HirFunction, HirParam, HirBlock, HirExpr, HirExprKind}
 from hir_types import {HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
 from lexer import {Span}
 use compiler.types.type_layout.{LayoutAttr, LayoutKind}
-use compiler.common.attributes.{ExportAttr}
+use compiler.common.attributes.{ExportAttr, DriverManifestAttr, DriverManifestAttrKind}
+use compiler.common.dependency.visibility.{Visibility}
 
 fn empty_span() -> Span:
     Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -36,6 +37,46 @@ fn dummy_expr() -> HirExpr:
         kind: HirExprKind.UnitLit,
         has_type_: false,
         type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn dummy_block() -> HirBlock:
+    HirBlock(
+        stmts: [],
+        has: true,
+        value: dummy_expr(),
+        span: empty_span()
+    )
+
+fn make_driver_function() -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 30),
+        name: "register_null_block_driver",
+        type_params: [],
+        params: [],
+        return_type: make_hir_type(HirTypeKind.Unit),
+        body: dummy_block(),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: nil,
+        export_attr: nil,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: [0],
+            version: "0.1",
+            abi: ""
+        ),
+        has_doc_comment: false,
+        doc_comment: "",
         span: empty_span()
     )
 
@@ -119,6 +160,10 @@ fn make_plain_struct() -> HirStruct:
     )
 
 fn make_module() -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    val driver_fn = make_driver_function()
+    functions[driver_fn.symbol] = driver_fn
+
     var classes: Dict<SymbolId, HirClass> = {}
     val cls = make_exported_class()
     classes[cls.symbol] = cls
@@ -133,7 +178,7 @@ fn make_module() -> HirModule:
         imports: [],
         exports: [],
         symbols: SymbolTable.new(),
-        functions: {},
+        functions: functions,
         classes: classes,
         structs: structs,
         enums: {},
@@ -188,3 +233,14 @@ describe "MIR exported type lowering":
                 expect(fields[1].offset).to_equal(4)
             case _:
                 expect(false).to_equal(true)
+
+    it "propagates driver manifest attributes onto MIR functions":
+        val hir_module = make_module()
+        val lowering = MirLowering.new(hir_module.symbols)
+
+        val mir_module = lowering.lower_module(hir_module)
+        val fn_ = mir_module.functions[SymbolId(id: 30)]
+
+        expect(fn_.has_driver_manifest_attr).to_equal(true)
+        expect(fn_.driver_manifest_attr.kind).to_equal(DriverManifestAttrKind.Driver)
+        expect(fn_.driver_manifest_attr.version).to_equal("0.1")

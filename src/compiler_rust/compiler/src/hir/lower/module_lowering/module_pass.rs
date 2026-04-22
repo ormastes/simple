@@ -74,6 +74,11 @@ impl Lowerer {
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
             }
+            Node::Bitfield(bf) => {
+                let bitfield_type_id = self.register_bitfield(bf)?;
+                self.globals.insert(bf.name.clone(), bitfield_type_id);
+                self.local_globals.insert(bf.name.clone());
+            }
             Node::TypeAlias(ta) => {
                 self.register_type_alias(ta)?;
             }

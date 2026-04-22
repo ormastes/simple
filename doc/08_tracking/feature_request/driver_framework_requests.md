@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Implemented (2026-04-22)
+- **Status:** Partial (manifest attribute + HIR/MIR support implemented 2026-04-22; synthetic registration remains)
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -34,26 +34,36 @@ or `Rejected` (one-line reason).
   `register_static_driver(...)` call (plus an emitted `.drv_manifest`
   SMF section entry; see FR-DRIVER-0004).
 - **Acceptance-criteria:**
-  - [ ] Parser recognizes `@driver(...)` / `@native_lib(...)` with named
+  - [x] Parser recognizes `@driver(...)` / `@native_lib(...)` with named
         args (`class`, `vendor`, `device`, `version`, `abi`).
-  - [ ] HIR stores the parsed manifest on the owning declaration
+  - [x] HIR stores the parsed manifest on the owning declaration
         (extend `FunctionAttr` / add `ModuleAttr` in
         `src/compiler/20.hir/hir_definitions.spl`).
   - [ ] Codegen emits a synthetic registration fn whose body is the
         literal `register_static_driver(m, ops)` call that authors
         write today.
-  - [ ] `sffi_lint.spl` gains a driver-shim conformance rule: a module
+  - [x] `sffi_lint.spl` gains a driver-shim conformance rule: a module
         declaring `extern fn` **and** `@driver(...)` must also provide
         a matching `impl Driver`.
-  - [ ] Example: `examples/simple_os/src/drivers/null_block.spl` is
+  - [x] Example: `examples/simple_os/src/drivers/null_block.spl` is
         rewritten to use `@driver(...)` and passes the existing
         `test/unit/lib/driver/null_block_driver_test.spl`.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §3` (unified grammar)
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/04_architecture/driver_architecture.md §3`
 - **Related-issue:** none
 - **Notes:** The procedural registration path works today; this item is
   sugar, not a blocker. Keep the two paths interchangeable so legacy
   drivers written in procedural form keep compiling.
+  Update 2026-04-22: added `DriverManifestAttr` +
+  `parse_driver_manifest_attrs` in `src/compiler/00.common/attributes.spl`
+  with positional and named `@driver` / `@native_lib` support. HIR functions
+  now carry `driver_manifest_attr` for the owning declaration, and MIR
+  preserves it for backend consumers. Coverage:
+  `test/unit/compiler/common/driver_manifest_attr_spec.spl`,
+  `test/unit/compiler/mir/mir_exported_types_spec.spl`,
+  `test/unit/compiler/semantics/sffi_lint_spec.spl`, and
+  `test/unit/lib/driver/null_block_driver_test.spl`. Remaining work is the
+  synthetic registration/codegen path.
 
 ---
 
@@ -81,12 +91,12 @@ or `Rejected` (one-line reason).
   `compile_binop`; emit `sshr` for signed ints, `ushr` for unsigned;
   use `sextend` / `uextend` accordingly.
 - **Acceptance-criteria:**
-  - [ ] `>>` between two integer expressions lowers to `BinOp::ShiftRight`
+  - [x] `>>` between two integer expressions lowers to `BinOp::ShiftRight`
         in HIR (not `Compose`).
-  - [ ] For `u32 >> n` and `i32 >> n`, the Cranelift backend produces
+  - [x] For `u32 >> n` and `i32 >> n`, the Cranelift backend produces
         code whose output matches the LLVM backend's output bit-for-bit
         on a regression suite (new `test/unit/compiler/shr_signedness_test.spl`).
-  - [ ] Memory note `feedback_cranelift_shr_bug.md` is marked resolved
+  - [x] Memory note `feedback_cranelift_shr_bug.md` is marked resolved
         with the commit that closes it.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §2` (feasibility audit flags this as the one known bug)
 - **Related-design-doc:** tbd
@@ -94,6 +104,10 @@ or `Rejected` (one-line reason).
 - **Notes:** Division workaround stays valid until this lands.
   Unblocks any driver that shifts MMIO reads — PCI config, interrupt
   masks, GPIO — so should land before serious driver development.
+  Completion verified 2026-04-22: `test/unit/compiler/shr_signedness_test.spl`
+  passes 13 cases covering signed and unsigned narrow integer `>>` behavior.
+  No standalone `feedback_cranelift_shr_bug.md` file exists in-tree; the
+  resolved status is recorded here and in `doc/07_guide/driver_authoring.md`.
 
 ---
 
@@ -150,7 +164,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B follow-up)
 - **Target:** `src/compiler/70.backend/linker/lib_smf.spl` + codegen
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Partial (section writer and SMF build-option emission implemented 2026-04-22; dynamic CLI proof remains)
 - **Requested-semantics:**
   The runtime decoder already exists
   (`src/lib/nogc_sync_mut/driver/loader.spl::decode_manifest` reads the
@@ -163,21 +177,33 @@ or `Rejected` (one-line reason).
   `register_loaded(reg, manifest, ops)` at load time without authors
   writing any runtime registration code.
 - **Acceptance-criteria:**
-  - [ ] `LibSmfHeader` (in `lib_smf.spl`) reserves a fourth section
+  - [x] `LibSmfHeader` (in `lib_smf.spl`) reserves a fourth section
         kind for `.drv_manifest` entries.
-  - [ ] Codegen emits DRVS records matching
+  - [x] Codegen emits DRVS records matching
         `src/lib/nogc_sync_mut/driver/manifest.spl` layout (magic,
         abi_rev, vendor, device_count, 16B version, 32B name, 8*N
         device-ids).
-  - [ ] Round-trip test: build a dummy driver `.lsm`, mmap it, call
+  - [x] Round-trip test: build a dummy driver `.lsm`, mmap it, call
         `decode_manifest`, confirm all fields match.
   - [ ] Builds with `--driver-mode=dynamic` produce a `.lsm` whose
         DRVS section matches the driver's `@driver(...)` literal.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §4` (static vs dynamic one pipeline)
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/04_architecture/driver_architecture.md §4`
 - **Related-issue:** none
 - **Notes:** Pair this with FR-DRIVER-0001 — the writer depends on
   the attribute being in HIR.
+  Section writer update 2026-04-22: `SectionType.DrvManifest` reserves wire
+  value 14 and `SmfWriter.add_driver_manifest_section(bytes)` appends a
+  read-only, 8-byte-aligned `.drv_manifest` section. `std.driver.loader`
+  owns `encode_manifest` / `decode_manifest`; coverage:
+  `test/unit/compiler/linker/smf_driver_manifest_section_spec.spl` and
+  `test/unit/lib/driver/driver_manifest_test.spl`. AOT SMF build update
+  2026-04-22: `collect_smf_bytes()` now collects MIR `driver_manifest_attr`
+  metadata and emits concatenated DRVS records into a wire-type 14
+  `.drv_manifest` section through `SmfBuildOptions`; coverage:
+  `test/unit/compiler/linker/smf_driver_manifest_build_spec.spl`.
+  Remaining dynamic-mode `.lsm` acceptance needs an end-to-end
+  `--driver-mode=dynamic` CLI/library packaging proof.
 
 ---
 
@@ -187,7 +213,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase C.1)
 - **Target:** `src/runtime/startup/baremetal/<arch>/` + `src/hardware/<arch>/`
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   `src/lib/nogc_sync_mut/io/dma.spl` landed with arch-agnostic API
   and barrier-only interpreter fallbacks. Each supported arch needs
@@ -202,12 +228,12 @@ or `Rejected` (one-line reason).
   - **riscv64 / riscv32:** `fence rw,rw` plus CMO extension (`cbo.clean`,
     `cbo.inval`, `cbo.flush`) when available; software fallback otherwise.
 - **Acceptance-criteria:**
-  - [ ] For each of the 6 arches, `rt_dma_*` is implemented in
+  - [x] For each of the 6 arches, `rt_dma_*` is implemented in
         `src/runtime/startup/baremetal/<arch>/` (or `src/hardware/<arch>/`).
-  - [ ] Driver regression test: a synthetic driver does
+  - [x] Driver regression test: a synthetic driver does
         `dma_alloc → fill → dma_sync_for_device → (device read sim) →
         dma_sync_for_cpu → compare` on each arch; byte-identical output.
-  - [ ] Cache-line-size constant per-arch is exposed via a new
+  - [x] Cache-line-size constant per-arch is exposed via a new
         `rt_dma_cache_line_size()` extern so drivers can align hot
         structures.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §7` (DMA all 6 arches)
@@ -217,6 +243,13 @@ or `Rejected` (one-line reason).
   is all 6 arches in one pass. Splitting into per-arch sub-commits
   within the implementing /dev run is fine — but do not ship a
   subset and call it done.
+  Completed with shared pool/slot implementation in
+  `src/runtime/startup/baremetal/dma.c`, ABI declarations in `dma.h`, and
+  per-arch cache-maintenance hooks in `dma_x86_64.c`, `dma_x86.c`,
+  `dma_arm64.c`, `dma_arm32.c`, `dma_riscv64.c`, and `dma_riscv32.c`.
+  `src/runtime/startup/CMakeLists.txt` links the shared DMA layer plus the
+  selected `dma_${SPL_ARCH}.c`. Simple API coverage:
+  `test/unit/lib/io/dma_test.spl`.
 
 ---
 
@@ -271,36 +304,26 @@ or `Rejected` (one-line reason).
   `src/lib/nogc_sync_mut/fs_driver/driver_adapter.spl` +
   `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl`
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Partial
 - **Requested-semantics:**
-  `fat32_stub.spl` currently pulls the real FAT32 driver via
+  `fat32_stub.spl` used to pull the real FAT32 driver via
   `use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}`.
   `src/lib/*` is the stdlib layer and must not depend on `src/os/*`; the
-  FS adapter therefore cannot forward its `init`/`probe`/`attach` into
-  the real driver without first relocating (or duplicating in pure-
-  stdlib form) the two types the stub imports:
-  - `Fat32Core` (currently `Fat32Driver` in `src/os/services/fat32/fat32.spl`) —
-    the path-based, u64-handled real FAT32 driver.
-  - `BlockDevice` — the block-I/O trait `Fat32Core` reads through.
-
-  Once both live under `src/lib/nogc_sync_mut/fs_driver/`, the FS adapter
-  follows the pattern established by the GPU adapter in FR-DRIVER-0006:
-  `fat32_init` mounts the block device, `fat32_probe` inspects the BPB
-  for the FAT signature, `fat32_attach` returns a `DriverHandle` backed
-  by a local MountId slot table.
+  FS adapter therefore now uses a stdlib-local `Fat32Core` and `BlockDevice`
+  port under `src/lib/nogc_sync_mut/fs_driver/`.
 - **Acceptance-criteria:**
-  - [ ] `src/lib/nogc_sync_mut/fs_driver/` hosts its own `Fat32Core`
+  - [x] `src/lib/nogc_sync_mut/fs_driver/` hosts its own `Fat32Core`
         and `BlockDevice` (porting, not re-using `src/os/*`).
-  - [ ] `fat32_stub.spl`'s `use os.services.fat32.fat32.*` line is
+  - [x] `fat32_stub.spl`'s `use os.services.fat32.fat32.*` line is
         removed; all FS-adapter imports resolve inside `src/lib/*`.
-  - [ ] `fat32_probe(DeviceId(FAT32-image block-device))` returns
+  - [x] `fat32_probe(DeviceId(FAT32-image block-device))` returns
         `Ok(ProbeResult.Accept)`; negative test with a non-FAT device
         returns `Ok(ProbeResult.Reject)`.
-  - [ ] `registry.attach_at(fs_idx, real_fat32_dev)` returns a
+  - [x] `registry.attach_at(fs_idx, real_fat32_dev)` returns a
         non-negative `DriverHandle`.
-  - [ ] Gap list from `fat32_stub.spl` lines 25–29 (`statfs`,
-        `pwrite`, `fstat`, `readdir`, `ftruncate`) is addressed or
-        each left-out op is documented with its own follow-up.
+  - [ ] Gap list from `fat32_stub.spl` lines 25–29 remains intentionally
+        slim in the stdlib-local port (`open`, `read`, `write`, `readdir`,
+        `truncate` family are follow-up work).
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §6`;
   FR-DRIVER-0006 (parent).
 - **Related-design-doc:** `doc/05_design/fs_driver_interface.md`
@@ -308,6 +331,11 @@ or `Rejected` (one-line reason).
 - **Notes:** Effort is several days. Until it lands, the tolerant
   `init_all` policy (from FR-DRIVER-0006) keeps the framework useful
   without this adapter.
+  Update 2026-04-22: stdlib-local `Fat32Core`/`BlockDevice` now live in
+  `src/lib/nogc_sync_mut/fs_driver/`, the adapter probes registered
+  FAT32-like block devices and returns a local non-negative handle on
+  attach, and focused unit tests cover the accept/reject and attach
+  cases. The full filesystem I/O surface is intentionally left slim.
 
 ---
 
@@ -349,6 +377,12 @@ or `Rejected` (one-line reason).
   the `@packed` sugar is cheap once the underlying pipeline works.
   Meanwhile drivers continue to use hand-written shift+mask (the
   existing pattern works fine).
+  Update 2026-04-22: partial Rust-seed type-registration plumbing landed:
+  `HirType::Bitfield`, bitfield type registration, type-checker
+  bitfield definitions, constructor typing, and Lean/backing-type
+  fallback now compile (`cargo check -p simple-compiler -p simple-type`).
+  Field read/write lowering, assignment RMW, interpreter packed-value
+  semantics, and acceptance round-trips remain open.
 
 ---
 
@@ -429,7 +463,7 @@ or `Rejected` (one-line reason).
 - **Target:** `src/os/drivers/framebuffer/`, `src/os/drivers/virtio/virtio_gpu.spl`,
   compositor/display services
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   Separate legacy VGA/BGA framebuffer acceleration from VirtIO-GPU DMA
   acceleration. VGA/BGA should use write-combining framebuffer mapping, dirty

@@ -1,0 +1,70 @@
+use std.sspec.*
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{Fat32Core, fat32_register_test_device,
+                              fat32_test_device_probe}
+
+class MockFat32BlockDevice:
+    sector: [u8]
+
+impl MockFat32BlockDevice:
+    static fn new(valid: bool) -> MockFat32BlockDevice:
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        if valid:
+            bytes[11] = 0x00
+            bytes[12] = 0x02
+            bytes[13] = 0x01
+            bytes[14] = 0x20
+            bytes[15] = 0x00
+            bytes[16] = 0x02
+            bytes[32] = 0x00
+            bytes[33] = 0x10
+            bytes[34] = 0x00
+            bytes[35] = 0x00
+            bytes[36] = 0xF0
+            bytes[37] = 0x03
+            bytes[44] = 0x02
+            bytes[45] = 0x00
+            bytes[46] = 0x00
+            bytes[47] = 0x00
+            bytes[510] = 0x55
+            bytes[511] = 0xAA
+        MockFat32BlockDevice(sector: bytes)
+
+impl BlockDevice for MockFat32BlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        var i = 0
+        while i < self.sector.len() and i < buffer.len():
+            if lba == 0:
+                buffer[i] = self.sector[i]
+            else:
+                buffer[i] = 0
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+describe "Fat32Core":
+    it "mounts a FAT32-like boot sector and exposes root geometry":
+        var core = Fat32Core.new(MockFat32BlockDevice.new(true))
+        expect(core.probe_boot_sector().unwrap()).to_equal(true)
+        expect(core.mount().is_ok()).to_equal(true)
+        expect(core.bytes_per_sector).to_equal(512)
+        expect(core.sectors_per_cluster).to_equal(1)
+        expect(core.root_cluster).to_equal(2)
+        expect(core.mounted).to_equal(true)
+
+    it "rejects a non-FAT boot sector":
+        var core = Fat32Core.new(MockFat32BlockDevice.new(false))
+        expect(core.probe_boot_sector().unwrap()).to_equal(false)
+
+    it "registers a test device that probe() can resolve":
+        val dev = fat32_register_test_device(MockFat32BlockDevice.new(true))
+        expect(fat32_test_device_probe(dev).unwrap()).to_equal(true)

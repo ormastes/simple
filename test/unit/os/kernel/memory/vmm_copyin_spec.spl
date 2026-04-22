@@ -10,12 +10,47 @@ paths because it needs real VMM/MMIO state.
 use std.spec.{describe, it, expect}
 use os.kernel.memory.vmm.{
     vmm_verify_user_read,
+    vmm_pt_walk_user_read,
+    vmm_pt_range_user_readable,
+    vmm_pt_range_user_writable,
+    vmm_copyin_bytes_from_space,
     vmm_copyin_bytes,
     vmm_copyin_u64,
     vmm_copyin_cstr,
     vmm_copyin_string_vector
 }
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
+use os.kernel.memory.pmm.{pmm_alloc_page_raw}
+use os.kernel.boot.mmio.{mmio_write8, mmio_write64}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
+
+val _TEST_PTE_PRESENT: u64 = 1
+val _TEST_PTE_WRITABLE: u64 = 2
+val _TEST_PTE_USER: u64 = 4
+val _TEST_PTE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+fn _zero_test_page(page: u64):
+    var i: u64 = 0
+    while i < 512:
+        mmio_write64(page + i * 8, 0)
+        i = i + 1
+
+fn _wire_test_user_pages(pml4: u64, first_user_page: u64, first_data_page: u64, second_data_page: u64):
+    val pdpt = pmm_alloc_page_raw()
+    val pd = pmm_alloc_page_raw()
+    val pt = pmm_alloc_page_raw()
+    _zero_test_page(pml4)
+    _zero_test_page(pdpt)
+    _zero_test_page(pd)
+    _zero_test_page(pt)
+    val flags = _TEST_PTE_PRESENT | _TEST_PTE_WRITABLE | _TEST_PTE_USER
+    mmio_write64(pml4 + (((first_user_page >> 39) & 0x1FF) * 8), (pdpt & _TEST_PTE_ADDR_MASK) | flags)
+    mmio_write64(pdpt + (((first_user_page >> 30) & 0x1FF) * 8), (pd & _TEST_PTE_ADDR_MASK) | flags)
+    mmio_write64(pd + (((first_user_page >> 21) & 0x1FF) * 8), (pt & _TEST_PTE_ADDR_MASK) | flags)
+    mmio_write64(pt + (((first_user_page >> 12) & 0x1FF) * 8), (first_data_page & _TEST_PTE_ADDR_MASK) | flags)
+    if second_data_page != 0:
+        val second_user_page = first_user_page + 4096
+        mmio_write64(pt + (((second_user_page >> 12) & 0x1FF) * 8), (second_data_page & _TEST_PTE_ADDR_MASK) | flags)
 
 describe "vmm copy-in status":
     """
@@ -68,3 +103,74 @@ describe "vmm copy-in status":
 
     it "rejects wrapping read verification ranges":
         expect(vmm_verify_user_read(0xFFFFFFFFFFFFFFF8, 16)).to_equal(false)
+
+describe "explicit ProcessVmSpace page-table copy-in":
+    """These cases cover the FR-SPM-0001 pt-walk contract before MMIO deref."""
+
+    it "returns nil when no page-table root is installed":
+        var space = ProcessVmSpace(pml4: 0, id: 1, vma_count: 0, areas: [])
+        expect(vmm_pt_walk_user_read(space, 0x1000)).to_be_nil()
+
+    it "rejects execute-only VMA before walking the page table":
+        val area = VmArea(start: 0x2000, len: 4096, kind: VMA_ANON, flags: VMA_EXEC, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0x100000, id: 2, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        expect(vmm_pt_walk_user_read(space, 0x2000)).to_be_nil()
+
+    it "rejects cross-page read ranges when the tail page cannot translate":
+        val first = VmArea(start: 0x3000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 3, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(first)
+        expect(vmm_pt_range_user_readable(space, 0x3FF0, 32)).to_equal(false)
+
+    it "rejects write ranges without writable PTE access":
+        val area = VmArea(start: 0x4000, len: 4096, kind: VMA_ANON, flags: VMA_READ | VMA_WRITE, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 4, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        expect(vmm_pt_range_user_writable(space, 0x4000, 8)).to_equal(false)
+
+    it "copy-in reports EFAULT instead of dereferencing when translation misses":
+        val area = VmArea(start: 0x5000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 5, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        val result = vmm_copyin_bytes_from_space(space, 0x5000, 4)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)
+
+    it "copies a byte range that crosses two mapped readable pages":
+        val pml4 = pmm_alloc_page_raw()
+        val data0 = pmm_alloc_page_raw()
+        val data1 = pmm_alloc_page_raw()
+        _wire_test_user_pages(pml4, 0x7000, data0, data1)
+        var i: u64 = 0
+        while i < 16:
+            mmio_write8(data0 + 0xFF0 + i, (0x40 + i).to_u8())
+            mmio_write8(data1 + i, (0x60 + i).to_u8())
+            i = i + 1
+        val area = VmArea(start: 0x7000, len: 8192, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: pml4, id: 6, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        val result = vmm_copyin_bytes_from_space(space, 0x7FF0, 32)
+        expect(result.status.ok).to_equal(true)
+        expect(result.bytes.len()).to_equal(32)
+        expect(result.bytes[0]).to_equal(0x40u8)
+        expect(result.bytes[15]).to_equal(0x4Fu8)
+        expect(result.bytes[16]).to_equal(0x60u8)
+        expect(result.bytes[31]).to_equal(0x6Fu8)
+
+    it "rejects cross-page copy when the tail page is unmapped":
+        val pml4 = pmm_alloc_page_raw()
+        val data0 = pmm_alloc_page_raw()
+        _wire_test_user_pages(pml4, 0x9000, data0, 0)
+        val area = VmArea(start: 0x9000, len: 8192, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: pml4, id: 7, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        val result = vmm_copyin_bytes_from_space(space, 0x9FF0, 32)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)

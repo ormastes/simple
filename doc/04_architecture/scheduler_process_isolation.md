@@ -51,10 +51,11 @@ Implemented source paths:
 
 The first production slice is intentionally bounded. Remaining scheduler/process logic is:
 
-- Wire automatic AP startup into the boot lane after APIC/IDT ordering is
-  validated. MADT APIC IDs now feed both scheduler topology and per-CPU firmware
-  metadata, and the x86_64 low-memory AP trampoline marks APs online only after
-  its 64-bit entry calls the AP-side online hook.
+- Prove automatic AP startup on a live SMP boot lane. MADT APIC IDs now feed
+  both scheduler topology and per-CPU firmware metadata, `X86Interrupt.init()`
+  calls the idempotent x86_64 AP startup hook after IDT/APIC init, and the
+  low-memory AP trampoline marks APs online only after its 64-bit entry calls
+  the AP-side online hook.
 - Add non-x86 topology providers for ARM/RISC-V package or NUMA data where the
   platform exposes it.
 - Extend fair scheduling from EEVDF-like virtual-deadline selection to full lag/sleeper decay and wakeup-preemption behavior.

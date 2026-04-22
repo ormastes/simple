@@ -1,0 +1,36 @@
+# NVFS offline upgrade helper.
+#
+# Converts v2 pmap records to v3-compatible compression metadata without
+# rewriting extent payloads. Full device walking is owned by the caller; this
+# module provides deterministic record-level upgrade decisions.
+
+struct NvfsUpgradeReport:
+    scanned: i64
+    upgraded: i64
+    failed: i64
+    target_version: i32
+
+fn nvfs_upgrade_report_empty() -> NvfsUpgradeReport:
+    NvfsUpgradeReport(scanned: 0, upgraded: 0, failed: 0, target_version: 3)
+
+fn nvfs_upgrade_pmap_record_len(record_len: i64) -> i64:
+    """Return upgraded pmap record length, or -1 for unsupported input."""
+    if record_len == 80:
+        return 88
+    if record_len == 88:
+        return 88
+    -1
+
+fn nvfs_upgrade_batch(record_lens: [i64]) -> NvfsUpgradeReport:
+    var report = nvfs_upgrade_report_empty()
+    var i = 0
+    while i < record_lens.len():
+        report.scanned = report.scanned + 1
+        val upgraded_len = nvfs_upgrade_pmap_record_len(record_lens[i])
+        if upgraded_len < 0:
+            report.failed = report.failed + 1
+        else:
+            if record_lens[i] != upgraded_len:
+                report.upgraded = report.upgraded + 1
+        i = i + 1
+    report

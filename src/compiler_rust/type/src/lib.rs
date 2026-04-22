@@ -690,6 +690,8 @@ pub struct TypeChecker {
     next_ref_id: usize,
     /// Trait implementation registry for coherence checks
     pub trait_impls: HashMap<String, TraitImplRegistry>,
+    /// Bitfield definitions by name
+    pub bitfields: HashMap<String, Bitfield>,
     /// Mixin definitions for composition (Feature #2200)
     pub mixins: HashMap<String, MixinInfo>,
     /// Mixin compositions: type -> mixins it includes (Feature #2201)

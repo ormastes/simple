@@ -194,7 +194,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-002 fix session
 - **Target:** compiler — `src/compiler/20.hir/hir_lowering/` + `src/compiler/80.driver/`
 - **Priority:** P0
-- **Status:** Implemented (2026-04-18, A2 agent)
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   The self-hosted HIR lowerer (`HirLowering`) must mirror the Rust seed's
   two-pass import loading pipeline from
@@ -213,14 +213,14 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   has no effect on the symbol table and `CompileOptions` resolves by module
   load order rather than explicit import path.
 - **Acceptance-criteria:**
-  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+  - [x] `use compiler.common.driver_core_types.{CompileOptions}` followed by
         a field access on the 17-field driver struct succeeds in the self-hosted
         binary (FR-COMPILER-002 AC #1).
-  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves
+  - [x] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves
         to the 7-field backend struct and does NOT expose `mode` / `low_memory`
         (FR-COMPILER-002 AC #2).
-  - [ ] Both can coexist in the same file via aliased imports (FR-COMPILER-002 AC #3).
-  - [ ] FR-COMPILER-001 acceptance criteria are met.
+  - [x] Both can coexist in the same file via aliased imports (FR-COMPILER-002 AC #3).
+  - [x] FR-COMPILER-001 acceptance criteria are met.
 - **Prerequisites (infrastructure changes needed first):**
   1. [x] Add `module_resolver: ModuleResolverPort?` field to `HirLowering` class
      (added 2026-04-18 by A1 agent; `HirLowering.with_resolver()` constructor also added).
@@ -259,6 +259,12 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   override A's already-registered id. Correct fix requires module-scoped symbol
   tables (FR-COMPILER-004). For the single-consumer-with-fresh-HirLowering case
   (tests, incremental compilation), A2 works correctly.
+
+  **Completion update (2026-04-22):** FR-COMPILER-004 landed module-scoped HIR
+  lowering and closed the shared-lowering limitation. Coverage:
+  `test/system/compiler_module_scoped_hir_lowering_spec.spl`,
+  `test/system/compiler_compile_options_field_access_spec.spl`, and
+  `test/unit/compiler/hir/resolve_import_symbols_spec.spl`.
 
 ---
 

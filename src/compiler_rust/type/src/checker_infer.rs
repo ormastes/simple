@@ -205,6 +205,13 @@ impl TypeChecker {
                         }
                         Ok(*ret)
                     }
+                    Type::Bitfield(name) => {
+                        if args.len() == 1 {
+                            Ok(Type::Bitfield(name))
+                        } else {
+                            Ok(result_ty)
+                        }
+                    }
                     _ => Ok(result_ty),
                 }
             }
@@ -265,8 +272,18 @@ impl TypeChecker {
                 Ok(result_ty)
             }
             Expr::FieldAccess { receiver, .. } => {
-                let _ = self.infer_expr(receiver)?;
-                Ok(self.fresh_var())
+                let inferred_recv = self.infer_expr(receiver)?;
+                let recv_ty = self.resolve(&inferred_recv);
+                match recv_ty {
+                    Type::Bitfield(name) => {
+                        if self.bitfields.contains_key(&name) {
+                            Ok(Type::Int)
+                        } else {
+                            Ok(self.fresh_var())
+                        }
+                    }
+                    _ => Ok(self.fresh_var()),
+                }
             }
             Expr::MethodCall {
                 receiver,
@@ -274,9 +291,16 @@ impl TypeChecker {
                 args,
                 ..
             } => {
-                let _ = self.infer_expr(receiver)?;
+                let inferred_recv = self.infer_expr(receiver)?;
                 for arg in args {
                     let _ = self.infer_expr(&arg.value)?;
+                }
+
+                let recv_ty = self.resolve(&inferred_recv);
+                if let Type::Bitfield(name) = recv_ty {
+                    if method == "new" {
+                        return Ok(Type::Bitfield(name));
+                    }
                 }
 
                 // Handle .with for FString literals and tracked variables

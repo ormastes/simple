@@ -31,7 +31,7 @@ use os.kernel.types.vmspace_types.{
     VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW,
     MAX_VMAS
 }
-use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
 
@@ -426,6 +426,12 @@ struct VmmCopyStringVectorResult:
     status: VmmUserCopyStatus
     values: [text]
 
+struct VmmPtWalkResult:
+    """Result of translating one user virtual address through a ProcessVmSpace."""
+    ok: bool
+    kernel_ptr: u64
+    bytes_until_page_end: u64
+
 fn _vmm_copy_ok(bytes_read: u64) -> VmmUserCopyStatus:
     VmmUserCopyStatus(ok: true, errno: ESUCCESS, bytes_read: bytes_read)
 
@@ -480,6 +486,134 @@ fn vmm_verify_user_read(addr: u64, size: u64) -> bool:
     unchanged for existing callers.
     """
     _vmm_verify_user_access(addr, size, PTE_PRESENT | PTE_USER)
+
+fn _vmm_pt_walk(space: ProcessVmSpace, vaddr: u64, required_bits: u64) -> VmmPtWalkResult:
+    """Translate one user VA in `space` to a kernel-readable physmap pointer."""
+    if space.pml4 == 0:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+    if not _vmm_is_userspace_ptr(vaddr):
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pml4_virt = _phys_to_virt(space.pml4)
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if (pml4_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if (pdpt_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if (pd_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        val offset = vaddr & 0x1FFFFF
+        return VmmPtWalkResult(
+            ok: true,
+            kernel_ptr: _phys_to_virt(_pte_phys_addr(pd_entry) + offset),
+            bytes_until_page_end: 0x200000 - offset
+        )
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if (pt_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val page_offset = vaddr & 0xFFF
+    VmmPtWalkResult(
+        ok: true,
+        kernel_ptr: _phys_to_virt(_pte_phys_addr(pt_entry) + page_offset),
+        bytes_until_page_end: PAGE_SIZE - page_offset
+    )
+
+fn vmm_pt_walk_user_read(space: ProcessVmSpace, vaddr: u64) -> u64?:
+    """Translate one readable user VA in an explicit address space."""
+    if space.vma_count > 0:
+        val area = vma_find(space, vaddr)
+        if area == nil:
+            return nil
+        if (area.flags & VMA_READ) == 0:
+            return nil
+
+    val walked = _vmm_pt_walk(space, vaddr, PTE_PRESENT | PTE_USER)
+    if not walked.ok:
+        return nil
+    walked.kernel_ptr
+
+fn vmm_pt_range_user_readable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool:
+    """Return true when every page in [ptr, ptr+len) translates for read."""
+    if ptr == 0 or len == 0 or ptr + len < ptr:
+        return false
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return false
+            if (area.flags & VMA_READ) == 0:
+                return false
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
+        if not walked.ok:
+            return false
+        copied = copied + walked.bytes_until_page_end
+    true
+
+fn vmm_pt_range_user_writable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool:
+    """Return true when every page in [ptr, ptr+len) translates for write."""
+    if ptr == 0 or len == 0 or ptr + len < ptr:
+        return false
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return false
+            if (area.flags & VMA_WRITE) == 0:
+                return false
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER | PTE_WRITABLE)
+        if not walked.ok:
+            return false
+        copied = copied + walked.bytes_until_page_end
+    true
+
+fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> VmmCopyBytesResult:
+    """Copy an exact byte range through an explicit address-space page walk."""
+    if ptr == 0:
+        return _vmm_copy_bytes_err(EFAULT)
+    if len == 0:
+        return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
+    if ptr + len < ptr:
+        return _vmm_copy_bytes_err(EFAULT)
+
+    var bytes: [u8] = []
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return _vmm_copy_bytes_err(EFAULT)
+            if (area.flags & VMA_READ) == 0:
+                return _vmm_copy_bytes_err(EFAULT)
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
+        if not walked.ok:
+            return _vmm_copy_bytes_err(EFAULT)
+        var chunk = walked.bytes_until_page_end
+        val remaining = len - copied
+        if chunk > remaining:
+            chunk = remaining
+        var i: u64 = 0
+        while i < chunk:
+            bytes.push(mmio_read8(walked.kernel_ptr + i))
+            i = i + 1
+        copied = copied + chunk
+
+    VmmCopyBytesResult(status: _vmm_copy_ok(len), bytes: bytes)
 
 fn _vmm_bytes_to_text(bytes: [u8]) -> text:
     var chars: [text] = []

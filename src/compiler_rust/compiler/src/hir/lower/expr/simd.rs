@@ -230,6 +230,12 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        if let Some(type_id) = self.module.types.lookup(class_name) {
+            if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && method == "new" {
+                return self.lower_bitfield_constructor(type_id, args, ctx);
+            }
+        }
+
         let qualified_name = format!("{}.{}", class_name, method);
 
         let mut args_hir = Vec::new();

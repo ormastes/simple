@@ -48,6 +48,7 @@ struct SmfBuildOptions:
     note_sdn: NoteSdnMetadata?
     target: Target
     deps: [SmfDependencyEntry]  # Dependency interface hashes for staleness checking
+    driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
 
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
@@ -56,11 +57,12 @@ impl SmfBuildOptions:
             metadata: nil,
             note_sdn: nil,
             target: target,
-            deps: []
+            deps: [],
+            driver_manifest_bytes: []
         )
 
     fn has_any_sections() -> bool:
-        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0
+        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0
 
 # ============================================================================
 # Dependency Tracking for SMF Staleness
@@ -162,7 +164,9 @@ fn generate_smf_with_templates(
         templates: templates,
         metadata: metadata,
         note_sdn: nil,
-        target: target
+        target: target,
+        deps: [],
+        driver_manifest_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -180,7 +184,9 @@ fn generate_smf_with_all_sections(
         templates: templates,
         metadata: metadata,
         note_sdn: note_sdn,
-        target: target
+        target: target,
+        deps: [],
+        driver_manifest_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -233,6 +239,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     else:
         []
     val has_deps = not deps_bytes.is_empty()
+    val has_driver_manifest = options.driver_manifest_bytes.len() > 0
 
     # Calculate section count
     var section_count = 1  # Code section
@@ -244,6 +251,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         section_count = section_count + 1  # note.sdn section
     if has_deps:
         section_count = section_count + 1  # note.deps section
+    if has_driver_manifest:
+        section_count = section_count + 1  # .drv_manifest section
 
     # Calculate offsets (sections come FIRST now, not after header)
     val header_size = 128  # SmfHeader::SIZE (written at END)
@@ -253,7 +262,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val metadata_offset = template_offset + template_bytes.len()
     val note_sdn_offset = metadata_offset + metadata_bytes.len()
     val deps_offset = note_sdn_offset + note_sdn_bytes.len()
-    val section_table_offset = deps_offset + deps_bytes.len()
+    val driver_manifest_offset = deps_offset + deps_bytes.len()
+    val section_table_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
     val string_table_offset = symbol_table_offset + 72  # One symbol
@@ -277,6 +287,10 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     # Write note.deps section (dependency interface hashes)
     if has_deps:
         buf = buf.concat(deps_bytes)
+
+    # Write .drv_manifest section payload
+    if has_driver_manifest:
+        buf = buf.concat(options.driver_manifest_bytes)
 
     # 2. Write section table
 
@@ -327,6 +341,16 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             offset: deps_offset,
             size: deps_bytes.len(),
             name: "note.deps"
+        ))
+
+    # .drv_manifest section (DRVS records)
+    if has_driver_manifest:
+        buf = buf.concat(build_section_entry(
+            section_type: 14,  # SectionType::DrvManifest
+            flags: 0x01,  # READ
+            offset: driver_manifest_offset,
+            size: options.driver_manifest_bytes.len(),
+            name: ".drv_manifest"
         ))
 
     # 3. Write symbol table

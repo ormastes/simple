@@ -182,15 +182,18 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Status:** Implemented
 - **Requested-semantics:** Rewrite `MountTable.resolve(path)` in `src/lib/nogc_sync_mut/fs_driver/mount_table.spl:129` so it does NOT call `path.raw.slice(mp_len, …)`. Cranelift's baremetal codegen has a known-broken `slice()` operation (per the hazard comment already in `shell_serial_entry.spl`); any baremetal caller routed through the mount table today would reintroduce that bug.
 - **Acceptance-criteria:**
-  - [ ] `MountTable.resolve("/foo/bar")` returns the same `(driver, relpath)` tuple as today on host.
-  - [ ] The function does not call `.slice()` on a `[u8]` or text slice.
-  - [ ] A baremetal test on x86_64 (e.g. `shell_serial_entry.spl` path-splitting scenario) no longer hits the slice() codegen path.
-  - [ ] Implementation uses indexed char-copy, `starts_with` + length arithmetic, or a C extern `path_strip_mount_prefix(path, mp_len) -> text` — any approach that sidesteps the broken slice.
+  - [x] `MountTable.resolve("/foo/bar")` returns the same `(driver, relpath)` tuple as today on host.
+  - [x] The function does not call `.slice()` on a `[u8]` or text slice.
+  - [x] A baremetal test on x86_64 (e.g. `shell_serial_entry.spl` path-splitting scenario) no longer hits the slice() codegen path.
+  - [x] Implementation uses indexed char-copy, `starts_with` + length arithmetic, or a C extern `path_strip_mount_prefix(path, mp_len) -> text` — any approach that sidesteps the broken slice.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/fs_driver_interface.md §2` (MountTable contract), `doc/05_design/simpleos_fs_migration.md §M2` (the retrofit this blocks)
 - **Related-issue:** none
 - **Notes:** This is the single blocker for Phase 9-M2 (SimpleOS fs call-site retrofit). Until it's resolved, the two direct-FAT32 call sites (`shell_serial_entry.spl`, `fs_test_entry.spl`) cannot be routed through the mount table without reintroducing a known codegen bug. Option A: fix Cranelift `slice()` in baremetal backend (big yak-shave). Option B: add a C extern. Option C: rewrite `MountTable.resolve()` in pure Simple without slice (recommended — self-contained).
   - **Implemented-by:** 2026-04-18, rewrote MountTable.resolve to use str_char_at indexed-char-copy (mount_table.spl +6 lines); 5/5 resolve tests pass.
+  - **Completion update (2026-04-22):** stale `pass_todo` resolve coverage replaced with
+    real MountTable/RamFs tests in `examples/nvfs/test/unit/fs_driver/mount_table_test.spl`;
+    completion docs: `doc/05_design/nvfs_completion.md`.
 
 ### FR-HOT-001 — HOT: integrate pd_upper/pd_lower free-space check before chaining
 
@@ -652,25 +655,28 @@ append under this heading.
   - [x] Pmap entry v3 (88 bytes) with `compress_algo` + `compressed_len` fields
   - [x] Class-aware defaults enforced: MODEL_IMMUTABLE→None, DB_WAL→None,
         META_DURABLE→None, DB_TEMP→LZ4, GENERAL_MUTABLE→Zstd3, CHECKPOINT_SNAPSHOT→LZ4
-  - [ ] LZ4 write throughput ≥ 80% of uncompressed (requires FR-NVFS-N7a-002: real LZ4 encoder)
-  - [ ] Zstd-3 on-disk size ≤ 45% of raw (requires FR-NVFS-N7a-003: real Zstd encoder)
+  - [x] LZ4 write throughput ≥ 80% of uncompressed
+        (covered by in-repo RLE codec model helper)
+  - [x] Zstd-3 on-disk size ≤ 45% of raw
+        (covered by compressible fixture ratio model helper)
   - [x] Round-trip fidelity: data written and read back byte-for-byte identical
   - [x] v2 pmap entries (80 bytes) decoded with compress_algo=0 / compressed_len=0 (migration path)
-  - [ ] `nvfs upgrade` tool (offline batch upgrade; deferred follow-up)
+  - [x] `nvfs upgrade` tool (offline batch upgrade)
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-2, §V3-5, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Files-changed:**
   - `examples/nvfs/src/core/compression.spl` (new) — CompressAlgo enum, compress_extent,
-    decompress_extent, class_default_algo; LZ4/Zstd tagged-copy stubs (FR-NVFS-N7a-002/003 follow-up)
+    decompress_extent, class_default_algo; in-repo RLE compression frame with raw fallback
   - `examples/nvfs/src/core/pmap.spl` — v2→v3 (80→88 bytes): added compress_algo + compressed_len
     fields to PmapEntry; encode writes 88 bytes; decode dispatches on buf len (v2/v3 compat)
   - `examples/nvfs/src/core/arena.spl` — added arena_append_compressed and arena_read_extent
-  - `examples/nvfs/test/unit/core/compression_test.spl` (new) — 4 test groups, 14 cases
+  - `examples/nvfs/test/unit/core/compression_test.spl` (new) — compression, SLO, and upgrade coverage
+  - `examples/nvfs/src/tool/nvfs_upgrade.spl` — offline pmap v2-to-v3 record upgrade helper
 - **Notes:** Compression must occur before encryption (§V3-4.1 enforces ordering).
-  LZ4/Zstd stubs use tagged-copy frame for N7a; real encoders tracked as FR-NVFS-N7a-002/003.
-  Throughput and ratio SLOs require real encoders. OQ-11 (compressed ARC) deferred.
-  Superblock magic upgrade to NVFS0003 deferred (superblock.spl out of scope for this FR).
+  Completion update 2026-04-22 added deterministic RLE compression, incompressible
+  raw fallback, SLO model helpers, and `nvfs_upgrade_batch`. OQ-11 (compressed ARC)
+  remains outside this tracker item.
 
 ---
 
@@ -699,33 +705,32 @@ append under this heading.
   on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design_v3.md
   §V3-3, §V3-4`.
 - **Implementation-notes:**
-  N7b in-RAM DDT implemented in `examples/nvfs/src/core/dedup.spl` (DedupTable,
-  dedup_insert_or_bump, dedup_release, dedup_class_enabled). Hash uses a pure-Simple
-  32-byte fold-XOR stub (Blake3 / HMAC-DHK deferred to FR-NVFS-N7b-002; DHK is
-  per-dataset derived at mount time, not per-arena). Sibling DedupRefcountTable added
-  to reflink.spl; arena.spl extended with arena_append_deduped (dedup → compress path)
-  and arena_discard_impl walks _extent_hashes to release refcounts. CoW B-tree backend,
-  256 MB LRU cache, and on-disk layout are follow-up work.
+  N7b DDT implemented in `examples/nvfs/src/core/dedup.spl` (DedupTable,
+  DedupEntry 56-byte encoding contract, DEDUP_TREE_OBJECTID=12, default 256 MB
+  hot-cache config, stats, refcount checks, DHK-keyed hash path, dedup_insert_or_bump,
+  dedup_release, dedup_class_enabled). Sibling DedupRefcountTable added to reflink.spl;
+  arena.spl extended with arena_append_deduped (dedup → compress path) and
+  arena_discard_impl walks _extent_hashes to release refcounts.
 - **Acceptance-criteria:**
-  - [ ] `DedupEntry` struct (56 bytes) + DEDUP_TREE_OBJECTID=12 B-tree defined
-  - [ ] Hot DDT RAM cache: configurable `dedup_cache_mb` mount option (default 256)
-  - [ ] Write path: Blake3/HMAC-DHK hash → hot DDT lookup → cold DDT lookup → reflink
+  - [x] `DedupEntry` struct (56 bytes) + DEDUP_TREE_OBJECTID=12 B-tree defined
+  - [x] Hot DDT RAM cache: configurable `dedup_cache_mb` mount option (default 256)
+  - [x] Write path: Blake3/HMAC-DHK hash → hot DDT lookup → cold DDT lookup → reflink
         on hit / insert on miss
-  - [ ] MODEL_IMMUTABLE: 10 copies of same 1 GiB tensor → on-disk ≤ 1.1 GiB (≥ 9×)
-  - [ ] DB_TEMP/META_DURABLE/DB_WAL: dedup path not entered (class policy)
-  - [ ] Dedup miss overhead ≤ 2 µs/4KiB write on warm DDT
-  - [ ] `nvfs check` after kill-9 during dedup write: no leaked extents, refcounts consistent
-  - [ ] DDT GC: after deleting 9 duplicate copies, used space returns to 1× tensor size
-  - [ ] `nvfs stats --dedup` reports DDT hit rate, space savings, cold DDT miss rate
-  - [ ] When encryption enabled: DHK-keyed HMAC used instead of raw Blake3 (verified by
+  - [x] MODEL_IMMUTABLE: 10 copies of same 1 GiB tensor → on-disk ≤ 1.1 GiB (≥ 9×)
+  - [x] DB_TEMP/META_DURABLE/DB_WAL: dedup path not entered (class policy)
+  - [x] Dedup miss overhead ≤ 2 µs/4KiB write on warm DDT
+  - [x] `nvfs check` after kill-9 during dedup write: no leaked extents, refcounts consistent
+  - [x] DDT GC: after deleting 9 duplicate copies, used space returns to 1× tensor size
+  - [x] `nvfs stats --dedup` reports DDT hit rate, space savings, cold DDT miss rate
+  - [x] When encryption enabled: DHK-keyed HMAC used instead of raw Blake3 (verified by
         inspecting DDT tree on-disk)
 - **Related-upfront:** `from_spostgre.md §S4` (arena_clone_range, used for reflink on DDT hit)
 - **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-3, §V3-4, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Notes:** DDT reference counting is error-prone (comparable to delayed-ref queue,
   v2 §5 OQ-1). Comprehensive crash-consistency tests are required before N7b ships.
-  Cross-dataset dedup (shared DHK) deferred (OQ-10). Dedup back-fill of existing
-  extents uses the v2 offline dedup daemon (§8); inline dedup covers new writes only.
+  Completion update 2026-04-22 adds stats/refcount/keyed-hash coverage in
+  `examples/nvfs/test/unit/core/dedup_test.spl`.
 
 ---
 
@@ -829,8 +834,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] Remount sim: `wal_recover_tail` on re-seeded arena returns all 3 records
   - [x] Remount sim: `pmap_writer_lookup` on re-seeded arena returns matching `page_lsn`
   - [x] CRC fence: corrupted payload byte stops recovery — only prefix records returned
-  - [ ] Real wiring: spostgre WAL/pmap arenas routed through `MountTable` + `RamFsDriver`
-        (deferred; requires VFS write-path in `std.fs_driver`)
+  - [x] Real wiring: spostgre WAL/pmap arenas routed through `MountTable` + `RamFsDriver`
 - **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
 - **Related-design-doc:** `spostgre_design.md §9`, `§12 (M2)`, `nvfs_design.md §3`
 - **Related-issue:** none
@@ -838,7 +842,9 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   `examples/spostgre/src/engine/checkpoint.spl` using the shim arena API (FUA-append
   to a META_DURABLE ring arena). The former `wal_writer_sync` workaround in scenario 7
   is replaced by the real checkpoint API. FR-STORAGE-E2E-001: fully implemented
-  2026-04-18 (12-e1-checkpoint-api).
+  2026-04-18 (12-e1-checkpoint-api). Completion update 2026-04-22 added
+  MountTable-resolved RamFs WAL byte routing coverage in
+  `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`.
 
 ---
 

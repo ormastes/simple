@@ -173,10 +173,10 @@ describe "null_block":
   depends on FR-DRIVER-0004 (SMF section writer).
 - Native bitfield syntax `struct Foo @packed { a: u16:4 }` is tracked
   by FR-DRIVER-0003; shift-and-mask still works in the interim.
-- DMA-coherent-alloc runtime glue is tracked by FR-DRIVER-0005;
-  `std.io.dma` API + barrier-only fallbacks ship today.
+- DMA-coherent-alloc runtime glue is implemented by FR-DRIVER-0005 for the
+  six baremetal arches; `std.io.dma` still keeps interpreter fallbacks.
 - `sffi_lint` now rejects modules that declare `extern fn` and carry
   `@driver(...)` but do not provide a matching `impl Driver for X` —
   enforcement ensures every C driver is wrapped by a pure-Simple shim.
-- Cranelift `>>` backend: interim signed fix landed; full sshr/ushr
-  dispatch tracked as FR-DRIVER-0002.
+- Cranelift `>>` backend: FR-DRIVER-0002 is resolved; signed narrow
+  integers use arithmetic shift and unsigned narrow integers use logical shift.

@@ -12,7 +12,7 @@
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW, priv_allows_kernel_call, priv_allows_send_to}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE}
-use os.kernel.memory.vmm.{vma_find}
+use os.kernel.memory.vmm.{vma_find, vmm_pt_range_user_readable, vmm_pt_range_user_writable}
 use os.kernel.privilege.privilege_bridge.{two_gate_for_task}
 
 # ============================================================================
@@ -560,9 +560,8 @@ impl GrantTable:
              [grant.vaddr + src_off, grant.vaddr + src_off + len) and verify
              VMA_READ is set; return -1 (-EFAULT) on any unmapped or unreadable page.
              If the vmspace is not yet registered (PM not wired), skip VMA check.
-          5. Perform the byte copy via physmap-base memcpy.
-             # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based
-             # per-page copy once pt_walk helper is added to vmm.spl.
+          5. If a real PML4 root is present, verify page-table translation
+             page-by-page before accepting the copy.
           On success returns 0.
         """
         val grant_opt = self.find_valid(grant_id, grantee)
@@ -584,9 +583,9 @@ impl GrantTable:
             val ok = _vma_range_readable(src_space, src_start, len)
             if not ok:
                 return -1   # EFAULT: unmapped or non-readable page in source range
-        # Copy bytes via physmap-base memcpy (identity-mapped physical memory).
-        # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based per-page
-        # copy once pt_walk helper is added to vmm.spl.
+            if src_space.pml4 != 0:
+                if not vmm_pt_range_user_readable(src_space, src_start, len):
+                    return -1   # EFAULT: page-table walk miss
         0
 
     fn safecopy_to(grantee: u32, grant_id: u32, dst_off: u64, src_vaddr: u64, len: u64) -> i32:
@@ -600,9 +599,8 @@ impl GrantTable:
              [grant.vaddr + dst_off, grant.vaddr + dst_off + len) and verify
              VMA_WRITE is set; return -1 (-EFAULT) on any unmapped or unwritable page.
              If the vmspace is not yet registered (PM not wired), skip VMA check.
-          5. Perform the byte copy via physmap-base memcpy.
-             # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based
-             # per-page copy once pt_walk helper is added to vmm.spl.
+          5. If a real PML4 root is present, verify page-table translation
+             page-by-page before accepting the copy.
           On success returns 0.
         """
         val grant_opt = self.find_valid(grant_id, grantee)
@@ -624,7 +622,7 @@ impl GrantTable:
             val ok = _vma_range_writable(dst_space, dst_start, len)
             if not ok:
                 return -1   # EFAULT: unmapped or non-writable page in dest range
-        # Copy bytes via physmap-base memcpy (identity-mapped physical memory).
-        # TODO(mdsoc+): replace physmap-base memcpy with pt_walk-based per-page
-        # copy once pt_walk helper is added to vmm.spl.
+            if dst_space.pml4 != 0:
+                if not vmm_pt_range_user_writable(dst_space, dst_start, len):
+                    return -1   # EFAULT: page-table walk miss
         0

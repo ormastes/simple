@@ -141,6 +141,21 @@ pub struct HirMixinMethod {
     pub ret: TypeId,
 }
 
+/// A field within a bitfield definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirBitfieldField {
+    /// Field name.
+    pub name: String,
+    /// Bit offset from the start of the bitfield.
+    pub bit_offset: u32,
+    /// Width in bits.
+    pub bit_width: u32,
+    /// Whether the field is reserved/padding.
+    pub is_reserved: bool,
+    /// Field type exposed to the type checker.
+    pub ty: TypeId,
+}
+
 /// Resolved type information
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirType {
@@ -244,6 +259,15 @@ pub enum HirType {
         // Generic template metadata
         is_generic_template: bool,
     },
+    /// Bitfield type: packed integer storage with named bit slices.
+    Bitfield {
+        name: String,
+        backing: TypeId,
+        fields: Vec<HirBitfieldField>,
+        generic_params: Vec<String>,
+        is_generic_template: bool,
+        type_bindings: HashMap<String, TypeId>,
+    },
     /// External class for FFI object-based bindings
     ExternClass {
         name: String,
@@ -282,6 +306,22 @@ impl HirType {
     pub fn promise_inner(&self) -> Option<TypeId> {
         match self {
             HirType::Promise { inner } => Some(*inner),
+            _ => None,
+        }
+    }
+
+    /// Get the backing storage type for a bitfield, if applicable.
+    pub fn bitfield_backing(&self) -> Option<TypeId> {
+        match self {
+            HirType::Bitfield { backing, .. } => Some(*backing),
+            _ => None,
+        }
+    }
+
+    /// Look up a named bitfield field.
+    pub fn bitfield_field(&self, field_name: &str) -> Option<&HirBitfieldField> {
+        match self {
+            HirType::Bitfield { fields, .. } => fields.iter().find(|f| f.name == field_name),
             _ => None,
         }
     }

@@ -26,7 +26,7 @@ use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.x86_64.cpu.{reboot}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
@@ -34,7 +34,7 @@ use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write8, mmio_write16, mm
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
-use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable}
+use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of}
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
@@ -1238,6 +1238,18 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
             serial_println("[syscall13] create_user_task failed")
             return -12
         sched.set_task_name(TaskId(id: pid), path)
+        val spawned = sched.get_task(TaskId(id: pid))
+        if spawned != nil:
+            val task = spawned
+            register_task_vmspace(
+                pid.to_u32(),
+                ProcessVmSpace(
+                    pml4: task.address_space,
+                    id: task.isolation.address_space_id,
+                    vma_count: 0,
+                    areas: []
+                )
+            )
 
         val pid_value = pid as i64
         var ulog = klog
@@ -3456,9 +3468,20 @@ fn _handle_brk_for_task(args: SyscallArgs, task_id: u64) -> SyscallResult:
     val new_page = _align_brk_up(requested)
     if new_page > old_page:
         val len = new_page - old_page
-        val rc = vmm_mmap(g_current_vmspace, old_page, len, VMA_READ | VMA_WRITE, VMA_ANON, 0, 0)
+        var map_space = g_current_vmspace
+        var mapped_registered_space = false
+        if task_id != 0:
+            val registered_space = task_vmspace_of(task_id.to_u32())
+            if registered_space != nil:
+                map_space = registered_space
+                mapped_registered_space = true
+        val rc = vmm_mmap(map_space, old_page, len, VMA_READ | VMA_WRITE, VMA_ANON, 0, 0)
         if rc < 0:
             return SyscallResult(value: rc)
+        if mapped_registered_space:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
     _task_brk_set(task_id, requested)
     if task_id == 0:
         _current_brk = requested
@@ -3612,7 +3635,7 @@ fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
     """Copy `len` bytes from caller's user-VA `ptr` into a kernel-owned [u8].
 
     Walks the caller's address space (g_current_vmspace) and copies bytes
-    from user VA `ptr` via identity-mapped user pointer. Mirrors the
+    from user VA `ptr` via the VMM page-table walker. Mirrors the
     safecopy_from contract in capability.spl: if the vmspace is wired
     (vma_count > 0), every page in [ptr, ptr+len) must be covered by a
     VMA with VMA_READ; on any unmapped/unreadable page, returns []. If
@@ -3624,10 +3647,9 @@ fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
       - ptr + len overflows u64
       - vmspace is wired and range is not fully VMA_READ
 
-    # TODO(mdsoc+): swap the identity-mapped user deref for a pt_walk-based
-    # per-page copy once vmm.spl exposes the walker (see capability.spl
-    # safecopy_from TODO). Cross-page handling on non-identity physmap is
-    # deferred behind the same helper.
+    Test-only / early-boot spaces with no PML4 root keep the historical
+    identity-pointer fallback after VMA validation. Real process spaces use
+    `vmm_copyin_bytes_from_space`, which translates each touched page.
     """
     if ptr == 0 as u64 or len == 0 as u64:
         return []
@@ -3639,8 +3661,13 @@ fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
     if g_current_vmspace.vma_count > 0 as u64:
         if not _vma_range_readable(g_current_vmspace, ptr, len):
             return []
+    if g_current_vmspace.pml4 != 0 as u64:
+        val copied = vmm_copyin_bytes_from_space(g_current_vmspace, ptr, len)
+        if not copied.status.ok:
+            return []
+        return copied.bytes
     # Bytewise copy through the identity-mapped user pointer. Mirrors the
-    # proven pattern in _copy_user_text above.
+    # proven pattern in _copy_user_text above for pml4-less test spaces.
     unsafe:
         val base = ptr as *const u8
         var bytes: [u8] = []

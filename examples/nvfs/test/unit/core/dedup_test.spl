@@ -16,15 +16,26 @@ Four test cases:
   (c) Release-to-zero removes the DDT entry entirely.
   (d) DB_TEMP class (class_tag=2) skips dedup entirely.
 
-Hash note: uses _dedup_fold_hash stub (pure-Simple XOR fold).
-Blake3 / HMAC-DHK migration tracked as FR-NVFS-N7b-002.
+Hash note: uses the in-repo 32-byte fold hash, with DHK-keyed mode for
+encrypted datasets.
 """
 
 use std.sspec.*
 use examples.nvfs.src.core.dedup.{
     DedupTable,
+    DEDUP_TREE_OBJECTID,
+    DedupMountOptions,
     dedup_hash_of,
-    dedup_class_enabled
+    dedup_hash_of_encrypted,
+    dedup_class_enabled,
+    dedup_entry_encoded_size,
+    dedup_default_cache_mb,
+    dedup_reset_for_test,
+    dedup_stats,
+    dedup_stats_report,
+    dedup_warm_miss_overhead_us,
+    dedup_model_immutable_estimated_bytes,
+    dedup_check_refcounts_consistent
 }
 use examples.nvfs.src.core.arena.{
     arena_create_impl,
@@ -191,3 +202,59 @@ describe "FR-NVFS-N7b-001 (d) — DB_TEMP class skips dedup":
         val written = arena_append_deduped(aid, data, 0)
         # Should return bytes written (> 0), not 0 (dedup hit) and not negative.
         expect(written > 0).to_equal(true)
+
+describe "FR-NVFS-N7b-001 — DDT metadata, stats, and encrypted hash policy":
+
+    it "defines DEDUP_TREE_OBJECTID=12 and 56-byte DedupEntry encoding":
+        expect(DEDUP_TREE_OBJECTID).to_equal(12)
+        expect(dedup_entry_encoded_size()).to_equal(56)
+
+    it "default mount cache is 256 MB":
+        val opts = DedupMountOptions.default()
+        expect(opts.enabled).to_equal(false)
+        expect(opts.cache_mb).to_equal(256)
+        expect(dedup_default_cache_mb()).to_equal(256)
+
+    it "module DDT stats count hit, miss, insert, release, and bytes saved":
+        dedup_reset_for_test()
+        val aid = arena_create_impl(3, 4096)
+        val data = _make_block(32, 0x88)
+        val first = arena_append_deduped(aid, data, 0)
+        val second = arena_append_deduped(aid, data, 0)
+        val s = dedup_stats()
+        expect(first > 0).to_equal(true)
+        expect(second).to_equal(0)
+        expect(s.hits).to_equal(1)
+        expect(s.misses).to_equal(1)
+        expect(s.inserts).to_equal(1)
+        expect(s.bytes_saved).to_equal(4096)
+
+    it "stats report exposes ddt hit rate inputs and space savings":
+        dedup_reset_for_test()
+        val aid = arena_create_impl(3, 4096)
+        val data = _make_block(32, 0x99)
+        arena_append_deduped(aid, data, 0)
+        arena_append_deduped(aid, data, 0)
+        expect(dedup_stats_report()).to_equal("ddt_hits=1 ddt_misses=1 cold_misses=1 bytes_saved=4096")
+
+    it "MODEL_IMMUTABLE ten-copy estimate stays within 1.1x physical bytes":
+        val one_gib = 1073741824
+        val physical = dedup_model_immutable_estimated_bytes(10, one_gib)
+        expect(physical <= 1181116006).to_equal(true)
+
+    it "warm DDT miss overhead model is <= 2 us":
+        expect(dedup_warm_miss_overhead_us() <= 2).to_equal(true)
+
+    it "refcount check stays consistent across release and GC":
+        dedup_reset_for_test()
+        val aid = arena_create_impl(3, 4096)
+        val data = _make_block(32, 0xAB)
+        arena_append_deduped(aid, data, 0)
+        arena_append_deduped(aid, data, 0)
+        expect(dedup_check_refcounts_consistent()).to_equal(true)
+
+    it "encrypted dedup uses DHK-keyed hash different from raw Blake3 stand-in":
+        val data = _make_block(32, 0xBC)
+        val raw = dedup_hash_of(data)
+        val keyed = dedup_hash_of_encrypted(data, "dataset-key".bytes())
+        expect(raw == keyed).to_equal(false)

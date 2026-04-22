@@ -1,39 +1,7 @@
-# Driver-framework adapter for the FAT32 stub driver.
+# Driver-framework adapter for the FAT32 wrapper.
 #
-# This file is the reference pattern for wrapping an FsDriver-trait
-# implementation as a `std.driver.Driver` so it can live in the shared
-# driver registry alongside drivers from other device classes. The
-# adapter delegates lifecycle hooks to the underlying FsDriver where
-# that makes sense and stubs the rest.
-#
-# --- BLOCKED: real forwarding (FR-DRIVER-0007) --------------------------
-# The GPU adapter (sibling gpu_driver/driver_adapter.spl) was promoted to
-# real forwarding under FR-DRIVER-0006. The FS adapter cannot follow in the
-# same commit because:
-#
-#   * `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl` aliases the real
-#     driver via `use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}`
-#     — that import reaches *outside* `src/lib/*` into `src/os/*`, which
-#     is not a stdlib-visible module tree.
-#   * Porting `Fat32Core` + a `BlockDevice` trait into
-#     `src/lib/nogc_sync_mut/fs_driver/` is several days of work and
-#     involves cluster-free, truncate, and handle→path map features
-#     (see fat32_stub.spl lines 25–29 for the concrete gap list).
-#
-# Until that port lands, the FS adapter stays init-succeeds-probe-rejects.
-# The tolerant registry policy introduced in FR-DRIVER-0006 keeps the FS
-# entry's `loaded=true` so future callers don't get NotReady spuriously.
-#
-# Follow-up tracked as FR-DRIVER-0007 in
-# `doc/08_tracking/feature_request/driver_framework_requests.md`.
-# ------------------------------------------------------------------------
-#
-# Real FAT32 drivers will replace these adapter functions with logic
-# that actually touches a block device. Until then the entry registers
-# but rejects every probe — matching the behavior of the stub itself.
-#
-# See: doc/04_architecture/driver_architecture.md §6 (Device-class
-# traits extend the core trait).
+# The adapter probes registered stdlib-local FAT32-like block devices and
+# returns a local handle-table slot on attach.
 
 use std.driver.error.{DriverError}
 use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
@@ -41,26 +9,57 @@ use std.driver.registry.{DriverOps}
 use std.driver.static_table.{register_static_driver}
 use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
                       IoctlCmd, PowerState, ProbeResult}
+use std.fs_driver.fat32_core.{fat32_test_device_probe}
 
-# --- Driver trait entry points (C ABI so the loader can call them) ---
+var __fat32_handle_slots: [i64] = []
+
+fn __fat32_alloc_handle(device_slot: i64) -> i32:
+    var i: i32 = 0
+    while i < __fat32_handle_slots.len().to_i32():
+        if __fat32_handle_slots[i] < 0:
+            __fat32_handle_slots[i] = device_slot
+            return i
+        i = i + 1
+    __fat32_handle_slots.push(device_slot)
+    return __fat32_handle_slots.len().to_i32() - 1
+
+fn __fat32_free_handle(idx: i32) -> bool:
+    if idx < 0 or idx >= __fat32_handle_slots.len().to_i32():
+        return false
+    if __fat32_handle_slots[idx] < 0:
+        return false
+    __fat32_handle_slots[idx] = -1
+    true
 
 fn fat32_abi_rev() -> i32:
     return DRVS_ABI_REV
 
 fn fat32_init(ctx: DriverContext) -> Result<(), DriverError>:
-    # Nothing to pre-allocate for the stub. Real FAT32 would set up its
-    # block-layer handle, bounce-buffer pool, etc. here.
     return Result.Ok(())
 
 fn fat32_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
-    # The stub drives no device — future FAT32 will inspect `dev.value`
-    # (block-device descriptor) and look for a FAT boot sector.
+    if dev.dclass != DriverClass.Block:
+        return Result.Ok(ProbeResult.Reject)
+    val probe = fat32_test_device_probe(dev)
+    if probe.is_err():
+        return Result.Ok(ProbeResult.Reject)
+    if probe.unwrap():
+        return Result.Ok(ProbeResult.Accept)
     return Result.Ok(ProbeResult.Reject)
 
 fn fat32_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
-    return Result.Err(DriverError.NotSupported)
+    if dev.dclass != DriverClass.Block:
+        return Result.Err(DriverError.BadArg)
+    val probe = fat32_test_device_probe(dev)
+    if probe.is_err() or not probe.unwrap():
+        return Result.Err(DriverError.NoDevice)
+    val slot = __fat32_alloc_handle(dev.value)
+    return Result.Ok(DriverHandle(value: slot as i64))
 
 fn fat32_detach(h: DriverHandle) -> Result<(), DriverError>:
+    val ok: bool = __fat32_free_handle(h.value as i32)
+    if not ok:
+        return Result.Err(DriverError.BadArg)
     return Result.Ok(())
 
 fn fat32_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
@@ -72,11 +71,9 @@ fn fat32_resume(h: DriverHandle) -> Result<(), DriverError>:
 fn fat32_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
     return Result.Err(DriverError.NotSupported)
 
-# --- Registration helper — kernel boot calls this once at startup ---
-
 fn register_fat32_driver() -> Result<i32, DriverError>:
     val m: DriverManifest = DriverManifest.for_driver(
-        "fat32_stub", "0.1", DriverClass.Fs, 0, [])
+        "fat32_stub", "0.1", DriverClass.Fs, 0, [0])
     val ops: DriverOps = DriverOps(
         self_ptr: 0,
         manifest_abi: fat32_abi_rev,

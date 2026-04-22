@@ -15,6 +15,7 @@ impl TypeChecker {
             available_macros: HashSet::new(),
             next_ref_id: 0,
             trait_impls: HashMap::new(),
+            bitfields: HashMap::new(),
             mixins: HashMap::new(),
             compositions: HashMap::new(),
             interface_bindings: HashMap::new(),

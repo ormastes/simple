@@ -28,6 +28,12 @@ impl TypeChecker {
 
             // Named types match by name
             (Type::Named(n1), Type::Named(n2)) if n1 == n2 => Ok(()),
+            (Type::Bitfield(n1), Type::Bitfield(n2)) if n1 == n2 => Ok(()),
+            (Type::Bitfield(n1), Type::Named(n2)) | (Type::Named(n1), Type::Bitfield(n2))
+                if n1 == n2 =>
+            {
+                Ok(())
+            }
 
             // Arrays unify if elements unify
             (Type::Array(e1), Type::Array(e2)) => self.unify(e1, e2),
@@ -212,6 +218,9 @@ impl TypeChecker {
                 if let Some(ty) = self.type_params.get(name) {
                     return ty.clone();
                 }
+                if self.bitfields.contains_key(name) {
+                    return Type::Bitfield(name.clone());
+                }
                 // Map common type names
                 match name.as_str() {
                     "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => {
@@ -327,6 +336,8 @@ impl TypeChecker {
             (Type::Var(_), _) | (_, Type::Var(_)) => true,
             // Named types match by name
             (Type::Named(n1), Type::Named(n2)) => n1 == n2,
+            (Type::Bitfield(n1), Type::Bitfield(n2)) => n1 == n2,
+            (Type::Bitfield(n1), Type::Named(n2)) | (Type::Named(n1), Type::Bitfield(n2)) => n1 == n2,
             // Arrays match if elements match
             (Type::Array(e1), Type::Array(e2)) => self.types_compatible(e1, e2),
             // Tuples match if all elements match

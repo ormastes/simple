@@ -36,26 +36,31 @@ Parent feature ship commits on `origin/main`:
   not straddle a page boundary into unmapped or differently-permissioned
   memory.
 - **Acceptance-criteria:**
-  - [ ] `pt_walk` returns a physmap-safe kernel pointer (or `nil` on miss /
+  - [x] `pt_walk` returns a physmap-safe kernel pointer (or `nil` on miss /
         non-present / user-bit-missing / execute-only page)
-  - [ ] `_copy_in_bytes` rewritten to loop one page at a time, translating
+  - [x] `_copy_in_bytes` rewritten to loop one page at a time, translating
         each page and copying the intersection with `[ptr, ptr+len)`
-  - [ ] `safecopy_from` / `safecopy_to` updated equivalently (remove the two
+  - [x] `safecopy_from` / `safecopy_to` updated equivalently (remove the two
         existing TODO comments in capability.spl)
-  - [ ] Cross-page spec: `_copy_in_bytes(vaddr_near_page_boundary, >PAGE_SIZE
+  - [x] Cross-page spec: `_copy_in_bytes(vaddr_near_page_boundary, >PAGE_SIZE
         length)` returns the full byte sequence when both pages are mapped
         READ, returns `[]` when the tail page is unmapped
-  - [ ] No regression in `test/os/kernel/ipc/` or
+  - [x] No regression in `test/os/kernel/ipc/` or
         `test/os/kernel/fs/win_vfs/`
 - **Related-upfront:** `doc/04_architecture/mdsoc_architecture_tobe.md` (MDSOC+
   boundary rules around kernel ↔ user memory)
-- **Related-design-doc:** tbd — likely expand
-  `doc/04_architecture/simple_process_manager.md` or add a `vmm_pt_walk.md`
+- **Related-design-doc:** `doc/05_design/spm_pt_walk_user_copy.md`
 - **Related-issue:** none
-- **Notes:** The stub in `_copy_in_bytes` is gated on `vma_count > 0` and on
-  `_vma_range_readable`; when `pt_walk` lands, remove the identity-deref path
-  entirely in favor of the walker. Do NOT introduce a new `unsafe:` deref site
-  elsewhere — concentrate the unsafe inside the walker.
+- **Notes:** Implemented 2026-04-22 with explicit `ProcessVmSpace` helpers in
+  `src/os/kernel/memory/vmm.spl`: `vmm_pt_walk_user_read`,
+  `vmm_pt_range_user_readable`, `vmm_pt_range_user_writable`, and
+  `vmm_copyin_bytes_from_space`. `_copy_in_bytes` now uses the explicit-space
+  helper for real vmspaces and keeps the pml4=0 fallback only for existing
+  early-boot/unit fixtures after VMA validation. Grant safecopy paths reject
+  page-table misses when a registered vmspace has a real PML4. Coverage:
+  `test/unit/os/kernel/memory/vmm_copyin_spec.spl`,
+  `test/unit/os/kernel/ipc/ipc_grants_spec.spl`, and
+  `test/system/simpleos_spm_pt_walk_copy_spec.spl`.
 
 ### FR-SPM-0002 — Caller-TaskId → privilege-mirror lookup for `sys_priv_check` (case 110)
 

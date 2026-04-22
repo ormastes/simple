@@ -14,11 +14,8 @@
 
 Exercises the spostgre WAL + pmap writers through the NVFS shim together:
 
-  1. Mount: A RamFs-backed MountTable is mounted at "/db" via std.fs_driver — this
-     represents the "storage namespace" that a real NVFS integration would own.
-     spostgre currently interacts with NVFS via the in-process nvfs_shim (arena API).
-     Both surfaces are exercised side-by-side; the wiring gap is documented as
-     FR-STORAGE-E2E-001 (shim does not yet route through the MountTable/RamFsDriver).
+  1. Mount: A RamFs-backed MountTable is mounted at "/db" via std.fs_driver and
+     resolves spostgre WAL bytes through the mounted driver surface.
 
   2. WAL write: one WAL record (tuple-insert payload) is appended via WalWriter;
      LSN is derived from byte offset (M2 convention).
@@ -28,7 +25,7 @@ Exercises the spostgre WAL + pmap writers through the NVFS shim together:
 
   4. Checkpoint: checkpoint_begin returns a target Lsn; checkpoint_commit
      appends a ring record via FUA fence and sets durable_lsn.
-     FR-STORAGE-E2E-001: fully implemented (no longer pass_todo).
+     FR-STORAGE-E2E-001: fully implemented.
 
   5. Remount simulation: WAL and pmap arena byte-images are extracted, re-injected
      into fresh arenas (simulating a process restart with durable storage), and
@@ -52,10 +49,10 @@ Scenarios (10 it-blocks):
 
 use std.sspec.*
 use std.fs_driver.mount_table.{MountTable, MountId}
-use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.ramfs.{RamFsDriver}
-use engine.wal.{WalWriter, wal_writer_append, wal_writer_commit_group,
+use engine.wal.{WalWriter, WalRecord, wal_writer_append, wal_writer_commit_group,
                 wal_writer_sync, wal_recover_tail, wal_record_encode,
                 WAL_HDR_LEN}
 use engine.pmap.{PmapWriter, pmap_writer_publish, pmap_writer_lookup}
@@ -77,7 +74,9 @@ fn make_opts() -> MountOptions:
     MountOptions.default()
 
 fn make_ramfs_driver() -> DriverInstance:
-    DriverInstance.RamFs(driver: RamFsDriver.new())
+    var ram = RamFsDriver.new()
+    ram.mount(make_opts())
+    DriverInstance.RamFs(driver: ram)
 
 fn tuple_insert_payload() -> [u8]:
     # Minimal "users" rel tuple: [rel_tag=1, col0=42, col1=99]
@@ -89,14 +88,34 @@ fn tuple_insert_payload() -> [u8]:
 
 describe "E2E spostgre+NVFS — mount surface":
     it "RamFs driver mounts at /db and returns a valid MountId":
-        # NOTE: spostgre's WalWriter/PmapWriter go through the in-process
-        # nvfs_shim, not through this MountTable. Both surfaces are exercised
-        # side-by-side to prove API compatibility. Real wiring is FR-STORAGE-E2E-001.
         var table = MountTable.new()
         val driver = make_ramfs_driver()
-        val (ok, mid, table2) = table.mount(db_path(), driver, make_opts())
-        expect(ok).to_equal(true)
-        expect(mid.id >= 0).to_equal(true)
+        val mid = table.mount(db_path(), driver, make_opts())
+        expect(mid.is_ok()).to_equal(true)
+        expect(mid.unwrap().id >= 0).to_equal(true)
+
+    it "routes WAL bytes through MountTable and RamFsDriver":
+        var table = MountTable.new()
+        val driver = make_ramfs_driver()
+        val mid = table.mount(db_path(), driver, make_opts())
+        val resolved = table.resolve(Path(raw: "/db/wal/segment0"))
+        expect(mid.is_ok()).to_equal(true)
+        expect(resolved.is_ok()).to_equal(true)
+        val entry = table.lookup(Path(raw: "/db/wal/segment0")).unwrap()
+        var wrote = false
+        match entry.driver:
+            case RamFs(ram):
+                var r = ram
+                r.mkdir(Path(raw: "/wal"), 0o755)
+                val opened = r.open(Path(raw: "/wal/segment0"), OpenFlags.read_write().with_create())
+                if opened.is_ok():
+                    val h = opened.unwrap()
+                    val payload = wal_record_encode(WalRecord(lsn: Lsn(value: 1), txn: TxnId(id: 7), payload: tuple_insert_payload(), crc32: 0))
+                    val n = r.write(h, 0, payload)
+                    if n.is_ok():
+                        wrote = n.unwrap() == payload.len() as i64
+            case _: wrote = false
+        expect(wrote).to_equal(true)
 
 # ============================================================================
 # Scenario 2-4 — WAL write and commit

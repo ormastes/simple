@@ -249,6 +249,9 @@ impl TypeRegistry {
             // SIMD vectors are safe if elements are safe (always primitive types)
             Some(HirType::Simd { element, .. }) => self.is_snapshot_safe(*element),
 
+            // Bitfields are safe if the backing storage is safe.
+            Some(HirType::Bitfield { backing, .. }) => self.is_snapshot_safe(*backing),
+
             // Unit types are snapshot-safe (they're constrained primitives)
             Some(HirType::UnitType { .. }) => true,
 
@@ -312,6 +315,7 @@ impl TypeRegistry {
     pub fn get_type_name(&self, type_id: TypeId) -> Option<&str> {
         match self.get(type_id) {
             Some(HirType::Struct { name, .. }) => Some(name.as_str()),
+            Some(HirType::Bitfield { name, .. }) => Some(name.as_str()),
             Some(HirType::Enum { name, .. }) => Some(name.as_str()),
             Some(HirType::ExternClass { name }) => Some(name.as_str()),
             Some(HirType::Pointer { inner, .. }) => {

@@ -59,9 +59,10 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] A linked x86_64 AP trampoline template is copied to low memory,
         patched with the boot GDT/PML4, entered via INIT/SIPI, and calls the
         AP-side online hook from its 64-bit entry.
-  - [ ] Wire automatic AP startup into the boot lane after APIC/IDT ordering is
-        validated; `x86_start_registered_aps()` is available for the explicit
-        bring-up step.
+  - [x] Wire automatic AP startup into the boot lane after APIC/IDT ordering is
+        validated; `X86Interrupt.init()` now calls the idempotent
+        `x86_start_registered_aps_once()` hook immediately after `idt_init()`
+        and `apic_init()`.
   - [ ] Prove at least one AP reaches `spl_x86_mark_current_ap_online()` from a
         boot-lane or QEMU diagnostic without faulting or regressing BSP-only
         boot.
@@ -76,9 +77,11 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Notes:** Synthetic topology construction, scheduler install hooks, x86_64
   CPUID shape probing, ACPI MADT APIC-ID enumeration, per-CPU APIC metadata,
   AP startup/online state hooks, and the low-memory x86_64 AP trampoline are
-  implemented. Automatic AP startup from the boot lane remains gated on APIC/IDT
-  ordering validation and a live proof that an AP reaches the AP-side online
-  hook.
+  implemented. Automatic AP startup is wired after BSP IDT/APIC init through an
+  idempotent x86_64 interrupt-init hook. Live proof that an AP reaches the
+  AP-side online hook remains open; run an x86_64 SMP QEMU lane with at least
+  two CPUs and assert serial output contains `[smp] AP reached 64-bit entry`
+  without regressing BSP-only boot.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 

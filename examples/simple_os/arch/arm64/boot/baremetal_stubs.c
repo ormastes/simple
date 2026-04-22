@@ -2507,6 +2507,422 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
     return (RuntimeValue)appended;
 }
 
+static uint16_t arm64_elf_u16(RuntimeValue bytes, uint64_t off)
+{
+    return (uint16_t)(arm64_array_byte_at_raw_index(bytes, off) |
+        (arm64_array_byte_at_raw_index(bytes, off + 1ULL) << 8));
+}
+
+static uint32_t arm64_elf_u32(RuntimeValue bytes, uint64_t off)
+{
+    return (uint32_t)(arm64_array_byte_at_raw_index(bytes, off) |
+        (arm64_array_byte_at_raw_index(bytes, off + 1ULL) << 8) |
+        (arm64_array_byte_at_raw_index(bytes, off + 2ULL) << 16) |
+        (arm64_array_byte_at_raw_index(bytes, off + 3ULL) << 24));
+}
+
+static uint64_t arm64_elf_u64(RuntimeValue bytes, uint64_t off)
+{
+    return (uint64_t)arm64_elf_u32(bytes, off) | ((uint64_t)arm64_elf_u32(bytes, off + 4ULL) << 32);
+}
+
+static uint64_t arm64_elf_len(RuntimeValue bytes)
+{
+    return (uint64_t)rt_arm_array_len_u32(bytes);
+}
+
+static int arm64_elf64_header_ok(RuntimeValue bytes)
+{
+    uint64_t len = arm64_elf_len(bytes);
+    if (len < 64ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 0) != 0x7FULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 1) != 0x45ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 2) != 0x4CULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 3) != 0x46ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 4) != 2ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 5) != 1ULL) return 0;
+    if (arm64_elf_u16(bytes, 18) != 183U) return 0;
+    if (arm64_elf_u16(bytes, 52) != 64U) return 0;
+    if (arm64_elf_u16(bytes, 54) != 56U) return 0;
+    uint64_t phoff = arm64_elf_u64(bytes, 32);
+    uint64_t phnum = arm64_elf_u16(bytes, 56);
+    if (phoff > len) return 0;
+    if (phnum > 256ULL) return 0;
+    if (phoff + phnum * 56ULL > len) return 0;
+    return 1;
+}
+
+static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
+{
+    if (!arm64_elf64_header_ok(bytes)) return UINT64_MAX;
+    uint64_t phoff = arm64_elf_u64(bytes, 32);
+    uint64_t phnum = arm64_elf_u16(bytes, 56);
+    uint32_t seen = 0;
+    for (uint64_t idx = 0; idx < phnum; idx++) {
+        uint64_t off = phoff + idx * 56ULL;
+        if (arm64_elf_u32(bytes, off) == 1U) {
+            if (seen == wanted) return off;
+            seen++;
+        }
+    }
+    return UINT64_MAX;
+}
+
+#define ARM64_UAS_REGION_BASE 0x48000000ULL
+#define ARM64_UAS_REGION_SIZE 0x00200000ULL
+#define ARM64_UAS_TABLE_BYTES 0x00100000ULL
+#define ARM64_UAS_MAX_SPACES 16U
+#define ARM64_PTE_VALID (1ULL << 0)
+#define ARM64_PTE_TABLE (1ULL << 1)
+#define ARM64_PTE_AF (1ULL << 10)
+#define ARM64_PTE_SH_INNER (3ULL << 8)
+#define ARM64_PTE_AP_RW_ALL (1ULL << 6)
+#define ARM64_PTE_AP_RO_ALL (3ULL << 6)
+#define ARM64_PTE_UXN (1ULL << 54)
+#define ARM64_PTE_PXN (1ULL << 53)
+#define ARM64_PTE_OUTPUT_MASK 0x0000FFFFFFFFF000ULL
+#define ARM64_VM_WRITABLE 2U
+#define ARM64_VM_USER 4U
+#define ARM64_VM_NO_EXECUTE 32U
+
+typedef struct {
+    uint64_t root;
+    uint64_t next_table;
+    uint64_t table_end;
+} Arm64UserAsArena;
+
+static Arm64UserAsArena arm64_user_as_arenas[ARM64_UAS_MAX_SPACES];
+static uint32_t arm64_user_as_count = 0;
+
+static Arm64UserAsArena *arm64_user_as_find(uint64_t root)
+{
+    for (uint32_t i = 0; i < arm64_user_as_count; i++) {
+        if (arm64_user_as_arenas[i].root == root) return &arm64_user_as_arenas[i];
+    }
+    return NULL;
+}
+
+static void arm64_zero_page(uint64_t phys)
+{
+    volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)phys;
+    for (uint32_t i = 0; i < 512U; i++) p[i] = 0;
+}
+
+static uint64_t arm64_user_as_alloc_table(Arm64UserAsArena *arena)
+{
+    if (!arena || arena->next_table + 4096ULL > arena->table_end) return 0;
+    uint64_t page = arena->next_table;
+    arena->next_table += 4096ULL;
+    arm64_zero_page(page);
+    return page;
+}
+
+static uint64_t arm64_user_as_ensure_table(Arm64UserAsArena *arena, uint64_t table, uint64_t idx)
+{
+    volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)table;
+    uint64_t entry = entries[idx];
+    if (entry & ARM64_PTE_VALID) return entry & ARM64_PTE_OUTPUT_MASK;
+    uint64_t next = arm64_user_as_alloc_table(arena);
+    if (!next) return 0;
+    entries[idx] = (next & ARM64_PTE_OUTPUT_MASK) | ARM64_PTE_VALID | ARM64_PTE_TABLE;
+    return next;
+}
+
+static uint64_t arm64_user_as_pte_bits(uint32_t flags)
+{
+    uint64_t bits = ARM64_PTE_VALID | ARM64_PTE_TABLE | ARM64_PTE_AF | ARM64_PTE_SH_INNER;
+    if (flags & ARM64_VM_USER) {
+        bits |= (flags & ARM64_VM_WRITABLE) ? ARM64_PTE_AP_RW_ALL : ARM64_PTE_AP_RO_ALL;
+    }
+    if (flags & ARM64_VM_NO_EXECUTE) bits |= ARM64_PTE_PXN | ARM64_PTE_UXN;
+    return bits;
+}
+
+RuntimeValue rt_arm64_user_as_create(void)
+{
+    if (arm64_user_as_count >= ARM64_UAS_MAX_SPACES) return 0;
+    uint64_t root = ARM64_UAS_REGION_BASE + ((uint64_t)arm64_user_as_count * ARM64_UAS_REGION_SIZE);
+    Arm64UserAsArena *arena = &arm64_user_as_arenas[arm64_user_as_count++];
+    arena->root = root;
+    arena->next_table = root + 4096ULL;
+    arena->table_end = root + ARM64_UAS_TABLE_BYTES;
+    arm64_zero_page(root);
+    return (RuntimeValue)root;
+}
+
+RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_val, RuntimeValue phys_val, RuntimeValue flags_val)
+{
+    uint64_t root = (uint64_t)root_val;
+    uint64_t virt = (uint64_t)virt_val;
+    uint64_t phys = (uint64_t)phys_val;
+    uint32_t flags = IS_INT(flags_val) ? (uint32_t)DECODE_INT(flags_val) : (uint32_t)flags_val;
+    Arm64UserAsArena *arena = arm64_user_as_find(root);
+    if (!arena || !root || (virt & 4095ULL) || (phys & 4095ULL)) return 0;
+
+    uint64_t l0 = (virt >> 39) & 0x1FFULL;
+    uint64_t l1 = (virt >> 30) & 0x1FFULL;
+    uint64_t l2 = (virt >> 21) & 0x1FFULL;
+    uint64_t l3 = (virt >> 12) & 0x1FFULL;
+    uint64_t l1_table = arm64_user_as_ensure_table(arena, root, l0);
+    if (!l1_table) return 0;
+    uint64_t l2_table = arm64_user_as_ensure_table(arena, l1_table, l1);
+    if (!l2_table) return 0;
+    uint64_t l3_table = arm64_user_as_ensure_table(arena, l2_table, l2);
+    if (!l3_table) return 0;
+
+    volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)l3_table;
+    entries[l3] = (phys & ARM64_PTE_OUTPUT_MASK) | arm64_user_as_pte_bits(flags);
+    return 1;
+}
+
+RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt_val)
+{
+    uint64_t root = (uint64_t)root_val;
+    uint64_t virt = (uint64_t)virt_val;
+    if (!arm64_user_as_find(root)) return 0;
+    uint64_t table = root;
+    uint64_t idxs[4] = {
+        (virt >> 39) & 0x1FFULL,
+        (virt >> 30) & 0x1FFULL,
+        (virt >> 21) & 0x1FFULL,
+        (virt >> 12) & 0x1FFULL
+    };
+    for (uint32_t level = 0; level < 3U; level++) {
+        volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)table;
+        uint64_t entry = entries[idxs[level]];
+        if (!(entry & ARM64_PTE_VALID) || !(entry & ARM64_PTE_TABLE)) return 0;
+        table = entry & ARM64_PTE_OUTPUT_MASK;
+    }
+    volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)table;
+    uint64_t entry = entries[idxs[3]];
+    if (!(entry & ARM64_PTE_VALID)) return 0;
+    return (RuntimeValue)((entry & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL));
+}
+
+RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)
+{
+    uint64_t root = (uint64_t)root_val;
+    if (!arm64_user_as_find(root)) return 0;
+
+    uint64_t sctlr = 0;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    if (sctlr & 1ULL) return 2;
+
+    uint64_t old_ttbr0 = 0;
+    uint64_t new_ttbr0 = 0;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(old_ttbr0));
+    __asm__ volatile("msr ttbr0_el1, %0\nisb" : : "r"(root) : "memory");
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(new_ttbr0));
+    __asm__ volatile("msr ttbr0_el1, %0\nisb" : : "r"(old_ttbr0) : "memory");
+
+    if ((new_ttbr0 & ARM64_PTE_OUTPUT_MASK) == (root & ARM64_PTE_OUTPUT_MASK)) return 1;
+    return 0;
+}
+
+RuntimeValue rt_arm_elf64_pt_load_count(RuntimeValue bytes)
+{
+    if (!arm64_elf64_header_ok(bytes)) return 0;
+    uint64_t phoff = arm64_elf_u64(bytes, 32);
+    uint64_t phnum = arm64_elf_u16(bytes, 56);
+    uint32_t count = 0;
+    for (uint64_t idx = 0; idx < phnum; idx++) {
+        if (arm64_elf_u32(bytes, phoff + idx * 56ULL) == 1U) count++;
+    }
+    return (RuntimeValue)count;
+}
+
+RuntimeValue rt_arm_elf64_entry(RuntimeValue bytes)
+{
+    if (!arm64_elf64_header_ok(bytes)) return 0;
+    return (RuntimeValue)arm64_elf_u64(bytes, 24);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_offset(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 8ULL);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_vaddr(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 16ULL);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_filesz(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 32ULL);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_memsz(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 40ULL);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_flags(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u32(bytes, ph + 4ULL);
+}
+
+RuntimeValue rt_arm_elf64_pt_load_align(RuntimeValue bytes, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint64_t ph = arm64_elf64_load_phoff(bytes, idx);
+    return ph == UINT64_MAX ? 0 : (RuntimeValue)arm64_elf_u64(bytes, ph + 48ULL);
+}
+
+RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
+{
+    uint64_t dst_phys = (uint64_t)dst_phys_val;
+    if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
+
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
+    if (count == 0) return 0;
+
+    uint64_t min_vaddr = UINT64_MAX;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+    }
+    min_vaddr &= ~4095ULL;
+
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t file_off = arm64_elf_u64(bytes_val, ph + 8ULL);
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        uint64_t filesz = arm64_elf_u64(bytes_val, ph + 32ULL);
+        uint64_t memsz = arm64_elf_u64(bytes_val, ph + 40ULL);
+        if (filesz > memsz) return 0;
+        if (file_off + filesz > arm64_elf_len(bytes_val)) return 0;
+        if (vaddr < min_vaddr) return 0;
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)(dst_phys + (vaddr - min_vaddr));
+        for (uint64_t i = 0; i < filesz; i++) {
+            dst[i] = (uint8_t)arm64_array_byte_at_raw_index(bytes_val, file_off + i);
+        }
+        for (uint64_t i = filesz; i < memsz; i++) {
+            dst[i] = 0;
+        }
+    }
+    return (RuntimeValue)count;
+}
+
+RuntimeValue rt_arm64_user_as_map_elf64(RuntimeValue root_val, RuntimeValue dst_phys_val, RuntimeValue bytes_val)
+{
+    uint64_t root = (uint64_t)root_val;
+    uint64_t dst_phys = (uint64_t)dst_phys_val;
+    if (!root || !dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
+
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
+    if (count == 0) return 0;
+
+    uint64_t min_vaddr = UINT64_MAX;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+    }
+    min_vaddr &= ~4095ULL;
+
+    uint32_t mapped = 0;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        uint64_t memsz = arm64_elf_u64(bytes_val, ph + 40ULL);
+        uint32_t pf = arm64_elf_u32(bytes_val, ph + 4ULL);
+        uint64_t va = vaddr & ~4095ULL;
+        uint64_t end = (vaddr + memsz + 4095ULL) & ~4095ULL;
+        uint32_t vm_flags = ARM64_VM_USER;
+        if (pf & 2U) vm_flags |= ARM64_VM_WRITABLE;
+        if ((pf & 1U) == 0) vm_flags |= ARM64_VM_NO_EXECUTE;
+        while (va < end) {
+            uint64_t phys = dst_phys + (va - min_vaddr);
+            if (!rt_arm64_user_as_map_page(root, va, phys, (RuntimeValue)vm_flags)) return 0;
+            mapped++;
+            va += 4096ULL;
+        }
+    }
+    return (RuntimeValue)mapped;
+}
+
+RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue dst_phys_val, RuntimeValue bytes_val, RuntimeValue entry_val)
+{
+    uint64_t dst_phys = (uint64_t)dst_phys_val;
+    uint64_t entry = (uint64_t)entry_val;
+    if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
+
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
+    if (count == 0) return 0;
+
+    uint64_t min_vaddr = UINT64_MAX;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+    }
+    min_vaddr &= ~4095ULL;
+    if (entry < min_vaddr) return 0;
+    return (RuntimeValue)(dst_phys + (entry - min_vaddr));
+}
+
+RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, RuntimeValue bytes_val, RuntimeValue entry_val)
+{
+    uint64_t dst_phys = (uint64_t)dst_phys_val;
+    uint64_t entry = (uint64_t)entry_val;
+    if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
+
+    uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
+    if (count == 0) return 0;
+
+    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t entry_ph = UINT64_MAX;
+    for (uint32_t idx = 0; idx < count; idx++) {
+        uint64_t ph = arm64_elf64_load_phoff(bytes_val, idx);
+        if (ph == UINT64_MAX) return 0;
+        uint64_t vaddr = arm64_elf_u64(bytes_val, ph + 16ULL);
+        uint64_t filesz = arm64_elf_u64(bytes_val, ph + 32ULL);
+        uint64_t memsz = arm64_elf_u64(bytes_val, ph + 40ULL);
+        if (filesz > memsz) return 0;
+        if (vaddr < min_vaddr) min_vaddr = vaddr;
+        if (entry >= vaddr && entry < vaddr + filesz) entry_ph = ph;
+    }
+    if (entry_ph == UINT64_MAX) return 0;
+
+    min_vaddr &= ~4095ULL;
+    if (entry < min_vaddr) return 0;
+
+    uint64_t file_off = arm64_elf_u64(bytes_val, entry_ph + 8ULL);
+    uint64_t vaddr = arm64_elf_u64(bytes_val, entry_ph + 16ULL);
+    uint64_t filesz = arm64_elf_u64(bytes_val, entry_ph + 32ULL);
+    uint64_t entry_delta = entry - vaddr;
+    uint64_t src_off = file_off + entry_delta;
+    if (entry_delta >= filesz || src_off >= arm64_elf_len(bytes_val)) return 0;
+
+    uint64_t probe_len = filesz - entry_delta;
+    if (probe_len > 16ULL) probe_len = 16ULL;
+    if (src_off + probe_len > arm64_elf_len(bytes_val)) return 0;
+
+    volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)(dst_phys + (entry - min_vaddr));
+    for (uint64_t i = 0; i < probe_len; i++) {
+        uint8_t expected = (uint8_t)arm64_array_byte_at_raw_index(bytes_val, src_off + i);
+        if (dst[i] != expected) return 0;
+    }
+    return 1;
+}
+
 typedef struct {
     uint64_t x[31];
     uint64_t sp;

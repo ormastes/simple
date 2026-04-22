@@ -212,9 +212,7 @@ impl TypeChecker {
                     self.env.insert(format!("__handle_pool_{}", hp.type_name), ty);
                 }
                 Node::Bitfield(bf) => {
-                    // Register bitfield as a type
-                    let ty = self.fresh_var();
-                    self.env.insert(bf.name.clone(), ty);
+                    self.register_bitfield_def(bf);
                 }
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
@@ -554,6 +552,10 @@ impl TypeChecker {
                 self.check_block_with_macro_rules(&with_stmt.body)?;
                 Ok(())
             }
+            Node::Bitfield(bf) => {
+                self.register_bitfield_def(bf);
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -628,6 +630,34 @@ impl TypeChecker {
     /// Resolve DependentKeys to ConstKeySet if possible
     pub fn resolve_dependent_keys(&self, source: &str) -> Option<Vec<String>> {
         self.fstring_keys.get(source).cloned()
+    }
+
+    fn register_bitfield_def(&mut self, bf: &simple_parser::ast::BitfieldDef) {
+        let backing = bf
+            .base_type
+            .as_ref()
+            .and_then(|ty| self.bitfield_backing_type(ty))
+            .unwrap_or(BackingType::U32);
+        let mut bitfield = Bitfield::new(bf.name.clone(), backing);
+        for field in &bf.fields {
+            let _ = bitfield.add_field(field.name.clone(), field.bits as u32);
+        }
+        self.bitfields.insert(bf.name.clone(), bitfield);
+        self.env.insert(bf.name.clone(), Type::Bitfield(bf.name.clone()));
+    }
+
+    fn bitfield_backing_type(&self, ast_ty: &AstType) -> Option<BackingType> {
+        match ast_ty {
+            AstType::Simple(name) => match name.as_str() {
+                "u8" | "i8" => Some(BackingType::U8),
+                "u16" | "i16" => Some(BackingType::U16),
+                "u32" | "i32" | "char" => Some(BackingType::U32),
+                "u64" | "i64" => Some(BackingType::U64),
+                "u128" | "i128" => Some(BackingType::U128),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Validate dict literal keys against ConstKeySet type annotation

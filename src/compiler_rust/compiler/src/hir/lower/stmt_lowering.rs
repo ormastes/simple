@@ -723,7 +723,6 @@ impl Lowerer {
             // Module-level definitions that should not appear in statement context
             Node::Function(_)
             | Node::Struct(_)
-            | Node::Bitfield(_)
             | Node::Class(_)
             | Node::Enum(_)
             | Node::Trait(_)
@@ -757,6 +756,11 @@ impl Lowerer {
                     "Definition type {:?} cannot appear as a statement in function body",
                     node
                 )))
+            }
+
+            Node::Bitfield(bf) => {
+                self.register_bitfield(bf)?;
+                Ok(vec![])
             }
 
             // In lenient mode, skip unsupported/definition nodes as no-ops

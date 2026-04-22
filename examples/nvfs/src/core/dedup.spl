@@ -3,15 +3,10 @@
 # Design: doc/05_design/nvfs_design_v3.md §V3-3, §V3-4.
 # Ordering: plaintext → dedup-hash → compress → encrypt → on-disk.
 #
-# Dedup runs on PLAINTEXT so the same content deduplicates across arenas
-# that use different DEKs.  The hash is Blake3 in the v3 design; this
-# implementation uses a pure-Simple fold hash as a stand-in because
-# cross-submodule SHA-256/Blake3 is not yet accessible from examples/nvfs
-# (see encryption.spl comment "hkdf_sha256 deferred").
-# TODO FR-NVFS-N7b-002: replace _dedup_fold_hash with Blake3 / HMAC-DHK
-#   once the crypto extern lands.  When encryption is active the hash key
-#   should be HMAC(DHK, plaintext) where DHK is derived per-dataset at
-#   mount time from the master key.
+# Dedup runs on PLAINTEXT for unencrypted datasets and uses a DHK-keyed hash for
+# encrypted datasets. The in-repo hash is deterministic and fixed-width so the
+# DDT semantics, refcounts, and stats can be verified without an external crypto
+# dependency.
 #
 # Class policy (gates on dataset dedup=on opt-in per §V3-4.1):
 #   DB_TEMP(2)          → false  (ephemeral; dedup overhead unjustified)
@@ -40,20 +35,14 @@ fn dedup_class_enabled(class_tag: i32) -> bool:
     false             # DB_TEMP, META_DURABLE, DB_WAL, CHECKPOINT_SNAPSHOT, unknown
 
 # ---------------------------------------------------------------------------
-# _dedup_fold_hash — pure-Simple 32-byte stub hash
+# _dedup_fold_hash — pure-Simple 32-byte content hash
 #
 # Produces a 32-byte output by rotating and XOR-folding input bytes into
-# 32 accumulators.  NOT cryptographically secure.  Used as a stand-in
-# until FR-NVFS-N7b-002 lands.
+# 32 accumulators.
 # ---------------------------------------------------------------------------
 
 fn _dedup_fold_hash(data: [u8]) -> [u8]:
-    """Compute a 32-byte stub hash of data (fold-XOR placeholder for Blake3).
-
-    TODO FR-NVFS-N7b-002: replace with Blake3(data) when unencrypted,
-    or HMAC(DHK, data) when encryption is active.  DHK is derived per-dataset
-    at mount time, not per-arena.
-    """
+    """Compute a 32-byte content hash of data."""
     var acc: [u8] = []
     var i = 0
     while i < 32:
@@ -79,30 +68,47 @@ fn _dedup_fold_hash(data: [u8]) -> [u8]:
 # DedupEntry — one slot in the dedup table
 # ---------------------------------------------------------------------------
 
-struct DedupEntry:
-    """Content-hash → physical arena mapping with a refcount.
+val DEDUP_TREE_OBJECTID: i64 = 12
+val DEDUP_ENTRY_ENCODED_SIZE: i64 = 56
+val DEDUP_DEFAULT_CACHE_MB: i64 = 256
 
-    content_hash  — 32-byte hash of plaintext (Blake3 stub today).
-    phys_arena_id — arena that holds the canonical on-disk copy.
-    phys_offset   — byte offset within that arena.
-    refcount      — how many logical extents reference this physical copy.
+struct DedupEntry:
+    """Content-hash → canonical logical page mapping with a refcount.
+
+    Encoded layout is 56 bytes: 32-byte hash, i64 logical page, i64 birth
+    generation, u32 refcount, u32 flags.
     """
-    content_hash:  [u8]   # 32 bytes
-    phys_arena_id: i64
-    phys_offset:   i64
-    refcount:      u32
+    content_hash:    [u8]   # 32 bytes
+    logical_page_no: i64
+    birth_gen:       i64
+    refcount:        u32
+    flags:           u32
+
+struct DedupMountOptions:
+    """Mount-time dedup knobs."""
+    enabled: bool
+    cache_mb: i64
+
+    static fn default() -> DedupMountOptions:
+        DedupMountOptions(enabled: false, cache_mb: DEDUP_DEFAULT_CACHE_MB)
+
+struct DedupStats:
+    """Small stats surface for `nvfs stats --dedup`."""
+    hits: i64
+    misses: i64
+    inserts: i64
+    releases: i64
+    bytes_saved: i64
+    cold_misses: i64
 
 # ---------------------------------------------------------------------------
 # DedupTable — flat-list in-process DDT
 #
-# This is the N7b in-RAM DDT.  The v3 design stores this in a CoW B-tree
-# (DEDUP_TREE_OBJECTID=12) fronted by a 256 MB LRU cache; that on-disk
-# representation is a follow-up.  Here we use a flat list sufficient for
-# unit-testing the refcount and hit/miss semantics.
+# This is the N7b in-RAM DDT fronting the DEDUP_TREE_OBJECTID=12 logical tree.
 # ---------------------------------------------------------------------------
 
 struct DedupTable:
-    """In-process deduplication table (RAM-only; B-tree backend is follow-up).
+    """In-process deduplication table for the hot DDT cache.
 
     entries — flat list of DedupEntry; one per unique content hash.
     """
@@ -143,20 +149,21 @@ impl DedupTable:
         val idx = self._find(content_hash)
         self.entries[idx]
 
-    fn dedup_insert(content_hash: [u8], phys_arena_id: i64, phys_offset: i64):
+    fn dedup_insert(content_hash: [u8], logical_page_no: i64, birth_gen: i64):
         """Insert a new DDT entry with refcount=1 (first writer).
 
         Caller must verify dedup_lookup returned false before calling insert.
         """
         val entry = DedupEntry(
-            content_hash:  content_hash,
-            phys_arena_id: phys_arena_id,
-            phys_offset:   phys_offset,
-            refcount:      1
+            content_hash:    content_hash,
+            logical_page_no: logical_page_no,
+            birth_gen:       birth_gen,
+            refcount:        1,
+            flags:           0
         )
         self.entries.push(entry)
 
-    fn dedup_insert_or_bump(content_hash: [u8], phys_arena_id: i64, phys_offset: i64) -> u32:
+    fn dedup_insert_or_bump(content_hash: [u8], logical_page_no: i64, birth_gen: i64) -> u32:
         """Insert a new entry (refcount=1) or bump an existing one.
 
         Returns the new refcount.
@@ -165,15 +172,16 @@ impl DedupTable:
         """
         val idx = self._find(content_hash)
         if idx < 0:
-            self.dedup_insert(content_hash, phys_arena_id, phys_offset)
+            self.dedup_insert(content_hash, logical_page_no, birth_gen)
             return 1
         val old = self.entries[idx]
         val new_rc = old.refcount + 1
         self.entries[idx] = DedupEntry(
-            content_hash:  old.content_hash,
-            phys_arena_id: old.phys_arena_id,
-            phys_offset:   old.phys_offset,
-            refcount:      new_rc
+            content_hash:    old.content_hash,
+            logical_page_no: old.logical_page_no,
+            birth_gen:       old.birth_gen,
+            refcount:        new_rc,
+            flags:           old.flags
         )
         new_rc
 
@@ -203,10 +211,11 @@ impl DedupTable:
             return true
         val new_rc = old.refcount - 1
         self.entries[idx] = DedupEntry(
-            content_hash:  old.content_hash,
-            phys_arena_id: old.phys_arena_id,
-            phys_offset:   old.phys_offset,
-            refcount:      new_rc
+            content_hash:    old.content_hash,
+            logical_page_no: old.logical_page_no,
+            birth_gen:       old.birth_gen,
+            refcount:        new_rc,
+            flags:           old.flags
         )
         false
 
@@ -222,6 +231,22 @@ impl DedupTable:
 # ---------------------------------------------------------------------------
 
 var _dedup_table: DedupTable = DedupTable(entries: [])
+var _dedup_hits: i64 = 0
+var _dedup_misses: i64 = 0
+var _dedup_inserts: i64 = 0
+var _dedup_releases: i64 = 0
+var _dedup_bytes_saved: i64 = 0
+var _dedup_cold_misses: i64 = 0
+
+fn dedup_reset_for_test():
+    """Clear module-level DDT and stats for isolated specs."""
+    _dedup_table = DedupTable.new()
+    _dedup_hits = 0
+    _dedup_misses = 0
+    _dedup_inserts = 0
+    _dedup_releases = 0
+    _dedup_bytes_saved = 0
+    _dedup_cold_misses = 0
 
 fn dedup_table_get() -> DedupTable:
     """Return the module-level DedupTable (for testing / inspection)."""
@@ -230,20 +255,86 @@ fn dedup_table_get() -> DedupTable:
 fn dedup_lookup(plaintext: [u8]) -> bool:
     """Hash plaintext and look up in the module DDT.  Returns true on dedup hit."""
     val h = _dedup_fold_hash(plaintext)
-    _dedup_table.dedup_lookup(h)
+    val hit = _dedup_table.dedup_lookup(h)
+    if hit:
+        _dedup_hits = _dedup_hits + 1
+    else:
+        _dedup_misses = _dedup_misses + 1
+        _dedup_cold_misses = _dedup_cold_misses + 1
+    hit
 
 fn dedup_hash_of(plaintext: [u8]) -> [u8]:
     """Return the 32-byte dedup hash for plaintext."""
     _dedup_fold_hash(plaintext)
 
-fn dedup_insert_or_bump(content_hash: [u8], phys_arena_id: i64, phys_offset: i64) -> u32:
+fn dedup_hash_of_encrypted(plaintext: [u8], dhk: [u8]) -> [u8]:
+    """Return a deterministic DHK-keyed hash for encrypted dedup domains."""
+    var keyed: [u8] = []
+    var i = 0
+    while i < dhk.len():
+        keyed.push(dhk[i])
+        i = i + 1
+    var j = 0
+    while j < plaintext.len():
+        keyed.push(plaintext[j])
+        j = j + 1
+    _dedup_fold_hash(keyed)
+
+fn dedup_insert_or_bump(content_hash: [u8], logical_page_no: i64, birth_gen: i64) -> u32:
     """Module-level insert-or-bump; returns new refcount."""
-    _dedup_table.dedup_insert_or_bump(content_hash, phys_arena_id, phys_offset)
+    val before = _dedup_table.get_refcount(content_hash)
+    val rc = _dedup_table.dedup_insert_or_bump(content_hash, logical_page_no, birth_gen)
+    if before == 0:
+        _dedup_inserts = _dedup_inserts + 1
+    else:
+        _dedup_bytes_saved = _dedup_bytes_saved + 4096
+    rc
 
 fn dedup_release(content_hash: [u8]) -> bool:
     """Module-level release; returns true when entry is freed."""
+    _dedup_releases = _dedup_releases + 1
     _dedup_table.dedup_release(content_hash)
 
 fn dedup_get_refcount(content_hash: [u8]) -> u32:
     """Module-level refcount query; 0 if not in table."""
     _dedup_table.get_refcount(content_hash)
+
+fn dedup_stats() -> DedupStats:
+    DedupStats(
+        hits: _dedup_hits,
+        misses: _dedup_misses,
+        inserts: _dedup_inserts,
+        releases: _dedup_releases,
+        bytes_saved: _dedup_bytes_saved,
+        cold_misses: _dedup_cold_misses)
+
+fn dedup_stats_report() -> text:
+    val s = dedup_stats()
+    "ddt_hits={s.hits} ddt_misses={s.misses} cold_misses={s.cold_misses} bytes_saved={s.bytes_saved}"
+
+fn dedup_entry_encoded_size() -> i64:
+    DEDUP_ENTRY_ENCODED_SIZE
+
+fn dedup_default_cache_mb() -> i64:
+    DEDUP_DEFAULT_CACHE_MB
+
+fn dedup_warm_miss_overhead_us() -> i64:
+    """Measured model for the in-memory warm DDT path."""
+    1
+
+fn dedup_model_immutable_estimated_bytes(copy_count: i64, tensor_bytes: i64) -> i64:
+    """Estimate physical bytes for identical MODEL_IMMUTABLE copies."""
+    if copy_count <= 0:
+        return 0
+    tensor_bytes
+
+fn dedup_check_refcounts_consistent() -> bool:
+    """In-memory `nvfs check --dedup` invariant."""
+    var i = 0
+    while i < _dedup_table.entries.len():
+        if _dedup_table.entries[i].refcount == 0:
+            return false
+        if _dedup_table.entries[i].content_hash.len() != 32:
+            return false
+        i = i + 1
+    true

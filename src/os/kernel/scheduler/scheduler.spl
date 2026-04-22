@@ -22,7 +22,7 @@ use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
 use os.kernel.memory.vmm.{vmm_cow_clone_pages}
-use os.kernel.loader.segment_mapper.{map_all, map_stack, stage_raw_image}
+use os.kernel.loader.segment_mapper.{map_all, map_stack, stage_raw_image, stage_elf64_load_image, direct_load_entry_point, verify_direct_load_entry}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.posix.fd_io.{posix_close_task_fds_with_backends}
@@ -193,11 +193,13 @@ fn _map_user_process_image(
         serial_println("[scheduler] map_user_process_image: synthetic address space root={space.phys_root} id={space.id}")
         return 0
     if _scheduler_uses_direct_load_arena():
-        val staged = stage_raw_image(space, file_bytes)
+        var staged = stage_elf64_load_image(space, file_bytes)
         if staged <= 0:
-            serial_println("[scheduler] map_user_process_image: arm64 raw stage failed root={space.phys_root}")
+            staged = stage_raw_image(space, file_bytes)
+        if staged <= 0:
+            serial_println("[scheduler] map_user_process_image: arm64 direct-load stage failed root={space.phys_root}")
             return -12
-        serial_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} pages={staged} id={space.id}")
+        serial_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} staged={staged} id={space.id}")
         return 0
     if stack_top == 0 or stack_size == 0:
         serial_println("[scheduler] map_user_process_image: invalid stack shape")
@@ -693,8 +695,6 @@ impl Scheduler:
                 serial_println("[scheduler] create_user_task: no free slot")
                 return 0
 
-        val user_ctx = _initial_user_task_context(entry, user_sp)
-
         val user_as: AddressSpace = create_user_address_space()
 
         val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
@@ -702,6 +702,14 @@ impl Scheduler:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] create_user_task: map failed")
             return 0
+        val mapped_entry = direct_load_entry_point(user_as, file_bytes, entry)
+        if mapped_entry != entry:
+            serial_println("[scheduler] create_user_task: direct entry mapped")
+            if not verify_direct_load_entry(user_as, file_bytes, entry):
+                destroy_user_address_space(user_as)
+                serial_println("[scheduler] create_user_task: direct entry verify failed")
+                return 0
+        val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
 
         # Dodge the `Scheduler.next_task_id` field-read stub by using a
         # module-level counter. The `self.next_task_id` read in the baremetal
@@ -719,7 +727,7 @@ impl Scheduler:
             state: TaskState.Ready,
             priority: priority,
             is_user: true,
-            entry_point: entry,
+            entry_point: mapped_entry,
             context: user_ctx,
             user_context: Some(user_ctx),
             address_space: user_as.phys_root,
@@ -778,13 +786,20 @@ impl Scheduler:
             serial_println("[scheduler] bootstrap_user_task: initial stack too large")
             return 0
 
-        val user_ctx = _initial_user_task_context(entry, user_sp)
         val user_as: AddressSpace = create_user_address_space()
         val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] bootstrap_user_task: map failed")
             return 0
+        val mapped_entry = direct_load_entry_point(user_as, file_bytes, entry)
+        if mapped_entry != entry:
+            serial_println("[scheduler] bootstrap_user_task: direct entry mapped")
+            if not verify_direct_load_entry(user_as, file_bytes, entry):
+                destroy_user_address_space(user_as)
+                serial_println("[scheduler] bootstrap_user_task: direct entry verify failed")
+                return 0
+        val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
 
         var user_next_id = g_scheduler_next_task_id
         if user_next_id == 0 or user_next_id >= 0x40000000:
@@ -798,7 +813,7 @@ impl Scheduler:
             state: TaskState.Ready,
             priority: priority,
             is_user: true,
-            entry_point: entry,
+            entry_point: mapped_entry,
             context: user_ctx,
             user_context: Some(user_ctx),
             address_space: user_as.phys_root,
@@ -1634,7 +1649,6 @@ impl Scheduler:
                 self._enqueue_ready(task_id)
             return -22
 
-        val user_ctx = _initial_user_task_context(entry, user_sp)
         val new_as: AddressSpace = create_user_address_space()
         val map_result = _map_user_process_image(new_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         if map_result < 0:
@@ -1642,6 +1656,15 @@ impl Scheduler:
             if was_ready:
                 self._enqueue_ready(task_id)
             return map_result
+        val mapped_entry = direct_load_entry_point(new_as, file_bytes, entry)
+        if mapped_entry != entry:
+            serial_println("[scheduler] exec_image: direct entry mapped")
+            if not verify_direct_load_entry(new_as, file_bytes, entry):
+                destroy_user_address_space(new_as)
+                if was_ready:
+                    self._enqueue_ready(task_id)
+                return -12
+        val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
 
         self._release_task_address_space(old_task)
 
@@ -1651,7 +1674,7 @@ impl Scheduler:
 
         var task = old_task
         task.is_user = true
-        task.entry_point = entry
+        task.entry_point = mapped_entry
         task.context = user_ctx
         task.user_context = Some(user_ctx)
         task.address_space = new_as.phys_root

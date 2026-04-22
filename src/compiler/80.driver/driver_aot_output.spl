@@ -12,11 +12,14 @@
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
-use compiler.driver.smf_writer.{generate_smf_with_templates, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
+use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_options, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
+use compiler.driver.smf_binary_helpers.{u32_to_bytes}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.common.config.{Logger}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
+use compiler.mir.mir_data.{MirModule}
 use compiler.driver.incremental.{BuildCache, FileFingerprint}
 use compiler.driver.driver.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 
@@ -362,6 +365,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
 
         # Collect dependency interface hashes for staleness tracking
         val deps = collect_dependency_hashes(self.ctx)
+        val driver_manifest_bytes = collect_driver_manifest_bytes(self.ctx.mir_modules)
 
         # Wrap object code into SMF format
         val target = Target.host()
@@ -373,12 +377,14 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             # Phase 2: Extract .text + relocations into separate sections
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
+            opts.driver_manifest_bytes = driver_manifest_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             # Default: strip ELF to raw .text bytes, with dependency tracking
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
-            generate_smf_with_templates(all_object_bytes, nil, nil, target)
+            opts.driver_manifest_bytes = driver_manifest_bytes
+            generate_smf_with_options(all_object_bytes, opts)
         CompileResult.Success(smf_bytes)
 
     # --------------------------------------------------------------------------
@@ -422,6 +428,52 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, output_ba
 # ============================================================================
 
 extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+
+fn collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
+    var payload: [u8] = []
+    for module_name in modules.keys():
+        val module = modules[module_name]
+        for fn_ in module.functions.values():
+            if fn_.has_driver_manifest_attr:
+                payload = payload.concat(encode_driver_manifest_record(fn_.name, fn_.driver_manifest_attr))
+    payload
+
+fn encode_driver_manifest_record(name: text, attr: DriverManifestAttr) -> [u8]:
+    var buf: [u8] = []
+    buf = buf.concat(u32_to_bytes(0x44525653))  # DRVS
+
+    var kind_byte: u8 = 0
+    match attr.kind:
+        case Driver:
+            kind_byte = 0
+        case NativeLib:
+            kind_byte = 1
+    buf = buf.push(kind_byte)
+    buf = buf.push((attr.driver_class & 0xFF).to_u8())
+    buf = buf.push(1)  # abi_rev low byte
+    buf = buf.push(0)  # abi_rev high byte
+    buf = buf.concat(u32_to_bytes(attr.vendor as i32))
+    buf = buf.concat(u32_to_bytes(attr.device_ids.len() as i32))
+    buf = buf.concat(fixed_ascii_bytes(attr.version, 16))
+    buf = buf.concat(fixed_ascii_bytes(name, 32))
+
+    for id in attr.device_ids:
+        buf = buf.concat(u32_to_bytes(0))
+        buf = buf.concat(u32_to_bytes(id as i32))
+
+    buf
+
+fn fixed_ascii_bytes(value: text, width: i64) -> [u8]:
+    var out: [u8] = []
+    val raw = value.to_bytes()
+    var i: i64 = 0
+    while i < width:
+        if i < raw.len():
+            out = out.push(raw[i])
+        else:
+            out = out.push(0)
+        i = i + 1
+    out
 
 fn collect_dependency_hashes(ctx: any) -> [SmfDependencyEntry]:
     """Collect interface hashes of all imported modules for SMF dependency tracking.

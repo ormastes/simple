@@ -459,6 +459,19 @@ impl Lowerer {
                         available_fields,
                     })
                 }
+                HirType::Bitfield { name, fields, .. } => {
+                    for (idx, field_info) in fields.iter().enumerate() {
+                        if field_info.name == field {
+                            return Ok((idx, field_info.ty));
+                        }
+                    }
+                    let available_fields = fields.iter().map(|f| f.name.clone()).collect();
+                    Err(LowerError::CannotInferFieldType {
+                        struct_name: name.clone(),
+                        field: field.to_string(),
+                        available_fields,
+                    })
+                }
                 HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
                 // Enum types - field access returns ANY (dynamic variant access)
                 HirType::Enum { .. } => Ok((0, TypeId::ANY)),
@@ -486,15 +499,28 @@ impl Lowerer {
                         // First: search local type registry
                         let mut best: Option<(usize, TypeId, usize)> = None;
                         for (_, hty) in self.module.types.iter() {
-                            if let HirType::Struct { fields, .. } = hty {
-                                for (idx, (fname, fty)) in fields.iter().enumerate() {
-                                    if fname == field {
-                                        let count = fields.len();
-                                        if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
-                                            best = Some((idx, *fty, count));
+                            match hty {
+                                HirType::Struct { fields, .. } => {
+                                    for (idx, (fname, fty)) in fields.iter().enumerate() {
+                                        if fname == field {
+                                            let count = fields.len();
+                                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                                best = Some((idx, *fty, count));
+                                            }
                                         }
                                     }
                                 }
+                                HirType::Bitfield { fields, .. } => {
+                                    for (idx, f) in fields.iter().enumerate() {
+                                        if f.name == field {
+                                            let count = fields.len();
+                                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                                best = Some((idx, f.ty, count));
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         if let Some((idx, ty, _)) = best {

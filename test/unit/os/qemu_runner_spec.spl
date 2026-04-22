@@ -3,12 +3,13 @@ use os.qemu_runner.{
     get_all_targets, get_gui_target, get_target,
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
     scenario_riscv64_virtio_fat32_smf, scenario_riscv32_virtio_fat32_smf,
+    scenario_x64_desktop_uefi,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
     riscv_fs_exec_disk_image_path, scenario_target,
     default_os_build_backend_for_target,
     desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
-    desktop_release_installer_iso_path, native_build_prerequisite_hint,
+    desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
     os_native_build_args,
     OsTarget,
     qemu_run_options_debug_gui
@@ -16,6 +17,7 @@ use os.qemu_runner.{
 use os.kernel.arch.arch_context.{Architecture}
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn scenario_name_or_missing(name: text) -> text:
     val scenario = get_scenario(name)
@@ -145,6 +147,25 @@ describe "Qemu runner serial routing":
             val disk_cmd = build_scenario_command(resolved_disk, "build/os/simpleos_desktop_e2e_32.elf")
             expect(disk_cmd).to_contain("drive=nvm")
             expect(disk_cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
+
+    it "defines a UEFI-native x64 desktop disk boot scenario":
+        expect(rt_env_set("SIMPLEOS_OVMF_CODE", "build/test-ovmf/OVMF_CODE.fd")).to_equal(true)
+        expect(ovmf_code_path()).to_equal("build/test-ovmf/OVMF_CODE.fd")
+        val scenario = scenario_x64_desktop_uefi()
+        expect(scenario.name).to_equal("x64-desktop-uefi")
+        expect(scenario.arch).to_equal(Architecture.X86_64)
+        expect(scenario_test_timeout_ms(scenario)).to_equal(180000)
+
+        val resolved = get_scenario("x64-desktop-uefi")
+        if val s = resolved:
+            val cmd = build_scenario_command(s, "build/os/simpleos_desktop_e2e_32.elf")
+            expect(cmd[0]).to_equal("qemu-system-x86_64")
+            expect(cmd.contains("-kernel")).to_equal(false)
+            expect(cmd).to_contain("if=pflash,format=raw,readonly=on,file=build/test-ovmf/OVMF_CODE.fd")
+            expect(cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=uefidisk,format=raw")
+            expect(cmd).to_contain("nvme,serial=uefi-desktop,drive=uefidisk")
+        else:
+            expect("missing").to_equal("x64-desktop-uefi")
 
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)
