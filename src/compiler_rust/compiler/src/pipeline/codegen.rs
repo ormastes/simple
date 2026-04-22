@@ -1,7 +1,7 @@
 //! Code generation, JIT compilation, and object file emission.
 
 use simple_common::target::Target;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::path::Path;
 
@@ -133,15 +133,8 @@ fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
 }
 
 fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), CompileError> {
-    use std::collections::{BTreeSet, HashMap};
-
     let entity = sanitize_vhdl_ident(&func.name);
-    let mut reg_expr: HashMap<u32, String> = HashMap::new();
-    let mut reg_ty: HashMap<u32, crate::hir::TypeId> = HashMap::new();
-    let mut reg_int_const: HashMap<u32, i64> = HashMap::new();
-    let mut addr_local: HashMap<u32, usize> = HashMap::new();
-    let mut signals: BTreeSet<(String, crate::hir::TypeId)> = BTreeSet::new();
-    let mut assigns: Vec<String> = Vec::new();
+    let mut state = VhdlLowerState::default();
     let mut result_expr: Option<String> = None;
 
     out.push_str("library ieee;\n");
@@ -161,97 +154,59 @@ fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), Compil
     out.push_str(&format!("end entity {};\n\n", entity));
     out.push_str(&format!("architecture rtl of {} is\n", entity));
 
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            match inst {
-                MirInst::LocalAddr { dest, local_index } => {
-                    addr_local.insert(dest.0, *local_index);
+    if let Some(entry) = func.blocks.first() {
+        if let Terminator::Branch {
+            cond,
+            then_block,
+            else_block,
+        } = &entry.terminator
+        {
+            lower_vhdl_block_instructions(func, &mut state, entry)?;
+            let cond_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *cond, crate::hir::TypeId::BOOL)?;
+            let base_assign_len = state.assigns.len();
+            let mut then_state = state.clone();
+            let mut else_state = state.clone();
+            let then_expr = lower_vhdl_return_block(func, &mut then_state, *then_block)?;
+            let else_expr = lower_vhdl_return_block(func, &mut else_state, *else_block)?;
+            let then_assigns = then_state.assigns.split_off(base_assign_len);
+            let else_assigns = else_state.assigns.split_off(base_assign_len);
+            state.signals.extend(then_state.signals);
+            state.signals.extend(else_state.signals);
+            state.assigns.extend(then_assigns);
+            state.assigns.extend(else_assigns);
+            result_expr = Some(format!("{} when {} = '1' else {}", then_expr, cond_expr, else_expr));
+        }
+    }
+
+    if result_expr.is_none() {
+        for block in &func.blocks {
+            lower_vhdl_block_instructions(func, &mut state, block)?;
+            match &block.terminator {
+                Terminator::Return(Some(reg)) => {
+                    result_expr = Some(reg_expr_for_type(
+                        &state.reg_expr,
+                        &state.reg_int_const,
+                        *reg,
+                        func.return_type,
+                    )?);
                 }
-                MirInst::Load { dest, addr, ty } => {
-                    let local_index = addr_local.get(&addr.0).ok_or_else(|| {
-                        CompileError::Codegen(format!("VHDL unsupported load from non-local address v{}", addr.0))
-                    })?;
-                    let name = local_name(func, *local_index)?;
-                    reg_expr.insert(dest.0, sanitize_vhdl_ident(name));
-                    reg_ty.insert(dest.0, *ty);
-                }
-                MirInst::ConstInt { dest, value } => {
-                    reg_int_const.insert(dest.0, *value);
-                    reg_expr.insert(dest.0, value.to_string());
-                }
-                MirInst::ConstBool { dest, value } => {
-                    reg_expr.insert(dest.0, if *value { "'1'".to_string() } else { "'0'".to_string() });
-                    reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
-                }
-                MirInst::Copy { dest, src } => {
-                    let expr = reg_expr_for(&reg_expr, *src)?;
-                    reg_expr.insert(dest.0, expr);
-                    if let Some(value) = reg_int_const.get(&src.0).copied() {
-                        reg_int_const.insert(dest.0, value);
-                    }
-                    if let Some(ty) = reg_ty.get(&src.0).copied() {
-                        reg_ty.insert(dest.0, ty);
-                    }
-                }
-                MirInst::BinOp { dest, op, left, right } => {
-                    let left_ty = reg_ty
-                        .get(&left.0)
-                        .copied()
-                        .or_else(|| reg_ty.get(&right.0).copied())
-                        .unwrap_or(func.return_type);
-                    let right_ty = reg_ty
-                        .get(&right.0)
-                        .copied()
-                        .or_else(|| reg_ty.get(&left.0).copied())
-                        .unwrap_or(func.return_type);
-                    let left_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *left, left_ty)?;
-                    let right_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *right, right_ty)?;
-                    let expr = vhdl_binop(op, &left_expr, &right_expr)?;
-                    let ty = binop_result_type(*op, left_ty);
-                    let sig = format!("tmp_{}", dest.0);
-                    signals.insert((sig.clone(), ty));
-                    assigns.push(format!("    {} <= {};", sig, expr));
-                    reg_expr.insert(dest.0, sig);
-                    reg_ty.insert(dest.0, ty);
-                }
-                MirInst::UnaryOp { dest, op, operand } => {
-                    let operand_ty = reg_ty.get(&operand.0).copied().unwrap_or(func.return_type);
-                    let operand_expr = reg_expr_for_type(&reg_expr, &reg_int_const, *operand, operand_ty)?;
-                    let expr = vhdl_unaryop(op, &operand_expr)?;
-                    let sig = format!("tmp_{}", dest.0);
-                    signals.insert((sig.clone(), operand_ty));
-                    assigns.push(format!("    {} <= {};", sig, expr));
-                    reg_expr.insert(dest.0, sig);
-                    reg_ty.insert(dest.0, operand_ty);
-                }
+                Terminator::Return(None) => {}
+                Terminator::Unreachable if block.instructions.is_empty() => {}
                 other => {
                     return Err(CompileError::Codegen(format!(
-                        "VHDL backend unsupported MIR instruction in {}: {:?}",
+                        "VHDL backend unsupported terminator in {}: {:?}",
                         func.name, other
                     )));
                 }
             }
         }
-        match &block.terminator {
-            Terminator::Return(Some(reg)) => {
-                result_expr = Some(reg_expr_for_type(&reg_expr, &reg_int_const, *reg, func.return_type)?);
-            }
-            Terminator::Return(None) => {}
-            Terminator::Unreachable if block.instructions.is_empty() => {}
-            other => {
-                return Err(CompileError::Codegen(format!(
-                    "VHDL backend unsupported terminator in {}: {:?}",
-                    func.name, other
-                )));
-            }
-        }
     }
 
-    for (name, ty) in &signals {
+    for (name, ty) in &state.signals {
         out.push_str(&format!("    signal {} : {};\n", name, vhdl_type(*ty)?));
     }
     out.push_str("begin\n");
-    for assign in assigns {
+    for assign in state.assigns {
         out.push_str(&assign);
         out.push('\n');
     }
@@ -259,6 +214,126 @@ fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), Compil
         out.push_str(&format!("    result_out <= {};\n", expr));
     }
     out.push_str("end architecture rtl;\n");
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct VhdlLowerState {
+    reg_expr: HashMap<u32, String>,
+    reg_ty: HashMap<u32, crate::hir::TypeId>,
+    reg_int_const: HashMap<u32, i64>,
+    addr_local: HashMap<u32, usize>,
+    signals: BTreeSet<(String, crate::hir::TypeId)>,
+    assigns: Vec<String>,
+}
+
+fn lower_vhdl_block_instructions(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    block: &crate::mir::MirBlock,
+) -> Result<(), CompileError> {
+    for inst in &block.instructions {
+        lower_vhdl_instruction(func, state, inst)?;
+    }
+    Ok(())
+}
+
+fn lower_vhdl_return_block(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    id: crate::mir::BlockId,
+) -> Result<String, CompileError> {
+    let block = func
+        .blocks
+        .iter()
+        .find(|block| block.id == id)
+        .ok_or_else(|| CompileError::Codegen(format!("VHDL backend missing block {:?}", id)))?;
+    lower_vhdl_block_instructions(func, state, block)?;
+    match &block.terminator {
+        Terminator::Return(Some(reg)) => {
+            reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *reg, func.return_type)
+        }
+        other => Err(CompileError::Codegen(format!(
+            "VHDL backend only supports if/else branches whose arms return in {}: {:?}",
+            func.name, other
+        ))),
+    }
+}
+
+fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: &MirInst) -> Result<(), CompileError> {
+    match inst {
+        MirInst::LocalAddr { dest, local_index } => {
+            state.addr_local.insert(dest.0, *local_index);
+        }
+        MirInst::Load { dest, addr, ty } => {
+            let local_index = state.addr_local.get(&addr.0).ok_or_else(|| {
+                CompileError::Codegen(format!("VHDL unsupported load from non-local address v{}", addr.0))
+            })?;
+            let name = local_name(func, *local_index)?;
+            state.reg_expr.insert(dest.0, sanitize_vhdl_ident(name));
+            state.reg_ty.insert(dest.0, *ty);
+        }
+        MirInst::ConstInt { dest, value } => {
+            state.reg_int_const.insert(dest.0, *value);
+            state.reg_expr.insert(dest.0, value.to_string());
+        }
+        MirInst::ConstBool { dest, value } => {
+            state
+                .reg_expr
+                .insert(dest.0, if *value { "'1'".to_string() } else { "'0'".to_string() });
+            state.reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
+        }
+        MirInst::Copy { dest, src } => {
+            let expr = reg_expr_for(&state.reg_expr, *src)?;
+            state.reg_expr.insert(dest.0, expr);
+            if let Some(value) = state.reg_int_const.get(&src.0).copied() {
+                state.reg_int_const.insert(dest.0, value);
+            }
+            if let Some(ty) = state.reg_ty.get(&src.0).copied() {
+                state.reg_ty.insert(dest.0, ty);
+            }
+        }
+        MirInst::BinOp { dest, op, left, right } => {
+            let left_ty = state
+                .reg_ty
+                .get(&left.0)
+                .copied()
+                .or_else(|| state.reg_ty.get(&right.0).copied())
+                .unwrap_or(func.return_type);
+            let right_ty = state
+                .reg_ty
+                .get(&right.0)
+                .copied()
+                .or_else(|| state.reg_ty.get(&left.0).copied())
+                .unwrap_or(func.return_type);
+            let left_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *left, left_ty)?;
+            let right_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *right, right_ty)?;
+            let expr = vhdl_binop(op, &left_expr, &right_expr)?;
+            let ty = binop_result_type(*op, left_ty);
+            let sig = format!("tmp_{}", dest.0);
+            state.signals.insert((sig.clone(), ty));
+            state.assigns.push(format!("    {} <= {};", sig, expr));
+            state.reg_expr.insert(dest.0, sig);
+            state.reg_ty.insert(dest.0, ty);
+        }
+        MirInst::UnaryOp { dest, op, operand } => {
+            let operand_ty = state.reg_ty.get(&operand.0).copied().unwrap_or(func.return_type);
+            let operand_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *operand, operand_ty)?;
+            let expr = vhdl_unaryop(op, &operand_expr)?;
+            let sig = format!("tmp_{}", dest.0);
+            state.signals.insert((sig.clone(), operand_ty));
+            state.assigns.push(format!("    {} <= {};", sig, expr));
+            state.reg_expr.insert(dest.0, sig);
+            state.reg_ty.insert(dest.0, operand_ty);
+        }
+        MirInst::Drop { .. } => {}
+        other => {
+            return Err(CompileError::Codegen(format!(
+                "VHDL backend unsupported MIR instruction in {}: {:?}",
+                func.name, other
+            )))
+        }
+    }
     Ok(())
 }
 
@@ -1267,6 +1342,27 @@ fn is_one(a: i32) -> bool:
         assert!(
             vhdl.contains("<= '1' when a = to_signed(1, 32) else '0';"),
             "expected typed constant comparison:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_emits_simple_if_else_return_mux() {
+        let source = "\
+fn sel(flag: bool, a: i32, b: i32) -> i32:
+    if flag:
+        return a
+    else:
+        return b
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("result_out <= a when flag = '1' else b;"),
+            "expected if/else result mux:\n{vhdl}"
         );
     }
 
