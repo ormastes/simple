@@ -1198,6 +1198,137 @@ describe "VHDL Backend E2E - Entity Generation":
         val result = backend.compile(module)
         check_msg(result.is_err(), "Expected hard error for unsupported Alloc instruction")
 
+    it "rejects pointer address arithmetic as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), true))
+        val locals = [
+            make_arg_local(0, 0, "ptr", ptr_type),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "next_ptr", ptr_type)
+        ]
+        val gep_inst = MirInst(
+            kind: MirInstKind.GetElementPtr(
+                LocalId(id: 2),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [gep_inst],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+        )
+        val func = make_function("bad_gep", [ptr_type], make_i32(), locals, [block])
+        val module = make_module("bad_gep_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported GetElementPtr instruction")
+
+    it "rejects indirect calls as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), false))
+        val locals = [
+            make_arg_local(0, 0, "fn_ptr", ptr_type),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_return_local(2, make_i32())
+        ]
+        val call_inst = MirInst(
+            kind: MirInstKind.CallIndirect(
+                Some(LocalId(id: 2)),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))],
+                MirSignature(params: [make_i32()], return_type: make_i32(), is_variadic: false)
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [call_inst],
+            terminator: nil
+        )
+        val func = make_function("bad_call_indirect", [ptr_type, make_i32()], make_i32(), locals, [block])
+        val module = make_module("bad_call_indirect_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported CallIndirect instruction")
+
+    it "rejects arbitrary intrinsics as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+        val intrinsic_inst = MirInst(
+            kind: MirInstKind.Intrinsic(
+                Some(LocalId(id: 1)),
+                "host_only",
+                [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [intrinsic_inst],
+            terminator: nil
+        )
+        val func = make_function("bad_intrinsic", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("bad_intrinsic_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported Intrinsic instruction")
+
+    it "rejects delayed signal assignment inside structured process":
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 4),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val delayed_assign = MirInst(
+            kind: MirInstKind.VhdlSignalAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                Some(10)
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [delayed_assign],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = make_function("bad_delayed_process_assign", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("bad_delayed_process_assign_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for delayed signal assignment inside process")
+
 # ============================================================================
 # Backend Compilation: Package Generation
 # ============================================================================
