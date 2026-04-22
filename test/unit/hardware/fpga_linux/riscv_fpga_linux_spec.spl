@@ -7,7 +7,9 @@ contract.
 
 import std.spec
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, FpgaPrepareManifest, create_default_riscv_fpga_linux_manifest}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, FpgaPrepareManifest, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 describe "RISC-V FPGA Linux board profile":
     it "allows the generic Xilinx profile for prepare-only generation":
@@ -110,3 +112,40 @@ describe "RISC-V FPGA Linux manifest":
         expect(tcl).to_contain("add_files build/fpga/rv64/rtl")
         expect(tcl).to_contain("set_property top simple_rv32_linux_soc")
         expect(tcl).to_contain("set_property top simple_rv64_linux_soc")
+
+describe "RISC-V FPGA Linux RTL generation":
+    it "emits RV32 and RV64 top-level VHDL bundles":
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_rtl_spec")
+        expect(result.is_ok()).to_equal(true)
+        val bundle = result.ok().unwrap()
+        expect(bundle.generated_files.len()).to_equal(5)
+
+        val rv32_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32_linux_pkg.vhd")
+        val rv32_soc = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32_linux_soc.vhd")
+        val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64_linux_pkg.vhd")
+        val rv64_soc = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64_linux_soc.vhd")
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+
+        expect(rv32_pkg).to_contain("constant XLEN : natural := 32")
+        expect(rv32_pkg).to_contain("constant RESET_VECTOR : xword_t := x\"80000000\"")
+        expect(rv32_soc).to_contain("entity simple_rv32_linux_soc is")
+        expect(rv32_soc).to_contain("boot_pc_debug : out xword_t")
+        expect(rv64_pkg).to_contain("constant XLEN : natural := 64")
+        expect(rv64_pkg).to_contain("constant RESET_VECTOR : xword_t := x\"0000000080000000\"")
+        expect(rv64_soc).to_contain("entity simple_rv64_linux_soc is")
+        expect(rv64_soc).to_contain("pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN))")
+        expect(manifest_text).to_contain("arch = \"rv32\"")
+        expect(manifest_text).to_contain("arch = \"rv64\"")
+        expect(manifest_text).to_contain("top = \"simple_rv64_linux_soc\"")
+
+    slow_it "generated RV32 and RV64 VHDL analyze with GHDL when available":
+        val probe = rt_process_run("which", ["ghdl"])
+        if probe[2] != 0:
+            return "skip: ghdl not available"
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_rtl_ghdl_spec")
+        expect(result.is_ok()).to_equal(true)
+        val cmd = "rm -f work-obj08.cf && " +
+            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32_linux_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32_linux_soc.vhd && " +
+            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_soc.vhd"
+        val analyzed = rt_process_run("/bin/sh", ["-c", cmd])
+        expect(analyzed[2]).to_equal(0)
