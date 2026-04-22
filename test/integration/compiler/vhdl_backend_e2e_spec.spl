@@ -197,6 +197,51 @@ describe "VHDL Backend E2E - Entity Generation":
         check(compiled.vhdl.contains("entity comparator is"))
         check(compiled.vhdl.contains("result_out : out bit"))
 
+    it "compiles local load and store to signal assignments":
+        val backend = make_backend()
+
+        # MIR shape for: tmp = a + 1; x = tmp; return x
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "tmp", make_i32()),
+            MirLocal(id: LocalId(id: 3), name: Some("x"), type_: make_i32(), kind: LocalKind.Var)
+        ]
+
+        val add_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 2),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val store_inst = MirInst(
+            kind: MirInstKind.Store(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+            ),
+            span: empty_span()
+        )
+        val load_inst = MirInst(
+            kind: MirInstKind.Load(LocalId(id: 1), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))),
+            span: empty_span()
+        )
+
+        val block = MirBlock(id: BlockId(id: 0), instructions: [add_inst, store_inst, load_inst], terminator: nil)
+        val func = make_function("local_store", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("local_store_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for local load/store")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal x : signed(31 downto 0);"))
+        check(vhdl.contains("tmp <= a + to_signed(1, 32);"))
+        check(vhdl.contains("x <= tmp;"))
+        check(vhdl.contains("result_out <= x;"))
+
     it "rejects unsupported MIR instruction with hard error":
         val backend = make_backend()
 
