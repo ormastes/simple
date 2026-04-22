@@ -2051,6 +2051,30 @@ RuntimeValue rt_arm_virtio_blk_dma_base(void)
     return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
 }
 
+RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue version_val)
+{
+    uint32_t version = (uint32_t)(uint64_t)version_val;
+    uint64_t queue = (uint64_t)(uintptr_t)g_arm_virtq_storage;
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE;
+    mmio[0x030U / 4U] = 0U;
+    mmio[0x038U / 4U] = 128U;
+    if (version == 1U) {
+        mmio[0x028U / 4U] = 4096U;
+        mmio[0x03cU / 4U] = 4096U;
+        mmio[0x040U / 4U] = (uint32_t)(queue >> 12);
+    } else {
+        mmio[0x080U / 4U] = (uint32_t)(queue & 0xffffffffULL);
+        mmio[0x084U / 4U] = (uint32_t)(queue >> 32);
+        mmio[0x090U / 4U] = (uint32_t)((queue + 2048ULL) & 0xffffffffULL);
+        mmio[0x094U / 4U] = (uint32_t)((queue + 2048ULL) >> 32);
+        mmio[0x0a0U / 4U] = (uint32_t)((queue + 4096ULL) & 0xffffffffULL);
+        mmio[0x0a4U / 4U] = (uint32_t)((queue + 4096ULL) >> 32);
+        mmio[0x044U / 4U] = 1U;
+    }
+    __asm__ volatile("dmb sy" ::: "memory");
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_arm_virtio_blk_mmio_read_u32(RuntimeValue off)
 {
     uint64_t decoded = (uint64_t)off;
@@ -2202,7 +2226,8 @@ RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeV
         serial_put_hex((uint64_t)next);
         serial_puts("\r\n");
     }
-    volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint64_t)base + ((uint64_t)index * 16ULL));
+    (void)base;
+    volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint64_t)(uintptr_t)g_arm_virtq_storage + ((uint64_t)index * 16ULL));
     write_le32_volatile(desc + 0, (uint32_t)(uint64_t)addr_lo);
     write_le32_volatile(desc + 4, (uint32_t)(uint64_t)addr_hi);
     write_le32_volatile(desc + 8, (uint32_t)(uint64_t)len);

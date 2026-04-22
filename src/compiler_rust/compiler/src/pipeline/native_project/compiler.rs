@@ -15,6 +15,21 @@ use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
 
+pub(crate) fn native_hir_resolver_roots(project_root: &Path, source_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let project_src = safe_canonicalize(&project_root.join("src"));
+    if project_src.is_dir() {
+        roots.push(project_src);
+    }
+    for dir in source_dirs {
+        let canonical = safe_canonicalize(dir);
+        if !roots.iter().any(|existing| existing == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
 impl NativeProjectBuilder {
     /// Compile entries (index, path, source) in parallel using rayon.
     pub(crate) fn compile_entries_parallel(
@@ -159,8 +174,9 @@ pub(crate) fn compile_file_to_object(
 
     // HIR
     let hir_source_root = source_root.to_path_buf();
+    let resolver_roots = native_hir_resolver_roots(project_root, source_dirs);
     let resolver =
-        ModuleResolver::new(project_root.to_path_buf(), hir_source_root).with_extra_source_roots(source_dirs.to_vec());
+        ModuleResolver::new(project_root.to_path_buf(), hir_source_root).with_extra_source_roots(resolver_roots);
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);

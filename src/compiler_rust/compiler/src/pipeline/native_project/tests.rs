@@ -78,6 +78,31 @@ fn test_source_dir_preserves_logical_path() {
 }
 
 #[test]
+fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    std::fs::create_dir_all(project_root.join("src/os/kernel/types")).unwrap();
+    std::fs::create_dir_all(project_root.join("src/lib")).unwrap();
+    std::fs::create_dir_all(project_root.join("examples/simple_os")).unwrap();
+
+    let roots = native_hir_resolver_roots(
+        &project_root,
+        &[
+            project_root.join("src/os"),
+            project_root.join("src/lib"),
+            project_root.join("examples/simple_os"),
+        ],
+    );
+
+    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src"))));
+    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src/os"))));
+    assert!(roots.iter().any(|root| root == &safe_canonicalize(&project_root.join("src/lib"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("examples/simple_os"))));
+}
+
+#[test]
 fn test_incremental_cache_dir_custom() {
     let mut config = NativeBuildConfig::default();
     config.cache_dir = Some(PathBuf::from("/tmp/my_cache"));
