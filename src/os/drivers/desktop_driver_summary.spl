@@ -1,0 +1,128 @@
+# x86_64 desktop driver capability summary.
+#
+# This module is deliberately string-only and side-effect free so boot lanes,
+# SSpec tests, and later driver services can share one truthful marker contract.
+
+struct DesktopDriverSummary:
+    boot_mode: text
+    acpi_state: text
+    pci_devices: u64
+    interrupt_mode: text
+    storage_driver: text
+    dma_mode: text
+    hidden_copy: bool
+    display_driver: text
+    display_mode: text
+    accelerated: bool
+    input_driver: text
+    network_driver: text
+    msi_state: text
+    iommu_state: text
+    xhci_state: text
+
+fn desktop_driver_summary_create(
+    boot_mode: text,
+    acpi_state: text,
+    pci_devices: u64,
+    interrupt_mode: text,
+    storage_driver: text,
+    dma_mode: text,
+    hidden_copy: bool,
+    display_driver: text,
+    display_mode: text,
+    accelerated: bool,
+    input_driver: text,
+    network_driver: text,
+    msi_state: text,
+    iommu_state: text,
+    xhci_state: text
+) -> DesktopDriverSummary:
+    DesktopDriverSummary(
+        boot_mode: boot_mode,
+        acpi_state: acpi_state,
+        pci_devices: pci_devices,
+        interrupt_mode: interrupt_mode,
+        storage_driver: storage_driver,
+        dma_mode: dma_mode,
+        hidden_copy: hidden_copy,
+        display_driver: display_driver,
+        display_mode: display_mode,
+        accelerated: accelerated,
+        input_driver: input_driver,
+        network_driver: network_driver,
+        msi_state: msi_state,
+        iommu_state: iommu_state,
+        xhci_state: xhci_state
+    )
+
+fn desktop_driver_summary_for_qemu_direct(vfs_mounted: bool) -> DesktopDriverSummary:
+    """Current x86_64 desktop E2E lane: direct QEMU kernel boot with truthful fallbacks."""
+    desktop_driver_summary_create(
+        "qemu-direct",
+        "not-reported",
+        0,
+        "polling",
+        if vfs_mounted: "nvme" else: "none",
+        if vfs_mounted: "kernel-owned" else: "none",
+        false,
+        "bga",
+        "framebuffer",
+        false,
+        "ps2",
+        "unsupported",
+        "unsupported",
+        "unsupported",
+        "not-enumerated"
+    )
+
+fn desktop_driver_summary_for_uefi_qemu(
+    acpi_ok: bool,
+    pci_devices: u64,
+    storage_driver: text,
+    display_driver: text,
+    display_mode: text,
+    accelerated: bool,
+    network_driver: text
+) -> DesktopDriverSummary:
+    """Target x64-desktop-uefi summary shape for the complete-driver lane."""
+    desktop_driver_summary_create(
+        "uefi",
+        if acpi_ok: "madt-ok" else: "madt-missing",
+        pci_devices,
+        "polling",
+        storage_driver,
+        if storage_driver == "none": "none" else: "kernel-owned",
+        false,
+        display_driver,
+        display_mode,
+        accelerated,
+        "ps2",
+        network_driver,
+        "unsupported",
+        "unsupported",
+        "not-enumerated"
+    )
+
+fn desktop_driver_summary_text(summary: DesktopDriverSummary) -> text:
+    "[driver-summary] platform=x86_64 boot={summary.boot_mode} acpi={summary.acpi_state} pci_devices={summary.pci_devices} interrupt_mode={summary.interrupt_mode}\n" +
+        "[driver-summary] storage={summary.storage_driver} dma={summary.dma_mode} hidden_copy={summary.hidden_copy}\n" +
+        "[driver-summary] display={summary.display_mode} driver={summary.display_driver} accelerated={summary.accelerated}\n" +
+        "[driver-summary] input={summary.input_driver}\n" +
+        "[driver-summary] network={summary.network_driver}\n" +
+        "[driver-summary] msi={summary.msi_state} iommu={summary.iommu_state} xhci={summary.xhci_state}"
+
+fn desktop_driver_summary_has_false_claim(summary_text: text) -> bool:
+    summary_text.contains("process-backed:resident") or
+        summary_text.contains("process-backed:unknown") or
+        summary_text.contains("hidden_copy=true") or
+        summary_text.contains("accelerated=true driver=vga")
+
+fn desktop_driver_summary_accepts_complete_qemu(summary_text: text) -> bool:
+    summary_text.contains("[driver-summary] platform=x86_64 boot=uefi") and
+        summary_text.contains("acpi=madt-ok") and
+        summary_text.contains("storage=") and
+        summary_text.contains("display=") and
+        summary_text.contains("input=ps2") and
+        summary_text.contains("network=virtio-net") and
+        not desktop_driver_summary_has_false_claim(summary_text)
+

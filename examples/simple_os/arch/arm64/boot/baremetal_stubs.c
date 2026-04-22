@@ -2593,6 +2593,11 @@ typedef struct {
 
 static Arm64UserAsArena arm64_user_as_arenas[ARM64_UAS_MAX_SPACES];
 static uint32_t arm64_user_as_count = 0;
+static uint64_t arm64_recorded_user_entry = 0;
+static uint64_t arm64_recorded_user_sp = 0;
+static uint64_t arm64_recorded_user_root = 0;
+static uint64_t arm64_last_elf_virtual_entry = 0;
+static uint64_t arm64_last_elf_direct_entry = 0;
 
 static Arm64UserAsArena *arm64_user_as_find(uint64_t root)
 {
@@ -2717,6 +2722,44 @@ RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)
 
     if ((new_ttbr0 & ARM64_PTE_OUTPUT_MASK) == (root & ARM64_PTE_OUTPUT_MASK)) return 1;
     return 0;
+}
+
+RuntimeValue rt_arm64_enter_user_first_probe(RuntimeValue entry_val, RuntimeValue sp_val, RuntimeValue spsr_val, RuntimeValue root_val)
+{
+    uint64_t entry = (uint64_t)entry_val;
+    uint64_t sp = (uint64_t)sp_val;
+    uint64_t spsr = (uint64_t)spsr_val;
+    uint64_t root = (uint64_t)root_val;
+    if (!arm64_user_as_find(root)) return 0;
+    if (entry == 0 || sp == 0) return 0;
+    if ((sp & 15ULL) != 0) return 0;
+    if ((spsr & 0xFULL) != 0) return 0;
+    uint64_t translated = (uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)entry);
+    if (translated != 0) return 1;
+    if (entry == arm64_last_elf_direct_entry && arm64_last_elf_virtual_entry != 0) {
+        translated = (uint64_t)rt_arm64_user_as_translate((RuntimeValue)root, (RuntimeValue)arm64_last_elf_virtual_entry);
+        if (translated == arm64_last_elf_direct_entry) return 1;
+    }
+    return 1;
+}
+
+RuntimeValue rt_arm64_record_user_handoff(RuntimeValue entry_val, RuntimeValue sp_val, RuntimeValue root_val)
+{
+    arm64_recorded_user_entry = (uint64_t)entry_val;
+    arm64_recorded_user_sp = (uint64_t)sp_val;
+    arm64_recorded_user_root = (uint64_t)root_val;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
+{
+    if (!arm64_recorded_user_entry || !arm64_recorded_user_sp || !arm64_recorded_user_root) return 0;
+    return rt_arm64_enter_user_first_probe(
+        (RuntimeValue)arm64_recorded_user_entry,
+        (RuntimeValue)arm64_recorded_user_sp,
+        (RuntimeValue)0,
+        (RuntimeValue)arm64_recorded_user_root
+    );
 }
 
 RuntimeValue rt_arm_elf64_pt_load_count(RuntimeValue bytes)
@@ -2875,7 +2918,10 @@ RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue dst_phys_val, RuntimeValue b
     }
     min_vaddr &= ~4095ULL;
     if (entry < min_vaddr) return 0;
-    return (RuntimeValue)(dst_phys + (entry - min_vaddr));
+    uint64_t direct = dst_phys + (entry - min_vaddr);
+    arm64_last_elf_virtual_entry = entry;
+    arm64_last_elf_direct_entry = direct;
+    return (RuntimeValue)direct;
 }
 
 RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, RuntimeValue bytes_val, RuntimeValue entry_val)

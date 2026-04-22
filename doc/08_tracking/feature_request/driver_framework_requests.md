@@ -64,6 +64,13 @@ or `Rejected` (one-line reason).
   `test/unit/compiler/semantics/sffi_lint_spec.spl`, and
   `test/unit/lib/driver/null_block_driver_test.spl`. Remaining work is the
   synthetic registration/codegen path.
+  Update 2026-04-22: synthetic registration remains open. The compiler-side
+  planner in `src/compiler/50.mir/synthetic_driver_registration.spl` now
+  classifies handwritten registration and records the exact blocker for body
+  synthesis: `@driver(...)` / `@native_lib(...)` supplies manifest fields but
+  does not identify the `DriverOps` value or native-lib adapter functions
+  required to emit a valid `register_static_driver(m, ops)` call. Coverage:
+  `test/unit/compiler/mir/synthetic_driver_registration_spec.spl`.
 
 ---
 
@@ -203,7 +210,17 @@ or `Rejected` (one-line reason).
   `.drv_manifest` section through `SmfBuildOptions`; coverage:
   `test/unit/compiler/linker/smf_driver_manifest_build_spec.spl`.
   Remaining dynamic-mode `.lsm` acceptance needs an end-to-end
-  `--driver-mode=dynamic` CLI/library packaging proof.
+  `--driver-mode=dynamic` CLI/library packaging proof. Codex update
+  2026-04-22: the Simple-side `cli_compile` path now has a narrow
+  `--driver-mode=dynamic` branch that compiles SMF and packages it with
+  `LibSmfBuilder`; coverage was added for preserving an SMF containing
+  `.drv_manifest` bytes inside `.lsm`. The acceptance box remains open
+  because the binary-facing `bin/simple compile --driver-mode=dynamic`
+  path still routes through the Rust/native CLI and produced an `SMF\0`
+  file at the `.lsm` path rather than an `LSMF` archive in smoke testing.
+  The `bin/simple run src/app/cli/compile_entry.spl ...` proof is also
+  blocked by an existing nil-args failure in `compile_entry.spl` before
+  packaging runs.
 
 ---
 
@@ -365,8 +382,8 @@ or `Rejected` (one-line reason).
   is a thin ~50-line routing pass that maps `@packed struct` onto the
   same `Bitfield` HIR node.
 - **Acceptance-criteria:**
-  - [ ] `bitfield Flags(u32): a:4; b:28` + `var f: Flags = Flags.new(0); f.a = 3; expect(f.a).to_equal(3)` round-trips under `bin/simple test`.
-  - [ ] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
+  - [x] `bitfield Flags(u32): a:4; b:28` + `var f: Flags = Flags.new(0); f.a = 3; expect(f.a).to_equal(3)` round-trips under `bin/simple test`.
+  - [x] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
   - [ ] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
   - [ ] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
@@ -381,8 +398,16 @@ or `Rejected` (one-line reason).
   `HirType::Bitfield`, bitfield type registration, type-checker
   bitfield definitions, constructor typing, and Lean/backing-type
   fallback now compile (`cargo check -p simple-compiler -p simple-type`).
-  Field read/write lowering, assignment RMW, interpreter packed-value
-  semantics, and acceptance round-trips remain open.
+  Native field read/write lowering, native assignment RMW, interpreter
+  packed-value semantics, and acceptance round-trips remained open.
+  Update 2026-04-22: verified the active interpreter bitfield registration,
+  `Flags.new(raw)` packed-value construction, and bitfield field-assignment
+  recomputation path with an exact `Flags(u32)` acceptance spec. `bin/simple test
+  test/feature/usage/bitfield_runtime_compat_spec.spl` now covers the
+  requested `Flags(u32)` round-trip and adjacent-field preservation. Compiled
+  `.smf` execution remains open: `/tmp/fr_driver_0008_bitfield.smf` failed to
+  load with unresolved `Flags_dot_new`, so native constructor/lowering/codegen
+  still needs completion.
 
 ---
 

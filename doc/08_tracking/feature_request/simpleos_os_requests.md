@@ -82,8 +82,15 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   AP-side online hook remains open until
   `SIMPLEOS_QEMU_SMP_AP_LIVE=1 bin/simple test test/system/simpleos_smp_ap_live_spec.spl`
   passes in an environment that can build and run x86_64 QEMU. The gated lane
-  boots with `-smp 2` and asserts serial output contains
-  `[smp] AP reached 64-bit entry` without regressing BSP-only boot.
+  builds `examples/simple_os/arch/x86_64/smp_ap_probe_entry.spl`, registers the
+  two-CPU QEMU diagnostic APIC topology, boots with `-smp 2`, and asserts serial
+  output contains `[smp] AP reached 64-bit entry` without regressing BSP-only
+  boot. Codex live attempt on 2026-04-22 with
+  `SIMPLEOS_QEMU_SMP_AP_LIVE=1 bin/simple test --force-rebuild test/system/simpleos_smp_ap_live_spec.spl`
+  did not complete the proof: QEMU reached `[smp-probe] boot` and registered
+  the diagnostic CPU topology, but `X86Interrupt.init()` emitted a long
+  heap-allocation trace and timed out before `[smp-probe] startup sent` or the
+  AP marker. Keep this acceptance box open until the gated lane passes live.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 

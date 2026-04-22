@@ -1,0 +1,60 @@
+# ARM64 User Entry Bridge
+#
+# Mirrors the x86_64 EnterUserBlocking bridge shape while ARM64 live EL0 entry
+# is still gated behind trap/syscall runtime completion. The current helper
+# validates the handoff frame and address-space root without executing `eret`.
+
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, TaskContext}
+
+extern fn serial_println(msg: text)
+extern fn rt_arm64_enter_user_first_probe(entry: u64, sp: u64, spsr: u64, ttbr0_root: u64) -> i32
+extern fn rt_arm64_probe_recorded_user_handoff() -> i32
+
+val ARM64_SPSR_EL0T: u64 = 0
+
+fn arch_arm64_probe_user_task(ctx: TaskContext, ttbr0_root: u64) -> bool:
+    """Validate the ARM64 first-user-entry frame without executing ERET."""
+    rt_arm64_enter_user_first_probe(ctx.rip, ctx.rsp, ARM64_SPSR_EL0T, ttbr0_root) == 1
+
+fn dispatch_enter_user_blocking_probe(pid_hint: u64, scheduler: Scheduler) -> i64:
+    """ARM64 EnterUserBlocking probe — validates task handoff state.
+
+    This intentionally parallels x86_64's bridge lookup contract so the
+    scheduler/loader side is shared. It returns 0 when the target task has a
+    valid EL0 handoff frame and verified TTBR0 root; live `eret` remains gated
+    on the ARM64 exception/syscall runtime.
+    """
+    serial_println("[arm64-user] dispatch_enter_user_blocking_probe enter")
+    val recorded = rt_arm64_probe_recorded_user_handoff()
+    if recorded == 1:
+        serial_println("[arm64-user] recorded handoff probe ok")
+        return 0
+
+    var sched = scheduler
+
+    val tcb = sched.get_user_handoff_task(pid_hint)
+    if tcb == nil:
+        serial_println("[arm64-user] handoff task not found pid_hint={pid_hint}")
+        return -22
+
+    val task = tcb
+    val target_pid = task.id.id
+    if not task.is_user:
+        serial_println("[arm64-user] task is not a user task pid={target_pid}")
+        return -22
+
+    val uctx = task.user_context
+    if uctx == nil:
+        serial_println("[arm64-user] task has no user_context pid={target_pid}")
+        return -22
+
+    val ctx = uctx.unwrap()
+    val root = task.address_space
+    serial_println("[arm64-user] probing EL0 handoff pid={target_pid} entry={ctx.rip} ttbr0={root}")
+    if not arch_arm64_probe_user_task(ctx, root):
+        serial_println("[arm64-user] handoff probe failed pid={target_pid}")
+        return -14
+
+    serial_println("[arm64-user] handoff probe ok")
+    0

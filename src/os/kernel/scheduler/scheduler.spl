@@ -35,6 +35,33 @@ use os.kernel.ipc.notification.{notification_clear_waiter}
 extern fn cap_init_task_record(task: TaskId, full: bool)
 extern fn serial_println(msg: text)
 
+@cfg(arm64)
+extern fn rt_arm64_record_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)
+
+@cfg(arm64)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    rt_arm64_record_user_handoff(entry, sp, ttbr0_root)
+
+@cfg(arm32)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    pass_dn
+
+@cfg(riscv64)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    pass_dn
+
+@cfg(riscv32)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    pass_dn
+
+@cfg(x86_64)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    pass_dn
+
+@cfg(x86)
+fn _record_arm64_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
+    pass_dn
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -649,6 +676,7 @@ impl Scheduler:
         )
 
         self.tasks[slot] = tcb
+        _record_arm64_user_handoff(mapped_entry, user_sp, user_as.phys_root)
 
         # Register capability record so cap_check finds an explicit entry
         # instead of falling through to the (now-removed) default-ALLOW path.
@@ -829,6 +857,7 @@ impl Scheduler:
         )
 
         self.tasks[0] = tcb
+        _record_arm64_user_handoff(mapped_entry, user_sp, user_as.phys_root)
         cap_init_task_record(id, true)
         self._enqueue_ready_at_slot(id, 0)
         user_next_id
@@ -1109,6 +1138,31 @@ impl Scheduler:
         if slot < 0:
             return nil
         self.tasks[slot]
+
+    fn get_user_handoff_task(pid_hint: u64) -> TaskControlBlock?:
+        """Return a user task suitable for first user-entry handoff.
+
+        The normal `get_task(TaskId)` path depends on aggregate TaskId lookup.
+        Some freestanding ARM builds can create a valid bootstrap TCB while
+        later aggregate lookup misses it, so handoff bridges use this linear
+        primitive-id scan instead.
+        """
+        var best: TaskControlBlock? = nil
+        var best_pid: u64 = 0
+        var i = 0
+        while i < MAX_TASKS:
+            val tcb = self.tasks[i]
+            if tcb != nil:
+                val task = tcb
+                val wanted = if pid_hint == 0: true else: task.id.id == pid_hint
+                if wanted and task.is_user and task.user_context != nil:
+                    if pid_hint != 0:
+                        return task
+                    if task.id.id > best_pid:
+                        best_pid = task.id.id
+                        best = task
+            i = i + 1
+        best
 
     fn active_task_count() -> i32:
         """Return the number of live task table entries."""
@@ -1683,6 +1737,7 @@ impl Scheduler:
         task.exit_code = 0
         task.ticks_remaining = TIME_SLICE_TICKS
         self.tasks[slot] = task
+        _record_arm64_user_handoff(mapped_entry, user_sp, new_as.phys_root)
 
         if was_ready:
             self._enqueue_ready(task_id)
