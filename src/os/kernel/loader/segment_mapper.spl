@@ -25,7 +25,6 @@ use os.kernel.types.task_types.{
 use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags, phys_addr_value}
 use os.kernel.memory.user_address_space.{alloc_user_page_frame, map_user_page_in}
 use os.kernel.memory.vmm.{vmm_copy_bytes_to_phys, vmm_zero_phys_range}
-use os.kernel.boot.mmio.{mmio_write8}
 
 # ============================================================================
 # ELF program-header permission bits (PF_*)
@@ -42,7 +41,7 @@ val PAGE_SIZE: u64 = 4096
 # ============================================================================
 
 extern fn serial_println(msg: text)
-extern fn rt_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32
+extern fn rt_arm_stage_raw_image(dst_phys: u64, bytes: [u8]) -> u32
 
 # ============================================================================
 # Helpers
@@ -233,24 +232,12 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
         serial_println("[segmap] raw stage failed: empty image")
         return -2
 
-    var copied: u64 = 0
-    var pages: i32 = 0
     val image_base = as_handle.phys_root + 0x100000
-    while copied < total:
-        val phys = image_base + (pages as u64 * PAGE_SIZE)
-        var chunk = total - copied
-        if chunk > PAGE_SIZE:
-            chunk = PAGE_SIZE
-        var off: u64 = 0
-        while off < chunk:
-            val byte_val = rt_arm_array_get_byte_u32(file_bytes, copied + off).to_u8()
-            mmio_write8(phys + off, byte_val)
-            off = off + 1
-        while off < PAGE_SIZE:
-            mmio_write8(phys + off, 0)
-            off = off + 1
-        copied = copied + chunk
-        pages = pages + 1
+    val staged = rt_arm_stage_raw_image(image_base, file_bytes)
+    if staged == 0:
+        serial_println("[segmap] raw stage failed: runtime copy")
+        return -12
+    val pages = ((total + PAGE_SIZE - 1) / PAGE_SIZE).to_i32()
     serial_println("[segmap] raw stage ok bytes={total} pages={pages} root={as_handle.phys_root}")
     pages
 

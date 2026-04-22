@@ -13,7 +13,7 @@ use os.kernel.types.task_types.{
 use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.types.notification_types.{Notification}
-use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_SHARED}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON, VMA_SHARED}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
 use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -110,6 +110,9 @@ var _pci_dev_irq: [u8; 256]
 
 # Bump allocator for anonymous mmap when address hint is 0
 var _next_mmap_addr: u64 = 0x10000000
+val USER_BRK_BASE: u64 = 0x30000000
+val USER_BRK_LIMIT: u64 = 0x38000000
+var _current_brk: u64 = USER_BRK_BASE
 
 # G11 — per-task privilege tables (Wave 1)
 var _priv_table: PrivilegeTable = PrivilegeTable.new()
@@ -303,6 +306,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
                 return SyscallResult(value: SYSCALL_EPERM)
             SyscallResult(value: -38)
+        case 15:    # Brk
+            _handle_brk(args)
 
         # -- Memory ----------------------------------------------------------
         case 10:    # Mmap
@@ -3362,6 +3367,43 @@ fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult
 # TODO(mdsoc+): replace g_current_vmspace with sched.get_current().vmspace
 # once PM Wave 2 lands and Task carries a ProcessVmSpace field.
 var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
+
+fn _align_brk_up(value: u64) -> u64:
+    if value % PAGE_SIZE == 0:
+        return value
+    ((value / PAGE_SIZE) + 1) * PAGE_SIZE
+
+fn brk_reset_for_test():
+    """Reset the process break model for isolated specs."""
+    _current_brk = USER_BRK_BASE
+
+fn _handle_brk(args: SyscallArgs) -> SyscallResult:
+    """brk — query or grow the current process break.
+
+    arg0=0 returns the current break. A non-zero arg0 requests a new break.
+    This MVP path supports monotonic growth only; shrinking returns -EINVAL.
+    """
+    val requested = args.arg0
+    if requested == 0:
+        return SyscallResult(value: _current_brk as i64)
+    if requested < USER_BRK_BASE:
+        return SyscallResult(value: -22)
+    if requested < _current_brk:
+        return SyscallResult(value: -22)
+    if requested > USER_BRK_LIMIT:
+        return SyscallResult(value: -12)
+    if requested == _current_brk:
+        return SyscallResult(value: _current_brk as i64)
+
+    val old_page = _align_brk_up(_current_brk)
+    val new_page = _align_brk_up(requested)
+    if new_page > old_page:
+        val len = new_page - old_page
+        val rc = vmm_mmap(g_current_vmspace, old_page, len, VMA_READ | VMA_WRITE, VMA_ANON, 0, 0)
+        if rc < 0:
+            return SyscallResult(value: rc)
+    _current_brk = requested
+    SyscallResult(value: _current_brk as i64)
 
 fn _handle_sys_mmap(args: SyscallArgs) -> SyscallResult:
     """sys_mmap — map a virtual address range into the current task's space.

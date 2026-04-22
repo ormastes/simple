@@ -2507,6 +2507,22 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
     return (RuntimeValue)appended;
 }
 
+RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
+{
+    uint64_t dst_phys = IS_INT(dst_phys_val) ? (uint64_t)DECODE_INT(dst_phys_val) : (uint64_t)dst_phys_val;
+    RuntimeArray *bytes = (RuntimeArray *)(IS_HEAP(bytes_val) ? DECODE_PTR(bytes_val) : (void *)(uintptr_t)(uint64_t)bytes_val);
+    if (!dst_phys || !bytes || bytes->hdr.type != HEAP_ARRAY || bytes->len > bytes->cap) return 0;
+    volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_phys;
+    for (uint64_t i = 0; i < bytes->len; i++) {
+        dst[i] = (uint8_t)arm64_array_byte_at_raw_index(bytes_val, i);
+    }
+    uint64_t padded = (bytes->len + 4095ULL) & ~4095ULL;
+    for (uint64_t i = bytes->len; i < padded; i++) {
+        dst[i] = 0;
+    }
+    return (RuntimeValue)bytes->len;
+}
+
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)
 {
     uint64_t id = IS_INT(id_val) ? (uint64_t)DECODE_INT(id_val) : (uint64_t)id_val;
