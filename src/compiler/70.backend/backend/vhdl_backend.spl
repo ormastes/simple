@@ -40,7 +40,9 @@ class VhdlBackend:
     options: CompileOptions
     use_resolved: bool
     active_local_names: Dict<i64, text>
+    active_local_types: Dict<i64, MirType>
     active_blocks: Dict<i64, MirBlock>
+    active_type_defs: Dict<i64, MirTypeDef>
 
     static fn empty_span() -> Span:
         Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -52,7 +54,9 @@ class VhdlBackend:
             options: options,
             use_resolved: false,
             active_local_names: {},
-            active_blocks: {}
+            active_local_types: {},
+            active_blocks: {},
+            active_type_defs: {}
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -62,12 +66,17 @@ class VhdlBackend:
             options: options,
             use_resolved: true,
             active_local_names: {},
-            active_blocks: {}
+            active_local_types: {},
+            active_blocks: {},
+            active_type_defs: {}
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
         """Compile MIR module to VHDL."""
         val builder = VhdlBuilder.create(module.name)
+        self.active_type_defs = {}
+        for symbol in module.types.keys():
+            self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
 
         # Emit library header
         builder.emit_library_header()
@@ -159,6 +168,7 @@ class VhdlBackend:
         """Compile a function as a VHDL entity/architecture pair."""
         val entity_name = func.name
         self.active_local_names = {}
+        self.active_local_types = {}
         self.active_blocks = {}
 
         for block in func.blocks:
@@ -167,6 +177,7 @@ class VhdlBackend:
         for local in func.locals:
             val resolved_name = self.default_local_name(local)
             self.active_local_names = self.active_local_names.set(local.id.id, resolved_name)
+            self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
 
         # Emit entity
         builder.emit_entity_begin(entity_name)
@@ -270,6 +281,13 @@ class VhdlBackend:
         else:
             Err(self.backend_error("No active VHDL name for local {local.id}"))
 
+    fn local_type(local: LocalId) -> Result<MirType, CompileError>:
+        val found = self.active_local_types.get(local.id)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("No active MIR type for local {local.id}"))
+
     fn operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         """Convert operand to VHDL signal/variable name."""
         match operand.kind:
@@ -277,6 +295,19 @@ class VhdlBackend:
             case Move(local): self.local_to_vhdl(local)
             case Const(value, ty):
                 self.const_value_to_vhdl(value, ty)
+
+    fn operand_type(operand: MirOperand) -> Result<MirType, CompileError>:
+        match operand.kind:
+            case Copy(local): self.local_type(local)
+            case Move(local): self.local_type(local)
+            case Const(_, ty): Ok(ty)
+
+    fn type_def_by_symbol(symbol: SymbolId) -> Result<MirTypeDef, CompileError>:
+        val found = self.active_type_defs.get(symbol.id)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("No active VHDL type definition for symbol {symbol.id}"))
 
     fn block_by_id(id: BlockId) -> Result<MirBlock, CompileError>:
         val found = self.active_blocks.get(id.id)
@@ -407,6 +438,42 @@ class VhdlBackend:
                 if expr_result.is_err():
                     return Err(expr_result.unwrap_err())
                 builder.emit_signal_assign(dest_name_result.unwrap(), expr_result.unwrap())
+
+            case Aggregate(dest, kind, operands):
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val dest_type_result = self.local_type(dest)
+                if dest_type_result.is_err():
+                    return Err(dest_type_result.unwrap_err())
+                val aggregate_result = self.aggregate_to_vhdl(kind, operands, dest_type_result.unwrap())
+                if aggregate_result.is_err():
+                    return Err(aggregate_result.unwrap_err())
+                builder.emit_signal_assign(dest_name_result.unwrap(), aggregate_result.unwrap())
+
+            case GetField(dest, base, field):
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val base_name_result = self.operand_to_vhdl(base)
+                if base_name_result.is_err():
+                    return Err(base_name_result.unwrap_err())
+                val field_name_result = self.field_name_for_operand(base, field)
+                if field_name_result.is_err():
+                    return Err(field_name_result.unwrap_err())
+                builder.emit_signal_assign(dest_name_result.unwrap(), "{base_name_result.unwrap()}.{field_name_result.unwrap()}")
+
+            case SetField(base, field, value):
+                val base_name_result = self.operand_to_vhdl(base)
+                if base_name_result.is_err():
+                    return Err(base_name_result.unwrap_err())
+                val field_name_result = self.field_name_for_operand(base, field)
+                if field_name_result.is_err():
+                    return Err(field_name_result.unwrap_err())
+                val value_name_result = self.operand_to_vhdl(value)
+                if value_name_result.is_err():
+                    return Err(value_name_result.unwrap_err())
+                builder.emit_signal_assign("{base_name_result.unwrap()}.{field_name_result.unwrap()}", value_name_result.unwrap())
 
             case UnaryOp(dest, op, operand):
                 val dest_name_result = self.local_to_vhdl(dest)
