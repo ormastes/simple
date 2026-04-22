@@ -910,22 +910,24 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
 - **Target:** spostgre  (examples/spostgre/src/engine/nvfs_shim.spl)
 - **Priority:** P1
-- **Status:** Open — blocked on FR-SPOSTGRE-M2-002 (named constants not yet in NVFS core)
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   After FR-COMPILER-003 (2-pass import resolver), replace duplicated constants and types in
   `nvfs_shim.spl` with `use examples.nvfs.src.core.<module>.{<name>}` imports. Items in scope:
   `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`, `DURABILITY_DATA_DURABLE` (constants)
   and `PmapEntry`/`Arena`/`SuperblockHeader` (types).
 - **Acceptance-criteria:**
-  - [ ] All `val STORAGE_CLASS_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
-  - [ ] All `val DURABILITY_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
-  - [ ] `PmapEntry` local definition replaced by `use` import where field layouts match
-  - [ ] Existing unit and e2e integration tests pass after substitution
+  - [x] All `val STORAGE_CLASS_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
+  - [x] All `val DURABILITY_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
+  - [x] `PmapEntry` local definition replaced by `use` import where field layouts match
+        (not applicable: no `PmapEntry` exists in `nvfs_shim.spl`; spostgre pmap entries
+        have a different logical layout than NVFS core pmap entries)
+  - [x] Existing unit and e2e integration tests pass after substitution
 - **Related-upfront:** `from_spostgre.md §S1`
 - **Related-design-doc:** `doc/05_design/nvfs_design.md §4.1`
 - **Related-issue:** FR-COMPILER-003 (prerequisite, Implemented 2026-04-18)
 
-**Investigation result (2026-04-18):** Full import is **not yet possible**. Root cause:
+**Investigation result (2026-04-18):** Full import was **not yet possible**. Root cause:
 
 1. **Constants not defined in NVFS.** `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`,
    `DURABILITY_DATA_DURABLE` have **no canonical definition** in `examples/nvfs/src/core/`.
@@ -947,6 +949,13 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 
 **Follow-up:** FR-SPOSTGRE-M2-002 tracks adding named StorageClass constants to NVFS.
 
+**Resolution (2026-04-22):** FR-SPOSTGRE-M2-002 added
+`examples/nvfs/src/core/constants.spl`; `nvfs_shim.spl` now imports the requested
+storage and durability constants from NVFS. The Pmap/Superblock type portions remain
+not applicable for the structural reasons above. Verification:
+`bin/simple test examples/spostgre/test/unit/engine`,
+`bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`.
+
 ---
 
 ### FR-SPOSTGRE-M2-002 — Add named StorageClass and DurabilityClass constants to NVFS core
@@ -955,7 +964,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
 - **Target:** nvfs  (examples/nvfs/src/core/arena.spl or new constants.spl)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   `examples/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no
   named constants. Consumers (spostgre, future callers) must either duplicate ordinal
@@ -970,19 +979,23 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   Then `nvfs_shim.spl` and `tier_cache.spl` can replace their local `val` declarations with
   `use examples.nvfs.src.core.constants.{STORAGE_CLASS_DB_WAL, ...}`.
 - **Acceptance-criteria:**
-  - [ ] `examples/nvfs/src/core/constants.spl` (or equivalent) exports all 4 named ordinals
-  - [ ] `nvfs_shim.spl` imports instead of re-declaring STORAGE_CLASS_DB_WAL and
+  - [x] `examples/nvfs/src/core/constants.spl` (or equivalent) exports all 4 named ordinals
+  - [x] `nvfs_shim.spl` imports instead of re-declaring STORAGE_CLASS_DB_WAL and
         STORAGE_CLASS_META_DURABLE
-  - [ ] `tier_cache.spl` imports STORAGE_CLASS_DB_TEMP instead of re-declaring it
-  - [ ] `bin/simple test examples/spostgre/test/unit/engine/*.spl` passes
-  - [ ] `bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`
+  - [x] `tier_cache.spl` imports STORAGE_CLASS_DB_TEMP instead of re-declaring it
+  - [x] `bin/simple test examples/spostgre/test/unit/engine/*.spl` passes
+        (verified with `bin/simple test examples/spostgre/test/unit/engine`)
+  - [x] `bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`
         passes
-- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
-- **Related-design-doc:** `doc/05_design/nvfs_design.md §4.1`
+- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class);
+  `doc/01_research/local/spostgre_nvfs_constants.md`;
+  `doc/03_plan/sys_test/spostgre_nvfs_constants.md`
+- **Related-design-doc:** `doc/05_design/spostgre_nvfs_constants.md`;
+  background: `doc/05_design/nvfs_design.md §4.1`
 - **Related-issue:** FR-SPOSTGRE-M2-001 (parent)
-- **Notes:** Do NOT modify NVFS source as part of the spostgre M2 task. This FR is filed
-  against NVFS and must be implemented by an NVFS agent. Until it lands, local `val`
-  declarations in spostgre are canonical and intentional — not bugs.
+- **Notes:** Implemented in NVFS by adding the canonical constants module and updating
+  spostgre consumers to import it. Regression coverage:
+  `examples/spostgre/test/integration/storage/spostgre_nvfs_constants_spec.spl`.
 
 ---
 

@@ -1181,17 +1181,23 @@ static void write_le32_volatile(volatile uint8_t *p, uint32_t v)
     p[3] = (uint8_t)((v >> 24) & 0xffU);
 }
 
+static uint32_t arm32_scalar_arg(RuntimeValue v)
+{
+    return IS_INT(v) ? (uint32_t)DECODE_INT(v) : (uint32_t)v;
+}
+
 RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
                                  RuntimeValue addr_hi, RuntimeValue len,
                                  RuntimeValue flags, RuntimeValue next)
 {
     (void)base;
-    volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint32_t)(uintptr_t)g_arm_virtq_storage + ((uint32_t)index * 16U));
+    uint32_t desc_index = arm32_scalar_arg(index);
+    volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint32_t)(uintptr_t)g_arm_virtq_storage + (desc_index * 16U));
     write_le32_volatile(desc + 0, (uint32_t)addr_lo);
     write_le32_volatile(desc + 4, (uint32_t)addr_hi);
-    write_le32_volatile(desc + 8, (uint32_t)len);
-    write_le16_volatile(desc + 12, (uint16_t)flags);
-    write_le16_volatile(desc + 14, (uint16_t)next);
+    write_le32_volatile(desc + 8, arm32_scalar_arg(len));
+    write_le16_volatile(desc + 12, (uint16_t)arm32_scalar_arg(flags));
+    write_le16_volatile(desc + 14, (uint16_t)arm32_scalar_arg(next));
     arm32_clean_dcache_range((uint32_t)(uintptr_t)desc, 16U);
     return NIL_VALUE;
 }
@@ -1242,7 +1248,7 @@ RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
     volatile uint16_t *avail_idx = (volatile uint16_t *)(uintptr_t)(avail_addr + 2U);
     uint16_t idx = *avail_idx;
     volatile uint16_t *slot = (volatile uint16_t *)(uintptr_t)(avail_addr + 4U + ((idx % 128U) * 2U));
-    *slot = (uint16_t)desc_idx;
+    *slot = (uint16_t)arm32_scalar_arg(desc_idx);
     __asm__ volatile("dsb sy" ::: "memory");
     *avail_idx = (uint16_t)(idx + 1U);
     __asm__ volatile("dsb sy" ::: "memory");
@@ -1281,7 +1287,7 @@ RuntimeValue rt_arm_virtio_blk_status_u8(void)
 
 RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue lba_val)
 {
-    uint32_t lba = (uint32_t)lba_val;
+    uint32_t lba = arm32_scalar_arg(lba_val);
     uint32_t dma_addr = (uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
     volatile uint8_t *dma = (volatile uint8_t *)(uintptr_t)dma_addr;
     for (uint32_t i = 0; i < 1024U; i++) {
@@ -1305,6 +1311,50 @@ RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
     RuntimeValue v = a->items[idx];
     if (IS_INT(v)) return ENCODE_INT(DECODE_INT(v));
     return ENCODE_INT((uint8_t)(uint32_t)v);
+}
+
+RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
+    RuntimeValue v = a->items[idx];
+    uint32_t byte = IS_INT(v) ? (uint32_t)DECODE_INT(v) : (uint8_t)(uint32_t)v;
+    return ENCODE_INT(byte);
+}
+
+RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint32_t lo = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
+    uint32_t hi = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1U)));
+    return ENCODE_INT(lo | (hi << 8));
+}
+
+RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
+{
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint32_t b0 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
+    uint32_t b1 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1U)));
+    uint32_t b2 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 2U)));
+    uint32_t b3 = (uint32_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 3U)));
+    return ENCODE_INT(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+}
+
+RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_val, RuntimeValue max_count_val)
+{
+    if (!IS_HEAP(dst_val) || !IS_HEAP(src_val)) return ENCODE_INT(0);
+    RuntimeArray *dst = (RuntimeArray *)DECODE_PTR(dst_val);
+    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(src_val);
+    if (!dst || !src || dst->hdr.type != HEAP_ARRAY || src->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    uint32_t max_count = IS_INT(max_count_val) ? (uint32_t)DECODE_INT(max_count_val) : (uint32_t)max_count_val;
+    uint32_t appended = 0;
+    while (appended < max_count && appended < src->len) {
+        if (dst->len >= dst->cap) break;
+        dst->items[dst->len++] = src->items[appended++];
+    }
+    return ENCODE_INT(appended);
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)

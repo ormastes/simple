@@ -23,9 +23,10 @@ bin/simple os test --scenario arm32-virtio-fat32-smf
 ## Blocker: x86_64 Desktop Disk Live Lane
 
 The desktop disk spec fails before QEMU can exercise editor save/readback.
-Native build reaches the freestanding unresolved-symbol guard and reports 455
-unexpected symbols after repeated `cannot resolve import: module path segment
-os not found` warnings.
+Native build reaches the freestanding unresolved-symbol guard and reports
+hundreds of unexpected symbols. A resolver follow-up reduced the import warning
+surface, but the guard still rejects the build without
+`SIMPLE_ALLOW_FREESTANDING_STUBS=1`.
 
 Observed command:
 
@@ -35,13 +36,43 @@ SIMPLE_TEST_DISABLE_CACHE=1 SIMPLEOS_QEMU_DESKTOP_DISK_LIVE=1 bin/simple test te
 
 Failure class:
 
-- `Freestanding unresolved symbol check: 455 unexpected symbol(s)`
-- import resolver searches under paths such as `examples/simple_os/arch/x86_64/os`
-  and `src/os/kernel/ipc/os`
-- test duration was about 103 seconds and the runner marked it `[PERF BUG]`
+- `Freestanding unresolved symbol check: 714 unexpected symbol(s)`
+- remaining warnings include unresolved `std`, `os.path`, and similar package
+  aliases from the HIR imported-type preload path
+- test duration remains over 100 seconds and the runner marks it `[PERF BUG]`
 
 This should be fixed in the native-build entry-closure/import-resolution lane
 before treating desktop save/readback as a VFS regression.
+
+## Diagnostic x86_64 Boot With Freestanding Stubs Allowed
+
+For diagnosis only, the build was run with:
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_LIB="$(pwd)/src" \
+  PATH="/usr/bin:$PATH" src/compiler_rust/target/debug/simple native-build \
+  --source src/os --source src/lib --source examples/simple_os \
+  --backend cranelift --entry-closure \
+  --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl \
+  --target x86_64-unknown-none \
+  -o build/os/simpleos_desktop_e2e_32.elf \
+  --linker-script examples/simple_os/arch/x86_64/linker.ld
+```
+
+That diagnostic ELF boots under the NVMe desktop disk shape and reaches:
+
+- `[vfs-init] Found NVMe device at index 3`
+- `[vfs-init] C NVMe controller initialized!`
+- `[vfs-init] executable load probe ok path=/sys/apps/browser_demo ...`
+- `[vfs] mounted fat32 device=nvme0 volume=simpleos`
+- `[desktop-e2e] launcher-ready apps=5`
+- `[launcher] posix_spawn begin name=Browser Demo path=/sys/apps/browser_demo.smf`
+- `[exec-source] resolve initramfs returned path=/sys/apps/browser_demo`
+
+It then faults before logging `vfs_alias_hit` or `vfs_miss`. This means the x86
+storage and launcher setup reaches the executable-source boundary, but the
+diagnostic run is still contaminated by weak freestanding stubs and is not a
+production PASS.
 
 ## Blocker: ARM64 VirtIO-BLK FAT32 SMF Lane
 

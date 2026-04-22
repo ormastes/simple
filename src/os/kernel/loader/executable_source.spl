@@ -175,36 +175,42 @@ fn _path_bytes_to_text(bytes: [u8]) -> text:
 # set_initramfs_blob(). Returns ENOENT when the file is not found.
 # ----------------------------------------------------------------------------
 
-fn _initramfs_read_file(path: text) -> Result<[u8], text>:
+fn _initramfs_read_file_bytes_or_empty(path: text) -> [u8]:
     serial_println("[exec-source] initramfs enter path={path}")
     # First consult the synthetic test map — this is the injection point used
     # by specs and is a no-op in production.
     val synthetic = _lookup_synthetic(path)
     if synthetic.is_ok():
         serial_println("[exec-source] initramfs synthetic-hit path={path}")
-        return synthetic
+        return synthetic.unwrap()
 
     # Real initramfs path: decompress + parse on first access, then cache.
     val blob = g_initramfs_blob
     if blob == nil:
         serial_println("[exec-source] initramfs no-blob path={path}")
-        return Err(ERR_ENOENT)
+        return []
 
     if not g_cpio_decoded:
         serial_println("[exec-source] initramfs decompress path={path}")
         val decomp = zstd_decompress(blob.unwrap())
         if decomp.is_err():
             serial_println("[exec-source] initramfs decompress-fail path={path}")
-            return Err(decomp.err().unwrap())
+            return []
         g_cpio_entries = cpio_parse(decomp.unwrap())
         g_cpio_decoded = true
 
     val found = cpio_lookup(g_cpio_entries, path)
     if found == nil:
         serial_println("[exec-source] initramfs miss path={path}")
-        return Err(ERR_ENOENT)
+        return []
     serial_println("[exec-source] initramfs hit path={path}")
-    Ok(found.unwrap())
+    found.unwrap()
+
+fn _initramfs_read_file(path: text) -> Result<[u8], text>:
+    val bytes = _initramfs_read_file_bytes_or_empty(path)
+    if bytes.len() > 0:
+        return Ok(bytes)
+    Err(ERR_ENOENT)
 
 fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
     buf.push((value & 0xFF).to_u8())
@@ -420,10 +426,11 @@ fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text
 
     if path.starts_with("/"):
         serial_println("[exec-source] resolve absolute path={path}")
-        val initramfs_result = _initramfs_read_file(path)
+        val initramfs_bytes = _initramfs_read_file_bytes_or_empty(path)
         serial_println("[exec-source] resolve initramfs returned path={path}")
-        if initramfs_result.is_ok():
-            return initramfs_result
+        if initramfs_bytes.len() > 0:
+            return Ok(initramfs_bytes)
+        serial_println("[exec-source] resolve vfs begin path={path}")
         val vfs_result = _vfs_read_file(path)
         serial_println("[exec-source] resolve vfs returned path={path}")
         if vfs_result.is_ok():

@@ -44,6 +44,10 @@ _entry32:
     /* Set up a temporary 32-bit stack */
     movl $_stack_top, %esp
 
+    call boot32_serial_init
+    movl $boot32_entry_msg, %esi
+    call boot32_serial_puts
+
     /* Clear BSS */
     movl $__bss_start, %edi
     movl $__bss_end, %ecx
@@ -138,6 +142,49 @@ _entry32:
      * Load 64-bit GDT and far-jump to 64-bit code segment. */
     lgdt (gdt64_ptr)
     ljmp $0x08, $long_mode_entry
+
+boot32_serial_init:
+    movw $0x3f9, %dx
+    xorb %al, %al
+    outb %al, %dx
+    movw $0x3fb, %dx
+    movb $0x80, %al
+    outb %al, %dx
+    movw $0x3f8, %dx
+    movb $0x03, %al
+    outb %al, %dx
+    movw $0x3f9, %dx
+    xorb %al, %al
+    outb %al, %dx
+    movw $0x3fb, %dx
+    movb $0x03, %al
+    outb %al, %dx
+    movw $0x3fa, %dx
+    movb $0xc7, %al
+    outb %al, %dx
+    movw $0x3fc, %dx
+    movb $0x0b, %al
+    outb %al, %dx
+    ret
+
+boot32_serial_puts:
+    lodsb
+    testb %al, %al
+    jz 2f
+1:
+    movw $0x3fd, %dx
+    inb %dx, %al
+    testb $0x20, %al
+    jz 1b
+    movw $0x3f8, %dx
+    movb -1(%esi), %al
+    outb %al, %dx
+    jmp boot32_serial_puts
+2:
+    ret
+
+boot32_entry_msg:
+    .asciz "[BOOT32] entry\r\n"
 
 /* ==================================================================
  * 64-bit code

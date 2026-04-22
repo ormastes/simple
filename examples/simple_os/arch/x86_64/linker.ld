@@ -24,6 +24,7 @@ SECTIONS
 {
     /* Kernel starts at 1MB (standard for multiboot) */
     . = 0x100000;
+    _kernel_start = .;
 
     /* Code section — .text.entry first for Multiboot header */
     .text ALIGN(4K) :

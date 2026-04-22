@@ -12,8 +12,11 @@ fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<Stri
         sym,
         "_sbss"
             | "_ebss"
+            | "__bss_start"
+            | "__bss_end"
             | "_stack_top"
             | "_stack_bottom"
+            | "_kernel_start"
             | "_kernel_end"
             | "__heap_start"
             | "__heap_end"

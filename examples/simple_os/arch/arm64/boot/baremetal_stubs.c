@@ -2042,9 +2042,6 @@ RuntimeValue rt_arm_virtq_base(void)
 
 RuntimeValue rt_arm_virtio_blk_queue_base(void)
 {
-    serial_puts("[virtq-base] ");
-    serial_put_hex((uint64_t)(uintptr_t)g_arm_virtq_storage);
-    serial_puts("\r\n");
     return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtq_storage;
 }
 
@@ -2086,9 +2083,6 @@ RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue version_val)
 RuntimeValue rt_arm_virtio_blk_mmio_read_u32(RuntimeValue off)
 {
     uint64_t decoded = (uint64_t)off;
-    serial_puts("[virtio-mmio32] off=");
-    serial_put_hex(decoded);
-    serial_puts("\r\n");
     return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + decoded);
 }
 RuntimeValue rt_arm_virtio_blk_mmio_read_u64(RuntimeValue off)
@@ -2100,13 +2094,6 @@ RuntimeValue rt_arm_virtio_blk_mmio_write_u32(RuntimeValue off, RuntimeValue val
 {
     uint64_t decoded = (uint64_t)off;
     uint32_t raw_val = (uint32_t)(uint64_t)val;
-    if (decoded == 0x38 || decoded == 0x40 || decoded == 0x50 || decoded == 0x70) {
-        serial_puts("[virtio-mmio32w] off=");
-        serial_put_hex(decoded);
-        serial_puts(" val=");
-        serial_put_hex(raw_val);
-        serial_puts("\r\n");
-    }
     *(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + decoded) = raw_val;
     __asm__ volatile("dsb sy" ::: "memory");
     return NIL_VALUE;
@@ -2222,19 +2209,6 @@ RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeV
                                  RuntimeValue addr_hi, RuntimeValue len,
                                  RuntimeValue flags, RuntimeValue next)
 {
-    if ((uint64_t)index < 3) {
-        serial_puts("[virtq-desc] i=");
-        serial_put_hex((uint64_t)index);
-        serial_puts(" addr=");
-        serial_put_hex((uint64_t)addr_lo);
-        serial_puts(" len=");
-        serial_put_hex((uint64_t)len);
-        serial_puts(" flags=");
-        serial_put_hex((uint64_t)flags);
-        serial_puts(" next=");
-        serial_put_hex((uint64_t)next);
-        serial_puts("\r\n");
-    }
     (void)base;
     volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint64_t)(uintptr_t)g_arm_virtq_storage + ((uint64_t)index * 16ULL));
     write_le32_volatile(desc + 0, (uint32_t)(uint64_t)addr_lo);
@@ -2242,17 +2216,6 @@ RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeV
     write_le32_volatile(desc + 8, (uint32_t)(uint64_t)len);
     write_le16_volatile(desc + 12, (uint16_t)(uint64_t)flags);
     write_le16_volatile(desc + 14, (uint16_t)(uint64_t)next);
-    if ((uint64_t)index < 3ULL) {
-        serial_puts("[virtq-desc-mem] i=");
-        serial_put_hex((uint64_t)index);
-        serial_puts(" desc=");
-        serial_put_hex((uint64_t)(uintptr_t)desc);
-        serial_puts(" len=");
-        serial_put_hex((uint64_t)(((uint32_t)desc[8]) | ((uint32_t)desc[9] << 8) | ((uint32_t)desc[10] << 16) | ((uint32_t)desc[11] << 24)));
-        serial_puts(" flags=");
-        serial_put_hex((uint64_t)(((uint16_t)desc[12]) | ((uint16_t)desc[13] << 8)));
-        serial_puts("\r\n");
-    }
     arm64_clean_dcache_range((uint64_t)(uintptr_t)desc, 16ULL);
     return NIL_VALUE;
 }
@@ -2263,12 +2226,6 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
     uint64_t len = (uint64_t)len_val;
     if (len == 0 || len > 0x100000) return rt_array_new(64);
     arm64_invalidate_dcache_range((uint64_t)(uintptr_t)src, len);
-    serial_puts("[dma-bytes] ");
-    for (uint64_t j = 0; j < 16 && j < len; j++) {
-        serial_put_hex((uint64_t)src[j]);
-        serial_puts(" ");
-    }
-    serial_puts("\r\n");
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
@@ -2336,11 +2293,6 @@ RuntimeValue rt_arm_virtio_blk_wait_completion(RuntimeValue timeout_val)
         g_arm_virtq_last_used_idx = used_idx;
         return (RuntimeValue)1;
     }
-    serial_puts("[virtq-wait] timeout used=");
-    serial_put_hex((uint64_t)used_idx);
-    serial_puts(" last=");
-    serial_put_hex((uint64_t)g_arm_virtq_last_used_idx);
-    serial_puts("\r\n");
     return (RuntimeValue)0;
 }
 
@@ -2377,6 +2329,50 @@ RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
     RuntimeValue v = a->items[idx];
     if (IS_INT(v)) return ENCODE_INT(DECODE_INT(v));
     return ENCODE_INT((uint8_t)(uint64_t)v);
+}
+
+RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    uint64_t idx = IS_INT(idx_val) ? (uint64_t)DECODE_INT(idx_val) : (uint64_t)idx_val;
+    if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
+    RuntimeValue v = a->items[idx];
+    uint64_t byte = IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint8_t)(uint64_t)v;
+    return ENCODE_INT(byte);
+}
+
+RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
+{
+    uint64_t idx = IS_INT(idx_val) ? (uint64_t)DECODE_INT(idx_val) : (uint64_t)idx_val;
+    uint64_t lo = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
+    uint64_t hi = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1ULL)));
+    return ENCODE_INT(lo | (hi << 8));
+}
+
+RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
+{
+    uint64_t idx = IS_INT(idx_val) ? (uint64_t)DECODE_INT(idx_val) : (uint64_t)idx_val;
+    uint64_t b0 = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)idx));
+    uint64_t b1 = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 1ULL)));
+    uint64_t b2 = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 2ULL)));
+    uint64_t b3 = (uint64_t)DECODE_INT(rt_arm_array_get_byte_u32(arr, (RuntimeValue)(idx + 3ULL)));
+    return ENCODE_INT(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+}
+
+RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_val, RuntimeValue max_count_val)
+{
+    if (!IS_HEAP(dst_val) || !IS_HEAP(src_val)) return ENCODE_INT(0);
+    RuntimeArray *dst = (RuntimeArray *)DECODE_PTR(dst_val);
+    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(src_val);
+    if (!dst || !src || dst->hdr.type != HEAP_ARRAY || src->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    uint64_t max_count = IS_INT(max_count_val) ? (uint64_t)DECODE_INT(max_count_val) : (uint64_t)max_count_val;
+    uint64_t appended = 0;
+    while (appended < max_count && appended < src->len) {
+        if (dst->len >= dst->cap) break;
+        dst->items[dst->len++] = src->items[appended++];
+    }
+    return ENCODE_INT(appended);
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)

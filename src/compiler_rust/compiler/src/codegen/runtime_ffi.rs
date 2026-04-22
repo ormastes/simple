@@ -457,6 +457,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_wait_completion", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_status_u8", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_prepare_read", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_get_byte_raw", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_array_get_byte_u32", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_array_get_u16_le", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_array_get_u32_le", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_array_append_bytes", &[I64, I64, I64], &[I64]),
     // =========================================================================
     // Async/concurrency operations
     // =========================================================================
