@@ -25,7 +25,7 @@ pub struct ResultCache {
 
 impl ResultCache {
     pub fn load() -> Self {
-        let mut entries = HashMap::new();
+        let mut entries: HashMap<String, CachedResult> = HashMap::new();
         if let Ok(content) = fs::read_to_string(CACHE_PATH) {
             for line in content.lines() {
                 if line.starts_with('#') || line.is_empty() {
@@ -45,17 +45,25 @@ impl ResultCache {
                         } else {
                             0
                         };
-                        entries.insert(
-                            parts[0].to_string(),
-                            CachedResult {
-                                mtime,
-                                size,
-                                passed,
-                                failed,
-                                skipped,
-                                duration_ms,
-                            },
-                        );
+                        let key = cache_key(Path::new(parts[0]));
+                        let result = CachedResult {
+                            mtime,
+                            size,
+                            passed,
+                            failed,
+                            skipped,
+                            duration_ms,
+                        };
+                        match entries.get(&key) {
+                            Some(existing)
+                                if existing.mtime > result.mtime
+                                    || (existing.mtime == result.mtime
+                                        && existing.size == result.size
+                                        && existing.duration_ms <= result.duration_ms) => {}
+                            _ => {
+                                entries.insert(key, result);
+                            }
+                        }
                     }
                 }
             }
@@ -65,7 +73,7 @@ impl ResultCache {
 
     /// Check if a test file is unchanged. Returns cached result if fresh.
     pub fn check(&self, path: &Path) -> Option<CachedResult> {
-        let key = path.to_string_lossy().to_string();
+        let key = cache_key(path);
         let entry = self.entries.get(&key)?;
 
         let meta = fs::metadata(path).ok()?;
@@ -86,7 +94,7 @@ impl ResultCache {
 
     /// Record a test result for caching.
     pub fn record(&mut self, path: &Path, passed: usize, failed: usize, skipped: usize, duration_ms: u64) {
-        let key = path.to_string_lossy().to_string();
+        let key = cache_key(path);
         if let Ok(meta) = fs::metadata(path) {
             let size = meta.len();
             let mtime = meta
@@ -121,5 +129,44 @@ impl ResultCache {
             ));
         }
         let _ = fs::write(CACHE_PATH, lines.join("\n") + "\n");
+    }
+}
+
+fn cache_key(path: &Path) -> String {
+    let normalized = normalize_path(path);
+    normalized.to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        return path.to_path_buf();
+    };
+
+    let canonical = absolute.canonicalize().unwrap_or(absolute);
+    if let Ok(cwd) = std::env::current_dir() {
+        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        if let Ok(stripped) = canonical.strip_prefix(&canonical_cwd) {
+            return stripped.to_path_buf();
+        }
+    }
+    canonical
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_key;
+    use std::path::Path;
+
+    #[test]
+    fn cache_key_normalizes_repo_absolute_paths_to_relative() {
+        let rel = Path::new("src/compiler_rust/driver/src/cli/test_runner/result_cache.rs");
+        let abs = std::env::current_dir().unwrap().join(rel);
+
+        assert_eq!(cache_key(rel), cache_key(&abs));
+        assert!(cache_key(rel).contains('/'));
     }
 }

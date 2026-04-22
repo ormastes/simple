@@ -167,7 +167,7 @@ fn step2_sync_project():
     print ""
 
     log("Syncing files (excludes .git, build, .jj)...")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='*.o' --exclude='*.a' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
+    val sync_result = shell("tar -czf - AGENTS.md CLAUDE.md GEMINI.md VERSION doc scripts src/app src/compiler src/lib src/runtime src/os src/std src/compiler_shared src/tooling src/hardware src/i18n bin/release/freebsd-x86_64 test tests | SSH_AUTH_SOCK= ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@localhost \"rm -rf ~/simple && mkdir -p ~/simple && tar -xzf - -C ~/simple\" 2>&1")
     if sync_result.exit_code == 0:
         pass_msg("Project files synced to VM")
     else:
@@ -175,6 +175,14 @@ fn step2_sync_project():
         exit(1)
 
     # Verify files
+    val seed_cmd = run_in_vm("cd ~/simple && mkdir -p bin/freebsd && ln -sf ../release/freebsd-x86_64/simple bin/freebsd/simple && chmod +x bin/release/freebsd-x86_64/simple")
+    val seed_result = shell(seed_cmd)
+    if seed_result.exit_code == 0:
+        pass_msg("FreeBSD seed compiler linked: bin/freebsd/simple")
+    else:
+        fail_msg("FreeBSD seed compiler link failed")
+        exit(1)
+
     val count_cmd = run_in_vm("find ~/simple -name '*.spl' | wc -l")
     val file_count = shell_output(count_cmd, "").trim()
     pass_msg("Found {file_count} .spl files in VM")
@@ -265,7 +273,7 @@ fn step4_run_tests(core_only: bool, verbose: bool):
     print ""
 
     log("Verifying deployed bootstrap compiler can transpile additional input...")
-    val remote_smoke = "cat > /tmp/freebsd_basic_check.spl <<'EOF'\nfn main():\n    print 1\nEOF\ncd ~/simple && bin/simple /tmp/freebsd_basic_check.spl > /tmp/freebsd_basic_check.cpp && test -s /tmp/freebsd_basic_check.cpp"
+    val remote_smoke = "cat > /tmp/freebsd_basic_check.spl <<'EOF'\nfn main():\n    print 1\nEOF\ncd ~/simple && bin/freebsd/simple /tmp/freebsd_basic_check.spl > /tmp/freebsd_basic_check.cpp && test -s /tmp/freebsd_basic_check.cpp"
     val smoke_cmd = run_in_vm(remote_smoke)
     val smoke_result = shell(smoke_cmd)
     if smoke_result.exit_code == 0:
@@ -307,7 +315,7 @@ fn step5_retrieve_binary():
 
     log("Syncing bin/simple from VM...")
     dir_create_all("bin")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/simple/bin/simple bin/simple.freebsd 2>&1")
+    val sync_result = shell("SSH_AUTH_SOCK= scp -P {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@localhost:~/simple/bin/freebsd/simple bin/simple.freebsd 2>&1")
 
     if sync_result.exit_code == 0:
         if path_exists("bin/simple.freebsd"):

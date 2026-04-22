@@ -106,12 +106,6 @@ fn test_prerequisites() -> bool:
     val qemu_ver = shell_output("qemu-system-x86_64 --version 2>&1 | head -1", "")
     pass_msg("qemu-system-x86_64: {qemu_ver}")
 
-    ok = check_command("rsync", "Install: apt install rsync")
-    if ok == false:
-        return false
-    val rsync_ver = shell_output("rsync --version 2>&1 | head -1", "")
-    pass_msg("rsync: {rsync_ver}")
-
     ok = check_command("ssh", "Install: apt install openssh-client")
     if ok == false:
         return false
@@ -347,13 +341,13 @@ fn test_rsync() -> bool:
     shell("echo 'FreeBSD QEMU test' > '{test_file}'")
 
     # Sync to VM
-    log("Testing rsync to VM...")
-    val sync_to = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" '{test_file}' {user}@localhost:~/ 2>&1")
+    log("Testing file copy to VM...")
+    val sync_to = shell("SSH_AUTH_SOCK= scp -P {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '{test_file}' {user}@localhost:~/ 2>&1")
     if sync_to.exit_code != 0:
-        fail_msg("Rsync to VM failed")
+        fail_msg("File copy to VM failed")
         shell("rm -f '{test_file}'")
         return false
-    pass_msg("Rsync to VM successful")
+    pass_msg("File copy to VM successful")
 
     # Verify file exists on VM
     val cat_cmd = ssh_cmd(port, user, "cat ~/{test_file}")
@@ -367,15 +361,15 @@ fn test_rsync() -> bool:
 
     # Sync back from VM
     shell("rm -f '{test_file}'")
-    log("Testing rsync from VM...")
-    val sync_from = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/{test_file} . 2>&1")
+    log("Testing file copy from VM...")
+    val sync_from = shell("SSH_AUTH_SOCK= scp -P {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@localhost:~/{test_file} . 2>&1")
     if sync_from.exit_code != 0:
-        fail_msg("Rsync from VM failed")
+        fail_msg("File copy from VM failed")
         return false
     if path_exists(test_file) == false:
-        fail_msg("Rsync from VM failed - file not created")
+        fail_msg("File copy from VM failed - file not created")
         return false
-    pass_msg("Rsync from VM successful")
+    pass_msg("File copy from VM successful")
 
     # Cleanup
     shell("rm -f '{test_file}'")
@@ -441,7 +435,7 @@ fn test_bootstrap_dry_run() -> bool:
 
     # Sync project to VM
     log("Syncing project files to VM...")
-    val sync_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='bin/simple' --exclude='bin/simple.*' --exclude='bin/release' . {user}@localhost:~/simple/ 2>&1")
+    val sync_result = shell("tar -czf - AGENTS.md CLAUDE.md GEMINI.md VERSION doc scripts src/app src/compiler src/lib src/runtime src/os src/std src/compiler_shared src/tooling src/hardware src/i18n bin/release/freebsd-x86_64 | SSH_AUTH_SOCK= ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@localhost \"rm -rf ~/simple && mkdir -p ~/simple && tar -xzf - -C ~/simple\" 2>&1")
     if sync_result.exit_code == 0:
         pass_msg("Project files synced to VM")
     else:
@@ -497,7 +491,7 @@ fn test_full_bootstrap() -> bool:
     # Retrieve binary
     log("Retrieving compiled binary from VM...")
     dir_create_all("bin")
-    val retrieve_result = shell("SSH_AUTH_SOCK= rsync -az -e \"ssh -p {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" {user}@localhost:~/simple/bin/simple bin/simple 2>&1")
+    val retrieve_result = shell("SSH_AUTH_SOCK= scp -P {port} -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@localhost:~/simple/bin/simple bin/simple 2>&1")
     if retrieve_result.exit_code != 0:
         fail_msg("Binary retrieval failed")
         return false

@@ -211,7 +211,7 @@ text_file_write("output.txt", "line1\nline2\n", win_cfg)  # Forces CRLF
 
 ```bash
 # 1. Install QEMU and seed ISO tooling
-sudo apt install qemu-system-x86 qemu-utils rsync openssh-client wget xz-utils genisoimage
+sudo apt install qemu-system-x86 qemu-utils openssh-client wget xz-utils genisoimage
 
 # 2. Run the repo-managed FreeBSD bootstrap smoke in QEMU
 sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
