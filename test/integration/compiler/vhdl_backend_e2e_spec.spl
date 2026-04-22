@@ -549,6 +549,52 @@ describe "VHDL Backend E2E - Entity Generation":
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("result_out <= a when flag = '1' else b;"))
 
+    it "compiles switch terminator return targets to conditional result":
+        val backend = make_backend()
+        val u8 = MirType(kind: MirTypeKind.U8)
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("select_switch", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for switch terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a when sel = to_unsigned(0, 8) else b when sel = to_unsigned(1, 8) else c;"))
+
     it "compiles struct aggregate to named record assignment":
         val backend = make_backend()
         val point_symbol = SymbolId(id: 42)

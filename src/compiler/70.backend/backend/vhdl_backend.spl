@@ -247,6 +247,13 @@ class VhdlBackend:
                             return Err(if_result.unwrap_err())
                         handled_branch_blocks = self.mark_return_chain_handled(then_, handled_branch_blocks)
                         handled_branch_blocks = self.mark_return_chain_handled(else_, handled_branch_blocks)
+                    case Switch(value, targets, default):
+                        val switch_result = self.compile_switch_return_terminator(builder, value, targets, default)
+                        if switch_result.is_err():
+                            return Err(switch_result.unwrap_err())
+                        for target in targets:
+                            handled_branch_blocks = self.mark_return_chain_handled(target.target, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(default, handled_branch_blocks)
                     case Goto(target):
                         val term_result = self.compile_terminator(builder, block.terminator)
                         if term_result.is_err():
@@ -658,6 +665,41 @@ class VhdlBackend:
         val else_value = else_value_result.unwrap()
         builder.emit_signal_assign("result_out", "{then_value} when {cond_name} = '1' else {else_value}")
         Ok(())
+
+    fn compile_switch_return_terminator(builder: VhdlBuilder, value: MirOperand, targets: [SwitchCase], default: BlockId) -> Result<(), CompileError>:
+        """Compile a switch whose reachable targets resolve to return values."""
+        val value_expr_result = self.operand_to_vhdl(value)
+        if value_expr_result.is_err():
+            return Err(value_expr_result.unwrap_err())
+        val value_type_result = self.operand_type(value)
+        if value_type_result.is_err():
+            return Err(value_type_result.unwrap_err())
+        val default_expr_result = self.compile_return_block(builder, default)
+        if default_expr_result.is_err():
+            return Err(default_expr_result.unwrap_err())
+        var expr = default_expr_result.unwrap()
+        val value_expr = value_expr_result.unwrap()
+        val value_type = value_type_result.unwrap()
+        var idx = targets.len() - 1
+        while idx >= 0:
+            val target = targets[idx]
+            val target_expr_result = self.compile_return_block(builder, target.target)
+            if target_expr_result.is_err():
+                return Err(target_expr_result.unwrap_err())
+            val literal_result = self.switch_case_value_to_vhdl(target.value, value_type)
+            if literal_result.is_err():
+                return Err(literal_result.unwrap_err())
+            expr = "{target_expr_result.unwrap()} when {value_expr} = {literal_result.unwrap()} else {expr}"
+            idx = idx - 1
+        builder.emit_signal_assign("result_out", expr)
+        Ok(())
+
+    fn switch_case_value_to_vhdl(value: i64, ty: MirType) -> Result<text, CompileError>:
+        match ty.kind:
+            case Bool:
+                Ok(if value == 0: "'0'" else: "'1'")
+            case _:
+                self.const_value_to_vhdl(MirConstValue.Int(value), ty)
 
     fn compile_return_block(builder: VhdlBuilder, block_id: BlockId) -> Result<text, CompileError>:
         self.compile_return_block_seen(builder, block_id, [])
