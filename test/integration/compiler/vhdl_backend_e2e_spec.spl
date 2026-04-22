@@ -264,6 +264,46 @@ describe "VHDL Backend E2E - Entity Generation":
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("result_out <= a;"))
 
+    it "compiles if terminator return arms to result mux":
+        val backend = make_resolved_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+
+        val func = make_function("select_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for if terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("flag : in std_logic"))
+        check(vhdl.contains("result_out <= a when flag = '1' else b;"))
+
     it "rejects unsupported MIR instruction with hard error":
         val backend = make_backend()
 

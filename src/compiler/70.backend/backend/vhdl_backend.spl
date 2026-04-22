@@ -219,16 +219,27 @@ class VhdlBackend:
         builder.emit_architecture_body_begin()
 
         # Compile basic blocks
+        var handled_branch_blocks: Dict<i64, bool> = {}
         for block in func.blocks:
+            if handled_branch_blocks.get(block.id.id).?:
+                continue
             builder.emit_comment("Block BB{block.id.id}")
             for inst in block.instructions:
                 val result = self.compile_instruction(builder, inst)
                 if result.is_err():
                     return Err(result.unwrap_err())
             if block.terminator != nil:
-                val term_result = self.compile_terminator(builder, block.terminator)
-                if term_result.is_err():
-                    return Err(term_result.unwrap_err())
+                match block.terminator:
+                    case If(cond, then_, else_):
+                        val if_result = self.compile_if_return_terminator(builder, cond, then_, else_)
+                        if if_result.is_err():
+                            return Err(if_result.unwrap_err())
+                        handled_branch_blocks = handled_branch_blocks.set(then_.id, true)
+                        handled_branch_blocks = handled_branch_blocks.set(else_.id, true)
+                    case _:
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
 
         builder.emit_architecture_end("rtl")
 
@@ -504,6 +515,40 @@ class VhdlBackend:
                 Ok(())
             case _:
                 Err(self.backend_error("Unsupported VHDL terminator: {terminator}"))
+
+    fn compile_if_return_terminator(builder: VhdlBuilder, cond: MirOperand, then_: BlockId, else_: BlockId) -> Result<(), CompileError>:
+        """Compile if/else return blocks as one VHDL conditional result assignment."""
+        val cond_name_result = self.operand_to_vhdl(cond)
+        if cond_name_result.is_err():
+            return Err(cond_name_result.unwrap_err())
+        val then_value_result = self.compile_return_block(builder, then_)
+        if then_value_result.is_err():
+            return Err(then_value_result.unwrap_err())
+        val else_value_result = self.compile_return_block(builder, else_)
+        if else_value_result.is_err():
+            return Err(else_value_result.unwrap_err())
+        val cond_name = cond_name_result.unwrap()
+        val then_value = then_value_result.unwrap()
+        val else_value = else_value_result.unwrap()
+        builder.emit_signal_assign("result_out", "{then_value} when {cond_name} = '1' else {else_value}")
+        Ok(())
+
+    fn compile_return_block(builder: VhdlBuilder, block_id: BlockId) -> Result<text, CompileError>:
+        val block_result = self.block_by_id(block_id)
+        if block_result.is_err():
+            return Err(block_result.unwrap_err())
+        val block = block_result.unwrap()
+        val inst_result = self.compile_block_instructions(builder, block)
+        if inst_result.is_err():
+            return Err(inst_result.unwrap_err())
+        match block.terminator:
+            case Return(value):
+                if value.?:
+                    self.operand_to_vhdl(value.unwrap())
+                else:
+                    Err(self.backend_error("VHDL if/else return block BB{block_id.id} returns no value"))
+            case _:
+                Err(self.backend_error("VHDL if/else branch BB{block_id.id} must terminate with return"))
 
     fn integer_width(ty: MirType) -> i64?:
         match ty.kind:
