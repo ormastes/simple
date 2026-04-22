@@ -76,9 +76,7 @@ pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
         || vhdl.starts_with("package ")
         || vhdl.starts_with("entity "))
     {
-        eprintln!(
-            "error: --backend=vhdl expected the source to print VHDL text, but no VHDL design unit was emitted"
-        );
+        eprintln!("error: --backend=vhdl expected the source to print VHDL text, but no VHDL design unit was emitted");
         return 1;
     }
 

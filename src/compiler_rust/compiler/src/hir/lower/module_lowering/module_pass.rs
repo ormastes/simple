@@ -9,6 +9,13 @@ use crate::hir::types::{
     TypeId,
 };
 
+fn is_domain_block_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "schema" | "style" | "ui" | "music" | "bim" | "cad" | "city" | "rtl"
+    )
+}
+
 impl Lowerer {
     /// Helper: Register type and function declarations from an AST node
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
