@@ -516,10 +516,13 @@ RuntimeValue rt_riscv_native_gui_process_render(void)
 {
     if (!riscv_load_smf_process("BROWSMF SMF", "SIMPLEOS_RISCV32_GUI_ELF", 1)) return 0;
     if (g_riscv_process_pid[1] == 0 || g_riscv_process_entry[1] == 0) return 0;
-    const char content[] = "pid=1002 app=/sys/apps/browser_demo tree=native";
-    for (uint32_t i = 0; i < sizeof(content) && i < sizeof(g_riscv_gui_surface); i++) {
+    const char *content = "pid=1002 app=/sys/apps/browser_demo tree=native";
+    uint32_t i = 0;
+    while (content[i] != 0 && i + 1U < sizeof(g_riscv_gui_surface)) {
         g_riscv_gui_surface[i] = content[i];
+        i++;
     }
+    g_riscv_gui_surface[i] = 0;
     return bytes_contains((const unsigned char *)g_riscv_gui_surface, sizeof(g_riscv_gui_surface), "pid=1002") ? 1 : 0;
 }
 
