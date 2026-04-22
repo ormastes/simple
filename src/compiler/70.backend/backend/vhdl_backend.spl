@@ -41,6 +41,7 @@ class VhdlBackend:
     use_resolved: bool
     active_local_names: Dict<i64, text>
     active_local_types: Dict<i64, MirType>
+    active_local_kinds: Dict<i64, LocalKind>
     active_blocks: Dict<i64, MirBlock>
     active_type_defs: Dict<i64, MirTypeDef>
 
@@ -55,6 +56,7 @@ class VhdlBackend:
             use_resolved: false,
             active_local_names: {},
             active_local_types: {},
+            active_local_kinds: {},
             active_blocks: {},
             active_type_defs: {}
         )
@@ -67,6 +69,7 @@ class VhdlBackend:
             use_resolved: true,
             active_local_names: {},
             active_local_types: {},
+            active_local_kinds: {},
             active_blocks: {},
             active_type_defs: {}
         )
@@ -169,6 +172,7 @@ class VhdlBackend:
         val entity_name = func.name
         self.active_local_names = {}
         self.active_local_types = {}
+        self.active_local_kinds = {}
         self.active_blocks = {}
 
         for block in func.blocks:
@@ -178,6 +182,7 @@ class VhdlBackend:
             val resolved_name = self.default_local_name(local)
             self.active_local_names = self.active_local_names.set(local.id.id, resolved_name)
             self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
+            self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
 
         # Emit entity
         builder.emit_entity_begin(entity_name)
@@ -228,6 +233,16 @@ class VhdlBackend:
                     ()
 
         builder.emit_architecture_body_begin()
+
+        if self.needs_control_process(func):
+            val process_result = self.compile_function_control_process(builder, func)
+            if process_result.is_err():
+                return Err(process_result.unwrap_err())
+            builder.emit_architecture_end("rtl")
+            return Ok(VhdlEntity(
+                name: entity_name,
+                port_count: total_ports
+            ))
 
         # Compile basic blocks
         var handled_branch_blocks: Dict<i64, bool> = {}
@@ -327,6 +342,248 @@ class VhdlBackend:
             Ok(found.unwrap())
         else:
             Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
+
+    fn needs_control_process(func: MirFunction) -> bool:
+        val entry = self.block_by_id(func.entry_block)
+        if entry.is_err():
+            return false
+        match entry.unwrap().terminator:
+            case If(_, then_, else_):
+                self.block_chain_has_instructions(then_, []) or self.block_chain_has_instructions(else_, [])
+            case _:
+                false
+
+    fn block_chain_has_instructions(id: BlockId, seen: [i64]) -> bool:
+        for prior in seen:
+            if prior == id.id:
+                return false
+        val block = self.active_blocks.get(id.id)
+        if not block.?:
+            return false
+        val current = block.unwrap()
+        if current.instructions.len() > 0:
+            return true
+        var next_seen = seen
+        next_seen = next_seen.push(id.id)
+        match current.terminator:
+            case Goto(target):
+                self.block_chain_has_instructions(target, next_seen)
+            case If(_, then_, else_):
+                self.block_chain_has_instructions(then_, next_seen) or self.block_chain_has_instructions(else_, next_seen)
+            case _:
+                false
+
+    fn process_local_name(local: LocalId) -> Result<text, CompileError>:
+        val name_result = self.local_to_vhdl(local)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        val ty_result = self.local_type(local)
+        if ty_result.is_err():
+            return Err(ty_result.unwrap_err())
+        match ty_result.unwrap().kind:
+            case _:
+                Ok("v_{name_result.unwrap()}")
+
+    fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                val ty_result = self.local_type(local)
+                if ty_result.is_err():
+                    return Err(ty_result.unwrap_err())
+                match ty_result.unwrap().kind:
+                    case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | Bool | Array(_, _) | Struct(_) | Enum(_):
+                        val local_name = self.local_to_vhdl(local)
+                        if local_name.is_err():
+                            return Err(local_name.unwrap_err())
+                        val name = local_name.unwrap()
+                        if name == "result_out":
+                            Ok(name)
+                        else:
+                            val kind_result = self.local_kind(local)
+                            if kind_result.is_err():
+                                return Err(kind_result.unwrap_err())
+                            match kind_result.unwrap():
+                                case Arg(_):
+                                    Ok(name)
+                                case _:
+                                    Ok("v_{name}")
+                    case _:
+                        self.local_to_vhdl(local)
+            case Const(value, ty):
+                self.const_value_to_vhdl(value, ty)
+
+    fn local_kind(local: LocalId) -> Result<LocalKind, CompileError>:
+        val found = self.active_local_kinds.get(local.id)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("No active MIR local kind for local {local.id}"))
+
+    fn emit_process_dest_assign(builder: VhdlBuilder, dest: LocalId, expr: text) -> Result<(), CompileError>:
+        val kind_result = self.local_kind(dest)
+        if kind_result.is_err():
+            return Err(kind_result.unwrap_err())
+        match kind_result.unwrap():
+            case Return:
+                builder.emit_signal_assign("result_out", expr)
+            case Var | Temp:
+                val dest_name_result = self.process_local_name(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                builder.emit_var_assign(dest_name_result.unwrap(), expr)
+            case Arg(_):
+                return Err(self.backend_error("Synthesizable VHDL process cannot assign function argument local {dest.id}"))
+        Ok(())
+
+    fn compile_function_control_process(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        builder.emit_process_begin(Some("comb"), ["all"])
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    if vhdl_type_result.is_err():
+                        return Err(vhdl_type_result.unwrap_err())
+                    val name = self.default_local_name(local)
+                    builder.emit_process_var("v_{name}", vhdl_type_result.unwrap(), nil)
+                case _:
+                    ()
+        builder.emit_process_body_begin()
+        val block_result = self.compile_control_block(builder, func.entry_block, [])
+        if block_result.is_err():
+            return Err(block_result.unwrap_err())
+        builder.emit_process_end(Some("comb"))
+        Ok(())
+
+    fn compile_control_block(builder: VhdlBuilder, block_id: BlockId, seen: [i64]) -> Result<(), CompileError>:
+        for prior in seen:
+            if prior == block_id.id:
+                return Err(self.backend_error("Synthesizable VHDL process cannot lower cyclic control flow at BB{block_id.id}"))
+        val block_result = self.block_by_id(block_id)
+        if block_result.is_err():
+            return Err(block_result.unwrap_err())
+        val block = block_result.unwrap()
+        var next_seen = seen
+        next_seen = next_seen.push(block_id.id)
+        for inst in block.instructions:
+            val inst_result = self.compile_process_instruction(builder, inst)
+            if inst_result.is_err():
+                return Err(inst_result.unwrap_err())
+        if block.terminator != nil:
+            match block.terminator:
+                case Return(value):
+                    if value.?:
+                        val value_result = self.process_operand_to_vhdl(value.unwrap())
+                        if value_result.is_err():
+                            return Err(value_result.unwrap_err())
+                        builder.emit_signal_assign("result_out", value_result.unwrap())
+                    Ok(())
+                case Goto(target):
+                    self.compile_control_block(builder, target, next_seen)
+                case If(cond, then_, else_):
+                    val cond_result = self.process_operand_to_vhdl(cond)
+                    if cond_result.is_err():
+                        return Err(cond_result.unwrap_err())
+                    builder.emit_if_begin("{cond_result.unwrap()} = '1'")
+                    val then_result = self.compile_control_block(builder, then_, next_seen)
+                    if then_result.is_err():
+                        return Err(then_result.unwrap_err())
+                    builder.emit_else()
+                    val else_result = self.compile_control_block(builder, else_, next_seen)
+                    if else_result.is_err():
+                        return Err(else_result.unwrap_err())
+                    builder.emit_if_end()
+                    Ok(())
+                case Unreachable:
+                    Ok(())
+                case _:
+                    Err(self.backend_error("Unsupported VHDL process terminator: {block.terminator}"))
+        else:
+            Ok(())
+
+    fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
+        match inst.kind:
+            case Const(dest, value, ty):
+                val value_result = self.const_value_to_vhdl(value, ty)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+
+            case Copy(dest, src) | Move(dest, src):
+                val value_result = self.process_operand_to_vhdl(MirOperand(kind: MirOperandKind.Copy(src)))
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+
+            case Load(dest, ptr):
+                val value_result = self.process_operand_to_vhdl(ptr)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+
+            case Store(ptr, value):
+                val value_result = self.process_operand_to_vhdl(value)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                match ptr.kind:
+                    case Copy(local) | Move(local):
+                        val kind_result = self.local_kind(local)
+                        if kind_result.is_err():
+                            return Err(kind_result.unwrap_err())
+                        match kind_result.unwrap():
+                            case Var | Temp | Return:
+                                val assign_result = self.emit_process_dest_assign(builder, local, value_result.unwrap())
+                                if assign_result.is_err():
+                                    return Err(assign_result.unwrap_err())
+                            case Arg(_):
+                                return Err(self.backend_error("Synthesizable VHDL process cannot store to argument local {local.id}"))
+                    case _:
+                        return Err(self.backend_error("Synthesizable VHDL process store requires local destination"))
+
+            case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
+                val left_name_result = self.process_operand_to_vhdl(left)
+                if left_name_result.is_err():
+                    return Err(left_name_result.unwrap_err())
+                val right_name_result = self.process_operand_to_vhdl(right)
+                if right_name_result.is_err():
+                    return Err(right_name_result.unwrap_err())
+                val left_type_result = self.operand_type(left)
+                if left_type_result.is_err():
+                    return Err(left_type_result.unwrap_err())
+                val right_type_result = self.operand_type(right)
+                if right_type_result.is_err():
+                    return Err(right_type_result.unwrap_err())
+                val expr_result = self.binop_to_vhdl(op, left_name_result.unwrap(), left_type_result.unwrap(), right_name_result.unwrap(), right_type_result.unwrap(), right)
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+
+            case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                val src_name_result = self.process_operand_to_vhdl(operand)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val src_type_result = self.operand_type(operand)
+                if src_type_result.is_err():
+                    return Err(src_type_result.unwrap_err())
+                val expr_result = self.cast_to_vhdl(src_name_result.unwrap(), src_type_result.unwrap(), target)
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+
+            case UnaryOp(dest, op, operand):
+                val src_name_result = self.process_operand_to_vhdl(operand)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val expr_result = self.unaryop_to_vhdl(op, src_name_result.unwrap())
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+
+            case Nop:
+                ()
+
+            case _:
+                return Err(self.backend_error("Unsupported instruction inside structured VHDL process: {inst.kind}"))
+        Ok(())
 
     fn mark_return_chain_handled(id: BlockId, handled: Dict<i64, bool>) -> Dict<i64, bool>:
         var next_handled = handled.set(id.id, true)
