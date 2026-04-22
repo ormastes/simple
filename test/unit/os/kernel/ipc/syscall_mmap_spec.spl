@@ -21,7 +21,7 @@ use std.spec.{describe, it, expect}
 use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON}
 use os.kernel.memory.vmm.{vmm_new_process_space, vma_find}
-use os.kernel.ipc.syscall.{_handle_sys_mmap, _handle_sys_munmap, g_current_vmspace}
+use os.kernel.ipc.syscall.{_handle_brk, _handle_sys_mmap, _handle_sys_munmap, brk_reset_for_test, g_current_vmspace}
 
 # ============================================================================
 # Helpers
@@ -43,6 +43,17 @@ fn _make_munmap_args(req_vaddr: u64, req_len: u64) -> SyscallArgs:
         id: 104,
         arg0: req_vaddr,
         arg1: req_len,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0
+    )
+
+fn _make_brk_args(req_addr: u64) -> SyscallArgs:
+    SyscallArgs(
+        id: 15,
+        arg0: req_addr,
+        arg1: 0,
         arg2: 0,
         arg3: 0,
         arg4: 0,
@@ -159,3 +170,40 @@ describe "sys_munmap error cases":
         val args = _make_munmap_args(req_vaddr: 0x400000, req_len: 0)
         val result = _handle_sys_munmap(args)
         expect(result.value).to_equal(-22)
+
+
+# ============================================================================
+# Test Group 5: brk MVP behavior
+# ============================================================================
+
+describe "brk MVP behavior":
+    """Tests for the monotonic brk syscall model."""
+
+    it "brk(0) returns the initial program break":
+        g_current_vmspace = _fresh_space()
+        brk_reset_for_test()
+        val result = _handle_brk(_make_brk_args(req_addr: 0))
+        expect(result.value).to_equal(0x30000000)
+
+    it "brk grows the process heap and records a writable VMA":
+        g_current_vmspace = _fresh_space()
+        brk_reset_for_test()
+        val requested = 0x30002000u64
+        val result = _handle_brk(_make_brk_args(req_addr: requested))
+        expect(result.value).to_equal(requested as i64)
+        val found = vma_find(g_current_vmspace, 0x30000000u64)
+        expect(found.start).to_equal(0x30000000u64)
+        expect(found.flags).to_equal(VMA_READ | VMA_WRITE)
+
+    it "brk rejects shrinking in the MVP":
+        g_current_vmspace = _fresh_space()
+        brk_reset_for_test()
+        _handle_brk(_make_brk_args(req_addr: 0x30002000u64))
+        val result = _handle_brk(_make_brk_args(req_addr: 0x30001000u64))
+        expect(result.value).to_equal(-22)
+
+    it "brk rejects growth beyond the MVP user heap limit":
+        g_current_vmspace = _fresh_space()
+        brk_reset_for_test()
+        val result = _handle_brk(_make_brk_args(req_addr: 0x38001000u64))
+        expect(result.value).to_equal(-12)
