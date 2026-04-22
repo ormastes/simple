@@ -11,9 +11,12 @@ use std.spec
 
 use compiler.common.attributes.{parse_platform_attrs}
 use compiler.types.type_layout.{
-    PlatformAbi, PlatformBit, PlatformDiagnosticLevel
+    PlatformAbi, PlatformBit, PlatformDiagnosticLevel,
+    platform_cpu_for_arch, platform_pointer_bit_for_arch,
+    platform_predicate_matches_arch, platform_select_variant_for_arch
 }
 use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
+use std.common.target.{TargetArch}
 from lexer import {Span}
 
 # ============================================================================
@@ -171,3 +174,54 @@ describe "Platform layout attributes":
             expect(result.diagnostics[0].message()).to_equal(
                 "@platform variant should spell out bit, size, or align explicitly"
             )
+
+        it "maps target architectures to canonical platform cpu and pointer bits":
+            expect(platform_cpu_for_arch(TargetArch.X86_64)).to_equal("x86_64")
+            expect(platform_cpu_for_arch(TargetArch.X86)).to_equal("x86")
+            expect(platform_cpu_for_arch(TargetArch.Aarch64)).to_equal("aarch64")
+            expect(platform_cpu_for_arch(TargetArch.Arm)).to_equal("arm")
+            expect(platform_cpu_for_arch(TargetArch.Riscv64)).to_equal("riscv64")
+            expect(platform_cpu_for_arch(TargetArch.Riscv32)).to_equal("riscv32")
+            expect(platform_pointer_bit_for_arch(TargetArch.Riscv64)).to_equal(PlatformBit.Bits64)
+            expect(platform_pointer_bit_for_arch(TargetArch.Riscv32)).to_equal(PlatformBit.Bits32)
+
+        it "matches platform predicates against target architecture and pointer width":
+            val result = parse_platform_attrs([
+                make_platform_attr([
+                    make_assign_expr("cpu", make_ident_expr("riscv64")),
+                    make_assign_expr("bit", make_int_expr(64))
+                ]),
+                make_platform_attr([
+                    make_assign_expr("cpu", make_ident_expr("riscv32")),
+                    make_assign_expr("bit", make_int_expr(32))
+                ])
+            ])
+
+            expect(platform_predicate_matches_arch(result.variants[0].predicate, TargetArch.Riscv64)).to_equal(true)
+            expect(platform_predicate_matches_arch(result.variants[0].predicate, TargetArch.Riscv32)).to_equal(false)
+            expect(platform_predicate_matches_arch(result.variants[1].predicate, TargetArch.Riscv32)).to_equal(true)
+
+        it "selects the most specific matching variant before default fallback":
+            val result = parse_platform_attrs([
+                make_platform_attr([
+                    make_ident_expr("default"),
+                    make_assign_expr("bit", make_int_expr(64))
+                ]),
+                make_platform_attr([
+                    make_assign_expr("bit", make_int_expr(32))
+                ]),
+                make_platform_attr([
+                    make_assign_expr("cpu", make_ident_expr("riscv32")),
+                    make_assign_expr("bit", make_int_expr(32)),
+                    make_assign_expr("size", make_int_expr(4))
+                ])
+            ])
+
+            val rv32 = platform_select_variant_for_arch(result.variants, TargetArch.Riscv32)
+            val rv64 = platform_select_variant_for_arch(result.variants, TargetArch.Riscv64)
+
+            expect(rv32.?).to_equal(true)
+            expect(rv32.unwrap().predicate.has_cpu).to_equal(true)
+            expect(rv32.unwrap().predicate.cpu).to_equal("riscv32")
+            expect(rv64.?).to_equal(true)
+            expect(rv64.unwrap().predicate.has_default).to_equal(true)

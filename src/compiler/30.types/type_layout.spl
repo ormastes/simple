@@ -352,6 +352,74 @@ fn platform_variant_is_ambiguous(left: PlatformVariant, right: PlatformVariant) 
     val same_layout = platform_variant_signature(left) == platform_variant_signature(right)
     same_predicate and not same_layout
 
+fn platform_cpu_for_arch(arch: TargetArch) -> text:
+    match arch:
+        case TargetArch.X86_64: "x86_64"
+        case TargetArch.X86: "x86"
+        case TargetArch.Aarch64: "aarch64"
+        case TargetArch.Arm: "arm"
+        case TargetArch.Riscv64: "riscv64"
+        case TargetArch.Riscv32: "riscv32"
+        case TargetArch.Wasm64: "wasm64"
+        case TargetArch.Wasm32: "wasm32"
+        case TargetArch.AVR: "avr"
+        case TargetArch.MCS51: "mcs51"
+        case TargetArch.I8086: "i8086"
+        case TargetArch.MSP430: "msp430"
+
+fn platform_pointer_bit_for_arch(arch: TargetArch) -> PlatformBit:
+    match arch.pointer_size().bits():
+        case 16: PlatformBit.Bits16
+        case 32: PlatformBit.Bits32
+        case 64: PlatformBit.Bits64
+        case _: PlatformBit.Pointer
+
+fn platform_bit_matches_arch(bit: PlatformBit, arch: TargetArch) -> bool:
+    match bit:
+        case PlatformBit.Pointer: true
+        case _:
+            bit == platform_pointer_bit_for_arch(arch)
+
+fn platform_predicate_matches_arch(pred: PlatformPredicate, arch: TargetArch) -> bool:
+    if pred.has_cpu and pred.cpu != platform_cpu_for_arch(arch):
+        return false
+    if pred.has_bit and not platform_bit_matches_arch(pred.bit, arch):
+        return false
+    true
+
+fn platform_predicate_specificity(pred: PlatformPredicate) -> i64:
+    var score: i64 = 0
+    if pred.has_cpu:
+        score = score + 1
+    if pred.has_os:
+        score = score + 1
+    if pred.has_abi:
+        score = score + 1
+    if pred.has_bit:
+        score = score + 1
+    score
+
+fn platform_select_variant_for_arch(variants: [PlatformVariant], arch: TargetArch) -> PlatformVariant?:
+    var best: PlatformVariant? = nil
+    var best_score: i64 = -1
+    var fallback: PlatformVariant? = nil
+
+    for variant in variants:
+        if variant.predicate.has_default:
+            if not fallback.?:
+                fallback = Some(variant)
+            continue
+
+        if platform_predicate_matches_arch(variant.predicate, arch):
+            val score = platform_predicate_specificity(variant.predicate)
+            if score > best_score:
+                best = Some(variant)
+                best_score = score
+
+    if best.?:
+        return best
+    fallback
+
 fn platform_validate_variants(variants: [PlatformVariant]) -> [PlatformLayoutDiagnostic]:
     var diagnostics: [PlatformLayoutDiagnostic] = []
     var seen_keys: [text] = []

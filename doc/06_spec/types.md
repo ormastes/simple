@@ -438,7 +438,7 @@ test "unit_types_and_literal_suffixes_7":
     """
     unit velocity(base: f64) = length / time:
         mps = 1.0         # meters per second (base)
-        kmph = exact(5/18) # km/hr in m/s
+        kmph = 0.2777777777777778 # catalog canonical: exact 5/18 m/s
         mph = 0.44704     # miles/hr in m/s
 
     unit area(base: f64) = length * length:

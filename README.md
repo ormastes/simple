@@ -393,7 +393,9 @@ unit length(base: f64):
     mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
 
 unit velocity(base: f64) = length / time:
-    mps = 1.0, kmph = exact(5/18), mph = 0.44704
+    mps = 1.0, kmph = 0.2777777777777778, mph = 0.44704
+# The standards-backed catalog records km/h canonically as kilometre / hour
+# with exact factor 5/18 relative to m/s.
 
 # Define nominal wrappers with postfix syntax
 newunit UserId: i64 as uid
