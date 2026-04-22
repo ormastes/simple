@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use simple_common::target::Target;
 use simple_compiler::linker::NativeLinker;
 use crate::cli::compile::{
-    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, list_linkers, list_targets,
+    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
+    list_linkers, list_targets,
 };
 use crate::CompileOptions;
 
@@ -50,10 +51,7 @@ pub fn handle_compile(args: &[String]) -> i32 {
             return compile_file_to_ptx(&source, output);
         }
         if b == "vhdl" {
-            eprintln!(
-                "error: --backend=vhdl is not supported by the Rust compile frontend; use the Simple compiler entrypoint for VHDL emission"
-            );
-            return 1;
+            return compile_file_to_vhdl(&source, output);
         }
     }
 

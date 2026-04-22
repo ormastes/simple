@@ -1,6 +1,7 @@
 //! Compilation commands: compile, list targets, list linkers.
 
 use crate::cli::examples_safety::{is_timeout_error, timeout_error_message, ExamplesWatchdogGuard};
+use crate::{Interpreter, RunConfig};
 use crate::runner::Runner;
 use crate::CompileOptions;
 use simple_common::smf::{SectionType, SmfHeader, SmfSection, SECTION_FLAG_READ};
@@ -37,6 +38,66 @@ pub fn compile_file(
             101
         }
     }
+}
+
+/// Generate VHDL by running a Simple VHDL generator source and capturing stdout.
+///
+/// The current VHDL CLI surface is builder-oriented: source files use the
+/// VhdlBuilder APIs and print VHDL text. The self-hosted MIR-to-VHDL compile app
+/// is not stable enough to own this command path, so the Rust CLI captures the
+/// supported generator output directly.
+pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
+    let out_path = output.unwrap_or_else(|| source.with_extension("vhd"));
+    let interpreter = Interpreter::new();
+    let config = RunConfig {
+        capture_output: true,
+        ..RunConfig::default()
+    };
+
+    let result = match interpreter.run_file(source, config) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: VHDL generator failed: {err}");
+            return 1;
+        }
+    };
+
+    if result.exit_code != 0 {
+        eprintln!("error: VHDL generator exited with status {}", result.exit_code);
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        return 1;
+    }
+
+    let vhdl = result.stdout.trim_start();
+    if !(vhdl.starts_with("library ")
+        || vhdl.starts_with("use ")
+        || vhdl.starts_with("package ")
+        || vhdl.starts_with("entity "))
+    {
+        eprintln!(
+            "error: --backend=vhdl expected the source to print VHDL text, but no VHDL design unit was emitted"
+        );
+        return 1;
+    }
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                eprintln!("error: failed to create output directory {}: {err}", parent.display());
+                return 1;
+            }
+        }
+    }
+
+    if let Err(err) = fs::write(&out_path, result.stdout) {
+        eprintln!("error: failed to write VHDL output {}: {err}", out_path.display());
+        return 1;
+    }
+
+    println!("Output: {}", out_path.display());
+    0
 }
 
 /// Compile a driver source to an SMF and wrap it in a loadable Library SMF archive.

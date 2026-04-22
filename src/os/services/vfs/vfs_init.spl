@@ -58,6 +58,12 @@ extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
 val KNOWN_APP_ELF_BUFFER_MAX: u64 = 32768
 val FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304
 
+var g_vfs_browser_demo_exec_bytes: [u8] = []
+var g_vfs_hello_world_exec_bytes: [u8] = []
+var g_vfs_file_manager_exec_bytes: [u8] = []
+var g_vfs_shell_exec_bytes: [u8] = []
+var g_vfs_editor_exec_bytes: [u8] = []
+
 class CNvmeBlockAdapter:
     """Wraps C NVMe bridge as BlockDevice for FAT32."""
     sector_buf_addr: u64    # DMA buffer address for sector transfers
@@ -284,6 +290,11 @@ fn vfs_boot_init() -> bool:
     if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
         serial_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
         return false
+    g_vfs_browser_demo_exec_bytes = simpleos_fat32_read_path_array(exec_probe_path)
+    g_vfs_hello_world_exec_bytes = _cache_c_fat32_exec_bytes("/HELLOSMF.SMF")
+    g_vfs_file_manager_exec_bytes = _cache_c_fat32_exec_bytes("/FILESMF.SMF")
+    g_vfs_shell_exec_bytes = _cache_c_fat32_exec_bytes("/SHELLSMF.SMF")
+    g_vfs_editor_exec_bytes = _cache_c_fat32_exec_bytes("/EDITORSM.SMF")
     serial_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
 
     serial_println("[vfs-init] VFS ready (C-backed)")
@@ -565,6 +576,34 @@ fn _bytes_have_elf_magic(bytes: [u8]) -> bool:
         bytes[2] == 0x4C.to_u8() and
         bytes[3] == 0x46.to_u8()
 
+fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
+    val signed_size = simpleos_fat32_read_path_size(path)
+    if signed_size <= 4:
+        return []
+    val file_size = signed_size.to_u64()
+    if file_size > FAT32_PATH_READ_BUFFER_MAX:
+        return []
+    val read_result = simpleos_fat32_read_path(path)
+    if read_result != 0:
+        return []
+    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+        return []
+    simpleos_fat32_read_path_array(path)
+
+fn _cached_known_exec_bytes(path: text) -> [u8]:
+    val app_id = g_vfs_known_app_id(path)
+    if app_id == 1:
+        return _clone_bytes(g_vfs_browser_demo_exec_bytes)
+    if app_id == 2:
+        return _clone_bytes(g_vfs_file_manager_exec_bytes)
+    if app_id == 3:
+        return _clone_bytes(g_vfs_hello_world_exec_bytes)
+    if app_id == 4:
+        return _clone_bytes(g_vfs_shell_exec_bytes)
+    if app_id == 5:
+        return _clone_bytes(g_vfs_editor_exec_bytes)
+    []
+
 fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)
     if app_id == 0:
@@ -611,8 +650,14 @@ fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
 
 pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
     """Read seeded executable bytes, preferring the stable FAT32 path bridge."""
+    val cached = _cached_known_exec_bytes(name)
+    if cached.len() > 0:
+        return cached
     val alias_name = _vfs_exec_disk_alias(name)
     if alias_name != name:
+        val alias_cached = _cached_known_exec_bytes(alias_name)
+        if alias_cached.len() > 0:
+            return alias_cached
         val alias_bytes = g_vfs_read_fat32_path_bytes(alias_name)
         if alias_bytes.len() > 0:
             return alias_bytes
