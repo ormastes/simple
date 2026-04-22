@@ -1,11 +1,12 @@
 # Cross-Platform Window Manager — Architecture
 
 > **Scope note.** This doc covers the full GUI drawing stack — not just
-> baremetal SimpleOS. All five compositor backends (Fb, GPU, Hosted,
-> Browser, Electron) share the same `Compositor` + `InputBackend` traits
-> and the same widget/session layer. For the work plan that maps the four
-> stack variations (SimpleOS / host OS / Chromium / Electron) onto these
-> modules, see [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md).
+> baremetal SimpleOS. All compositor backends (Fb, GPU, Hosted,
+> Browser/SimpleWeb, Electron) share the same headless WM service,
+> `Compositor` + `InputBackend` traits, widget/session layer, and Simple
+> 2D rendering model. For the work plan that maps the drawing stack
+> variations onto these modules, see
+> [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md).
 > For the dev-facing "which backend do I pick" guide, see
 > [`doc/07_guide/ui_stack_guide.md`](../07_guide/ui_stack_guide.md).
 
@@ -58,6 +59,7 @@ Separate (not integrated):
 │   — single entry for CLI, TUI, and GUI backends                  │
 ├──────────────────────────────────────────────────────────────────┤
 │                   Window Manager Service                          │
+│   headless service: session, window, taskbar, focus, lifecycle   │
 │   os.services.wm · lib.nogc_sync_mut.play.wm · window_protocol   │
 ├──────────────────────────────────────────────────────────────────┤
 │                          Compositor                               │
@@ -79,12 +81,50 @@ Separate (not integrated):
 │             gpu · cuda · rocm · intel · baremetal               │
 ├──────────────────────────────────────────────────────────────────┤
 │                       Platform Layer                              │
-│  Baremetal : PS/2 ports, MMIO framebuffer, VirtIO-GPU            │
-│  Hosted    : winit+softbuffer (macOS/Linux/Windows/FreeBSD)      │
-│  Browser   : HTMLCanvas / WebGPU surface in Chromium/CEF         │
+│  SimpleOS  : PS/2 ports, MMIO framebuffer, VirtIO-GPU, SimpleWeb │
+│  Host OS   : winit/Cocoa/Win32/WebCanvas on macOS/Linux/Windows  │
+│  SimpleWeb : HTMLCanvas/WebGPU through the shared Simple 2D engine│
 │  Electron  : BrowserWindow via main+renderer IPC                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+## Runtime Environments
+
+The WM is always split into two parts:
+
+1. **Headless WM service.** Owns session state, windows, z-order, focus,
+   taskbar state, lifecycle, input routing, and protocol state. This service is
+   the authority in host mode and SimpleOS mode.
+2. **GUI frontend.** Renders the service state and forwards input through the
+   selected backend. Frontends may be native, web-hosted, Electron-hosted, or
+   SimpleOS-backed, but they do not own WM state.
+
+### Host mode
+
+Host mode runs on macOS, Linux, Windows, and the other supported hosted
+platforms. It has two web-capable frontend families:
+
+- **Electron GUI backend**: Electron/BrowserWindow host adapter. It uses the
+  `ui.web` protocol plus native host-window commands.
+- **Simple web backend**: Chromium-class/simple-browser path. It uses the same
+  `ui.web` protocol and renders through the shared Simple 2D engine, not a
+  separate browser-only drawing stack.
+
+Host mode supports three presentation modes:
+
+| Mode | Host window shape | Taskbar behavior | WM ownership |
+|------|-------------------|------------------|--------------|
+| Embedded | One host-native window embeds the full Simple desktop | Simple taskbar visible inside the app window | Simple WM owns app windows and taskbar state |
+| Native | Each Simple app maps to its own host-native window | Host OS taskbar/window list shows app windows | Simple WM owns logical state; host owns native shells |
+| Hidden-taskbar | Each Simple app maps to its own host-native window | Simple taskbar hidden | Simple WM owns logical state; host owns native shells |
+
+### SimpleOS mode
+
+SimpleOS mode runs inside SimpleOS. The WM service uses the same logical
+window/taskbar/session model as host mode, but the frontend uses SimpleOS
+display/input backends and the Simple web engine where web UI is needed. The
+Simple web backend still renders through the shared Simple 2D engine, so
+SimpleOS and host mode do not fork the drawing model.
 
 ### UISession is the single entry for CLI, TUI, and GUI
 
@@ -105,8 +145,8 @@ backends**, not a separate stack:
 | CLI | `ui.cli`, `ui.ipc`, `ui.mcp`, `ui.vscode` | stdio / socket / LSP |
 | TUI | `ui.tui`, `ui.tui_web` | terminal cells |
 | GUI (pure Simple) | via `os.compositor` + `hosted_backend` / `fb_backend` | winit / framebuffer |
-| GUI (web host) | `ui.browser`, `ui.web` | HTMLCanvas |
-| GUI (desktop host) | `ui.electron`, `ui.tauri` | BrowserWindow |
+| GUI (Simple web) | `ui.browser`, `ui.web` | HTMLCanvas / WebGPU through Simple 2D |
+| GUI (desktop host) | `ui.electron`, `ui.tauri` | BrowserWindow / host native window |
 
 A backend implements the `backend.spl` trait (`common.ui.backend`) plus
 the usual event-loop integration. The widget tree, diff, lifecycle, and
@@ -114,16 +154,16 @@ capability policy are identical for every backend — which is why the
 CLI-mode observer in `ui.cli/observer.spl` and the baremetal compositor
 consume the same `UIEvent` stream.
 
-**Consequence for the four drawing-layer variations** (plan doc):
+**Consequence for the drawing-layer variations** (plan doc):
 
 - V1 (SimpleOS baremetal) and V2 (host OS) differ only below the
   `Compositor` line — swap `fb_backend` + `Ps2InputBackend` for
   `hosted_backend` + `HostedInputBackend`.
-- V3 (Chromium) and V4 (Electron) swap the backend pair for
-  `browser_compositor_backend` / `electron_capture` and translate DOM
-  or IPC events into `os.gui.input_event`.
+- V3 (Simple web / Chromium-class simple_browser) and V4 (Electron) swap the
+  backend pair for `browser_compositor_backend` / `electron_capture` and
+  translate DOM or IPC events into `os.gui.input_event`.
 - The app, GUI Lib, WM service, and 2D engine are unchanged across all
-  four. That is the invariant this doc defends.
+  environments and presentation modes. That is the invariant this doc defends.
 
 ## Component Design
 
@@ -308,16 +348,16 @@ src/app/wm_compare/                # Cross-backend parity harness
 
 ## Platform Support Matrix
 
-| Variation | Platform | Compositor Backend | Input Backend | Surface | 2D Engine Backend | Status |
-|-----------|----------|--------------------|---------------|---------|-------------------|--------|
-| V1 | Baremetal x86_64 | `fb_backend` | `Ps2InputBackend` | BGA framebuffer | `backend_software` / `backend_baremetal` | sys-gui-006 baseline |
-| V1 | Baremetal x86_64 + VirtIO | `display_backend` (GPU) | `Ps2InputBackend` | VirtIO-GPU | `backend_virtio_gpu` | sys-gui-007 in progress |
-| V2 | macOS | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Cocoa | `backend_metal` / `backend_cpu` | hosted path green; Metal WIP |
-| V2 | Linux | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → X11/Wayland | `backend_vulkan` / `backend_cpu` | hosted path green |
-| V2 | Windows | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Win32 | `backend_cpu` (DX WIP) | hosted shim WIP |
-| V2 | FreeBSD | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Xlib | `backend_cpu` | exists, untested |
-| V3 | simple_browser shell | `browser_compositor_backend` + `browser_backend` | DOM → `input_event` | winit → HTMLCanvas / WebGPU | `backend_software` / `backend_webgpu` | ✅ Row 5 Done 2026-04-14 — M1–M12 landed, wm_compare parity green, Acid2 passes |
-| V4 | Electron | `browser_compositor_backend` + `electron_capture` | IPC → `input_event` | BrowserWindow (main+renderer) | `backend_software` | advisory/dev-preview; unit state covered, live OS smoke not default CI |
+| Variation | Environment | Presentation | Compositor Backend | Input Backend | Surface | 2D Engine Backend | Status |
+|-----------|-------------|--------------|--------------------|---------------|---------|-------------------|--------|
+| V1 | SimpleOS / baremetal x86_64 | Embedded desktop | `fb_backend` | `Ps2InputBackend` | BGA framebuffer | `backend_software` / `backend_baremetal` | sys-gui-006 baseline |
+| V1 | SimpleOS / baremetal x86_64 + VirtIO | Embedded desktop | `display_backend` (GPU) | `Ps2InputBackend` | VirtIO-GPU | `backend_virtio_gpu` | sys-gui-007 in progress |
+| V2 | Host macOS | Embedded / Native / Hidden-taskbar | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Cocoa | `backend_metal` / `backend_cpu` | hosted path green; Metal WIP |
+| V2 | Host Linux | Embedded / Native / Hidden-taskbar | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → X11/Wayland | `backend_vulkan` / `backend_cpu` | hosted path green |
+| V2 | Host Windows | Embedded / Native / Hidden-taskbar | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Win32 | `backend_cpu` (DX WIP) | hosted shim WIP |
+| V2 | Host FreeBSD | Embedded / Native / Hidden-taskbar | `hosted_backend` | `hosted_input_backend` | winit+softbuffer → Xlib | `backend_cpu` | exists, untested |
+| V3 | Host or SimpleOS Simple web | Embedded / web surface | `browser_compositor_backend` + `browser_backend` | DOM → `input_event` | HTMLCanvas / WebGPU | shared Simple 2D engine via `backend_software` / `backend_webgpu` | ✅ Row 5 Done 2026-04-14 — M1–M12 landed, wm_compare parity green, Acid2 passes |
+| V4 | Host Electron | Embedded / Native / Hidden-taskbar | `browser_compositor_backend` + `electron_capture` | IPC → `input_event` | BrowserWindow (main+renderer) | shared Simple 2D engine via `backend_software` | advisory/dev-preview; unit state covered, live OS smoke not default CI |
 
 See [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
 for the restored handoff and current gap summary.

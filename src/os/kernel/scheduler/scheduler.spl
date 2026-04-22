@@ -217,6 +217,16 @@ fn _scheduler_uses_direct_load_arena() -> bool:
 fn _scheduler_uses_direct_load_arena() -> bool:
     false
 
+@cfg(arm64)
+fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    direct_load_entry_point(user_as, file_bytes, entry)
+
+@cfg(not(arm64))
+fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
+    val _user_as = user_as
+    val _file_bytes = file_bytes
+    entry
+
 fn _map_user_process_image(
     space: AddressSpace,
     segments: [UserLoadSegment],
@@ -751,12 +761,16 @@ impl Scheduler:
 
         val user_as: AddressSpace = create_user_address_space()
 
-        val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        val map_result = if _address_space_can_map(user_as):
+            _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        else:
+            serial_println("[scheduler] create_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
+            0
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] create_user_task: map failed")
             return 0
-        val mapped_entry = direct_load_entry_point(user_as, file_bytes, entry)
+        val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
         if mapped_entry != entry:
             serial_println("[scheduler] create_user_task: direct entry mapped")
             if not verify_direct_load_entry(user_as, file_bytes, entry):
@@ -841,12 +855,16 @@ impl Scheduler:
             return 0
 
         val user_as: AddressSpace = create_user_address_space()
-        val map_result = _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        val map_result = if _address_space_can_map(user_as):
+            _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        else:
+            serial_println("[scheduler] bootstrap_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
+            0
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] bootstrap_user_task: map failed")
             return 0
-        val mapped_entry = direct_load_entry_point(user_as, file_bytes, entry)
+        val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
         if mapped_entry != entry:
             serial_println("[scheduler] bootstrap_user_task: direct entry mapped")
             if not verify_direct_load_entry(user_as, file_bytes, entry):
@@ -1730,13 +1748,17 @@ impl Scheduler:
             return -22
 
         val new_as: AddressSpace = create_user_address_space()
-        val map_result = _map_user_process_image(new_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        val map_result = if _address_space_can_map(new_as):
+            _map_user_process_image(new_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+        else:
+            serial_println("[scheduler] exec_image: synthetic address space root={new_as.phys_root} id={new_as.id}")
+            0
         if map_result < 0:
             destroy_user_address_space(new_as)
             if was_ready:
                 self._enqueue_ready(task_id)
             return map_result
-        val mapped_entry = direct_load_entry_point(new_as, file_bytes, entry)
+        val mapped_entry = _scheduler_mapped_entry(new_as, file_bytes, entry)
         if mapped_entry != entry:
             serial_println("[scheduler] exec_image: direct entry mapped")
             if not verify_direct_load_entry(new_as, file_bytes, entry):

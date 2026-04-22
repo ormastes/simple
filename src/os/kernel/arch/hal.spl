@@ -21,11 +21,14 @@ use os.kernel.memory.pmm.{PhysMemManager}
 # x86_64 arch imports
 use os.kernel.arch.x86_64.console.{serial_init, serial_write_byte, serial_write, serial_writeln}
 use os.kernel.arch.x86_64.boot.{X86Boot}
-use os.kernel.arch.x86_64.cpu.{cli, sti, hlt, halt_loop, invlpg, read_cr3, write_cr3}
+use os.kernel.arch.x86_64.cpu.{cli, sti, hlt, halt_loop, reboot as x86_64_reboot, invlpg, read_cr3, write_cr3}
 use os.kernel.arch.x86_64.paging.{vmm_init, vmm_map_page, vmm_unmap_page, vmm_translate, vmm_create_address_space, vmm_switch_address_space}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.timer.{X86Timer}
 use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+
+# x86_32 arch imports
+use os.kernel.arch.x86_32.cpu.{reboot as x86_32_reboot}
 
 # arm64 arch imports
 use os.kernel.arch.arm64.console.{uart_init, uart_write_byte, uart_write, uart_writeln}
@@ -49,6 +52,7 @@ use os.kernel.arch.arm32.context.{Arm32ContextSwitch}
 use os.kernel.arch.riscv64.console.{serial_init as rv64_serial_init, serial_write_byte as rv64_serial_write_byte, serial_write as rv64_serial_write, serial_writeln as rv64_serial_writeln}
 use os.kernel.arch.riscv64.boot_info.{Rv64Boot}
 use os.kernel.arch.riscv64.cpu.{csrc_sstatus, csrs_sstatus, wfi as rv64_wfi, sfence_vma, sfence_vma_addr, read_tp, SSTATUS_SIE}
+use os.kernel.arch.riscv64.sbi.{sbi_system_reset as rv64_system_reset}
 use os.kernel.arch.riscv64.paging.{Rv64Paging, vmm_init as rv64_vmm_init, vmm_map_page as rv64_vmm_map_page, vmm_unmap_page as rv64_vmm_unmap_page, vmm_translate as rv64_vmm_translate, vmm_create_address_space as rv64_vmm_create_address_space, vmm_switch_address_space as rv64_vmm_switch_address_space}
 use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt}
 use os.kernel.arch.riscv64.timer.{Rv64Timer}
@@ -58,6 +62,7 @@ use os.kernel.arch.riscv64.context.{Rv64ContextSwitch}
 use os.kernel.arch.riscv32.console.{uart_init as rv32_uart_init, uart_write_byte as rv32_uart_write_byte, uart_write as rv32_uart_write, uart_writeln as rv32_uart_writeln}
 use os.kernel.arch.riscv32.boot.{Rv32Boot}
 use os.kernel.arch.riscv32.cpu.{wfi as rv32_wfi, sfence_vma as rv32_sfence_vma, sfence_vma_all as rv32_sfence_vma_all, csrr_sstatus as rv32_csrr_sstatus, csrw_sstatus as rv32_csrw_sstatus, SSTATUS_SIE as RV32_SSTATUS_SIE}
+use os.kernel.arch.riscv32.sbi.{sbi_system_reset as rv32_system_reset}
 use os.kernel.arch.riscv32.paging.{Rv32Paging, vmm_init as rv32_vmm_init, vmm_map_page as rv32_vmm_map_page, vmm_unmap_page as rv32_vmm_unmap_page, vmm_translate as rv32_vmm_translate, vmm_create_address_space as rv32_vmm_create_address_space, vmm_switch_address_space as rv32_vmm_switch_address_space}
 use os.kernel.arch.riscv32.interrupt.{Rv32Interrupt}
 use os.kernel.arch.riscv32.timer.{Rv32Timer}
@@ -88,6 +93,10 @@ trait HalCpu:
     fn cpu_flush_tlb_all()
     fn cpu_id() -> u64
     fn cpu_address_width() -> u32
+
+trait HalPower:
+    """Machine-level power controls exposed through syscall-safe facades."""
+    fn system_reset() -> i64
 
 trait HalPaging:
     """Page table management — map, unmap, translate virtual addresses."""
@@ -376,6 +385,72 @@ fn hal_halt_loop():
     rv32_csrw_sstatus(status & (~RV32_SSTATUS_SIE))
     while true:
         rv32_wfi()
+
+# ============================================================================
+# Power Control
+# ============================================================================
+
+var _hal_reset_test_mode: u64 = 0
+var _hal_reset_requested_for_test: u64 = 0
+
+fn hal_reset_set_test_mode(enabled: bool):
+    """Enable a test-only reset latch so syscall tests cannot reset QEMU."""
+    if enabled:
+        _hal_reset_test_mode = 1
+        _hal_reset_requested_for_test = 0
+    else:
+        _hal_reset_test_mode = 0
+        _hal_reset_requested_for_test = 0
+
+fn hal_reset_requested_for_test() -> bool:
+    """Return whether hal_system_reset() was requested while test mode was active."""
+    _hal_reset_requested_for_test != 0
+
+fn hal_system_reset() -> i64:
+    """Request a machine reset through the active architecture backend.
+
+    Returns 0 only in test mode. On real hardware/QEMU the backend should not
+    return; if it does, callers receive -38 to match ENOSYS-style syscall
+    fallback behavior.
+    """
+    if _hal_reset_test_mode != 0:
+        _hal_reset_requested_for_test = 1
+        return 0
+    _hal_system_reset_arch()
+
+@cfg(x86_64)
+fn _hal_system_reset_arch() -> i64:
+    """Reset x86_64 via the reset control register."""
+    x86_64_reboot()
+    -38
+
+@cfg(x86)
+fn _hal_system_reset_arch() -> i64:
+    """Reset x86_32 via the reset control register."""
+    x86_32_reboot()
+    -38
+
+@cfg(arm64)
+fn _hal_system_reset_arch() -> i64:
+    """ARM64 reset needs PSCI wiring; report unsupported until that backend exists."""
+    -38
+
+@cfg(arm32)
+fn _hal_system_reset_arch() -> i64:
+    """ARM32 reset needs platform firmware wiring; report unsupported until that backend exists."""
+    -38
+
+@cfg(riscv64)
+fn _hal_system_reset_arch() -> i64:
+    """Reset RISC-V 64 via SBI SRST cold reboot."""
+    rv64_system_reset(1u32, 0u32)
+    -38
+
+@cfg(riscv32)
+fn _hal_system_reset_arch() -> i64:
+    """Reset RISC-V 32 via SBI SRST cold reboot."""
+    rv32_system_reset(1u32, 0u32)
+    -38
 
 @cfg(x86_64)
 fn hal_flush_tlb(addr: u64):

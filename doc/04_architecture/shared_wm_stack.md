@@ -2,11 +2,11 @@
 
 Status: current (2026-04-20)
 Owners: `src/os/compositor/`, `src/os/services/wm/`, `src/lib/common/window_protocol/`
-Related: [`cross_platform_wm.md`](cross_platform_wm.md), [`gui_layer_contract.md`](gui_layer_contract.md)
+Related: [`cross_platform_wm.md`](cross_platform_wm.md), [`gui_layer_contract.md`](gui_layer_contract.md), [`ui_web_protocol.md`](ui_web_protocol.md)
 
 ## 1. Overview
 
-The shared WM stack lets host-side UI shells (Electron, Tauri, Cocoa, Win32, Browser, TUI, WebCanvas) and the SimpleOS kernel desktop run the same `Compositor` + `WmService` code with no duplication. Before this migration, hosted windows duplicated rendering logic outside `CompositorBackend` and used bare primitive types on public API boundaries, triggering `primitive_api` lint warnings throughout the WM surface. The fix has two parts: (1) a unified entry point (`host_compositor_entry.spl`) that selects the correct backend at runtime while keeping the compositor core unchanged, and (2) wrapper types in `geometry.spl` that replace bare `i32`/`u32`/`u64` on every public WM/UI API. Zero `@allow(primitive_api)` annotations are permitted in WM or UI scope.
+The shared WM stack lets host-side UI shells (Electron, Tauri, Cocoa, Win32, Browser, TUI, WebCanvas) and the SimpleOS kernel desktop run the same headless `WmService` + `Compositor` code with no duplication. The WM has two parts: the headless service owns sessions, windows, z-order, focus, taskbar state, lifecycle, input routing, and protocol state; the GUI frontend renders that state and forwards input through a selected backend. Before this migration, hosted windows duplicated rendering logic outside `CompositorBackend` and used bare primitive types on public API boundaries, triggering `primitive_api` lint warnings throughout the WM surface. The fix has two parts: (1) a unified entry point (`host_compositor_entry.spl`) that selects the correct backend at runtime while keeping the compositor core unchanged, and (2) wrapper types in `geometry.spl` that replace bare `i32`/`u32`/`u64` on every public WM/UI API. Zero `@allow(primitive_api)` annotations are permitted in WM or UI scope.
 
 All six host backend entry-point files now call `init_host_wm` and accept both a `--shared-wm` CLI flag and a per-backend env var (see §4c).
 
@@ -57,6 +57,11 @@ All WM public APIs use the wrapper types declared in
 
 The baremetal desktop shell at `src/os/desktop/shell.spl` constructs `Compositor` directly, passing an `FbCompositorBackend` (framebuffer) and a `Ps2InputBackend` (PS/2 keyboard + mouse). `WmService` runs in the same process, opens the named IPC port `"compositor"`, and accepts `WmCreateRequest` / `WmMoveRequest` / `WmResizeRequest` / `WmCloseRequest` from app processes. All message fields are typed with the wrapper types from `geometry.spl` and `window_protocol.spl`.
 
+When SimpleOS needs web UI, it uses the Simple web engine path. That path is
+still a frontend over the same headless WM service and renders through the
+shared Simple 2D engine; it must not introduce a separate web-only WM or drawing
+stack.
+
 ### 4b. Host path
 
 `init_host_wm(config: HostWmConfig) -> HostWmHandle?` in
@@ -82,6 +87,12 @@ All six host-app entry points wire `init_host_wm`:
 | `src/app/ui.web/server.spl` | `WebCanvas` | `SIMPLE_UI_WEB_SHARED_WM` |
 | `src/app/ui.tui_web/app.spl` | `Tui` | `SIMPLE_UI_TUI_WEB_SHARED_WM` |
 
+Host frontends select one of three presentation modes defined by
+[`cross_platform_wm.md`](cross_platform_wm.md): Embedded mode shows the full
+Simple desktop inside one host-native window; Native mode maps Simple app
+windows to host-native windows; Hidden-taskbar mode uses host-native app
+windows while suppressing the Simple taskbar.
+
 ### 4c. `--shared-wm` flag and env var convention
 
 Every host backend entry point accepts `--shared-wm` on the CLI and a corresponding env var (see the table in §4b). When either is set, the app delegates window management to the shared `Compositor`+`WmService` stack instead of its native windowing path. The env vars are checked first; the CLI flag overrides. Neither is required for standalone operation — omitting both keeps the previous single-window native mode.
@@ -101,7 +112,8 @@ Simple class. The adapter renders snapshots and patches, forwards input,
 executes host-window commands, sends native feedback, and advertises
 capabilities. `SimpleWebAdapter` means embedded web rendering with
 `UI_SURFACE_KIND_SIMPLE_WEB`; `ElectronWebAdapter` means the same protocol plus
-native BrowserWindow execution with `UI_SURFACE_KIND_ELECTRON`.
+native BrowserWindow execution with `UI_SURFACE_KIND_ELECTRON`. Both adapters
+use the shared Simple 2D engine as their rendering model.
 
 Constant ownership is Simple-side. `HOST_NATIVE_EVENT_SOURCE` lives in
 `src/app/ui.web/host_adapter_contract.spl`; `UI_SURFACE_KIND_LEGACY`,
