@@ -466,6 +466,29 @@ impl Fat32Driver:
                 return f
         nil
 
+    me restore_open_file_cursor(handle: u64, current_cluster: u32, current_offset: u64) -> Result<bool, text>:
+        var idx = -1
+        var scan = 0
+        while scan < self.open_files.len():
+            if self.open_files[scan].handle == handle:
+                idx = scan
+                break
+            scan = scan + 1
+        if idx < 0:
+            return Result.Err("invalid file handle")
+        val f = self.open_files[idx]
+        self.open_files[idx] = Fat32OpenFile(
+            handle: f.handle,
+            first_cluster: f.first_cluster,
+            current_cluster: current_cluster,
+            current_offset: current_offset,
+            file_size: f.file_size,
+            dir_cluster: f.dir_cluster,
+            name: f.name,
+            flags: f.flags
+        )
+        Result.Ok(true)
+
 # Filesystem trait implementation
 impl Filesystem for Fat32Driver:
     fn fs_name() -> text: "fat32"
@@ -582,10 +605,17 @@ impl Filesystem for Fat32Driver:
 
     me read(handle: u64, size: u64) -> Result<[u8], text>:
         """Read data from open file following cluster chain."""
-        val file = me find_open_file(handle)
-        if not file.?:
+        var open_idx = -1
+        var scan = 0
+        while scan < self.open_files.len():
+            if self.open_files[scan].handle == handle:
+                open_idx = scan
+                break
+            scan = scan + 1
+        
+        if open_idx < 0:
             return Result.Err("invalid file handle")
-        val f = file.unwrap()
+        val f = self.open_files[open_idx]
         val remaining = f.file_size - f.current_offset
         val read_size = if size < remaining: size else: remaining
         if read_size == 0:
@@ -616,8 +646,18 @@ impl Filesystem for Fat32Driver:
             current_cluster = next_result.unwrap()
             offset_in_cluster = 0
 
-        # Update file position
-        # Note: would need mutable reference to open_files entry
+        if open_idx >= 0:
+            val old = self.open_files[open_idx]
+            self.open_files[open_idx] = Fat32OpenFile(
+                handle: old.handle,
+                first_cluster: old.first_cluster,
+                current_cluster: current_cluster,
+                current_offset: old.current_offset + bytes_read,
+                file_size: old.file_size,
+                dir_cluster: old.dir_cluster,
+                name: old.name,
+                flags: old.flags
+            )
         Result.Ok(result_buf)
 
     me write(handle: u64, data: [u8]) -> Result<u64, text>:
@@ -627,10 +667,16 @@ impl Filesystem for Fat32Driver:
         writing. Updates the file size in the directory entry if the
         write extends beyond the current file size.
         """
-        val file = me find_open_file(handle)
-        if not file.?:
+        var open_idx = -1
+        var scan = 0
+        while scan < self.open_files.len():
+            if self.open_files[scan].handle == handle:
+                open_idx = scan
+                break
+            scan = scan + 1
+        if open_idx < 0:
             return Result.Err("invalid file handle")
-        val f = file.unwrap()
+        val f = self.open_files[open_idx]
         if not f.flags.write:
             return Result.Err("file not opened for writing")
 
@@ -690,17 +736,49 @@ impl Filesystem for Fat32Driver:
 
     me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
         """Seek to position in file."""
-        val file = me find_open_file(handle)
-        if not file.?:
+        var open_idx = -1
+        var scan = 0
+        while scan < self.open_files.len():
+            if self.open_files[scan].handle == handle:
+                open_idx = scan
+                break
+            scan = scan + 1
+        if open_idx < 0:
             return Result.Err("invalid file handle")
-        val f = file.unwrap()
+        val f = self.open_files[open_idx]
         val new_offset = match whence:
             case SeekWhence.Set: offset.to_u64()
             case SeekWhence.Cur: (f.current_offset.to_i64() + offset).to_u64()
             case SeekWhence.End: (f.file_size.to_i64() + offset).to_u64()
         if new_offset > f.file_size:
             return Result.Err("seek beyond end of file")
-        # Would need to recompute current_cluster by walking chain
+        if new_offset > 0 and self.sectors_per_cluster == 0:
+            return Result.Err("invalid filesystem geometry")
+        var cluster = f.first_cluster
+        if new_offset > 0:
+            val cluster_size = (self.sectors_per_cluster * self.bytes_per_sector).to_u64()
+            var clusters_to_skip = new_offset / cluster_size
+            if new_offset % cluster_size == 0:
+                clusters_to_skip = clusters_to_skip - 1
+            while clusters_to_skip > 0:
+                val next_result = me read_fat_entry(cluster)
+                if next_result.is_err():
+                    return Result.Err(next_result.unwrap_err())
+                val next = next_result.unwrap()
+                if next >= FAT32_EOC:
+                    return Result.Err("seek beyond cluster chain")
+                cluster = next
+                clusters_to_skip = clusters_to_skip - 1
+        self.open_files[open_idx] = Fat32OpenFile(
+            handle: f.handle,
+            first_cluster: f.first_cluster,
+            current_cluster: cluster,
+            current_offset: new_offset,
+            file_size: f.file_size,
+            dir_cluster: f.dir_cluster,
+            name: f.name,
+            flags: f.flags
+        )
         Result.Ok(new_offset)
 
     fn stat(path: text) -> Result<FsNode, text>:

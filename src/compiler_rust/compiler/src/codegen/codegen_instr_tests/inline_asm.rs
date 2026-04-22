@@ -85,6 +85,33 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
 }
 
 #[test]
+fn native_inline_asm_riscv_target_preserves_raw_instructions() {
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_riscv_raw", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["wfi".to_string(), "j .".to_string()],
+            volatile: true,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(!c.contains(".intel_syntax noprefix"));
+    assert!(c.contains("\"wfi\\n\""));
+    assert!(c.contains("\"j .\\n\""));
+}
+
+#[test]
 fn native_inline_asm_skips_unresolved_simple_operands() {
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_operand_skip", |f| {

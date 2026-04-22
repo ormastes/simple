@@ -454,6 +454,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtq_used_idx", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtq_reset", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtq_push_avail", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arm_virtio_blk_wait_completion", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_status_u8", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_prepare_read", &[I64], &[I64]),
     // =========================================================================

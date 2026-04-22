@@ -1016,9 +1016,11 @@ RuntimeValue rt_mmio_write_u16(RuntimeValue, RuntimeValue)
 RuntimeValue rt_mmio_write_u32(RuntimeValue, RuntimeValue)
     __attribute__((alias("rt_mmio_write_u32_real")));
 
-#define SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE 0x0A003E00U
+#define SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT 0x0A003E00U
 static uint8_t g_arm_virtq_storage[8192] __attribute__((aligned(4096)));
 static uint8_t g_arm_virtio_blk_dma_storage[1024] __attribute__((aligned(512)));
+static uint16_t g_arm_virtq_last_used_idx = 0;
+static uint32_t g_arm_virtio_blk_mmio_base = SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT;
 
 RuntimeValue rt_arm_virtq_base(void)
 {
@@ -1035,11 +1037,17 @@ RuntimeValue rt_arm_virtio_blk_dma_base(void)
     return (RuntimeValue)(uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
 }
 
+RuntimeValue rt_arm_virtio_blk_set_mmio_base(RuntimeValue base_val)
+{
+    g_arm_virtio_blk_mmio_base = (uint32_t)base_val;
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue version_val)
 {
     uint32_t version = (uint32_t)version_val;
     uint32_t queue = (uint32_t)(uintptr_t)g_arm_virtq_storage;
-    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE;
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm_virtio_blk_mmio_base;
     mmio[0x030U / 4U] = 0U;
     mmio[0x038U / 4U] = 128U;
     if (version == 1U) {
@@ -1062,12 +1070,12 @@ RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue version_val)
 RuntimeValue rt_arm_virtio_blk_mmio_read_u32(RuntimeValue off)
 {
     uint32_t decoded = (uint32_t)off;
-    return (RuntimeValue)*(volatile uint32_t *)(uintptr_t)(SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded);
+    return (RuntimeValue)*(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + decoded);
 }
 RuntimeValue rt_arm_virtio_blk_mmio_read_u64(RuntimeValue off)
 {
     uint32_t decoded = (uint32_t)off;
-    uint32_t base = SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded;
+    uint32_t base = g_arm_virtio_blk_mmio_base + decoded;
     uint64_t lo = *(volatile uint32_t *)(uintptr_t)base;
     uint64_t hi = *(volatile uint32_t *)(uintptr_t)(base + 4);
     return (RuntimeValue)(lo | (hi << 32));
@@ -1076,7 +1084,8 @@ RuntimeValue rt_arm_virtio_blk_mmio_write_u32(RuntimeValue off, RuntimeValue val
 {
     uint32_t decoded = (uint32_t)off;
     uint32_t raw_val = (uint32_t)val;
-    *(volatile uint32_t *)(uintptr_t)(SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE + decoded) = raw_val;
+    *(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + decoded) = raw_val;
+    __asm__ volatile("dsb sy" ::: "memory");
     return NIL_VALUE;
 }
 
@@ -1192,6 +1201,7 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
     uint8_t *src = (uint8_t *)(uintptr_t)(uint32_t)addr;
     uint32_t len = (uint32_t)len_val;
     if (len == 0 || len > 0x100000) len = 64;
+    arm32_invalidate_dcache_range((uint32_t)(uintptr_t)src, len);
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
@@ -1226,6 +1236,9 @@ RuntimeValue rt_arm_virtq_reset(void)
 RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
 {
     uint32_t avail_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage + 2048U;
+    uint32_t used_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage + 4096U;
+    arm32_invalidate_dcache_range(used_addr, 64U);
+    g_arm_virtq_last_used_idx = *(volatile uint16_t *)(uintptr_t)(used_addr + 2U);
     volatile uint16_t *avail_idx = (volatile uint16_t *)(uintptr_t)(avail_addr + 2U);
     uint16_t idx = *avail_idx;
     volatile uint16_t *slot = (volatile uint16_t *)(uintptr_t)(avail_addr + 4U + ((idx % 128U) * 2U));
@@ -1237,10 +1250,31 @@ RuntimeValue rt_arm_virtq_push_avail(RuntimeValue desc_idx)
     return NIL_VALUE;
 }
 
+RuntimeValue rt_arm_virtio_blk_wait_completion(RuntimeValue timeout_val)
+{
+    uint32_t used_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage + 4096U;
+    uint32_t timeout = (uint32_t)timeout_val;
+    for (uint32_t i = 0; i < timeout; i++) {
+        arm32_invalidate_dcache_range(used_addr, 64U);
+        uint16_t used_idx = *(volatile uint16_t *)(uintptr_t)(used_addr + 2U);
+        if (used_idx != g_arm_virtq_last_used_idx) {
+            g_arm_virtq_last_used_idx = used_idx;
+            return (RuntimeValue)1;
+        }
+    }
+    arm32_invalidate_dcache_range(used_addr, 64U);
+    uint16_t used_idx = *(volatile uint16_t *)(uintptr_t)(used_addr + 2U);
+    if (used_idx != g_arm_virtq_last_used_idx) {
+        g_arm_virtq_last_used_idx = used_idx;
+        return (RuntimeValue)1;
+    }
+    return (RuntimeValue)0;
+}
+
 RuntimeValue rt_arm_virtio_blk_status_u8(void)
 {
     uint32_t dma_addr = (uint32_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
-    arm32_invalidate_dcache_range(dma_addr + 512U, 64U);
+    arm32_invalidate_dcache_range(dma_addr, 1024U);
     return (RuntimeValue)*(volatile uint8_t *)(uintptr_t)(dma_addr + 528U);
 }
 
@@ -1266,11 +1300,11 @@ RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 {
     if (!IS_HEAP(arr)) return 0;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    uint32_t idx = (uint32_t)idx_val;
+    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
     if (!a || a->hdr.type != HEAP_ARRAY || idx >= a->len) return 0;
     RuntimeValue v = a->items[idx];
-    if (IS_INT(v)) return (RuntimeValue)DECODE_INT(v);
-    return (RuntimeValue)(uint8_t)(uint32_t)v;
+    if (IS_INT(v)) return ENCODE_INT(DECODE_INT(v));
+    return ENCODE_INT((uint8_t)(uint32_t)v);
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)

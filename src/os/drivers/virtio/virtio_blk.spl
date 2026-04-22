@@ -117,7 +117,9 @@ extern fn rt_arm_virtq_reset()
 extern fn rt_arm_virtio_blk_prepare_read(lba: u64)
 extern fn rt_arm_virtio_blk_queue_base() -> u64
 extern fn rt_arm_virtio_blk_dma_base() -> u64
+extern fn rt_arm_virtio_blk_set_mmio_base(base: u64)
 extern fn rt_arm_virtio_blk_configure_queue(version: u32)
+extern fn rt_arm_virtio_blk_wait_completion(timeout_polls: u32) -> u32
 
 struct VirtioBlkDmaAlloc:
     virt_addr: u64
@@ -261,6 +263,7 @@ impl VirtioBlkDriver:
         """Return the ARM QEMU virt block device at the known high MMIO slot."""
         val fixed_addr: u64 = 0x0A003E00
         g_virtio_blk_mmio_base = fixed_addr
+        rt_arm_virtio_blk_set_mmio_base(fixed_addr)
         VirtioBlkDriver(
             base_addr: fixed_addr,
             capacity_sectors: 0,
@@ -288,11 +291,6 @@ impl VirtioBlkDriver:
         or nil if no device is found.
         """
         arm_fs_exec_trace(100)
-        val fixed_addr: u64 = 0x0A003E00
-        serial_println("[virtio-blk-probe] mmio=0x0a003e00")
-        arm_fs_exec_trace(101)
-        g_virtio_blk_mmio_base = fixed_addr
-        return Some(VirtioBlkDriver.new(fixed_addr))
         var i: i32 = 0
         while i < 32:
             val addr = VIRTIO_MMIO_BASE + ((i as u64) * VIRTIO_MMIO_STRIDE)
@@ -306,6 +304,7 @@ impl VirtioBlkDriver:
                     serial_println("[virtio-blk-probe] mmio=0x{addr}")
                     arm_fs_exec_trace(101)
                     g_virtio_blk_mmio_base = addr
+                    rt_arm_virtio_blk_set_mmio_base(addr)
                     return Some(VirtioBlkDriver.new(addr))
             i = i + 1
         arm_fs_exec_trace(102)
@@ -422,7 +421,6 @@ impl VirtioBlkDriver:
             return []
         val data_addr = header_addr + 16
         val status_addr = data_addr + 512
-        rt_arm_virtq_reset()
         rt_arm_virtio_blk_prepare_read(lba)
 
         val h_low = header_addr & 0xFFFFFFFF
@@ -442,7 +440,7 @@ impl VirtioBlkDriver:
         _virtio_blk_reg_write32(80, 0)
         arm_fs_exec_trace(123)
 
-        if not _virtq_wait_completion_early(BLK_COMPLETION_TIMEOUT_POLLS):
+        if rt_arm_virtio_blk_wait_completion(BLK_COMPLETION_TIMEOUT_POLLS) == 0:
             serial_println("[virtio-blk] direct read timeout lba={lba}")
             return []
         arm_fs_exec_trace(124)

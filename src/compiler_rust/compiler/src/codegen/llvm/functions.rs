@@ -598,27 +598,19 @@ impl LlvmBackend {
                 self.compile_call(*dest, target, args, vreg_map, builder, module)?;
             }
             MirInst::InlineAsm { instructions, .. } => {
-                if !matches!(
-                    self.target.arch,
-                    simple_common::target::TargetArch::X86 | simple_common::target::TargetArch::X86_64
-                ) {
-                    // Inline asm blocks are target-specific. Full-tree OS builds can still
-                    // compile unrelated x86 modules while targeting RISC-V.
-                } else {
-                    let fn_type = self.context.void_type().fn_type(&[], false);
-                    let asm = self.context.create_inline_asm(
-                        fn_type,
-                        instructions.join("\n"),
-                        String::new(),
-                        true,
-                        false,
-                        Some(InlineAsmDialect::ATT),
-                        false,
-                    );
-                    builder
-                        .build_indirect_call(fn_type, asm, &[], "")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
-                }
+                let fn_type = self.context.void_type().fn_type(&[], false);
+                let asm = self.context.create_inline_asm(
+                    fn_type,
+                    instructions.join("\n"),
+                    String::new(),
+                    true,
+                    false,
+                    Some(InlineAsmDialect::ATT),
+                    false,
+                );
+                builder
+                    .build_indirect_call(fn_type, asm, &[], "")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
             }
             MirInst::IndirectCall {
                 dest,

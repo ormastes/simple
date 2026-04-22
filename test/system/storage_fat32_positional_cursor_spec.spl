@@ -1,0 +1,83 @@
+"""
+# FAT32 Positional Cursor Preservation
+
+System-level regression check for FR-STORAGE-0002. FAT32 positional I/O uses
+save/seek/operation/restore, so cursor restoration must preserve size changes.
+"""
+
+use os.services.fat32.fat32.{Fat32Driver, Fat32OpenFile, BlockDevice}
+use os.kernel.types.fs_types.{FileFlags}
+use os.services.vfs.vfs.{SeekWhence}
+
+class CursorMockBlockDevice:
+    sector: [u8]
+
+impl CursorMockBlockDevice:
+    static fn new() -> CursorMockBlockDevice:
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        CursorMockBlockDevice(sector: bytes)
+
+impl BlockDevice for CursorMockBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        var i = 0
+        while i < self.sector.len() and i < buffer.len():
+            buffer[i] = self.sector[i]
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+fn cursor_driver() -> Fat32Driver:
+    var driver = Fat32Driver.new(CursorMockBlockDevice.new())
+    driver.open_files.push(Fat32OpenFile(
+        handle: 7,
+        first_cluster: 2,
+        current_cluster: 2,
+        current_offset: 10,
+        file_size: 64,
+        dir_cluster: 2,
+        name: "A.TXT",
+        flags: FileFlags(read: true, write: true, create: false, append: false, truncate: false)
+    ))
+    driver
+
+describe "FAT32 positional cursor preservation":
+    """FAT32 open-file cursor restoration must not roll back metadata."""
+    it "seek updates the open-file cursor":
+        """Seek replaces the stored open-file entry with the requested offset."""
+        var driver = cursor_driver()
+        val seek_r = driver.seek(7, 0, SeekWhence.Set)
+        expect(seek_r.is_ok()).to_equal(true)
+        val file = driver.open_files[0]
+        expect(file.current_offset).to_equal(0)
+
+    it "cursor restore keeps file size while restoring saved position":
+        """Restoring a saved cursor preserves any file-size growth already recorded."""
+        var driver = cursor_driver()
+        driver.seek(7, 0, SeekWhence.Set)
+        val current = driver.open_files[0]
+        driver.open_files.remove(0)
+        driver.open_files.push(Fat32OpenFile(
+            handle: current.handle,
+            first_cluster: current.first_cluster,
+            current_cluster: current.current_cluster,
+            current_offset: current.current_offset,
+            file_size: 96u64,
+            dir_cluster: current.dir_cluster,
+            name: current.name,
+            flags: current.flags
+        ))
+        val restore = driver.restore_open_file_cursor(7, 2, 10)
+        expect(restore.is_ok()).to_equal(true)
+        val file = driver.open_files[0]
+        expect(file.current_offset).to_equal(10)
+        expect(file.current_cluster).to_equal(2)
+        expect(file.file_size).to_equal(96u64)

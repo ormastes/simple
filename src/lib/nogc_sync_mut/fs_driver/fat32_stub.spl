@@ -1,3 +1,5 @@
+#![allow(stub_impl)]
+
 # Fat32Driver — FsDriver wrapper delegating to the pure-Simple FAT32 implementation.
 #
 # TODO(rename): rename this file to fat32.spl once M2 entry-point migration is done.
@@ -234,16 +236,64 @@ impl FsDriver for Fat32Driver:
             case Result.Err(msg): Err(FsError.Io(msg))
 
     me fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        # pread = positional read without advancing the file cursor.
-        # Fat32Core has no true positional I/O; seek+read is the best we can do.
-        # pass_todo for cursor-preservation; for M1 this is equivalent to read().
-        # Tracked as FR-STORAGE-0002.
-        pass_todo
+        val entry = self.find_file_entry(handle.id)
+        if not entry.?:
+            return Err(FsError.BadHandle)
+        val e = entry.unwrap()
+        var saved_idx = -1
+        var scan = 0
+        while scan < self.inner.open_files.len():
+            if self.inner.open_files[scan].handle == e.core_id:
+                saved_idx = scan
+                break
+            scan = scan + 1
+        if saved_idx < 0:
+            return Err(FsError.BadHandle)
+        val saved_file = self.inner.open_files[saved_idx]
+        use os.services.vfs.vfs.{SeekWhence}
+        val seek_r = self.inner.seek(e.core_id, offset, SeekWhence.Set)
+        if seek_r.is_err():
+            return Err(FsError.Io(seek_r.unwrap_err()))
+        val read_r = self.inner.read(e.core_id, buf.len().to_u64())
+        val restore_r = self.inner.restore_open_file_cursor(e.core_id, saved_file.current_cluster, saved_file.current_offset)
+        if restore_r.is_err():
+            return Err(FsError.Io(restore_r.unwrap_err()))
+        match read_r:
+            case Result.Ok(data):
+                var i: i32 = 0
+                while i < data.len() and i < buf.len():
+                    buf[i] = data[i]
+                    i = i + 1
+                Ok(i.to_i64())
+            case Result.Err(msg):
+                Err(FsError.Io(msg))
 
     me fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        # pass_todo: same reason as pread — Fat32Core advances the cursor.
-        # Tracked as FR-STORAGE-0002.
-        pass_todo
+        val entry = self.find_file_entry(handle.id)
+        if not entry.?:
+            return Err(FsError.BadHandle)
+        val e = entry.unwrap()
+        var saved_idx = -1
+        var scan = 0
+        while scan < self.inner.open_files.len():
+            if self.inner.open_files[scan].handle == e.core_id:
+                saved_idx = scan
+                break
+            scan = scan + 1
+        if saved_idx < 0:
+            return Err(FsError.BadHandle)
+        val saved_file = self.inner.open_files[saved_idx]
+        use os.services.vfs.vfs.{SeekWhence}
+        val seek_r = self.inner.seek(e.core_id, offset, SeekWhence.Set)
+        if seek_r.is_err():
+            return Err(FsError.Io(seek_r.unwrap_err()))
+        val write_r = self.inner.write(e.core_id, buf)
+        val restore_r = self.inner.restore_open_file_cursor(e.core_id, saved_file.current_cluster, saved_file.current_offset)
+        if restore_r.is_err():
+            return Err(FsError.Io(restore_r.unwrap_err()))
+        match write_r:
+            case Result.Ok(n): Ok(n.to_i64())
+            case Result.Err(msg): Err(FsError.Io(msg))
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         # pass_todo: Fat32Core exposes no handle→stat; needs open_files exposure

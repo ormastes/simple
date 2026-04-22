@@ -341,7 +341,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Claude Sonnet 4.6 / FR-COMPILER-003 A2 session
 - **Target:** compiler — `src/compiler/20.hir/hir_types.spl` + `src/compiler/20.hir/hir_lowering/`
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented (source-level, 2026-04-22; release artifact acceptance pending)
 - **Requested-semantics:**
   The driver uses a single shared `HirLowering` instance with a flat global
   `SymbolTable` scope to lower all modules in sequence. When two modules export
@@ -358,16 +358,27 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   different modules do not collide. The Rust seed uses per-compilation-unit
   `GlobalScope` instances for this purpose.
 - **Acceptance-criteria:**
-  - [ ] `use compiler.common.driver_core_types.{CompileOptions}` followed by
+  - [x] `use compiler.common.driver_core_types.{CompileOptions}` followed by
         a field access on `low_memory` / `mode` succeeds in the self-hosted binary
         regardless of module load order (FR-COMPILER-002 AC #1 and #2).
-  - [ ] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to
+  - [x] `use compiler.backend.backend.backend_types.{CompileOptions}` resolves to
         the 7-field backend struct and does NOT expose `mode` / `low_memory`.
-  - [ ] Both coexist in the same compilation unit via aliased imports without collision.
-  - [ ] FR-COMPILER-001 acceptance criteria are fully met.
+  - [x] Both coexist in the same compilation unit via aliased imports without collision.
+  - [ ] FR-COMPILER-001 release-binary acceptance criteria are fully met.
 - **Related-upfront:** none
-- **Related-design-doc:** `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
+- **Related-design-doc:** `doc/05_design/compiler_module_scoped_hir_lowering.md`
+  (implementation design); `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
   (reference: per-unit GlobalScope creation)
+- **Notes:**
+  Implemented by constructing a fresh `HirLowering` per module in
+  `Driver.lower_and_check_impl` and `Driver.lower_to_hir_impl`, using
+  `hirlowering_for_module(filename, modules_by_name)` to preserve shared import
+  context without sharing the symbol table. Regression coverage:
+  `test/system/compiler_module_scoped_hir_lowering_spec.spl`,
+  `test/system/compiler_compile_options_field_access_spec.spl`, and
+  `test/unit/compiler/hir/resolve_import_symbols_spec.spl`. The release-binary
+  acceptance remains pending for the same artifact refresh reason noted in
+  FR-COMPILER-001.
 - **Related-issue:** FR-COMPILER-002, FR-COMPILER-003 (prerequisites and parent)
 - **Notes:**
   FR-COMPILER-003 A2 (`resolve_import_symbols` + first-write-wins guard) partially

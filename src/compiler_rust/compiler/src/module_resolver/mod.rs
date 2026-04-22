@@ -83,6 +83,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_directory_mod_file_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let security = src.join("common").join("security");
+        fs::create_dir_all(&security).unwrap();
+
+        fs::write(security.join("mod.spl"), "pub use std.security.types").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["common".into(), "security".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, security.join("mod.spl"));
+        assert!(resolved.is_directory);
+    }
+
+    #[test]
     fn test_resolve_nested_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");

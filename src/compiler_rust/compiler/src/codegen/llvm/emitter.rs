@@ -466,12 +466,6 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool) -> Result<(), String> {
-        if !matches!(
-            self.backend.target.arch,
-            simple_common::target::TargetArch::X86 | simple_common::target::TargetArch::X86_64
-        ) {
-            return Ok(());
-        }
         let fn_type = self.backend.context.void_type().fn_type(&[], false);
         let asm = self.backend.context.create_inline_asm(
             fn_type,

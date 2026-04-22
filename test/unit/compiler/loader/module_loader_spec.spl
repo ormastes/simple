@@ -35,6 +35,41 @@ describe "Module Loader":
         expect(loader.loaded_modules().len()).to_equal(1)
         expect(loader.stats().module_count).to_equal(1)
 
+    it "loads a module with a symbol and resolves it from globals":
+        var loader = ModuleLoader.with_defaults()
+        val loaded = loader.load(EXISTING_MODULE_PATH)
+
+        match loaded:
+            case LoadResult.Success(module):
+                expect(module.path).to_equal(EXISTING_MODULE_PATH)
+            case _:
+                fail("expected load success")
+
+        val symbol = LoadedSymbol(
+            name: "module_exported_fn",
+            address: 4096,
+            size: 16,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 8
+        )
+        loader.global_symbols["module_exported_fn"] = (EXISTING_MODULE_PATH, symbol)
+
+        val resolved = loader.resolve_symbol("module_exported_fn")
+        match resolved:
+            case SymbolResult.Found(found, code):
+                expect(found.name).to_equal("module_exported_fn")
+                expect(found.address).to_equal(4096)
+                expect(found.size).to_equal(16)
+                expect(found.ty).to_equal(SymbolType.Function)
+                expect(found.is_jit).to_equal(false)
+                expect(found.file_offset).to_equal(8)
+                expect(code.len()).to_equal(0)
+            case _:
+                fail("expected loaded module symbol")
+
+        expect(loader.stats().symbol_count).to_equal(1)
+
     it "loads multiple existing paths and reports module count":
         var loader = ModuleLoader.with_defaults()
         val first = loader.load(EXISTING_MODULE_PATH)
@@ -134,6 +169,7 @@ describe "Module Loader":
 
     it "mangles explicit generic type arguments":
         var loader = ModuleLoader.with_defaults()
+        expect(loader.config.enable_jit).to_equal(true)
         val result = loader.resolve_generic("Vec", [make_named_type("Int"), make_named_type("String")])
 
         match result:
@@ -141,6 +177,11 @@ describe "Module Loader":
                 expect(name).to_equal("Vec$Int_String")
             case _:
                 fail("expected unresolved mangled generic symbol")
+
+        expect(loader.global_symbols.contains_key("Vec$Int_String")).to_equal(false)
+        expect(loader.jit.stats().compile_count).to_equal(0)
+        expect(loader.jit.stats().cached_count).to_equal(0)
+        expect(loader.stats().symbol_count).to_equal(0)
 
     it "resolves Vec i64 through the generic loader API":
         var loader = ModuleLoader.with_defaults()

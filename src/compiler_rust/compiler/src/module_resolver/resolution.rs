@@ -321,6 +321,15 @@ impl ModuleResolver {
                 manifest: None, // Will be loaded on demand
             });
         }
+        let mod_path = dir_path.join("mod.spl");
+        if mod_path.exists() && mod_path.is_file() {
+            return Ok(ResolvedModule {
+                path: mod_path,
+                module_path: original_path.clone(),
+                is_directory: true,
+                manifest: None,
+            });
+        }
 
         // Try .spl file
         let file_path = current.join(format!("{}.spl", last));
@@ -356,6 +365,15 @@ impl ModuleResolver {
                     manifest: None,
                 });
             }
+            let numbered_mod = numbered_dir.join("mod.spl");
+            if numbered_mod.exists() && numbered_mod.is_file() {
+                return Ok(ResolvedModule {
+                    path: numbered_mod,
+                    module_path: original_path.clone(),
+                    is_directory: true,
+                    manifest: None,
+                });
+            }
             // Try NN.name/name.spl (e.g., 70.backend/backend.spl)
             let numbered_file = numbered_dir.join(format!("{}.spl", last));
             if numbered_file.exists() && numbered_file.is_file() {
@@ -375,6 +393,15 @@ impl ModuleResolver {
             if dotted_init.exists() && dotted_init.is_file() {
                 return Ok(ResolvedModule {
                     path: dotted_init,
+                    module_path: original_path.clone(),
+                    is_directory: true,
+                    manifest: None,
+                });
+            }
+            let dotted_mod = dotted_dir.join("mod.spl");
+            if dotted_mod.exists() && dotted_mod.is_file() {
+                return Ok(ResolvedModule {
+                    path: dotted_mod,
                     module_path: original_path.clone(),
                     is_directory: true,
                     manifest: None,

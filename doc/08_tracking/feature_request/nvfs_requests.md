@@ -101,7 +101,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Filed-by:** Phase 9-M1-retrofit agent (session nvfs-m1-retrofit)
 - **Target:** storage  (src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl → fat32.spl)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-04-22, source-level)
 - **Requested-semantics:**
   `FsDriver.pread(handle, offset, buf)` must not advance the file cursor — it is
   a POSIX `pread(2)` semantics requirement. The current `Fat32Driver` in
@@ -112,16 +112,20 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   `Fat32Driver` (alias: `src/os/services/fat32/fat32.spl`). Positional write
   (`pwrite`) has the same requirement.
 - **Acceptance-criteria:**
-  - [ ] `pread(h, 0, buf)` reads from offset 0 without changing the cursor reported
+  - [x] `pread(h, 0, buf)` reads from offset 0 without changing the cursor reported
         by a subsequent `read(h, current_pos, buf2)`
-  - [ ] `pwrite(h, 0, buf)` writes at offset 0 without changing the cursor
-  - [ ] Round-trip: `write(h, 10, a)` then `pread(h, 0, b)` reads from 0, cursor
+  - [x] `pwrite(h, 0, buf)` writes at offset 0 without changing the cursor
+  - [x] Round-trip: `write(h, 10, a)` then `pread(h, 0, b)` reads from 0, cursor
         remains at 10 for the next sequential read
-- **Related-upfront:** none
-- **Related-design-doc:** `doc/05_design/simpleos_fs_migration.md §M4`
+- **Related-upfront:** `doc/01_research/local/storage_fat32_positional_cursor.md`,
+  `doc/03_plan/sys_test/storage_fat32_positional_cursor.md`
+- **Related-design-doc:** `doc/05_design/storage_fat32_positional_cursor.md`;
+  background: `doc/05_design/simpleos_fs_migration.md §M4`
 - **Related-issue:** none
 - **Notes:** P2 because pread/pwrite are not used by any current entry-point file.
-  Will become P1 when M2 (replace rt_fat32_* in shell) lands.
+  Implemented by save/seek/operation/restore in the Fat32 wrapper plus cursor
+  persistence in the underlying Fat32Driver. Regression coverage:
+  `test/system/storage_fat32_positional_cursor_spec.spl`.
 
 ---
 

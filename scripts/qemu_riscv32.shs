@@ -6,6 +6,7 @@
 #   sh scripts/qemu_riscv32.shs --smoke      # minimal boot smoke
 #   sh scripts/qemu_riscv32.shs --skip-build # use prebuilt kernel
 #   sh scripts/qemu_riscv32.shs --interactive --net --display
+#   sh scripts/qemu_riscv32.shs --fs-image   # attach generated FAT/NVFS-marked image
 #
 # Exit codes:
 #   0 — boot markers found or QEMU/kernel unavailable (SKIP)
@@ -25,6 +26,9 @@ SMOKE=0
 INTERACTIVE=0
 NET=0
 DISPLAY=0
+FS_IMAGE=0
+NVFS_IMAGE=0
+DISK_IMAGE="${RISCV32_DISK_IMAGE:-$REPO_ROOT/build/os/fat32-riscv32.img}"
 QMP_SOCKET=""
 CAPTURE_PPM=""
 
@@ -38,6 +42,14 @@ while [ $# -gt 0 ]; do
         --interactive) INTERACTIVE=1 ;;
         --net) NET=1 ;;
         --display) DISPLAY=1 ;;
+        --fs-image) FS_IMAGE=1 ;;
+        --nvfs-image) FS_IMAGE=1; NVFS_IMAGE=1 ;;
+        --disk-image=*) DISK_IMAGE="${1#--disk-image=}" ;;
+        --disk-image)
+            shift
+            [ $# -gt 0 ] || { echo "Missing value for --disk-image"; exit 1; }
+            DISK_IMAGE="$1"
+            ;;
         *)            echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
@@ -134,6 +146,42 @@ if [ ! -f "$KERNEL" ]; then
     exit 0
 fi
 
+ensure_fs_image() {
+    _img="$1"
+    _arch="$2"
+    mkdir -p "$(dirname "$_img")"
+    SIMPLEOS_IMAGE_VERSION="${SIMPLEOS_IMAGE_VERSION:-0.1.0}" \
+        sh "$REPO_ROOT/scripts/make_os_disk.shs" 64 "$_img" "" "$_arch"
+}
+
+validate_fs_image_markers() {
+    _img="$1"
+    if [ ! -f "$_img" ]; then
+        echo "FAIL: RISC-V filesystem image missing: $_img"
+        return 1
+    fi
+    if ! grep -a -q "simpleos=" "$_img"; then
+        echo "FAIL: RISC-V filesystem image lacks /SYS/VERSION.TXT marker"
+        return 1
+    fi
+    if ! grep -a -q "nvfs-image-version=" "$_img"; then
+        echo "FAIL: RISC-V filesystem image lacks /SYS/NVFSVER.TXT marker"
+        return 1
+    fi
+    return 0
+}
+
+if [ "$FS_IMAGE" -eq 1 ]; then
+    echo "[disk] Building RISC-V filesystem image: $DISK_IMAGE"
+    if ! ensure_fs_image "$DISK_IMAGE" "riscv32"; then
+        echo "FAIL: RISC-V filesystem image build failed"
+        exit 1
+    fi
+    if ! validate_fs_image_markers "$DISK_IMAGE"; then
+        exit 1
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Boot QEMU — direct M-mode virt machine, serial to log file
 # ---------------------------------------------------------------------------
@@ -148,6 +196,9 @@ else
 fi
 if [ "$DISPLAY" -eq 1 ]; then
     QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -device virtio-gpu-pci,disable-legacy=on"
+fi
+if [ "$FS_IMAGE" -eq 1 ]; then
+    QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -drive file=$DISK_IMAGE,if=none,id=rvfs,format=raw -device virtio-blk-device,drive=rvfs"
 fi
 
 QMP_ARGS=""
@@ -357,6 +408,15 @@ if [ "$DISPLAY" -eq 1 ]; then
     check_marker "Display GPU I/O" "Display GPU ready|Display flush passed"
     echo "PASS: Display screenshot"
     PASS=$((PASS + 1))
+fi
+
+if [ "$FS_IMAGE" -eq 1 ]; then
+    echo "PASS: RISC-V filesystem image attached"
+    PASS=$((PASS + 1))
+    if [ "$NVFS_IMAGE" -eq 1 ]; then
+        echo "PASS: RISC-V NVFS image markers present"
+        PASS=$((PASS + 1))
+    fi
 fi
 
 echo ""
