@@ -7,8 +7,7 @@
 use std.spostgre_if.types.{Rel, BlkNo}
 use std.spostgre_if.storage_api.{PageBuf}
 use engine.page.{PageHeader}
-use engine.tier_cache.{TierCache, tier_cache_new, tier_cache_put,
-                        tier_cache_get, tier_cache_invalidate}
+use engine.tier_cache.{TierCache, tier_cache_new, tier_cache_put}
 
 # ---------------------------------------------------------------------------
 # Free-space accounting helpers (FR-HOT-001).
@@ -51,6 +50,20 @@ struct BufferPool:
         BufferPool(slots: [], capacity: capacity,
                    tier: tier_cache_new(), disk_reads: 0)
 
+fn _buf_cached_pagebuf(pool: BufferPool, rel: Rel, blk: BlkNo) -> PageBuf:
+    """Return a PageBuf for a TierCache hit, or a null PageBuf on miss."""
+    var i = 0
+    while i < pool.tier.index_keys.len():
+        val key = pool.tier.index_keys[i]
+        if key.rel_id == rel.id and key.blk == blk.n:
+            return PageBuf(
+                arena_id: pool.tier.arena_handle,
+                offset: pool.tier.index_offsets[i],
+                length: pool.tier.index_lengths[i],
+                generation: 0)
+        i = i + 1
+    PageBuf(arena_id: -1, offset: 0, length: 0, generation: 0)
+
 fn buf_get(pool: BufferPool, rel: Rel, blk: BlkNo) -> PageBuf:
     """Pin (rel, blk); load from arena if missing.
 
@@ -59,13 +72,9 @@ fn buf_get(pool: BufferPool, rel: Rel, blk: BlkNo) -> PageBuf:
       2. Otherwise fall through to durable storage (disk_reads counter bumped).
     """
     # M4 fault hook — L2 check before durable read.
-    val cached = tier_cache_get(pool.tier, rel.id, blk.n)
-    if cached.len() > 0:
-        return PageBuf(
-            arena_id: pool.tier.arena_handle,
-            offset: 0,
-            length: cached.len() as i64,
-            generation: 0)
+    val cached = _buf_cached_pagebuf(pool, rel, blk)
+    if cached.length > 0:
+        return cached
     # L2 miss: no durable page store is wired into this example buffer pool yet.
     # disk_reads increment omitted because pool is immutable here;
     # a real impl would return (PageBuf, BufferPool) or use interior mutability.
@@ -91,5 +100,5 @@ fn buf_evict(pool: BufferPool, slot: BufferSlot) -> BufferPool:
 
 fn buf_prefetch(pool: BufferPool, rel: Rel, blk: BlkNo) -> bool:
     """Fire-and-forget prefetch."""
-    val cached = tier_cache_get(pool.tier, rel.id, blk.n)
-    cached.len() > 0
+    val cached = _buf_cached_pagebuf(pool, rel, blk)
+    cached.length > 0

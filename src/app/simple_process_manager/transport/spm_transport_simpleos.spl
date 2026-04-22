@@ -2,14 +2,14 @@
 """SpmTransportSimpleos — SimpleOS-kernel syscall-backed transport.
 
 Uses `sys_spm_send` / `sys_spm_listen` from `src/os/userlib/syscall_raw.spl`.
-The real byte-slice pointer wiring is a TODO (marked inline) — for unit
-specs we expose `SpmTransportMock` which routes requests straight into a
-handler callback without touching the kernel.
+For unit specs we expose `SpmTransportMock` which routes requests straight
+into a handler callback without touching the kernel.
 
 Feature: spm-winfs-llm-suite AC-3.
 """
 
-use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_response, spm_encode_response, spm_decode_request}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_response, spm_decode_request}
+use os.userlib.syscall_raw.{sys_spm_send, sys_spm_listen}
 
 # ---------------------------------------------------------------------------
 # Production impl (syscall-backed)
@@ -26,18 +26,22 @@ class SpmTransportSimpleos:
 impl SpmTransport for SpmTransportSimpleos:
     fn send(req: SpmRequest) -> SpmResponse:
         val encoded = spm_encode_request(req)
-        # TODO: wire raw pointer + length from `encoded` through
-        # `syscall_raw.sys_spm_send`. For now this stub returns an
-        # "unavailable" response so userland callers can detect that the
-        # kernel path is not wired yet.
-        SpmResponse(
-            ok: false,
-            body: [],
-            error: "simpleos transport not wired (kernel stub)")
+        val response_bytes = sys_spm_send(encoded)
+        if response_bytes.len() == 0:
+            return SpmResponse(
+                ok: false,
+                body: [],
+                error: "simpleos transport has no response available")
+        spm_decode_response(response_bytes)
 
     fn listen(bind: text) -> TransportStatus:
-        # TODO: invoke `syscall_raw.sys_spm_listen` with a handler port.
-        TransportStatus.failure("simpleos listen not wired")
+        val request_bytes = sys_spm_listen()
+        if request_bytes.len() == 0:
+            return TransportStatus.success()
+        val req = spm_decode_request(request_bytes)
+        if req.kind == "":
+            return TransportStatus.failure("simpleos listen received malformed request on {bind}")
+        TransportStatus.failure("simpleos listen requires response copy-out syscall support")
 
 # ---------------------------------------------------------------------------
 # Test / in-process mock (used by spm_service_spec)

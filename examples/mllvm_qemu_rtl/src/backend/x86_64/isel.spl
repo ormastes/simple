@@ -212,35 +212,35 @@ fn isel_inst(ctx: ISelContext, op: IrTcOp) -> ISelInstResult:
         Ret(value):
             _isel_ret(ctx, value)
         Switch(value, cases, default):
-            pass_todo
+            _isel_switch(ctx, value, cases, default)
 
         # ---- Function Calls ----
         Call(dest, func, args, cc):
             _isel_call(ctx, dest, func, args, cc)
         CallHelper(dest, helper_id, args):
-            pass_todo
+            _isel_call_helper(ctx, dest, helper_id, args)
 
         # ---- Guest State (Emulation Only) ----
         ReadGuestReg(dest, guest_reg):
-            pass_todo
+            _isel_read_guest_reg(ctx, dest, guest_reg)
         WriteGuestReg(guest_reg, value):
-            pass_todo
+            _isel_write_guest_reg(ctx, guest_reg, value)
 
         # ---- Translation Block Control (Emulation Only) ----
         ExitTB(exit_code):
-            pass_todo
+            _isel_exit_tb(ctx, exit_code)
         GotoTB(tb_index):
-            pass_todo
+            _isel_goto_tb(ctx, tb_index)
         LookupGotoTB(target_pc):
-            pass_todo
+            _isel_lookup_goto_tb(ctx, target_pc)
 
         # ---- Aggregates ----
         GetElementPtr(dest, base, indices):
-            pass_todo
+            _isel_get_element_ptr(ctx, dest, base, indices)
         ExtractValue(dest, agg, index):
-            pass_todo
+            _isel_extract_value(ctx, dest, agg, index)
         InsertValue(dest, agg, value, index):
-            pass_todo
+            _isel_insert_value(ctx, dest, agg, value, index)
 
         # ---- SSA ----
         Phi(dest, incoming):
@@ -249,7 +249,7 @@ fn isel_inst(ctx: ISelContext, op: IrTcOp) -> ISelInstResult:
 
         # ---- Special ----
         SyncGuestPC(value):
-            pass_todo
+            _isel_sync_guest_pc(ctx, value)
         Barrier(kind):
             # Memory fence — emit mfence or lfence depending on kind
             ISelInstResult(insts: [new_x64_inst(X64_OP_NOP, [])], ctx: ctx)
@@ -266,18 +266,20 @@ fn isel_inst(ctx: ISelContext, op: IrTcOp) -> ISelInstResult:
 fn _isel_binop(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, opcode: i64) -> ISelInstResult:
     """Generic binary op: mov dest, a; op dest, b."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
 
     var insts: [X64Inst] = []
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
+
     # mov dest, a
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, va]))
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, ar.operand]))
     # op dest, b
-    insts.push(new_x64_inst(opcode, [d, vb]))
+    insts.push(new_x64_inst(opcode, [d, br.operand]))
 
     ISelInstResult(insts: insts, ctx: c)
 
@@ -288,13 +290,13 @@ fn _isel_binop(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, op
 fn _isel_unary(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, opcode: i64) -> ISelInstResult:
     """Generic unary op: mov dest, a; op dest."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
 
     var insts: [X64Inst] = []
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, va]))
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, ar.operand]))
     insts.push(new_x64_inst(opcode, [d]))
 
     ISelInstResult(insts: insts, ctx: c)
@@ -306,18 +308,19 @@ fn _isel_unary(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, opcode: i64) -> 
 fn _isel_mul(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue) -> ISelInstResult:
     """imul dest, src — dest = a * b."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
 
     var insts: [X64Inst] = []
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
     # mov dest, a
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, va]))
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, ar.operand]))
     # imul dest, b
-    insts.push(new_x64_inst(X64_OP_IMUL_RR, [d, vb]))
+    insts.push(new_x64_inst(X64_OP_IMUL_RR, [d, br.operand]))
 
     ISelInstResult(insts: insts, ctx: c)
 
@@ -330,27 +333,28 @@ fn _isel_div(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, sign
     x86 idiv: RDX:RAX / src -> quotient in RAX, remainder in RDX.
     """
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
 
     var insts: [X64Inst] = []
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
     # mov RAX, a
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), va]))
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), ar.operand]))
 
     if signed:
         # cqo — sign-extend RAX into RDX:RAX
         insts.push(new_x64_inst(X64_OP_CQO, []))
         # idiv b
-        insts.push(new_x64_inst(X64_OP_IDIV_R, [vb]))
+        insts.push(new_x64_inst(X64_OP_IDIV_R, [br.operand]))
     else:
         # xor RDX, RDX — zero-extend
         insts.push(new_x64_inst(X64_OP_XOR_RR, [op_phys(X64_RDX), op_phys(X64_RDX)]))
         # div b
-        insts.push(new_x64_inst(X64_OP_DIV_R, [vb]))
+        insts.push(new_x64_inst(X64_OP_DIV_R, [br.operand]))
 
     # mov dest, RAX (quotient)
     insts.push(new_x64_inst(X64_OP_MOV_RR, [d, op_phys(X64_RAX)]))
@@ -360,22 +364,23 @@ fn _isel_div(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, sign
 fn _isel_rem(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, signed: bool) -> ISelInstResult:
     """Remainder: dest = a % b. Remainder is in RDX after idiv/div."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
 
     var insts: [X64Inst] = []
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), va]))
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), ar.operand]))
 
     if signed:
         insts.push(new_x64_inst(X64_OP_CQO, []))
-        insts.push(new_x64_inst(X64_OP_IDIV_R, [vb]))
+        insts.push(new_x64_inst(X64_OP_IDIV_R, [br.operand]))
     else:
         insts.push(new_x64_inst(X64_OP_XOR_RR, [op_phys(X64_RDX), op_phys(X64_RDX)]))
-        insts.push(new_x64_inst(X64_OP_DIV_R, [vb]))
+        insts.push(new_x64_inst(X64_OP_DIV_R, [br.operand]))
 
     # mov dest, RDX (remainder)
     insts.push(new_x64_inst(X64_OP_MOV_RR, [d, op_phys(X64_RDX)]))
@@ -389,18 +394,19 @@ fn _isel_rem(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, sign
 fn _isel_shift(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, opcode: i64) -> ISelInstResult:
     """Shift/rotate: dest = a op b. Shift amount goes into RCX."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
 
     var insts: [X64Inst] = []
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
     # mov dest, a
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, va]))
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, ar.operand]))
     # mov RCX, b (shift amount in CL)
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RCX), vb]))
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RCX), br.operand]))
     # shl/shr/sar/rol/ror dest, cl
     insts.push(new_x64_inst(opcode, [d]))
 
@@ -413,17 +419,18 @@ fn _isel_shift(ctx: ISelContext, dest: IrTcValue, a: IrTcValue, b: IrTcValue, op
 fn _isel_cmp(ctx: ISelContext, dest: IrTcValue, cond: IrTcCond, a: IrTcValue, b: IrTcValue) -> ISelInstResult:
     """Compare and set: cmp a, b; setcc dest; movzx dest, dest_8."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, a)
-    c = _lower_value(c, b)
-
     val d = _value_op(c, dest)
-    val va = _value_op(c, a)
-    val vb = _value_op(c, b)
     val x64_cond = irtc_cond_to_x64(cond)
 
     var insts: [X64Inst] = []
+    val ar = _materialize_value(c, a)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val br = _materialize_value(c, b)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
     # cmp a, b
-    insts.push(new_x64_inst(X64_OP_CMP_RR, [va, vb]))
+    insts.push(new_x64_inst(X64_OP_CMP_RR, [ar.operand, br.operand]))
     # setcc dest (8-bit result)
     val setcc_op = _setcc_opcode(x64_cond)
     insts.push(new_x64_inst(setcc_op, [d]))
@@ -439,57 +446,59 @@ fn _isel_cmp(ctx: ISelContext, dest: IrTcValue, cond: IrTcCond, a: IrTcValue, b:
 fn _isel_ext(ctx: ISelContext, dest: IrTcValue, src: IrTcValue, signed: bool) -> ISelInstResult:
     """Extend to wider type."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, src)
-
     val d = _value_op(c, dest)
-    val vs = _value_op(c, src)
 
     val src_width = src.type_.bit_width()
     var insts: [X64Inst] = []
+    val sr = _materialize_value(c, src)
+    c = sr.ctx
+    insts = _append_insts(insts, sr.insts)
 
     if src_width == 8:
         val op = if signed: X64_OP_MOVSX8 else: X64_OP_MOVZX8
-        insts.push(new_x64_inst(op, [d, vs]))
+        insts.push(new_x64_inst(op, [d, sr.operand]))
     elif src_width == 16:
         val op = if signed: X64_OP_MOVSX16 else: X64_OP_MOVZX16
-        insts.push(new_x64_inst(op, [d, vs]))
+        insts.push(new_x64_inst(op, [d, sr.operand]))
     elif src_width == 32:
         if signed:
-            insts.push(new_x64_inst(X64_OP_MOVSXD, [d, vs]))
+            insts.push(new_x64_inst(X64_OP_MOVSXD, [d, sr.operand]))
         else:
             # mov r32, r32 zero-extends to 64
-            insts.push(new_x64_inst(X64_OP_MOV32_RR, [d, vs]))
+            insts.push(new_x64_inst(X64_OP_MOV32_RR, [d, sr.operand]))
     else:
         # 64->64 or 1->64 — just mov
-        insts.push(new_x64_inst(X64_OP_MOV_RR, [d, vs]))
+        insts.push(new_x64_inst(X64_OP_MOV_RR, [d, sr.operand]))
 
     ISelInstResult(insts: insts, ctx: c)
 
 fn _isel_trunc(ctx: ISelContext, dest: IrTcValue, src: IrTcValue) -> ISelInstResult:
     """Truncate to narrower type — just mov (upper bits ignored by consumer)."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, src)
-
     val d = _value_op(c, dest)
-    val vs = _value_op(c, src)
 
     var insts: [X64Inst] = []
+    val sr = _materialize_value(c, src)
+    c = sr.ctx
+    insts = _append_insts(insts, sr.insts)
     val dest_width = dest.type_.bit_width()
     if dest_width == 32:
         # mov r32, r32 naturally zeroes upper 32 bits
-        insts.push(new_x64_inst(X64_OP_MOV32_RR, [d, vs]))
+        insts.push(new_x64_inst(X64_OP_MOV32_RR, [d, sr.operand]))
     else:
         # For i8/i16, just mov — consumer uses appropriate width
-        insts.push(new_x64_inst(X64_OP_MOV_RR, [d, vs]))
+        insts.push(new_x64_inst(X64_OP_MOV_RR, [d, sr.operand]))
 
     ISelInstResult(insts: insts, ctx: c)
 
 fn _isel_bitcast(ctx: ISelContext, dest: IrTcValue, src: IrTcValue) -> ISelInstResult:
     """Reinterpret bits — just a register move."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, src)
     var insts: [X64Inst] = []
-    insts.push(new_x64_inst(X64_OP_MOV_RR, [_value_op(c, dest), _value_op(c, src)]))
+    val sr = _materialize_value(c, src)
+    c = sr.ctx
+    insts = _append_insts(insts, sr.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [_value_op(c, dest), sr.operand]))
     ISelInstResult(insts: insts, ctx: c)
 
 # ============================================================================
@@ -499,30 +508,31 @@ fn _isel_bitcast(ctx: ISelContext, dest: IrTcValue, src: IrTcValue) -> ISelInstR
 fn _isel_load(ctx: ISelContext, dest: IrTcValue, addr: IrTcValue, mem: MemOp) -> ISelInstResult:
     """Load from memory: dest = [addr]."""
     var c = _lower_value(ctx, dest)
-    c = _lower_value(c, addr)
 
     val d = _value_op(c, dest)
-    val va = _value_vreg(c, addr)
-
     val load_op = _load_opcode_for_width(mem.width, mem.signed)
 
     var insts: [X64Inst] = []
-    insts.push(new_x64_inst(load_op, [d, op_mem(va, 0)]))
+    val ar = _materialize_value(c, addr)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    insts.push(new_x64_inst(load_op, [d, op_mem(ar.reg, 0)]))
 
     ISelInstResult(insts: insts, ctx: c)
 
 fn _isel_store(ctx: ISelContext, value: IrTcValue, addr: IrTcValue, mem: MemOp) -> ISelInstResult:
     """Store to memory: [addr] = value."""
-    var c = _lower_value(ctx, value)
-    c = _lower_value(c, addr)
-
-    val vv = _value_op(c, value)
-    val va = _value_vreg(c, addr)
-
+    var c = ctx
     val store_op = _store_opcode_for_width(mem.width)
 
     var insts: [X64Inst] = []
-    insts.push(new_x64_inst(store_op, [op_mem(va, 0), vv]))
+    val vr = _materialize_value(c, value)
+    c = vr.ctx
+    insts = _append_insts(insts, vr.insts)
+    val ar = _materialize_value(c, addr)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    insts.push(new_x64_inst(store_op, [op_mem(ar.reg, 0), vr.operand]))
 
     ISelInstResult(insts: insts, ctx: c)
 
@@ -556,12 +566,14 @@ fn _isel_br(ctx: ISelContext, target: BlockId) -> ISelInstResult:
 
 fn _isel_brcond(ctx: ISelContext, cond: IrTcValue, true_: BlockId, false_: BlockId) -> ISelInstResult:
     """Conditional branch: test cond; jnz true_; jmp false_."""
-    var c = _lower_value(ctx, cond)
-    val vc = _value_op(c, cond)
+    var c = ctx
 
     var insts: [X64Inst] = []
+    val cr = _materialize_value(c, cond)
+    c = cr.ctx
+    insts = _append_insts(insts, cr.insts)
     # test cond, cond
-    insts.push(new_x64_inst(X64_OP_TEST_RR, [vc, vc]))
+    insts.push(new_x64_inst(X64_OP_TEST_RR, [cr.operand, cr.operand]))
     # jnz true_block
     insts.push(x64_inst_with_cond(X64_OP_JCC, [op_label(true_.id)], X64Cond::NE))
     # jmp false_block
@@ -574,10 +586,12 @@ fn _isel_ret(ctx: ISelContext, value: IrTcValue?) -> ISelInstResult:
     var insts: [X64Inst] = []
 
     if val v = value:
-        var c = _lower_value(ctx, v)
-        val vv = _value_op(c, v)
+        var c = ctx
+        val vr = _materialize_value(c, v)
+        c = vr.ctx
+        insts = _append_insts(insts, vr.insts)
         # mov RAX, value
-        insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), vv]))
+        insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), vr.operand]))
         insts.push(new_x64_inst(X64_OP_RET, []))
         ISelInstResult(insts: insts, ctx: c)
     else:
@@ -590,29 +604,32 @@ fn _isel_ret(ctx: ISelContext, value: IrTcValue?) -> ISelInstResult:
 
 fn _isel_call(ctx: ISelContext, dest: IrTcValue?, func: IrTcValue, args: [IrTcValue], cc: CallConv) -> ISelInstResult:
     """Function call with System V AMD64 ABI argument passing."""
-    var c = _lower_value(ctx, func)
-    # Lower all arguments
-    for arg in args:
-        c = _lower_value(c, arg)
+    var c = ctx
 
     var insts: [X64Inst] = []
+    var arg_ops: [X64Operand] = []
+    for arg in args:
+        val ar = _materialize_value(c, arg)
+        c = ar.ctx
+        insts = _append_insts(insts, ar.insts)
+        arg_ops.push(ar.operand)
 
     # Move arguments into ABI registers
     var i = 0
     while i < args.len():
         if i < X64_ARG_REG_COUNT:
             val arg_phys = X64_ARG_REGS[i]
-            val arg_op = _value_op(c, args[i])
-            insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(arg_phys), arg_op]))
+            insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(arg_phys), arg_ops[i]]))
         else:
             # Stack argument
-            val arg_op = _value_op(c, args[i])
-            insts.push(new_x64_inst(X64_OP_PUSH, [arg_op]))
+            insts.push(new_x64_inst(X64_OP_PUSH, [arg_ops[i]]))
         i = i + 1
 
+    val fr = _materialize_value(c, func)
+    c = fr.ctx
+    insts = _append_insts(insts, fr.insts)
     # Call (indirect through register)
-    val func_op = _value_op(c, func)
-    insts.push(new_x64_inst(X64_OP_CALL_R, [func_op]))
+    insts.push(new_x64_inst(X64_OP_CALL_R, [fr.operand]))
 
     # Clean up stack arguments
     val num_stack_args = if args.len() > X64_ARG_REG_COUNT: args.len() - X64_ARG_REG_COUNT else: 0
@@ -626,6 +643,153 @@ fn _isel_call(ctx: ISelContext, dest: IrTcValue?, func: IrTcValue, args: [IrTcVa
         val dop = _value_op(c, d)
         insts.push(new_x64_inst(X64_OP_MOV_RR, [dop, op_phys(X64_RAX)]))
 
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _isel_call_helper(ctx: ISelContext, dest: IrTcValue?, helper_id: i64, args: [IrTcValue]) -> ISelInstResult:
+    """Call a runtime helper by absolute helper address/id."""
+    val helper = IrTcValue.const_imm(helper_id, IrTcTypeKind.Ptr(addr_space: 0))
+    _isel_call(ctx, dest, helper, args, CallConv.Helper)
+
+# ============================================================================
+# Switch and emulation state
+# ============================================================================
+
+fn _isel_switch(ctx: ISelContext, value: IrTcValue, cases: [SwitchCase], default: BlockId) -> ISelInstResult:
+    """Lower switch as a linear cmp/jcc chain followed by default jump."""
+    var c = ctx
+    var insts: [X64Inst] = []
+    val vr = _materialize_value(c, value)
+    c = vr.ctx
+    insts = _append_insts(insts, vr.insts)
+
+    for case in cases:
+        insts.push(new_x64_inst(X64_OP_CMP_RI, [vr.operand, op_imm(case.value)]))
+        insts.push(x64_inst_with_cond(X64_OP_JCC, [op_label(case.target.id)], X64Cond::E))
+
+    insts.push(new_x64_inst(X64_OP_JMP, [op_label(default.id)]))
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _guest_reg_offset(index: i64) -> i64:
+    """Offset into the guest register value array passed in RDI."""
+    index * 8
+
+fn _guest_pc_offset() -> i64:
+    """PC spill slot next to the guest register value array ABI."""
+    -8
+
+fn _isel_read_guest_reg(ctx: ISelContext, dest: IrTcValue, guest_reg: GuestRegId) -> ISelInstResult:
+    """Read guest register state from the emulation state pointer in RDI."""
+    var c = _lower_value(ctx, dest)
+    val d = _value_op(c, dest)
+    val width = dest.type_.byte_width()
+    val load_op = _load_opcode_for_width(width, false)
+    val mem = op_mem(phys_reg(X64_RDI), _guest_reg_offset(guest_reg.index))
+    ISelInstResult(insts: [new_x64_inst(load_op, [d, mem])], ctx: c)
+
+fn _isel_write_guest_reg(ctx: ISelContext, guest_reg: GuestRegId, value: IrTcValue) -> ISelInstResult:
+    """Write guest register state through the emulation state pointer in RDI."""
+    var c = ctx
+    var insts: [X64Inst] = []
+    val vr = _materialize_value(c, value)
+    c = vr.ctx
+    insts = _append_insts(insts, vr.insts)
+    val width = value.type_.byte_width()
+    val store_op = _store_opcode_for_width(width)
+    val mem = op_mem(phys_reg(X64_RDI), _guest_reg_offset(guest_reg.index))
+    insts.push(new_x64_inst(store_op, [mem, vr.operand]))
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _isel_sync_guest_pc(ctx: ISelContext, value: IrTcValue) -> ISelInstResult:
+    """Synchronize the current guest PC beside the guest register value array."""
+    var c = ctx
+    var insts: [X64Inst] = []
+    val vr = _materialize_value(c, value)
+    c = vr.ctx
+    insts = _append_insts(insts, vr.insts)
+    val width = value.type_.byte_width()
+    val store_op = _store_opcode_for_width(width)
+    insts.push(new_x64_inst(store_op, [op_mem(phys_reg(X64_RDI), _guest_pc_offset()), vr.operand]))
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _isel_exit_tb(ctx: ISelContext, exit_code: i64) -> ISelInstResult:
+    """Return an exit code from a translated block."""
+    ISelInstResult(insts: [
+        new_x64_inst(X64_OP_MOV_RI, [op_phys(X64_RAX), op_imm(exit_code)]),
+        new_x64_inst(X64_OP_RET, [])
+    ], ctx: ctx)
+
+fn _isel_goto_tb(ctx: ISelContext, tb_index: i64) -> ISelInstResult:
+    """Return the next translation-block index."""
+    ISelInstResult(insts: [
+        new_x64_inst(X64_OP_MOV_RI, [op_phys(X64_RAX), op_imm(tb_index)]),
+        new_x64_inst(X64_OP_RET, [])
+    ], ctx: ctx)
+
+fn _isel_lookup_goto_tb(ctx: ISelContext, target_pc: IrTcValue) -> ISelInstResult:
+    """Return a dynamic target PC for dispatcher lookup."""
+    var c = ctx
+    var insts: [X64Inst] = []
+    val tr = _materialize_value(c, target_pc)
+    c = tr.ctx
+    insts = _append_insts(insts, tr.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [op_phys(X64_RAX), tr.operand]))
+    insts.push(new_x64_inst(X64_OP_RET, []))
+    ISelInstResult(insts: insts, ctx: c)
+
+# ============================================================================
+# Aggregates and pointer arithmetic
+# ============================================================================
+
+fn _isel_get_element_ptr(ctx: ISelContext, dest: IrTcValue, base: IrTcValue, indices: [IrTcValue]) -> ISelInstResult:
+    """Lower GEP as byte-offset pointer arithmetic."""
+    var c = _lower_value(ctx, dest)
+    val d = _value_op(c, dest)
+    var insts: [X64Inst] = []
+    val br = _materialize_value(c, base)
+    c = br.ctx
+    insts = _append_insts(insts, br.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, br.operand]))
+
+    for index in indices:
+        if val imm = index.const_value:
+            if imm != 0:
+                insts.push(new_x64_inst(X64_OP_ADD_RI, [d, op_imm(imm)]))
+        else:
+            val ir = _materialize_value(c, index)
+            c = ir.ctx
+            insts = _append_insts(insts, ir.insts)
+            insts.push(new_x64_inst(X64_OP_ADD_RR, [d, ir.operand]))
+
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _isel_extract_value(ctx: ISelContext, dest: IrTcValue, agg: IrTcValue, index: i64) -> ISelInstResult:
+    """Load an aggregate field from an aggregate pointer value."""
+    var c = _lower_value(ctx, dest)
+    val d = _value_op(c, dest)
+    var insts: [X64Inst] = []
+    val ar = _materialize_value(c, agg)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val width = dest.type_.byte_width()
+    val load_op = _load_opcode_for_width(width, false)
+    insts.push(new_x64_inst(load_op, [d, op_mem(ar.reg, index * 8)]))
+    ISelInstResult(insts: insts, ctx: c)
+
+fn _isel_insert_value(ctx: ISelContext, dest: IrTcValue, agg: IrTcValue, value: IrTcValue, index: i64) -> ISelInstResult:
+    """Store an aggregate field and return the aggregate pointer value."""
+    var c = _lower_value(ctx, dest)
+    val d = _value_op(c, dest)
+    var insts: [X64Inst] = []
+    val ar = _materialize_value(c, agg)
+    c = ar.ctx
+    insts = _append_insts(insts, ar.insts)
+    val vr = _materialize_value(c, value)
+    c = vr.ctx
+    insts = _append_insts(insts, vr.insts)
+    insts.push(new_x64_inst(X64_OP_MOV_RR, [d, ar.operand]))
+    val width = value.type_.byte_width()
+    val store_op = _store_opcode_for_width(width)
+    insts.push(new_x64_inst(store_op, [op_mem(ar.reg, index * 8), vr.operand]))
     ISelInstResult(insts: insts, ctx: c)
 
 # ============================================================================
