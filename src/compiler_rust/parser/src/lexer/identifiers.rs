@@ -350,7 +350,8 @@ impl<'a> super::Lexer<'a> {
 
     /// Try to scan a custom block: kind{payload}
     /// Returns Some(TokenKind) if a valid custom block is found, None otherwise.
-    /// Supported kinds: m, sh, sql, re, md, html, graph, img
+    /// Supported kinds: m, sh, sql, re, md, html, graph, img, schema, style,
+    /// ui, music, bim, cad, city, rtl.
     pub(super) fn try_scan_custom_block(&mut self, first: char) -> Option<TokenKind> {
         // Check single-character block kinds: m{...}
         if first == 'm' && self.peek() == Some('{') {
@@ -372,6 +373,29 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("sql"));
                 }
+                if self.peek() == Some('c')
+                    && self.peek_ahead(1) == Some('h')
+                    && self.peek_ahead(2) == Some('e')
+                    && self.peek_ahead(3) == Some('m')
+                    && self.peek_ahead(4) == Some('a')
+                    && self.peek_ahead(5) == Some('{')
+                {
+                    for _ in 0..6 {
+                        self.advance();
+                    }
+                    return Some(self.scan_custom_block_payload("schema"));
+                }
+                if self.peek() == Some('t')
+                    && self.peek_ahead(1) == Some('y')
+                    && self.peek_ahead(2) == Some('l')
+                    && self.peek_ahead(3) == Some('e')
+                    && self.peek_ahead(4) == Some('{')
+                {
+                    for _ in 0..5 {
+                        self.advance();
+                    }
+                    return Some(self.scan_custom_block_payload("style"));
+                }
             }
             'r' => {
                 if self.peek() == Some('e') && self.peek_ahead(1) == Some('{') {
@@ -379,12 +403,29 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("re"));
                 }
+                if self.peek() == Some('t') && self.peek_ahead(1) == Some('l') && self.peek_ahead(2) == Some('{') {
+                    self.advance(); // consume 't'
+                    self.advance(); // consume 'l'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("rtl"));
+                }
             }
             'm' => {
                 if self.peek() == Some('d') && self.peek_ahead(1) == Some('{') {
                     self.advance(); // consume 'd'
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("md"));
+                }
+                if self.peek() == Some('u')
+                    && self.peek_ahead(1) == Some('s')
+                    && self.peek_ahead(2) == Some('i')
+                    && self.peek_ahead(3) == Some('c')
+                    && self.peek_ahead(4) == Some('{')
+                {
+                    for _ in 0..5 {
+                        self.advance();
+                    }
+                    return Some(self.scan_custom_block_payload("music"));
                 }
             }
             'h' => {
@@ -421,6 +462,39 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume 'g'
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("img"));
+                }
+            }
+            'u' => {
+                if self.peek() == Some('i') && self.peek_ahead(1) == Some('{') {
+                    self.advance(); // consume 'i'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("ui"));
+                }
+            }
+            'b' => {
+                if self.peek() == Some('i') && self.peek_ahead(1) == Some('m') && self.peek_ahead(2) == Some('{') {
+                    self.advance(); // consume 'i'
+                    self.advance(); // consume 'm'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("bim"));
+                }
+            }
+            'c' => {
+                if self.peek() == Some('a') && self.peek_ahead(1) == Some('d') && self.peek_ahead(2) == Some('{') {
+                    self.advance(); // consume 'a'
+                    self.advance(); // consume 'd'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("cad"));
+                }
+                if self.peek() == Some('i')
+                    && self.peek_ahead(1) == Some('t')
+                    && self.peek_ahead(2) == Some('y')
+                    && self.peek_ahead(3) == Some('{')
+                {
+                    for _ in 0..4 {
+                        self.advance();
+                    }
+                    return Some(self.scan_custom_block_payload("city"));
                 }
             }
             'l' => {

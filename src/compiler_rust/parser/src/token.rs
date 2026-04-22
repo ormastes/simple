@@ -264,7 +264,7 @@ pub enum TokenKind {
     // Custom Blocks (#1090-1098)
     // DSL embedding blocks: kind{payload} where payload is captured raw
     CustomBlock {
-        kind: String,             // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        kind: String,             // Block kind: "m", "sh", "sql", "re", "schema", "style", etc.
         payload: String,          // Raw payload content (not parsed by outer lexer)
         pre_lex_info: PreLexInfo, // Pre-lex info from Tier 1+2 scanning
     },
