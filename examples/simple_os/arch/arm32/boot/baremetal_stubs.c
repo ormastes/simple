@@ -1193,8 +1193,8 @@ RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeV
     (void)base;
     uint32_t desc_index = arm32_scalar_arg(index);
     volatile uint8_t *desc = (volatile uint8_t *)(uintptr_t)((uint32_t)(uintptr_t)g_arm_virtq_storage + (desc_index * 16U));
-    write_le32_volatile(desc + 0, (uint32_t)addr_lo);
-    write_le32_volatile(desc + 4, (uint32_t)addr_hi);
+    write_le32_volatile(desc + 0, arm32_scalar_arg(addr_lo));
+    write_le32_volatile(desc + 4, arm32_scalar_arg(addr_hi));
     write_le32_volatile(desc + 8, arm32_scalar_arg(len));
     write_le16_volatile(desc + 12, (uint16_t)arm32_scalar_arg(flags));
     write_le16_volatile(desc + 14, (uint16_t)arm32_scalar_arg(next));

@@ -57,8 +57,8 @@ fn arm_fs_exec_vfs_boot_init() -> bool:
         serial_println("[vfs-init] FAT32 BPB probe failed")
         return false
     arm_fs_exec_trace(16)
-    val hello_smf_bytes = dev.read_sector_bytes(2063)
-    val version_bytes = dev.read_sector_bytes(2081)
+    val hello_smf_bytes = _arm_fat32_read_hello_smf_from_dev(dev, "/HELLOSMF.SMF")
+    val version_bytes = _arm_fat32_read_sys_version_from_dev(dev, "/SYS/VERSION.TXT")
     arm_fs_exec_trace(17)
     if hello_smf_bytes.len() <= 4:
         serial_println("[vfs-init] executable direct read probe failed path=/HELLOSMF.SMF")
@@ -89,9 +89,13 @@ fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
     val mapped = _arm_exec_alias(path)
     if val Some(dev) = g_arm_blk:
         if mapped == "/HELLOSMF.SMF":
-            return dev.read_sector_bytes(2063)
+            val bytes = _arm_fat32_read_hello_smf_from_dev(dev, mapped)
+            if bytes.len() > 0:
+                return bytes
         if mapped == "/SYS/VERSION.TXT":
-            return dev.read_sector_bytes(2081)
+            val bytes = _arm_fat32_read_sys_version_from_dev(dev, mapped)
+            if bytes.len() > 0:
+                return bytes
     if mapped == "/HELLOSMF.SMF" and g_arm_hello_smf_bytes.len() > 0:
         return _clone_bytes(g_arm_hello_smf_bytes)
     if mapped == "/SYS/VERSION.TXT" and g_arm_version_bytes.len() > 0:
@@ -139,30 +143,38 @@ fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
     val bpb = _arm_read_sector(dev, 0)
     if bpb.len() < 512:
         return false
-    g_arm_bps = 512
-    g_arm_spc = 1
-    g_arm_reserved = 32
-    g_arm_fats = 2
-    g_arm_fat_size = 1009
-    g_arm_root_cluster = 2
-    g_arm_data_start = 2050
-    serial_println("[vfs-init] FAT32 bpb bps=512 spc=1 root=2")
-    true
+    g_arm_bps = _u16_le(bpb, 11)
+    g_arm_spc = _byte(bpb, 13)
+    g_arm_reserved = _u16_le(bpb, 14)
+    g_arm_fats = _byte(bpb, 16)
+    g_arm_fat_size = _u32_le(bpb, 36)
+    g_arm_root_cluster = _u32_le(bpb, 44)
+    g_arm_data_start = g_arm_reserved + (g_arm_fats * g_arm_fat_size)
+    serial_println("[vfs-init] FAT32 bpb bps={g_arm_bps} spc={g_arm_spc} root={g_arm_root_cluster}")
+    g_arm_bps == 512 and g_arm_spc > 0 and g_arm_fat_size > 0
 
 fn _arm_cluster_sector(cluster: u64) -> u64:
-    2050 + (cluster - 2)
+    (g_arm_data_start + ((cluster.to_u32() - 2) * g_arm_spc)) as u64
 
 fn _arm_fat_next(dev: VirtioBlkDriver, cluster: u64) -> u64:
     val fat_offset = cluster * 4
-    val sector = 32 + (fat_offset / 512)
+    val sector = g_arm_reserved.to_u64() + (fat_offset / 512)
     val off = (fat_offset % 512).to_i32()
     val buf = _arm_read_sector(dev, sector)
     if buf.len() < 512:
         return 0x0FFFFFFF
-    _u32_le(buf, off)
+    (_u32_le(buf, off) & 0x0FFFFFFF) as u64
 
 fn _arm_read_cluster(dev: VirtioBlkDriver, cluster: u64) -> [u8]:
-    _arm_read_sector(dev, _arm_cluster_sector(cluster))
+    if g_arm_spc == 1:
+        return _arm_read_sector(dev, _arm_cluster_sector(cluster))
+    var out: [u8] = rt_array_new_with_cap((g_arm_spc * 512).to_i64())
+    var sec: u32 = 0
+    while sec < g_arm_spc:
+        val buf = _arm_read_sector(dev, _arm_cluster_sector(cluster) + sec.to_u64())
+        rt_arm_array_append_bytes(out, buf, buf.len().to_u64())
+        sec = sec + 1
+    out
 
 fn _arm_dirent_is_hello_smf(data: [u8], off: i32) -> bool:
     _byte(data, off) == 0x48 and _byte(data, off + 1) == 0x45 and
@@ -195,13 +207,12 @@ fn _arm_read_file_chain(dev: VirtioBlkDriver, first_cluster: u64, size: u64) -> 
         val data = _arm_read_cluster(dev, cluster)
         val remaining = size - out.len().to_u64()
         rt_arm_array_append_bytes(out, data, remaining)
-        cluster = cluster + 1
+        cluster = _arm_fat_next(dev, cluster)
     out
 
 fn _arm_fat32_read_hello_smf_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
     if path != "/HELLOSMF.SMF":
         return []
-    return _arm_read_cluster(dev, 15)
     var dir_cluster = g_arm_root_cluster
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
@@ -220,7 +231,6 @@ fn _arm_fat32_read_hello_smf_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
     []
 
 fn _arm_fat32_find_sys_cluster(dev: VirtioBlkDriver) -> u64:
-    return 3
     var dir_cluster = g_arm_root_cluster
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
@@ -239,7 +249,6 @@ fn _arm_fat32_find_sys_cluster(dev: VirtioBlkDriver) -> u64:
 fn _arm_fat32_read_sys_version_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
     if path != "/SYS/VERSION.TXT":
         return []
-    return _arm_read_cluster(dev, 33)
     var dir_cluster = _arm_fat32_find_sys_cluster(dev)
     if dir_cluster < 2:
         return []
