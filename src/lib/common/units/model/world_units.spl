@@ -25,6 +25,14 @@ struct ExactRatio:
     numerator: i64
     denominator: i64
 
+struct UnitFactor:
+    unit_id: text
+    exponent: i64
+
+struct UnitExpression:
+    scale: ExactRatio
+    factors: [UnitFactor]
+
 fn exact_ratio(num: i64, den: i64) -> ExactRatio:
     ExactRatio(numerator: num, denominator: den)
 
@@ -52,6 +60,63 @@ fn exact_ratio_div(left: ExactRatio, right: ExactRatio) -> ExactRatio:
         numerator: left.numerator * right.denominator,
         denominator: left.denominator * right.numerator
     ))
+
+fn unit_factor(unit_id: text, exponent: i64) -> UnitFactor:
+    UnitFactor(unit_id: unit_id, exponent: exponent)
+
+fn unit_expression(scale: ExactRatio, factors: [UnitFactor]) -> UnitExpression:
+    UnitExpression(scale: exact_ratio_normalize(scale), factors: normalize_unit_factors(factors))
+
+fn unit_expression_from_base(unit_id: text) -> UnitExpression:
+    unit_expression(exact_ratio(1, 1), [unit_factor(unit_id, 1)])
+
+fn unit_expression_scaled(scale: ExactRatio, unit_id: text) -> UnitExpression:
+    unit_expression(scale, [unit_factor(unit_id, 1)])
+
+fn unit_expression_mul(left: UnitExpression, right: UnitExpression) -> UnitExpression:
+    var factors: [UnitFactor] = []
+    for factor in left.factors:
+        factors.push(factor)
+    for factor in right.factors:
+        factors.push(factor)
+    unit_expression(exact_ratio_mul(left.scale, right.scale), factors)
+
+fn unit_expression_div(left: UnitExpression, right: UnitExpression) -> UnitExpression:
+    var factors: [UnitFactor] = []
+    for factor in left.factors:
+        factors.push(factor)
+    for factor in right.factors:
+        factors.push(unit_factor(factor.unit_id, 0 - factor.exponent))
+    unit_expression(exact_ratio_div(left.scale, right.scale), factors)
+
+fn normalize_unit_factors(factors: [UnitFactor]) -> [UnitFactor]:
+    var normalized: [UnitFactor] = []
+    for factor in factors:
+        if factor.exponent != 0:
+            merge_unit_factor(normalized, factor)
+    var compact: [UnitFactor] = []
+    for factor in normalized:
+        if factor.exponent != 0:
+            compact.push(factor)
+    compact
+
+fn merge_unit_factor(factors: [UnitFactor], factor: UnitFactor):
+    var index = 0
+    while index < factors.len():
+        if factors[index].unit_id == factor.unit_id:
+            factors[index].exponent = factors[index].exponent + factor.exponent
+            return
+        index = index + 1
+    factors.push(factor)
+
+fn unit_expression_factor_exponent(expression: UnitExpression, unit_id: text) -> i64:
+    for factor in expression.factors:
+        if factor.unit_id == unit_id:
+            return factor.exponent
+    0
+
+fn unit_expression_factor_count(expression: UnitExpression) -> i64:
+    expression.factors.len()
 
 fn abs_i64(value: i64) -> i64:
     if value < 0:
@@ -92,6 +157,21 @@ fn is_prefix_blocked(unit_symbol: text) -> bool:
 
 fn kilometre_per_hour_factor_to_metre_per_second() -> ExactRatio:
     exact_ratio(5, 18)
+
+fn kilometre_expression() -> UnitExpression:
+    unit_expression_scaled(exact_ratio(1000, 1), "metre")
+
+fn hour_expression() -> UnitExpression:
+    unit_expression_scaled(exact_ratio(3600, 1), "second")
+
+fn kilometre_per_hour_expression() -> UnitExpression:
+    unit_expression_div(kilometre_expression(), hour_expression())
+
+fn litre_expression() -> UnitExpression:
+    unit_expression(exact_ratio(1, 1000), [unit_factor("metre", 3)])
+
+fn mole_per_litre_expression() -> UnitExpression:
+    unit_expression_div(unit_expression_from_base("mole"), litre_expression())
 
 fn catalog_has_required_world_units(catalog: text) -> bool:
     catalog.contains("derived_unit kilometre_per_hour") and
