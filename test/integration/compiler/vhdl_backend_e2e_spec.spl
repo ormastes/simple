@@ -648,6 +648,45 @@ describe "VHDL Backend E2E - Entity Generation":
         check(vhdl.contains("arr_sig <= (0 => a, 1 => b);"))
         check(vhdl.contains("result_out <= arr_sig;"))
 
+    it "compiles explicit VHDL port map component instantiation":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "lhs", make_i32()),
+            make_arg_local(1, 1, "rhs", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "sum_sig", make_i32())
+        ]
+        val port_map = MirInst(
+            kind: MirInstKind.VhdlPortMap(
+                "adder",
+                "u_add",
+                [
+                    ("a", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))),
+                    ("b", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))),
+                    ("result_out", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [port_map],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("uses_adder", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("port_map_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for VHDL port map")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("u_add: entity work.adder"))
+        check(vhdl.contains("port map ("))
+        check(vhdl.contains("a => lhs,"))
+        check(vhdl.contains("b => rhs,"))
+        check(vhdl.contains("result_out => sum_sig"))
+        check(vhdl.contains("result_out <= sum_sig;"))
+
     it "rejects unsupported MIR instruction with hard error":
         val backend = make_backend()
 
