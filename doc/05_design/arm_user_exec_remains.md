@@ -10,6 +10,7 @@ Date: 2026-04-22
 - ARM64 context save/restore/switch methods call runtime ABI hooks so HAL users have a concrete path instead of Simple-level placeholders.
 - ARM64 process-image construction keeps the original VFS byte array in the unchecked freestanding path and records scalar ELF header fields because aggregate `ElfImage`/segment readback is not yet reliable there. The direct-load mapper uses the scalar ELF64 program-header path to stage PT_LOAD contents, creates an ARM64 user page-table image for the PT_LOAD virtual pages, probes TTBR0_EL1 with immediate restore when the MMU is off, resolves the task context entry to the staged physical address, verifies the page-table translation for that entry, and byte-checks that the staged entry matches the file-backed ELF source.
 - ARM64 uses the same high-level user-entry bridge shape as x86: arch code asks the scheduler for a handoff-ready user task and calls one runtime helper with entry, stack, status, and address-space root. The current ARM64 fs-exec closure now records the verified ELF virtual entry, installs the user TTBR0 root, enables SCTLR_EL1.M, and performs a live `eret` into the loaded proof ELF at its virtual entry. The virtual-entry preflight verifies the ELF virtual entry, initial `SP_EL0`, a compact EL1 support mapping from linker `_start` through `_sbss`, current EL1 stack, and UART MMIO in the user root. The lower-EL AArch64 synchronous vector handles SVC64 by saving a GPR frame, dispatching to the C syscall shim, returning the result in user `x0`, advancing `ELR_EL1`, and `eret`ing back to EL0. `svc #0` remains the QEMU proof exit path.
+- The ARM64 live switch uses named constants for MAIR/TCR/SCTLR and repeats the preflight at the final activation boundary so bad entry/root/stack state fails before TTBR0 or `eret`.
 - x86 and ARM64 share `Scheduler.get_user_handoff_task(pid_hint)` for user-entry task selection.
 - ARM32 keeps the existing VMM/synthetic behavior to avoid regressing the fragile trace-based lane.
 
@@ -26,6 +27,7 @@ Date: 2026-04-22
 - ARM64 QEMU must show the virtual-entry preflight passed before live virtual entry.
 - ARM64 QEMU must show the user-entry handoff probe succeeded.
 - ARM64 QEMU must show live EL0 virtual-entry `eret` and SVC exit handling succeeded.
+- ARM64 live entry must fail closed if the recorded handoff root, entry, or stack is missing or no longer passes preflight.
 - ARM64 lower-EL SVC handling must preserve user registers across handled syscalls except for the `x0` return value.
 - ARM64 QEMU must not show the old `synthetic address space` line for the fs-exec path.
 - ARM32 QEMU must keep the existing trace-marker acceptance passing.

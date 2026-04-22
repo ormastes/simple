@@ -2591,6 +2591,16 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
 #define ARM64_VM_WRITABLE 2U
 #define ARM64_VM_USER 4U
 #define ARM64_VM_NO_EXECUTE 32U
+#define ARM64_MAIR_NORMAL 0xFFULL
+#define ARM64_MAIR_DEVICE 0x00ULL
+#define ARM64_MAIR_VALUE (ARM64_MAIR_NORMAL | (ARM64_MAIR_DEVICE << 8))
+#define ARM64_TCR_T0SZ 16ULL
+#define ARM64_TCR_TG0_4KB (0ULL << 14)
+#define ARM64_TCR_SH0_INNER (3ULL << 12)
+#define ARM64_TCR_ORGN0_WBWA (1ULL << 10)
+#define ARM64_TCR_IRGN0_WBWA (1ULL << 8)
+#define ARM64_TCR_VALUE (ARM64_TCR_T0SZ | ARM64_TCR_TG0_4KB | ARM64_TCR_SH0_INNER | ARM64_TCR_ORGN0_WBWA | ARM64_TCR_IRGN0_WBWA)
+#define ARM64_SCTLR_M 1ULL
 
 typedef struct {
     uint64_t root;
@@ -2916,7 +2926,7 @@ static void arm64_enter_user_virtual(uint64_t root, uint64_t entry, uint64_t sp)
         "isb\n\t"
         "eret\n\t"
         :
-        : "r"(0xFFULL), "r"(0x3510ULL), "r"(root), "r"(sp), "r"(entry)
+        : "r"(ARM64_MAIR_VALUE), "r"(ARM64_TCR_VALUE), "r"(root), "r"(sp), "r"(entry)
         : "x3", "memory"
     );
     for (;;) __asm__ volatile("wfe");
@@ -2929,6 +2939,14 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
     uint64_t entry = arm64_recorded_user_entry;
     uint64_t sp = arm64_recorded_user_sp;
     uint64_t root = arm64_recorded_user_root;
+    if (!arm64_user_as_find(root) || !entry || !sp) {
+        serial_puts("[arm64-user] live virtual invalid handoff\r\n");
+        return 0;
+    }
+    if (!arm64_user_as_virtual_entry_preflight(root, entry, sp)) {
+        serial_puts("[arm64-user] live virtual preflight failed\r\n");
+        return 0;
+    }
     arm64_enter_user_virtual(root, entry, sp);
     return 0;
 }
