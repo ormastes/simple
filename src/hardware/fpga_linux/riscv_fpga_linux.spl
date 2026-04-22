@@ -1,0 +1,252 @@
+"""
+# RISC-V FPGA Linux Preparation Contracts
+
+Board-profiled preparation model for RISC-V CPU SoC RTL bring-up on Xilinx
+FPGAs. This module describes the pre-hardware contract: what must be generated,
+validated, and later consumed by Vivado/programming/boot-test wrappers.
+"""
+
+enum RiscvXlen:
+    Rv32
+    Rv64
+
+impl RiscvXlen:
+    fn bits() -> i64:
+        match self:
+            Rv32: 32
+            Rv64: 64
+
+    fn to_text() -> text:
+        match self:
+            Rv32: "rv32"
+            Rv64: "rv64"
+
+    fn linux_policy() -> text:
+        match self:
+            Rv32: "experimental"
+            Rv64: "upstream"
+
+    fn mmu_mode() -> text:
+        match self:
+            Rv32: "sv32"
+            Rv64: "sv39"
+
+struct XilinxBoardProfile:
+    name: text
+    part: text
+    clock_hz: i64
+    reset_polarity: text
+    memory_kind: text
+    memory_base: i64
+    memory_size_bytes: i64
+    uart_baud: i64
+    constraints_path: text
+    programmer: text
+    vivado_mode: text
+
+impl XilinxBoardProfile:
+    static fn generic() -> XilinxBoardProfile:
+        XilinxBoardProfile(
+            name: "xilinx_generic",
+            part: "BOARD_PART_TBD",
+            clock_hz: 100000000,
+            reset_polarity: "active-low",
+            memory_kind: "ddr",
+            memory_base: 0x80000000,
+            memory_size_bytes: 0,
+            uart_baud: 115200,
+            constraints_path: "constraints/xilinx_generic.xdc",
+            programmer: "hw_server",
+            vivado_mode: "batch"
+        )
+
+    fn is_generic() -> bool:
+        self.part == "BOARD_PART_TBD"
+
+    fn validate_for_prepare() -> [text]:
+        var errors: [text] = []
+        if self.name == "":
+            errors.push("board name is required")
+        if self.clock_hz <= 0:
+            errors.push("clock_hz must be positive")
+        if self.reset_polarity != "active-low" and self.reset_polarity != "active-high":
+            errors.push("reset_polarity must be active-low or active-high")
+        if self.memory_kind != "ddr" and self.memory_kind != "bram":
+            errors.push("memory_kind must be ddr or bram")
+        if self.uart_baud <= 0:
+            errors.push("uart_baud must be positive")
+        if self.constraints_path == "":
+            errors.push("constraints_path is required")
+        if self.programmer == "":
+            errors.push("programmer is required")
+        if self.vivado_mode != "batch":
+            errors.push("vivado_mode must be batch")
+        errors
+
+    fn validate_for_hardware_boot() -> [text]:
+        var errors = self.validate_for_prepare()
+        if self.is_generic():
+            errors.push("xilinx part must be selected before hardware boot")
+        if self.memory_size_bytes <= 0:
+            errors.push("memory_size_bytes must be set before hardware boot")
+        errors
+
+struct LinuxArtifactSet:
+    kernel_image: text
+    rootfs_image: text
+    opensbi_image: text
+    uboot_image: text
+    dtb_path: text
+    toolchain_prefix: text
+
+impl LinuxArtifactSet:
+    static fn empty() -> LinuxArtifactSet:
+        LinuxArtifactSet(
+            kernel_image: "",
+            rootfs_image: "",
+            opensbi_image: "",
+            uboot_image: "",
+            dtb_path: "",
+            toolchain_prefix: ""
+        )
+
+    fn configured() -> bool:
+        self.kernel_image != "" and self.rootfs_image != "" and self.dtb_path != "" and self.toolchain_prefix != ""
+
+    fn firmware_configured() -> bool:
+        self.opensbi_image != "" or self.uboot_image != ""
+
+struct RiscvFpgaLane:
+    xlen: RiscvXlen
+    top_module: text
+    rtl_dir: text
+    bootrom_path: text
+    linux: LinuxArtifactSet
+
+impl RiscvFpgaLane:
+    static fn rv64_default() -> RiscvFpgaLane:
+        RiscvFpgaLane(
+            xlen: RiscvXlen.Rv64,
+            top_module: "simple_rv64_linux_soc",
+            rtl_dir: "build/fpga/rv64/rtl",
+            bootrom_path: "build/fpga/rv64/bootrom.bin",
+            linux: LinuxArtifactSet.empty()
+        )
+
+    static fn rv32_default() -> RiscvFpgaLane:
+        RiscvFpgaLane(
+            xlen: RiscvXlen.Rv32,
+            top_module: "simple_rv32_linux_soc",
+            rtl_dir: "build/fpga/rv32/rtl",
+            bootrom_path: "build/fpga/rv32/bootrom.bin",
+            linux: LinuxArtifactSet.empty()
+        )
+
+    fn expected_boot_markers() -> [text]:
+        if self.xlen == RiscvXlen.Rv32:
+            var markers: [text] = []
+            markers.push("Linux version")
+            markers.push("OF: fdt")
+            markers.push("Freeing unused kernel memory")
+            markers.push("init started")
+            markers.push("rv32-linux-experimental")
+            return markers
+        var markers: [text] = []
+        markers.push("OpenSBI")
+        markers.push("Linux version")
+        markers.push("OF: fdt")
+        markers.push("Freeing unused kernel memory")
+        markers.push("init started")
+        markers
+
+    fn required_soc_blocks() -> [text]:
+        if self.xlen == RiscvXlen.Rv32:
+            var blocks: [text] = []
+            blocks.push("rv32ima-core")
+            blocks.push("sv32-mmu")
+            blocks.push("clint")
+            blocks.push("plic")
+            blocks.push("uart16550")
+            blocks.push("bootrom")
+            blocks.push("memory-bus")
+            blocks.push("dtb")
+            return blocks
+        var blocks: [text] = []
+        blocks.push("rv64ima-core")
+        blocks.push("sv39-mmu")
+        blocks.push("clint")
+        blocks.push("plic")
+        blocks.push("uart16550")
+        blocks.push("bootrom")
+        blocks.push("memory-bus")
+        blocks.push("dtb")
+        blocks.push("opensbi-handoff")
+        blocks
+
+    fn validate_for_prepare() -> [text]:
+        var errors: [text] = []
+        if self.top_module == "":
+            errors.push("top_module is required")
+        if self.rtl_dir == "":
+            errors.push("rtl_dir is required")
+        if self.bootrom_path == "":
+            errors.push("bootrom_path is required")
+        errors
+
+    fn validate_for_linux_boot() -> [text]:
+        var errors = self.validate_for_prepare()
+        if not self.linux.configured():
+            errors.push("{self.xlen.to_text()} linux kernel, rootfs, dtb, and toolchain must be configured")
+        if self.xlen == RiscvXlen.Rv64 and not self.linux.firmware_configured():
+            errors.push("rv64 linux requires OpenSBI or U-Boot firmware")
+        if self.xlen == RiscvXlen.Rv32 and self.xlen.linux_policy() != "experimental":
+            errors.push("rv32 linux must remain marked experimental")
+        errors
+
+struct FpgaPrepareManifest:
+    board: XilinxBoardProfile
+    lanes: [RiscvFpgaLane]
+    vivado_project_dir: text
+    generated_dir: text
+
+impl FpgaPrepareManifest:
+    static fn default_xilinx() -> FpgaPrepareManifest:
+        FpgaPrepareManifest(
+            board: XilinxBoardProfile.generic(),
+            lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()],
+            vivado_project_dir: "build/fpga/xilinx_generic/vivado",
+            generated_dir: "build/fpga/xilinx_generic/generated"
+        )
+
+    fn validate_for_prepare() -> [text]:
+        var errors = self.board.validate_for_prepare()
+        if self.vivado_project_dir == "":
+            errors.push("vivado_project_dir is required")
+        if self.generated_dir == "":
+            errors.push("generated_dir is required")
+        if self.lanes.len() == 0:
+            errors.push("at least one RISC-V lane is required")
+        for lane in self.lanes:
+            val lane_errors = lane.validate_for_prepare()
+            for err in lane_errors:
+                errors.push("{lane.xlen.to_text()}: {err}")
+        errors
+
+    fn vivado_tcl_plan() -> text:
+        var out = "create_project simple_riscv_fpga {self.vivado_project_dir} -part {self.board.part}\n"
+        out = out + "set_property target_language VHDL [current_project]\n"
+        out = out + "add_files {self.board.constraints_path}\n"
+        for lane in self.lanes:
+            out = out + "add_files {lane.rtl_dir}\n"
+            out = out + "set_property top {lane.top_module} [current_fileset]\n"
+        out = out + "synth_design\n"
+        out
+
+    fn readiness_summary() -> text:
+        var out = "board={self.board.name} part={self.board.part} lanes={self.lanes.len()}"
+        for lane in self.lanes:
+            out = out + " {lane.xlen.to_text()}:{lane.xlen.linux_policy()}:{lane.xlen.mmu_mode()}"
+        out
+
+fn create_default_riscv_fpga_linux_manifest() -> FpgaPrepareManifest:
+    FpgaPrepareManifest.default_xilinx()

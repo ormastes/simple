@@ -17,6 +17,14 @@
 
 use os.kernel.arch.x86_32.cpu.{port_outb, port_outb_wait, port_inb, cli, sti}
 use os.kernel.arch.x86_32.cpu.{GDT_KERNEL_CODE}
+use os.kernel.arch.x86_32.trap_model.{x86_32_syscall_args_from_context, x86_32_apply_syscall_result}
+use os.kernel.arch.x86_32.trap_runtime.{X86_32TrapRuntime}
+use os.kernel.arch.arch_context.{X86Context}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.syscall.{syscall_handler}
 
 # ============================================================================
 # PIC 8259 Port Addresses
@@ -189,6 +197,12 @@ struct X86_32Interrupt:
     """
     pass_dn
 
+var g_x86_32_runtime_installed: bool = false
+var g_x86_32_runtime: X86_32TrapRuntime? = nil
+var g_x86_32_scheduler: Scheduler = Scheduler.new_bootstrap()
+var g_x86_32_ipc: IpcManager = IpcManager.new()
+var g_x86_32_klog: KernelLog = KernelLog.new(256)
+
 impl X86_32Interrupt:
     fn init():
         """Initialize IDT and remap PIC 8259."""
@@ -242,3 +256,85 @@ impl X86_32Interrupt:
     fn disable_irq(irq: u32):
         """Mask a specific IRQ line."""
         _pic_set_mask(irq, true)
+
+    fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+        """Install runtime objects used by int 0x80 dispatch."""
+        x86_32_install_runtime(scheduler, ipc, klog)
+
+    fn install_runtime_bundle(runtime: X86_32TrapRuntime):
+        """Install a precomposed runtime bundle for int 0x80 dispatch."""
+        x86_32_install_runtime_bundle(runtime)
+
+    fn install_bootstrap_runtime(log_capacity: u64):
+        """Install the minimal early-boot runtime bundle."""
+        x86_32_install_bootstrap_runtime(log_capacity)
+
+    fn runtime_installed() -> bool:
+        """Report whether the x86_32 trap runtime has been installed."""
+        x86_32_runtime_installed()
+
+fn _sync_x86_32_runtime_state():
+    if not g_x86_32_runtime_installed:
+        return
+    if g_x86_32_runtime == nil:
+        return
+    var runtime = g_x86_32_runtime.unwrap()
+    runtime.scheduler = g_x86_32_scheduler
+    runtime.ipc = g_x86_32_ipc
+    runtime.klog = g_x86_32_klog
+    g_x86_32_runtime = Some(runtime)
+
+fn x86_32_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+    """Install the kernel runtime objects used by the x86_32 trap bridge."""
+    g_x86_32_scheduler = scheduler
+    g_x86_32_ipc = ipc
+    g_x86_32_klog = klog
+    g_x86_32_runtime = Some(X86_32TrapRuntime.new(scheduler, ipc, klog))
+    g_x86_32_runtime_installed = true
+
+fn x86_32_install_runtime_bundle(runtime: X86_32TrapRuntime):
+    """Install a precomposed runtime bundle for x86_32 trap dispatch."""
+    g_x86_32_scheduler = runtime.scheduler
+    g_x86_32_ipc = runtime.ipc
+    g_x86_32_klog = runtime.klog
+    g_x86_32_runtime = Some(runtime)
+    g_x86_32_runtime_installed = true
+
+fn x86_32_install_bootstrap_runtime(log_capacity: u64):
+    """Install the minimal early-boot runtime bundle."""
+    val runtime = X86_32TrapRuntime.bootstrap(log_capacity)
+    x86_32_install_runtime_bundle(runtime)
+
+fn x86_32_runtime_installed() -> bool:
+    """Report whether the x86_32 trap bridge has runtime objects installed."""
+    g_x86_32_runtime_installed
+
+fn x86_32_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, text>:
+    """Dispatch syscall arguments through the installed x86_32 runtime."""
+    if not x86_32_runtime_installed():
+        return Err("x86_32 trap runtime is not installed")
+    val result = syscall_handler(args, g_x86_32_scheduler, g_x86_32_ipc, g_x86_32_klog)
+    _sync_x86_32_runtime_state()
+    Ok(result)
+
+fn x86_32_dispatch_context(ctx: X86Context) -> Result<X86Context, text>:
+    """Dispatch a trapped int 0x80 context and return the updated context."""
+    val result = x86_32_dispatch_installed_syscall(x86_32_syscall_args_from_context(ctx))
+    if result.is_err():
+        return Err(result.err().unwrap())
+    Ok(x86_32_apply_syscall_result(ctx, result.unwrap()))
+
+fn x86_32_dispatch_installed_syscall_abi(id: u32, arg0: u32, arg1: u32, arg2: u32, arg3: u32, arg4: u32, arg5: u32) -> i32:
+    """Primitive ABI for a future i386 trap-entry assembly stub."""
+    val result = x86_32_dispatch_installed_syscall(SyscallArgs(
+        id: id as u64,
+        arg0: arg0 as u64,
+        arg1: arg1 as u64,
+        arg2: arg2 as u64,
+        arg3: arg3 as u64,
+        arg4: arg4 as u64,
+        arg5: arg5 as u64
+    ))
+    if result.is_err():
+        return -38
+    result.unwrap().value as i32

@@ -1669,8 +1669,15 @@ RuntimeValue serial_println(RuntimeValue val) {
 }
 
 RuntimeValue rt_qemu_exit_success(void) {
-    register uint64_t op asm("x0") = 0x18;
-    __asm__ volatile("hlt #0xF000" : : "r"(op) : "memory");
+    __asm__ volatile(
+        "mrs x1, sctlr_el1\n\t"
+        "bic x1, x1, #1\n\t"
+        "msr sctlr_el1, x1\n\t"
+        "isb\n\t"
+        "mov x0, #0x18\n\t"
+        "hlt #0xF000\n\t"
+        ::: "x0", "x1", "memory"
+    );
     for (;;) __asm__ volatile("wfe");
     return NIL_VALUE;
 }
@@ -2599,8 +2606,10 @@ static uint64_t arm64_recorded_user_root = 0;
 static uint64_t arm64_last_elf_virtual_entry = 0;
 static uint64_t arm64_last_elf_direct_entry = 0;
 
+extern char _start[];
 extern char _vectors[];
 extern char _stack_top[];
+extern char _sbss[];
 extern void _lower_el_aarch64_sync_handler(void);
 
 RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_val, RuntimeValue phys_val, RuntimeValue flags_val);
@@ -2670,19 +2679,17 @@ static int arm64_user_as_kernel_window_prepare(uint64_t root)
 {
     uint32_t rx_el1 = 0U;
     uint32_t rw_el1_nx = ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE;
-    uint64_t vector = (uint64_t)(uintptr_t)_vectors;
-    uint64_t sync_handler = (uint64_t)(uintptr_t)_lower_el_aarch64_sync_handler;
-    uint64_t svc_handler = (uint64_t)(uintptr_t)rt_arm64_handle_user_svc;
-    uint64_t live_handoff = (uint64_t)(uintptr_t)rt_arm64_enter_recorded_user_live;
     uint64_t uart = 0x09000000ULL;
+    uint64_t kernel_page = (uint64_t)(uintptr_t)_start & ~4095ULL;
+    uint64_t kernel_end = ((uint64_t)(uintptr_t)_sbss + 4095ULL) & ~4095ULL;
     uint64_t stack_top = (uint64_t)(uintptr_t)_stack_top;
     uint64_t current_sp = 0;
     __asm__ volatile("mov %0, sp" : "=r"(current_sp));
 
-    if (!arm64_user_as_map_identity_el1(root, vector, rx_el1)) return 0;
-    if (!arm64_user_as_map_identity_el1(root, sync_handler, rx_el1)) return 0;
-    if (!arm64_user_as_map_identity_el1(root, svc_handler, rx_el1)) return 0;
-    if (!arm64_user_as_map_identity_el1(root, live_handoff, rx_el1)) return 0;
+    while (kernel_page < kernel_end) {
+        if (!arm64_user_as_map_identity_el1(root, kernel_page, rx_el1)) return 0;
+        kernel_page += 4096ULL;
+    }
     if (!arm64_user_as_map_identity_el1(root, uart, rw_el1_nx)) return 0;
     if (!arm64_user_as_map_identity_el1(root, stack_top - 1ULL, rw_el1_nx)) return 0;
     if (!arm64_user_as_map_identity_el1(root, current_sp, rw_el1_nx)) return 0;
@@ -2839,7 +2846,11 @@ RuntimeValue rt_arm64_enter_user_first_probe(RuntimeValue entry_val, RuntimeValu
 
 RuntimeValue rt_arm64_record_user_handoff(RuntimeValue entry_val, RuntimeValue sp_val, RuntimeValue root_val)
 {
-    arm64_recorded_user_entry = (uint64_t)entry_val;
+    uint64_t entry = (uint64_t)entry_val;
+    if (entry == arm64_last_elf_direct_entry && arm64_last_elf_virtual_entry != 0) {
+        entry = arm64_last_elf_virtual_entry;
+    }
+    arm64_recorded_user_entry = entry;
     arm64_recorded_user_sp = (uint64_t)sp_val;
     arm64_recorded_user_root = (uint64_t)root_val;
     return NIL_VALUE;
@@ -2883,22 +2894,42 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-RuntimeValue rt_arm64_enter_recorded_user_live(void)
+static void arm64_enter_user_virtual(uint64_t root, uint64_t entry, uint64_t sp)
 {
-    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return 0;
-    serial_puts("[arm64-user] live eret enter\r\n");
-    uint64_t entry = arm64_recorded_user_entry;
-    uint64_t sp = arm64_recorded_user_sp;
     __asm__ volatile(
-        "msr sp_el0, %0\n\t"
-        "msr elr_el1, %1\n\t"
+        "msr mair_el1, %0\n\t"
+        "msr tcr_el1, %1\n\t"
+        "dsb sy\n\t"
+        "isb\n\t"
+        "msr ttbr0_el1, %2\n\t"
+        "dsb sy\n\t"
+        "tlbi vmalle1\n\t"
+        "dsb sy\n\t"
+        "isb\n\t"
+        "mrs x3, sctlr_el1\n\t"
+        "orr x3, x3, #1\n\t"
+        "msr sctlr_el1, x3\n\t"
+        "isb\n\t"
+        "msr sp_el0, %3\n\t"
+        "msr elr_el1, %4\n\t"
         "msr spsr_el1, xzr\n\t"
         "isb\n\t"
         "eret\n\t"
         :
-        : "r"(sp), "r"(entry)
-        : "memory"
+        : "r"(0xFFULL), "r"(0x3510ULL), "r"(root), "r"(sp), "r"(entry)
+        : "x3", "memory"
     );
+    for (;;) __asm__ volatile("wfe");
+}
+
+RuntimeValue rt_arm64_enter_recorded_user_live(void)
+{
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1) return 0;
+    serial_puts("[arm64-user] live virtual eret enter\r\n");
+    uint64_t entry = arm64_recorded_user_entry;
+    uint64_t sp = arm64_recorded_user_sp;
+    uint64_t root = arm64_recorded_user_root;
+    arm64_enter_user_virtual(root, entry, sp);
     return 0;
 }
 

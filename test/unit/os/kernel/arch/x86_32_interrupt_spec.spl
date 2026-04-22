@@ -1,0 +1,65 @@
+use std.spec
+use os.kernel.arch.arch_context.{X86Context}
+use os.kernel.arch.x86_32.interrupt.{X86_32Interrupt, x86_32_runtime_installed, x86_32_dispatch_context, x86_32_dispatch_installed_syscall_abi}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.syscall.{brk_reset_for_test}
+
+fn syscall_context(id: u32) -> X86Context:
+    X86Context(
+        eax: id,
+        ebx: 0,
+        ecx: 0,
+        edx: 0,
+        esi: 0,
+        edi: 0,
+        ebp: 0,
+        esp: 0x9000,
+        eip: 0x1000,
+        eflags: 0x202,
+        cs: 0x1B,
+        ss: 0x23,
+        ds: 0x23,
+        es: 0x23,
+        fpu_state: 0
+    )
+
+describe "x86_32 interrupt runtime bridge":
+    """Hosted coverage for the future i386 int 0x80 runtime bridge."""
+
+    it "fails cleanly before runtime installation":
+        """Dispatch should report missing runtime instead of fabricating success."""
+        val result = x86_32_dispatch_context(syscall_context(4u32))
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_contain("runtime is not installed")
+
+    it "installs runtime through the HAL wrapper":
+        """The x86_32 interrupt HAL owns runtime installation entrypoints."""
+        X86_32Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        expect(X86_32Interrupt.runtime_installed()).to_equal(true)
+        expect(x86_32_runtime_installed()).to_equal(true)
+
+    it "dispatches getpid through a trapped context":
+        """A successful syscall writes eax and advances eip past int 0x80."""
+        X86_32Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        val result = x86_32_dispatch_context(syscall_context(4u32))
+        expect(result.is_err()).to_equal(false)
+        val updated = result.unwrap()
+        expect(updated.eax).to_equal(0u32)
+        expect(updated.eip).to_equal(0x1002u32)
+
+    it "dispatches brk query through a trapped context":
+        """The x86_32 bridge carries nontrivial process syscalls through int 0x80."""
+        brk_reset_for_test()
+        X86_32Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        val result = x86_32_dispatch_context(syscall_context(15u32))
+        expect(result.is_err()).to_equal(false)
+        val updated = result.unwrap()
+        expect(updated.eax).to_equal(0x30000000u32)
+        expect(updated.eip).to_equal(0x1002u32)
+
+    it "exposes a primitive ABI for future assembly stubs":
+        """The ABI helper returns syscall results as signed i32 values."""
+        X86_32Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        expect(x86_32_dispatch_installed_syscall_abi(4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)).to_equal(0)

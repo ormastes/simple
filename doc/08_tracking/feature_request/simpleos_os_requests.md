@@ -81,7 +81,22 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   switching is still not proven because the i686 boot build is blocked. The
   pure `int 0x80` syscall register contract is captured in
   `src/os/kernel/arch/x86_32/trap_model.spl`; trap-entry assembly and runtime
-  dispatch remain open.
+  dispatch remain open. `src/os/kernel/arch/x86_32/interrupt.spl` now has a
+  hosted runtime bridge that installs scheduler/IPC/log objects, dispatches
+  trapped `X86Context` values through the common syscall handler, applies the
+  result to `eax/eip`, and exposes a primitive ABI for future assembly stubs.
+  The remaining gap is the actual i386 IDT gate plus assembly save/restore path
+  that calls the bridge from a live `int 0x80`. x86_32 process-image admission
+  now accepts ELF32/i386 executables through `Architecture.X86`, uses the
+  dedicated `X86_32_USER_STACK_TOP`, and has unit coverage in the common ELF
+  loader and process-image specs. Scheduler user-context construction now has
+  an explicit `Architecture.X86` branch with covered i386 entry/stack alignment
+  and ring-3 selector values. The syscall spawn handoff now has an
+  architecture-parameterized test path proving that resolved ELF32/i386 bytes
+  can become a process-backed user task with the x86_32 entry and stack top;
+  the x86_32 trap bridge also covers a `brk(0)` query through the common
+  syscall handler. Exec live mapping remains blocked behind the i686
+  boot/runtime lane.
 
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 

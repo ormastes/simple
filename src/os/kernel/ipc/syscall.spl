@@ -1214,10 +1214,10 @@ fn _direct_spawn_app_id_path(app_id: u64) -> text?:
         case _:
             nil
 
-fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
-    val arch = CURRENT_EXEC_ARCH
+fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
     val _sp_argv: [text] = []
     val _sp_envp: [text] = []
+    val _path_bytes = path_bytes
     serial_println("[syscall13] build_user_process_image begin")
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
@@ -1264,6 +1264,9 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
     serial_println("[syscall13] rejected invalid filesystem executable")
     -8
 
+fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    _spawn_from_resolved_bytes_for_arch(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
+
 fn _builtin_binary_path_for_spawn(path: text) -> text:
     if path.ends_with(".smf") and path.len() > 4:
         return path.substring(0, path.len() - 4)
@@ -1279,12 +1282,12 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
         val sentinel_path = _direct_spawn_app_id_path(path_ptr)
         if sentinel_path != nil:
             val path = sentinel_path.unwrap()
-            if _is_builtin_binary_path(path):
-                serial_println("[syscall13] builtin resident fallback path={path}")
-                return -2
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
                 return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
+            if _is_builtin_binary_path(path):
+                serial_println("[syscall13] builtin resident fallback path={path}")
+                return -2
         return -14
 
     if path_len > MAX_BINARY_PATH_LEN:
@@ -1298,21 +1301,25 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     serial_println("[syscall13] dispatch_direct path-ready")
-    if _is_builtin_binary_path(path):
-        serial_println("[syscall13] builtin resident fallback path={path}")
-        return -2
     val arch = CURRENT_EXEC_ARCH
     serial_println("[syscall13] dispatch_direct arch-ready")
 
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     serial_println("[syscall13] dispatch_direct resolve returned")
+    if bytes_result.is_ok():
+        serial_println("[syscall13] vfs bytes ok; exec handoff active")
+        return _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+
+    if _is_builtin_binary_path(path):
+        serial_println("[syscall13] builtin resident fallback path={path}")
+        return -2
+
     if bytes_result.is_err():
         var log = klog
         log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return -2
 
-    serial_println("[syscall13] vfs bytes ok; exec handoff active")
-    _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+    -2
 
 # ============================================================================
 # IPC Syscall Handlers

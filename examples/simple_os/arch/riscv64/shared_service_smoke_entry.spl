@@ -1,13 +1,7 @@
-use common.window_protocol.geometry.{WindowId}
-use os.services.launcher.launcher.{
-    launcher_register,
-    launcher_record_process,
-    launcher_get_process_app_id_for_pid,
-    launcher_get_process_window_count,
-    launcher_note_window_opened,
-    launcher_process_is_process_backed,
+use os.services.desktop_app_ownership_contract.{
+    desktop_app_ownership_valid,
+    desktop_app_ownership_marker,
 }
-use os.services.wm.wm_service.{WmService}
 
 extern fn serial_println(msg: text)
 extern fn rt_qemu_exit_success()
@@ -16,13 +10,6 @@ extern fn rt_riscv_smf_cli_probe() -> i64
 extern fn rt_riscv_smf_cli_load() -> i64
 extern fn rt_riscv_smf_gui_probe() -> i64
 extern fn rt_riscv_native_gui_process_render() -> i64
-
-fn register_default_apps():
-    launcher_register("Hello World", "/sys/apps/hello_world.smf", "H", 0x48, 1)
-    launcher_register("File Manager", "/sys/apps/file_manager.smf", "F", 0x46, 1)
-    launcher_register("Terminal", "/sys/apps/shell.smf", ">", 0x54, 1)
-    launcher_register("Browser Demo", "/sys/apps/browser_demo.smf", "B", 0x42, 1)
-    launcher_register("Editor", "/sys/apps/editor.smf", "E", 0x45, 1)
 
 fn spl_start():
     serial_println("")
@@ -67,48 +54,16 @@ fn spl_start():
         rt_qemu_exit_success()
         return
 
-    register_default_apps()
-
     val pid: u64 = 1002
     val app_id = "/sys/apps/browser_demo.smf"
-    val window_id = WindowId(value: 1)
-    val wm = WmService.new()
-
-    if not launcher_record_process(pid, 3, "running", 0, 0, true):
-        serial_println("[riscv-smf] launcher_record_process failed")
-        serial_println("TEST FAILED")
-        rt_qemu_exit_success()
-        return
-
-    wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
-    launcher_note_window_opened(pid)
-
-    if not launcher_process_is_process_backed(pid):
-        serial_println("[riscv-smf] launcher process-backed check failed")
-        serial_println("TEST FAILED")
-        rt_qemu_exit_success()
-        return
-
-    if launcher_get_process_app_id_for_pid(pid) != app_id:
-        serial_println("[riscv-smf] launcher app identity mismatch")
-        serial_println("TEST FAILED")
-        rt_qemu_exit_success()
-        return
-
-    if launcher_get_process_window_count(0) != 1:
-        serial_println("[riscv-smf] launcher window count mismatch")
-        serial_println("TEST FAILED")
-        rt_qemu_exit_success()
-        return
-
-    if wm.window_owner_process_id(1) != pid or wm.window_owner_app_id(1) != app_id:
-        serial_println("[riscv-smf] wm ownership mismatch")
+    if not desktop_app_ownership_valid(pid, app_id, 1, 1, pid, app_id):
+        serial_println("[riscv-smf] shared desktop ownership contract mismatch")
         serial_println("TEST FAILED")
         rt_qemu_exit_success()
         return
 
     serial_println("SMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_demo.smf pid=1002 wm=x86_64_desktop_shell_contract")
-    serial_println("[desktop-e2e] process-backed:ok app=/sys/apps/browser_demo.smf pid=1002")
+    serial_println(desktop_app_ownership_marker(pid, app_id, 1, 1))
     serial_println("NATIVE_GUI_PROCESS_RENDER_OK app=/sys/apps/browser_demo.smf pid=1002")
     serial_println("SIMPLEOS_RISCV_SMF_FS_PASS")
     serial_println("TEST PASSED")

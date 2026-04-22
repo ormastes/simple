@@ -1,5 +1,5 @@
 use std.spec
-use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch, dispatch_spawn_binary_direct}
+use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch, dispatch_spawn_binary_direct, _spawn_from_resolved_bytes_for_arch}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallTrapDisposition}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -12,6 +12,7 @@ use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState, BlockReason}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_source.{RV64_PROOF_BINARY_PATH, _set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
+use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_read64, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
@@ -102,6 +103,48 @@ fn _make_x86_64_exec() -> [u8]:
     while bytes.len() < 0x1000:
         bytes.push(0.to_u8())
     bytes.push(0xC3.to_u8())
+    bytes
+
+fn _make_x86_32_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 3)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x8048000)
+    bytes = _push_u32_le(bytes, 52)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 52)
+    bytes = _push_u16_le(bytes, 32)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x100)
+    bytes = _push_u32_le(bytes, 0x8048000)
+    bytes = _push_u32_le(bytes, 0x8048000)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u32_le(bytes, 0x1000)
+    while bytes.len() < 0x100:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
     bytes
 
 fn _make_exec_smf(stub: [u8]) -> [u8]:
@@ -524,6 +567,27 @@ describe "syscall_handler":
             expect(task.is_user).to_equal(true)
             expect(task.entry_point).to_equal(0x400000)
         _clear_synthetic_vfs_for_test()
+
+    it "architecture-param spawn handoff accepts x86_32 ELF images":
+        var scheduler = Scheduler.new()
+        val pid = _spawn_from_resolved_bytes_for_arch(
+            "/sys/apps/x86_32_probe",
+            [],
+            _make_x86_32_exec(),
+            2,
+            scheduler,
+            KernelLog.new(16),
+            Architecture.X86
+        )
+        expect(pid).to_be_greater_than(0)
+        val spawned = scheduler.get_task(TaskId(id: pid as u64))
+        val found = if spawned == nil: 0 else: 1
+        expect(found).to_equal(1)
+        if spawned != nil:
+            val task = spawned
+            expect(task.is_user).to_equal(true)
+            expect(task.entry_point).to_equal(0x8048000)
+            expect(task.user_stack).to_equal(0x00000000BFFFF000)
 
     it "direct SMF sentinel spawn creates process-backed user task without resident fallback":
         _clear_synthetic_vfs_for_test()
