@@ -166,20 +166,20 @@ fn _file_contains_vhdl_design(path: text) -> bool:
 fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     val lines = source.split("\n")
     var header = ""
-    var body = ""
+    var body_lines: [text] = []
     var i = 0
     while i < lines.len():
-        val line = lines[i].trim()
+        val raw_line = lines[i]
+        val line = raw_line.trim()
         if line != "":
             if header == "":
                 header = line
             else:
-                body = line
-                break
+                body_lines = body_lines.push(raw_line)
         i = i + 1
     if not header.starts_with("fn "):
         return Err("VHDL subset fallback requires a single function declaration")
-    if body == "":
+    if body_lines.len() == 0:
         return Err("VHDL subset fallback requires a single expression body")
 
     val after_fn = header.substring(3).trim()
@@ -201,6 +201,8 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     if return_vhdl_type == "":
         return Err("VHDL subset fallback unsupported return type: {return_type}")
 
+    var param_names: [text] = []
+    var param_types: [text] = []
     var ports: [text] = []
     if params_text != "":
         val parts = params_text.split(",")
@@ -215,10 +217,12 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
             val vhdl_type = _simple_type_to_vhdl(param_type)
             if vhdl_type == "":
                 return Err("VHDL subset fallback unsupported parameter type: {param_type}")
+            param_names = param_names.push(param_name)
+            param_types = param_types.push(param_type)
             ports = ports.push("        {param_name} : in {vhdl_type};")
     ports = ports.push("        result_out : out {return_vhdl_type}")
 
-    val expr_result = _simple_expr_to_vhdl(body, return_type)
+    val expr_result = _simple_body_to_vhdl(body_lines, return_type, param_names, param_types)
     if expr_result.is_err():
         return Err(expr_result.unwrap_err())
     val expr = expr_result.unwrap()
@@ -237,6 +241,78 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     out = out + "end architecture rtl;\n"
     Ok(out)
 
+fn _simple_body_to_vhdl(body_lines: [text], result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    var trimmed_lines: [text] = []
+    var i = 0
+    while i < body_lines.len():
+        val trimmed = body_lines[i].trim()
+        if trimmed != "":
+            trimmed_lines = trimmed_lines.push(trimmed)
+        i = i + 1
+
+    if trimmed_lines.len() == 0:
+        return Err("VHDL subset fallback requires a non-empty body")
+
+    if trimmed_lines.len() == 1:
+        return _simple_expr_to_vhdl(_simple_strip_return(trimmed_lines[0]), result_type, param_names, param_types)
+
+    val first = trimmed_lines[0]
+    if first.starts_with("if "):
+        return _simple_if_block_to_vhdl(trimmed_lines, result_type, param_names, param_types)
+
+    if first.starts_with("return "):
+        return _simple_expr_to_vhdl(first.substring(7).trim(), result_type, param_names, param_types)
+
+    Err("VHDL subset fallback supports only a single expression or a simple if block")
+
+fn _simple_if_block_to_vhdl(lines: [text], result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    val first = lines[0]
+    if not first.starts_with("if "):
+        return Err("VHDL subset fallback expected an if block")
+    if not first.ends_with(":"):
+        return Err("VHDL subset fallback if block must end with ':'")
+
+    var else_index = -1
+    var i = 1
+    while i < lines.len():
+        if lines[i] == "else:":
+            else_index = i
+            break
+        i = i + 1
+    if else_index < 0:
+        return Err("VHDL subset fallback if block requires an else branch")
+
+    val cond_text = first.substring(3, first.len() - 1).trim()
+    val then_result = _simple_single_branch_expr(lines, 1, else_index, result_type, param_names, param_types)
+    if then_result.is_err():
+        return Err(then_result.unwrap_err())
+    val else_result = _simple_single_branch_expr(lines, else_index + 1, lines.len(), result_type, param_names, param_types)
+    if else_result.is_err():
+        return Err(else_result.unwrap_err())
+    val cond_result = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)
+    if cond_result.is_err():
+        return Err(cond_result.unwrap_err())
+    Ok("{then_result.unwrap()} when {cond_result.unwrap()} = '1' else {else_result.unwrap()}")
+
+fn _simple_single_branch_expr(lines: [text], start_index: i64, end_index: i64, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    var branch_lines: [text] = []
+    var i = start_index
+    while i < end_index:
+        val trimmed = lines[i].trim()
+        if trimmed != "":
+            branch_lines = branch_lines.push(trimmed)
+        i = i + 1
+
+    if branch_lines.len() != 1:
+        return Err("VHDL subset fallback if branches must contain exactly one expression")
+
+    return _simple_expr_to_vhdl(_simple_strip_return(branch_lines[0]), result_type, param_names, param_types)
+
+fn _simple_strip_return(expr: text) -> text:
+    if expr.starts_with("return "):
+        return expr.substring(7, expr.len()).trim()
+    expr
+
 fn _simple_type_to_vhdl(type_name: text) -> text:
     match type_name:
         case "i32": "signed(31 downto 0)"
@@ -246,8 +322,14 @@ fn _simple_type_to_vhdl(type_name: text) -> text:
         case "bool": "std_logic"
         case _: ""
 
-fn _simple_expr_to_vhdl(expr: text, result_type: text) -> Result<text, text>:
+fn _simple_expr_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     val trimmed = expr.trim()
+    val inline_if_result = _simple_inline_if_to_vhdl(trimmed, result_type, param_names, param_types)
+    if not inline_if_result.is_err():
+        return inline_if_result
+    val cast_result = _simple_cast_to_vhdl(trimmed, result_type, param_names, param_types)
+    if not cast_result.is_err():
+        return cast_result
     if trimmed.contains(" + "):
         val parts = trimmed.split(" + ")
         if parts.len() == 2:
@@ -261,6 +343,111 @@ fn _simple_expr_to_vhdl(expr: text, result_type: text) -> Result<text, text>:
         if parts.len() == 2:
             return Ok("{_simple_operand_to_vhdl(parts[0].trim(), result_type)} * {_simple_operand_to_vhdl(parts[1].trim(), result_type)}")
     Ok(_simple_operand_to_vhdl(trimmed, result_type))
+
+fn _simple_inline_if_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    if not expr.starts_with("if "):
+        return Err("not an inline if")
+    val else_opt = expr.find(" else:")
+    if not else_opt.?:
+        return Err("not an inline if")
+    val else_index = else_opt.unwrap()
+    val head = expr.substring(3, else_index).trim()
+    val colon_opt = head.find(":")
+    if not colon_opt.?:
+        return Err("inline if is missing ':'")
+    val colon_index = colon_opt.unwrap()
+    val cond_text = head.substring(0, colon_index).trim()
+    val then_text = head.substring(colon_index + 1, head.len()).trim()
+    val else_text = expr.substring(else_index + 6, expr.len()).trim()
+    if then_text == "" or else_text == "":
+        return Err("inline if must have both then and else expressions")
+    val cond_result = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)
+    if cond_result.is_err():
+        return Err(cond_result.unwrap_err())
+    val then_result = _simple_expr_to_vhdl(_simple_strip_return(then_text), result_type, param_names, param_types)
+    if then_result.is_err():
+        return Err(then_result.unwrap_err())
+    val else_result = _simple_expr_to_vhdl(_simple_strip_return(else_text), result_type, param_names, param_types)
+    if else_result.is_err():
+        return Err(else_result.unwrap_err())
+    Ok("{then_result.unwrap()} when {cond_result.unwrap()} = '1' else {else_result.unwrap()}")
+
+fn _simple_cast_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
+    val as_opt = expr.find(" as ")
+    if not as_opt.?:
+        return Err("not a cast expression")
+    val as_index = as_opt.unwrap()
+    val source_text = expr.substring(0, as_index).trim()
+    val target_type = expr.substring(as_index + 4, expr.len()).trim()
+    if source_text == "" or target_type == "":
+        return Err("not a cast expression")
+    val source_type = _simple_expr_type(source_text, param_names, param_types)
+    if source_type == "":
+        return Err("VHDL subset fallback could not infer cast source type for {source_text}")
+    val source_width = _simple_integer_width(source_type)
+    val target_width = _simple_integer_width(target_type)
+    if target_type == "bool":
+        if source_type == "bool":
+            return Ok(source_text)
+        if source_width == "":
+            return Err("VHDL subset fallback unsupported cast source type: {source_type}")
+        if source_type.starts_with("u"):
+            return Ok("'1' when {source_text} /= to_unsigned(0, {source_width}) else '0'")
+        if source_type.starts_with("i"):
+            return Ok("'1' when {source_text} /= to_signed(0, {source_width}) else '0'")
+        return Err("VHDL subset fallback unsupported cast source type: {source_type}")
+    if target_width == "":
+        return Err("VHDL subset fallback unsupported cast target type: {target_type}")
+    if source_type == "bool":
+        if target_type.starts_with("u"):
+            return Ok("to_unsigned(1, {target_width}) when {source_text} = '1' else to_unsigned(0, {target_width})")
+        if target_type.starts_with("i"):
+            return Ok("to_signed(1, {target_width}) when {source_text} = '1' else to_signed(0, {target_width})")
+        return Err("VHDL subset fallback unsupported cast target type: {target_type}")
+    if source_width == "":
+        return Err("VHDL subset fallback unsupported cast source type: {source_type}")
+    if target_type.starts_with("u"):
+        return Ok("resize(unsigned({source_text}), {target_width})")
+    if target_type.starts_with("i"):
+        return Ok("resize(signed({source_text}), {target_width})")
+    Err("VHDL subset fallback unsupported cast target type: {target_type}")
+
+fn _simple_expr_type(expr: text, param_names: [text], param_types: [text]) -> text:
+    val trimmed = expr.trim()
+    if trimmed == "true" or trimmed == "false":
+        return "bool"
+    val name_type = _simple_param_type(trimmed, param_names, param_types)
+    if name_type != "":
+        return name_type
+    if _is_decimal_literal(trimmed):
+        return "i32"
+    ""
+
+fn _simple_param_type(name: text, param_names: [text], param_types: [text]) -> text:
+    var i = 0
+    while i < param_names.len():
+        if param_names[i] == name:
+            return param_types[i]
+        i = i + 1
+    ""
+
+fn _simple_integer_width(type_name: text) -> text:
+    match type_name:
+        case "i32": "32"
+        case "i64": "64"
+        case "u8": "8"
+        case "u32": "32"
+        case _: ""
+
+fn _is_decimal_literal(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    while i < value.len():
+        if not _is_decimal_digit(value.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
 
 fn _simple_operand_to_vhdl(value: text, type_name: text) -> text:
     if value == "true":
