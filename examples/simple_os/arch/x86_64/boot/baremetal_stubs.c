@@ -13262,6 +13262,8 @@ __attribute__((weak)) int64_t spl_handle_munmap(uint64_t, uint64_t, uint64_t, ui
 __attribute__((weak)) int64_t spl_handle_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_enter_user_blocking(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_brk(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_system_reboot(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_send(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_ipc_create_port(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -13348,6 +13350,8 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 12: return spl_handle_mprotect(a0, a1, a2, a3, a4, a5);
         case 13: return spl_handle_spawn_binary(a0, a1, a2, a3, a4, a5);
         case 14: return spl_handle_enter_user_blocking(a0, a1, a2, a3, a4, a5);
+        case 15: return spl_handle_brk(a0, a1, a2, a3, a4, a5);
+        case 16: return spl_handle_system_reboot(a0, a1, a2, a3, a4, a5);
         case 20: return spl_handle_ipc_send(a0, a1, a2, a3, a4, a5);
         case 21: return spl_handle_ipc_recv(a0, a1, a2, a3, a4, a5);
         case 22: return spl_handle_ipc_create_port(a0, a1, a2, a3, a4, a5);
@@ -13507,6 +13511,18 @@ __attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t a0, uint64_t a1, 
 __attribute__((weak)) int64_t spl_handle_enter_user_blocking(uint64_t a0, uint64_t a1, uint64_t a2,
                                                               uint64_t a3, uint64_t a4, uint64_t a5) {
     /* Weak fallback: EnterUserBlocking not yet installed — return ENOSYS */
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_brk(uint64_t a0, uint64_t a1, uint64_t a2,
+                                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_system_reboot(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                        uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }

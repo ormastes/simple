@@ -25,6 +25,7 @@ use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.x86_64.cpu.{reboot}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
@@ -47,6 +48,7 @@ use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, f
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 extern fn serial_println(msg: text)
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 val MAX_EXEC_ARG_COUNT: u64 = 64
@@ -307,7 +309,11 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
                 return SyscallResult(value: SYSCALL_EPERM)
             SyscallResult(value: -38)
         case 15:    # Brk
-            _handle_brk(args)
+            _handle_brk_for_task(args, caller.id)
+        case 16:    # SystemReboot
+            if not _cap_check(ipc, caller, CapabilityKind.SystemReboot):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_system_reboot(args)
 
         # -- Memory ----------------------------------------------------------
         case 10:    # Mmap
@@ -1231,6 +1237,7 @@ fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priorit
         if pid == 0:
             serial_println("[syscall13] create_user_task failed")
             return -12
+        sched.set_task_name(TaskId(id: pid), path)
 
         val pid_value = pid as i64
         var ulog = klog
@@ -1564,7 +1571,9 @@ fn _handle_get_task_info(args: SyscallArgs, scheduler: Scheduler) -> SyscallResu
 
     Args:
       arg0: target task PID
-      arg1: pointer to TaskInfoBuf
+      arg1: pointer to TaskInfoBuf fixed prefix
+      arg2: optional pointer to caller-provided name buffer
+      arg3: name buffer capacity in bytes
     Returns: 0 on success (info written to shared buffer), -1 if not found.
     """
     val target = TaskId(id: args.arg0)
@@ -1574,7 +1583,7 @@ fn _handle_get_task_info(args: SyscallArgs, scheduler: Scheduler) -> SyscallResu
     if args.arg1 != 0:
         # Fixed prefix of TaskInfoBuf:
         # pid:u64, parent_pid:u64, state:u8, priority:u8, padding, memory:u64,
-        # cpu_ticks:u64, name_len:u32. The variable name buffer is left empty.
+        # cpu_ticks:u64, name_len:u32.
         if not _is_userspace_range(args.arg1, 44):
             return SyscallResult(value: -14)
         if not vmm_verify_user_write(args.arg1, 44):
@@ -1582,13 +1591,26 @@ fn _handle_get_task_info(args: SyscallArgs, scheduler: Scheduler) -> SyscallResu
         val task = tcb
         val parent_pid = if task.parent == nil: 0 else: task.parent.unwrap().id
         val memory_pages = if task.address_space == 0: 0 else: 1
+        val name_bytes = rt_text_to_bytes(task.name)
+        val name_len = name_bytes.len() as u32
+        val name_len_u64 = name_len as u64
         mmio_write64(args.arg1, task.id.id)
         mmio_write64(args.arg1 + 8, parent_pid)
         mmio_write8(args.arg1 + 16, _task_state_code(task.state))
         mmio_write8(args.arg1 + 17, _task_priority_code(task.priority))
         mmio_write64(args.arg1 + 24, memory_pages)
         mmio_write64(args.arg1 + 32, task.ticks_remaining)
-        mmio_write32(args.arg1 + 40, 0u32)
+        mmio_write32(args.arg1 + 40, name_len)
+        if args.arg2 != 0 and args.arg3 > 0 and name_len > 0:
+            val max = if name_len_u64 < args.arg3: name_len_u64 else: args.arg3
+            if not _is_userspace_range(args.arg2, max):
+                return SyscallResult(value: -14)
+            if not vmm_verify_user_write(args.arg2, max):
+                return SyscallResult(value: -14)
+            var i = 0u64
+            while i < max:
+                mmio_write8(args.arg2 + i, name_bytes[i])
+                i = i + 1
     SyscallResult(value: 0)
 
 fn _handle_signal(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -3368,6 +3390,13 @@ fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult
 # once PM Wave 2 lands and Task carries a ProcessVmSpace field.
 var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
 
+struct TaskBrkEntry:
+    """Per-task program break state."""
+    task_id: u64
+    current: u64
+
+var _task_brks: [TaskBrkEntry] = []
+
 fn _align_brk_up(value: u64) -> u64:
     if value % PAGE_SIZE == 0:
         return value
@@ -3376,34 +3405,70 @@ fn _align_brk_up(value: u64) -> u64:
 fn brk_reset_for_test():
     """Reset the process break model for isolated specs."""
     _current_brk = USER_BRK_BASE
+    _task_brks = []
 
 fn _handle_brk(args: SyscallArgs) -> SyscallResult:
+    _handle_brk_for_task(args, 0)
+
+fn _find_task_brk_slot(task_id: u64) -> i32:
+    var i = 0
+    while i < _task_brks.len():
+        if _task_brks[i].task_id == task_id:
+            return i
+        i = i + 1
+    -1
+
+fn _task_brk_current(task_id: u64) -> u64:
+    val slot = _find_task_brk_slot(task_id)
+    if slot < 0:
+        return USER_BRK_BASE
+    _task_brks[slot].current
+
+fn _task_brk_set(task_id: u64, value: u64):
+    val slot = _find_task_brk_slot(task_id)
+    if slot >= 0:
+        var entry = _task_brks[slot]
+        entry.current = value
+        _task_brks[slot] = entry
+        return
+    _task_brks.push(TaskBrkEntry(task_id: task_id, current: value))
+
+fn _handle_brk_for_task(args: SyscallArgs, task_id: u64) -> SyscallResult:
     """brk — query or grow the current process break.
 
     arg0=0 returns the current break. A non-zero arg0 requests a new break.
     This MVP path supports monotonic growth only; shrinking returns -EINVAL.
     """
     val requested = args.arg0
+    val current_brk = _task_brk_current(task_id)
     if requested == 0:
-        return SyscallResult(value: _current_brk as i64)
+        return SyscallResult(value: current_brk as i64)
     if requested < USER_BRK_BASE:
         return SyscallResult(value: -22)
-    if requested < _current_brk:
+    if requested < current_brk:
         return SyscallResult(value: -22)
     if requested > USER_BRK_LIMIT:
         return SyscallResult(value: -12)
-    if requested == _current_brk:
-        return SyscallResult(value: _current_brk as i64)
+    if requested == current_brk:
+        return SyscallResult(value: current_brk as i64)
 
-    val old_page = _align_brk_up(_current_brk)
+    val old_page = _align_brk_up(current_brk)
     val new_page = _align_brk_up(requested)
     if new_page > old_page:
         val len = new_page - old_page
         val rc = vmm_mmap(g_current_vmspace, old_page, len, VMA_READ | VMA_WRITE, VMA_ANON, 0, 0)
         if rc < 0:
             return SyscallResult(value: rc)
-    _current_brk = requested
-    SyscallResult(value: _current_brk as i64)
+    _task_brk_set(task_id, requested)
+    if task_id == 0:
+        _current_brk = requested
+    SyscallResult(value: requested as i64)
+
+fn _handle_system_reboot(args: SyscallArgs) -> SyscallResult:
+    """Reset the current x86_64 machine. Does not return on real hardware/QEMU."""
+    _ = args
+    reboot()
+    SyscallResult(value: -38)
 
 fn _handle_sys_mmap(args: SyscallArgs) -> SyscallResult:
     """sys_mmap — map a virtual address range into the current task's space.

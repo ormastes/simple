@@ -41,7 +41,6 @@ val PAGE_SIZE: u64 = 4096
 # ============================================================================
 
 extern fn serial_println(msg: text)
-extern fn rt_arm_stage_raw_image(dst_phys: u64, bytes: [u8]) -> u32
 
 # ============================================================================
 # Helpers
@@ -216,6 +215,7 @@ fn map_stack(as_handle: AddressSpace, stack_top: u64, stack_size: u64, stack_byt
 
     Ok(mapped)
 
+@cfg(arm64)
 fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     """Stage raw executable bytes into direct-load frames.
 
@@ -224,6 +224,7 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     still proves that the filesystem bytes are copied into RAM owned by the
     process image instead of stopping at metadata-only scheduler registration.
     """
+    extern fn rt_arm_stage_raw_image(dst_phys: u64, bytes: [u8]) -> i32
     if as_handle.phys_root == 0:
         serial_println("[segmap] raw stage failed: no address-space root")
         return -1
@@ -234,19 +235,41 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
 
     val image_base = as_handle.phys_root + 0x100000
     val staged = rt_arm_stage_raw_image(image_base, file_bytes)
-    if staged == 0:
+    if staged <= 0:
         serial_println("[segmap] raw stage failed: runtime copy")
         return -12
-    var remaining = total
-    var pages: i32 = 0
-    while remaining > 0:
-        pages = pages + 1
-        if remaining <= PAGE_SIZE:
-            remaining = 0
-        else:
-            remaining = remaining - PAGE_SIZE
-    serial_println("[segmap] raw stage ok bytes={total} pages={pages} root={as_handle.phys_root}")
-    pages
+    serial_println("[segmap] raw stage ok bytes={total} root={as_handle.phys_root}")
+    staged
+
+@cfg(arm32)
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(riscv64)
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(riscv32)
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(x86_64)
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
+
+@cfg(x86)
+fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
+    val _as_handle = as_handle
+    val _file_bytes = file_bytes
+    -1
 
 fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8]) -> Result<i32, text>:
     """Map every PT_LOAD segment in order; abort on first error.
@@ -256,20 +279,15 @@ fn map_all(as_handle: AddressSpace, segments: [UserLoadSegment], file_bytes: [u8
     """
     var i: i64 = 0
     var mapped: i32 = 0
-    serial_println("[segmap] map_all begin segments={segments.len()} root={as_handle.phys_root}")
     while i < segments.len():
-        serial_println("[segmap] map_all segment index={i}")
         val seg = segments[i]
         val r = map_segment(as_handle, seg, file_bytes)
         match r:
             case Ok(_):
-                serial_println("[segmap] map_all segment ok index={i}")
                 mapped = mapped + 1
             case Err(msg):
-                serial_println("[segmap] map_all segment err index={i}")
                 return Err(msg)
         i = i + 1
-    serial_println("[segmap] map_all ok mapped={mapped}")
     Ok(mapped)
 
 fn highest_loaded_address(segments: [UserLoadSegment]) -> u64:

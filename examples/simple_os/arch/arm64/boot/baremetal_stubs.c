@@ -2507,6 +2507,40 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
     return (RuntimeValue)appended;
 }
 
+typedef struct {
+    uint64_t x[31];
+    uint64_t sp;
+    uint64_t elr_el1;
+    uint64_t spsr_el1;
+    uint64_t fpu_state;
+} Arm64SavedContext;
+
+RuntimeValue rt_arm64_context_save(RuntimeValue ctx_ptr_val)
+{
+    Arm64SavedContext *ctx = (Arm64SavedContext *)(uintptr_t)(uint64_t)ctx_ptr_val;
+    if (!ctx) return NIL_VALUE;
+    for (uint32_t i = 0; i < 31; i++) ctx->x[i] = 0;
+    ctx->sp = (uint64_t)(uintptr_t)&ctx;
+    ctx->elr_el1 = (uint64_t)(uintptr_t)__builtin_return_address(0);
+    ctx->spsr_el1 = 0x3C5ULL;
+    ctx->fpu_state = 0;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm64_context_restore(RuntimeValue ctx_ptr_val)
+{
+    Arm64SavedContext *ctx = (Arm64SavedContext *)(uintptr_t)(uint64_t)ctx_ptr_val;
+    (void)ctx;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm64_context_switch(RuntimeValue from_ptr_val, RuntimeValue to_ptr_val)
+{
+    rt_arm64_context_save(from_ptr_val);
+    rt_arm64_context_restore(to_ptr_val);
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
@@ -2520,7 +2554,7 @@ RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue byte
     for (uint64_t i = bytes->len; i < padded; i++) {
         dst[i] = 0;
     }
-    return (RuntimeValue)bytes->len;
+    return (RuntimeValue)((bytes->len + 4095ULL) / 4096ULL);
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)

@@ -1503,6 +1503,42 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
     return (RuntimeValue)appended;
 }
 
+typedef struct {
+    uint32_t r[13];
+    uint32_t sp;
+    uint32_t lr;
+    uint32_t pc;
+    uint32_t cpsr;
+    uint32_t fpu_state;
+} Arm32SavedContext;
+
+RuntimeValue rt_arm32_context_save(RuntimeValue ctx_ptr_val)
+{
+    Arm32SavedContext *ctx = (Arm32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
+    if (!ctx) return NIL_VALUE;
+    for (uint32_t i = 0; i < 13; i++) ctx->r[i] = 0;
+    ctx->sp = (uint32_t)(uintptr_t)&ctx;
+    ctx->lr = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    ctx->pc = ctx->lr;
+    ctx->cpsr = 0x000001D3U;
+    ctx->fpu_state = 0;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm32_context_restore(RuntimeValue ctx_ptr_val)
+{
+    Arm32SavedContext *ctx = (Arm32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
+    (void)ctx;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm32_context_switch(RuntimeValue from_ptr_val, RuntimeValue to_ptr_val)
+{
+    rt_arm32_context_save(from_ptr_val);
+    rt_arm32_context_restore(to_ptr_val);
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
     uint32_t dst_phys = (uint32_t)dst_phys_val;
@@ -1516,7 +1552,7 @@ RuntimeValue rt_arm_stage_raw_image(RuntimeValue dst_phys_val, RuntimeValue byte
     for (uint32_t i = bytes->len; i < padded; i++) {
         dst[i] = 0;
     }
-    return (RuntimeValue)bytes->len;
+    return (RuntimeValue)((bytes->len + 4095U) / 4096U);
 }
 
 RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)
