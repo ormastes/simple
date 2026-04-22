@@ -6,6 +6,10 @@ FPGAs. This module describes the pre-hardware contract: what must be generated,
 validated, and later consumed by Vivado/programming/boot-test wrappers.
 """
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
 enum RiscvXlen:
     Rv32
     Rv64
@@ -203,6 +207,70 @@ impl RiscvFpgaLane:
             errors.push("rv32 linux must remain marked experimental")
         errors
 
+    fn package_name() -> text:
+        "simple_{self.xlen.to_text()}_linux_pkg"
+
+    fn reset_vector_hex() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "80000000"
+        "0000000080000000"
+
+    fn boot_stride_decimal() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "4"
+        "4"
+
+    fn package_vhdl() -> text:
+        val bits = self.xlen.bits()
+        val package_name = self.package_name()
+        "library ieee;\n" +
+            "use ieee.std_logic_1164.all;\n" +
+            "use ieee.numeric_std.all;\n\n" +
+            "package {package_name} is\n" +
+            "    constant XLEN : natural := {bits};\n" +
+            "    subtype xword_t is std_logic_vector(XLEN - 1 downto 0);\n" +
+            "    constant RESET_VECTOR : xword_t := x\"{self.reset_vector_hex()}\";\n" +
+            "    constant BOOT_STRIDE : natural := {self.boot_stride_decimal()};\n" +
+            "end package {package_name};\n\n" +
+            "package body {package_name} is\n" +
+            "end package body {package_name};\n"
+
+    fn soc_vhdl() -> text:
+        val package_name = self.package_name()
+        val top = self.top_module
+        "library ieee;\n" +
+            "use ieee.std_logic_1164.all;\n" +
+            "use ieee.numeric_std.all;\n" +
+            "use work.{package_name}.all;\n\n" +
+            "entity {top} is\n" +
+            "    port (\n" +
+            "        clk           : in  std_logic;\n" +
+            "        reset_n       : in  std_logic;\n" +
+            "        uart_rx       : in  std_logic;\n" +
+            "        uart_tx       : out std_logic;\n" +
+            "        led_heartbeat : out std_logic;\n" +
+            "        boot_pc_debug : out xword_t\n" +
+            "    );\n" +
+            "end entity {top};\n\n" +
+            "architecture rtl of {top} is\n" +
+            "    signal pc_reg : xword_t := RESET_VECTOR;\n" +
+            "    signal tick   : unsigned(23 downto 0) := (others => '0');\n" +
+            "begin\n" +
+            "    uart_tx <= '1';\n" +
+            "    led_heartbeat <= tick(23);\n" +
+            "    boot_pc_debug <= pc_reg;\n\n" +
+            "    process(clk, reset_n)\n" +
+            "    begin\n" +
+            "        if reset_n = '0' then\n" +
+            "            pc_reg <= RESET_VECTOR;\n" +
+            "            tick <= (others => '0');\n" +
+            "        elsif rising_edge(clk) then\n" +
+            "            tick <= tick + 1;\n" +
+            "            pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "        end if;\n" +
+            "    end process;\n" +
+            "end architecture rtl;\n"
+
 struct FpgaPrepareManifest:
     board: XilinxBoardProfile
     lanes: [RiscvFpgaLane]
@@ -247,6 +315,67 @@ impl FpgaPrepareManifest:
         for lane in self.lanes:
             out = out + " {lane.xlen.to_text()}:{lane.xlen.linux_policy()}:{lane.xlen.mmu_mode()}"
         out
+
+    fn rtl_manifest_text() -> text:
+        var out = "[riscv_fpga_rtl]\n"
+        out = out + "board = \"{self.board.name}\"\n"
+        out = out + "part = \"{self.board.part}\"\n"
+        for lane in self.lanes:
+            out = out + "\n[[lane]]\n"
+            out = out + "arch = \"{lane.xlen.to_text()}\"\n"
+            out = out + "xlen = {lane.xlen.bits()}\n"
+            out = out + "top = \"{lane.top_module}\"\n"
+            out = out + "rtl_dir = \"{lane.rtl_dir}\"\n"
+            out = out + "package = \"{lane.package_name()}\"\n"
+            out = out + "package_file = \"{lane.rtl_dir}/{lane.package_name()}.vhd\"\n"
+            out = out + "top_file = \"{lane.rtl_dir}/{lane.top_module}.vhd\"\n"
+            out = out + "linux_policy = \"{lane.xlen.linux_policy()}\"\n"
+            out = out + "mmu = \"{lane.xlen.mmu_mode()}\"\n"
+        out
+
+class RiscvFpgaRtlBundle:
+    root_dir: text
+    manifest_path: text
+    generated_files: [text]
+
+fn _write_text_file(path: text, content: text) -> Result<(), text>:
+    if not rt_file_write_text(path, content):
+        return Err("failed to write {path}")
+    Ok(())
+
+fn generate_riscv_fpga_rtl_bundle(root_dir: text, manifest: FpgaPrepareManifest) -> Result<RiscvFpgaRtlBundle, text>:
+    val errors = manifest.validate_for_prepare()
+    if errors.len() != 0:
+        return Err(errors.join("; "))
+    if not rt_dir_create(root_dir, true):
+        return Err("failed to create rtl root dir: {root_dir}")
+
+    var generated: [text] = []
+    for lane in manifest.lanes:
+        val lane_dir = "{root_dir}/{lane.xlen.to_text()}/rtl"
+        if not rt_dir_create(lane_dir, true):
+            return Err("failed to create rtl lane dir: {lane_dir}")
+        val package_path = "{lane_dir}/{lane.package_name()}.vhd"
+        val soc_path = "{lane_dir}/{lane.top_module}.vhd"
+        _write_text_file(package_path, lane.package_vhdl())?
+        _write_text_file(soc_path, lane.soc_vhdl())?
+        generated.push(package_path)
+        generated.push(soc_path)
+
+    val manifest_path = "{root_dir}/riscv_fpga_rtl_manifest.sdn"
+    _write_text_file(manifest_path, manifest.rtl_manifest_text())?
+    generated.push(manifest_path)
+    Ok(RiscvFpgaRtlBundle(
+        root_dir: root_dir,
+        manifest_path: manifest_path,
+        generated_files: generated
+    ))
+
+fn generate_default_riscv_fpga_rtl_bundle(root_dir: text) -> Result<RiscvFpgaRtlBundle, text>:
+    generate_riscv_fpga_rtl_bundle(root_dir, FpgaPrepareManifest.default_xilinx())
+
+fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 fn create_default_riscv_fpga_linux_manifest() -> FpgaPrepareManifest:
     FpgaPrepareManifest.default_xilinx()

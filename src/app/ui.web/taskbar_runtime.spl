@@ -58,11 +58,11 @@ class HostTaskbarRuntime:
     static fn new() -> HostTaskbarRuntime:
         HostTaskbarRuntime(
             enabled: false,
-            mode: HostShellMode.DesktopEmbedded,
+            mode: HostShellMode.Embedded,
             electron_available: false,
             next_window_ordinal: 0,
             next_process_id: 1000u64,
-            adapter_capabilities: _adapter_capabilities_for(HostShellMode.DesktopEmbedded, false),
+            adapter_capabilities: _adapter_capabilities_for(HostShellMode.Embedded, false),
             pinned: _default_pinned(),
             tray: _default_tray(),
             minimized_surface_ids: [],
@@ -115,6 +115,14 @@ fn host_taskbar_runtime_is_enabled() -> bool:
 fn host_taskbar_runtime_mode_name() -> text:
     val rt = _get_host_taskbar_runtime()
     _mode_name(rt.mode)
+
+fn host_taskbar_runtime_hides_desktop() -> bool:
+    val rt = _get_host_taskbar_runtime()
+    _mode_hides_embedded_desktop(rt.mode)
+
+fn host_taskbar_runtime_hides_taskbar() -> bool:
+    val rt = _get_host_taskbar_runtime()
+    _mode_hides_taskbar(rt.mode)
 
 fn host_taskbar_runtime_adapter_capabilities() -> HostTaskbarAdapterCapabilities:
     val rt = _get_host_taskbar_runtime()
@@ -588,49 +596,12 @@ fn _backend_is_native_host(kind: UiBackendKind) -> bool:
         _: false
 
 fn _adapter_capabilities_for(mode: HostShellMode, electron_available: bool) -> HostTaskbarAdapterCapabilities:
-    match mode:
-        HostShellMode.DesktopEmbedded:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: false,
-                supports_embedded_surfaces: true,
-                supports_headless_session: false,
-                requires_js_host_bridge: true
-            )
-        HostShellMode.TaskbarOnly:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: electron_available,
-                supports_embedded_surfaces: false,
-                supports_headless_session: false,
-                requires_js_host_bridge: true
-            )
-        HostShellMode.Embedded:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: false,
-                supports_embedded_surfaces: true,
-                supports_headless_session: false,
-                requires_js_host_bridge: true
-            )
-        HostShellMode.Native:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: electron_available,
-                supports_embedded_surfaces: false,
-                supports_headless_session: false,
-                requires_js_host_bridge: true
-            )
-        HostShellMode.HiddenTaskbar:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: electron_available,
-                supports_embedded_surfaces: false,
-                supports_headless_session: false,
-                requires_js_host_bridge: true
-            )
-        HostShellMode.Headless:
-            HostTaskbarAdapterCapabilities(
-                supports_native_windows: false,
-                supports_embedded_surfaces: false,
-                supports_headless_session: true,
-                requires_js_host_bridge: false
-            )
+    HostTaskbarAdapterCapabilities(
+        supports_native_windows: electron_available and _mode_uses_native_windows(mode),
+        supports_embedded_surfaces: _mode_uses_embedded_surfaces(mode),
+        supports_headless_session: _mode_is_headless(mode),
+        requires_js_host_bridge: not _mode_is_headless(mode)
+    )
 
 fn _record_launch_error(rt: HostTaskbarRuntime, app_id: text, message: text) -> Result<Unit, text>:
     rt.launch_errors = [TaskbarLaunchError(app_id: app_id, message: message)]
@@ -740,15 +711,32 @@ fn _mode_name(mode: HostShellMode) -> text:
         HostShellMode.Headless: "headless"
 
 fn _mode_is_taskbar_only(mode: HostShellMode) -> bool:
+    _mode_uses_native_windows(mode)
+
+fn _mode_uses_native_windows(mode: HostShellMode) -> bool:
     match mode:
         HostShellMode.TaskbarOnly: true
         HostShellMode.Native: true
         HostShellMode.HiddenTaskbar: true
         _: false
 
+fn _mode_uses_embedded_surfaces(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.DesktopEmbedded: true
+        HostShellMode.Embedded: true
+        _: false
+
 fn _mode_is_headless(mode: HostShellMode) -> bool:
     match mode:
         HostShellMode.Headless: true
+        _: false
+
+fn _mode_hides_embedded_desktop(mode: HostShellMode) -> bool:
+    _mode_uses_native_windows(mode) or _mode_is_headless(mode)
+
+fn _mode_hides_taskbar(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.HiddenTaskbar: true
         _: false
 
 fn _build_app_tree(surface_id: text, title: text, width: i32, height: i32, visible: bool):
