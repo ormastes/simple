@@ -564,16 +564,30 @@ def write_dir_entry(dir_cluster, index, name11, attr, first_cluster, size):
     struct.pack_into("<I", entry, 28, size)
     data[off:off + 32] = entry
 
+entries_per_cluster = cluster_size // 32
 dir_entries = {root_cluster: 0}
+dir_chains = {root_cluster: [root_cluster]}
 dirs = {source: root_cluster}
+
+def alloc_dir_slot(dir_cluster):
+    index = dir_entries[dir_cluster]
+    chain = dir_chains[dir_cluster]
+    chain_index = index // entries_per_cluster
+    entry_index = index % entries_per_cluster
+    if chain_index >= len(chain):
+        new_cluster = alloc_cluster()
+        set_fat(chain[-1], new_cluster)
+        chain.append(new_cluster)
+    dir_entries[dir_cluster] = index + 1
+    return chain[chain_index], entry_index
 
 def add_dir(path, parent_cluster):
     cluster = alloc_cluster()
-    index = dir_entries[parent_cluster]
-    write_dir_entry(parent_cluster, index, fat_name(path), 0x10, cluster, 0)
-    dir_entries[parent_cluster] = index + 1
+    slot_cluster, index = alloc_dir_slot(parent_cluster)
+    write_dir_entry(slot_cluster, index, fat_name(path), 0x10, cluster, 0)
     dirs[path] = cluster
     dir_entries[cluster] = 0
+    dir_chains[cluster] = [cluster]
     return cluster
 
 def add_file(path, parent_cluster):
@@ -589,9 +603,8 @@ def add_file(path, parent_cluster):
             if i + 1 < len(clusters):
                 set_fat(cluster, clusters[i + 1])
         first = clusters[0]
-    index = dir_entries[parent_cluster]
-    write_dir_entry(parent_cluster, index, fat_name(path), 0x20, first, len(payload))
-    dir_entries[parent_cluster] = index + 1
+    slot_cluster, index = alloc_dir_slot(parent_cluster)
+    write_dir_entry(slot_cluster, index, fat_name(path), 0x20, first, len(payload))
 
 for root, dirnames, filenames in os.walk(source):
     root_path = pathlib.Path(root)

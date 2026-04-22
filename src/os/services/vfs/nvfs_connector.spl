@@ -1,0 +1,128 @@
+"""NVFS connector for service-level VFS path semantics.
+
+This module deliberately stays separate from `vfs_init.spl` so x86_64 boot
+does not link the examples NVFS implementation into the freestanding kernel.
+"""
+
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use common.string_core.{str_char_at}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+
+struct NvfsVfsConnection:
+    """Mounted NVFS POSIX shim plus VFS-style mount prefix."""
+    mount_path: text
+    driver: NvfsPosixDriver
+    mounted: bool
+
+fn nvfs_vfs_connect(mount_path: text, name: text, read_only: bool) -> NvfsVfsConnection:
+    """Create and mount an NVFS POSIX driver behind a VFS-style prefix."""
+    var driver = NvfsPosixDriver.new(name)
+    val opts = MountOptions(read_only: read_only, want_caps: 0, require_caps: 0)
+    val mounted = driver.mount(opts).is_ok()
+    NvfsVfsConnection(
+        mount_path: if mount_path == "": "/" else: mount_path,
+        driver: driver,
+        mounted: mounted
+    )
+
+fn _nvfs_relpath(conn: NvfsVfsConnection, path: text) -> Path:
+    if conn.mount_path == "/":
+        return Path(raw: path)
+    if not path.starts_with(conn.mount_path):
+        return Path(raw: "")
+    var rel: text = ""
+    var i: i64 = conn.mount_path.len()
+    while i < path.len():
+        rel = rel + str_char_at(path, i)
+        i = i + 1
+    if rel == "":
+        rel = "/"
+    Path(raw: rel)
+
+fn nvfs_vfs_write_text(conn: NvfsVfsConnection, path: text, content: text) -> bool:
+    """Write a complete text file through the NVFS connection."""
+    if not conn.mounted:
+        return false
+    val rel = _nvfs_relpath(conn, path)
+    if rel.raw == "":
+        return false
+    var driver = conn.driver
+    val open_r = driver.open(rel, OpenFlags.read_write().with_create())
+    if open_r.is_err():
+        return false
+    val handle = open_r.unwrap()
+    val trunc_r = driver.ftruncate(handle, 0)
+    if trunc_r.is_err():
+        driver.close(handle)
+        return false
+    var buf: [u8] = []
+    var i: i32 = 0
+    while i < content.len():
+        buf.push(str_char_at(content, i.to_i64()).to_u8())
+        i = i + 1
+    val write_r = driver.write(handle, 0, buf)
+    driver.close(handle)
+    write_r.is_ok()
+
+fn nvfs_vfs_read_bytes(conn: NvfsVfsConnection, path: text) -> [u8]:
+    """Read a complete file as bytes through the NVFS connection."""
+    if not conn.mounted:
+        return []
+    val rel = _nvfs_relpath(conn, path)
+    if rel.raw == "":
+        return []
+    var driver = conn.driver
+    val stat_r = driver.stat(rel)
+    if stat_r.is_err():
+        return []
+    val size = stat_r.unwrap().size.to_i64()
+    if size <= 0:
+        return []
+    val open_r = driver.open(rel, OpenFlags.read_only())
+    if open_r.is_err():
+        return []
+    val handle = open_r.unwrap()
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        buf.push(0)
+        i = i + 1
+    val read_r = driver.read(handle, 0, buf)
+    driver.close(handle)
+    if read_r.is_err():
+        return []
+    val n = read_r.unwrap()
+    if n.to_i32() == buf.len():
+        return buf
+    var out: [u8] = []
+    var j: i32 = 0
+    while j < n.to_i32():
+        out.push(buf[j])
+        j = j + 1
+    out
+
+fn nvfs_vfs_read_text(conn: NvfsVfsConnection, path: text) -> text:
+    """Read a complete file as text through the NVFS connection."""
+    val bytes = nvfs_vfs_read_bytes(conn, path)
+    var out: text = ""
+    var i: i32 = 0
+    while i < bytes.len():
+        out = out + bytes[i].to_char()
+        i = i + 1
+    out
+
+fn nvfs_vfs_file_size(conn: NvfsVfsConnection, path: text) -> i64:
+    """Return file size for a path through the NVFS connection."""
+    val rel = _nvfs_relpath(conn, path)
+    if rel.raw == "":
+        return -1
+    var driver = conn.driver
+    val stat_r = driver.stat(rel)
+    if stat_r.is_err():
+        return -1
+    stat_r.unwrap().size.to_i64()
+
+fn nvfs_vfs_file_exists(conn: NvfsVfsConnection, path: text) -> bool:
+    """Return true when a path exists through the NVFS connection."""
+    nvfs_vfs_file_size(conn, path) >= 0

@@ -1,0 +1,167 @@
+#!/bin/sh
+# Local RV64 RTL Linux boot smoke through CVA6 Verilator simulation.
+#
+# CVA6 is used as the first RV64 local RTL Linux reference lane. The script
+# pins the external checkout and scans the simulation log for Linux boot
+# markers; QEMU is not accepted as a substitute.
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC_DIR="${CVA6_DIR:-$REPO_ROOT/build/third_party/rtl/cva6}"
+LOG_DIR="${RTL_LINUX_LOG_DIR:-$REPO_ROOT/build/rtl_linux/rv64}"
+LOG_FILE="$LOG_DIR/serial.log"
+REPO_URL="${CVA6_URL:-https://github.com/openhwgroup/cva6.git}"
+PIN="${CVA6_REF:-8e694e6460d017fb8a175336cd7dcb91d8eff682}"
+SDK_DIR="${CVA6_SDK_DIR:-$REPO_ROOT/build/third_party/rtl/cva6-sdk/v0.3.0}"
+BBL_URL_TAG="${CVA6_SDK_BBL_TAG:-v0.3.0}"
+TOOLCHAIN_DIR="${CVA6_RISCV_TOOLCHAIN_DIR:-$REPO_ROOT/build/third_party/rtl/riscv64-unknown-elf-toolchain}"
+TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-1800}"
+CHECK_TOOLS=0
+FETCH_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check-tools) CHECK_TOOLS=1 ;;
+        --fetch-only) FETCH_ONLY=1 ;;
+        --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
+        --timeout)
+            shift
+            [ $# -gt 0 ] || { echo "missing value for --timeout" >&2; exit 2; }
+            TIMEOUT_SEC="$1"
+            ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+check_tools() {
+    missing=""
+    for tool in git gh python3 make gcc g++ cmake verilator; do
+        if ! have "$tool"; then
+            missing="$missing $tool"
+        fi
+    done
+    if ! have dtc; then
+        missing="$missing device-tree-compiler(dtc)"
+    fi
+    if [ -n "$missing" ]; then
+        echo "FAIL: missing RV64 RTL Linux tools:$missing" >&2
+        echo "hint: Debian/Ubuntu: sudo apt install git python3 make gcc g++ cmake verilator device-tree-compiler help2man" >&2
+        return 1
+    fi
+    if [ -z "${RISCV:-}" ] && ! have riscv64-unknown-elf-gcc; then
+        echo "FAIL: RISCV must point to the CVA6-compatible RISC-V toolchain installation, or riscv64-unknown-elf-gcc must be on PATH" >&2
+        return 1
+    fi
+    echo "PASS: RV64 RTL Linux tools present"
+}
+
+prepare_repo() {
+    mkdir -p "$(dirname "$SRC_DIR")" "$LOG_DIR"
+    if [ ! -d "$SRC_DIR/.git" ]; then
+        git clone "$REPO_URL" "$SRC_DIR"
+    fi
+    git -C "$SRC_DIR" fetch origin "$PIN"
+    git -C "$SRC_DIR" checkout --detach FETCH_HEAD
+    git -C "$SRC_DIR" submodule update --init --recursive
+    apply_compat_patches
+}
+
+apply_compat_patches() {
+    python3 - "$SRC_DIR/verif/core-v-verif/vendor/riscv/riscv-isa-sim/yaml-cpp/CMakeLists.txt" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "cmake_minimum_required(VERSION 3.4)",
+    "cmake_minimum_required(VERSION 3.5...3.31)",
+)
+path.write_text(text)
+PY
+}
+
+prepare_linux_payload() {
+    mkdir -p "$SDK_DIR"
+    if [ ! -x "$SDK_DIR/bbl" ]; then
+        gh release download "$BBL_URL_TAG" -R openhwgroup/cva6-sdk -p bbl -D "$SDK_DIR" --clobber
+        chmod +x "$SDK_DIR/bbl"
+    fi
+}
+
+prepare_toolchain_shim() {
+    if [ -n "${RISCV:-}" ]; then
+        return 0
+    fi
+    mkdir -p "$TOOLCHAIN_DIR/bin" "$TOOLCHAIN_DIR/include" "$TOOLCHAIN_DIR/lib"
+    found=0
+    for src in /usr/bin/riscv64-unknown-elf-*; do
+        if [ -e "$src" ]; then
+            ln -sf "$src" "$TOOLCHAIN_DIR/bin/$(basename "$src")"
+            found=1
+        fi
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "FAIL: no riscv64-unknown-elf-* tools found under /usr/bin; set RISCV or install gcc-riscv64-unknown-elf" >&2
+        return 1
+    fi
+}
+
+default_cva6_command() {
+    if [ -n "${CVA6_LINUX_CMD:-}" ]; then
+        printf '%s\n' "$CVA6_LINUX_CMD"
+        return 0
+    fi
+    if [ -f "$SRC_DIR/verif/regress/linux.sh" ]; then
+        printf '%s\n' "RISCV=\${RISCV:-$TOOLCHAIN_DIR} CV_SW_PREFIX=\${CV_SW_PREFIX:-riscv64-unknown-elf-} SPIKE_INSTALL_DIR=\${SPIKE_INSTALL_DIR:-$SRC_DIR/tools/spike} BBL_ROOT=$SDK_DIR DV_SIMULATORS=veri-testharness NUM_JOBS=\${NUM_JOBS:-8} bash -lc 'source verif/regress/install-verilator.sh && source verif/regress/install-spike.sh && bash verif/regress/linux.sh'"
+        return 0
+    fi
+    return 1
+}
+
+run_sim() {
+    cmd="$(default_cva6_command)" || {
+        echo "FAIL: no CVA6 simulation command found; set CVA6_LINUX_CMD to the local Linux-boot Verilator command" >&2
+        return 1
+    }
+    echo "[rv64] running CVA6 Verilator simulation; log=$LOG_FILE"
+    echo "[rv64] command: $cmd" >"$LOG_FILE"
+    if have timeout; then
+        (cd "$SRC_DIR" && PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" /bin/sh -c "$cmd") >>"$LOG_FILE" 2>&1 || true
+    else
+        (cd "$SRC_DIR" && PYTHONUNBUFFERED=1 /bin/sh -c "$cmd") >>"$LOG_FILE" 2>&1 || true
+    fi
+    if ! grep -a -E -q "OpenSBI|Booting Linux" "$LOG_FILE"; then
+        echo "FAIL: RV64 RTL simulation did not reach firmware/Linux handoff marker" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+    if ! grep -a -q "Linux version" "$LOG_FILE"; then
+        echo "FAIL: RV64 RTL simulation did not reach Linux version marker" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+    if ! grep -a -E -q "Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$LOG_FILE"; then
+        echo "FAIL: RV64 RTL simulation did not reach init/userspace marker" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+    echo "PASS: RV64 RTL Linux boot markers found"
+}
+
+if [ "$FETCH_ONLY" -eq 1 ]; then
+    have git || { echo "FAIL: git is required for --fetch-only" >&2; exit 1; }
+    prepare_repo
+    exit 0
+fi
+
+check_tools
+[ "$CHECK_TOOLS" -eq 1 ] && exit 0
+prepare_repo
+prepare_linux_payload
+prepare_toolchain_shim
+run_sim

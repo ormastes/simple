@@ -17,6 +17,7 @@ let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
 let nativeSmokeFrames = [];
+let nativeSmokeActions = [];
 let nativeSmokeStarted = false;
 let wmReady = false;
 let wmReadyResolvers = [];
@@ -654,6 +655,35 @@ function nativeSmokeHasKind(kind) {
     return nativeSmokeCommandKinds().includes(kind);
 }
 
+function recordNativeSmokeAction(kind, ok) {
+    nativeSmokeActions.push({ kind, ok: !!ok });
+}
+
+function nativeSmokeActionKinds() {
+    return nativeSmokeActions.filter((action) => action.ok).map((action) => action.kind);
+}
+
+function nativeSmokeHasAction(kind) {
+    return nativeSmokeActionKinds().includes(kind);
+}
+
+function recordNativeSmokeResult(kind, result) {
+    if (isNativeSmokeMode()) recordNativeSmokeAction(kind, result !== false);
+    return result;
+}
+
+function sendNativeSmokeHostCommand(action, payload = {}) {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    mainWindow.webContents.send('wm-frame', {
+        t: 'host_window_command',
+        v: 1,
+        s: 'electron-smoke',
+        seq: null,
+        payload: { action, ...payload }
+    });
+    return true;
+}
+
 function finishNativeSmoke(code) {
     try {
         for (const bw of BrowserWindow.getAllWindows()) {
@@ -671,6 +701,7 @@ async function runNativeWindowSmoke() {
     nativeSmokeStarted = true;
     const windowId = 'simple-electron-smoke-window';
     nativeSmokeFrames = [];
+    nativeSmokeActions = [];
     try {
         const ready = await waitForWmReady(5000);
         if (!ready) {
@@ -679,38 +710,48 @@ async function runNativeWindowSmoke() {
             return;
         }
         await waitMs(100);
-        spawnNativeWindow({
+        sendNativeSmokeHostCommand('spawn_native_window', {
             windowId,
+            window_id: windowId,
+            surface_id: 'simple-electron-smoke-surface',
+            app_id: 'examples/hello_taskbar',
             url: 'data:text/html,<title>Smoke Window</title><body>Simple Electron smoke</body>',
             width: 420,
             height: 280,
             title: 'Smoke Window'
         });
-        await waitMs(200);
-        focusNativeWindow(windowId);
+        await waitMs(300);
+        if (!getNativeWindow(windowId)) {
+            console.error('Electron native smoke failed; host_window_command did not create a BrowserWindow');
+            finishNativeSmoke(1);
+            return;
+        }
+        sendNativeSmokeHostCommand('focus_native_window', { windowId, window_id: windowId });
         await waitMs(150);
-        minimizeNativeWindow(windowId);
+        sendNativeSmokeHostCommand('minimize_native_window', { windowId, window_id: windowId });
         await waitMs(200);
-        restoreNativeWindow(windowId);
+        sendNativeSmokeHostCommand('restore_native_window', { windowId, window_id: windowId });
         await waitMs(200);
-        moveNativeWindow(windowId, 40, 40);
+        sendNativeSmokeHostCommand('move_native_window', { windowId, window_id: windowId, x: 40, y: 40 });
         await waitMs(200);
-        resizeNativeWindow(windowId, 460, 300);
+        sendNativeSmokeHostCommand('resize_native_window', { windowId, window_id: windowId, width: 460, height: 300 });
         await waitMs(200);
-        setNativeWindowTitle(windowId, 'Smoke Window Updated');
+        sendNativeSmokeHostCommand('set_native_window_title', { windowId, window_id: windowId, title: 'Smoke Window Updated' });
         await waitMs(200);
-        closeNativeWindow(windowId);
+        sendNativeSmokeHostCommand('close_native_window', { windowId, window_id: windowId });
         await waitMs(250);
 
-        const required = ['focus', 'minimize', 'restore', 'move', 'resize', 'set_title', 'close'];
-        const missing = required.filter((kind) => !nativeSmokeHasKind(kind));
+        const requiredActions = ['spawn', 'focus', 'minimize', 'restore', 'move', 'resize', 'set_title', 'close'];
+        const missing = requiredActions.filter((kind) => !nativeSmokeHasAction(kind));
         if (missing.length > 0) {
-            console.error(`Electron native smoke failed; missing native feedback: ${missing.join(', ')}`);
+            console.error(`Electron native smoke failed; missing native API success: ${missing.join(', ')}`);
+            console.error(`Observed actions: ${nativeSmokeActionKinds().join(', ') || '(none)'}`);
             console.error(`Observed feedback: ${nativeSmokeCommandKinds().join(', ') || '(none)'}`);
             finishNativeSmoke(1);
             return;
         }
-        console.log(`Electron native smoke passed: ${nativeSmokeCommandKinds().join(', ')}`);
+        const feedback = nativeSmokeCommandKinds();
+        console.log(`Electron native smoke passed: actions=${nativeSmokeActionKinds().join(', ')} feedback=${feedback.join(', ') || '(suppressed by command echo guard)'}`);
         finishNativeSmoke(0);
     } catch (err) {
         console.error(`Electron native smoke failed: ${err.stack || err.message || err}`);
@@ -889,54 +930,54 @@ ipcMain.on('inputChange', (event, payload) => {
 });
 
 ipcMain.handle('spawn-native-window', async (event, payload) => {
-    return spawnNativeWindow(payload || {});
+    return recordNativeSmokeResult('spawn', spawnNativeWindow(payload || {}));
 });
 
 ipcMain.handle('close-native-window', async (event, payload) => {
-    return closeNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('close', closeNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('focus-native-window', async (event, payload) => {
-    return focusNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('focus', focusNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('minimize-native-window', async (event, payload) => {
-    return minimizeNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('minimize', minimizeNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('restore-native-window', async (event, payload) => {
-    return restoreNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('restore', restoreNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('move-native-window', async (event, payload) => {
-    return moveNativeWindow(
+    return recordNativeSmokeResult('move', moveNativeWindow(
         payload && payload.windowId,
         payload && payload.x,
         payload && payload.y
-    );
+    ));
 });
 
 ipcMain.handle('resize-native-window', async (event, payload) => {
-    return resizeNativeWindow(
+    return recordNativeSmokeResult('resize', resizeNativeWindow(
         payload && payload.windowId,
         payload && payload.width,
         payload && payload.height
-    );
+    ));
 });
 
 ipcMain.handle('maximize-native-window', async (event, payload) => {
-    return maximizeNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('maximize', maximizeNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('unmaximize-native-window', async (event, payload) => {
-    return unmaximizeNativeWindow(payload && payload.windowId);
+    return recordNativeSmokeResult('unmaximize', unmaximizeNativeWindow(payload && payload.windowId));
 });
 
 ipcMain.handle('set-native-window-title', async (event, payload) => {
-    return setNativeWindowTitle(
+    return recordNativeSmokeResult('set_title', setNativeWindowTitle(
         payload && payload.windowId,
         payload && payload.title
-    );
+    ));
 });
 
 app.on('window-all-closed', () => {

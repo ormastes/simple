@@ -86,6 +86,7 @@ var process_count: u64 = 0
 var process_sequence: u64 = 1
 var synthetic_pid_next: u64 = 0x40000000
 var launcher_last_launch_pid: u64 = 0
+var launcher_packaged_spawn_enabled: bool = false
 
 # ============================================================================
 # Modifier Flag Constants
@@ -151,6 +152,23 @@ fn _manifest_present_for_path(path: text) -> bool:
         serial_println("[launcher] manifest read failed path={path} file={manifest_name}")
         return false
     true
+
+fn _should_use_resident_manifest_before_spawn(path: text) -> bool:
+    """Return true when a seeded app has no VFS executable bytes to spawn.
+
+    The serial-only x86_64 QEMU desktop lane registers the same seeded app
+    manifests as the disk lane, but it has no NVMe/VirtIO block device. In that
+    environment, calling posix_spawn on the packaged `.smf` path can enter the
+    executable loader with no bytes and recover-fault forever. Use the shared
+    resident-manifest path before spawn only when the known packaged path has no
+    VFS payload; disk-backed lanes still use posix_spawn.
+    """
+    if _manifest_name_for_path(path) == "":
+        return false
+    not launcher_packaged_spawn_enabled
+
+fn launcher_set_packaged_spawn_enabled(enabled: bool):
+    launcher_packaged_spawn_enabled = enabled
 
 fn _alloc_synthetic_pid() -> u64:
     val pid = synthetic_pid_next
@@ -392,6 +410,10 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         if seeded_index >= 0:
             _ensure_seeded_app_slot(slot, path)
         val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: app_name[slot]
+        if _should_use_resident_manifest_before_spawn(path):
+            val resident_pid = _try_resident_manifest_launch(slot, name, path, -38)
+            if resident_pid > 0:
+                return resident_pid
         serial_println("[launcher] posix_spawn begin name={name} path={path}")
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
         serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
@@ -650,6 +672,7 @@ fn launcher_init():
     process_sequence = 1
     synthetic_pid_next = 0x40000000
     launcher_last_launch_pid = 0
+    launcher_packaged_spawn_enabled = false
 
     # Register default apps
     launcher_register("Hello World", _preferred_app_exec_path("/sys/apps/hello_world"), "H", 0x48, MOD_META)    # Meta+H

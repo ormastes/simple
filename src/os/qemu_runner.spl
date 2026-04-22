@@ -180,16 +180,16 @@ fn get_target(arch: Architecture) -> OsTarget:
         Architecture.X86_64:
             OsTarget(
                 arch: Architecture.X86_64,
-                entry: "src/os/kernel/arch/x86_64/boot.spl",
-                linker_script: "src/os/kernel/arch/x86_64/linker.ld",
+                entry: "examples/simple_os/arch/x86_64/os_entry.spl",
+                linker_script: "examples/simple_os/arch/x86_64/linker.ld",
                 target_triple: "x86_64-unknown-none",
                 output: simpleos_platform_kernel_output("x86_64"),
                 qemu_system: "qemu-system-x86_64",
                 qemu_machine: "q35",
                 qemu_cpu: "qemu64",
-                qemu_memory: "128M",
+                qemu_memory: "512M",
                 qemu_bios: "",
-                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
                 gui_mode: false
             )
         Architecture.Riscv64:
@@ -569,6 +569,8 @@ fn _find_simple_binary() -> text:
     "bin/simple"
 
 fn _build_sources(target: OsTarget) -> [text]:
+    if _is_x86_64_kernel_target(target):
+        return ["src/os", "src/lib", "examples/simple_os"]
     if _is_browser_wrapper_target(target):
         return ["src/os", "src/lib", "examples/simple_os"]
     if _is_desktop_wrapper_target(target):
@@ -583,7 +585,7 @@ fn _build_sources(target: OsTarget) -> [text]:
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     var envs: [text] = []
-    if _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _uses_baremetal_wrapper_profile(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _is_arm_fs_exec_target(target):
@@ -592,7 +594,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _is_riscv_fs_exec_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
-    if _is_desktop_wrapper_target(target):
+    if _is_x86_64_kernel_target(target) or _is_desktop_wrapper_target(target) or _is_fs_wrapper_target(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
     if objcopy_prefix != "":
         envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
@@ -600,7 +602,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
     val cwd = rt_env_cwd()
-    if _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _uses_baremetal_wrapper_profile(target):
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
         rt_env_set("SIMPLE_LIB", "{cwd}/src")
     if _is_arm_fs_exec_target(target):
@@ -609,7 +611,7 @@ fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
         rt_env_set("SIMPLE_LIB", "{cwd}/src")
     if _is_riscv_fs_exec_target(target):
         rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
-    if _is_desktop_wrapper_target(target):
+    if _is_x86_64_kernel_target(target) or _is_desktop_wrapper_target(target) or _is_fs_wrapper_target(target):
         rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
     if objcopy_prefix != "":
         val old_path = rt_env_get("PATH") ?? ""
@@ -623,6 +625,9 @@ fn _needs_elf32_wrap(target: OsTarget) -> bool:
 
 fn _uses_baremetal_wrapper_profile(target: OsTarget) -> bool:
     _is_browser_wrapper_target(target) or _is_desktop_wrapper_target(target) or _is_fs_wrapper_target(target)
+
+fn _is_x86_64_kernel_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_64/os_entry.spl"
 
 fn _is_browser_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or
@@ -1157,6 +1162,7 @@ fn _riscv_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
 
 fn ovmf_code_candidates() -> [text]:
     [
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
         "/usr/share/OVMF/OVMF_CODE.fd",
         "/usr/share/edk2/ovmf/OVMF_CODE.fd",
         "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
@@ -1173,6 +1179,29 @@ fn ovmf_code_path() -> text:
         if rt_file_exists(candidate):
             return candidate
     ""
+
+fn desktop_uefi_bootloader_candidates() -> [text]:
+    [
+        "build/os/esp/EFI/BOOT/BOOTX64.EFI",
+        "build/os/EFI/BOOT/BOOTX64.EFI",
+        "build/os/BOOTX64.EFI",
+        "third_party/limine/BOOTX64.EFI",
+        "vendor/limine/BOOTX64.EFI"
+    ]
+
+fn desktop_uefi_bootloader_path() -> text:
+    """Resolve a repo-managed EFI bootloader artifact for the desktop UEFI lane."""
+    val env_path = rt_env_get("SIMPLEOS_UEFI_BOOTLOADER") ?? ""
+    if env_path != "":
+        return env_path
+    for candidate in desktop_uefi_bootloader_candidates():
+        if rt_file_exists(candidate):
+            return candidate
+    ""
+
+fn desktop_uefi_boot_media_ready() -> bool:
+    """True when the local disk image can be expected to boot under OVMF."""
+    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != ""
 
 fn _x64_desktop_uefi_args() -> [text]:
     val fw = ovmf_code_path()
@@ -1745,6 +1774,9 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     if scenario.name == "x64-desktop-uefi":
         if ovmf_code_path() == "":
             print "[ensure_scenario_media] OVMF firmware not found; set SIMPLEOS_OVMF_CODE to an x86_64 OVMF_CODE.fd path"
+            return false
+        if desktop_uefi_bootloader_path() == "":
+            print "[ensure_scenario_media] UEFI desktop bootloader not found; set SIMPLEOS_UEFI_BOOTLOADER to EFI/BOOT/BOOTX64.EFI"
             return false
         return ensure_desktop_disk_image()
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":

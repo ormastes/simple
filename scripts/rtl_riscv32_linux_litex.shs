@@ -1,0 +1,164 @@
+#!/bin/sh
+# Local RV32 RTL Linux boot smoke through Linux-on-LiteX-VexRiscv.
+#
+# This is the first local RTL Linux reference lane. It intentionally uses a
+# proven Linux-capable external RTL SoC cached under build/third_party instead
+# of claiming the repo-native FPGA shell can boot Linux yet.
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC_DIR="${LITEX_VEXRISCV_DIR:-$REPO_ROOT/build/third_party/rtl/linux-on-litex-vexriscv}"
+VENV_DIR="${LITEX_VEXRISCV_VENV:-$REPO_ROOT/build/third_party/rtl/.venv_litex}"
+LOG_DIR="${RTL_LINUX_LOG_DIR:-$REPO_ROOT/build/rtl_linux/rv32}"
+LOG_FILE="$LOG_DIR/serial.log"
+REPO_URL="${LITEX_VEXRISCV_URL:-https://github.com/litex-hub/linux-on-litex-vexriscv.git}"
+PIN="${LITEX_VEXRISCV_REF:-7a871494ab9719baedb3ae25a731e33756fd20d8}"
+LINUX_IMAGE_URL="${LITEX_VEXRISCV_LINUX_IMAGE_URL:-https://github.com/litex-hub/linux-on-litex-vexriscv/files/8331338/linux_2022_03_23.zip}"
+LINUX_IMAGE_ZIP="$SRC_DIR/images/linux_2022_03_23.zip"
+TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-3600}"
+CHECK_TOOLS=0
+FETCH_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check-tools) CHECK_TOOLS=1 ;;
+        --fetch-only) FETCH_ONLY=1 ;;
+        --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
+        --timeout)
+            shift
+            [ $# -gt 0 ] || { echo "missing value for --timeout" >&2; exit 2; }
+            TIMEOUT_SEC="$1"
+            ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+check_tools() {
+    missing=""
+    for tool in git gh unzip python3 make gcc g++ verilator; do
+        if ! have "$tool"; then
+            missing="$missing $tool"
+        fi
+    done
+    if ! have dtc; then
+        missing="$missing device-tree-compiler(dtc)"
+    fi
+    if [ -n "$missing" ]; then
+        echo "FAIL: missing RV32 RTL Linux tools:$missing" >&2
+        echo "hint: Debian/Ubuntu: sudo apt install git unzip python3 make gcc g++ verilator device-tree-compiler libevent-dev libjson-c-dev" >&2
+        return 1
+    fi
+    echo "PASS: RV32 RTL Linux tools present"
+}
+
+prepare_repo() {
+    mkdir -p "$(dirname "$SRC_DIR")" "$LOG_DIR"
+    if [ ! -d "$SRC_DIR/.git" ]; then
+        git clone "$REPO_URL" "$SRC_DIR"
+    fi
+    git -C "$SRC_DIR" fetch origin "$PIN"
+    git -C "$SRC_DIR" checkout --detach FETCH_HEAD
+    apply_compat_patches
+}
+
+apply_compat_patches() {
+    python3 - "$SRC_DIR/sim.py" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "from litex.tools.litex_sim    import sdram_module_nphases, get_sdram_phy_settings",
+    "from litedram.phy.model       import sdram_module_nphases, get_sdram_phy_settings",
+)
+text = text.replace(
+    "        self.comb += platform.trace.eq(1)",
+    "        self.comb += platform.trace.eq(0)",
+)
+path.write_text(text)
+PY
+}
+
+prepare_python_env() {
+    if [ ! -x "$VENV_DIR/bin/python" ]; then
+        python3 -m venv "$VENV_DIR"
+    fi
+    if [ -f "$VENV_DIR/.litex_rtl_linux_deps_v2" ]; then
+        return 0
+    fi
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip meson ninja >/dev/null
+    "$VENV_DIR/bin/python" -m pip install \
+        git+https://github.com/m-labs/migen.git \
+        git+https://github.com/enjoy-digital/litex.git \
+        git+https://github.com/enjoy-digital/litedram.git \
+        git+https://github.com/enjoy-digital/liteeth.git \
+        git+https://github.com/enjoy-digital/litescope.git \
+        git+https://github.com/litex-hub/pythondata-misc-tapcfg.git \
+        git+https://github.com/litex-hub/pythondata-cpu-vexriscv_smp.git \
+        git+https://github.com/litex-hub/pythondata-software-picolibc.git \
+        git+https://github.com/litex-hub/pythondata-software-compiler_rt.git >/dev/null
+    : >"$VENV_DIR/.litex_rtl_linux_deps_v2"
+}
+
+prepare_linux_images() {
+    if [ -f "$SRC_DIR/images/Image" ] && [ -f "$SRC_DIR/images/opensbi.bin" ] && [ -f "$SRC_DIR/images/rootfs.cpio" ]; then
+        return 0
+    fi
+    mkdir -p "$SRC_DIR/images"
+    echo "[rv32] fetching LiteX/VexRiscv Linux/OpenSBI payload"
+    gh api "$LINUX_IMAGE_URL" >"$LINUX_IMAGE_ZIP"
+    unzip -o "$LINUX_IMAGE_ZIP" -d "$SRC_DIR/images" >/dev/null
+}
+
+run_sim() {
+    if [ ! -f "$SRC_DIR/sim.py" ]; then
+        echo "FAIL: LiteX simulation entry missing: $SRC_DIR/sim.py" >&2
+        return 1
+    fi
+    if [ ! -d "$SRC_DIR/images" ]; then
+        echo "FAIL: LiteX images directory missing after checkout" >&2
+        return 1
+    fi
+    echo "[rv32] running LiteX/VexRiscv Verilator simulation; log=$LOG_FILE"
+    rm -f "$LOG_FILE"
+    if have script; then
+        if have timeout; then
+            (cd "$SRC_DIR" && script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 timeout $TIMEOUT_SEC $VENV_DIR/bin/python ./sim.py" "$LOG_FILE") >/dev/null 2>&1 || true
+        else
+            (cd "$SRC_DIR" && script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 $VENV_DIR/bin/python ./sim.py" "$LOG_FILE") >/dev/null 2>&1 || true
+        fi
+    elif have timeout; then
+        (cd "$SRC_DIR" && PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" "$VENV_DIR/bin/python" ./sim.py) >"$LOG_FILE" 2>&1 || true
+    else
+        (cd "$SRC_DIR" && PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 "$VENV_DIR/bin/python" ./sim.py) >"$LOG_FILE" 2>&1 || true
+    fi
+    if ! grep -a -q "Linux version" "$LOG_FILE"; then
+        echo "FAIL: RV32 RTL simulation did not reach Linux version marker" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+    if ! grep -a -E -q "Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$LOG_FILE"; then
+        echo "FAIL: RV32 RTL simulation did not reach init/userspace marker" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+    echo "PASS: RV32 RTL Linux boot markers found"
+}
+
+if [ "$FETCH_ONLY" -eq 1 ]; then
+    have git || { echo "FAIL: git is required for --fetch-only" >&2; exit 1; }
+    prepare_repo
+    exit 0
+fi
+
+check_tools
+[ "$CHECK_TOOLS" -eq 1 ] && exit 0
+prepare_repo
+prepare_python_env
+prepare_linux_images
+run_sim

@@ -1,1 +1,1 @@
-/Users/ormastes/simple/src/app/ui.web/wm.js
+../../src/app/ui.web/wm.js

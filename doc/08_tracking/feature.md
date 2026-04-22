@@ -27,7 +27,7 @@ Platform columns use `impl/verified`.
 | OS-BOOT-004 | QEMU command construction | Shared + platform options | `qemu_runner.build_qemu_command` | I/V | I/V | I/V | I/V | I/V | I/V | x86_32 command verifies `qemu-system-i386`, `pc`, `qemu32`, `128M`; ARM/RISC-V scenario specs cover their registered lanes. |
 | OS-BOOT-005 | Live serial boot marker | Platform | QEMU live specs | I/V | P/B | I/P | I/V | I/V | I/V | x86_32 gated live spec exists but true live boot is blocked by i686 backend support; arm32/riscv boot specs and RISC-V SMF serial markers exist. |
 | OS-BOOT-006 | Debug-exit / deterministic QEMU exit | Platform | QEMU target extras | I/V | P/B | P | P | P | P | x86_32 acceptance requires `isa-debug-exit`; not live-proven. |
-| OS-BOOT-007 | Disk/firmware boot lane | Platform | QEMU scenarios | I/V | N | P | P | P | P | x86_64 has OVMF/disk desktop lanes; x86_32 has no disk boot acceptance lane. |
+| OS-BOOT-007 | Disk/firmware boot lane | Platform | QEMU scenarios | I/V | N | P | P | P | P | x86_64 BIOS/NVMe desktop disk lane is live; OVMF discovery is wired but UEFI remains gated until a repo-managed `EFI/BOOT/BOOTX64.EFI` bootloader artifact is available. x86_32 has no disk boot acceptance lane. |
 | OS-HAL-001 | HAL aggregate type | Shared shape, platform structs | `arch/*/mod.spl` | I/V | I/P | I/P | I/P | I/P | I/P | x86_64 aggregate now has pure CPU/paging contract coverage; other platform aggregate behavior tests are incomplete. |
 | OS-HAL-002 | Serial console primitive | Platform | `arch/*/console.spl` | I/P | I/P | I/P | I/P | I/P | I/P | x86_32 COM1 console exists; live serial proof is boot-blocked. |
 | OS-HAL-003 | CPU interrupt enable/disable | Platform | `arch/*/cpu.spl` | I/P | I/P | I/P | I/P | I/P | I/P | Source exists for x86_32 CPU primitives; live interrupt behavior not proven. |
@@ -46,7 +46,7 @@ Platform columns use `impl/verified`.
 | OS-EXEC-006 | Process-backed task creation from image | Shared | `Scheduler.create_user_task_pid` | I/V | I/V | I/P | I/P | I/P | I/P | x86_32 arch-param syscall handoff proves process-backed task in hosted tests. |
 | OS-EXEC-007 | execve-style replacement | Shared syscall + scheduler | `_handle_exec`, `Scheduler.exec_image` | I/V | P | P | P | P | P | x86_32 process image is ready, but live `exec` on x86_32 is not proven. |
 | OS-EXEC-008 | spawn binary from path bytes | Shared syscall + source resolver | `dispatch_spawn_binary_direct` | I/V | I/V | I/P | I/P | I/P | I/P | x86_32 arch-param handoff covers resolved bytes; compile-time x86 live path not proven. |
-| OS-EXEC-009 | Filesystem-backed app execution | Shared + media | VFS/FAT32/NVMe/VirtIO lanes | I/V | N | I/P | I/P | I/V | I/P | RISC-V SMF/fs launch specs and rv64 shared-service markers exist; x86_32 has no FAT32/NVMe or equivalent QEMU app-exec lane. |
+| OS-EXEC-009 | Filesystem-backed app execution | Shared + media | VFS/FAT32/NVMe/VirtIO lanes | I/V | N | I/P | I/P | I/V | I/P | x86_64 live desktop disk lane now loads browser, hello, and editor SMF bytes from FAT32/NVMe into `build_user_process_image`; RISC-V SMF/fs launch specs and rv64 shared-service markers exist; x86_32 has no FAT32/NVMe or equivalent QEMU app-exec lane. |
 | OS-SYSCALL-001 | Portable syscall argument/result structs | Yes | `types/syscall_types.spl` | I/V | I/V | I/V | I/V | I/V | I/V | Shared handler used by x86_32 hosted trap bridge. |
 | OS-SYSCALL-002 | x86_64 syscall register model | Platform | `arch/x86_64/interrupt.spl` | I/V | NA | NA | NA | NA | NA | Full x86_64 lane owns current desktop/syscall smoke. |
 | OS-SYSCALL-003 | x86_32 int 0x80 register model | Platform but pure logic | `arch/x86_32/trap_model.spl` | NA | I/V | NA | NA | NA | NA | `eax` id/result, `ebx/ecx/edx/esi/edi/ebp` args, `eip += 2`. |
@@ -62,7 +62,7 @@ Platform columns use `impl/verified`.
 | OS-STOR-001 | FAT32 image creation metadata | Shared build tooling | `make_os_disk.shs`, qemu runner | I/P | P | I/P | I/P | I/P | I/P | x86_32 has disk image output metadata but no acceptance lane. |
 | OS-STOR-002 | NVMe block-device lane | x86_64-specific device path today | x86_64 QEMU scenarios | I/V | N | NA | NA | NA | NA | x86_32 needs either NVMe-capable lane or deliberate alternative. |
 | OS-STOR-003 | VirtIO block-device lane | Shared concept, platform QEMU args | ARM/RISC-V scenarios | NA | N | I/P | I/P | I/V | I/P | RISC-V VirtIO/FAT32 SMF scenarios are registered and rv64 has local verified notes; x86_32 could reuse this if wired. |
-| OS-STOR-004 | VFS executable byte resolution | Shared | `loader/executable_source.spl`, `vfs_init.spl` | I/V | I/V | I/P | I/P | I/V | I/P | VFS helpers now route mounted NVFS POSIX files through read/write/size/exists; rv64 SMF/fs markers include image read, discovery, and ELF load. |
+| OS-STOR-004 | VFS executable byte resolution | Shared | `loader/executable_source.spl`, `vfs_init.spl` | I/V | I/V | I/P | I/P | I/V | I/P | x86_64 C-backed FAT32 arrays now use the runtime-compatible pointer layout and preserve full SMF lengths; isolated NVFS connector routes POSIX NVFS files through VFS-style read/write/size/exists without pulling NVFS into x86_64 boot; rv64 SMF/fs markers include image read, discovery, and ELF load. |
 | OS-UI-001 | Text shell launch | Shared app + platform boot | shell app, spawn | I/V | N/B | P | P | P | P | x86_32 shell smoke remains open. |
 | OS-UI-002 | Desktop compositor boot | x86_64 first lane | desktop entries, WM | I/V | N | NA/P | NA/P | NA/P | NA/P | Current full desktop acceptance is x86_64-centered. |
 | OS-UI-003 | Browser/app probe | Shared app, platform wrappers | app entries | I/V | P/B | P | P | P | P | x86_32 browser probe entry exists but live build is blocked. |
@@ -73,13 +73,13 @@ Platform columns use `impl/verified`.
 | OS-REBOOT-002 | Platform reset primitive | Platform | HAL reset facade + CPU/SBI primitive | I/V | I/P | NA/P | NA/P | I/P | I/P | Syscall no longer imports x86_64 directly; x86_64 is verified, x86_32 uses CF9 reset, RISC-V uses SBI SRST, ARM awaits PSCI/platform firmware reset. |
 | OS-TEST-001 | Hosted unit tests for pure contracts | Shared | `test/unit/os/kernel` | I/V | I/V | I/V | I/V | I/V | I/V | Covers many pieces but does not replace live QEMU. |
 | OS-TEST-002 | Gated live QEMU test | Platform | `test/system/*live*` | I/V | P/B | P | P | P | P | x86_32 gated test reports toolchain block, not successful boot. |
-| OS-TEST-003 | Full OS acceptance matrix | Cross-platform | QEMU scenarios + serial markers | I/V | N | P | P | P | P | x86_64 is the only full lane in this matrix. |
+| OS-TEST-003 | Full OS acceptance matrix | Cross-platform | QEMU scenarios + serial markers | I/V | N | P | P | P | P | x86_64 is the only full live lane in this matrix; explicit UEFI live flag now skips fast when boot media lacks `BOOTX64.EFI` instead of timing out in PXE. |
 
 ## Platform Evidence Index
 
 | Platform | Evidence Files | What They Prove | Remaining Proof Gap |
 |----------|----------------|-----------------|---------------------|
-| x86_64 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_desktop_disk_boot_spec.spl`, `test/system/simpleos_reboot_live_spec.spl`, `test/unit/os/kernel/arch/x86_64_hal_spec.spl`, `test/unit/os/kernel/ipc/syscall_reboot_spec.spl`, `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl`, `examples/simple_os/arch/x86_64/*` | Baseline boot, desktop, disk, syscall, reboot, app lanes, HAL aggregate contract, reset-facade dispatch, and NVFS-mounted VFS helper routing exist. | Keep as regression baseline while other platforms catch up. |
+| x86_64 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_desktop_disk_boot_spec.spl`, `test/system/os_filesystem_variants_spec.spl`, `test/system/simpleos_reboot_live_spec.spl`, `test/unit/os/kernel/arch/x86_64_hal_spec.spl`, `test/unit/os/kernel/ipc/syscall_reboot_spec.spl`, `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl`, `examples/simple_os/arch/x86_64/*` | Baseline boot, desktop, disk, syscall, reboot, app lanes, HAL aggregate contract, reset-facade dispatch, FAT32/NVFS filesystem contract, real SMF app-byte loading, and isolated NVFS/VFS connector coverage exist. | Keep as regression baseline while other platforms catch up. |
 | x86_32 | `test/system/os/boot_smoke_spec.spl`, `test/system/simpleos_x86_32_boot_probe_live_spec.spl`, `test/unit/os/kernel/arch/x86_32_*_spec.spl`, `examples/simple_os/arch/x86_32/*` | Target metadata, pure context, int 0x80 register model, hosted trap dispatch, ELF/process-image handoff. | True i386 live boot, live int 0x80 entry, storage, shell, and process diagnostics. |
 | arm64 | `examples/simple_os/arch/arm64/fs_exec_entry.spl`, `src/os/kernel/arch/arm64/*`, `test/qemu/os/boot/arm64_boot_qemu_spec.spl`, `test/os/kernel/arch/hal_arm64_phase_a_spec.spl` | ARM64 boot/HAL source and fs-exec entry exist; QEMU boot and HAL tests are present. | First-class acceptance markers for SVC, EL0 handoff, SMF bytes to process image, shell. |
 | arm32 | `examples/simple_os/arch/arm32/fs_exec_entry.spl`, `examples/simple_os/arch/arm32/os_entry.spl`, `src/os/kernel/arch/arm32/*`, `test/qemu/os/boot/arm32_boot_qemu_spec.spl` | ARM32 boot entry, fs-exec entry, HAL source, and QEMU boot spec exist. | Clean current live proof, SVC model, user-mode handoff, SMF process image, shell. |
@@ -130,6 +130,7 @@ one platform-specific milestone.
 1. Keep x86_64 as the baseline full OS lane while other platforms catch up.
 2. Maintain the shared HAL reset facade as the syscall reset boundary.
 3. Preserve desktop, shell, NVMe/FAT32, and process diagnostics live smoke coverage as regression gates.
+4. Add or vendor a UEFI bootloader artifact (`EFI/BOOT/BOOTX64.EFI`) before enabling the OVMF desktop lane as a required live gate.
 
 ### x86_32
 

@@ -40,7 +40,9 @@ use os.qemu_runner.{
     scenario_x64_desktop_uefi,
     ensure_desktop_disk_image,
     desktop_disk_image_path,
-    ovmf_code_path}
+    ovmf_code_path,
+    desktop_uefi_boot_media_ready,
+    desktop_uefi_bootloader_path}
 use std.nogc_sync_mut.ffi.io.{dir_create_all}
 
 use test.qemu.os.common.qemu_os_harness.{
@@ -58,15 +60,17 @@ fn ensure_disk_image_or_skip() -> bool:
     val ok = ensure_desktop_disk_image()
     if not ok:
         print "[simpleos_desktop_disk_boot_spec] disk image unavailable (missing mkfs.fat/mformat?), skipping"
-        expect(true).to_equal(true)
+        expect(ok).to_equal(false)
         return false
     true
 
-fn live_desktop_disk_boot_value() -> text:
-    rt_env_get("SIMPLEOS_QEMU_DESKTOP_DISK_LIVE") ?? ""
+fn live_desktop_disk_boot_enabled() -> bool:
+    val _warm = rt_env_get("SIMPLEOS_QEMU_DESKTOP_DISK_LIVE") ?? ""
+    (rt_env_get("SIMPLEOS_QEMU_DESKTOP_DISK_LIVE") ?? "") == "1"
 
-fn live_desktop_uefi_boot_value() -> text:
-    rt_env_get("SIMPLEOS_QEMU_DESKTOP_UEFI_LIVE") ?? ""
+fn live_desktop_uefi_boot_enabled() -> bool:
+    val _warm = rt_env_get("SIMPLEOS_QEMU_DESKTOP_UEFI_LIVE") ?? ""
+    (rt_env_get("SIMPLEOS_QEMU_DESKTOP_UEFI_LIVE") ?? "") == "1"
 
 # ===========================================================================
 # Spec
@@ -82,98 +86,112 @@ describe "SimpleOS desktop boot with FAT32 disk (SYS-GUI-007)":
 
     it "boots the desktop disk lane and proves editor save/readback":
         val disk_ok = ensure_disk_image_or_skip()
+        val disk_live = live_desktop_disk_boot_enabled()
         if not disk_ok:
-            expect(true).to_equal(true)
-        elif live_desktop_disk_boot_value() != "1":
-            print "[simpleos_desktop_disk_boot_spec] live desktop disk boot disabled; set SIMPLEOS_QEMU_DESKTOP_DISK_LIVE=1 to run"
-            expect(true).to_equal(true)
+            expect(disk_ok).to_equal(false)
         else:
+            if disk_live:
 
-            val target = get_desktop_browser_target()
-            expect(build_os(target)).to_equal(true)
-            expect(file_exists(target.output)).to_equal(true)
+                val target = get_desktop_browser_target()
+                expect(build_os(target)).to_equal(true)
+                expect(file_exists(target.output)).to_equal(true)
 
-            if not can_run_target(target):
-                print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping live boot"
-                expect(true).to_equal(true)
+                if not can_run_target(target):
+                    print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping live boot"
+                    expect(can_run_target(target)).to_equal(false)
+                else:
+
+                    val scenario = scenario_x64_desktop_disk()
+                    val qmp_socket = "/tmp/simpleos_desktop_disk_editor_qmp.sock"
+                    val serial_log = "build/os/simpleos_desktop_disk_editor_serial.log"
+
+                    match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
+                        Ok(handle):
+                            val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 60000)
+                            val output = read_serial_log(handle)
+                            stop_guest(handle)
+
+                            expect(saw_pass).to_equal(true)
+                            expect(output.contains("[vfs] mounted fat32")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] memory-bootstrap:ok")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] editor-shortcut:ok")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] editor-save:ok")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] cli-verify:ok")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=browser_demo")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=hello_world")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=editor")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=browser_demo pid=1001")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=hello_world pid=1002")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:ok app=editor pid=1003")).to_equal(true)
+                            expect(output.contains("[launcher] spawned app_id=/sys/apps/browser_demo.smf pid=1001")).to_equal(true)
+                            expect(output.contains("[launcher] spawned app_id=/sys/apps/hello_world.smf pid=1002")).to_equal(true)
+                            expect(output.contains("[launcher] spawned app_id=/sys/apps/editor.smf pid=1003")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:resident")).to_equal(false)
+                            expect(output.contains("[desktop-e2e] process-backed:unknown")).to_equal(false)
+                            expect(output.contains("[desktop-e2e] editor-save:fail")).to_equal(false)
+                            expect(output.contains("[desktop-e2e] editor-launch:fail")).to_equal(false)
+                            expect(output.contains("[desktop-e2e] cli-verify:fail")).to_equal(false)
+                            expect(output.contains("FAULT @")).to_equal(false)
+                            expect(output.contains("EXCEPTION")).to_equal(false)
+                            expect(output.contains("cr2=")).to_equal(false)
+                            expect(output.contains("cr3=")).to_equal(false)
+                            expect(output.contains("panic")).to_equal(false)
+                            expect(output.contains("PANIC")).to_equal(false)
+                        Err(err):
+                            print "[simpleos_desktop_disk_boot_spec] failed to spawn guest: {err}"
+                            expect(false).to_equal(true)
             else:
-
-                val scenario = scenario_x64_desktop_disk()
-                val qmp_socket = "/tmp/simpleos_desktop_disk_editor_qmp.sock"
-                val serial_log = "build/os/simpleos_desktop_disk_editor_serial.log"
-
-                match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
-                    Ok(handle):
-                        val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 60000)
-                        val output = read_serial_log(handle)
-                        stop_guest(handle)
-
-                        expect(saw_pass).to_equal(true)
-                        expect(output.contains("[vfs] mounted fat32")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] memory-bootstrap:ok")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] editor-shortcut:ok")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] editor-save:ok")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] cli-verify:ok")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] process-backed:ok app=browser_demo")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] process-backed:ok app=hello_world")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] process-backed:ok app=editor")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] process-backed:resident")).to_equal(false)
-                        expect(output.contains("[desktop-e2e] process-backed:unknown")).to_equal(false)
-                        expect(output.contains("[c-syscall13] fat32 app image validated")).to_equal(false)
-                        expect(output.contains("[desktop-e2e] editor-save:fail")).to_equal(false)
-                        expect(output.contains("[desktop-e2e] editor-launch:fail")).to_equal(false)
-                        expect(output.contains("[desktop-e2e] cli-verify:fail")).to_equal(false)
-                        expect(output.contains("FAULT @")).to_equal(false)
-                        expect(output.contains("EXCEPTION")).to_equal(false)
-                        expect(output.contains("cr2=")).to_equal(false)
-                        expect(output.contains("cr3=")).to_equal(false)
-                        expect(output.contains("panic")).to_equal(false)
-                        expect(output.contains("PANIC")).to_equal(false)
-                    Err(err):
-                        print "[simpleos_desktop_disk_boot_spec] failed to spawn guest: {err}"
-                        expect(false).to_equal(true)
+                print "[simpleos_desktop_disk_boot_spec] live desktop disk boot disabled; set SIMPLEOS_QEMU_DESKTOP_DISK_LIVE=1 to run"
+                expect(disk_live).to_equal(false)
 
     it "boots the UEFI desktop lane when explicitly enabled":
         val disk_ok = ensure_disk_image_or_skip()
+        val uefi_live = live_desktop_uefi_boot_enabled()
         if not disk_ok:
-            expect(true).to_equal(true)
-        elif live_desktop_uefi_boot_value() != "1":
-            print "[simpleos_desktop_disk_boot_spec] live UEFI desktop boot disabled; set SIMPLEOS_QEMU_DESKTOP_UEFI_LIVE=1 to run"
-            expect(true).to_equal(true)
-        elif ovmf_code_path() == "":
-            print "[simpleos_desktop_disk_boot_spec] OVMF unavailable; set SIMPLEOS_OVMF_CODE to run UEFI desktop boot"
-            expect(true).to_equal(true)
+            expect(disk_ok).to_equal(false)
         else:
-            val target = get_desktop_browser_target()
-            expect(build_os(target)).to_equal(true)
-            expect(file_exists(target.output)).to_equal(true)
+            if uefi_live and desktop_uefi_boot_media_ready():
+                val target = get_desktop_browser_target()
+                expect(build_os(target)).to_equal(true)
+                expect(file_exists(target.output)).to_equal(true)
 
-            if not can_run_target(target):
-                print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping UEFI live boot"
-                expect(true).to_equal(true)
+                if not can_run_target(target):
+                    print "[simpleos_desktop_disk_boot_spec] qemu-system-x86_64 not available, skipping UEFI live boot"
+                    expect(can_run_target(target)).to_equal(false)
+                else:
+                    val scenario = scenario_x64_desktop_uefi()
+                    val qmp_socket = "/tmp/simpleos_desktop_uefi_qmp.sock"
+                    val serial_log = "build/os/simpleos_desktop_uefi_serial.log"
+
+                    match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
+                        Ok(handle):
+                            val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 90000)
+                            val output = read_serial_log(handle)
+                            stop_guest(handle)
+
+                            expect(saw_pass).to_equal(true)
+                            expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
+                            expect(output.contains("[desktop-e2e] process-backed:resident")).to_equal(false)
+                            expect(output.contains("[desktop-e2e] process-backed:unknown")).to_equal(false)
+                            expect(output.contains("FAULT @")).to_equal(false)
+                            expect(output.contains("EXCEPTION")).to_equal(false)
+                            expect(output.contains("cr2=")).to_equal(false)
+                            expect(output.contains("cr3=")).to_equal(false)
+                            expect(output.contains("panic")).to_equal(false)
+                            expect(output.contains("PANIC")).to_equal(false)
+                        Err(err):
+                            print "[simpleos_desktop_disk_boot_spec] failed to spawn UEFI guest: {err}"
+                            expect(false).to_equal(true)
             else:
-                val scenario = scenario_x64_desktop_uefi()
-                val qmp_socket = "/tmp/simpleos_desktop_uefi_qmp.sock"
-                val serial_log = "build/os/simpleos_desktop_uefi_serial.log"
-
-                match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
-                    Ok(handle):
-                        val saw_pass = wait_for_serial_marker(handle, "TEST PASSED", 90000)
-                        val output = read_serial_log(handle)
-                        stop_guest(handle)
-
-                        expect(saw_pass).to_equal(true)
-                        expect(output.contains("[desktop-e2e] desktop-ready")).to_equal(true)
-                        expect(output.contains("[desktop-e2e] process-backed:resident")).to_equal(false)
-                        expect(output.contains("[desktop-e2e] process-backed:unknown")).to_equal(false)
-                        expect(output.contains("FAULT @")).to_equal(false)
-                        expect(output.contains("EXCEPTION")).to_equal(false)
-                        expect(output.contains("cr2=")).to_equal(false)
-                        expect(output.contains("cr3=")).to_equal(false)
-                        expect(output.contains("panic")).to_equal(false)
-                        expect(output.contains("PANIC")).to_equal(false)
-                    Err(err):
-                        print "[simpleos_desktop_disk_boot_spec] failed to spawn UEFI guest: {err}"
-                        expect(false).to_equal(true)
+                if uefi_live:
+                    if ovmf_code_path() == "":
+                        print "[simpleos_desktop_disk_boot_spec] OVMF unavailable; set SIMPLEOS_OVMF_CODE to run UEFI desktop boot"
+                        expect(ovmf_code_path()).to_equal("")
+                    else:
+                        print "[simpleos_desktop_disk_boot_spec] UEFI bootloader unavailable; set SIMPLEOS_UEFI_BOOTLOADER to EFI/BOOT/BOOTX64.EFI"
+                        expect(desktop_uefi_bootloader_path()).to_equal("")
+                else:
+                    print "[simpleos_desktop_disk_boot_spec] live UEFI desktop boot disabled; set SIMPLEOS_QEMU_DESKTOP_UEFI_LIVE=1 to run"
+                    expect(uefi_live).to_equal(false)

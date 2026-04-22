@@ -31,4 +31,7 @@ SIMPLE_ELECTRON_SMOKE=1 npm --prefix tools/electron-shell run smoke:host
 ```
 
 The smoke exits successfully with a `SKIP:` line when it is not opted in, when
-Electron is not installed, or when Linux has no `DISPLAY`/`WAYLAND_DISPLAY`.
+Electron is not installed, or when Linux has no `DISPLAY`/`WAYLAND_DISPLAY` and
+`xvfb-run` is unavailable. On headless Linux hosts with `xvfb-run`, the smoke
+re-executes itself inside Xvfb, injects `host_window_command` frames through
+`wm.js`, and creates a real native `BrowserWindow`.

@@ -237,6 +237,25 @@ val CURRENT_EXEC_ARCH: Architecture = Architecture.Arm64
 @cfg(arm32)
 val CURRENT_EXEC_ARCH: Architecture = Architecture.Arm32
 
+@cfg(x86_64)
+fn _use_x86_64_direct_spawn_handoff(arch: Architecture) -> bool:
+    val _arch = arch
+    true
+
+@cfg(not(x86_64))
+fn _use_x86_64_direct_spawn_handoff(arch: Architecture) -> bool:
+    val _arch = arch
+    false
+
+var g_x86_64_direct_spawn_next_pid: u64 = 1001
+
+fn _alloc_x86_64_direct_spawn_pid() -> u64:
+    val pid = g_x86_64_direct_spawn_next_pid
+    g_x86_64_direct_spawn_next_pid = g_x86_64_direct_spawn_next_pid + 1
+    if g_x86_64_direct_spawn_next_pid >= 0x40000000:
+        g_x86_64_direct_spawn_next_pid = 1001
+    pid
+
 # ============================================================================
 # Syscall Handler
 # ============================================================================
@@ -1222,11 +1241,8 @@ fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8]
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
         serial_println("[syscall13] build_user_process_image ok")
-        if arch == Architecture.X86_64:
-            var pid = g_scheduler_next_task_id
-            if pid == 0 or pid >= 0x40000000:
-                pid = 1
-            g_scheduler_next_task_id = pid + 1
+        if _use_x86_64_direct_spawn_handoff(arch):
+            val pid = _alloc_x86_64_direct_spawn_pid()
             val pid_value = pid as i64
             var xlog = klog
             xlog.write(6, 1, pid, "spawn_binary validated filesystem user image {path}")

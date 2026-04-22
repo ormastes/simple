@@ -307,9 +307,9 @@ typedef struct {
 
 typedef struct {
     HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
+    uint64_t     len;
+    uint64_t     cap;
+    RuntimeValue *items;
 } RuntimeArray;
 
 #define HEAP_STRING  1
@@ -319,6 +319,11 @@ typedef struct {
 #define HEAP_CLOSURE 5
 #define HEAP_MODULE  6
 #define HEAP_ENUM    7
+
+static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
+{
+    return (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
+}
 
 /* ===================================================================
  * 3a. x86_64 AP startup trampoline support
@@ -2379,6 +2384,16 @@ static const char *simpleos_known_app_name(uint64_t app_id)
     }
 }
 
+static uint64_t simpleos_known_app_arg(RuntimeValue app_id_val)
+{
+    uint64_t raw = (uint64_t)app_id_val;
+    if (simpleos_known_app_name(raw))
+        return raw;
+    if (IS_INT(app_id_val))
+        return (uint64_t)DECODE_INT(app_id_val);
+    return raw;
+}
+
 uint64_t simpleos_fat32_read_buffer_addr(void)
 {
     return (uint64_t)(uintptr_t)simpleos_fat32_read_buf;
@@ -2389,7 +2404,7 @@ uint64_t simpleos_fat32_path_read_buffer_addr(void)
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
 }
 
-int64_t simpleos_fat32_read_known_app_size(uint64_t app_id)
+static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
 {
     const char *name = simpleos_known_app_name(app_id);
     uint32_t cluster = 0;
@@ -2402,11 +2417,16 @@ int64_t simpleos_fat32_read_known_app_size(uint64_t app_id)
     return (int64_t)file_size;
 }
 
-int64_t simpleos_fat32_read_known_app(uint64_t app_id)
+int64_t simpleos_fat32_read_known_app_size(RuntimeValue app_id_val)
+{
+    return simpleos_fat32_read_known_app_size_raw(simpleos_known_app_arg(app_id_val));
+}
+
+static int64_t simpleos_fat32_read_known_app_raw(uint64_t app_id)
 {
     const char *name = simpleos_known_app_name(app_id);
     uint32_t bytes_read = 0;
-    uint64_t file_size = simpleos_fat32_read_known_app_size(app_id);
+    uint64_t file_size = (uint64_t)simpleos_fat32_read_known_app_size_raw(app_id);
 
     if (!name || file_size == 0)
         return -1;
@@ -2422,9 +2442,15 @@ int64_t simpleos_fat32_read_known_app(uint64_t app_id)
     return 0;
 }
 
-RuntimeValue simpleos_fat32_read_known_app_array(uint64_t app_id)
+int64_t simpleos_fat32_read_known_app(RuntimeValue app_id_val)
 {
-    int64_t rc = simpleos_fat32_read_known_app(app_id);
+    return simpleos_fat32_read_known_app_raw(simpleos_known_app_arg(app_id_val));
+}
+
+RuntimeValue simpleos_fat32_read_known_app_array(RuntimeValue app_id_val)
+{
+    uint64_t app_id = simpleos_known_app_arg(app_id_val);
+    int64_t rc = simpleos_fat32_read_known_app_raw(app_id);
     uint32_t cluster = 0;
     uint32_t file_size = 0;
     const char *name = simpleos_known_app_name(app_id);
@@ -2443,6 +2469,7 @@ RuntimeValue simpleos_fat32_read_known_app_array(uint64_t app_id)
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = file_size;
     a->cap = file_size;
+    a->items = runtime_array_inline_items(a);
     for (uint32_t i = 0; i < file_size; i++)
         a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_read_buf[i]);
     return ENCODE_PTR(a);
@@ -2499,6 +2526,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = (uint32_t)file_size;
     a->cap = (uint32_t)file_size;
+    a->items = runtime_array_inline_items(a);
     for (uint32_t i = 0; i < (uint32_t)file_size; i++)
         a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
     return ENCODE_PTR(a);
@@ -8678,6 +8706,7 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = (uint32_t)cap;
+    a->items = runtime_array_inline_items(a);
     /* Zero-init items */
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
@@ -8709,6 +8738,7 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
         new_a->hdr.size = (uint32_t)alloc_size;
         new_a->len = a->len;
         new_a->cap = new_cap;
+        new_a->items = runtime_array_inline_items(new_a);
         for (uint32_t i = 0; i < a->len; i++) new_a->items[i] = a->items[i];
         for (uint32_t i = a->len; i < new_cap; i++) new_a->items[i] = NIL_VALUE;
         a = new_a;

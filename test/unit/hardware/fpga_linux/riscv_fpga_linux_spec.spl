@@ -10,6 +10,7 @@ import std.spec
 use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, FpgaPrepareManifest, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
 
 describe "RISC-V FPGA Linux board profile":
     it "allows the generic Xilinx profile for prepare-only generation":
@@ -56,6 +57,7 @@ describe "RISC-V FPGA Linux lanes":
         expect(lane.xlen.bits()).to_equal(64)
         expect(lane.xlen.linux_policy()).to_equal("upstream")
         expect(lane.xlen.mmu_mode()).to_equal("sv39")
+        expect(lane.rtl_sim_backend).to_equal("cva6-verilator")
         expect(lane.required_soc_blocks()).to_contain("sv39-mmu")
         expect(lane.required_soc_blocks()).to_contain("opensbi-handoff")
         expect(lane.expected_boot_markers()).to_contain("OpenSBI")
@@ -66,6 +68,7 @@ describe "RISC-V FPGA Linux lanes":
         expect(lane.xlen.bits()).to_equal(32)
         expect(lane.xlen.linux_policy()).to_equal("experimental")
         expect(lane.xlen.mmu_mode()).to_equal("sv32")
+        expect(lane.rtl_sim_backend).to_equal("litex-vexriscv-verilator")
         expect(lane.required_soc_blocks()).to_contain("sv32-mmu")
         expect(lane.expected_boot_markers()).to_contain("rv32-linux-experimental")
 
@@ -80,6 +83,7 @@ describe "RISC-V FPGA Linux lanes":
             xlen: RiscvXlen.Rv64,
             top_module: "simple_rv64_linux_soc",
             rtl_dir: "build/fpga/rv64/rtl",
+            rtl_sim_backend: "cva6-verilator",
             bootrom_path: "build/fpga/rv64/bootrom.bin",
             linux: LinuxArtifactSet(
                 kernel_image: "linux/arch/riscv/boot/Image",
@@ -137,6 +141,8 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(manifest_text).to_contain("arch = \"rv32\"")
         expect(manifest_text).to_contain("arch = \"rv64\"")
         expect(manifest_text).to_contain("top = \"simple_rv64_linux_soc\"")
+        expect(manifest_text).to_contain("rtl_sim_backend = \"litex-vexriscv-verilator\"")
+        expect(manifest_text).to_contain("rtl_sim_backend = \"cva6-verilator\"")
 
     slow_it "generated RV32 and RV64 VHDL analyze with GHDL when available":
         val probe = rt_process_run("which", ["ghdl"])
@@ -149,3 +155,22 @@ describe "RISC-V FPGA Linux RTL generation":
             "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_soc.vhd"
         val analyzed = rt_process_run("/bin/sh", ["-c", cmd])
         expect(analyzed[2]).to_equal(0)
+
+describe "RISC-V RTL Linux smoke scripts":
+    it "keeps local RTL Linux smoke scripts shell syntax-valid":
+        val rv32 = rt_process_run("sh", ["-n", "scripts/rtl_riscv32_linux_litex.shs"])
+        val rv64 = rt_process_run("sh", ["-n", "scripts/rtl_riscv64_linux_cva6.shs"])
+        val both = rt_process_run("sh", ["-n", "scripts/check-riscv-rtl-linux-smoke.shs"])
+        expect(rv32[2]).to_equal(0)
+        expect(rv64[2]).to_equal(0)
+        expect(both[2]).to_equal(0)
+
+    it "documents the pinned local RTL Linux reference backends":
+        val rv32_lock = rt_file_read_text("doc/08_tracking/rtl_linux/rv32_litex_vexriscv.lock.md") ?? ""
+        val rv64_lock = rt_file_read_text("doc/08_tracking/rtl_linux/rv64_cva6.lock.md") ?? ""
+        val status = rt_file_read_text("doc/08_tracking/rtl_linux/status.md") ?? ""
+        expect(rv32_lock).to_contain("7a871494ab9719baedb3ae25a731e33756fd20d8")
+        expect(rv32_lock).to_contain("litex-vexriscv-verilator")
+        expect(rv64_lock).to_contain("8e694e6460d017fb8a175336cd7dcb91d8eff682")
+        expect(rv64_lock).to_contain("cva6-verilator")
+        expect(status).to_contain("QEMU RISC-V boot scripts remain functional references")

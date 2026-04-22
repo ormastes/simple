@@ -10,8 +10,8 @@
 # directory listing, rename, unlink, and close.
 #
 # The FAT32 live QEMU boot is gated by SIMPLEOS_QEMU_FS_LIVE=1. The default
-# system suite still materializes the fixture and builds the dedicated kernel,
-# while keeping unstable host-dependent QEMU storage boots out of fail-fast
+# system suite materializes the fixture and validates scenario metadata, while
+# keeping the host-dependent native-build/QEMU storage boot out of fail-fast
 # runs unless explicitly requested.
 
 use std.spec
@@ -31,7 +31,7 @@ use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.types.{DirEntry, DirHandle, MountOptions, OpenFlags, Path}
 use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 
 struct FsSystemVariant:
     name: text
@@ -73,7 +73,7 @@ fn _contract_fail(reason: text) -> bool:
 
 fn _live_qemu_fs_enabled() -> bool:
     val enabled = rt_env_get("SIMPLEOS_QEMU_FS_LIVE") ?? ""
-    enabled == "1" or enabled == "true"
+    enabled == "1"
 
 fn _run_nvfs_posix_contract() -> bool:
     var driver = NvfsPosixDriver.new("system-nvfs-posix")
@@ -176,11 +176,12 @@ describe "SimpleOS filesystem variant system matrix":
     describe "fat32 via x64-nvme-fat32 QEMU scenario":
 
         it "materializes a FAT32 fixture disk image":
-            if not ensure_fs_test_disk_image():
+            val fixture_ready = ensure_fs_test_disk_image()
+            if not fixture_ready:
                 print "[os_filesystem_variants_spec] FAT32 fixture image unavailable, skipping artifact assertion"
-                expect(true).to_equal(true)
-                return
-            expect(file_exists(fs_test_disk_image_path())).to_equal(true)
+                expect(fixture_ready).to_equal(false)
+            else:
+                expect(file_exists(fs_test_disk_image_path())).to_equal(true)
 
         it "binds x64-nvme-fat32 to the dedicated filesystem test entry":
             val scenario = scenario_x64_nvme_fat32()
@@ -189,28 +190,29 @@ describe "SimpleOS filesystem variant system matrix":
             expect(target.output).to_equal("build/os/simpleos_fs_test_32.elf")
 
         it "boots the FAT32 contract under QEMU when available":
-            if not ensure_fs_test_disk_image():
+            val fixture_ready = ensure_fs_test_disk_image()
+            val live_enabled = _live_qemu_fs_enabled()
+            if not fixture_ready:
                 print "[os_filesystem_variants_spec] FAT32 fixture image unavailable, skipping live QEMU boot"
-                expect(true).to_equal(true)
-                return
-
-            val scenario = scenario_x64_nvme_fat32()
-            val target = scenario_target(scenario)
-            if not can_run_target(target):
-                print "[os_filesystem_variants_spec] qemu-system-x86_64 or target ELF unavailable, attempting build"
-
-            expect(build_scenario(scenario)).to_equal(true)
-            expect(file_exists(target.output)).to_equal(true)
-
-            if _live_qemu_fs_enabled():
-                if not can_run_target(target):
-                    print "[os_filesystem_variants_spec] qemu-system-x86_64 unavailable, skipping live FAT32 boot"
-                    expect(true).to_equal(true)
-                else:
-                    expect(test_scenario(scenario, scenario_test_timeout_ms(scenario))).to_equal(true)
+                expect(fixture_ready).to_equal(false)
             else:
-                print "[os_filesystem_variants_spec] SIMPLEOS_QEMU_FS_LIVE not set, skipping live FAT32 boot"
-                expect(true).to_equal(true)
+                if not live_enabled:
+                    print "[os_filesystem_variants_spec] SIMPLEOS_QEMU_FS_LIVE not set, skipping live FAT32 build/boot"
+                    expect(live_enabled).to_equal(false)
+                else:
+                    val scenario = scenario_x64_nvme_fat32()
+                    val target = scenario_target(scenario)
+                    if not can_run_target(target):
+                        print "[os_filesystem_variants_spec] qemu-system-x86_64 or target ELF unavailable, attempting build"
+
+                    expect(build_scenario(scenario)).to_equal(true)
+                    expect(file_exists(target.output)).to_equal(true)
+
+                    if not can_run_target(target):
+                        print "[os_filesystem_variants_spec] qemu-system-x86_64 unavailable, skipping live FAT32 boot"
+                        expect(can_run_target(target)).to_equal(false)
+                    else:
+                        expect(test_scenario(scenario, scenario_test_timeout_ms(scenario))).to_equal(true)
 
     describe "nvfs via FsDriver POSIX shim":
 
