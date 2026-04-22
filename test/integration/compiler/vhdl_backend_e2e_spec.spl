@@ -1558,6 +1558,152 @@ describe "VHDL Backend E2E - GHDL Validation", tag: ["only-compiled", "slow"]:
         val valid = write_and_analyze(compiled.vhdl, "passthrough")
         check_msg(valid, "GHDL rejected backend-generated passthrough VHDL")
 
+    slow_it "backend-generated computed if process passes GHDL analysis and elaboration":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "then_tmp", make_i32()),
+            make_temp_local(5, "else_tmp", make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 4),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+
+        val func = make_function("select_computed_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed if process")
+
+        val path = "/tmp/simple_vhdl_e2e_select_computed_i32.vhd"
+        check(vhdl_write_file(path, result.unwrap().vhdl))
+        val valid = ghdl_analyze_and_elaborate(path, "select_computed_i32")
+        check_msg(valid.success, "GHDL rejected backend-generated computed if process VHDL")
+
+    slow_it "backend-generated switch process passes GHDL analysis and elaboration":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_resolved_backend()
+        val u8 = make_u8()
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32()),
+            make_temp_local(5, "case_zero_tmp", make_i32()),
+            make_temp_local(6, "case_one_tmp", make_i32()),
+            make_temp_local(7, "default_tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [case_zero_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val case_one_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 6),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [case_one_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+        )
+        val default_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(2), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [default_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+        val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed switch process")
+
+        val path = "/tmp/simple_vhdl_e2e_select_switch_computed.vhd"
+        check(vhdl_write_file(path, result.unwrap().vhdl))
+        val valid = ghdl_analyze_and_elaborate(path, "select_switch_computed")
+        check_msg(valid.success, "GHDL rejected backend-generated switch process VHDL")
+
     slow_it "GHDL rejects intentionally invalid VHDL":
         if not ghdl_available():
             print "SKIP: GHDL not available"
