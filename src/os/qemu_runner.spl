@@ -9,7 +9,17 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.packages.os_packages.{os_version}
 use os.machine_profile.{MachineProfile, get_machine_profile, riscv32_machine_profile, riscv64_machine_profile}
-use os.port.simpleos_multiplatform_build.{simpleos_platform_disk_image_output, simpleos_platform_kernel_output}
+use os.port.simpleos_multiplatform_build.{
+    simpleos_platform_default_entry,
+    simpleos_platform_disk_image_output,
+    simpleos_platform_linker_script,
+    simpleos_platform_native_target,
+    simpleos_platform_qemu_cpu,
+    simpleos_platform_qemu_machine,
+    simpleos_platform_qemu_system,
+    simpleos_platform_kernel_output,
+    simpleos_platform_target_by_name
+}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -170,6 +180,28 @@ fn profile_to_target(profile: MachineProfile) -> OsTarget:
         gui_mode: false
     )
 
+fn catalog_os_target(platform_name: text, memory: text, qemu_extra: [text], gui_mode: bool) -> OsTarget:
+    """Build a QEMU target from the shared SimpleOS platform catalog."""
+    OsTarget(
+        arch: simpleos_platform_arch(platform_name),
+        entry: simpleos_platform_default_entry(platform_name),
+        linker_script: simpleos_platform_linker_script(platform_name),
+        target_triple: simpleos_platform_native_target(platform_name),
+        output: simpleos_platform_kernel_output(platform_name),
+        qemu_system: simpleos_platform_qemu_system(platform_name),
+        qemu_machine: simpleos_platform_qemu_machine(platform_name),
+        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        qemu_memory: memory,
+        qemu_bios: "",
+        qemu_extra: qemu_extra,
+        gui_mode: gui_mode
+    )
+
+fn simpleos_platform_arch(platform_name: text) -> Architecture:
+    if val target = simpleos_platform_target_by_name(platform_name):
+        return target.arch
+    Architecture.X86_64
+
 # ===========================================================================
 # Hardcoded Target Definitions
 # ===========================================================================
@@ -178,20 +210,7 @@ fn get_target(arch: Architecture) -> OsTarget:
     """Returns hardcoded target config for the given architecture."""
     match arch:
         Architecture.X86_64:
-            OsTarget(
-                arch: Architecture.X86_64,
-                entry: "examples/simple_os/arch/x86_64/os_entry.spl",
-                linker_script: "examples/simple_os/arch/x86_64/linker.ld",
-                target_triple: "x86_64-unknown-none",
-                output: simpleos_platform_kernel_output("x86_64"),
-                qemu_system: "qemu-system-x86_64",
-                qemu_machine: "q35",
-                qemu_cpu: "qemu64",
-                qemu_memory: "512M",
-                qemu_bios: "",
-                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
-                gui_mode: false
-            )
+            catalog_os_target("x86_64", "512M", ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"], false)
         Architecture.Riscv64:
             if val Some(profile) = get_machine_profile(Architecture.Riscv64):
                 profile_to_target(profile)
@@ -203,50 +222,11 @@ fn get_target(arch: Architecture) -> OsTarget:
             else:
                 profile_to_target(riscv32_machine_profile())
         Architecture.X86:
-            OsTarget(
-                arch: Architecture.X86,
-                entry: "src/os/kernel/arch/x86_32/boot.spl",
-                linker_script: "src/os/kernel/arch/x86_32/linker.ld",
-                target_triple: "i686-unknown-none",
-                output: simpleos_platform_kernel_output("x86_32"),
-                qemu_system: "qemu-system-i386",
-                qemu_machine: "pc",
-                qemu_cpu: "qemu32",
-                qemu_memory: "128M",
-                qemu_bios: "",
-                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
-                gui_mode: false
-            )
+            catalog_os_target("x86_32", "128M", ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"], false)
         Architecture.Arm64:
-            OsTarget(
-                arch: Architecture.Arm64,
-                entry: "src/os/kernel/arch/arm64/boot.spl",
-                linker_script: "src/os/kernel/arch/arm64/linker.ld",
-                target_triple: "aarch64-unknown-none",
-                output: simpleos_platform_kernel_output("arm64"),
-                qemu_system: "qemu-system-aarch64",
-                qemu_machine: "virt",
-                qemu_cpu: "cortex-a72",
-                qemu_memory: "128M",
-                qemu_bios: "",
-                qemu_extra: [],
-                gui_mode: false
-            )
+            catalog_os_target("arm64", "128M", [], false)
         Architecture.Arm32:
-            OsTarget(
-                arch: Architecture.Arm32,
-                entry: "src/os/kernel/arch/arm32/boot.spl",
-                linker_script: "src/os/kernel/arch/arm32/linker.ld",
-                target_triple: "armv7-unknown-none-eabihf",
-                output: simpleos_platform_kernel_output("arm32"),
-                qemu_system: "qemu-system-arm",
-                qemu_machine: "virt",
-                qemu_cpu: "cortex-a15",
-                qemu_memory: "128M",
-                qemu_bios: "",
-                qemu_extra: [],
-                gui_mode: false
-            )
+            catalog_os_target("arm32", "128M", [], false)
 
 # ===========================================================================
 # Target Enumeration & Name Parsing
