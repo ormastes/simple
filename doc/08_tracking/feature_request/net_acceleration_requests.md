@@ -19,7 +19,7 @@ server safely.
 Id scheme: `FR-NET-####`, monotonic, no reuse.
 Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
 
-## Open Requests
+## Requests
 
 ### FR-NET-0001 - Add connect completion and nonblocking socket semantics
 
