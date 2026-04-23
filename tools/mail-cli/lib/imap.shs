@@ -5,7 +5,17 @@
 # Build IMAP URL for a folder
 _imap_url() {
   local folder="${1:-INBOX}"
-  echo "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}"
+  case "$MAIL_ACCT_TLS" in
+    none|plain)
+      echo "imap://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}"
+      ;;
+    starttls)
+      echo "imap://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}"
+      ;;
+    implicit|*)
+      echo "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}"
+      ;;
+  esac
 }
 
 # Build curl auth args
@@ -13,14 +23,25 @@ _imap_auth_args() {
   echo "--user" "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}"
 }
 
+_imap_tls_args() {
+  case "$MAIL_ACCT_TLS" in
+    starttls)
+      echo "--ssl-reqd"
+      ;;
+  esac
+}
+
 # Test IMAP connection
 mail_imap_connect() {
   mail_resolve_account || return 1
   local url
   url=$(_imap_url)
+  local tls_args
+  tls_args=$(_imap_tls_args)
   curl -s --url "$url" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
     --request "NOOP" \
+    ${tls_args} \
     -o /dev/null -w "%{http_code}" 2>/dev/null
   return $?
 }
@@ -28,8 +49,11 @@ mail_imap_connect() {
 # List folders
 mail_imap_list_folders() {
   mail_resolve_account || return 1
-  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/" \
+  local tls_args
+  tls_args=$(_imap_tls_args)
+  curl -s --url "$(_imap_url "")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request 'LIST "" "*"' 2>/dev/null
 }
 
@@ -40,9 +64,12 @@ mail_imap_search() {
 
   local url
   url=$(_imap_url "$folder")
+  local tls_args
+  tls_args=$(_imap_tls_args)
   local result
   result=$(curl -s --url "$url" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "SEARCH ${criteria}" 2>/dev/null)
 
   # Parse: "* SEARCH 1 2 3 4 5" → "1 2 3 4 5"
@@ -54,8 +81,11 @@ mail_imap_fetch_headers() {
   local folder="${1:-INBOX}" uid="$2"
   mail_resolve_account || return 1
 
-  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder};UID=${uid};SECTION=HEADER" \
-    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" 2>/dev/null
+  local tls_args
+  tls_args=$(_imap_tls_args)
+  curl -s --url "$(_imap_url "${folder};UID=${uid};SECTION=HEADER")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} 2>/dev/null
 }
 
 # Fetch full message for a UID
@@ -63,8 +93,11 @@ mail_imap_fetch_body() {
   local folder="${1:-INBOX}" uid="$2"
   mail_resolve_account || return 1
 
-  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder};UID=${uid}" \
-    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" 2>/dev/null
+  local tls_args
+  tls_args=$(_imap_tls_args)
+  curl -s --url "$(_imap_url "${folder};UID=${uid}")" \
+    --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} 2>/dev/null
 }
 
 # Store flags on a message
@@ -72,8 +105,11 @@ mail_imap_store_flags() {
   local folder="${1:-INBOX}" uid="$2" flags="$3"
   mail_resolve_account || return 1
 
+  local tls_args
+  tls_args=$(_imap_tls_args)
   curl -s --url "$(_imap_url "$folder")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "STORE ${uid} +FLAGS (${flags})" 2>/dev/null
 }
 
@@ -82,8 +118,11 @@ mail_imap_remove_flags() {
   local folder="${1:-INBOX}" uid="$2" flags="$3"
   mail_resolve_account || return 1
 
+  local tls_args
+  tls_args=$(_imap_tls_args)
   curl -s --url "$(_imap_url "$folder")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "STORE ${uid} -FLAGS (${flags})" 2>/dev/null
 }
 
@@ -92,8 +131,11 @@ mail_imap_copy() {
   local folder="${1:-INBOX}" uid="$2" dest="$3"
   mail_resolve_account || return 1
 
+  local tls_args
+  tls_args=$(_imap_tls_args)
   curl -s --url "$(_imap_url "$folder")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "COPY ${uid} ${dest}" 2>/dev/null
 }
 
@@ -101,8 +143,11 @@ mail_imap_copy() {
 mail_imap_delete() {
   local folder="${1:-INBOX}" uid="$2"
   mail_imap_store_flags "$folder" "$uid" "\\Deleted"
+  local tls_args
+  tls_args=$(_imap_tls_args)
   curl -s --url "$(_imap_url "$folder")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "EXPUNGE" 2>/dev/null
 }
 
@@ -111,8 +156,11 @@ mail_imap_create_folder() {
   local folder="$1"
   mail_resolve_account || return 1
 
-  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/" \
+  local tls_args
+  tls_args=$(_imap_tls_args)
+  curl -s --url "$(_imap_url "")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --request "CREATE ${folder}" 2>/dev/null
 }
 
@@ -121,7 +169,10 @@ mail_imap_append() {
   local folder="$1" message_file="$2"
   mail_resolve_account || return 1
 
-  curl -s --url "imaps://${MAIL_ACCT_IMAP_SERVER}:${MAIL_ACCT_IMAP_PORT}/${folder}" \
+  local tls_args
+  tls_args=$(_imap_tls_args)
+  curl -s --url "$(_imap_url "$folder")" \
     --user "${MAIL_ACCT_EMAIL}:${MAIL_ACCT_PASSWORD}" \
+    ${tls_args} \
     --upload-file "$message_file" 2>/dev/null
 }

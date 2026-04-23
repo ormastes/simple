@@ -134,11 +134,25 @@ cmd_auth_login() {
   fi
 
   # Test IMAP connection
-  printf "- Testing IMAP connection..."
+  printf -- "- Testing IMAP connection..."
+  local imap_url
+  local -a imap_extra_args=()
+  case "$tls_mode" in
+    none|plain)
+      imap_url="imap://${imap_server}:${imap_port}/"
+      ;;
+    starttls)
+      imap_url="imap://${imap_server}:${imap_port}/"
+      imap_extra_args+=(--ssl-reqd)
+      ;;
+    implicit|*)
+      imap_url="imaps://${imap_server}:${imap_port}/"
+      ;;
+  esac
   local test_result
-  test_result=$(curl -s --url "imaps://${imap_server}:${imap_port}/" \
+  test_result=$(curl -s --url "$imap_url" \
     --user "${email}:${password}" \
-    --request "NOOP" -o /dev/null -w "%{http_code}" 2>&1)
+    --request "NOOP" "${imap_extra_args[@]}" -o /dev/null -w "%{http_code}" 2>&1)
   local test_exit=$?
 
   if [ $test_exit -ne 0 ]; then
@@ -241,9 +255,10 @@ cmd_auth_status() {
     local email provider
     email=$(echo "$acc" | jq -r '.email')
     provider=$(echo "$acc" | jq -r '.provider')
-    local imap_server imap_port
+    local imap_server imap_port tls_mode
     imap_server=$(echo "$acc" | jq -r '.imap_server')
     imap_port=$(echo "$acc" | jq -r '.imap_port')
+    tls_mode=$(echo "$acc" | jq -r '.tls // "implicit"')
 
     local default_mark=""
     [ "$name" = "$default_acc" ] && default_mark=" (default)"
@@ -254,9 +269,23 @@ cmd_auth_status() {
 
     # Quick connection test
     local test_exit
-    curl -s --url "imaps://${imap_server}:${imap_port}/" \
+    local imap_url
+    local -a imap_extra_args=()
+    case "$tls_mode" in
+      none|plain)
+        imap_url="imap://${imap_server}:${imap_port}/"
+        ;;
+      starttls)
+        imap_url="imap://${imap_server}:${imap_port}/"
+        imap_extra_args+=(--ssl-reqd)
+        ;;
+      implicit|*)
+        imap_url="imaps://${imap_server}:${imap_port}/"
+        ;;
+    esac
+    curl -s --url "$imap_url" \
       --user "${email}:$(echo "$acc" | jq -r '.password')" \
-      --request "NOOP" -o /dev/null 2>/dev/null
+      --request "NOOP" "${imap_extra_args[@]}" -o /dev/null 2>/dev/null
     test_exit=$?
     if [ $test_exit -eq 0 ]; then
       echo "  ✓ Connection OK"
