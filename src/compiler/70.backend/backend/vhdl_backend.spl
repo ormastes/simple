@@ -716,6 +716,8 @@ class VhdlBackend:
         var params: [text] = []
         var idx = 0
         while idx < func.signature.params.len():
+            if self.type_has_general_memory(func.signature.params[idx]):
+                return Err(self.backend_error("VHDL-MEM-GENERAL: Helper subprogram memory parameters require an explicit package-level memory ABI before VHDL emission"))
             val ty_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
             if ty_result.is_err():
                 return Err(ty_result.unwrap_err())
@@ -735,6 +737,8 @@ class VhdlBackend:
         val maybe_params = if params.len() > 0: "({params})" else: ""
         if vhdl_helper_is_procedure(func):
             return Ok("procedure {name_result.unwrap()}{maybe_params}{suffix}")
+        if self.type_has_general_memory(func.signature.return_type):
+            return Err(self.backend_error("VHDL-MEM-GENERAL: Helper subprogram memory results require an explicit package-level memory ABI before VHDL emission"))
         val ret_type_result = self.mir_type_to_vhdl_at(func.signature.return_type, Some(func.span))
         if ret_type_result.is_err():
             return Err(ret_type_result.unwrap_err())
@@ -752,6 +756,7 @@ class VhdlBackend:
         self.active_local_types = {}
         self.active_local_kinds = {}
         self.active_blocks = {}
+        self.active_local_memory_type_names = {}
         for block in func.blocks:
             self.active_blocks = self.active_blocks.set(block.id.id, block)
         for local in func.locals:
@@ -771,6 +776,8 @@ class VhdlBackend:
                 case Var | Temp | Return:
                     if local.kind == LocalKind.Return and vhdl_helper_is_procedure(func):
                         continue
+                    if self.type_has_general_memory(local.type_):
+                        return Err(self.backend_error("VHDL-MEM-GENERAL: Helper subprogram local memory requires explicit constrained lowering before VHDL emission"))
                     val ty_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
                     if ty_result.is_err():
                         return Err(ty_result.unwrap_err())

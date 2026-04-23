@@ -101,6 +101,20 @@ Current output:
 - `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip`
 - `doc/04_architecture/vhdl_support_matrix.md`
 
+### Worker 8 Wave 2: Source-Facade Broad-HLS Deferral Diagnostics
+
+Owns the narrow compatibility guardrail for source-facade behavior while broad
+Python-HDL/HLS ownership remains deferred from pure Simple lowering.
+
+- Keep unsupported ROM/RAM inference as an explicit hard diagnostic.
+- Ensure failed source-facade VHDL lowering deletes stale `.vhd` and
+  `.map.json` artifacts.
+- Do not promote broad memory inference support claims until the pure Simple
+  compiler owns typed memory templates outside the facade string fallback.
+
+Acceptance:
+- `aot_vhdl_file rejects ROM RAM inference facade paths and removes stale artifacts`
+
 ## Verification
 
 Run after docs/spec edits:
