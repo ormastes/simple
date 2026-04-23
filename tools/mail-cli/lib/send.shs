@@ -63,6 +63,7 @@ cmd_send() {
     echo " done"
     echo "✓ Sent to ${to}"
     [ -n "$cc" ] && echo "  Cc: ${cc}"
+    return 0
   else
     echo " FAILED"
     echo "error: could not send email (exit code: ${send_exit})" >&2
@@ -109,6 +110,12 @@ cmd_reply() {
   orig_subject=$(echo "$orig_headers" | jq -r '.subject')
   orig_msg_id=$(echo "$orig_headers" | jq -r '.message_id')
   orig_references=$(echo "$orig_headers" | jq -r '.in_reply_to // ""')
+  local reply_to="$orig_from"
+  case "$reply_to" in
+    *"<"*">"*)
+      reply_to=$(echo "$reply_to" | sed -n 's/.*<\([^>]*\)>.*/\1/p')
+      ;;
+  esac
 
   # Build reply headers
   local reply_subject="$orig_subject"
@@ -139,17 +146,18 @@ ${quoted}"
   # Compose and send
   local msg_file
   msg_file=$(mktemp /tmp/mail-cli-reply.XXXXXX)
-  mail_format_compose "$from" "$orig_from" "$reply_subject" "$full_body" "" "" "$orig_msg_id" "$references" > "$msg_file"
+  mail_format_compose "$from" "$reply_to" "$reply_subject" "$full_body" "" "" "$orig_msg_id" "$references" > "$msg_file"
 
   printf -- "- Sending reply..."
-  mail_smtp_send "$MAIL_ACCT_EMAIL" "$orig_from" "$msg_file"
+  mail_smtp_send "$MAIL_ACCT_EMAIL" "$reply_to" "$msg_file"
   local send_exit=$?
 
   rm -f "$msg_file"
 
   if [ $send_exit -eq 0 ]; then
     echo " done"
-    echo "✓ Replied to ${orig_from}"
+    echo "✓ Replied to ${reply_to}"
+    return 0
   else
     echo " FAILED"
     return 1
@@ -224,6 +232,7 @@ ${orig_body}"
   if [ $send_exit -eq 0 ]; then
     echo " done"
     echo "✓ Forwarded to ${to}"
+    return 0
   else
     echo " FAILED"
     return 1
