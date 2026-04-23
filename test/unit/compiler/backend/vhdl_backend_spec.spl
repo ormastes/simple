@@ -1103,6 +1103,103 @@ describe "VHDL Backend - real backend compilation":
         check(compiled.vhdl.contains("port ("))
         check(compiled.vhdl.contains("result_out")).to_equal(false)
 
+    it "switches on payload enum tags inside combinational processes":
+        val payload_symbol = SymbolId(id: 170)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_proc_match_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val arg_local = make_arg_local(1, 0, "state", enum_type)
+        val ret_local = make_return_local(2, make_i32())
+        val payload_local = make_temp_local(3, "payload_sig", make_i32())
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.Combinational(["state"]),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("body"),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                [SwitchCase(value: 1, target: BlockId(id: 2))],
+                BlockId(id: 3)
+            )
+        )
+        val some_block = MirBlock(
+            id: BlockId(id: 2),
+            label: Some("some"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.GetField(
+                        LocalId(id: 3),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        1
+                    ),
+                    span: nil
+                ),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)), span: nil)
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val none_block = MirBlock(
+            id: BlockId(id: 3),
+            label: Some("none"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 171),
+            name: "payload_proc_match",
+            signature: MirSignature(params: [enum_type], return_type: make_i32(), is_variadic: false),
+            locals: [arg_local, ret_local, payload_local],
+            blocks: [entry_block, body_block, some_block, none_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_proc_match_mod"), func)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.vhdl.contains("process(state)"))
+        check(compiled.vhdl.contains("if state.tag = Some then"))
+        check(compiled.vhdl.contains("payload_sig <= state.Some_payload;"))
+
     it "lowers payload-free variants of payload enums inside processes":
         val payload_symbol = SymbolId(id: 63)
         val payload_enum = MirTypeDef(
