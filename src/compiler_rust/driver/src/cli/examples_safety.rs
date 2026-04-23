@@ -26,12 +26,21 @@ pub fn examples_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_EXAMPLES_TIMEOUT_SECS)
 }
 
+fn examples_timeout_disabled() -> bool {
+    std::env::var("SIMPLE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        == Some(0)
+}
+
 fn should_apply_examples_timeout(path: &Path) -> bool {
     is_examples_path(path) && std::env::var_os("SIMPLE_TIMEOUT_SECONDS").is_none()
 }
 
 fn should_isolate_example_process(path: &Path) -> bool {
-    is_examples_path(path) && std::env::var_os(EXAMPLES_CHILD_ENV).is_none()
+    is_examples_path(path)
+        && std::env::var_os(EXAMPLES_CHILD_ENV).is_none()
+        && !examples_timeout_disabled()
 }
 
 pub fn timeout_error_message(path: &Path, timeout_secs: u64) -> String {
@@ -230,6 +239,16 @@ mod tests {
         let _lock = env_lock().lock().expect("lock");
         let _env = EnvVarGuard::set("SIMPLE_TIMEOUT_SECONDS", "17");
         assert_eq!(examples_timeout_secs(), 17);
+    }
+
+    #[test]
+    fn zero_timeout_disables_example_isolation_watchdog() {
+        let _lock = env_lock().lock().expect("lock");
+        let _timeout_env = EnvVarGuard::set("SIMPLE_TIMEOUT_SECONDS", "0");
+        let _child_env = EnvVarGuard::clear(EXAMPLES_CHILD_ENV);
+        assert!(!should_isolate_example_process(&PathBuf::from(
+            "examples/ui/simple_browser.spl"
+        )));
     }
 
     #[test]

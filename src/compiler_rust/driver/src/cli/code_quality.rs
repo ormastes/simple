@@ -27,6 +27,12 @@ fn is_source_like_path(path: &Path) -> bool {
     text.ends_with(".spl") && !is_test_like_path(path)
 }
 
+fn is_theme_package_lint_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.contains("config/themes/")
+        && matches!(path.extension().and_then(|s| s.to_str()), Some("sdn") | Some("css") | Some("html"))
+}
+
 fn compact(source: &str) -> String {
     source.replace([' ', '\t', '\n', '\r'], "")
 }
@@ -727,7 +733,7 @@ pub fn run_lint(args: &[String]) -> i32 {
     lint_file(&path, json_output, &fix_flags)
 }
 
-/// Lint all .spl files in a directory
+/// Lint all .spl files and theme package files in a directory
 pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) -> i32 {
     let mut all_errors = false;
     let mut total_errors = 0;
@@ -740,7 +746,7 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) ->
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl"))
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl") || is_theme_package_lint_path(e.path()))
     {
         let path = entry.path();
         let result = lint_file_internal(path, false);
@@ -789,8 +795,8 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) ->
                 .filter(|e| e
                     .as_ref()
                     .ok()
-                    .and_then(|e| e.path().extension().and_then(|s| s.to_str()))
-                    == Some("spl"))
+                    .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl") || is_theme_package_lint_path(e.path()))
+                    == Some(true))
                 .count()
         );
     }
@@ -847,9 +853,244 @@ pub type LintResult = (
     Option<String>,
 );
 
+fn theme_root_value(content: &str, key: &str) -> String {
+    let prefix = format!("{}:", key);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            return rest.trim().trim_matches('"').to_string();
+        }
+    }
+    String::new()
+}
+
+fn theme_section_value(content: &str, section: &str, key: &str) -> String {
+    let mut current = "";
+    let section_header = format!("{}:", section);
+    let prefix = format!("{}:", key);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == section_header {
+            current = section;
+            continue;
+        }
+        if !line.starts_with(' ') && trimmed.ends_with(':') {
+            current = trimmed.trim_end_matches(':');
+            continue;
+        }
+        if current == section {
+            if let Some(rest) = trimmed.strip_prefix(&prefix) {
+                return rest.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn theme_section_items(content: &str, section: &str) -> Vec<String> {
+    let mut current = "";
+    let section_header = format!("{}:", section);
+    let mut items = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == section_header {
+            current = section;
+            continue;
+        }
+        if !line.starts_with(' ') && trimmed.ends_with(':') {
+            current = trimmed.trim_end_matches(':');
+            continue;
+        }
+        if current == section {
+            if let Some(rest) = trimmed.strip_prefix("- ") {
+                items.push(rest.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    items
+}
+
+fn theme_defined_tokens(css: &str) -> Vec<String> {
+    css.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("--") && line.contains(':'))
+        .filter_map(|line| line.split(':').next().map(|s| s.trim().to_string()))
+        .collect()
+}
+
+fn theme_validate_refs(path: &str, content: &str, tokens: &[String], issues: &mut Vec<(String, String, String)>) {
+    let mut rest = content;
+    while let Some(idx) = rest.find("var(--") {
+        let tail = &rest[idx + 4..];
+        let Some(end) = tail.find(')') else {
+            break;
+        };
+        let token = tail[..end].trim();
+        if !tokens.iter().any(|t| t == token) {
+            issues.push((path.to_string(), token.to_string(), "unresolved CSS token reference".to_string()));
+        }
+        rest = &tail[end + 1..];
+    }
+}
+
+fn validate_theme_package_for_lint() -> Vec<(String, String, String)> {
+    let registry_path = PathBuf::from("config/themes/theme.sdn");
+    let mut issues = Vec::new();
+    let Ok(registry) = fs::read_to_string(&registry_path) else {
+        issues.push(("config/themes/theme.sdn".to_string(), "registry".to_string(), "theme registry file is missing".to_string()));
+        return issues;
+    };
+
+    let default_id = theme_root_value(&registry, "default_theme");
+    if default_id.is_empty() {
+        issues.push(("config/themes/theme.sdn".to_string(), "default_theme".to_string(), "default_theme is required".to_string()));
+    }
+    let theme_id = if default_id.is_empty() { "aetheric_dark".to_string() } else { default_id };
+    let theme_path = theme_section_value(&registry, "themes", &theme_id);
+    if theme_path.is_empty() {
+        issues.push(("config/themes/theme.sdn".to_string(), format!("themes.{}", theme_id), "default theme is not listed in themes".to_string()));
+        return issues;
+    }
+    let Ok(theme_sdn) = fs::read_to_string(&theme_path) else {
+        issues.push((theme_path, format!("themes.{}", theme_id), "theme package file is missing".to_string()));
+        return issues;
+    };
+
+    let family_id = theme_root_value(&theme_sdn, "family");
+    let family_path = theme_section_value(&registry, "families", &family_id);
+    if family_id.is_empty() {
+        issues.push((theme_path.clone(), "family".to_string(), "theme family is required".to_string()));
+    } else if family_path.is_empty() {
+        issues.push(("config/themes/theme.sdn".to_string(), format!("families.{}", family_id), "theme references an unknown family".to_string()));
+    }
+    let family_sdn = fs::read_to_string(&family_path).unwrap_or_default();
+    for (owner, key, target) in [
+        (theme_path.as_str(), "base_css", theme_root_value(&theme_sdn, "base_css")),
+        (family_path.as_str(), "shape_css", theme_root_value(&family_sdn, "shape_css")),
+        (family_path.as_str(), "icons", theme_root_value(&family_sdn, "icons")),
+        (theme_path.as_str(), "source_raw_reference", theme_root_value(&theme_sdn, "source_raw_reference")),
+    ] {
+        if target.is_empty() {
+            issues.push((owner.to_string(), key.to_string(), format!("{} is required", key)));
+        } else if !Path::new(&target).exists() {
+            issues.push((target, key.to_string(), "referenced file is missing".to_string()));
+        }
+    }
+
+    let base_path = theme_root_value(&theme_sdn, "base_css");
+    let shape_path = theme_root_value(&family_sdn, "shape_css");
+    let icons_path = theme_root_value(&family_sdn, "icons");
+    let local_widget_dir = theme_root_value(&theme_sdn, "widget_css_dir");
+    let family_widget_dir = theme_root_value(&family_sdn, "widget_css_dir");
+    let base_css = fs::read_to_string(&base_path).unwrap_or_default();
+    let shape_css = fs::read_to_string(&shape_path).unwrap_or_default();
+    let icons_sdn = fs::read_to_string(&icons_path).unwrap_or_default();
+    let defaults_css = fs::read_to_string(format!("{}/defaults.css", family_widget_dir)).unwrap_or_default();
+    let widgets = theme_section_items(&registry, "required_widgets");
+    for widget in &widgets {
+        let local = format!("{}/{}.css", local_widget_dir, widget);
+        let family = format!("{}/{}.css", family_widget_dir, widget);
+        let class_name = format!(".widget-{}", widget.replace('_', "-"));
+        if !Path::new(&local).exists() && !Path::new(&family).exists() && !defaults_css.contains(&class_name) {
+            issues.push(("config/themes/theme.sdn".to_string(), format!("required_widgets.{}", widget), "missing widget CSS in local package or family defaults".to_string()));
+        }
+        let local_css = fs::read_to_string(&local).unwrap_or_default();
+        if !theme_defined_tokens(&local_css).is_empty() {
+            issues.push((local, widget.clone(), "local widget CSS must not define tokens".to_string()));
+        }
+    }
+
+    for app in ["Terminal", "Browser", "File Manager", "Editor", "Calculator"] {
+        if theme_section_value(&icons_sdn, "apps", app).is_empty() {
+            issues.push((icons_path.clone(), format!("apps.{}", app), "missing default app icon".to_string()));
+        }
+    }
+    for key in ["close", "minimize", "maximize", "settings", "fallback_app", "fallback_file"] {
+        if theme_section_value(&icons_sdn, "system", key).is_empty() {
+            issues.push((icons_path.clone(), format!("system.{}", key), "missing default system icon".to_string()));
+        }
+    }
+
+    for forbidden in ["--ui-", "--app-", "--font-", "--motion-"] {
+        if shape_css.contains(forbidden) {
+            issues.push((shape_path.clone(), forbidden.to_string(), "family shape CSS must only define shape tokens".to_string()));
+        }
+    }
+    for forbidden in ["--radius-", "--spacing-", "--blur-", "--border-width-", "--elevation-"] {
+        if base_css.contains(forbidden) {
+            issues.push((base_path.clone(), forbidden.to_string(), "theme base CSS must not define family shape tokens".to_string()));
+        }
+    }
+
+    let tokens = [theme_defined_tokens(&base_css), theme_defined_tokens(&shape_css)].concat();
+    theme_validate_refs(&base_path, &base_css, &tokens, &mut issues);
+    theme_validate_refs(&shape_path, &shape_css, &tokens, &mut issues);
+    theme_validate_refs(&icons_path, &icons_sdn, &tokens, &mut issues);
+    theme_validate_refs(&format!("{}/defaults.css", family_widget_dir), &defaults_css, &tokens, &mut issues);
+    for widget in &widgets {
+        for path in [format!("{}/{}.css", family_widget_dir, widget), format!("{}/{}.css", local_widget_dir, widget)] {
+            let css = fs::read_to_string(&path).unwrap_or_default();
+            theme_validate_refs(&path, &css, &tokens, &mut issues);
+        }
+    }
+    issues
+}
+
+fn lint_theme_package_file(path: &std::path::Path, json_output: bool) -> Option<LintResult> {
+    let source = fs::read_to_string(path).unwrap_or_default();
+    let issues = validate_theme_package_for_lint();
+    let diags: Vec<Diagnostic> = issues
+        .into_iter()
+        .map(|(issue_path, key, message)| {
+            Diagnostic::error(format!("{} {}: {}", issue_path, key, message))
+                .with_code("THEME001".to_string())
+                .with_file(path.display().to_string())
+                .with_label(Span::new(0, 0, 1, 1), "theme package validation")
+                .with_help("Fix config/themes/theme.sdn or the referenced theme package file")
+        })
+        .collect();
+
+    if !json_output {
+        if diags.is_empty() {
+            println!("{}: OK", path.display());
+        } else {
+            for diagnostic in &diags {
+                println!(
+                    "{}:1:1: error: {} [{}]",
+                    path.display(),
+                    diagnostic.message,
+                    diagnostic.code.clone().unwrap_or_else(|| "THEME001".to_string())
+                );
+                for help in &diagnostic.help {
+                    println!("  help: {}", help);
+                }
+            }
+        }
+    }
+
+    Some((
+        !diags.is_empty(),
+        diags.len(),
+        0,
+        diags,
+        Vec::new(),
+        Some(source),
+    ))
+}
+
 /// Internal lint function that returns diagnostic information
 /// Returns: (has_errors, error_count, warning_count, diagnostics, easy_fixes, source_text)
 pub fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<LintResult> {
+    if is_theme_package_lint_path(path) {
+        return lint_theme_package_file(path, json_output);
+    }
+
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
