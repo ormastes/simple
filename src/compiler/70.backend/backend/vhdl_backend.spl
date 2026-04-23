@@ -10,6 +10,7 @@ use compiler.backend.hardware_codegen_types.{HardwareCodegen}
 use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
 use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
+use compiler.backend.vhdl.vhdl_memory_templates.{VhdlConstrainedSignalMemoryTemplate, render_constrained_signal_memory_template}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
@@ -70,6 +71,7 @@ class VhdlBackend:
     active_return_abi: VhdlReturnAbi
     active_function_by_name: Dict<text, MirFunction>
     active_helper_name_by_source: Dict<text, text>
+    active_local_memory_type_names: Dict<i64, text>
 
     static fn empty_span() -> Span:
         Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -90,7 +92,8 @@ class VhdlBackend:
             active_tuple_type_order: [],
             active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
             active_function_by_name: {},
-            active_helper_name_by_source: {}
+            active_helper_name_by_source: {},
+            active_local_memory_type_names: {}
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -109,7 +112,8 @@ class VhdlBackend:
             active_tuple_type_order: [],
             active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
             active_function_by_name: {},
-            active_helper_name_by_source: {}
+            active_helper_name_by_source: {},
+            active_local_memory_type_names: {}
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
@@ -975,6 +979,7 @@ class VhdlBackend:
         self.active_local_types = {}
         self.active_local_kinds = {}
         self.active_blocks = {}
+        self.active_local_memory_type_names = {}
         val return_abi_result = self.vhdl_return_abi(func)
         if return_abi_result.is_err():
             return Err(return_abi_result.unwrap_err())
@@ -1011,12 +1016,9 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
-                    if vhdl_type_result.is_err():
-                        return Err(vhdl_type_result.unwrap_err())
-                    val vhdl_type = vhdl_type_result.unwrap()
-                    val name = self.default_local_name(local)
-                    builder.emit_signal_decl(name, vhdl_type, nil)
+                    val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
+                    if declare_result.is_err():
+                        return Err(declare_result.unwrap_err())
                 case _:
                     ()
 
