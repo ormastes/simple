@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
-    GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -183,6 +183,20 @@ pub(crate) fn evaluate_call(
                 }
                 _ => {}
             }
+        }
+
+        // Check bitfield constructors (e.g., Flags(raw) instantiation)
+        let is_bitfield = BITFIELDS.with(|cell| cell.borrow().contains_key(name));
+        if is_bitfield {
+            return core::bitfield_support::instantiate_bitfield_from_args(
+                name,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            );
         }
 
         // Check class constructors (e.g., MyClass() instantiation)
@@ -455,6 +469,19 @@ pub(crate) fn evaluate_call(
         if segments.len() == 2 {
             let type_name = &segments[0];
             let method_name = &segments[1];
+
+            // Check bitfield constructor paths (e.g., Flags.new(raw))
+            if method_name == "new" && BITFIELDS.with(|cell| cell.borrow().contains_key(type_name)) {
+                return core::bitfield_support::instantiate_bitfield_from_args(
+                    type_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
+            }
 
             // Check if it's an enum variant constructor (local enums + GLOBAL_ENUMS fallback)
             let path_enum_def = enums

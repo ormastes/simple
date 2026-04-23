@@ -21,17 +21,32 @@ When a new feature or layer expert is needed, copy the matching template from `t
 
 ## generator tool
 
-Planned tool:
+Use the generator to keep copied LLM process files reproducible from the manifest and source skill files:
 
 ```bash
 bin/simple llm-process-gen check
+bin/simple llm-process-gen check --json
+bin/simple llm-process-gen list
+bin/simple llm-process-gen list --owner codex
+bin/simple llm-process-gen list --mode tools_sdn
+bin/simple llm-process-gen list --stage sync
 bin/simple llm-process-gen generate
 bin/simple llm-process-gen generate --force
 ```
 
 The tool should generate skills, commands, and subagent docs for Claude, Codex, and Gemini CLI. Subagent docs should hide MCP details behind task-oriented instructions; tool metadata stays in `tools.sdn` with `id` and `type`.
 
-`check` alerts the user when generated docs drift from templates or the manifest. When generated docs change, the LLM should notify the user that `skill_command/` should be regenerated. `generate --force` regenerates all managed outputs after the user accepts the overwrite.
+`check` alerts the user when generated docs drift from templates or the manifest. `list` prints manifest-managed outputs and can filter by owner, mode, or stage. When generated docs change, the LLM should notify the user that `skill_command/` should be regenerated. `generate --force` regenerates marker-managed outputs after the user accepts the overwrite.
+
+Skeleton records create feature and layer expert files only when the target is missing. Existing skeleton targets are durable knowledge files and are not overwritten by `generate` or `generate --force`.
+
+`generated_files.mode` is validated. Allowed values are:
+
+- `managed`: copy the source text into a marker-managed output
+- `gemini_toml_skill`: render a Gemini TOML command or skill as markdown
+- `tools_sdn`: render standard skill `tools.sdn` metadata from the manifest
+- `claude_lib_tools_sdn`: render Claude helper skill `tools.sdn` metadata
+- `skeleton`: create the target only when missing, then leave later edits intact
 
 ## skills & commands
 

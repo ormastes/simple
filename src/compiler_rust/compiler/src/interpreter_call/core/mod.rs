@@ -22,6 +22,9 @@ pub(crate) mod function_exec;
 // Class instantiation and initialization
 pub(crate) mod class_instantiation;
 
+// Bitfield construction helpers
+pub(crate) mod bitfield_support;
+
 // Dependency injection resolution
 pub(crate) mod di_injection;
 

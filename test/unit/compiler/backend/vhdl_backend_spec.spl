@@ -14,7 +14,11 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, compileo
 use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.backend.common.type_mapper.PrimitiveType
 use compiler.common.attributes.{VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony, vhdl_hardware_metadata_default}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
 from hir_types import {SymbolId}
 from lexer import {Span}
 
@@ -22,6 +26,9 @@ extern fn rt_file_read_text(path: text) -> text
 
 fn check(condition: bool):
     expect(condition).to_equal(true)
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
 
 fn empty_span() -> Span:
     Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -1806,6 +1813,139 @@ describe "VHDL Backend - real backend compilation":
         check(vhdl.contains("wide : in unsigned(16 downto 0);"))
         check(vhdl.contains("result_out : out unsigned(4 downto 0)"))
         check(vhdl.contains("result_out <= resize(unsigned(wide), 5);"))
+
+    it "zero-extends VhdlSlice results into wider unsigned destinations":
+        val src_local = make_arg_local(1, 0, "imem_rdata", make_bits(32))
+        val ret_local = make_return_local(2, make_bits(7))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlSlice(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        6,
+                        0
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 751),
+            name: "bitfield_opcode_slice",
+            signature: MirSignature(params: [make_bits(32)], return_type: make_bits(7), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bitfield_opcode_slice_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("imem_rdata : in unsigned(31 downto 0);"))
+        check(vhdl.contains("result_out : out unsigned(6 downto 0)"))
+        check(vhdl.contains("result_out <= resize(unsigned(imem_rdata(6 downto 0)), 7);"))
+
+    it "casts VhdlSlice results into wider signed destinations":
+        val src_local = make_arg_local(1, 0, "status_word", make_bits(32))
+        val ret_local = make_return_local(2, make_sbits(7))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlSlice(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        11,
+                        5
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 752),
+            name: "bitfield_signed_slice",
+            signature: MirSignature(params: [make_bits(32)], return_type: make_sbits(7), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bitfield_signed_slice_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("status_word : in unsigned(31 downto 0);"))
+        check(vhdl.contains("result_out : out signed(6 downto 0)"))
+        check(vhdl.contains("result_out <= resize(signed(status_word(11 downto 5)), 7);"))
+
+    it "lowers hardware bitfield reads through MIR VhdlSlice into typed VHDL slices":
+        val src = """
+bitfield Rv32Instruction(u32):
+    opcode: 7
+    rd: 5
+    funct3: 3
+    rs1: 5
+    rs2: 5
+    funct7: 7
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_opcode(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:
+    val inst = Rv32Instruction.new(imem_rdata)
+    inst.opcode as u32
+"""
+        val path = "testdata/bitfield_opcode_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_opcode_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_opcode_slice = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 6 and lo == 0:
+                            has_opcode_slice = true
+                    case _:
+                        nil
+        check(has_opcode_slice)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("imem_rdata : in unsigned(31 downto 0);"))
+        check(vhdl.contains("imem_rdata(6 downto 0)"))
+        check(vhdl.contains("resize(unsigned("))
 
     it "rejects non-positive fixed-width bit lanes before VHDL emission":
         val src_local = make_arg_local(1, 0, "bad", make_bits(0))

@@ -12,6 +12,9 @@ extern fn rt_getpid() -> i64
 
 struct GeneratedFile:
     id: text
+    kind: text
+    owner: text
+    stage: text
     source_path: text
     target_path: text
     mode: text
@@ -19,6 +22,9 @@ struct GeneratedFile:
 struct Options:
     action: text
     root: text
+    owner_filter: text
+    mode_filter: text
+    stage_filter: text
     json: bool
     dry_run: bool
     force: bool
@@ -41,6 +47,8 @@ fn main() -> i64:
         val r = check_all(opts.root)
         emit_result(r, opts.json, "check")
         return if r.ok: 0 else: 1
+    if opts.action == "list":
+        return list_records(opts.root, opts.json, opts.owner_filter, opts.mode_filter, opts.stage_filter)
     if opts.action == "generate":
         val r = generate_all(opts.root, opts.dry_run, opts.force)
         emit_result(r, opts.json, "generate")
@@ -49,11 +57,14 @@ fn main() -> i64:
     2
 
 fn print_usage():
-    print "Usage: simple llm-process-gen <check|generate> [options]"
+    print "Usage: simple llm-process-gen <check|generate|list> [options]"
     print ""
     print "Options:"
     print "  --root <path>    Repository root (default: current directory)"
     print "  --json           Machine-readable check output"
+    print "  --owner <id>     For list, include only records with this owner"
+    print "  --mode <mode>    For list, include only records with this mode"
+    print "  --stage <stage>  For list, include only records with this stage"
     print "  --dry-run        For generate, report changes without writing"
     print "  --force          For generate, overwrite manually edited managed outputs"
     print "  -h, --help       Show this help"
@@ -70,7 +81,7 @@ fn clean_args() -> [text]:
     out
 
 fn parse_options(args: [text]) -> Options:
-    var opts = Options(action: "", root: ".", json: false, dry_run: false, force: false, usage_error: false)
+    var opts = Options(action: "", root: ".", owner_filter: "", mode_filter: "", stage_filter: "", json: false, dry_run: false, force: false, usage_error: false)
     if args.len() == 0:
         opts.usage_error = true
         return opts
@@ -78,7 +89,7 @@ fn parse_options(args: [text]) -> Options:
     if opts.action == "-h" or opts.action == "--help":
         opts.action = "help"
         return opts
-    if opts.action != "check" and opts.action != "generate":
+    if opts.action != "check" and opts.action != "generate" and opts.action != "list":
         opts.usage_error = true
         return opts
     var i = 1
@@ -98,6 +109,30 @@ fn parse_options(args: [text]) -> Options:
             i = i + 1
         elif arg.starts_with("--root="):
             opts.root = arg.slice("--root=".len(), arg.len())
+        elif arg == "--owner":
+            if i + 1 >= args.len():
+                opts.usage_error = true
+                return opts
+            opts.owner_filter = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--owner="):
+            opts.owner_filter = arg.slice("--owner=".len(), arg.len())
+        elif arg == "--mode":
+            if i + 1 >= args.len():
+                opts.usage_error = true
+                return opts
+            opts.mode_filter = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--mode="):
+            opts.mode_filter = arg.slice("--mode=".len(), arg.len())
+        elif arg == "--stage":
+            if i + 1 >= args.len():
+                opts.usage_error = true
+                return opts
+            opts.stage_filter = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--stage="):
+            opts.stage_filter = arg.slice("--stage=".len(), arg.len())
         elif arg == "-h" or arg == "--help":
             opts.action = "help"
             return opts
@@ -122,6 +157,11 @@ fn check_all(root: text) -> ResultSummary:
     if records.len() == 0:
         failures.push("manifest generated_files table has no records")
     for rec in records:
+        val record_failures = validate_record_manifest(rec)
+        if record_failures.len() > 0:
+            for f in record_failures:
+                failures.push(f)
+            continue
         for f in check_record(root, rec):
             failures.push(f)
     ResultSummary(ok: failures.len() == 0, records: records.len(), failures: failures)
@@ -138,6 +178,11 @@ fn generate_all(root: text, dry_run: bool, force: bool) -> ResultSummary:
     if records.len() == 0:
         failures.push("manifest generated_files table has no records")
     for rec in records:
+        val record_failures = validate_record_manifest(rec)
+        if record_failures.len() > 0:
+            for f in record_failures:
+                failures.push(f)
+            continue
         for f in generate_record(root, rec, dry_run, force):
             failures.push(f)
     ResultSummary(ok: failures.len() == 0, records: records.len(), failures: failures)
@@ -158,7 +203,7 @@ fn validate_tables(manifest: text) -> [text]:
 
 fn parse_records(manifest: text) -> [GeneratedFile]:
     var records: [GeneratedFile] = []
-    var rec = GeneratedFile(id: "", source_path: "", target_path: "", mode: "")
+    var rec = empty_record()
     var in_generated = false
     var have = false
     for raw in manifest.split("\n"):
@@ -166,7 +211,7 @@ fn parse_records(manifest: text) -> [GeneratedFile]:
         if line.ends_with(":") and not line.starts_with("- "):
             if in_generated and have:
                 records.push(rec)
-                rec = GeneratedFile(id: "", source_path: "", target_path: "", mode: "")
+                rec = empty_record()
                 have = false
             in_generated = line == "generated_files:"
             continue
@@ -175,10 +220,17 @@ fn parse_records(manifest: text) -> [GeneratedFile]:
         if line.starts_with("- id:"):
             if have:
                 records.push(rec)
-            rec = GeneratedFile(id: value_after(line, "- id:"), source_path: "", target_path: "", mode: "")
+            rec = empty_record()
+            rec.id = value_after(line, "- id:")
             have = true
         elif have:
-            if line.starts_with("source_path:"):
+            if line.starts_with("kind:"):
+                rec.kind = value_after(line, "kind:")
+            elif line.starts_with("owner:"):
+                rec.owner = value_after(line, "owner:")
+            elif line.starts_with("stage:"):
+                rec.stage = value_after(line, "stage:")
+            elif line.starts_with("source_path:"):
                 rec.source_path = value_after(line, "source_path:")
             elif line.starts_with("target_path:"):
                 rec.target_path = value_after(line, "target_path:")
@@ -187,6 +239,33 @@ fn parse_records(manifest: text) -> [GeneratedFile]:
     if in_generated and have:
         records.push(rec)
     records
+
+fn empty_record() -> GeneratedFile:
+    GeneratedFile(id: "", kind: "", owner: "", stage: "", source_path: "", target_path: "", mode: "")
+
+fn validate_record_manifest(rec: GeneratedFile) -> [text]:
+    var failures: [text] = []
+    val name = if rec.id == "": "<missing id>" else: rec.id
+    if rec.id == "":
+        failures.push("generated_files record missing id")
+    if rec.kind == "":
+        failures.push("{name}: missing kind")
+    if rec.owner == "":
+        failures.push("{name}: missing owner")
+    if rec.stage == "":
+        failures.push("{name}: missing stage")
+    if rec.source_path == "":
+        failures.push("{name}: missing source_path")
+    if rec.target_path == "":
+        failures.push("{name}: missing target_path")
+    if rec.mode == "":
+        failures.push("{name}: missing mode")
+    elif not allowed_mode(rec.mode):
+        failures.push("{name}: unsupported mode {rec.mode}")
+    failures
+
+fn allowed_mode(mode: text) -> bool:
+    mode == "managed" or mode == "gemini_toml_skill" or mode == "tools_sdn" or mode == "claude_lib_tools_sdn" or mode == "skeleton"
 
 fn value_after(line: text, prefix: text) -> text:
     var value = line.slice(prefix.len(), line.len()).trim()
@@ -204,6 +283,10 @@ fn check_record(root: text, rec: GeneratedFile) -> [text]:
         failures.push("{rec.id}: missing source {rec.source_path}")
     if rec.target_path == "" or not rt_file_exists(target):
         failures.push("{rec.id}: missing target {rec.target_path}")
+        return failures
+    if rec.mode == "skeleton":
+        for f in check_links(root, target, parent_dir(source)):
+            failures.push("{rec.id}: {f}")
         return failures
     val target_text = rt_file_read_text(target)
     val first = first_line(target_text)
@@ -228,7 +311,17 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
     if rec.source_path == "" or not rt_file_exists(source):
         failures.push("{rec.id}: missing source {rec.source_path}")
         return failures
+    if rec.mode == "skeleton" and rt_file_exists(target):
+        return failures
     val body = render_content(root, rec)
+    if rec.mode == "skeleton":
+        if dry_run:
+            print "would create skeleton {rec.target_path}"
+            return failures
+        ensure_parent(target)
+        if not rt_file_write_text(target, body):
+            failures.push("{rec.id}: failed to write {rec.target_path}")
+        return failures
     val output = marker_for(rec, hash_file(source), hash_text(root, body)) + "\n" + body
     if rt_file_exists(target):
         val existing = rt_file_read_text(target)
@@ -258,7 +351,140 @@ fn render_content(root: text, rec: GeneratedFile) -> text:
     val raw = rt_file_read_text(source)
     if rec.mode == "gemini_toml_skill":
         return render_gemini_skill(rec.source_path, raw)
+    if rec.mode == "tools_sdn":
+        return render_tools(rec)
+    if rec.mode == "claude_lib_tools_sdn":
+        return render_claude_lib_tools(rec)
+    if rec.mode == "skeleton":
+        return render_skeleton(rec, raw)
     raw
+
+fn render_tools(rec: GeneratedFile) -> text:
+    val skill = skill_name_from_target(rec.target_path)
+    if rec.owner == "codex":
+        return "skill_tools |skill, source|\n    " + skill + ", codex\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and project context\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and completions\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run Simple build, query, test, and verification commands\"\n"
+    if rec.owner == "gemini":
+        return "skill_tools |skill, source|\n    " + skill + ", gemini\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    gemini_cli, cli, \"Gemini command prompt\", \"Run or adapt the copied Gemini workflow prompt\"\n" +
+            "    playwright, cli, \"Playwright CLI\", \"Support browser research, visual testing, or UI review when requested\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run project checks referenced by the workflow\"\n"
+    if rec.owner == "claude" and rec.target_path.contains("/skills/pipe/"):
+        return render_pipe_tools(rec, skill)
+    "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+        "tools |id, type, name, purpose|\n" +
+        "    simple_cli, cli, \"bin/simple\", \"Build, run, test, lint, and inspect Simple code\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Check token, structural, or semantic duplication\"\n" +
+        "    git, cli, \"git\", \"Inspect local changes without reverting user work\"\n"
+
+fn render_pipe_tools(rec: GeneratedFile, skill: text) -> text:
+    if rec.target_path.contains("/skills/pipe/research/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Query codebase structure, symbols, and module graph\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, and hover context\"\n" +
+            "    playwright, cli, \"Playwright CLI\", \"Gather external domain research when needed\"\n"
+    if rec.target_path.contains("/skills/pipe/design/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Inspect modules, dependencies, and existing tests\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Inspect type signatures, references, and call sites\"\n" +
+            "    sspec, cli, \"bin/simple test\", \"Validate designed SSpec scenarios when applicable\"\n"
+    if rec.target_path.contains("/skills/pipe/release/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    git, cli, \"git\", \"Commit, tag, and inspect release state\"\n" +
+            "    version_files, cli, \"VERSION / CHANGELOG.md updates\", \"Apply version bump and release notes\"\n" +
+            "    npm, cli, \"npm\", \"Run package checks when release/package paths changed\"\n"
+    if rec.target_path.contains("/skills/pipe/verify/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_cli, cli, \"bin/simple test\", \"Run focused and broad test verification\"\n" +
+            "    smoke_core, cli, \"scripts/check-core-runtime-smoke.shs\", \"Verify compiler/core/runtime smoke paths\"\n" +
+            "    smoke_mcp, cli, \"scripts/check-mcp-native-smoke.shs\", \"Verify MCP native startup and request smoke paths\"\n"
+    if rec.target_path.contains("/skills/pipe/impl/"):
+        return render_pipe_impl_tools(rec, skill)
+    "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+        "tools |id, type, name, purpose|\n" +
+        "    simple_cli, cli, \"bin/simple\", \"Build, run, test, lint, and inspect Simple code\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Check token, structural, or semantic duplication\"\n" +
+        "    git, cli, \"git\", \"Inspect local changes without reverting user work\"\n"
+
+fn render_pipe_impl_tools(rec: GeneratedFile, skill: text) -> text:
+    if rec.target_path.contains("/skills/pipe/impl/refactor/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and module context\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and call sites\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run lint, tests, and coupling-related queries\"\n" +
+            "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Run token, cosine, and semantic duplication scans\"\n" +
+            "    git, cli, \"git\", \"Inspect diffs and history during refactors\"\n"
+    if rec.target_path.contains("/skills/pipe/impl/sspec_loop/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run targeted specs, lint, and checks in a loop\"\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Inspect related symbols and project context for failing specs\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, and hover for spec failures\"\n" +
+            "    git, cli, \"git\", \"Inspect local changes while iterating on fixes\"\n"
+    if rec.target_path.contains("/skills/pipe/impl/stitch/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    stitch_mcp, mcp, \"Stitch MCP\", \"Create projects, design systems, screens, and variants in Stitch\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Inspect local design-token files and run related checks\"\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Inspect UI token modules and local project context\"\n" +
+            "    git, cli, \"git\", \"Review local snapshot and token-file changes\"\n"
+    if rec.target_path.contains("/skills/pipe/impl/sync/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    jj, cli, \"jj\", \"Commit, fetch, rebase, inspect ops, and push with worktree-aware sync flow\"\n" +
+            "    git, cli, \"git\", \"Audit tracked file counts and remote commit ranges\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run post-resolve tests, bug-gen, and todo-scan checks\"\n"
+    if rec.target_path.contains("/skills/pipe/impl/sstack/") or rec.target_path.contains("/skills/pipe/impl/dev/"):
+        return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+            "tools |id, type, name, purpose|\n" +
+            "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and project context across phases\"\n" +
+            "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and completions across phases\"\n" +
+            "    simple_cli, cli, \"bin/simple\", \"Run build, query, lint, test, and verification commands\"\n" +
+            "    playwright, cli, \"Playwright CLI\", \"Support domain research when the research phase needs external sources\"\n" +
+            "    git, cli, \"git\", \"Inspect local changes and history across the pipeline\"\n"
+    "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
+        "tools |id, type, name, purpose|\n" +
+        "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and project context\"\n" +
+        "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and completions\"\n" +
+        "    simple_cli, cli, \"bin/simple\", \"Run build, query, lint, test, and verification commands\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Run explicit duplication scans during impl/refactor phases\"\n" +
+        "    playwright, cli, \"Playwright CLI\", \"Gather external domain research when prerequisites are missing\"\n" +
+        "    git, cli, \"git\", \"Inspect local changes and history without reverting user work\"\n"
+
+fn render_claude_lib_tools(rec: GeneratedFile) -> text:
+    val skill = skill_name_from_target(rec.target_path)
+    "skill_tools |skill, source|\n    " + skill + ", claude_lib\n\n" +
+        "tools |id, type, name, purpose|\n" +
+        "    simple_cli, cli, \"bin/simple\", \"Run project-specific query, build, and test commands\"\n" +
+        "    git, cli, \"git\", \"Inspect local changes without reverting user work\"\n" +
+        "    simple_mcp, mcp, \"Simple MCP\", \"Query project symbols and local code context when available\"\n"
+
+fn skill_name_from_target(path: text) -> text:
+    val parent = parent_dir(path)
+    val slash = parent.last_index_of("/") ?? -1
+    if slash >= 0:
+        return parent.slice(slash + 1, parent.len())
+    parent
+
+fn render_skeleton(rec: GeneratedFile, raw: text) -> text:
+    val name = skill_name_from_target(rec.target_path)
+    if rec.kind == "feature_expert":
+        return replace_text(replace_text(raw, "<feature>", name), "<feature-or-area>", name)
+    if rec.kind == "layer_expert":
+        return replace_text(raw, "<layer>", name)
+    raw
+
+fn replace_text(raw: text, needle: text, value: text) -> text:
+    raw.split(needle).join(value)
 
 fn render_gemini_skill(source_path: text, raw: text) -> text:
     val desc = toml_string(raw, "description")
@@ -427,6 +653,49 @@ fn emit_result(r: ResultSummary, json: bool, label: text):
         print "llm-process-gen: {label} failed"
         for f in r.failures:
             print "- {f}"
+
+fn list_records(root: text, json: bool, owner_filter: text, mode_filter: text, stage_filter: text) -> i64:
+    val manifest = read_manifest(root)
+    if manifest == "":
+        if json:
+            print "{\"ok\":false,\"records\":0,\"items\":[],\"failures\":[\"missing manifest: " + json_escape(manifest_path(root)) + "\"]}"
+        else:
+            print "llm-process-gen: missing manifest"
+        return 1
+    val records = filter_records(parse_records(manifest), owner_filter, mode_filter, stage_filter)
+    if json:
+        print list_json(records)
+    else:
+        for rec in records:
+            print rec.owner + "\t" + rec.stage + "\t" + rec.mode + "\t" + rec.id + "\t" + rec.target_path
+    0
+
+fn filter_records(records: [GeneratedFile], owner_filter: text, mode_filter: text, stage_filter: text) -> [GeneratedFile]:
+    var out: [GeneratedFile] = []
+    for rec in records:
+        if record_matches(rec, owner_filter, mode_filter, stage_filter):
+            out.push(rec)
+    out
+
+fn record_matches(rec: GeneratedFile, owner_filter: text, mode_filter: text, stage_filter: text) -> bool:
+    if owner_filter != "" and rec.owner != owner_filter:
+        return false
+    if mode_filter != "" and rec.mode != mode_filter:
+        return false
+    if stage_filter != "" and rec.stage != stage_filter:
+        return false
+    true
+
+fn list_json(records: [GeneratedFile]) -> text:
+    var out = "{\"ok\":true,\"records\":" + records.len().to_text() + ",\"items\":["
+    var i = 0
+    while i < records.len():
+        val rec = records[i]
+        if i > 0:
+            out = out + ","
+        out = out + "{\"id\":\"" + json_escape(rec.id) + "\",\"kind\":\"" + json_escape(rec.kind) + "\",\"owner\":\"" + json_escape(rec.owner) + "\",\"stage\":\"" + json_escape(rec.stage) + "\",\"mode\":\"" + json_escape(rec.mode) + "\",\"source_path\":\"" + json_escape(rec.source_path) + "\",\"target_path\":\"" + json_escape(rec.target_path) + "\"}"
+        i = i + 1
+    out + "]}"
 
 fn result_json(r: ResultSummary) -> text:
     var out = "{\"ok\":" + (if r.ok: "true" else: "false") + ",\"records\":" + r.records.to_text() + ",\"failures\":["

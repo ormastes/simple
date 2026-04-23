@@ -7,7 +7,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
 use crate::value::{Env, NativeFnArc, NativeFunction, Value};
 
-use super::super::{classes, Enums, ImplMethods, BITFIELDS};
+use super::super::{Enums, ImplMethods, BITFIELDS};
 
 fn bitfield_def(class_name: &str) -> Option<Arc<BitfieldDef>> {
     BITFIELDS.with(|cell| cell.borrow().get(class_name).cloned())
@@ -114,16 +114,30 @@ pub(crate) fn instantiate_bitfield_from_args(
     let mut named: HashMap<String, Value> = HashMap::new();
     let mut positional_idx = 0usize;
     for arg in args {
-        let value = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
+            if !def.fields.iter().any(|field| field.name == *name && !field.is_reserved) {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_STRUCT_LITERAL)
+                    .with_help(format!("bitfield `{}` has no field `{}`", class_name, name));
+                return Err(CompileError::semantic_with_context(
+                    format!("unknown field `{}` for bitfield `{}` constructor", name, class_name),
+                    ctx,
+                ));
+            }
+            let value = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
             named.insert(name.clone(), value);
         } else if let Some(field) = def.fields.get(positional_idx) {
+            let value = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
             named.insert(field.name.clone(), value);
             positional_idx += 1;
         } else {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_STRUCT_LITERAL)
-                .with_help(format!("bitfield `{}` expects {} field(s)", class_name, def.fields.len()));
+                .with_help(format!(
+                    "bitfield `{}` expects {} field(s)",
+                    class_name,
+                    def.fields.len()
+                ));
             return Err(CompileError::semantic_with_context(
                 format!("too many arguments for bitfield `{}` constructor", class_name),
                 ctx,
@@ -137,9 +151,10 @@ pub(crate) fn instantiate_bitfield_from_args(
 }
 
 pub(crate) fn bitfield_new_native(class_name: String) -> Value {
+    let native_name = class_name.clone();
     let func: NativeFnArc = Arc::new(move |args: &[Value]| instantiate_bitfield_from_values(&class_name, args));
     Value::NativeFunction(NativeFunction {
-        name: format!("{}.new", class_name),
+        name: format!("{}.new", native_name),
         func,
     })
 }
@@ -164,4 +179,70 @@ pub(crate) fn update_bitfield_field(object: &Value, field: &str, value: Value) -
         class: class.clone(),
         fields: Arc::new(decoded),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::ast::{Argument, BitfieldField, Expr, Visibility};
+    use simple_parser::token::Span;
+
+    fn flags_bitfield() -> BitfieldDef {
+        BitfieldDef {
+            span: Span::new(0, 0, 0, 0),
+            name: "Flags".to_string(),
+            base_type: None,
+            fields: vec![
+                BitfieldField {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "a".to_string(),
+                    bits: 4,
+                    unit_type: None,
+                    is_reserved: false,
+                },
+                BitfieldField {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "b".to_string(),
+                    bits: 28,
+                    unit_type: None,
+                    is_reserved: false,
+                },
+            ],
+            constants: vec![],
+            visibility: Visibility::Private,
+            attributes: vec![],
+            doc_comment: None,
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_named_bitfield_constructor_arg() {
+        BITFIELDS.with(|cell| {
+            cell.borrow_mut()
+                .insert("Flags".to_string(), Arc::new(flags_bitfield()));
+        });
+
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let args = vec![Argument::new(Some("typo".to_string()), Expr::Integer(1))];
+
+        let err = instantiate_bitfield_from_args(
+            "Flags",
+            &args,
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect_err("misspelled bitfield field should be rejected");
+
+        assert!(err.to_string().contains("unknown field `typo`"));
+        BITFIELDS.with(|cell| {
+            cell.borrow_mut().remove("Flags");
+        });
+    }
 }

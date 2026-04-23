@@ -77,6 +77,12 @@ impl MirLowering:
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value
                 val receiver = self.lower_expr(base)
+                val bitfield_value = self.try_lower_bitfield_set(base, receiver, field, value_local)
+                if bitfield_value.?:
+                    var bitfield_b = self.builder
+                    bitfield_b.emit_copy(receiver, bitfield_value.unwrap())
+                    self.builder = bitfield_b
+                    return
                 val field_index = self.resolve_field_index(base, field, resolved)
                 var b = self.builder
                 b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(value_local))
@@ -118,6 +124,60 @@ impl MirLowering:
             case Div: MirBinOp.Div
             case Mod: MirBinOp.Rem
             case _: MirBinOp.Add
+
+    me try_lower_bitfield_set(base: HirExpr, base_local: LocalId, field_name: text, value_local: LocalId) -> LocalId?:
+        """Lower bitfield field writes before generic struct field assignment."""
+        val type_sym = self.expr_type_symbol(base)
+        if not type_sym.?:
+            return nil
+
+        val sym_id = type_sym.unwrap().id
+        if not self.bitfield_map.contains_key(sym_id):
+            return nil
+
+        val fields = self.bitfield_map[sym_id]
+        var idx = 0
+        while idx < fields.len():
+            val field = fields[idx]
+            if field.name == field_name and not field.is_reserved:
+                val mask = self.bitfield_field_mask(field.bit_width)
+                val shifted_mask = mask << field.bit_offset
+                var b = self.builder
+                val clear_mask_const = b.emit_const_int(~shifted_mask)
+                val cleared = b.emit_binop(
+                    MirBinOp.BitAnd,
+                    mir_operand_copy(base_local),
+                    mir_operand_copy(clear_mask_const),
+                    MirType.i64()
+                )
+                val mask_const = b.emit_const_int(mask)
+                val masked_new = b.emit_binop(
+                    MirBinOp.BitAnd,
+                    mir_operand_copy(value_local),
+                    mir_operand_copy(mask_const),
+                    MirType.i64()
+                )
+                val shifted_new = if field.bit_offset == 0:
+                    masked_new
+                else:
+                    val offset_const = b.emit_const_int(field.bit_offset)
+                    b.emit_binop(
+                        MirBinOp.Shl,
+                        mir_operand_copy(masked_new),
+                        mir_operand_copy(offset_const),
+                        MirType.i64()
+                    )
+                val result = b.emit_binop(
+                    MirBinOp.BitOr,
+                    mir_operand_copy(cleared),
+                    mir_operand_copy(shifted_new),
+                    MirType.i64()
+                )
+                self.builder = b
+                return Some(result)
+            idx = idx + 1
+
+        nil
 
 # ============================================================================
 # Control Flow Lowering

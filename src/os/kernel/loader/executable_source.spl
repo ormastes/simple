@@ -50,29 +50,29 @@ var g_cpio_decoded: bool = false
 
 fn _desktop_app_short_alias(path: text) -> text?:
     """Return the FAT32 short-name alias for seeded desktop app binaries."""
-    match path:
-        case "/sys/apps/browser_demo":
-            Some("/SYS/APPS/BROWSMF.SMF")
-        case "/sys/apps/browser_demo.smf":
-            Some("/SYS/APPS/BROWSMF.SMF")
-        case "/sys/apps/hello_world":
-            Some("/SYS/APPS/HELLOSMF.SMF")
-        case "/sys/apps/hello_world.smf":
-            Some("/SYS/APPS/HELLOSMF.SMF")
-        case "/sys/apps/file_manager":
-            Some("/SYS/APPS/FILESMF.SMF")
-        case "/sys/apps/file_manager.smf":
-            Some("/SYS/APPS/FILESMF.SMF")
-        case "/sys/apps/shell":
-            Some("/SYS/APPS/SHELLSMF.SMF")
-        case "/sys/apps/shell.smf":
-            Some("/SYS/APPS/SHELLSMF.SMF")
-        case "/sys/apps/editor":
-            Some("/SYS/APPS/EDITORSM.SMF")
-        case "/sys/apps/editor.smf":
-            Some("/SYS/APPS/EDITORSM.SMF")
-        case _:
-            nil
+    if path == "/sys/apps/browser_demo" or path == "/sys/apps/browser_demo.smf":
+        return Some("/SYS/APPS/BROWSMF.SMF")
+    if path == "/sys/apps/hello_world" or path == "/sys/apps/hello_world.smf":
+        return Some("/SYS/APPS/HELLOSMF.SMF")
+    if path == "/sys/apps/file_manager" or path == "/sys/apps/file_manager.smf":
+        return Some("/SYS/APPS/FILESMF.SMF")
+    if path == "/sys/apps/shell" or path == "/sys/apps/shell.smf":
+        return Some("/SYS/APPS/SHELLSMF.SMF")
+    if path == "/sys/apps/editor" or path == "/sys/apps/editor.smf":
+        return Some("/SYS/APPS/EDITORSM.SMF")
+    if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf":
+        return Some("/SYS/APPS/SBROWSMF.SMF")
+    if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf":
+        return Some("/SYS/APPS/SCOMPSMF.SMF")
+    if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf":
+        return Some("/SYS/APPS/SINTSMF.SMF")
+    if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf":
+        return Some("/SYS/APPS/SLOADSMF.SMF")
+    if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf":
+        return Some("/SYS/APPS/LLVMSMF.SMF")
+    if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf":
+        return Some("/SYS/APPS/RUSTSMF.SMF")
+    nil
 
 fn _desktop_app_root_elf_alias(path: text) -> text?:
     """Return the root-level 8.3 ELF alias currently present on seeded images.
@@ -82,29 +82,11 @@ fn _desktop_app_root_elf_alias(path: text) -> text?:
     root as well as under the canonical app paths. Keep this as a filesystem
     fallback only; the launcher and app model still use `/sys/apps/...`.
     """
-    match path:
-        case "/sys/apps/browser_demo":
-            Some("/BROWSMF.SMF")
-        case "/sys/apps/browser_demo.smf":
-            Some("/BROWSMF.SMF")
-        case "/sys/apps/hello_world":
-            Some("/HELLOSMF.SMF")
-        case "/sys/apps/hello_world.smf":
-            Some("/HELLOSMF.SMF")
-        case "/sys/apps/file_manager":
-            Some("/FILESMF.SMF")
-        case "/sys/apps/file_manager.smf":
-            Some("/FILESMF.SMF")
-        case "/sys/apps/shell":
-            Some("/SHELLSMF.SMF")
-        case "/sys/apps/shell.smf":
-            Some("/SHELLSMF.SMF")
-        case "/sys/apps/editor":
-            Some("/EDITORSM.SMF")
-        case "/sys/apps/editor.smf":
-            Some("/EDITORSM.SMF")
-        case _:
-            nil
+    val short = _desktop_app_short_alias(path)
+    if short == nil:
+        return nil
+    val alias = short.unwrap()
+    Some(alias.replace("/SYS/APPS", ""))
 
 fn _path_bytes_to_text(path_bytes: [u8]) -> text:
     rt_string_from_byte_array(path_bytes)
@@ -125,6 +107,18 @@ fn _canonical_seeded_path_from_bytes(path_bytes: [u8]) -> text?:
             Some("/sys/apps/shell")
         case "/sys/apps/editor":
             Some("/sys/apps/editor")
+        case "/sys/apps/simple_browser":
+            Some("/sys/apps/simple_browser")
+        case "/sys/apps/simple_compiler":
+            Some("/sys/apps/simple_compiler")
+        case "/sys/apps/simple_interpreter":
+            Some("/sys/apps/simple_interpreter")
+        case "/sys/apps/simple_loader":
+            Some("/sys/apps/simple_loader")
+        case "/sys/apps/llvm":
+            Some("/sys/apps/llvm")
+        case "/sys/apps/rust":
+            Some("/sys/apps/rust")
         case _:
             nil
 
@@ -395,6 +389,11 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
     if synthetic.len() > 0:
         return Ok(synthetic)
 
+    val bytes = _exec_vfs_read_file_bytes(path)
+    if bytes.len() > 0:
+        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
+        return Ok(bytes)
+
     # Desktop app paths are long logical names, but the FAT32 disk fixture is
     # 8.3. Try the known executable aliases before the generic mount-table
     # fallback so a long-path miss cannot trap in the legacy retry path.
@@ -414,10 +413,6 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
             serial_println("[exec-source] vfs_root_alias_hit path={path} alias={root_alias_path} bytes={root_alias_bytes.len()}")
             return Ok(root_alias_bytes)
         serial_println("[exec-source] vfs_root_alias_miss path={path} alias={root_alias_path}")
-    val bytes = _exec_vfs_read_file_bytes(path)
-    if bytes.len() > 0:
-        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
-        return Ok(bytes)
     serial_println("[exec-source] vfs_miss path={path}")
     Err(ERR_ENOENT)
 

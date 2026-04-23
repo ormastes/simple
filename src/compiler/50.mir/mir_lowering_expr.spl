@@ -21,6 +21,24 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 # ============================================================================
 
 impl MirLowering:
+    me bitfield_field_mask(bit_width: i64) -> i64:
+        """Return a signed i64 mask for a bitfield slice, including full-width fields."""
+        if bit_width <= 0:
+            return 0
+        if bit_width >= 64:
+            return -1
+        (1 << bit_width) - 1
+
+    me bitfield_field_result_type(field: HirBitfieldField) -> MirType:
+        """Choose the MIR result type for a lowered bitfield field read."""
+        if field.has_type_:
+            match field.type_.kind:
+                case Bool:
+                    return MirType.bool()
+                case _:
+                    return MirType.bits(field.bit_width)
+        MirType.bits(field.bit_width)
+
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local."""
 
@@ -226,6 +244,9 @@ impl MirLowering:
             # Field access: obj.field_name
             case Field(base, field_name, resolved):
                 val base_local = self.lower_expr(base)
+                val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
+                if bitfield_result.?:
+                    return bitfield_result.unwrap()
                 val field_idx = self.resolve_field_index(base, field_name, resolved)
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, MirType.i64())
@@ -236,6 +257,60 @@ impl MirLowering:
 
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
+
+    me try_lower_bitfield_get(base: HirExpr, base_local: LocalId, field_name: text) -> LocalId?:
+        """Lower bitfield field reads before generic struct field access."""
+        val type_sym = self.expr_type_symbol(base)
+        if not type_sym.?:
+            return nil
+
+        val sym_id = type_sym.unwrap().id
+        if not self.bitfield_map.contains_key(sym_id):
+            return nil
+
+        val fields = self.bitfield_map[sym_id]
+        var idx = 0
+        while idx < fields.len():
+            val field = fields[idx]
+            if field.name == field_name and not field.is_reserved:
+                var b = self.builder
+                val result = if self.current_has_vhdl_metadata:
+                    val slice_dest = b.new_temp(self.bitfield_field_result_type(field))
+                    val hi = field.bit_offset + field.bit_width - 1
+                    b.emit(MirInst(
+                        kind: MirInstKind.VhdlSlice(
+                            slice_dest,
+                            mir_operand_copy(base_local),
+                            hi,
+                            field.bit_offset
+                        ),
+                        span: nil
+                    ))
+                    slice_dest
+                else:
+                    val mask = self.bitfield_field_mask(field.bit_width)
+                    val shifted = if field.bit_offset == 0:
+                        base_local
+                    else:
+                        val offset_const = b.emit_const_int(field.bit_offset)
+                        b.emit_binop(
+                            MirBinOp.Shr,
+                            mir_operand_copy(base_local),
+                            mir_operand_copy(offset_const),
+                            MirType.i64()
+                        )
+                    val mask_const = b.emit_const_int(mask)
+                    b.emit_binop(
+                        MirBinOp.BitAnd,
+                        mir_operand_copy(shifted),
+                        mir_operand_copy(mask_const),
+                        MirType.i64()
+                    )
+                self.builder = b
+                return Some(result)
+            idx = idx + 1
+
+        nil
 
     me lower_binop_special(op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId?:
         """Check if this is a special binary op needing non-BinOp lowering."""

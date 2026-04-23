@@ -47,6 +47,50 @@ fn test_lower_binary_op() {
 }
 
 #[test]
+fn test_lower_bitfield_field_read_write() {
+    let mir = compile_to_mir(
+        r#"
+bitfield Rv32Instruction(u32):
+    opcode: 7
+    rd: 5
+    funct3: 3
+    rs1: 5
+    rs2: 5
+    funct7: 7
+
+fn bitfield_rw(raw: u32, next_rd: i64) -> i64:
+    var inst = Rv32Instruction.new(raw)
+    val old_rd = inst.rd
+    inst.rd = next_rd
+    return old_rd
+"#,
+    )
+    .unwrap();
+
+    let func = &mir.functions[0];
+    let ops: Vec<_> = func.blocks.iter().flat_map(|block| block.instructions.iter()).collect();
+
+    assert!(ops
+        .iter()
+        .any(|i| matches!(i, MirInst::BinOp { op: BinOp::BitAnd, .. })));
+    assert!(ops.iter().any(|i| matches!(
+        i,
+        MirInst::BinOp {
+            op: BinOp::ShiftRight,
+            ..
+        }
+    )));
+    assert!(ops.iter().any(|i| matches!(
+        i,
+        MirInst::BinOp {
+            op: BinOp::ShiftLeft,
+            ..
+        }
+    )));
+    assert!(ops.iter().any(|i| matches!(i, MirInst::BinOp { op: BinOp::BitOr, .. })));
+}
+
+#[test]
 fn test_lower_if_statement() {
     let mir = compile_to_mir(
         "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n",
