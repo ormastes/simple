@@ -12,6 +12,6 @@ The pure Simple compiler path remains the source of truth for MIR-to-VHDL behavi
 ## Decisions
 
 - Payload-free enums use VHDL enumeration declarations in MIR declaration order.
-- Payload enum hardware use is rejected until tagged-record lowering is designed and tested.
+- Payload enums use tagged-record lowering for hardware ports/results, aggregate construction, payload field projection, and tag-based switch matching.
 - Optional vendor smoke is environment-gated and not a normal verification dependency.
 - Source maps are sidecar JSON next to generated VHDL: `<output>.map.json`.

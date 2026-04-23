@@ -932,6 +932,145 @@ describe "VHDL Backend - real backend compilation":
         val compiled = result.unwrap()
         check(compiled.vhdl.contains("state_sig <= (tag => Some, Some_payload => to_signed(7, 32));"))
 
+    it "projects payload enum tag and payload fields from tagged records":
+        val payload_symbol = SymbolId(id: 165)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_project_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val ret_local = make_return_local(1, make_i32())
+        val state_local = make_temp_local(2, "state_sig", enum_type)
+        val payload_local = make_temp_local(3, "payload_sig", make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 2),
+                        AggregateKind.Enum(payload_symbol, 1),
+                        [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(9), make_i32()))]
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.GetField(
+                        LocalId(id: 3),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                        1
+                    ),
+                    span: nil
+                ),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 3)), span: nil)
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 166),
+            name: "payload_project",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local, state_local, payload_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_project_mod"), func)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.vhdl.contains("payload_sig <= state_sig.Some_payload;"))
+        check(compiled.vhdl.contains("result_out <= payload_sig;"))
+
+    it "switches on payload enum tags while projecting payload fields":
+        val payload_symbol = SymbolId(id: 167)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_match_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val arg_local = make_arg_local(1, 0, "state", enum_type)
+        val ret_local = make_return_local(2, make_i32())
+        val payload_local = make_temp_local(3, "payload_sig", make_i32())
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                [SwitchCase(value: 1, target: BlockId(id: 1))],
+                BlockId(id: 2)
+            )
+        )
+        val some_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("some"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.GetField(
+                        LocalId(id: 3),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        1
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val none_block = MirBlock(
+            id: BlockId(id: 2),
+            label: Some("none"),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 168),
+            name: "payload_match",
+            signature: MirSignature(params: [enum_type], return_type: make_i32(), is_variadic: false),
+            locals: [arg_local, ret_local, payload_local],
+            blocks: [entry_block, some_block, none_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_match_mod"), func)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.vhdl.contains("payload_sig <= state.Some_payload;"))
+        check(compiled.vhdl.contains("state.tag = Some"))
+
     it "lowers payload-free variants of payload enums inside processes":
         val payload_symbol = SymbolId(id: 63)
         val payload_enum = MirTypeDef(
