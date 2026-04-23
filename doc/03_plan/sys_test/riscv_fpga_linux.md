@@ -5,7 +5,7 @@
 - Unit: Linux boot validation fails until required artifacts are configured.
 - Integration: Vivado TCL plan generation is deterministic for `xilinx_generic`.
 - Integration: generated RV32/RV64 Simple hardware source preserves `@hardware`, `@clocked`, instruction bitfields, opcode width, and decode source traces.
-- Integration: generated VHDL includes source-map comments and the RTL manifest records source, package, and core files for both lanes.
+- Integration: generated VHDL includes source-map comments, RV base integer decode cases, and the RTL manifest records source, package, and core files for both lanes.
 - Regression: existing VHDL backend E2E, RV32 RTL simulation, RV32/RV64 emulator, and RISC-V QEMU boot specs remain green.
 - Hardware: when the Xilinx board arrives, program bitstreams and capture UART markers for RV64 upstream Linux and RV32 experimental Linux.
 
