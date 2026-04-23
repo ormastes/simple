@@ -628,6 +628,14 @@ fn type_to_string(ty: &Type) -> String {
         Type::Array { element, .. } => format!("[{}]", type_to_string(element)),
         Type::Optional(inner) => format!("{}?", type_to_string(inner)),
         Type::Tuple(types) => format!("({})", types.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
+        Type::LabeledTuple(fields) => format!(
+            "({})",
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.label, type_to_string(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Type::Function { params, ret } => {
             let params_str = params.iter().map(type_to_string).collect::<Vec<_>>().join(", ");
             let ret_str = ret

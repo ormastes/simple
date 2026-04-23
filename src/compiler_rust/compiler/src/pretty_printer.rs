@@ -1023,6 +1023,18 @@ impl PrettyPrinter {
                 }
                 self.write(")");
             }
+            Type::LabeledTuple(fields) => {
+                self.write("(");
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(&field.label);
+                    self.write(": ");
+                    self.print_type(&field.ty);
+                }
+                self.write(")");
+            }
             Type::Optional(inner) => {
                 self.print_type(inner);
                 self.write("?");
@@ -1127,6 +1139,18 @@ impl PrettyPrinter {
                         self.write(", ");
                     }
                     self.print_expr(elem);
+                }
+                self.write(")");
+            }
+            Expr::LabeledTuple(fields) => {
+                self.write("(");
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(&field.label);
+                    self.write(": ");
+                    self.print_expr(&field.value);
                 }
                 self.write(")");
             }
