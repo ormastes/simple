@@ -13,6 +13,24 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
+# VHDL Return ABI
+# ============================================================================
+
+struct VhdlPortSpec:
+    name: text
+    direction: text
+    type_name: text
+
+struct VhdlReturnField:
+    name: text
+    type_: MirType
+    index: i64
+
+struct VhdlReturnAbi:
+    is_tuple: bool
+    fields: [VhdlReturnField]
+
+# ============================================================================
 # VHDL Backend
 # ============================================================================
 
@@ -47,6 +65,7 @@ class VhdlBackend:
     active_tuple_type_names: Dict<text, text>
     active_tuple_type_shapes: Dict<text, [MirType]>
     active_tuple_type_order: [text]
+    active_return_abi: VhdlReturnAbi
 
     static fn empty_span() -> Span:
         Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -64,7 +83,8 @@ class VhdlBackend:
             active_type_defs: {},
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
-            active_tuple_type_order: []
+            active_tuple_type_order: [],
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: [])
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -80,7 +100,8 @@ class VhdlBackend:
             active_type_defs: {},
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
-            active_tuple_type_order: []
+            active_tuple_type_order: [],
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: [])
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
@@ -326,6 +347,107 @@ class VhdlBackend:
             case Opaque(name): "opaque({name})"
             case _: "type#{ty.kind}"
 
+    fn sanitize_vhdl_identifier(name: text) -> text:
+        """Return a deterministic VHDL-safe identifier fragment."""
+        var result = name.trim()
+        if result.len() == 0:
+            result = "out"
+        result = result.replace(" ", "_")
+        result = result.replace("-", "_")
+        result = result.replace(".", "_")
+        result = result.replace(":", "_")
+        result = result.replace("/", "_")
+        result = result.replace("\\", "_")
+        result = result.replace("(", "_")
+        result = result.replace(")", "_")
+        result = result.replace("[", "_")
+        result = result.replace("]", "_")
+        result
+
+    fn vhdl_return_field_name(func: MirFunction, index: i64) -> text:
+        if func.has_vhdl_metadata:
+            val meta = func.vhdl_metadata
+            if index < meta.return_fields.len():
+                val label = meta.return_fields[index].label
+                if label.len() > 0:
+                    return self.sanitize_vhdl_identifier(label)
+        "out{index}"
+
+    fn vhdl_return_abi(func: MirFunction) -> Result<VhdlReturnAbi, CompileError>:
+        match func.signature.return_type.kind:
+            case Unit:
+                Ok(VhdlReturnAbi(is_tuple: false, fields: []))
+            case Tuple(elements):
+                var fields: [VhdlReturnField] = []
+                var used: Dict<text, bool> = {}
+                var idx = 0
+                while idx < elements.len():
+                    val name = self.vhdl_return_field_name(func, idx)
+                    if used.get(name).?:
+                        return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
+                    used[name] = true
+                    fields = fields.push(VhdlReturnField(
+                        name: name,
+                        type_: elements[idx],
+                        index: idx
+                    ))
+                    idx = idx + 1
+                Ok(VhdlReturnAbi(is_tuple: true, fields: fields))
+            case _:
+                Ok(VhdlReturnAbi(is_tuple: false, fields: [
+                    VhdlReturnField(
+                        name: "result_out",
+                        type_: func.signature.return_type,
+                        index: 0
+                    )
+                ]))
+
+    fn vhdl_ports_for_function(func: MirFunction) -> Result<[VhdlPortSpec], CompileError>:
+        var ports: [VhdlPortSpec] = []
+
+        var idx = 0
+        while idx < func.signature.params.len():
+            val param_type_result = self.mir_type_to_vhdl(func.signature.params[idx])
+            if param_type_result.is_err():
+                return Err(param_type_result.unwrap_err())
+            ports = ports.push(VhdlPortSpec(
+                name: "arg{idx}",
+                direction: "in",
+                type_name: param_type_result.unwrap()
+            ))
+            idx = idx + 1
+
+        val abi_result = self.vhdl_return_abi(func)
+        if abi_result.is_err():
+            return Err(abi_result.unwrap_err())
+        val abi = abi_result.unwrap()
+        for field in abi.fields:
+            val return_type_result = self.mir_type_to_vhdl(field.type_)
+            if return_type_result.is_err():
+                return Err(return_type_result.unwrap_err())
+            ports = ports.push(VhdlPortSpec(
+                name: field.name,
+                direction: "out",
+                type_name: return_type_result.unwrap()
+            ))
+
+        Ok(ports)
+
+    fn emit_return_assign(builder: VhdlBuilder, value: MirOperand) -> Result<(), CompileError>:
+        val value_name_result = self.operand_to_vhdl(value)
+        if value_name_result.is_err():
+            return Err(value_name_result.unwrap_err())
+        val value_name = value_name_result.unwrap()
+        self.emit_return_expr(builder, value_name)
+
+    fn emit_return_expr(builder: VhdlBuilder, value_name: text) -> Result<(), CompileError>:
+        if self.active_return_abi.is_tuple:
+            for field in self.active_return_abi.fields:
+                builder.emit_signal_assign(field.name, "{value_name}.f{field.index}")
+        else:
+            builder.emit_signal_assign("result_out", value_name)
+        Ok(())
+
     fn compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
         """Compile a function as a VHDL entity/architecture pair."""
         val entity_name = func.name
@@ -333,6 +455,10 @@ class VhdlBackend:
         self.active_local_types = {}
         self.active_local_kinds = {}
         self.active_blocks = {}
+        val return_abi_result = self.vhdl_return_abi(func)
+        if return_abi_result.is_err():
+            return Err(return_abi_result.unwrap_err())
+        self.active_return_abi = return_abi_result.unwrap()
 
         for block in func.blocks:
             self.active_blocks = self.active_blocks.set(block.id.id, block)
@@ -343,34 +469,17 @@ class VhdlBackend:
             self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
             self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
 
+        val ports_result = self.vhdl_ports_for_function(func)
+        if ports_result.is_err():
+            return Err(ports_result.unwrap_err())
+        val ports = ports_result.unwrap()
+
         # Emit entity
         builder.emit_entity_begin(entity_name)
         builder.emit_port_begin()
-
-        # Emit ports from function parameters
-        var port_idx = 0
-        val total_ports = func.signature.params.len() + 1  # +1 for return
-        for local in func.locals:
-            match local.kind:
-                case Arg(idx):
-                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
-                    if vhdl_type_result.is_err():
-                        return Err(vhdl_type_result.unwrap_err())
-                    val vhdl_type = vhdl_type_result.unwrap()
-                    val name = self.default_local_name(local)
-                    val is_last = port_idx == total_ports - 1
-                    builder.emit_port(name, "in", vhdl_type, is_last)
-                    port_idx = port_idx + 1
-                case Return:
-                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
-                    if vhdl_type_result.is_err():
-                        return Err(vhdl_type_result.unwrap_err())
-                    val vhdl_type = vhdl_type_result.unwrap()
-                    val is_last = port_idx == total_ports - 1
-                    builder.emit_port("result_out", "out", vhdl_type, is_last)
-                    port_idx = port_idx + 1
-                case _:
-                    ()
+        for i in 0..ports.len():
+            val port = ports[i]
+            builder.emit_port(port.name, port.direction, port.type_name, i == ports.len() - 1)
 
         builder.emit_port_end()
         builder.emit_entity_end(entity_name)
@@ -400,7 +509,7 @@ class VhdlBackend:
             builder.emit_architecture_end("rtl")
             return Ok(VhdlEntity(
                 name: entity_name,
-                port_count: total_ports
+                port_count: ports.len()
             ))
 
         # Compile basic blocks
@@ -442,7 +551,7 @@ class VhdlBackend:
 
         Ok(VhdlEntity(
             name: entity_name,
-            port_count: total_ports
+            port_count: ports.len()
         ))
 
     fn default_local_name(local: MirLocal) -> text:
@@ -451,9 +560,12 @@ class VhdlBackend:
                 if local.name.?:
                     local.name.unwrap()
                 else:
-                    "p{idx}"
+                    "arg{idx}"
             case Return:
-                "result_out"
+                if self.active_return_abi.is_tuple:
+                    "return_value"
+                else:
+                    "result_out"
             case Var | Temp:
                 if local.name.?:
                     local.name.unwrap()
@@ -640,7 +752,9 @@ class VhdlBackend:
                         val value_result = self.process_operand_to_vhdl(value.unwrap())
                         if value_result.is_err():
                             return Err(value_result.unwrap_err())
-                        builder.emit_signal_assign("result_out", value_result.unwrap())
+                        val assign_result = self.emit_return_expr(builder, value_result.unwrap())
+                        if assign_result.is_err():
+                            return Err(assign_result.unwrap_err())
                     Ok(())
                 case Goto(target):
                     self.compile_control_block(builder, target, next_seen)
@@ -1176,16 +1290,17 @@ class VhdlBackend:
         match terminator:
             case Return(value):
                 if value.?:
-                    val value_name_result = self.operand_to_vhdl(value.unwrap())
-                    if value_name_result.is_err():
-                        return Err(value_name_result.unwrap_err())
-                    builder.emit_signal_assign("result_out", value_name_result.unwrap())
+                    val assign_result = self.emit_return_assign(builder, value.unwrap())
+                    if assign_result.is_err():
+                        return Err(assign_result.unwrap_err())
                 Ok(())
             case Goto(target):
                 val value_result = self.compile_return_block(builder, target)
                 if value_result.is_err():
                     return Err(value_result.unwrap_err())
-                builder.emit_signal_assign("result_out", value_result.unwrap())
+                val assign_result = self.emit_return_expr(builder, value_result.unwrap())
+                if assign_result.is_err():
+                    return Err(assign_result.unwrap_err())
                 Ok(())
             case Unreachable:
                 Ok(())
@@ -1206,6 +1321,10 @@ class VhdlBackend:
         val cond_name = cond_name_result.unwrap()
         val then_value = then_value_result.unwrap()
         val else_value = else_value_result.unwrap()
+        if self.active_return_abi.is_tuple:
+            for field in self.active_return_abi.fields:
+                builder.emit_signal_assign(field.name, "{then_value}.f{field.index} when {cond_name} = '1' else {else_value}.f{field.index}")
+            return Ok(())
         builder.emit_signal_assign("result_out", "{then_value} when {cond_name} = '1' else {else_value}")
         Ok(())
 
@@ -1234,6 +1353,8 @@ class VhdlBackend:
                 return Err(literal_result.unwrap_err())
             expr = "{target_expr_result.unwrap()} when {value_expr} = {literal_result.unwrap()} else {expr}"
             idx = idx - 1
+        if self.active_return_abi.is_tuple:
+            return Err(self.backend_error("VHDL tuple return switch lowering is not implemented in the pure Simple backend"))
         builder.emit_signal_assign("result_out", expr)
         Ok(())
 

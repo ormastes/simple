@@ -130,6 +130,42 @@ struct DriverManifestAttr:
     version: text
     abi: text
 
+enum VhdlResetPolarity:
+    ActiveLow
+    ActiveHigh
+
+enum VhdlResetSynchrony:
+    Async
+    Sync
+
+struct VhdlClockedMetadata:
+    """Structured @clocked(...) metadata for hardware VHDL lowering."""
+    clock_signal: text
+    reset_signal: text
+    has_reset: bool
+    reset_polarity: VhdlResetPolarity
+    reset_synchrony: VhdlResetSynchrony
+    domain: text
+
+struct VhdlGenericMetadata:
+    """Structured @generic(...) item preserved for VHDL entity generation."""
+    name: text
+    type_text: text
+    default_text: text
+
+struct VhdlReturnFieldMetadata:
+    """Structured labeled return field metadata for VHDL output ports."""
+    label: text
+    type_text: text
+
+struct VhdlHardwareMetadata:
+    """Function-level structured metadata for pure-Simple VHDL lowering."""
+    is_hardware: bool
+    generics: [VhdlGenericMetadata]
+    has_clocked: bool
+    clocked: VhdlClockedMetadata
+    return_fields: [VhdlReturnFieldMetadata]
+
 # ============================================================================
 # Export Attribute Parsing
 # ============================================================================
@@ -266,6 +302,144 @@ fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
             )
 
     nil
+
+fn vhdl_clocked_metadata_default() -> VhdlClockedMetadata:
+    VhdlClockedMetadata(
+        clock_signal: "",
+        reset_signal: "",
+        has_reset: false,
+        reset_polarity: VhdlResetPolarity.ActiveLow,
+        reset_synchrony: VhdlResetSynchrony.Async,
+        domain: ""
+    )
+
+fn vhdl_hardware_metadata_default() -> VhdlHardwareMetadata:
+    VhdlHardwareMetadata(
+        is_hardware: false,
+        generics: [],
+        has_clocked: false,
+        clocked: vhdl_clocked_metadata_default(),
+        return_fields: []
+    )
+
+fn parse_vhdl_hardware_attrs(attrs: [Attribute]) -> VhdlHardwareMetadata:
+    """Extract structured VHDL hardware metadata from function attributes.
+
+    This intentionally preserves the existing syntax as metadata instead of
+    making the VHDL backend rescan source text for @hardware/@generic/@clocked.
+    """
+    var meta = vhdl_hardware_metadata_default()
+
+    for attr in attrs:
+        if attr.name == "hardware":
+            meta.is_hardware = true
+        elif attr.name == "generic":
+            meta.generics = _parse_vhdl_generic_args(attr.args)
+        elif attr.name == "clocked":
+            meta.has_clocked = true
+            meta.clocked = _parse_vhdl_clocked_args(attr.args)
+
+    meta
+
+fn vhdl_hardware_metadata_with_return_fields(meta: VhdlHardwareMetadata, fields: [VhdlReturnFieldMetadata]) -> VhdlHardwareMetadata:
+    VhdlHardwareMetadata(
+        is_hardware: meta.is_hardware,
+        generics: meta.generics,
+        has_clocked: meta.has_clocked,
+        clocked: meta.clocked,
+        return_fields: fields
+    )
+
+fn _parse_vhdl_generic_args(args: [Expr]) -> [VhdlGenericMetadata]:
+    var generics: [VhdlGenericMetadata] = []
+    for arg in args:
+        match arg.kind:
+            case Assign(left, op, right):
+                val name = extract_text_arg(left)
+                val default_text = extract_text_arg(right)
+                if name != "":
+                    generics.push(VhdlGenericMetadata(
+                        name: name,
+                        type_text: "",
+                        default_text: default_text
+                    ))
+            case Ident(name):
+                generics.push(VhdlGenericMetadata(
+                    name: name,
+                    type_text: "",
+                    default_text: ""
+                ))
+            case _:
+                val text_value = extract_text_arg(arg)
+                if text_value != "":
+                    generics.push(VhdlGenericMetadata(
+                        name: text_value,
+                        type_text: "",
+                        default_text: ""
+                    ))
+    generics
+
+fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
+    var clock_signal = ""
+    var reset_signal = ""
+    var has_reset = false
+    var polarity = VhdlResetPolarity.ActiveLow
+    var synchrony = VhdlResetSynchrony.Async
+    var domain = ""
+    var positional = 0
+
+    for arg in args:
+        match arg.kind:
+            case Assign(left, op, right):
+                val key = extract_text_arg(left).lower()
+                val value = extract_text_arg(right)
+                val lower_value = value.lower()
+                if key == "clock" or key == "clk":
+                    clock_signal = value
+                elif key == "reset" or key == "rst":
+                    reset_signal = value
+                    has_reset = value != ""
+                elif key == "domain":
+                    domain = value
+                elif key == "polarity":
+                    if lower_value == "active_high" or lower_value == "high":
+                        polarity = VhdlResetPolarity.ActiveHigh
+                    elif lower_value == "active_low" or lower_value == "low":
+                        polarity = VhdlResetPolarity.ActiveLow
+                elif key == "sync" or key == "synchrony":
+                    if lower_value == "sync" or lower_value == "synchronous" or lower_value == "true":
+                        synchrony = VhdlResetSynchrony.Sync
+                    elif lower_value == "async" or lower_value == "asynchronous" or lower_value == "false":
+                        synchrony = VhdlResetSynchrony.Async
+            case _:
+                val token = extract_text_arg(arg)
+                val lower_token = token.lower()
+                if positional == 0:
+                    clock_signal = token
+                elif positional == 1:
+                    reset_signal = token
+                    has_reset = token != ""
+                else:
+                    if lower_token == "active_high" or lower_token == "high" or lower_token == "reset_high":
+                        polarity = VhdlResetPolarity.ActiveHigh
+                    elif lower_token == "active_low" or lower_token == "low" or lower_token == "reset_low":
+                        polarity = VhdlResetPolarity.ActiveLow
+                    elif lower_token == "sync" or lower_token == "synchronous":
+                        synchrony = VhdlResetSynchrony.Sync
+                    elif lower_token == "async" or lower_token == "asynchronous":
+                        synchrony = VhdlResetSynchrony.Async
+                    elif lower_token.starts_with("domain="):
+                        domain = token.substring(7, token.len())
+                positional = positional + 1
+
+    VhdlClockedMetadata(
+        clock_signal: clock_signal,
+        reset_signal: reset_signal,
+        has_reset: has_reset,
+        reset_polarity: polarity,
+        reset_synchrony: synchrony,
+        domain: domain
+    )
 
 # ============================================================================
 # Function Attribute Types

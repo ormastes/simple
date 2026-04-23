@@ -4,9 +4,14 @@
 **Status:** Active
 **Canonical reference for VHDL backend support claims.**
 
+Note: this matrix distinguishes implemented Rust MIR backend behavior,
+Simple-side source-facade compatibility behavior, and the intended pure Simple
+compiler source of truth. A feature is not considered pure-Simple-owned until a
+`test/system/compiler/pure_simple_*vhdl*_spec.spl` acceptance spec is runnable.
+
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. The CLI VHDL path is supported for the conservative synthesizable subset, and MIR-to-VHDL lowering supports straight-line logic, computed branch/switch returns through combinational processes, process-local aggregates, tuple records, payloadless enum literals, and explicit VHDL hardware instructions. Full arbitrary Simple source-to-VHDL compilation remains partial because the public source facade still does not cover the entire MIR surface.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend and a Simple-side source facade. The pure Simple compiler is the target source of truth, but full pure-Simple source-to-VHDL ownership remains pending until structured metadata, return ABI, hardware-call `port map` lowering, fixed-width semantics, and clock-domain semantics are implemented in `src/compiler/**/*.spl`.
 
 ## Type Support
 
@@ -132,10 +137,10 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 |------|----------|--------|
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
-| Pure Simple source fallback | Conservative single-function scalar expression subset: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, and labeled tuple output ports | **supported** |
+| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, selected `@generic`/`@clocked` forms, nested tuple input flattening, and narrow slice/concat support. This is not yet the structured pure Simple compiler source of truth. | **partial** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
 | Anonymous hardware outputs | Distinct-type anonymous returns use positional tuple semantics in Simple; labeled outputs are required for stable VHDL public APIs | **partial** |
-| Full Simple source facade | Arbitrary source-to-MIR-to-VHDL path | **partial** |
+| Full pure Simple compiler VHDL path | Structured AST/HIR/MIR metadata to VHDL without source-facade parsing or Rust-only source-of-truth behavior | **deferred** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **supported** |
@@ -144,9 +149,9 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 
 ## MIR Backend Source-of-Truth Parity Specs
 
-The MIR backend parity handoff is tracked by pending system specs until the
-Rust MIR-to-VHDL backend owns the behavior currently covered by the source
-facade compatibility tests:
+The Rust MIR backend parity handoff is tracked by pending system specs as a
+reference implementation path. These specs do not by themselves satisfy the
+pure Simple compiler source-of-truth requirement:
 
 - `test/system/compiler/vhdl_mir_backend_multi_output_spec.spl` covers labeled
   tuple return ABI ports, same-type labeled outputs, anonymous-output rejection,
@@ -158,6 +163,19 @@ facade compatibility tests:
 
 When those specs are promoted from pending to runnable, duplicate source-facade
 assertions should be reduced to compatibility smoke coverage.
+
+## Pure Simple Source-of-Truth Specs
+
+The pure Simple compiler parity handoff is tracked separately by:
+
+- `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
+
+This file covers the implementation-worker acceptance surface for structured
+pure Simple metadata, return ABI, direct hardware-call `port map` lowering,
+fixed-width operations, reset/domain metadata, diagnostics, and GHDL
+analyze/elaborate/synth checks. The examples remain pending until the behavior
+is implemented in `src/compiler/**/*.spl` rather than only in Rust codegen or
+the source facade.
 
 ## Simulation Targets
 
