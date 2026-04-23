@@ -21,16 +21,18 @@
 - Source-facade tuple input flattening checks sanitized input/input and input/output port collisions before writing VHDL.
 - Source-facade named and nested bundle aliases lower to deterministic flattened names with named wiring and source-map anchors.
 - Source-facade fixed-width support is conservative: fixed integer ports, arithmetic/logic, literal shifts, one-level slices, explicit `concat`, unary operations, comparisons, extension/truncation through explicit casts, and width mismatch diagnostics.
+- Source-facade implicit-width behavior outside that subset produces hard diagnostics rather than inferred VHDL.
+- Pure Simple compiler source-of-truth behavior remains a separate deferral path with explicit diagnostics; compatibility parsing must not be documented as pure-Simple ownership.
 
 ## Testbench Renderer
 
-- `compiler.backend.vhdl.vhdl_testbench.render_vhdl_testbench` renders a minimal testbench artifact for one DUT.
-- The implemented renderer supports literal stimuli, named DUT port maps, optional clock/reset driving, and equality assertions with `severity failure`.
-- The artifact includes deterministic source-map JSON anchors for the source test name, DUT ports, generated port-map lines, and expectation assertions.
-- Multi-DUT and multi-phase source-test conversion remain deferred.
+- `compiler.backend.vhdl.vhdl_testbench.render_vhdl_testbench` renders a deterministic testbench artifact for one DUT.
+- `render_vhdl_testbench_suite` renders ordered multi-DUT/multi-phase suites with shared signal validation before VHDL output.
+- The implemented renderers support literal stimuli, named DUT port maps, optional clock/reset driving, default phase waits, and equality assertions with `severity failure`.
+- Artifacts include deterministic source-map JSON anchors for the source test name, DUTs, phases, DUT ports, generated port-map lines, and expectation assertions.
 
 ## Vendor Smoke
 
 - `test/unit/compiler/backend/vhdl_vendor_synthesis_smoke_spec.spl` checks the opt-in/skip contract.
 - Vendor execution is enabled only when `SIMPLE_VHDL_VENDOR_SMOKE=1`.
-- Disabled or missing-tool lanes report clear diagnostics with deterministic report and log path fields.
+- Disabled, missing-tool, and executed lanes report clear diagnostics with deterministic command, report, and log path fields.

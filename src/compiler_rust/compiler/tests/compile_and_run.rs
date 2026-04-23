@@ -37,7 +37,9 @@ fn compile_and_run_main() {
 #[test]
 fn compile_todo_statement_as_noop() {
     assert_eq!(
-        compile_and_run("todo(\"implement retry backoff\", \"tracked by SIMPLE-123\")\nmain = 7"),
+        compile_and_run(
+            "fn value() -> i32:\n    todo(\"implement retry backoff\", \"tracked by SIMPLE-123\")\n    return 7\nmain = value()"
+        ),
         7
     );
 }

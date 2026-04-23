@@ -1,6 +1,8 @@
 use std.spec
 use compiler.backend.vhdl.{VhdlReadDuringWritePolicy, VhdlStaticRomTemplate, VhdlSinglePortSyncRamTemplate, render_static_rom_template, render_single_port_sync_ram_template}
-use compiler.backend.vhdl.vhdl_testbench.{VhdlTestbenchPort, VhdlTestbenchAssignment, VhdlTestbenchAssertion, VhdlTestbenchCase, render_vhdl_testbench}
+use compiler.backend.vhdl.vhdl_testbench.{VhdlTestbenchPort, VhdlTestbenchAssignment, VhdlTestbenchAssertion, VhdlTestbenchCase, VhdlTestbenchDut, VhdlTestbenchPhase, VhdlTestbenchSuite, render_vhdl_testbench, render_vhdl_testbench_suite}
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "VHDL Python-HDL parity acceptance":
     """Acceptance smoke for the selected VHDL parity milestone."""
@@ -67,3 +69,86 @@ describe "VHDL Python-HDL parity acceptance":
 
         expect(ram.is_err()).to_equal(true)
         expect(ram.unwrap_err().code).to_equal("VHDL-MEM-RDW-AMBIGUOUS")
+
+    it "renders ordered multi-DUT multi-phase source-test suites":
+        val drive = VhdlTestbenchPhase(
+            name: "drive producer",
+            source_line: 70,
+            stimuli: [
+                VhdlTestbenchAssignment(target: "producer_en", literal: "'1'", source_line: 71),
+                VhdlTestbenchAssignment(target: "consumer_ready", literal: "'0'", source_line: 72)
+            ],
+            assertions: [
+                VhdlTestbenchAssertion(actual: "shared_valid", expected: "'1'", test_name: "pipeline", expectation_index: 0, source_line: 73)
+            ],
+            wait_for: "2 ns"
+        )
+        val accept = VhdlTestbenchPhase(
+            name: "consumer accepts",
+            source_line: 74,
+            stimuli: [
+                VhdlTestbenchAssignment(target: "consumer_ready", literal: "'1'", source_line: 75)
+            ],
+            assertions: [
+                VhdlTestbenchAssertion(actual: "consumer_done", expected: "'1'", test_name: "pipeline", expectation_index: 1, source_line: 76)
+            ],
+            wait_for: ""
+        )
+
+        val result = render_vhdl_testbench_suite(VhdlTestbenchSuite(
+            testbench_name: "pipeline_tb",
+            test_name: "pipeline",
+            test_source_line: 69,
+            duts: [
+                VhdlTestbenchDut(
+                    instance_name: "producer_dut",
+                    entity: "producer",
+                    ports: [
+                        VhdlTestbenchPort(name: "producer_en", direction: "in", type_name: "std_logic", source_line: 60),
+                        VhdlTestbenchPort(name: "shared_valid", direction: "out", type_name: "std_logic", source_line: 61)
+                    ],
+                    source_line: 60
+                ),
+                VhdlTestbenchDut(
+                    instance_name: "consumer_dut",
+                    entity: "consumer",
+                    ports: [
+                        VhdlTestbenchPort(name: "shared_valid", direction: "in", type_name: "std_logic", source_line: 62),
+                        VhdlTestbenchPort(name: "consumer_ready", direction: "in", type_name: "std_logic", source_line: 63),
+                        VhdlTestbenchPort(name: "consumer_done", direction: "out", type_name: "std_logic", source_line: 64)
+                    ],
+                    source_line: 62
+                )
+            ],
+            phases: [drive, accept],
+            clock_name: "",
+            reset_name: "",
+            reset_asserted: ""
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val artifact = result.unwrap()
+        expect(artifact.testbench_vhdl).to_contain("producer_dut: entity work.producer")
+        expect(artifact.testbench_vhdl).to_contain("consumer_dut: entity work.consumer")
+        expect(artifact.testbench_vhdl).to_contain("-- phase: drive producer")
+        expect(artifact.testbench_vhdl).to_contain("assert consumer_done = '1'")
+        expect(artifact.source_map_json).to_contain("\"duts\": [{\"instance\":\"producer_dut\"")
+        expect(artifact.source_map_json).to_contain("\"phases\": [{\"name\":\"drive producer\"")
+        expect(artifact.source_map_json).to_contain("\"phase\":\"consumer accepts\",\"expectationIndex\":1")
+
+    it "keeps parity docs aligned with supported and deferred lanes":
+        val requirements = rt_file_read_text("doc/02_requirements/feature/vhdl_python_hdl_parity.md") ?? ""
+        val roadmap = rt_file_read_text("doc/03_plan/vhdl_python_hdl_parity_roadmap.md") ?? ""
+        val matrix = rt_file_read_text("doc/04_architecture/vhdl_support_matrix.md") ?? ""
+        val design = rt_file_read_text("doc/05_design/vhdl_python_hdl_parity.md") ?? ""
+
+        expect(requirements).to_contain("Payload enum lowering remains out of scope")
+        expect(requirements).to_contain("unsupported MIR instructions")
+        expect(requirements).to_contain("Anonymous hardware outputs are not a stable VHDL public API")
+        expect(roadmap).to_contain("multi-DUT/multi-phase")
+        expect(roadmap).to_contain("vendor smoke skip/report/log behavior")
+        expect(matrix).to_contain("unsupported-MIR hard diagnostic")
+        expect(matrix).to_contain("hard diagnostics for unsupported implicit-width behavior")
+        expect(matrix).to_contain("same-type anonymous hardware outputs are rejected")
+        expect(design).to_contain("render_vhdl_testbench_suite")
+        expect(design).to_contain("explicit diagnostics; compatibility parsing must not be documented as pure-Simple ownership")

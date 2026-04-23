@@ -4,8 +4,9 @@ This matrix records the selected Python-HDL parity milestone. The 2026-04-23
 implementation batch closes `VHDL-PARITY-003` through `VHDL-PARITY-015` for
 the supported Simple/VHDL subset: reset/domain metadata, fixed-width operations,
 interface bundle flattening, payload-free enums, helper subprogram templates,
-ROM/RAM templates, generated testbench artifacts, source-map sidecars, vendor
-smoke skip/report behavior, and documentation are implemented and verified.
+ROM/RAM templates, generated one-DUT and multi-DUT/multi-phase testbench
+artifacts, source-map sidecars, vendor smoke skip/report/log behavior, and
+documentation are implemented and verified.
 Broad HLS behavior outside that selected subset is explicitly deferred and must
 fail with hard diagnostics instead of emitting partial VHDL.
 
@@ -36,10 +37,10 @@ completed lanes below.
 | VHDL-PARITY-008 | C | Complete | Enum encoding. | Payload-free enum declarations, ports, literals, sanitized VHDL names, and collision diagnostics are supported in the current compiler layers. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl`; `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl` |
 | VHDL-PARITY-009 | C | Complete | Payload enums. | Payload enums remain milestone-out-of-scope and fail before VHDL emission with enum/variant-specific diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl` |
 | VHDL-PARITY-010 | D | Complete | VHDL subprogram emission. | Helper classification, deterministic helper names, function/procedure declarations and bodies, direct helper calls, package integration, and name collision diagnostics are covered. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl`; `ghdl -a --std=08 <generated>.vhdl` |
-| VHDL-PARITY-011 | D | Complete | ROM/RAM inference. | Static ROM, registered ROM read, and explicit single-port synchronous RAM read-during-write policies render synthesizable templates; ambiguous policies fail with hard diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_memory_templates_spec.spl`; `ghdl --synth --std=08 <entity>` |
-| VHDL-PARITY-012 | D | Complete | Testbench conversion. | The renderer emits deterministic one-DUT VHDL testbenches with literal stimuli, optional clock/reset driving, named port maps, equality assertions, pass/fail `severity failure` behavior, and source-map anchors. | `bin/simple test test/unit/compiler/backend/vhdl_testbench_spec.spl` |
+| VHDL-PARITY-011 | D | Complete | ROM/RAM inference. | Static ROM, registered ROM read, and explicit single-port synchronous RAM read-during-write policies render synthesizable templates; ambiguous, unconstrained, or unsupported memory forms fail with hard diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_memory_templates_spec.spl`; `ghdl --synth --std=08 <entity>` |
+| VHDL-PARITY-012 | D | Complete | Testbench conversion. | The renderer emits deterministic one-DUT testbenches and ordered multi-DUT/multi-phase suites with literal stimuli, optional clock/reset driving, named port maps, equality assertions, pass/fail `severity failure` behavior, and source-map anchors. | `bin/simple test test/unit/compiler/backend/vhdl_testbench_spec.spl` |
 | VHDL-PARITY-013 | E | Complete | Source maps. | `aot_vhdl_file` emits deterministic `<output>.map.json` sidecars for generated entities and ports; testbench artifacts include source-map JSON for test names, ports, port-map lines, and expectations. Diagnostics use source spans where available. | `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl`; `bin/simple test test/unit/compiler/backend/vhdl_testbench_spec.spl` |
-| VHDL-PARITY-014 | E | Complete | Vendor synthesis smoke. | Optional smoke is environment-gated, never blocks normal verification, and reports deterministic report/log paths with clear disabled or missing-tool diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_vendor_synthesis_smoke_spec.spl` |
+| VHDL-PARITY-014 | E | Complete | Vendor synthesis smoke. | Optional smoke is environment-gated, never blocks normal verification, and reports deterministic command, report, and log paths with clear disabled, missing-tool, or executed diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_vendor_synthesis_smoke_spec.spl` |
 | VHDL-PARITY-015 | E | Complete | Parity documentation and support matrix maintenance. | Final feature/NFR/design/test artifacts exist and the support matrix distinguishes implemented milestone behavior from deferred unsupported Python-HDL/HLS features. | `bin/simple test doc/06_spec/app/compiler/feature/vhdl_python_hdl_parity_spec.spl`; docs review of `doc/04_architecture/vhdl_support_matrix.md` |
 
 ## Worker Boundaries

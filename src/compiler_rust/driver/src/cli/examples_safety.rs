@@ -38,9 +38,7 @@ fn should_apply_examples_timeout(path: &Path) -> bool {
 }
 
 fn should_isolate_example_process(path: &Path) -> bool {
-    is_examples_path(path)
-        && std::env::var_os(EXAMPLES_CHILD_ENV).is_none()
-        && !examples_timeout_disabled()
+    is_examples_path(path) && std::env::var_os(EXAMPLES_CHILD_ENV).is_none() && !examples_timeout_disabled()
 }
 
 pub fn timeout_error_message(path: &Path, timeout_secs: u64) -> String {
