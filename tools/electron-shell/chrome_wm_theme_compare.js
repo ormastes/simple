@@ -321,6 +321,10 @@ function writePpm(filePath, widthValue, heightValue, data) {
     ]));
 }
 
+function writeSummary(filePath, summary) {
+    fs.writeFileSync(filePath, JSON.stringify(summary, null, 2) + '\n', 'utf8');
+}
+
 function comparePpm(referencePath, actualPath, heatmapPath) {
     const a = decodePpm(referencePath);
     const b = decodePpm(actualPath);
@@ -355,12 +359,26 @@ function main() {
     const chromePpmPath = path.join(outDir, 'chrome_reference.ppm');
     const electronPpmPath = path.join(outDir, 'electron_wm.ppm');
     const heatmapPath = path.join(outDir, 'diff_heatmap.ppm');
+    const summaryPath = path.join(outDir, 'summary.json');
     writeFixtureHtml(htmlPath);
     captureChromePpm(htmlPath, chromePngPath, chromePpmPath);
     captureElectronPpm(htmlPath, electronPpmPath);
     const result = comparePpm(chromePpmPath, electronPpmPath, heatmapPath);
+    const summary = {
+        requestedTheme: process.env.SIMPLE_THEME || '',
+        width,
+        height,
+        diffPixels: result.diffPixels,
+        totalPixels: result.total,
+        diffRatio: result.diffRatio,
+        maxChannelDiff: result.maxChannelDiff,
+        chromeReferencePpm: path.relative(projectRoot, chromePpmPath),
+        electronPpm: path.relative(projectRoot, electronPpmPath),
+        heatmapPpm: path.relative(projectRoot, heatmapPath)
+    };
+    writeSummary(summaryPath, summary);
     console.log(`Chrome/Electron WM theme compare: diff_pixels=${result.diffPixels}/${result.total} max_channel_diff=${result.maxChannelDiff}`);
-    console.log(`Artifacts: ${path.relative(projectRoot, chromePpmPath)}, ${path.relative(projectRoot, electronPpmPath)}, ${path.relative(projectRoot, heatmapPath)}`);
+    console.log(`Artifacts: ${path.relative(projectRoot, chromePpmPath)}, ${path.relative(projectRoot, electronPpmPath)}, ${path.relative(projectRoot, heatmapPath)}, ${path.relative(projectRoot, summaryPath)}`);
     if (result.diffRatio > 0.03) {
         throw new Error(`theme visual diff exceeded tolerance: ${(result.diffRatio * 100).toFixed(2)}%`);
     }

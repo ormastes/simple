@@ -3,6 +3,7 @@ const path = require('path');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const THEME_REGISTRY_PATH = 'config/themes/theme.sdn';
+const packageCache = new Map();
 
 const FALLBACK_ICON_ROLES = [
     'terminal', 'browser', 'file_manager', 'finder', 'editor', 'calculator', 'settings', 'generic_app',
@@ -141,9 +142,12 @@ function loadThemeWidgetCss(widgets, themeDir) {
 }
 
 function loadThemePackage(themeId = '') {
-    const registry = readTextIfExists(THEME_REGISTRY_PATH);
     const requestedId = themeId || process.env.SIMPLE_THEME || defaultThemeId();
     const resolvedId = resolveThemeAlias(requestedId);
+    const cacheKey = `${requestedId}::${resolvedId}`;
+    if (packageCache.has(cacheKey)) return packageCache.get(cacheKey);
+
+    const registry = readTextIfExists(THEME_REGISTRY_PATH);
     const themePath = sectionValue(registry, 'themes', resolvedId) || `config/themes/${resolvedId}/theme.sdn`;
     const themeSdn = readTextIfExists(themePath);
     const familyId = rootValue(themeSdn, 'family');
@@ -157,7 +161,7 @@ function loadThemePackage(themeId = '') {
     const iconSdn = readTextIfExists(rootValue(familySdn, 'icons'));
     const iconCss = iconsToCss(iconSdn, requiredIconRoles(registry));
 
-    return {
+    const pkg = {
         id: resolvedId,
         requestedId,
         displayName: rootValue(themeSdn, 'display_name') || resolvedId,
@@ -173,6 +177,8 @@ function loadThemePackage(themeId = '') {
         iconCss,
         css: [shapeCss, familyWidgetCss, baseCss, themeWidgetCss, iconCss].filter(Boolean).join('\n') + '\n'
     };
+    packageCache.set(cacheKey, pkg);
+    return pkg;
 }
 
 module.exports = {
@@ -183,6 +189,7 @@ module.exports = {
         rootValue,
         sectionValue,
         sectionItems,
-        readTextIfExists
+        readTextIfExists,
+        packageCache
     }
 };

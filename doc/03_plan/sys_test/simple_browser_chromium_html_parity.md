@@ -10,6 +10,7 @@ SSpec coverage:
 Manual/focused parity checks:
 
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=00_text_only`
+- `bin/simple run src/app/wm_compare/html_compat.spl --only=01_inline_text`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=04_button`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=05_text_input`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=06_card_panel`

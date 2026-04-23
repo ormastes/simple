@@ -22,6 +22,9 @@ use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
 use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
 use common.render_scene.scene.{RenderScene, SceneCommand, rgba_to_argb}
 use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
+use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
+    execute_scene_to_engine2d_pixels}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 # =========================================================================
 # Render Result
@@ -89,6 +92,7 @@ class BrowserRenderer:
     viewport_w: i32
     viewport_h: i32
     bg_color: u32
+    engine: Engine2D?
 
     static fn create(w: i32, h: i32) -> BrowserRenderer:
         """Create a browser renderer with the given viewport size.
@@ -97,7 +101,17 @@ class BrowserRenderer:
         return BrowserRenderer(
             viewport_w: w,
             viewport_h: h,
-            bg_color: 0xFFFFFFFF
+            bg_color: 0xFFFFFFFF,
+            engine: nil
+        )
+
+    static fn create_with_engine(w: i32, h: i32, engine: Engine2D) -> BrowserRenderer:
+        """Create a browser renderer backed by an Engine2D instance."""
+        return BrowserRenderer(
+            viewport_w: w,
+            viewport_h: h,
+            bg_color: 0xFFFFFFFF,
+            engine: engine
         )
 
     static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
@@ -107,6 +121,9 @@ class BrowserRenderer:
         'intel', 'software', 'cpu'), creates an Engine2D instance with that
         backend. Unknown names fall back to the deterministic default.
         """
+        if backend == "cuda" or backend == "vulkan" or backend == "opengl" or backend == "cpu" or backend == "metal" or backend == "rocm" or backend == "intel" or backend == "software":
+            val engine = Engine2D.create_with_backend(w, h, backend)
+            return BrowserRenderer.create_with_engine(w, h, engine)
         return BrowserRenderer.create(w, h)
 
     me set_background(color: u32):
@@ -153,17 +170,20 @@ class BrowserRenderer:
         var result = self.render_dom(root)
         val scene = result.to_scene()
         var pixels: [u32] = []
-        # Propagate body's background-color to the full canvas per CSS
-        # "canvas background" spec: body's bg fills the viewport, not
-        # just body's layout box.
-        val body_rgba = _find_body_bg_color(root)
-        val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
-        val pixel_count = self.viewport_w * self.viewport_h
-        var i = 0
-        while i < pixel_count:
-            pixels.push(fill_argb)
-            i = i + 1
-        pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
+        if val Some(e) = self.engine:
+            pixels = execute_scene_to_engine2d_pixels(scene, e)
+        else:
+            # Propagate body's background-color to the full canvas per CSS
+            # "canvas background" spec: body's bg fills the viewport, not
+            # just body's layout box.
+            val body_rgba = _find_body_bg_color(root)
+            val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
+            val pixel_count = self.viewport_w * self.viewport_h
+            var i = 0
+            while i < pixel_count:
+                pixels.push(fill_argb)
+                i = i + 1
+            pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
         return BeRenderResult(
             format: "pixels",
             pixel_data: pixels,
@@ -190,7 +210,23 @@ class BrowserRenderer:
 
         Pipeline: DOM -> Layout -> Paint -> Scene -> Engine2D -> present()
         """
-        self.render_dom(root)
+        var result = self.render_dom(root)
+        if val Some(e) = self.engine:
+            val scene = result.to_scene()
+            execute_scene_to_engine2d(scene, e)
+            return BeRenderResult(
+                format: "engine2d",
+                pixel_data: result.pixel_data,
+                commands: result.commands,
+                width: result.width,
+                height: result.height,
+                node_count: result.node_count,
+                warnings: result.warnings,
+                scene_commands: result.scene_commands,
+                scene_width: result.scene_width,
+                scene_height: result.scene_height
+            )
+        return result
 
     me render_html(html: text) -> BeRenderResult:
         """Render an HTML string to a scene.
