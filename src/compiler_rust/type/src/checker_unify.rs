@@ -41,6 +41,26 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+            (Type::LabeledTuple(ts1), Type::LabeledTuple(ts2)) if ts1.len() == ts2.len() => {
+                for ((label_a, ty_a), (label_b, ty_b)) in ts1.iter().zip(ts2.iter()) {
+                    if label_a != label_b {
+                        return Err(TypeError::Mismatch {
+                            expected: t1.clone(),
+                            found: t2.clone(),
+                        });
+                    }
+                    self.unify(ty_a, ty_b)?;
+                }
+                Ok(())
+            }
+            (Type::Tuple(ts1), Type::LabeledTuple(ts2)) | (Type::LabeledTuple(ts2), Type::Tuple(ts1))
+                if ts1.len() == ts2.len() =>
+            {
+                for (a, (_, b)) in ts1.iter().zip(ts2.iter()) {
+                    self.unify(a, b)?;
+                }
+                Ok(())
+            }
 
             // Functions unify if params and return types unify
             (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 })
@@ -241,6 +261,13 @@ impl TypeChecker {
                 let converted: Vec<Type> = types.iter().map(|t| self.ast_type_to_type(t)).collect();
                 Type::Tuple(converted)
             }
+            AstType::LabeledTuple(fields) => {
+                let converted: Vec<(String, Type)> = fields
+                    .iter()
+                    .map(|field| (field.label.clone(), self.ast_type_to_type(&field.ty)))
+                    .collect();
+                Type::LabeledTuple(converted)
+            }
             AstType::Array { element, .. } => Type::Array(Box::new(self.ast_type_to_type(element))),
             AstType::Function { params, ret } => {
                 let param_types: Vec<Type> = params.iter().map(|p| self.ast_type_to_type(p)).collect();
@@ -343,6 +370,16 @@ impl TypeChecker {
                 p1.len() == p2.len()
                     && p1.iter().zip(p2.iter()).all(|(a, b)| self.types_compatible(a, b))
                     && self.types_compatible(r1, r2)
+            }
+            (Type::Tuple(t1), Type::LabeledTuple(t2)) | (Type::LabeledTuple(t2), Type::Tuple(t1)) => {
+                t1.len() == t2.len() && t1.iter().zip(t2.iter()).all(|(a, (_, b))| self.types_compatible(a, b))
+            }
+            (Type::LabeledTuple(t1), Type::LabeledTuple(t2)) => {
+                t1.len() == t2.len()
+                    && t1
+                        .iter()
+                        .zip(t2.iter())
+                        .all(|((la, a), (lb, b))| la == lb && self.types_compatible(a, b))
             }
             // Optional types
             (Type::Optional(inner1), Type::Optional(inner2)) => self.types_compatible(inner1, inner2),

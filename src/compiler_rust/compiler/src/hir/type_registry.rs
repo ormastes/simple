@@ -74,21 +74,11 @@ impl TypeRegistry {
         registry.types.insert(TypeId::I32, HirType::signed_int(32));
         registry.types.insert(TypeId::I64, HirType::signed_int(64));
         registry.types.insert(TypeId::U8, HirType::unsigned_int(8));
-        registry
-            .types
-            .insert(TypeId::U16, HirType::unsigned_int(16));
-        registry
-            .types
-            .insert(TypeId::U32, HirType::unsigned_int(32));
-        registry
-            .types
-            .insert(TypeId::U64, HirType::unsigned_int(64));
-        registry
-            .types
-            .insert(TypeId::F32, HirType::Float { bits: 32 });
-        registry
-            .types
-            .insert(TypeId::F64, HirType::Float { bits: 64 });
+        registry.types.insert(TypeId::U16, HirType::unsigned_int(16));
+        registry.types.insert(TypeId::U32, HirType::unsigned_int(32));
+        registry.types.insert(TypeId::U64, HirType::unsigned_int(64));
+        registry.types.insert(TypeId::F32, HirType::Float { bits: 32 });
+        registry.types.insert(TypeId::F64, HirType::Float { bits: 64 });
         registry.types.insert(TypeId::STRING, HirType::String);
         registry.types.insert(TypeId::NIL, HirType::Nil);
         registry.types.insert(TypeId::ANY, HirType::Any);
@@ -108,17 +98,11 @@ impl TypeRegistry {
         registry.name_to_id.insert("f16".to_string(), TypeId::F32); // f16 maps to f32 for now
         registry.name_to_id.insert("f32".to_string(), TypeId::F32);
         registry.name_to_id.insert("f64".to_string(), TypeId::F64);
-        registry
-            .name_to_id
-            .insert("str".to_string(), TypeId::STRING);
+        registry.name_to_id.insert("str".to_string(), TypeId::STRING);
         // Simple uses "text" as the canonical string type name
-        registry
-            .name_to_id
-            .insert("text".to_string(), TypeId::STRING);
+        registry.name_to_id.insert("text".to_string(), TypeId::STRING);
         // Also support "String" for compatibility
-        registry
-            .name_to_id
-            .insert("String".to_string(), TypeId::STRING);
+        registry.name_to_id.insert("String".to_string(), TypeId::STRING);
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
         // Dynamic Any type for DI containers, generic parameters, etc.
         registry.name_to_id.insert("Any".to_string(), TypeId::ANY);
@@ -199,14 +183,6 @@ impl TypeRegistry {
                     None
                 }
             }
-            Some(HirType::LabeledTuple(elements)) if !elements.is_empty() => {
-                let first = elements[0].1;
-                if elements.iter().all(|(_, e)| *e == first) {
-                    Some(first)
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
@@ -243,16 +219,11 @@ impl TypeRegistry {
             Some(HirType::Float { .. }) => true,
             Some(HirType::String) => true, // Strings are immutable
             Some(HirType::Nil) => true,
-            Some(HirType::Char) => true,   // Chars are primitives
+            Some(HirType::Char) => true,        // Chars are primitives
             Some(HirType::Enum { .. }) => true, // Enums captured by discriminant
 
             // Tuples are safe if all elements are safe
-            Some(HirType::Tuple(elements)) => {
-                elements.iter().all(|e| self.is_snapshot_safe(*e))
-            }
-            Some(HirType::LabeledTuple(elements)) => {
-                elements.iter().all(|(_, e)| self.is_snapshot_safe(*e))
-            }
+            Some(HirType::Tuple(elements)) => elements.iter().all(|e| self.is_snapshot_safe(*e)),
 
             // Arrays are safe if elements are safe (assuming immutable array)
             Some(HirType::Array { element, .. }) => self.is_snapshot_safe(*element),
@@ -267,18 +238,16 @@ impl TypeRegistry {
             Some(HirType::UnitType { .. }) => true,
 
             // Union types are snapshot-safe if all variants are snapshot-safe
-            Some(HirType::Union { variants }) => {
-                variants.iter().all(|v| self.is_snapshot_safe(*v))
-            }
+            Some(HirType::Union { variants }) => variants.iter().all(|v| self.is_snapshot_safe(*v)),
 
             // Mixins are snapshot-safe if all fields are snapshot-safe
-            Some(HirType::Mixin { fields, .. }) => {
-                fields.iter().all(|(_, ty)| self.is_snapshot_safe(*ty))
-            }
+            Some(HirType::Mixin { fields, .. }) => fields.iter().all(|(_, ty)| self.is_snapshot_safe(*ty)),
 
             // CTR-061: Structs are snapshot-safe if all fields are snapshot-safe
             // CTR-062: Structs with #[snapshot] attribute have custom snapshot semantics
-            Some(HirType::Struct { fields, has_snapshot, .. }) => {
+            Some(HirType::Struct {
+                fields, has_snapshot, ..
+            }) => {
                 // If marked with #[snapshot], always consider it snapshot-safe
                 if *has_snapshot {
                     return true;
@@ -288,9 +257,11 @@ impl TypeRegistry {
             }
 
             // Pointers are only safe if they're immutable borrows
-            Some(HirType::Pointer { kind, capability: _, inner }) => {
-                matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner)
-            }
+            Some(HirType::Pointer {
+                kind,
+                capability: _,
+                inner,
+            }) => matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner),
 
             // Promise types are snapshot-safe if their inner type is
             // (snapshotting a promise captures its eventual value)

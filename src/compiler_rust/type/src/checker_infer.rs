@@ -275,6 +275,14 @@ impl TypeChecker {
                 let inferred_recv = self.infer_expr(receiver)?;
                 let recv_ty = self.resolve(&inferred_recv);
                 match recv_ty {
+                    Type::LabeledTuple(fields) => {
+                        if let Expr::FieldAccess { field, .. } = expr {
+                            if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
+                                return Ok(ty.clone());
+                            }
+                        }
+                        Ok(self.fresh_var())
+                    }
                     Type::Bitfield(name) => {
                         if self.bitfields.contains_key(&name) {
                             Ok(Type::Int)
@@ -328,6 +336,13 @@ impl TypeChecker {
                     let _ = self.infer_expr(spread_expr)?;
                 }
                 Ok(self.fresh_var())
+            }
+            Expr::LabeledTuple(fields) => {
+                let mut typed_fields = Vec::new();
+                for field in fields {
+                    typed_fields.push((field.label.clone(), self.infer_expr(&field.value)?));
+                }
+                Ok(Type::LabeledTuple(typed_fields))
             }
             Expr::Path(_) => Ok(self.fresh_var()),
             Expr::Range { start, end, .. } => {
