@@ -24,7 +24,6 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "only",
     "slow",
     "flaky",
-    "test",
     "modes",
     "skip_modes",
     "only_modes",
