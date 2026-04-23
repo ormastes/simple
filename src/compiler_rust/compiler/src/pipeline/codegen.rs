@@ -8,12 +8,13 @@ use std::path::Path;
 use super::core::CompilerPipeline;
 use crate::codegen::llvm::LlvmBackend;
 use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
-use crate::hir::{BinOp, HirType, TypeRegistry, UnaryOp};
+use crate::hir::{BinOp, HirType, Signedness, TypeRegistry, UnaryOp};
 use crate::import_loader::load_module_with_imports;
 use crate::mir;
 use crate::mir::{CallTarget, MirFunction, MirInst, GpuMemoryScope, Terminator};
 use crate::monomorphize::monomorphize_module;
 use crate::CompileError;
+use simple_parser::ast;
 
 impl CompilerPipeline {
     pub(super) fn compile_mir_to_object(
@@ -100,12 +101,20 @@ impl CompilerPipeline {
     /// This is intentionally conservative: unsupported MIR instructions fail
     /// instead of being silently dropped.
     pub fn compile_file_to_vhdl(&mut self, source: &Path, output: &Path) -> Result<(), CompileError> {
-        let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
-        let ast_module = monomorphize_module(&ast_module);
-        let mir_module = self.type_check_and_lower_with_context(&ast_module, source)?;
-        let vhdl = generate_vhdl(&mir_module)?;
-        std::fs::write(output, vhdl).map_err(|e| CompileError::Io(format!("{e}")))?;
-        Ok(())
+        let result = (|| {
+            let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
+            let vhdl_metadata = collect_vhdl_source_metadata(&ast_module);
+            let ast_module = monomorphize_module(&ast_module);
+            let mir_module = self.type_check_and_lower_with_context(&ast_module, source)?;
+            let vhdl = generate_vhdl_with_metadata(&mir_module, &vhdl_metadata)?;
+            std::fs::write(output, vhdl).map_err(|e| CompileError::Io(format!("{e}")))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(output);
+            let _ = std::fs::remove_file(vhdl_source_map_path(output));
+        }
+        result
     }
 }
 
@@ -114,8 +123,17 @@ impl CompilerPipeline {
 // =============================================================================
 
 fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
+    generate_vhdl_with_metadata(module, &HashMap::new())
+}
+
+fn generate_vhdl_with_metadata(
+    module: &mir::MirModule,
+    metadata: &HashMap<String, VhdlFunctionMetadata>,
+) -> Result<String, CompileError> {
     let types = &module.type_registry;
     let entity_table = vhdl_entity_table(module)?;
+    validate_vhdl_domain_crossings(module, metadata)?;
+    validate_vhdl_mir_boundary(&entity_table)?;
     let mut out = String::new();
     for func in &module.functions {
         if !entity_table.contains_key(func.name.as_str()) {
@@ -124,7 +142,7 @@ fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        emit_vhdl_function(&mut out, func, types, &entity_table)?;
+        emit_vhdl_function(&mut out, func, types, &entity_table, metadata.get(&func.name))?;
     }
     if out.trim().is_empty() {
         return Err(CompileError::Codegen(
@@ -157,11 +175,142 @@ fn is_vhdl_entity_function(func: &MirFunction) -> bool {
     func.attributes.iter().any(|attr| attr == "hardware")
 }
 
+fn validate_vhdl_mir_boundary(entity_table: &BTreeMap<&str, &MirFunction>) -> Result<(), CompileError> {
+    for func in entity_table.values() {
+        if func.generator_states.is_some() || func.generator_complete.is_some() {
+            return Err(vhdl_unsupported_stateful_metadata(func, "generator state machine"));
+        }
+        if func.async_states.is_some() || func.async_complete.is_some() {
+            return Err(vhdl_unsupported_stateful_metadata(func, "async state machine"));
+        }
+
+        let mut local_addr_regs = BTreeSet::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::LocalAddr { dest, .. } = inst {
+                    local_addr_regs.insert(dest.0);
+                }
+
+                if let Some(source_form) = vhdl_memory_boundary_source(inst) {
+                    return Err(vhdl_unsupported_memory_boundary(func, source_form));
+                }
+
+                if let Some(reason) = vhdl_unsupported_mir_reason(inst) {
+                    return Err(vhdl_unsupported_mir_error(func, block.id, inst, reason));
+                }
+
+                match inst {
+                    MirInst::Load { addr, .. } if !local_addr_regs.contains(&addr.0) => {
+                        return Err(vhdl_unsupported_memory_boundary(
+                            func,
+                            "load from pointer-like/non-local address",
+                        ));
+                    }
+                    MirInst::Store { addr, .. } if !local_addr_regs.contains(&addr.0) => {
+                        return Err(vhdl_unsupported_memory_boundary(
+                            func,
+                            "store to pointer-like/non-local address",
+                        ));
+                    }
+                    MirInst::Call { target, .. } if !vhdl_supported_call_target(target, entity_table) => {
+                        return Err(vhdl_unsupported_mir_error(
+                            func,
+                            block.id,
+                            inst,
+                            "runtime or non-hardware direct call; only VHDL intrinsics and direct @hardware entity calls are supported",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn vhdl_memory_boundary_source(inst: &MirInst) -> Option<&'static str> {
+    match inst {
+        MirInst::GcAlloc { .. } => Some("implicit heap allocation"),
+        MirInst::PointerNew { .. } => Some("pointer allocation/wrapper"),
+        MirInst::PointerRef { .. } => Some("pointer reference"),
+        MirInst::PointerDeref { .. } => Some("pointer dereference"),
+        MirInst::GetElementPtr { .. } => Some("pointer-like address calculation"),
+        MirInst::ArrayLit { .. } => Some("implicit array literal memory"),
+        MirInst::IndexGet { .. } => Some("implicit collection/pointer-like indexed load"),
+        MirInst::IndexSet { .. } => Some("implicit collection/pointer-like indexed store"),
+        _ => None,
+    }
+}
+
+fn vhdl_supported_call_target(target: &CallTarget, entity_table: &BTreeMap<&str, &MirFunction>) -> bool {
+    matches!(target.name(), "rt_value_bool" | "rt_tuple_get" | "rt_slice" | "concat")
+        || entity_table.contains_key(target.name())
+}
+
+fn vhdl_unsupported_mir_reason(inst: &MirInst) -> Option<&'static str> {
+    match inst {
+        MirInst::GlobalLoad { .. } | MirInst::GlobalStore { .. } => {
+            Some("global state access; VHDL lowering does not infer registers, memories, or initialization from runtime globals")
+        }
+        MirInst::StructInit { .. }
+        | MirInst::FieldGet { .. }
+        | MirInst::FieldSet { .. } => {
+            Some("runtime-managed aggregate or heap state; full HLS memory/object lowering is out of scope for VHDL")
+        }
+        MirInst::ClosureCreate { .. } | MirInst::IndirectCall { .. } | MirInst::MethodCallVirtual { .. } => {
+            Some("indirect dispatch; VHDL lowering requires statically resolved direct @hardware calls")
+        }
+        MirInst::InterpCall { .. } | MirInst::InterpEval { .. } | MirInst::ExternMethodCall { .. } => {
+            Some("runtime-only call boundary; VHDL cannot invoke the interpreter, FFI, or host runtime")
+        }
+        MirInst::Wait { .. }
+        | MirInst::FutureCreate { .. }
+        | MirInst::Await { .. }
+        | MirInst::ActorSpawn { .. }
+        | MirInst::ActorSend { .. }
+        | MirInst::ActorRecv { .. }
+        | MirInst::ActorJoin { .. }
+        | MirInst::ActorReply { .. }
+        | MirInst::GeneratorCreate { .. }
+        | MirInst::Yield { .. }
+        | MirInst::GeneratorNext { .. } => {
+            Some("runtime-only state transition; async, actor, and generator state machines are not lowered to VHDL")
+        }
+        MirInst::ContractCheck { .. } | MirInst::ContractOldCapture { .. } => {
+            Some("runtime contract state; VHDL lowering does not emit runtime assertion machinery")
+        }
+        MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } | MirInst::PathProbe { .. } => {
+            Some("runtime coverage instrumentation; remove instrumentation before VHDL lowering")
+        }
+        _ => None,
+    }
+}
+
+fn vhdl_unsupported_stateful_metadata(func: &MirFunction, state_kind: &str) -> CompileError {
+    CompileError::Codegen(format!(
+        "VHDL backend unsupported runtime-only state metadata in {}: {}; VHDL supports the static combinational/direct-call @hardware subset only. Rewrite this hardware boundary as explicit registers/ports or keep it on a runtime/native backend.",
+        func.name, state_kind
+    ))
+}
+
+fn vhdl_unsupported_mir_error(
+    func: &MirFunction,
+    block: crate::mir::BlockId,
+    inst: &MirInst,
+    reason: &'static str,
+) -> CompileError {
+    CompileError::Codegen(format!(
+        "VHDL backend unsupported MIR instruction before emission in {} block {:?}: {}; instruction: {:?}. VHDL supports the static combinational/direct-call @hardware subset only. Rewrite with fixed-width values, fixed local temporaries, and direct @hardware calls, or keep this logic on a runtime/native backend.",
+        func.name, block, reason, inst
+    ))
+}
+
 fn emit_vhdl_function(
     out: &mut String,
     func: &MirFunction,
     types: &TypeRegistry,
     entity_table: &BTreeMap<&str, &MirFunction>,
+    metadata: Option<&VhdlFunctionMetadata>,
 ) -> Result<(), CompileError> {
     let entity = sanitize_vhdl_ident(&func.name);
     let mut state = VhdlLowerState::default();
@@ -175,6 +324,9 @@ fn emit_vhdl_function(
             param.ty,
         ));
     }
+    if let Some(clocked) = metadata.and_then(|meta| meta.clocked.as_ref()) {
+        add_clocked_ports(&mut ports, clocked);
+    }
     ports.extend(return_abi.ports().iter().cloned());
     validate_vhdl_port_names(&entity, &func.name, &ports)?;
 
@@ -182,6 +334,9 @@ fn emit_vhdl_function(
     out.push_str("use ieee.std_logic_1164.all;\n");
     out.push_str("use ieee.numeric_std.all;\n\n");
     out.push_str(&format!("entity {} is\n", entity));
+    if let Some(meta) = metadata {
+        emit_vhdl_generics(out, &meta.generics)?;
+    }
     out.push_str("    port (\n");
     for (idx, port) in ports.iter().enumerate() {
         let semicolon = if idx + 1 == ports.len() { "" } else { ";" };
@@ -255,22 +410,208 @@ fn emit_vhdl_function(
         out.push_str(&format!("    signal {} : {};\n", name, vhdl_type(*ty, types)?));
     }
     out.push_str("begin\n");
-    for instance in state.instances {
-        out.push_str(&instance);
-        out.push('\n');
-    }
-    for assign in state.assigns {
-        out.push_str(&assign);
-        out.push('\n');
-    }
-    if let Some(assignments) = return_assignments {
-        for assign in assignments {
+    if let Some(clocked) = metadata.and_then(|meta| meta.clocked.as_ref()) {
+        emit_clocked_vhdl_body(
+            out,
+            clocked,
+            &state,
+            &return_assignments.unwrap_or_default(),
+            &return_abi,
+            types,
+        )?;
+    } else {
+        for instance in state.instances {
+            out.push_str(&instance);
+            out.push('\n');
+        }
+        for assign in state.assigns {
             out.push_str(&assign);
             out.push('\n');
+        }
+        if let Some(assignments) = return_assignments {
+            for assign in assignments {
+                out.push_str(&assign);
+                out.push('\n');
+            }
         }
     }
     out.push_str("end architecture rtl;\n");
     Ok(())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct VhdlFunctionMetadata {
+    generics: Vec<VhdlGenericMetadata>,
+    clocked: Option<VhdlClockedMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlGenericMetadata {
+    name: String,
+    type_text: String,
+    default_text: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlClockedMetadata {
+    clock: String,
+    reset: Option<String>,
+    reset_active_high: bool,
+    reset_sync: bool,
+    domain: String,
+}
+
+fn collect_vhdl_source_metadata(module: &ast::Module) -> HashMap<String, VhdlFunctionMetadata> {
+    let mut metadata = HashMap::new();
+    for item in &module.items {
+        if let ast::Node::Function(func) = item {
+            let func_metadata = collect_vhdl_function_metadata(func);
+            if func_metadata != VhdlFunctionMetadata::default() {
+                metadata.insert(func.name.clone(), func_metadata);
+            }
+        }
+    }
+    metadata
+}
+
+fn collect_vhdl_function_metadata(func: &ast::FunctionDef) -> VhdlFunctionMetadata {
+    let mut metadata = VhdlFunctionMetadata::default();
+    for decorator in &func.decorators {
+        let Some(name) = vhdl_decorator_name(&decorator.name) else {
+            continue;
+        };
+        match name.as_str() {
+            "generic" => {
+                if let Some(args) = &decorator.args {
+                    metadata.generics.extend(args.iter().filter_map(vhdl_generic_from_arg));
+                }
+            }
+            "clocked" | "domain" => {
+                if let Some(args) = &decorator.args {
+                    metadata.clocked = Some(vhdl_clocked_from_args(args));
+                }
+            }
+            _ => {}
+        }
+    }
+    metadata
+}
+
+fn vhdl_decorator_name(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Identifier(name) => Some(name.clone()),
+        ast::Expr::Call { callee, .. } => vhdl_decorator_name(callee),
+        ast::Expr::Path(parts) => parts.last().cloned(),
+        _ => None,
+    }
+}
+
+fn vhdl_generic_from_arg(arg: &ast::Argument) -> Option<VhdlGenericMetadata> {
+    let name = arg.name.clone().or_else(|| match &arg.value {
+        ast::Expr::Identifier(name) => Some(name.clone()),
+        _ => None,
+    })?;
+    let default_text = match &arg.value {
+        ast::Expr::Integer(value) | ast::Expr::TypedInteger(value, _) => Some(value.to_string()),
+        ast::Expr::Bool(value) => Some(value.to_string()),
+        ast::Expr::Identifier(value) if arg.name.is_some() => Some(value.clone()),
+        _ => None,
+    };
+    let type_text = match default_text.as_deref() {
+        Some("true") | Some("false") => "boolean",
+        _ => "natural",
+    };
+    Some(VhdlGenericMetadata {
+        name: sanitize_vhdl_ident(&name).to_ascii_uppercase(),
+        type_text: type_text.to_string(),
+        default_text,
+    })
+}
+
+fn vhdl_clocked_from_args(args: &[ast::Argument]) -> VhdlClockedMetadata {
+    let mut positional = Vec::new();
+    let mut domain = None;
+    let mut reset_active_high = true;
+    let mut reset_sync = true;
+    for arg in args {
+        if let Some(name) = &arg.name {
+            match name.as_str() {
+                "clock" | "clk" => {
+                    if let Some(value) = vhdl_expr_token(&arg.value) {
+                        positional.insert(0, value);
+                    }
+                }
+                "reset" | "rst" => {
+                    if let Some(value) = vhdl_expr_token(&arg.value) {
+                        positional.push(value);
+                    }
+                }
+                "domain" | "name" => domain = vhdl_expr_token(&arg.value),
+                "reset_polarity" | "polarity" => {
+                    if let Some(value) = vhdl_expr_token(&arg.value) {
+                        reset_active_high = value.contains("high");
+                    }
+                }
+                "active_low" => reset_active_high = !vhdl_expr_bool(&arg.value).unwrap_or(true),
+                "active_high" => reset_active_high = vhdl_expr_bool(&arg.value).unwrap_or(true),
+                "sync" | "reset_sync" | "synchrony" => {
+                    if let Some(value) = vhdl_expr_token(&arg.value) {
+                        reset_sync = value.contains("sync") && !value.contains("async");
+                    } else {
+                        reset_sync = vhdl_expr_bool(&arg.value).unwrap_or(true);
+                    }
+                }
+                "async" => reset_sync = !vhdl_expr_bool(&arg.value).unwrap_or(true),
+                _ => {}
+            }
+        } else if let Some(token) = vhdl_expr_token(&arg.value) {
+            positional.push(token);
+        }
+    }
+
+    let clock = positional.first().cloned().unwrap_or_else(|| "clk".to_string());
+    let mut reset = None;
+    for token in positional.iter().skip(1) {
+        match token.as_str() {
+            "none" | "no_reset" => reset = None,
+            "active_low" => reset_active_high = false,
+            "active_high" => reset_active_high = true,
+            "sync" => reset_sync = true,
+            "async" => reset_sync = false,
+            other if domain.is_none() && other.starts_with("domain_") => {
+                domain = Some(other["domain_".len()..].to_string())
+            }
+            other if reset.is_none() => reset = Some(other.to_string()),
+            other => domain = Some(other.to_string()),
+        }
+    }
+    let domain = domain.unwrap_or_else(|| clock.clone());
+    VhdlClockedMetadata {
+        clock: sanitize_vhdl_ident(&clock),
+        reset: reset.map(|name| sanitize_vhdl_ident(&name)),
+        reset_active_high,
+        reset_sync,
+        domain: sanitize_vhdl_ident(&domain),
+    }
+}
+
+fn vhdl_expr_token(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Identifier(value) | ast::Expr::String(value) | ast::Expr::Symbol(value) | ast::Expr::Atom(value) => {
+            Some(value.clone())
+        }
+        ast::Expr::Path(parts) => parts.last().cloned(),
+        _ => None,
+    }
+}
+
+fn vhdl_expr_bool(expr: &ast::Expr) -> Option<bool> {
+    match expr {
+        ast::Expr::Bool(value) => Some(*value),
+        ast::Expr::Identifier(value) if value == "true" => Some(true),
+        ast::Expr::Identifier(value) if value == "false" => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +654,145 @@ impl VhdlPort {
             direction: VhdlPortDirection::Out,
             ty,
         }
+    }
+}
+
+fn emit_vhdl_generics(out: &mut String, generics: &[VhdlGenericMetadata]) -> Result<(), CompileError> {
+    if generics.is_empty() {
+        return Ok(());
+    }
+    let mut seen = HashSet::new();
+    out.push_str("    generic (\n");
+    for (idx, generic) in generics.iter().enumerate() {
+        if !seen.insert(generic.name.clone()) {
+            return Err(CompileError::Codegen(format!(
+                "VHDL generic identifier collision after sanitization: `{}`",
+                generic.name
+            )));
+        }
+        let semicolon = if idx + 1 == generics.len() { "" } else { ";" };
+        let default_text = generic
+            .default_text
+            .as_ref()
+            .map(|value| format!(" := {}", value))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "        {} : {}{}{}\n",
+            generic.name, generic.type_text, default_text, semicolon
+        ));
+    }
+    out.push_str("    );\n");
+    Ok(())
+}
+
+fn add_clocked_ports(ports: &mut Vec<VhdlPort>, clocked: &VhdlClockedMetadata) {
+    add_std_logic_port_once(ports, &clocked.clock);
+    if let Some(reset) = &clocked.reset {
+        add_std_logic_port_once(ports, reset);
+    }
+}
+
+fn add_std_logic_port_once(ports: &mut Vec<VhdlPort>, name: &str) {
+    let port_name = sanitize_vhdl_ident(name);
+    if ports.iter().any(|port| port.name == port_name) {
+        return;
+    }
+    ports.push(VhdlPort::input(port_name, name.to_string(), crate::hir::TypeId::BOOL));
+}
+
+fn emit_clocked_vhdl_body(
+    out: &mut String,
+    clocked: &VhdlClockedMetadata,
+    state: &VhdlLowerState,
+    return_assignments: &[String],
+    return_abi: &VhdlReturnAbi,
+    types: &TypeRegistry,
+) -> Result<(), CompileError> {
+    for instance in &state.instances {
+        out.push_str(instance);
+        out.push('\n');
+    }
+    for assign in &state.assigns {
+        out.push_str(assign);
+        out.push('\n');
+    }
+
+    let label = format!("p_{}", clocked.domain);
+    if let Some(reset) = &clocked.reset {
+        if clocked.reset_sync {
+            out.push_str(&format!("    {}: process({})\n", label, clocked.clock));
+            out.push_str("    begin\n");
+            out.push_str(&format!("        if rising_edge({}) then\n", clocked.clock));
+            out.push_str(&format!(
+                "            if {} = '{}' then\n",
+                reset,
+                if clocked.reset_active_high { '1' } else { '0' }
+            ));
+            emit_reset_assignments(out, return_abi, types, 16)?;
+            out.push_str("            else\n");
+            emit_indented_assignments(out, return_assignments, 16);
+            out.push_str("            end if;\n");
+            out.push_str("        end if;\n");
+            out.push_str("    end process;\n");
+        } else {
+            out.push_str(&format!("    {}: process({}, {})\n", label, clocked.clock, reset));
+            out.push_str("    begin\n");
+            out.push_str(&format!(
+                "        if {} = '{}' then\n",
+                reset,
+                if clocked.reset_active_high { '1' } else { '0' }
+            ));
+            emit_reset_assignments(out, return_abi, types, 12)?;
+            out.push_str(&format!("        elsif rising_edge({}) then\n", clocked.clock));
+            emit_indented_assignments(out, return_assignments, 12);
+            out.push_str("        end if;\n");
+            out.push_str("    end process;\n");
+        }
+    } else {
+        out.push_str(&format!("    {}: process({})\n", label, clocked.clock));
+        out.push_str("    begin\n");
+        out.push_str(&format!("        if rising_edge({}) then\n", clocked.clock));
+        emit_indented_assignments(out, return_assignments, 12);
+        out.push_str("        end if;\n");
+        out.push_str("    end process;\n");
+    }
+    Ok(())
+}
+
+fn emit_indented_assignments(out: &mut String, assignments: &[String], spaces: usize) {
+    let indent = " ".repeat(spaces);
+    for assign in assignments {
+        out.push_str(&indent);
+        out.push_str(assign.trim());
+        out.push('\n');
+    }
+}
+
+fn emit_reset_assignments(
+    out: &mut String,
+    return_abi: &VhdlReturnAbi,
+    types: &TypeRegistry,
+    spaces: usize,
+) -> Result<(), CompileError> {
+    let indent = " ".repeat(spaces);
+    for field in return_abi.fields() {
+        out.push_str(&format!(
+            "{}{} <= {};\n",
+            indent,
+            field.port_name,
+            vhdl_zero_value(field.ty, types)?
+        ));
+    }
+    Ok(())
+}
+
+fn vhdl_zero_value(ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<String, CompileError> {
+    if ty == crate::hir::TypeId::BOOL {
+        Ok("'0'".to_string())
+    } else if vhdl_int_type_info(ty, types).is_some() {
+        Ok("(others => '0')".to_string())
+    } else {
+        vhdl_type(ty, types).map(|_| "(others => '0')".to_string())
     }
 }
 
@@ -394,6 +874,42 @@ fn validate_vhdl_port_names(entity: &str, source_entity: &str, ports: &[VhdlPort
                 "VHDL identifier collision after sanitization: {} and port `{}` both map to `{}`",
                 previous, port.source_name, port.name
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_vhdl_domain_crossings(
+    module: &mir::MirModule,
+    metadata: &HashMap<String, VhdlFunctionMetadata>,
+) -> Result<(), CompileError> {
+    for func in &module.functions {
+        let Some(source_domain) = metadata
+            .get(&func.name)
+            .and_then(|meta| meta.clocked.as_ref())
+            .map(|clocked| clocked.domain.as_str())
+        else {
+            continue;
+        };
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::Call { target, .. } = inst {
+                    let target_name = target.name();
+                    let Some(target_domain) = metadata
+                        .get(target_name)
+                        .and_then(|meta| meta.clocked.as_ref())
+                        .map(|clocked| clocked.domain.as_str())
+                    else {
+                        continue;
+                    };
+                    if source_domain != target_domain {
+                        return Err(CompileError::Codegen(format!(
+                            "E0710 clock domain crossing: `{}` in domain `{}` reads `{}` in domain `{}` without an explicit synchronizer",
+                            func.name, source_domain, target_name, target_domain
+                        )));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -571,7 +1087,7 @@ fn lower_vhdl_instruction(
         }
         MirInst::Load { dest, addr, ty } => {
             let local_index = state.addr_local.get(&addr.0).ok_or_else(|| {
-                CompileError::Codegen(format!("VHDL unsupported load from non-local address v{}", addr.0))
+                vhdl_unsupported_memory_boundary(func, format!("load from pointer-like/non-local address v{}", addr.0))
             })?;
             if let Some(fields) = state.local_tuple_fields.get(local_index).cloned() {
                 state.reg_tuple_fields.insert(dest.0, fields);
@@ -598,6 +1114,9 @@ fn lower_vhdl_instruction(
                 .reg_expr
                 .insert(dest.0, if *value { "'1'".to_string() } else { "'0'".to_string() });
             state.reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
+        }
+        MirInst::ConstFloat { .. } | MirInst::BoxFloat { .. } | MirInst::UnboxFloat { .. } => {
+            return Err(vhdl_float_contract_error(crate::hir::TypeId::F64, 64));
         }
         MirInst::Copy { dest, src } => {
             if let Some(expr) = state.reg_expr.get(&src.0).cloned() {
@@ -633,7 +1152,16 @@ fn lower_vhdl_instruction(
                 .unwrap_or(func.return_type);
             let left_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *left, left_ty, types)?;
             let right_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *right, right_ty, types)?;
-            let expr = vhdl_binop(op, &left_expr, &right_expr)?;
+            let expr = match op {
+                BinOp::ShiftLeft | BinOp::ShiftRight => {
+                    if let Some(amount) = state.reg_int_const.get(&right.0) {
+                        vhdl_binop(op, &left_expr, &amount.to_string())?
+                    } else {
+                        vhdl_binop(op, &left_expr, &format!("to_integer({})", right_expr))?
+                    }
+                }
+                _ => vhdl_binop(op, &left_expr, &right_expr)?,
+            };
             let ty = binop_result_type(*op, left_ty);
             let sig = format!("tmp_{}", dest.0);
             state.signals.insert((sig.clone(), ty));
@@ -680,7 +1208,7 @@ fn lower_vhdl_instruction(
         }
         MirInst::Store { addr, value, ty } => {
             let local_index = state.addr_local.get(&addr.0).copied().ok_or_else(|| {
-                CompileError::Codegen(format!("VHDL unsupported store to non-local address v{}", addr.0))
+                vhdl_unsupported_memory_boundary(func, format!("store to pointer-like/non-local address v{}", addr.0))
             })?;
             state.local_ty.insert(local_index, *ty);
             if let Some(fields) = state.reg_tuple_fields.get(&value.0).cloned() {
@@ -701,7 +1229,60 @@ fn lower_vhdl_instruction(
                 lower_vhdl_tuple_get(func, state, *dest, args)?;
                 return Ok(());
             }
+            if target.name() == "rt_slice" {
+                lower_vhdl_bit_slice(func, state, *dest, args, types)?;
+                return Ok(());
+            }
+            if target.name() == "concat" {
+                lower_vhdl_concat(func, state, *dest, args, types)?;
+                return Ok(());
+            }
             lower_vhdl_call(func, state, *dest, target, args, types, entity_table)?;
+        }
+        MirInst::GetElementPtr { .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                "pointer-like address calculation (GetElementPtr)",
+            ));
+        }
+        MirInst::GcAlloc { .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                "implicit heap allocation (GcAlloc)",
+            ));
+        }
+        MirInst::PointerNew { kind, .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                format!("pointer allocation/wrapper ({kind:?})"),
+            ));
+        }
+        MirInst::PointerRef { kind, .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                format!("pointer-like borrow/reference ({kind:?})"),
+            ));
+        }
+        MirInst::PointerDeref { kind, .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                format!("pointer dereference ({kind:?})"),
+            ));
+        }
+        MirInst::IndexGet { .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                "implicit collection/pointer-like indexed load",
+            ));
+        }
+        MirInst::IndexSet { .. } => {
+            return Err(vhdl_unsupported_memory_boundary(
+                func,
+                "implicit collection/pointer-like indexed store",
+            ));
+        }
+        MirInst::ArrayLit { .. } => {
+            return Err(vhdl_unsupported_memory_boundary(func, "implicit array literal memory"));
         }
         MirInst::Drop { .. } => {}
         other => {
@@ -712,6 +1293,18 @@ fn lower_vhdl_instruction(
         }
     }
     Ok(())
+}
+
+fn vhdl_unsupported_memory_boundary(func: &MirFunction, source_form: impl AsRef<str>) -> CompileError {
+    CompileError::Codegen(format!(
+        "VHDL-MEM-POLICY: VHDL backend unsupported memory boundary in {}: {}. Vendor-safe VHDL does not infer implicit heap allocation, pointer wrappers, array literals, or dynamic pointer-like addressing; model storage with explicit static ROM, registered ROM, or synchronous RAM templates and fixed address/data/control signals. Use an explicit ROM/RAM memory-interface when storage is required.",
+        func.name,
+        source_form.as_ref()
+    ))
+}
+
+fn vhdl_source_map_path(output: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.map.json", output.display()))
 }
 
 fn lower_vhdl_value_bool(
@@ -790,6 +1383,99 @@ fn lower_vhdl_tuple_get(
     })?;
     state.reg_expr.insert(dest.0, field.expr.clone());
     state.reg_ty.insert(dest.0, field.ty);
+    Ok(())
+}
+
+fn lower_vhdl_bit_slice(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    dest: Option<mir::VReg>,
+    args: &[mir::VReg],
+    types: &TypeRegistry,
+) -> Result<(), CompileError> {
+    let dest = dest.ok_or_else(|| {
+        CompileError::Codegen(format!("VHDL backend unsupported void bit-slice call in {}", func.name))
+    })?;
+    if args.len() != 4 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend bit-slice lowering in {} expects 4 arguments, got {}",
+            func.name,
+            args.len()
+        )));
+    }
+    let collection = args[0];
+    let start = state.reg_int_const.get(&args[1].0).copied().ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported dynamic bit-slice start in {}: v{} is not a constant",
+            func.name, args[1].0
+        ))
+    })?;
+    let end = state.reg_int_const.get(&args[2].0).copied().ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported dynamic bit-slice end in {}: v{} is not a constant",
+            func.name, args[2].0
+        ))
+    })?;
+    let step = state.reg_int_const.get(&args[3].0).copied().ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported dynamic bit-slice step in {}: v{} is not a constant",
+            func.name, args[3].0
+        ))
+    })?;
+    if step != 1 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend bit-slice lowering in {} only supports step 1, got {}",
+            func.name, step
+        )));
+    }
+    let collection_ty = state.reg_ty.get(&collection.0).copied().unwrap_or(func.return_type);
+    if vhdl_int_type_info(collection_ty, types).is_none() {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend bit-slice lowering in {} requires a fixed-width integer receiver",
+            func.name
+        )));
+    }
+    let hi = start.max(end);
+    let lo = start.min(end);
+    let width = (hi - lo + 1) as u8;
+    if let Some((return_bits, _)) = vhdl_int_type_info(func.return_type, types) {
+        if return_bits != width {
+            return Err(CompileError::Codegen(format!(
+                "VHDL backend bit-slice width mismatch in {}: slice width {} does not match return width {}",
+                func.name, width, return_bits
+            )));
+        }
+    }
+    let collection_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, collection, collection_ty, types)?;
+    state
+        .reg_expr
+        .insert(dest.0, format!("{}({} downto {})", collection_expr, hi, lo));
+    state.reg_ty.insert(dest.0, func.return_type);
+    Ok(())
+}
+
+fn lower_vhdl_concat(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    dest: Option<mir::VReg>,
+    args: &[mir::VReg],
+    types: &TypeRegistry,
+) -> Result<(), CompileError> {
+    let dest = dest
+        .ok_or_else(|| CompileError::Codegen(format!("VHDL backend unsupported void concat call in {}", func.name)))?;
+    if args.len() != 2 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend concat lowering in {} expects 2 arguments, got {}",
+            func.name,
+            args.len()
+        )));
+    }
+    let left_ty = state.reg_ty.get(&args[0].0).copied().unwrap_or(func.return_type);
+    let right_ty = state.reg_ty.get(&args[1].0).copied().unwrap_or(func.return_type);
+    let left_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, args[0], left_ty, types)?;
+    let right_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, args[1], right_ty, types)?;
+    state.reg_expr.insert(dest.0, format!("{} & {}", left_expr, right_expr));
+    state.reg_ty.insert(dest.0, func.return_type);
     Ok(())
 }
 
@@ -903,22 +1589,48 @@ fn reg_expr_for_type(
     reg_expr_for(reg_expr, reg)
 }
 
-fn vhdl_type(ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<&'static str, CompileError> {
+fn vhdl_type(ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<String, CompileError> {
     if ty == crate::hir::TypeId::I32 {
-        Ok("signed(31 downto 0)")
+        Ok("signed(31 downto 0)".to_string())
     } else if ty == crate::hir::TypeId::I64 {
-        Ok("signed(63 downto 0)")
+        Ok("signed(63 downto 0)".to_string())
     } else if ty == crate::hir::TypeId::BOOL {
-        Ok("std_logic")
+        Ok("std_logic".to_string())
+    } else if let Some((bits, signedness)) = vhdl_int_type_info(ty, types) {
+        let base = if signedness == Signedness::Signed {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        Ok(format!("{}({} downto 0)", base, bits - 1))
+    } else if let Some(bits) = vhdl_float_type_bits(ty, types) {
+        Err(vhdl_float_contract_error(ty, bits))
     } else {
         let detail = types
             .get(ty)
             .map(format_vhdl_type_detail)
             .unwrap_or_else(|| "unregistered".to_string());
-        Err(CompileError::Codegen(format!(
-            "VHDL backend unsupported type id: {:?} ({})",
-            ty, detail
-        )))
+        if matches!(types.get(ty), Some(HirType::Array { size: None, .. })) {
+            Err(CompileError::Codegen(format!(
+                "VHDL-MEM-UNCONSTRAINED: VHDL backend unsupported unconstrained memory type id: {:?} ({}). Memory must have a concrete positive depth and explicit ROM/RAM template policy before VHDL emission.",
+                ty, detail
+            )))
+        } else if matches!(types.get(ty), Some(HirType::Array { .. })) {
+            Err(CompileError::Codegen(format!(
+                "VHDL-MEM-POLICY: VHDL backend unsupported implicit array type id: {:?} ({}). Use explicit static ROM, registered ROM, or synchronous RAM templates with vendor-safe read-during-write policy before VHDL emission.",
+                ty, detail
+            )))
+        } else if matches!(types.get(ty), Some(HirType::Pointer { .. })) {
+            Err(CompileError::Codegen(format!(
+                "VHDL backend unsupported pointer type id: {:?} ({}). Use an explicit ROM/RAM memory-interface boundary with fixed address/data/control signals instead of implicit pointer values.",
+                ty, detail
+            )))
+        } else {
+            Err(CompileError::Codegen(format!(
+                "VHDL backend unsupported type id: {:?} ({})",
+                ty, detail
+            )))
+        }
     }
 }
 
@@ -927,6 +1639,12 @@ fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId, types: &TypeRegistry) ->
         Ok(format!("to_signed({}, 32)", value))
     } else if ty == crate::hir::TypeId::I64 {
         Ok(format!("to_signed({}, 64)", value))
+    } else if let Some((bits, signedness)) = vhdl_int_type_info(ty, types) {
+        if signedness == Signedness::Signed {
+            Ok(format!("to_signed({}, {})", value, bits))
+        } else {
+            Ok(format!("to_unsigned({}, {})", value, bits))
+        }
     } else {
         let detail = types
             .get(ty)
@@ -936,6 +1654,41 @@ fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId, types: &TypeRegistry) ->
             "VHDL backend cannot materialize integer literal for type id: {:?} ({})",
             ty, detail
         )))
+    }
+}
+
+fn vhdl_float_type_bits(ty: crate::hir::TypeId, types: &TypeRegistry) -> Option<u8> {
+    match ty {
+        crate::hir::TypeId::F32 => Some(32),
+        crate::hir::TypeId::F64 => Some(64),
+        _ => match types.get(ty) {
+            Some(HirType::Float { bits }) => Some(*bits),
+            _ => None,
+        },
+    }
+}
+
+fn vhdl_float_contract_error(ty: crate::hir::TypeId, bits: u8) -> CompileError {
+    CompileError::Codegen(format!(
+        "VHDL backend unsupported bare f{} hardware value for type id {:?}; use an explicit fixed-point contract encoded as a fixed-width integer (for example i32/u32 with documented scale, rounding, and saturation) or isolate floating-point behind an explicit float IP boundary",
+        bits, ty
+    ))
+}
+
+fn vhdl_int_type_info(ty: crate::hir::TypeId, types: &TypeRegistry) -> Option<(u8, Signedness)> {
+    match ty {
+        crate::hir::TypeId::I8 => Some((8, Signedness::Signed)),
+        crate::hir::TypeId::I16 => Some((16, Signedness::Signed)),
+        crate::hir::TypeId::I32 => Some((32, Signedness::Signed)),
+        crate::hir::TypeId::I64 => Some((64, Signedness::Signed)),
+        crate::hir::TypeId::U8 => Some((8, Signedness::Unsigned)),
+        crate::hir::TypeId::U16 => Some((16, Signedness::Unsigned)),
+        crate::hir::TypeId::U32 => Some((32, Signedness::Unsigned)),
+        crate::hir::TypeId::U64 => Some((64, Signedness::Unsigned)),
+        _ => match types.get(ty) {
+            Some(HirType::Int { bits, signedness }) => Some((*bits, *signedness)),
+            _ => None,
+        },
     }
 }
 
@@ -966,6 +1719,8 @@ fn vhdl_binop(op: &BinOp, left: &str, right: &str) -> Result<String, CompileErro
         BinOp::BitAnd | BinOp::And => format!("{} and {}", left, right),
         BinOp::BitOr | BinOp::Or => format!("{} or {}", left, right),
         BinOp::BitXor => format!("{} xor {}", left, right),
+        BinOp::ShiftLeft => format!("shift_left({}, {})", left, right),
+        BinOp::ShiftRight => format!("shift_right({}, {})", left, right),
         BinOp::Eq => format!("'1' when {} = {} else '0'", left, right),
         BinOp::NotEq => format!("'1' when {} /= {} else '0'", left, right),
         BinOp::Lt => format!("'1' when {} < {} else '0'", left, right),
@@ -1762,6 +2517,43 @@ mod tests {
     use std::ffi::CString;
     use tempfile::NamedTempFile;
 
+    fn vhdl_module_with_instruction(inst: MirInst) -> mir::MirModule {
+        let mut func = MirFunction::new(
+            "dynamic_bad".to_string(),
+            crate::hir::TypeId::I32,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.attributes.push("hardware".to_string());
+        func.blocks[0].instructions.push(inst);
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: crate::mir::VReg(99),
+            value: 0,
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(crate::mir::VReg(99)));
+
+        let mut module = mir::MirModule::new();
+        module.functions.push(func);
+        module
+    }
+
+    fn expect_vhdl_boundary_error(inst: MirInst, expected: &str) {
+        let module = vhdl_module_with_instruction(inst);
+        let err = generate_vhdl(&module).expect_err("unsupported MIR should fail before VHDL emission");
+        let message = format!("{err}");
+        assert!(
+            message.contains("unsupported MIR instruction before emission") || message.contains("VHDL-MEM-POLICY"),
+            "expected pre-emission boundary diagnostic, got: {message}"
+        );
+        assert!(
+            message.contains(expected),
+            "expected diagnostic to contain `{expected}`, got: {message}"
+        );
+        assert!(
+            message.contains("runtime/native backend") || message.contains("explicit ROM/RAM memory-interface"),
+            "expected actionable fallback guidance, got: {message}"
+        );
+    }
+
     #[test]
     fn backend_env_defaults_to_target_selection() {
         env::remove_var("SIMPLE_BACKEND");
@@ -1832,6 +2624,107 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
         assert!(
             !ptx.contains("call.uni (%rd0), gpu_thread_id_x;"),
             "gpu_thread_id_x should not remain as a call target:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_dynamic_address_ops_before_emission() {
+        expect_vhdl_boundary_error(
+            MirInst::GetElementPtr {
+                dest: crate::mir::VReg(0),
+                base: crate::mir::VReg(1),
+                index: crate::mir::VReg(2),
+            },
+            "pointer-like address calculation",
+        );
+        expect_vhdl_boundary_error(
+            MirInst::Load {
+                dest: crate::mir::VReg(0),
+                addr: crate::mir::VReg(55),
+                ty: crate::hir::TypeId::I32,
+            },
+            "load from pointer-like/non-local address",
+        );
+        expect_vhdl_boundary_error(
+            MirInst::Store {
+                addr: crate::mir::VReg(55),
+                value: crate::mir::VReg(1),
+                ty: crate::hir::TypeId::I32,
+            },
+            "store to pointer-like/non-local address",
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_indirect_and_runtime_calls_before_emission() {
+        expect_vhdl_boundary_error(
+            MirInst::IndirectCall {
+                dest: Some(crate::mir::VReg(0)),
+                callee: crate::mir::VReg(1),
+                param_types: vec![],
+                return_type: crate::hir::TypeId::I32,
+                args: vec![],
+                effect: crate::mir::Effect::Compute,
+            },
+            "indirect dispatch",
+        );
+        expect_vhdl_boundary_error(
+            MirInst::Call {
+                dest: Some(crate::mir::VReg(0)),
+                target: CallTarget::from_name("runtime_helper"),
+                args: vec![],
+            },
+            "runtime or non-hardware direct call",
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_runtime_stateful_mir_before_emission() {
+        expect_vhdl_boundary_error(
+            MirInst::GlobalLoad {
+                dest: crate::mir::VReg(0),
+                global_name: "state".to_string(),
+                ty: crate::hir::TypeId::I32,
+            },
+            "global state access",
+        );
+        expect_vhdl_boundary_error(
+            MirInst::GcAlloc {
+                dest: crate::mir::VReg(0),
+                ty: crate::hir::TypeId::I32,
+            },
+            "implicit heap allocation",
+        );
+        expect_vhdl_boundary_error(
+            MirInst::Await {
+                dest: crate::mir::VReg(0),
+                future: crate::mir::VReg(1),
+            },
+            "runtime-only state transition",
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_runtime_state_metadata_before_emission() {
+        let mut module = vhdl_module_with_instruction(MirInst::ConstInt {
+            dest: crate::mir::VReg(0),
+            value: 1,
+        });
+        module.functions[0].generator_complete = Some(crate::mir::BlockId(1));
+
+        let err = generate_vhdl(&module).expect_err("generator metadata should fail");
+        let message = format!("{err}");
+        assert!(
+            message.contains("unsupported runtime-only state metadata"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("generator state machine"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("runtime/native backend"),
+            "unexpected error: {message}"
         );
     }
 
@@ -2198,6 +3091,110 @@ fn top(a: bool, b: bool) -> bool:
         );
     }
 
+    fn assert_vhdl_memory_boundary_error(inst: MirInst, expected_source: &str) {
+        let func = MirFunction::new(
+            "heapish".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        let mut state = VhdlLowerState::default();
+        let types = TypeRegistry::new();
+
+        let err = lower_vhdl_instruction(&func, &mut state, &inst, &types, &BTreeMap::new())
+            .expect_err("implicit memory form should be rejected");
+        let message = format!("{err}");
+
+        assert!(
+            message.contains("unsupported memory boundary"),
+            "expected memory-boundary wording, got: {message}"
+        );
+        assert!(
+            message.contains(expected_source),
+            "expected source form `{expected_source}`, got: {message}"
+        );
+        assert!(
+            message.contains("explicit ROM/RAM memory-interface"),
+            "expected action wording, got: {message}"
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_implicit_heap_and_pointer_mir_before_emission() {
+        assert_vhdl_memory_boundary_error(
+            MirInst::GcAlloc {
+                dest: crate::mir::VReg(1),
+                ty: crate::hir::TypeId::I64,
+            },
+            "implicit heap allocation",
+        );
+        assert_vhdl_memory_boundary_error(
+            MirInst::PointerNew {
+                dest: crate::mir::VReg(2),
+                kind: crate::hir::PointerKind::Unique,
+                value: crate::mir::VReg(1),
+            },
+            "pointer allocation/wrapper",
+        );
+        assert_vhdl_memory_boundary_error(
+            MirInst::PointerDeref {
+                dest: crate::mir::VReg(3),
+                pointer: crate::mir::VReg(2),
+                kind: crate::hir::PointerKind::Unique,
+            },
+            "pointer dereference",
+        );
+    }
+
+    #[test]
+    fn vhdl_rejects_pointer_like_dynamic_addressing_with_action() {
+        assert_vhdl_memory_boundary_error(
+            MirInst::GetElementPtr {
+                dest: crate::mir::VReg(3),
+                base: crate::mir::VReg(1),
+                index: crate::mir::VReg(2),
+            },
+            "pointer-like address calculation",
+        );
+        assert_vhdl_memory_boundary_error(
+            MirInst::Load {
+                dest: crate::mir::VReg(4),
+                addr: crate::mir::VReg(99),
+                ty: crate::hir::TypeId::I64,
+            },
+            "load from pointer-like/non-local address",
+        );
+        assert_vhdl_memory_boundary_error(
+            MirInst::Store {
+                addr: crate::mir::VReg(99),
+                value: crate::mir::VReg(4),
+                ty: crate::hir::TypeId::I64,
+            },
+            "store to pointer-like/non-local address",
+        );
+    }
+
+    #[test]
+    fn vhdl_pointer_type_diagnostic_names_explicit_memory_interface_boundary() {
+        let mut types = TypeRegistry::new();
+        let ptr_ty = types.register(HirType::Pointer {
+            kind: crate::hir::PointerKind::Borrow,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner: crate::hir::TypeId::I64,
+        });
+
+        let err = vhdl_type(ptr_ty, &types).expect_err("pointer type should be rejected");
+        let message = format!("{err}");
+
+        assert!(
+            message.contains("unsupported pointer type id"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("explicit ROM/RAM memory-interface boundary"),
+            "expected action wording, got: {message}"
+        );
+    }
+
     #[test]
     fn vhdl_rt_tuple_get_projects_constant_index_from_virtual_tuple() {
         let types = TypeRegistry::new();
@@ -2320,6 +3317,145 @@ fn top(a: bool, b: bool) -> bool:
             "expected VHDL library header:\n{vhdl}"
         );
         assert!(vhdl.contains("entity add is"), "expected add entity:\n{vhdl}");
+    }
+
+    #[test]
+    fn compile_file_to_vhdl_lowers_unsigned_fixed_width_operations() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "\
+@hardware
+fn shl(a: u32) -> u32:
+    return a << 2
+
+@hardware
+fn high_byte(a: u16) -> u8:
+    return a[15:8]
+
+@hardware
+fn join_bytes(hi: u8, lo: u8) -> u16:
+    return concat(hi, lo)
+",
+        )
+        .expect("write source");
+        let output_file = NamedTempFile::new().expect("temp vhdl");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        pipeline
+            .compile_file_to_vhdl(source_file.path(), output_file.path())
+            .expect("compile VHDL");
+
+        let vhdl = std::fs::read_to_string(output_file.path()).expect("read VHDL");
+        assert!(
+            vhdl.contains("a : in unsigned(31 downto 0);"),
+            "expected u32 input port:\n{vhdl}"
+        );
+        assert!(vhdl.contains("shift_left(a, 2)"), "expected shift lowering:\n{vhdl}");
+        assert!(
+            vhdl.contains("result_out <= a(15 downto 8);"),
+            "expected bit-slice lowering:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("result_out <= hi & lo;"),
+            "expected concat lowering:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn compile_file_to_vhdl_removes_stale_output_on_failure() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "\
+@hardware
+fn float_bad(a: f32) -> f32:
+    return a
+",
+        )
+        .expect("write source");
+        let output_file = NamedTempFile::new().expect("temp vhdl");
+        std::fs::write(output_file.path(), "stale VHDL").expect("write stale output");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        let result = pipeline.compile_file_to_vhdl(source_file.path(), output_file.path());
+
+        let err = result.expect_err("expected unsupported VHDL input to fail");
+        let message = format!("{err}");
+        assert!(
+            message.contains("VHDL backend unsupported bare f32 hardware value"),
+            "expected explicit float contract diagnostic, got: {message}"
+        );
+        assert!(
+            message.contains("explicit fixed-point contract encoded as a fixed-width integer"),
+            "expected fixed-point remediation in diagnostic, got: {message}"
+        );
+        assert!(
+            !output_file.path().exists(),
+            "failed VHDL compile should remove stale output artifact"
+        );
+    }
+
+    #[test]
+    fn compile_file_to_vhdl_rejects_implicit_memory_and_removes_stale_artifacts() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "\
+@hardware
+fn read_rom(addr: u8) -> u8:
+    val rom = [1, 2, 3, 4]
+    return rom[0]
+",
+        )
+        .expect("write source");
+        let output_file = NamedTempFile::new().expect("temp vhdl");
+        let map_path = vhdl_source_map_path(output_file.path());
+        std::fs::write(output_file.path(), "stale VHDL").expect("write stale output");
+        std::fs::write(&map_path, "stale map").expect("write stale source map");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        let result = pipeline.compile_file_to_vhdl(source_file.path(), output_file.path());
+
+        let err = result.expect_err("expected implicit memory to fail");
+        let message = format!("{err}");
+        assert!(
+            message.contains("VHDL-MEM-POLICY"),
+            "expected vendor-safe memory policy diagnostic, got: {message}"
+        );
+        assert!(
+            message.contains("explicit static ROM, registered ROM, or synchronous RAM templates"),
+            "expected explicit ROM/RAM template guidance, got: {message}"
+        );
+        assert!(
+            !output_file.path().exists(),
+            "failed VHDL compile should remove stale output artifact"
+        );
+        assert!(
+            !map_path.exists(),
+            "failed VHDL compile should remove stale source-map artifact"
+        );
+    }
+
+    #[test]
+    fn vhdl_type_rejects_bare_float_with_fixed_point_contract_guidance() {
+        let types = TypeRegistry::new();
+
+        let err = vhdl_type(crate::hir::TypeId::F64, &types).expect_err("f64 should be rejected");
+        let message = format!("{err}");
+
+        assert!(
+            message.contains("VHDL backend unsupported bare f64 hardware value"),
+            "unexpected diagnostic: {message}"
+        );
+        assert!(
+            message.contains("i32/u32 with documented scale, rounding, and saturation"),
+            "diagnostic should describe the explicit fixed-point integer contract: {message}"
+        );
+        assert!(
+            message.contains("explicit float IP boundary"),
+            "diagnostic should describe the explicit float IP escape hatch: {message}"
+        );
     }
 
     #[test]

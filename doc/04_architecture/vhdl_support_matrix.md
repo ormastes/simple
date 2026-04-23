@@ -11,7 +11,7 @@ compiler source of truth. A feature is not considered pure-Simple-owned until a
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, tagged-record payload enum ports/results, aggregate construction, payload field projection, tag-based switch matching, payload-free enum literal sanitization/collision checks, unit-return no-output entities, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for floats, pointers, unconstrained memories, unsupported MIR instructions, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, tagged-record payload enum ports/results, aggregate construction, payload field projection, tag-based switch matching, payload-free enum literal sanitization/collision checks, unit-return no-output entities, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for floats, pointers, unconstrained memories, unsupported MIR instructions, ordinary-function helper inference outside explicit `@hardware` helper entities, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path. Implicit heap allocation, pointer wrappers, pointer dereference, and dynamic pointer-like addressing fail before VHDL file emission with diagnostics that name the unsupported source form and direct authors to explicit ROM/RAM memory-interface boundaries.
 
 ## Type Support
 
@@ -32,9 +32,9 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Struct | `record ... end record` | stable | stable | stable | supported | **stable** |
 | Payloadless Enum | `type T is (A, B, C)` and variant literal assignments; MIR literals are sanitized and checked for VHDL collisions | stable | stable | stable | supported | **stable** |
 | Payload Enum | tagged record with `tag` plus deterministic payload fields | supported | stable | stable | supported for supported record operations | **supported** |
-| `f16/f32/f64` | — (unsupported-type diagnostic) | error | — | — | — | **deferred** |
+| `f16/f32/f64` | explicit fixed-point must be encoded as fixed-width integer ports/signals with documented scale/rounding/saturation; bare float hardware values emit actionable diagnostics or require an explicit float IP boundary | fixed-point via integer: supported; bare float: error | fixed-point stable | fixed-point stable | fixed-point supported | **contracted/deferred** |
 | `Unit` return | no output port | supported | stable | stable | supported | **supported** |
-| Pointer | — (unsupported-type diagnostic) | error | — | — | — | **deferred** |
+| Pointer | — (unsupported pointer-type diagnostic; use explicit ROM/RAM memory-interface ports/templates) | error | — | — | — | **deferred** |
 
 ## Constant Support
 
@@ -72,11 +72,13 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `GetField` | Record field select | **stable** |
 | `SetField` | Record update through aggregate lowering | **supported** |
 | `Nop` | (no output) | **stable** |
-| `Alloc` | — (hard error) | **deferred** |
-| `GetElementPtr` | — (hard error) | **deferred** |
-| Generic `Call` | — (hard error unless explicitly handled) | **deferred** |
-| `CallIndirect` | — (hard error) | **deferred** |
-| Stateful/general memory MIR | — (hard error unless matched by explicit ROM/RAM template renderer) | **deferred** |
+| `GcAlloc` / implicit heap allocation | — (memory-boundary diagnostic before VHDL emission; source form named) | **deferred** |
+| `PointerNew` / `PointerRef` / `PointerDeref` | — (memory-boundary diagnostic before VHDL emission; explicit memory-interface action named) | **deferred** |
+| `GetElementPtr` / non-local `Load` / non-local `Store` / indexed collection memory | — (pointer-like addressing diagnostic before VHDL emission; explicit address/data/control interface required) | **deferred** |
+| Generic `Call` | — (pre-emission diagnostic unless target is a VHDL intrinsic or direct `@hardware` entity) | **deferred** |
+| `CallIndirect` / closure dispatch / virtual method dispatch | — (pre-emission diagnostic; direct `@hardware` calls required) | **deferred** |
+| Stateful/general memory MIR | — (`VHDL-MEM-*` or unsupported-stateful hard error unless matched by explicit ROM/RAM template renderer or explicit memory-interface ports) | **deferred** |
+| Async/actor/generator MIR and state-machine metadata | — (pre-emission runtime-only state transition diagnostic; no HLS state-machine lowering) | **deferred** |
 | All other unsupported MIR | — (unsupported-MIR hard diagnostic) | **deferred** |
 
 ## Control Flow Support
@@ -140,17 +142,18 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
 | VHDL source-map sidecar | `<output>.map.json` with generated entity and port anchors | **supported** |
-| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, deterministic anonymous tuple output ports, selected `@generic`/`@clocked` forms, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, narrow slice/concat support, and hard diagnostics for unsupported implicit-width behavior. This is not yet the structured pure Simple compiler source of truth. | **supported** |
+| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, deterministic anonymous tuple output ports, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, narrow slice/concat support, and hard diagnostics for unsupported implicit-width behavior. Structured `@generic` and `@clocked` metadata are now owned by the compiler VHDL path instead of the source facade. | **supported** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
 | Anonymous hardware outputs | Source-facade hardware tuple returns without field labels lower to deterministic `out_N` output ports, validate collisions before VHDL emission, and are covered by GHDL analysis/elaboration | **supported** |
-| Full pure Simple compiler VHDL path | Structured AST/HIR/MIR metadata for broad HLS behavior without source-facade compatibility parsing or Rust-only source-of-truth behavior; currently emits explicit deferral diagnostics where exercised | **deferred** |
+| Pure Simple compiler VHDL path | `simple compile --backend=vhdl` owns the runnable scalar entity, tuple-output ABI, direct hardware-call instance/port-map, selected pure combinational helpers expressed as explicit `@hardware` entities, deterministic temp-signal, field-access, typed signed comparison, explicit fixed-point-by-fixed-width-integer contract, unsigned fixed-width literal shift, fixed-width slice/concat, structured `@generic` declarations, structured `@clocked` process metadata including sync/async/no-reset named-domain forms, E0710 cross-domain rejection, stale-artifact cleanup on failed lowering, actionable bare-float diagnostics, and GHDL analyze/elaborate checks. Ordinary-function helper inference and broader HLS behavior remain deferred with hard diagnostics. | **partial** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **supported** |
 | GHDL `--synth` | Synthesis | **supported** |
 | Optional vendor synthesis smoke | `SIMPLE_VHDL_VENDOR_SMOKE=1`, clear diagnostics with deterministic command, report, and log paths when disabled, missing, or executed | **supported** |
 | VHDL testbench renderer | One-DUT artifacts and ordered multi-DUT/multi-phase suites with literal stimuli, optional clock/reset driving, named port maps, equality assertions with `severity failure`, and source-map anchors for test name, DUTs, phases, ports, port-map lines, and expectations | **supported** |
-| ROM/RAM template renderer | Static ROM, registered ROM read, and single-port synchronous RAM with explicit read-during-write policy; ambiguous memory semantics reject before VHDL output | **supported** |
+| Explicit memory-interface boundary | Fixed address/data/control ports or explicit ROM/RAM templates; this is the accepted path for storage, rather than inferred heap or pointer lowering | **supported** |
+| ROM/RAM template renderer | Static ROM, registered ROM read, and single-port synchronous RAM with explicit vendor-safe read-during-write policy; ambiguous or unconstrained memory semantics reject with `VHDL-MEM-*` diagnostics before VHDL output | **supported** |
 | Yosys | Synthesis | **deferred** |
 
 ## MIR Backend Source-of-Truth Parity Specs
@@ -176,10 +179,15 @@ The broad pure Simple compiler handoff is tracked separately by:
 
 - `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
 
-This file covers behavior beyond the selected milestone: structured pure Simple
-metadata, broad HLS ownership, direct hardware-call `port map` lowering, and
-GHDL analyze/elaborate/synth checks that are not already covered by the
-source-facade or MIR backend slices.
+This file now has runnable coverage for the pure Simple CLI path over scalar
+hardware entities, tuple output ABI, direct hardware-call `port map` lowering,
+selected pure combinational helpers expressed as explicit `@hardware` entities,
+hard diagnostics for ordinary-function helper inference, deterministic temp
+signals, labeled field access, typed signed comparisons, unsigned fixed-width
+literal shifts, fixed-width slice/concat, stale-artifact cleanup on failed
+lowering, and GHDL analyze/elaborate checks. Remaining skipped examples track
+structured `@generic`/`@clocked` metadata, domain semantics, and broad HLS
+ownership other than the helper-inference hard-error boundary.
 
 ## Simulation Targets
 
@@ -193,10 +201,11 @@ source-facade or MIR backend slices.
 Deferred and migrated SSpec coverage is surfaced by
 `bin/simple test --only-skipped --list-skip-features --pending` where present.
 The remaining tracked gaps are milestone-out-of-scope broad HLS work:
-floats, pointers, unconstrained memories, unsupported MIR instructions,
-implicit-width behavior outside the supported source-facade
-subset, and the full pure-Simple compiler
-source-of-truth path. Runnable coverage for the selected milestone is in
+float IP lowering, pointers, unconstrained memories, unsupported MIR instructions,
+ordinary-function helper inference outside explicit `@hardware` helper
+entities, implicit-width behavior outside the supported source-facade subset,
+and the remaining structured pure-Simple generic/clock-domain
+handoff. Runnable coverage for the selected milestone is in
 `test/unit/compiler/backend/vhdl_backend_spec.spl`,
 `test/unit/compiler/backend/vhdl_type_mapper_spec.spl`,
 `test/unit/compiler/backend/vhdl_constraints_spec.spl`,

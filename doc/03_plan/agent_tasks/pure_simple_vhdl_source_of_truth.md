@@ -1,6 +1,6 @@
 # Pure Simple VHDL Source-of-Truth Migration
 
-**Status:** Pending implementation
+**Status:** Partial implementation
 **Owner model:** parallel implementation workers with tests/docs coordination
 **Acceptance specs:** `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
 
@@ -17,7 +17,7 @@ Simple only when the pure-Simple specs are runnable.
 
 Owns pure Simple parser/lowering/compiler metadata modules.
 
-- Preserve `@hardware` as structured metadata.
+- Preserve `@hardware` as structured metadata. **Runnable coverage exists.**
 - Preserve `@generic(...)` declarations and defaults as structured metadata.
 - Preserve `@clocked(...)` clock, reset, polarity, synchrony, and domain names.
 - Preserve labeled tuple return field names through pure Simple IR.
@@ -32,10 +32,9 @@ Acceptance:
 
 Owns pure Simple VHDL entity/port emission.
 
-- Scalar returns emit `result_out`.
-- labeled tuple returns emit sanitized output ports.
-- anonymous tuple returns emit deterministic `outN` only when allowed.
-- reject same-type anonymous hardware outputs.
+- Scalar returns emit `result_out`. **Runnable coverage exists.**
+- labeled tuple returns emit sanitized output ports. **Runnable coverage exists.**
+- anonymous tuple returns emit deterministic `outN`. **Runnable coverage exists.**
 - reject sanitized collisions across entity, input, and output names.
 
 Acceptance:
@@ -46,11 +45,12 @@ Acceptance:
 
 Owns pure Simple call lowering and virtual aggregate values.
 
-- Select direct `@hardware` callees.
-- Emit deterministic entity instances.
-- Emit named `port map` connections.
-- Allocate deterministic temp signals for multi-output calls.
-- Resolve `lo.sum`, `lo.cout`, `lo.0`, and `lo.1`.
+- Select direct `@hardware` callees. **Runnable coverage exists.**
+- Emit deterministic entity instances. **Runnable coverage exists.**
+- Emit named `port map` connections. **Runnable coverage exists.**
+- Allocate deterministic temp signals for multi-output calls. **Runnable coverage exists.**
+- Resolve labeled field access such as `lo.sum` and `lo.cout`. **Runnable coverage exists.**
+- Resolve numeric field access such as `lo.0` and `lo.1`.
 - Reject dynamic/runtime tuple access in hardware lowering.
 
 Acceptance:
@@ -62,8 +62,13 @@ Acceptance:
 
 Owns typed pure Simple hardware operations and clock-domain validation.
 
-- Lower slices, concat, shifts, comparisons, casts, and resize operations from
-  typed IR, not facade string parsing.
+- Lower signed integer comparisons from typed IR, not facade string parsing.
+  **Runnable coverage exists.**
+- Lower unsigned fixed-width literal shifts from typed IR, not facade string
+  parsing. **Runnable coverage exists.**
+- Lower slices and concat from typed IR, not facade string parsing. **Runnable
+  coverage exists.**
+- Lower casts and resize operations from typed IR, not facade string parsing.
 - Define width and signedness diagnostics.
 - Lower named domains, reset polarity, reset synchrony, and no-reset domains.
 - Reject implicit cross-domain reads.
@@ -77,8 +82,10 @@ Acceptance:
 
 Owns generated-file acceptance and diagnostics.
 
-- Run GHDL analyze/elaborate/synth for pure Simple full_add and add2 fixtures.
+- Run GHDL analyze/elaborate for pure Simple full_add and caller/callee fixtures. **Runnable coverage exists.**
+- Extend pure Simple GHDL verification to synth where supported.
 - Ensure failed VHDL lowering does not leave stale or partial artifacts.
+  **Runnable coverage exists.**
 - Keep outputs byte-stable for repeated compilation.
 
 Acceptance:
@@ -95,11 +102,19 @@ Owns docs/tests only.
 - Keep facade and Rust MIR claims clearly demoted where pure Simple does not own
   the behavior.
 - Promote pending specs to runnable only when implementation workers land.
+- Document selected pure combinational helper coverage as explicit `@hardware`
+  helper entities.
+- Replace broad ordinary-function HLS helper inference parity skips with a
+  runnable hard-error spec before VHDL emission.
 
 Current output:
 - `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
 - `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip`
 - `doc/04_architecture/vhdl_support_matrix.md`
+
+Acceptance:
+- `pure Simple VHDL backend lowers selected pure combinational helpers as explicit hardware entities`
+- `pure Simple VHDL backend rejects broad HLS helper inference outside explicit hardware helpers`
 
 ### Worker 8 Wave 2: Source-Facade Broad-HLS Deferral Diagnostics
 

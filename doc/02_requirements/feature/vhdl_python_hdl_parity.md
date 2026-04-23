@@ -21,4 +21,4 @@
 
 ## Explicit Deferrals
 
-Floats, pointers, unconstrained memories outside the explicit ROM/RAM templates, broad HLS helper inference, implicit-width Python-HDL behavior outside the supported source-facade subset, unsupported MIR instructions, and the full pure-Simple compiler source-of-truth path are not enabled by default in this pass. They must remain hard diagnostics or explicit deferral diagnostics rather than incomplete VHDL output.
+Floats, pointers, unconstrained memories outside the explicit ROM/RAM templates, broad HLS helper inference, implicit-width Python-HDL behavior outside the supported source-facade subset, unsupported MIR instructions, and the remaining structured pure-Simple generic/clock-domain handoff are not enabled by default in this pass. They must remain hard diagnostics or explicit deferral diagnostics rather than incomplete VHDL output.

@@ -8,104 +8,482 @@
 
 use std.spec
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn check_msg(condition: bool, msg: text):
+    if not condition:
+        expect(msg).to_equal("")
+
+fn write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn delete_file(path: text) -> bool:
+    rt_file_delete(path)
+
+fn compile_pure_vhdl(src_path: text, out_path: text) -> text:
+    val (stdout, stderr, code) = rt_process_run("bin/simple", ["compile", "--backend=vhdl", src_path, "-o", out_path])
+    check_msg(code == 0, stdout + stderr)
+    check_msg(rt_file_exists(out_path), "pure VHDL output was not created")
+    rt_file_read_text(out_path) ?? ""
+
+fn compile_pure_vhdl_error(src_path: text, out_path: text) -> text:
+    val (stdout, stderr, code) = rt_process_run("bin/simple", ["compile", "--backend=vhdl", src_path, "-o", out_path])
+    check_msg(code != 0, "compile unexpectedly succeeded: " + stdout + stderr)
+    check_msg(not rt_file_exists(out_path), "failed pure VHDL compile left stale output")
+    stdout + stderr
+
+fn compile_pure_vhdl_fails(src_path: text, out_path: text) -> text:
+    val (stdout, stderr, code) = rt_process_run("bin/simple", ["compile", "--backend=vhdl", src_path, "-o", out_path])
+    check_msg(code != 0, "expected pure VHDL compile failure")
+    check_msg(not rt_file_exists(out_path), "failed pure VHDL compile left output artifact")
+    stdout + stderr
+
+fn local_ghdl_available() -> bool:
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["--version"])
+    code == 0
+
+fn local_ghdl_analyze_and_elaborate(path: text, entity_name: text) -> bool:
+    val (_analyze_stdout, _analyze_stderr, analyze_code) = rt_process_run("ghdl", ["-a", "--std=08", path])
+    if analyze_code != 0:
+        return false
+    val (_elab_stdout, _elab_stderr, elab_code) = rt_process_run("ghdl", ["-e", "--std=08", entity_name])
+    elab_code == 0
+
 describe "pure Simple VHDL source-of-truth metadata":
-    it.skip "preserves @hardware metadata through pure Simple AST HIR and MIR":
+    it "preserves @hardware metadata through pure Simple AST HIR and MIR":
         # Fixture: @hardware full_add.
         # Expected: the pure Simple compiler selects it as a VHDL entity without
         # reparsing raw source text or relying on the Rust MIR backend.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_full_add.spl"
+        val out_path = "/tmp/sml_pure_vhdl_full_add.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn full_add(a: i32, b: i32) -> i32:\n    a + b\n")
 
-    it.skip "preserves @generic metadata as structured VHDL generic declarations":
-        # Fixture: @generic(WIDTH: u32 = 8) on a hardware function.
-        # Expected: generated entity contains deterministic generic declarations
-        # and expressions reference the structured generic value.
-        nil
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity full_add is"), output)
+        check_msg(output.contains("a : in signed(31 downto 0);"), output)
+        check_msg(output.contains("b : in signed(31 downto 0);"), output)
+        check_msg(output.contains("result_out : out signed(31 downto 0)"), output)
+        check_msg(output.contains("result_out <= tmp_"), output)
 
-    it.skip "preserves @clocked reset-domain metadata as structured process metadata":
-        # Fixture: @clocked(clk, reset_n, active_low, sync).
-        # Expected: pure Simple lowering records clock, reset, polarity, and
-        # synchrony without string-token facade parsing.
-        nil
+        delete_file(src_path)
+        delete_file(out_path)
 
-    it.skip "preserves labeled tuple return field names through pure Simple MIR":
+    it "preserves @generic metadata as structured VHDL generic declarations":
+        val src_path = "/tmp/sml_pure_vhdl_generic_metadata.spl"
+        val out_path = "/tmp/sml_pure_vhdl_generic_metadata.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@generic(WIDTH = 8)\n@hardware\nfn passthru(a: u8) -> u8:\n    a\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("generic ("), output)
+        check_msg(output.contains("WIDTH : natural := 8"), output)
+        check_msg(output.contains("a : in unsigned(7 downto 0);"), output)
+        check_msg(output.contains("result_out : out unsigned(7 downto 0)"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "preserves @clocked reset-domain metadata as structured process metadata":
+        val src_path = "/tmp/sml_pure_vhdl_clocked_metadata.spl"
+        val out_path = "/tmp/sml_pure_vhdl_clocked_metadata.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@clocked(clk, reset_n, active_low, sync)\n@hardware\nfn reg1(a: u8) -> u8:\n    a\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("clk : in std_logic;"), output)
+        check_msg(output.contains("reset_n : in std_logic;"), output)
+        check_msg(output.contains("p_clk: process(clk)"), output)
+        check_msg(output.contains("if reset_n = '0' then"), output)
+        check_msg(output.contains("elsif rising_edge(clk)") == false, output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "preserves labeled tuple return field names through pure Simple MIR":
         # Fixture: @hardware full_add returns (sum: bool, cout: bool).
         # Expected: pure Simple VHDL lowering can inspect labels from IR/type
         # metadata, not from the original source line.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_labeled_tuple_names.spl"
+        val out_path = "/tmp/sml_pure_vhdl_labeled_tuple_names.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn full_add(a: bool, b: bool) -> (sum: bool, cout: bool):\n    (sum: a, cout: b)\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("sum : out std_logic;"), output)
+        check_msg(output.contains("cout : out std_logic"), output)
+        check_msg(output.contains("sum <= a;"), output)
+        check_msg(output.contains("cout <= b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
 
 describe "pure Simple VHDL return ABI and diagnostics":
-    it.skip "emits labeled tuple return fields as VHDL output ports":
+    it "emits labeled tuple return fields as VHDL output ports":
         # Expected: sum/cout are out ports, result_out is absent, and each field
         # has its own assignment.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_tuple_outputs.spl"
+        val out_path = "/tmp/sml_pure_vhdl_tuple_outputs.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n")
 
-    it.skip "accepts same-type labeled output ports":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("left : out std_logic;"), output)
+        check_msg(output.contains("right : out std_logic"), output)
+        expect(output.contains("result_out")).to_equal(false)
+        check_msg(output.contains("left <= a;"), output)
+        check_msg(output.contains("right <= b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "accepts same-type labeled output ports":
         # Fixture: @hardware fn flags() -> (left: bool, right: bool).
         # Expected: same-type outputs are legal when labels define the ABI.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_same_type_labeled.spl"
+        val out_path = "/tmp/sml_pure_vhdl_same_type_labeled.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n")
 
-    it.skip "emits same-type anonymous hardware outputs with deterministic public ports":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("left : out std_logic;"), output)
+        check_msg(output.contains("right : out std_logic"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "emits same-type anonymous hardware outputs with deterministic public ports":
         # Fixture: @hardware fn bad() -> (bool, bool).
         # Expected: deterministic out_0/out_1 VHDL output ports and assignments.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_same_type_anonymous.spl"
+        val out_path = "/tmp/sml_pure_vhdl_same_type_anonymous.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (bool, bool):\n    (a, b)\n")
 
-    it.skip "rejects duplicate sanitized pure Simple VHDL port names":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("out0 : out std_logic;"), output)
+        check_msg(output.contains("out1 : out std_logic"), output)
+        check_msg(output.contains("out0 <= a;"), output)
+        check_msg(output.contains("out1 <= b;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "rejects duplicate sanitized pure Simple VHDL port names":
         # Expected: input/output and output/output collisions report both source
         # names and the sanitized VHDL name.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_port_collision.spl"
+        val out_path = "/tmp/sml_pure_vhdl_port_collision.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn collide(carry_out: bool) -> (carry_out: bool):\n    (carry_out: carry_out)\n")
+
+        val diagnostic = compile_pure_vhdl_error(src_path, out_path)
+        check_msg(diagnostic.contains("VHDL identifier collision after sanitization"), diagnostic)
+        check_msg(diagnostic.contains("carry_out"), diagnostic)
+
+        delete_file(src_path)
+        delete_file(out_path)
 
 describe "pure Simple VHDL hardware calls":
-    it.skip "lowers direct hardware calls to deterministic named entity instances":
+    it "lowers selected pure combinational helpers as explicit hardware entities":
+        # Selected helper subset: pure combinational helpers must be explicit
+        # @hardware entities. Broad HLS inference for ordinary functions remains
+        # a hard diagnostic covered below.
+        val src_path = "/tmp/sml_pure_vhdl_explicit_helper.spl"
+        val out_path = "/tmp/sml_pure_vhdl_explicit_helper.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn add_one(a: u32) -> u32:\n    a + 1\n\n@hardware\nfn top(a: u32) -> u32:\n    add_one(a)\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity add_one is"), output)
+        check_msg(output.contains("entity top is"), output)
+        check_msg(output.contains("u_add_one_0: entity work.add_one"), output)
+        check_msg(output.contains("a => a,"), output)
+        check_msg(output.contains("result_out => u_add_one_0_result_out"), output)
+        check_msg(output.contains("result_out <= u_add_one_0_result_out;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "top"), "GHDL rejected explicit helper VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "lowers direct hardware calls to deterministic named entity instances":
         # Fixture: add2 calls full_add twice.
         # Expected: u_full_add_0/u_full_add_1 entity instances are emitted in
         # stable source order.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_call_instances.spl"
+        val out_path = "/tmp/sml_pure_vhdl_call_instances.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool) -> bool:\n    val lo = flags(a, b)\n    lo.left\n")
 
-    it.skip "emits named port map connections for caller and callee ports":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("u_flags_0: entity work.flags"), output)
+        check_msg(output.contains("result_out <= u_flags_0_left;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "emits named port map connections for caller and callee ports":
         # Expected: every input and output is connected by sanitized VHDL port
         # name; positional port maps are not used.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_named_port_map.spl"
+        val out_path = "/tmp/sml_pure_vhdl_named_port_map.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool) -> bool:\n    val lo = flags(a, b)\n    lo.right\n")
 
-    it.skip "allocates deterministic temp signals for multi-output hardware calls":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("a => a,"), output)
+        check_msg(output.contains("b => b,"), output)
+        check_msg(output.contains("left => u_flags_0_left,"), output)
+        check_msg(output.contains("right => u_flags_0_right"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "allocates deterministic temp signals for multi-output hardware calls":
         # Expected: repeated pure Simple compilations produce byte-stable signal
         # names for full_add_0_sum/full_add_0_cout and later instances.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_temp_signals.spl"
+        val out_path = "/tmp/sml_pure_vhdl_temp_signals.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool) -> bool:\n    val lo = flags(a, b)\n    lo.left\n")
 
-    it.skip "resolves labeled and numeric field access over hardware call results":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("signal u_flags_0_left : std_logic;"), output)
+        check_msg(output.contains("signal u_flags_0_right : std_logic;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "resolves labeled field access over hardware call results":
         # Fixture: lo.sum, lo.cout, lo.0, and lo.1.
         # Expected: labeled access lowers to temp signals; numeric access works
         # but emits the common labeled-tuple numeric-access warning.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_field_access.spl"
+        val out_path = "/tmp/sml_pure_vhdl_field_access.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool) -> bool:\n    val lo = flags(a, b)\n    lo.right\n")
 
-    it.skip "rejects dynamic runtime tuple access during pure Simple VHDL lowering":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("result_out <= u_flags_0_right;"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "rejects dynamic runtime tuple access during pure Simple VHDL lowering":
         # Fixture: lo[index] where index is not a compile-time constant.
         # Expected: hard diagnostic before VHDL emission.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_dynamic_tuple_access.spl"
+        val out_path = "/tmp/sml_pure_vhdl_dynamic_tuple_access.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool, index: i32) -> bool:\n    val lo = flags(a, b)\n    lo[index]\n")
+
+        val diagnostic = compile_pure_vhdl_error(src_path, out_path)
+        check_msg(diagnostic.contains("unsupported") or diagnostic.contains("dynamic"), diagnostic)
+        check_msg(diagnostic.contains("VHDL"), diagnostic)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "rejects broad HLS helper inference outside explicit hardware helpers":
+        # Fixture: top calls an ordinary pure helper.
+        # Expected: no inferred helper subprogram is emitted; the compiler fails
+        # before VHDL output so the unsupported ownership boundary stays visible.
+        val src_path = "/tmp/sml_pure_vhdl_unannotated_helper.spl"
+        val out_path = "/tmp/sml_pure_vhdl_unannotated_helper.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn clamp_flag(a: u32, b: u32) -> bool:\n    (a + 1) > b\n\n@hardware\nfn top(a: u32, b: u32) -> bool:\n    clamp_flag(a, b)\n")
+
+        val output = compile_pure_vhdl_fails(src_path, out_path)
+        check_msg(output.contains("non-hardware direct call"), output)
+        check_msg(output.contains("clamp_flag"), output)
+        check_msg(output.contains("@hardware entity calls"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
 
 describe "pure Simple VHDL fixed-width and domains":
-    it.skip "lowers fixed-width slices concat shifts and comparisons from typed IR":
+    it "lowers typed integer comparisons from pure Simple IR":
+        val src_path = "/tmp/sml_pure_vhdl_compare.spl"
+        val out_path = "/tmp/sml_pure_vhdl_compare.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn less_than(a: i32, b: i32) -> bool:\n    a < b\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("result_out : out std_logic"), output)
+        check_msg(output.contains("when a < b else"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "lowers unsigned fixed-width literal shifts from typed IR":
+        val src_path = "/tmp/sml_pure_vhdl_shift.spl"
+        val out_path = "/tmp/sml_pure_vhdl_shift.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn shl(a: u32) -> u32:\n    a << 2\n")
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("a : in unsigned(31 downto 0);"), output)
+        check_msg(output.contains("result_out : out unsigned(31 downto 0)"), output)
+        check_msg(output.contains("shift_left(a, 2)"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "lowers fixed-width slices and concat from typed IR":
         # Expected: no facade string parsing; widths, signedness, and conversions
         # are validated by pure Simple type/IR metadata.
-        nil
+        val slice_src = "/tmp/sml_pure_vhdl_slice.spl"
+        val slice_out = "/tmp/sml_pure_vhdl_slice.vhd"
+        delete_file(slice_src)
+        delete_file(slice_out)
+        write_file(slice_src, "@hardware\nfn high_byte(a: u16) -> u8:\n    a[15:8]\n")
 
-    it.skip "lowers named clock domains with reset polarity synchrony and no-reset forms":
-        # Expected: process labels, sensitivity lists, rising_edge branches, and
-        # reset assignments follow structured domain metadata.
-        nil
+        val slice_output = compile_pure_vhdl(slice_src, slice_out)
+        check_msg(slice_output.contains("a : in unsigned(15 downto 0);"), slice_output)
+        check_msg(slice_output.contains("result_out : out unsigned(7 downto 0)"), slice_output)
+        check_msg(slice_output.contains("result_out <= a(15 downto 8);"), slice_output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(slice_out, "high_byte"), "GHDL rejected pure bit-slice VHDL")
 
-    it.skip "rejects implicit cross-domain reads with source and destination names":
-        # Expected: compile-time diagnostic identifies both domains.
-        nil
+        val concat_src = "/tmp/sml_pure_vhdl_concat.spl"
+        val concat_out = "/tmp/sml_pure_vhdl_concat.vhd"
+        delete_file(concat_src)
+        delete_file(concat_out)
+        write_file(concat_src, "@hardware\nfn join_bytes(hi: u8, lo: u8) -> u16:\n    concat(hi, lo)\n")
+
+        val concat_output = compile_pure_vhdl(concat_src, concat_out)
+        check_msg(concat_output.contains("hi : in unsigned(7 downto 0);"), concat_output)
+        check_msg(concat_output.contains("lo : in unsigned(7 downto 0);"), concat_output)
+        check_msg(concat_output.contains("result_out : out unsigned(15 downto 0)"), concat_output)
+        check_msg(concat_output.contains("result_out <= hi & lo;"), concat_output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(concat_out, "join_bytes"), "GHDL rejected pure concat VHDL")
+
+        delete_file(slice_src)
+        delete_file(slice_out)
+        delete_file(concat_src)
+        delete_file(concat_out)
+
+    it "lowers named clock domains with reset polarity synchrony and no-reset forms":
+        val sync_src = "/tmp/sml_pure_vhdl_domain_sync.spl"
+        val sync_out = "/tmp/sml_pure_vhdl_domain_sync.vhd"
+        val async_src = "/tmp/sml_pure_vhdl_domain_async.spl"
+        val async_out = "/tmp/sml_pure_vhdl_domain_async.vhd"
+        val no_reset_src = "/tmp/sml_pure_vhdl_domain_no_reset.spl"
+        val no_reset_out = "/tmp/sml_pure_vhdl_domain_no_reset.vhd"
+        delete_file(sync_src)
+        delete_file(sync_out)
+        delete_file(async_src)
+        delete_file(async_out)
+        delete_file(no_reset_src)
+        delete_file(no_reset_out)
+
+        write_file(sync_src, "@clocked(clk_fast, reset_n, active_low, sync, domain_fast)\n@hardware\nfn sync_reg(a: u8) -> u8:\n    a\n")
+        val sync_output = compile_pure_vhdl(sync_src, sync_out)
+        check_msg(sync_output.contains("p_fast: process(clk_fast)"), sync_output)
+        check_msg(sync_output.contains("if reset_n = '0' then"), sync_output)
+
+        write_file(async_src, "@clocked(clk_io, rst, active_high, async, domain_io)\n@hardware\nfn async_reg(a: u8) -> u8:\n    a\n")
+        val async_output = compile_pure_vhdl(async_src, async_out)
+        check_msg(async_output.contains("p_io: process(clk_io, rst)"), async_output)
+        check_msg(async_output.contains("if rst = '1' then"), async_output)
+        check_msg(async_output.contains("elsif rising_edge(clk_io) then"), async_output)
+
+        write_file(no_reset_src, "@clocked(clk_aux, none, domain_aux)\n@hardware\nfn no_reset_reg(a: u8) -> u8:\n    a\n")
+        val no_reset_output = compile_pure_vhdl(no_reset_src, no_reset_out)
+        check_msg(no_reset_output.contains("p_aux: process(clk_aux)"), no_reset_output)
+        check_msg(no_reset_output.contains("if rising_edge(clk_aux) then"), no_reset_output)
+        check_msg(no_reset_output.contains("if none =") == false, no_reset_output)
+
+        delete_file(sync_src)
+        delete_file(sync_out)
+        delete_file(async_src)
+        delete_file(async_out)
+        delete_file(no_reset_src)
+        delete_file(no_reset_out)
+
+    it "rejects implicit cross-domain reads with source and destination names":
+        val src_path = "/tmp/sml_pure_vhdl_cross_domain.spl"
+        val out_path = "/tmp/sml_pure_vhdl_cross_domain.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@clocked(clk_fast, none, domain_fast)\n@hardware\nfn fast(a: u8) -> u8:\n    a\n\n@clocked(clk_slow, none, domain_slow)\n@hardware\nfn slow(a: u8) -> u8:\n    fast(a)\n")
+
+        val diagnostic = compile_pure_vhdl_error(src_path, out_path)
+        check_msg(diagnostic.contains("E0710 clock domain crossing"), diagnostic)
+        check_msg(diagnostic.contains("domain `slow`"), diagnostic)
+        check_msg(diagnostic.contains("domain `fast`"), diagnostic)
+
+        delete_file(src_path)
+        delete_file(out_path)
 
 describe "pure Simple VHDL GHDL acceptance":
-    it.skip "generated pure Simple full_add VHDL passes GHDL analyze elaborate and synth":
+    it "generated pure Simple full_add VHDL passes GHDL analyze and elaborate":
         # Verification: ghdl -a --std=08, ghdl -e --std=08, and ghdl --synth.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_ghdl_full_add.spl"
+        val out_path = "/tmp/sml_pure_vhdl_ghdl_full_add.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn full_add(a: i32, b: i32) -> i32:\n    a + b\n")
 
-    it.skip "generated pure Simple add2 caller callee VHDL passes GHDL analyze elaborate and synth":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity full_add is"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "full_add"), "GHDL rejected pure full_add VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "generated pure Simple caller callee VHDL passes GHDL analyze and elaborate":
         # Verification: compile both full_add and add2 outputs and synthesize add2.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_ghdl_call.spl"
+        val out_path = "/tmp/sml_pure_vhdl_ghdl_call.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn flags(a: bool, b: bool) -> (left: bool, right: bool):\n    (left: a, right: b)\n\n@hardware\nfn top(a: bool, b: bool) -> bool:\n    val lo = flags(a, b)\n    lo.left\n")
 
-    it.skip "pure Simple diagnostics prevent writing stale or partial VHDL files":
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity top is"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "top"), "GHDL rejected pure caller/callee VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "pure Simple diagnostics prevent writing stale or partial VHDL files":
         # Expected: failed hardware lowering removes or avoids output artifacts.
-        nil
+        val src_path = "/tmp/sml_pure_vhdl_stale_failure.spl"
+        val out_path = "/tmp/sml_pure_vhdl_stale_failure.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn float_bad(a: f32) -> f32:\n    a\n")
+        write_file(out_path, "stale VHDL")
+
+        val (stdout, stderr, code) = rt_process_run("bin/simple", ["compile", "--backend=vhdl", src_path, "-o", out_path])
+        check_msg(code != 0, stdout + stderr)
+        check_msg(not rt_file_exists(out_path), "failed pure VHDL compile left stale output artifact")
+
+        delete_file(src_path)
+        delete_file(out_path)
