@@ -293,6 +293,7 @@ impl From<&Value> for BridgeValue {
             Value::FrozenArray(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
             Value::FixedSizeArray { data, .. } => Self::from_vec_with_tag(data, bridge_tags::ARRAY),
             Value::Tuple(items) => Self::from_vec_with_tag(items, bridge_tags::TUPLE),
+            Value::LabeledTuple { values, .. } => Self::from_vec_with_tag(values, bridge_tags::TUPLE),
             Value::Dict(_) | Value::FrozenDict(_) => {
                 // For now, store dict as a serialized form
                 // Full implementation would need proper serialization

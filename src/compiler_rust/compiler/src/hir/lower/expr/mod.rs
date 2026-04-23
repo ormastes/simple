@@ -45,6 +45,7 @@ impl Lowerer {
                 step,
             } => self.lower_slice(receiver, start.as_deref(), end.as_deref(), step.as_deref(), ctx),
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
+            Expr::LabeledTuple(fields) => self.lower_labeled_tuple(fields, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
             Expr::Dict(pairs) => self.lower_dict(pairs, ctx),
             Expr::ArrayRepeat { value, count } => self.lower_array_repeat(value, count, ctx),

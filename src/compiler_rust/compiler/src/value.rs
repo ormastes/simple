@@ -863,6 +863,13 @@ pub enum Value {
         data: Vec<Value>,
     },
     Tuple(Vec<Value>),
+    /// Tuple with field labels preserved for runtime field access and display.
+    ///
+    /// Storage remains positional; labels are metadata paired with values.
+    LabeledTuple {
+        labels: Vec<String>,
+        values: Vec<Value>,
+    },
     /// Mutable dict (default for dict literals)
     Dict(Arc<HashMap<String, Value>>),
     /// Immutable frozen dict (created via freeze(), copy-on-freeze semantics)

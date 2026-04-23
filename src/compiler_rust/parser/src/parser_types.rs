@@ -164,19 +164,28 @@ impl<'a> Parser<'a> {
 
         // Handle tuple type
         if self.check(&TokenKind::LParen) {
-            let types = self.parse_paren_type_list()?;
+            let tuple_type = self.parse_tuple_type()?;
 
             // Check if it's a function type
             if self.check(&TokenKind::Arrow) {
                 self.advance();
                 let ret = self.parse_type()?;
+                let types = match tuple_type {
+                    Type::Tuple(types) => types,
+                    Type::LabeledTuple(_) => {
+                        return Err(ParseError::syntax_error_with_span(
+                            "function parameter type lists cannot use tuple field labels",
+                            self.previous.span,
+                        ));
+                    }
+                    _ => unreachable!("parse_tuple_type only returns tuple variants"),
+                };
                 return Ok(Type::Function {
                     params: types,
                     ret: Some(Box::new(ret)),
                 });
             }
 
-            let tuple_type = Type::Tuple(types);
             // Check for optional tuple: (T, U)?
             if self.check(&TokenKind::Question) {
                 self.advance();
@@ -672,6 +681,77 @@ impl<'a> Parser<'a> {
         let end = self.parse_integer_literal()?;
 
         Ok((start, end))
+    }
+
+    fn skip_type_tuple_whitespace(&mut self) {
+        while matches!(
+            self.current.kind,
+            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+        ) {
+            self.advance();
+        }
+    }
+
+    fn parse_tuple_type(&mut self) -> Result<Type, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        self.skip_type_tuple_whitespace();
+
+        if self.check(&TokenKind::RParen) {
+            self.advance();
+            return Ok(Type::Tuple(vec![]));
+        }
+
+        let first_is_label =
+            matches!(&self.current.kind, TokenKind::Identifier { .. }) && self.peek_next().kind == TokenKind::Colon;
+        if first_is_label {
+            let mut fields = Vec::new();
+            let mut labels = std::collections::HashSet::new();
+            loop {
+                self.skip_type_tuple_whitespace();
+                if self.check(&TokenKind::RParen) {
+                    break;
+                }
+                let label = self.expect_identifier()?;
+                if !labels.insert(label.clone()) {
+                    return Err(ParseError::syntax_error_with_span(
+                        format!("duplicate tuple field label `{}`", label),
+                        self.previous.span,
+                    ));
+                }
+                self.expect(&TokenKind::Colon)?;
+                let ty = self.parse_type()?;
+                fields.push(TupleTypeField { label, ty });
+                self.skip_type_tuple_whitespace();
+                if self.check(&TokenKind::RParen) {
+                    break;
+                }
+                self.expect(&TokenKind::Comma)?;
+            }
+            self.expect(&TokenKind::RParen)?;
+            return Ok(Type::LabeledTuple(fields));
+        }
+
+        let mut types = Vec::new();
+        loop {
+            self.skip_type_tuple_whitespace();
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
+            if matches!(&self.current.kind, TokenKind::Identifier { .. }) && self.peek_next().kind == TokenKind::Colon {
+                return Err(ParseError::syntax_error_with_span(
+                    "tuple type fields must be either all labeled or all unlabeled",
+                    self.current.span,
+                ));
+            }
+            types.push(self.parse_type()?);
+            self.skip_type_tuple_whitespace();
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
+            self.expect(&TokenKind::Comma)?;
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(Type::Tuple(types))
     }
 
     /// Parse an integer literal (possibly negative)

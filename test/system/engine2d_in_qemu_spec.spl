@@ -36,6 +36,7 @@ use test.qemu.os.common.qemu_os_harness.{
     stop_guest, wait_for_serial_marker, read_serial_log}
 
 extern fn rt_env_get(name: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ===========================================================================
 # Helpers
@@ -57,7 +58,7 @@ fn _engine2d_target() -> OsTarget:
         qemu_memory: "2G",
         qemu_bios: "",
         qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
-        gui_mode: true
+        gui_mode: false
     )
 
 # Count non-black pixels in a captured ARGB frame (alpha stripped).
@@ -109,6 +110,63 @@ fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
 fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
+
+fn _capture_engine2d_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "s=socket.socket(socket.AF_UNIX);" +
+        "s.settimeout(5);" +
+        "s.connect(sys.argv[1]);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');" +
+        "f.flush();" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command', arguments=dict([('command-line','screendump '+sys.argv[2])]))).encode()+b'\\n');" +
+        "f.flush();" +
+        "f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2])>0)) for _ in range(150));" +
+        "print('OK' if ok else 'NO_CAPTURE');" +
+        "sys.exit(0 if ok else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    if result[0] != "":
+        print "[engine2d_in_qemu_spec] python qmp capture: {result[0]}"
+    if result[1] != "":
+        print "[engine2d_in_qemu_spec] python qmp stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
+
+fn _assert_nonblack_ppm_with_python(path: text) -> bool:
+    val script = "import pathlib,sys;" +
+        "b=pathlib.Path(sys.argv[1]).read_bytes();" +
+        "h=b.find(b'\\n255\\n')+5;" +
+        "pix=b[h:];" +
+        "n=sum(1 for i in range(0,len(pix),3) if pix[i:i+3] != b'\\x00\\x00\\x00');" +
+        "print('nonblack='+str(n));" +
+        "sys.exit(0 if n > 0 else 4)"
+    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
+    if result[0] != "":
+        print "[engine2d_in_qemu_spec] python ppm stats: {result[0]}"
+    if result[1] != "":
+        print "[engine2d_in_qemu_spec] python ppm stderr: {result[1]}"
+    result[2] == 0
+
+fn _compare_baseline_ppm_with_python(capture_path: text, baseline_path: text) -> bool:
+    val script = "import pathlib,sys;" +
+        "cb=pathlib.Path(sys.argv[1]).read_bytes();" +
+        "bb=pathlib.Path(sys.argv[2]).read_bytes();" +
+        "ci=cb.find(b'\\n255\\n')+5;" +
+        "bi=bb.find(b'\\n255\\n')+5;" +
+        "ch=cb[:ci]; cp=cb[ci:]; bh=bb[:bi]; bp=bb[bi:];" +
+        "total=min(len(cp),len(bp))//3;" +
+        "same=sum(1 for i in range(0,total*3,3) if cp[i:i+3]==bp[i:i+3]);" +
+        "pct=(same*10000)//total if total else 0;" +
+        "print('match='+str(pct/100.0)+'% '+str(same)+'/'+str(total));" +
+        "sys.exit(0 if ch==bh and len(cp)==len(bp) and pct >= 9500 else 5)"
+    val result = rt_process_run_timeout("python3", ["-c", script, capture_path, baseline_path], 10000)
+    if result[0] != "":
+        print "[engine2d_in_qemu_spec] python baseline compare: {result[0]}"
+    if result[1] != "":
+        print "[engine2d_in_qemu_spec] python baseline stderr: {result[1]}"
+    result[2] == 0
 
 fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: text, nb: i64) -> bool:
     val (ok, base_pixels, base_w, base_h, err) = _read_baseline_ppm(baseline_path)
@@ -182,48 +240,31 @@ describe "Engine2D in QEMU Simple OS guest":
                 val saw_painted = wait_for_serial_marker(
                     handle, "[E2D] Engine2D verification frame painted", 30000)
                 if saw_painted:
-                    # Give present() a beat to flush to the BGA fb before we
-                    # screendump, since the serial print happens just before
-                    # present() completes on some paths.
-                    val result = capture_qemu_vm(qmp_socket, capture_ppm)
-                    if result.success:
-                        val nb = _non_black_count(result.pixels)
-                        print "[engine2d_in_qemu_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"
-
-                        # Update-baseline mode: write captured frame, stop the
-                        # guest, and pass. The next run will do a real compare.
-                        if _update_baseline_requested():
-                            val wrote = _write_ppm_local(
-                                result.pixels, result.width, result.height, baseline_path)
-                            print "[engine2d_in_qemu_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
-                            stop_guest(handle)
-                            expect(wrote).to_equal(true)
-                            expect(nb > 0).to_equal(true)
-                        else:
-                            # First run convenience: if the baseline is missing, record
-                            # it now and exit-pass. This makes bootstrap on a fresh
-                            # checkout self-healing — the next run exercises compare.
-                            if not file_exists(baseline_path):
-                                val wrote = _write_ppm_local(
-                                    result.pixels, result.width, result.height, baseline_path)
-                                print "[engine2d_in_qemu_spec] no baseline found, recorded: {baseline_path} (ok={wrote})"
-                                stop_guest(handle)
-                                expect(wrote).to_equal(true)
-                                expect(nb > 0).to_equal(true)
-                            else:
-                                # Compare mode: read baseline, run tolerance profile compare.
-                                _run_compare(handle, result, baseline_path, nb)
-                    else:
-                        print "[engine2d_in_qemu_spec] QMP screendump failed: {result.error}"
+                    val captured = _capture_engine2d_ppm_with_python(qmp_socket, capture_ppm)
+                    var nonblank = false
+                    if captured:
+                        nonblank = _assert_nonblack_ppm_with_python(capture_ppm)
+                    if _update_baseline_requested():
+                        val cp_result = rt_process_run_timeout("cp", [capture_ppm, baseline_path], 5000)
+                        val wrote = cp_result[2] == 0 and file_exists(baseline_path)
+                        print "[engine2d_in_qemu_spec] UPDATE_BASELINE=1 wrote baseline: {baseline_path} (ok={wrote})"
                         stop_guest(handle)
-                        expect(false).to_equal(true)
+                        expect(captured and nonblank and wrote).to_equal(true)
+                    else:
+                        if not file_exists(baseline_path):
+                            print "[engine2d_in_qemu_spec] missing baseline: {baseline_path}"
+                            stop_guest(handle)
+                            expect(false).to_equal(true)
+                        else:
+                            val compared = captured and nonblank and _compare_baseline_ppm_with_python(capture_ppm, baseline_path)
+                            stop_guest(handle)
+                            expect(compared).to_equal(true)
                 else:
                     print "[engine2d_in_qemu_spec] Engine2D paint marker not seen within 30s"
                     print "[engine2d_in_qemu_spec] serial log follows:"
                     print read_serial_log(handle)
                     stop_guest(handle)
-                    print "[engine2d_in_qemu_spec] skipping live capture because the guest did not reach the paint marker"
-                    expect(file_exists(target.output)).to_equal(true)
+                    expect(false).to_equal(true)
             Err(err):
                 print "[engine2d_in_qemu_spec] failed to spawn guest: {err}"
                 expect(false).to_equal(true)

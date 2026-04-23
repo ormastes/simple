@@ -89,13 +89,24 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
     // Sum all occurrences (each describe block outputs one)
     let mut total_passed = 0;
     let mut total_failed = 0;
+    let mut summary_passed = None;
+    let mut summary_failed = None;
 
     for line in output.lines() {
+        let clean_line = strip_ansi_codes(line);
+        let trimmed = clean_line.trim();
+
+        if let Some(value) = trimmed.strip_prefix("Passed:") {
+            summary_passed = value.trim().parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("Failed:") {
+            summary_failed = value.trim().parse::<usize>().ok();
+            continue;
+        }
+
         // Pattern: "X examples, Y failures"
         if line.contains("examples") && line.contains("failure") {
-            // Strip ANSI escape codes first (they contain numbers like \x1b[32m)
-            let clean_line = strip_ansi_codes(line);
-
             // Extract numbers from cleaned line
             let parts: Vec<&str> = clean_line.split(|c: char| !c.is_numeric()).collect();
             let numbers: Vec<usize> = parts.iter().filter_map(|p| p.parse::<usize>().ok()).collect();
@@ -110,7 +121,51 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
         }
     }
 
+    if let (Some(passed), Some(failed)) = (summary_passed, summary_failed) {
+        return (passed, failed);
+    }
+
     (total_passed, total_failed)
+}
+
+fn output_has_zero_pass_summary(output: &str) -> bool {
+    let mut saw_passed_zero = false;
+    let mut saw_failed_zero = false;
+
+    for line in output.lines() {
+        let clean_line = strip_ansi_codes(line);
+        let trimmed = clean_line.trim();
+        if trimmed == "Passed: 0" {
+            saw_passed_zero = true;
+        } else if trimmed == "Failed: 0" {
+            saw_failed_zero = true;
+        }
+    }
+
+    saw_passed_zero && saw_failed_zero
+}
+
+fn fallback_counts_from_output(
+    output: &str,
+    exit_code: i32,
+    options: &super::types::TestOptions,
+) -> (usize, usize, usize) {
+    let (passed, failed) = parse_test_output(output);
+    if passed != 0 || failed != 0 {
+        return (passed, failed, 0);
+    }
+
+    if exit_code == 0
+        && (options.only_slow || options.only_skipped || options.list_ignored || output_has_zero_pass_summary(output))
+    {
+        return (0, 0, 0);
+    }
+
+    if exit_code == 0 {
+        (1, 0, 0)
+    } else {
+        (0, 1, 0)
+    }
 }
 
 /// Parse individual test results from BDD output (✓/✗/○ lines)
@@ -123,6 +178,9 @@ pub fn parse_individual_results(output: &str) -> Vec<IndividualTestResult> {
         let trimmed = clean.trim();
 
         if let Some(stripped) = trimmed.strip_prefix("✓ ") {
+            if stripped == "All tests passed!" {
+                continue;
+            }
             let name = stripped.to_string();
             results.push(IndividualTestResult {
                 name,
@@ -539,16 +597,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 (p, f, s)
             } else {
                 // Fall back to summary line parsing
-                let (p, f) = parse_test_output(&combined_output);
-                if p == 0 && f == 0 {
-                    if exit_code == 0 {
-                        (1, 0, 0)
-                    } else {
-                        (0, 1, 0)
-                    }
-                } else {
-                    (p, f, 0)
-                }
+                fallback_counts_from_output(&combined_output, exit_code, options)
             };
 
             let result = TestFileResult {
@@ -620,6 +669,12 @@ fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) 
     }
     if options.fail_fast {
         args.push("--fail-fast".to_string());
+    }
+    if options.no_cache {
+        args.push("--no-cache".to_string());
+    }
+    if options.no_db {
+        args.push("--no-db".to_string());
     }
     if let Some(tag) = &options.tag {
         args.push("--tag".to_string());
@@ -1201,16 +1256,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 let s = individual_results.iter().filter(|r| r.skipped).count();
                 (p, f, s)
             } else {
-                let (p, f) = parse_test_output(&combined_output);
-                if p == 0 && f == 0 {
-                    if exit_code == 0 {
-                        (1, 0, 0)
-                    } else {
-                        (0, 1, 0)
-                    }
-                } else {
-                    (p, f, 0)
-                }
+                fallback_counts_from_output(&combined_output, exit_code, options)
             };
 
             let result = TestFileResult {
@@ -1340,16 +1386,7 @@ pub fn run_test_file_native_mode(
                 let s = individual_results.iter().filter(|r| r.skipped).count();
                 (p, f, s)
             } else {
-                let (p, f) = parse_test_output(&combined_output);
-                if p == 0 && f == 0 {
-                    if exit_code == 0 {
-                        (1, 0, 0)
-                    } else {
-                        (0, 1, 0)
-                    }
-                } else {
-                    (p, f, 0)
-                }
+                fallback_counts_from_output(&combined_output, exit_code, options)
             };
 
             let result = TestFileResult {
@@ -1482,6 +1519,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_output_summary_lines_are_authoritative() {
+        let output = "\x1b[32mPassed: 28\x1b[0m\nFailed: 0\n\x1b[32m✓ All tests passed!\x1b[0m";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 28);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_individual_results_ignores_success_banner() {
+        let output = "\x1b[32m✓ All tests passed!\x1b[0m";
+        let results = parse_individual_results(output);
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn test_strip_ansi_codes() {
         assert_eq!(strip_ansi_codes("\x1b[32mhello\x1b[0m"), "hello");
         assert_eq!(strip_ansi_codes("no codes"), "no codes");
@@ -1500,6 +1552,20 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
+    }
+
+    #[test]
+    fn test_build_safe_mode_child_args_forwards_cache_flags() {
+        let options = super::super::types::TestOptions {
+            no_cache: true,
+            no_db: true,
+            ..Default::default()
+        };
+
+        let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
+
+        assert!(args.iter().any(|arg| arg == "--no-cache"));
+        assert!(args.iter().any(|arg| arg == "--no-db"));
     }
 
     #[test]

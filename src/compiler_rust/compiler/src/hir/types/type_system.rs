@@ -190,6 +190,7 @@ pub enum HirType {
         element: TypeId,
     },
     Tuple(Vec<TypeId>),
+    LabeledTuple(Vec<(String, TypeId)>),
     Function {
         params: Vec<TypeId>,
         ret: TypeId,

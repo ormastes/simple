@@ -183,6 +183,8 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 }
             }
             "--force-rebuild" => options.force_rebuild = true,
+            "--no-cache" => options.no_cache = true,
+            "--no-db" => options.no_db = true,
             "--keep-artifacts" => options.keep_artifacts = true,
             "--safe-mode" | "--safe" => options.safe_mode = true,
             "--timeout" => {
@@ -529,6 +531,14 @@ mod tests {
         assert_eq!(opts.execution_mode, TestExecutionMode::Native);
         assert!(opts.safe_mode);
         assert!(opts.force_rebuild);
+    }
+
+    #[test]
+    fn test_parse_no_cache_and_no_db() {
+        let args = vec!["--no-cache".to_string(), "--no-db".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.no_cache);
+        assert!(opts.no_db);
     }
 
     #[test]

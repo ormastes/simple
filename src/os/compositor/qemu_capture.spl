@@ -61,7 +61,7 @@ fn _qmp_hmp_screendump_client(client: QmpClient, output_path: text) -> Result<bo
     Ok(true)
 
 fn _capture_qmp_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
-    val script = "import json, os, socket, sys;" +
+    val script = "import json, os, socket, sys, time;" +
         "s=socket.socket(socket.AF_UNIX);" +
         "s.settimeout(10);" +
         "s.connect(sys.argv[1]);" +
@@ -70,13 +70,14 @@ fn _capture_qmp_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
         "cap=json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n';" +
         "f.write(cap);" +
         "f.flush();" +
-        "f.readline();" +
+        "reply=f.readline();" +
         "cmd=json.dumps(dict(execute='screendump', arguments=dict(filename=sys.argv[2], format='ppm'))).encode()+b'\\n';" +
         "f.write(cmd);" +
         "f.flush();" +
-        "f.readline();" +
-        "sys.exit(0 if os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2]) > 0 else 3)"
-    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 12000)
+        "reply=f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2])>0)) for _ in range(300));" +
+        "sys.exit(0 if ok else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 32000)
     result[2] == 0 and file_exists(output_path) and file_size(output_path) > 0
 
 fn _qmp_screendump_hmc(socket_path: text, output_path: text) -> Result<bool, text>:
@@ -156,9 +157,10 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
             val fallback = _qmp_hmp_screendump_client(client, output_path)
             match fallback:
                 Err(err):
-                    qmp_disconnect(client)
-                    val reason = if initial_err != "": "{initial_err}; fallback={err}" else: err
-                    return capture_error("qemu_vm", 0, 0, "QMP screendump file missing after fallback: {output_path} ({reason})")
+                    if (not file_exists(output_path) or file_size(output_path) == 0) and _wait_for_capture_file(output_path, 8000) == nil:
+                        qmp_disconnect(client)
+                        val reason = if initial_err != "": "{initial_err}; fallback={err}" else: err
+                        return capture_error("qemu_vm", 0, 0, "QMP screendump file missing after fallback: {output_path} ({reason})")
                 Ok(_):
                     pass_dn
             if _wait_for_capture_file(output_path, 8000) == nil:
@@ -171,7 +173,7 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
     # QEMU may ACK screendump before the host file is fully materialized.
     # Poll briefly for a fresh non-empty file instead of decoding a stale
     # leftover capture from a previous run or racing a zero-length write.
-    var ppm_data_opt = _wait_for_capture_file(output_path, 2000)
+    var ppm_data_opt = _wait_for_capture_file(output_path, 15000)
     match ppm_data_opt:
         Some(_):
             pass_dn
@@ -181,7 +183,7 @@ fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
                 Err(_):
                     pass_dn
                 Ok(_):
-                    ppm_data_opt = _wait_for_capture_file(output_path, 2000)
+                    ppm_data_opt = _wait_for_capture_file(output_path, 15000)
     match ppm_data_opt:
         Some(ppm_data):
             val decode_result = decode_ppm_to_argb(ppm_data)

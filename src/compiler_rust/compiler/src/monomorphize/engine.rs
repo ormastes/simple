@@ -348,6 +348,15 @@ impl<'a> Monomorphizer<'a> {
             AstType::Tuple(elems) => {
                 AstType::Tuple(elems.iter().map(|e| self.substitute_ast_type(e, bindings)).collect())
             }
+            AstType::LabeledTuple(fields) => AstType::LabeledTuple(
+                fields
+                    .iter()
+                    .map(|field| simple_parser::ast::TupleTypeField {
+                        label: field.label.clone(),
+                        ty: self.substitute_ast_type(&field.ty, bindings),
+                    })
+                    .collect(),
+            ),
             AstType::Array { element, size } => AstType::Array {
                 element: Box::new(self.substitute_ast_type(element, bindings)),
                 size: size.clone(),

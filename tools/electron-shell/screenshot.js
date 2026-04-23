@@ -19,8 +19,13 @@ const args = process.argv.slice(2);
 const displayPpmIdx = args.indexOf('--display-ppm');
 const displayPpmPath = displayPpmIdx >= 0 ? args[displayPpmIdx + 1] : null;
 
-// Filter out Electron's internal flags (like --inspect, --no-sandbox, etc.)
-const userArgs = args.filter(a => !a.startsWith('--') && !a.startsWith('-'));
+// Filter out Electron's internal flags (like --inspect, --no-sandbox, etc.).
+// When flags are passed before the script, Electron may leave the script path
+// in argv; do not treat this helper itself as the HTML input.
+const userArgs = args.filter(a => {
+    if (a.startsWith('--') || a.startsWith('-')) return false;
+    return path.resolve(a) !== __filename && path.basename(a) !== 'screenshot.js';
+});
 
 const htmlInput = displayPpmPath ? null : userArgs[0];
 const outputPath = userArgs[1] || 'screenshot.png';
@@ -35,6 +40,11 @@ if (!htmlInput && !displayPpmPath) {
 
 // Disable GPU for headless operation
 app.disableHardwareAcceleration();
+// This tool is used in CI/headless developer workspaces where Electron's
+// chrome-sandbox helper is often not installed setuid root. Keep the bypass
+// scoped to this screenshot helper instead of requiring host mutation.
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-setuid-sandbox');
 // Force 1x device pixel ratio so the captured bitmap matches the
 // requested width/height exactly (otherwise HiDPI macOS yields a 2x
 // bitmap, breaking the wm_compare 320x240 baseline harness).

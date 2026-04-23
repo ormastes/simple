@@ -51,7 +51,7 @@ impl Default for TypeIdAllocator {
 }
 
 /// Type registry that maps TypeId to HirType
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TypeRegistry {
     types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
@@ -183,6 +183,14 @@ impl TypeRegistry {
                     None
                 }
             }
+            Some(HirType::LabeledTuple(fields)) if !fields.is_empty() => {
+                let first = fields[0].1;
+                if fields.iter().all(|(_, ty)| *ty == first) {
+                    Some(first)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -224,6 +232,7 @@ impl TypeRegistry {
 
             // Tuples are safe if all elements are safe
             Some(HirType::Tuple(elements)) => elements.iter().all(|e| self.is_snapshot_safe(*e)),
+            Some(HirType::LabeledTuple(fields)) => fields.iter().all(|(_, ty)| self.is_snapshot_safe(*ty)),
 
             // Arrays are safe if elements are safe (assuming immutable array)
             Some(HirType::Array { element, .. }) => self.is_snapshot_safe(*element),

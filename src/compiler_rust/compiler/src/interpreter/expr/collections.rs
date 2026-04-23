@@ -295,6 +295,22 @@ pub(super) fn eval_collection_expr(
             }
             Ok(Some(Value::Tuple(tup)))
         }
+        Expr::LabeledTuple(fields) => {
+            let mut labels = Vec::new();
+            let mut values = Vec::new();
+            for field in fields {
+                labels.push(field.label.clone());
+                values.push(evaluate_expr(
+                    &field.value,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?);
+            }
+            Ok(Some(Value::LabeledTuple { labels, values }))
+        }
         Expr::Index { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
@@ -463,6 +479,29 @@ pub(super) fn eval_collection_expr(
                         )
                     })
                 }
+                Value::LabeledTuple { values, .. } => {
+                    let raw_idx = require_integer_index_value(&idx_val, "tuple")?;
+                    let len = values.len() as i64;
+                    let idx = if raw_idx < 0 {
+                        (len + raw_idx) as usize
+                    } else {
+                        raw_idx as usize
+                    };
+                    values.get(idx).cloned().ok_or_else(|| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("tuple has {} element(s)", values.len()))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!(
+                                "tuple index out of bounds: index is {} but length is {}",
+                                raw_idx,
+                                values.len()
+                            ),
+                            ctx,
+                        )
+                    })
+                }
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
@@ -592,6 +631,20 @@ pub(super) fn eval_collection_expr(
                         ctx,
                     )
                 }),
+                Value::LabeledTuple { values, .. } => values.get(*index).cloned().ok_or_else(|| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TUPLE_INDEX_OOB)
+                        .with_note(format!("tuple has {} element(s)", values.len()))
+                        .with_help("ensure the index is within bounds");
+                    CompileError::semantic_with_context(
+                        format!(
+                            "tuple index out of bounds: index is {} but length is {}",
+                            index,
+                            values.len()
+                        ),
+                        ctx,
+                    )
+                }),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)
@@ -670,6 +723,7 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
+                Value::LabeledTuple { values, .. } => values.len() as i64,
                 Value::Object {
                     ref class, ref fields, ..
                 } => {
@@ -775,6 +829,9 @@ pub(super) fn eval_collection_expr(
                     Ok(Value::Str(sliced.into_iter().collect()))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
+                Value::LabeledTuple { values, .. } => {
+                    Ok(Value::Tuple(slice_collection(&values, start_idx, end_idx, step_val)))
+                }
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)

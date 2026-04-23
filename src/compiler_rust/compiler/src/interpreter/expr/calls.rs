@@ -586,6 +586,38 @@ pub(super) fn eval_call_expr(
                         }
                     }
                 },
+                Value::LabeledTuple { labels, values } => match field.as_str() {
+                    "len" => Ok(Value::Int(values.len() as i64)),
+                    _ => {
+                        if let Some((idx, _)) = labels.iter().enumerate().find(|(_, label)| label.as_str() == field) {
+                            return Ok(Some(values.get(idx).cloned().unwrap_or(Value::Nil)));
+                        }
+
+                        let empty_args: Vec<Argument> = vec![];
+                        match evaluate_method_call(
+                            receiver,
+                            field,
+                            &empty_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            Ok(result) => Ok(result),
+                            Err(_) => {
+                                let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
+                                    "available tuple fields: {}; or use numeric tuple access",
+                                    labels.join(", ")
+                                ));
+                                Err(CompileError::semantic_with_context(
+                                    format!("undefined field: unknown tuple field '{field}'"),
+                                    ctx,
+                                ))
+                            }
+                        }
+                    }
+                },
                 // Dict property access (e.g., dict.len, dict.is_empty)
                 // Also supports module namespace access and no-paren method calls
                 Value::Dict(ref map) => match field.as_str() {

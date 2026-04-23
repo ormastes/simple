@@ -1,7 +1,7 @@
 //! Basic MIR lowering tests
 
 use super::common::*;
-use crate::hir::BinOp;
+use crate::hir::{BinOp, HirType};
 use crate::mir::{BlockId, MirInst, Terminator};
 
 #[test]
@@ -15,6 +15,21 @@ fn test_lower_simple_return() {
     let entry = func.block(BlockId(0)).unwrap();
     assert!(!entry.instructions.is_empty());
     assert!(matches!(entry.terminator, Terminator::Return(Some(_))));
+}
+
+#[test]
+fn test_lower_preserves_labeled_tuple_type_registry() {
+    let mir = compile_to_mir("fn pair() -> (left: i64, right: bool):\n    return (left: 7, right: true)\n").unwrap();
+
+    let func = &mir.functions[0];
+    let return_type = func.return_type;
+    let Some(HirType::LabeledTuple(fields)) = mir.type_registry.get(return_type) else {
+        panic!("expected labeled tuple return type in MIR type registry");
+    };
+
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0], ("left".to_string(), crate::hir::TypeId::I64));
+    assert_eq!(fields[1], ("right".to_string(), crate::hir::TypeId::BOOL));
 }
 
 #[test]

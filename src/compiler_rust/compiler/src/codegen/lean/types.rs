@@ -298,6 +298,10 @@ impl<'a> TypeTranslator<'a> {
                 let lean_elements: Result<Vec<_>, _> = elements.iter().map(|tid| self.translate(*tid)).collect();
                 Ok(LeanType::Tuple(lean_elements?))
             }
+            HirType::LabeledTuple(fields) => {
+                let lean_elements: Result<Vec<_>, _> = fields.iter().map(|(_, tid)| self.translate(*tid)).collect();
+                Ok(LeanType::Tuple(lean_elements?))
+            }
             HirType::Function { params, ret } => {
                 let lean_params: Result<Vec<_>, _> = params.iter().map(|tid| self.translate(*tid)).collect();
                 let lean_ret = self.translate(*ret)?;

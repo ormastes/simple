@@ -19,7 +19,7 @@ use std.io_runtime.{get_args}
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult}
 use std.test_runner.test_runner_args.parse_test_args
 use std.test_runner.test_config.{TestConfig, load_test_config}
-use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
+use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode, run_test_file_composite}
@@ -243,7 +243,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
     var incremental_state = incremental_test_state_new(cache_path, "", false)
-    var use_result_cache = not updated_options.clean
+    var use_result_cache = not updated_options.clean and not updated_options.no_cache
     if use_result_cache:
         incremental_state = incremental_test_state_load(cache_path, "", false)
     else:
@@ -379,7 +379,7 @@ fn run_tests_parallel_mode(
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
     var incremental_state = incremental_test_state_new(cache_path, "", false)
-    var use_result_cache = not options.clean
+    var use_result_cache = not options.clean and not options.no_cache
     if use_result_cache:
         incremental_state = incremental_test_state_load(cache_path, "", false)
     var cached_results: [TestFileResult] = []
@@ -558,6 +558,10 @@ fn run_tests_parallel_mode(
     )
 
 fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
+    if is_skip_marker_file(file_path):
+        val skipped = count_skip_marker_cases(file_path)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
+
     # Set runtime mode env var so skip_it/skip_on_interpreter can detect mode
     val mode_str = mode_to_str(options.mode)
     env_set("SIMPLE_RUNTIME_MODE", mode_str)

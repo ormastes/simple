@@ -9,9 +9,7 @@ pub struct ManualUniqueValue {
 
 impl ManualUniqueValue {
     pub fn new(value: Value) -> Self {
-        MANUAL_GC.with(|gc| Self {
-            ptr: gc.alloc(value),
-        })
+        MANUAL_GC.with(|gc| Self { ptr: gc.alloc(value) })
     }
 
     pub fn inner(&self) -> &Value {
@@ -68,9 +66,7 @@ impl ManualSharedValue {
 
 impl Clone for ManualSharedValue {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr.clone(),
-        }
+        Self { ptr: self.ptr.clone() }
     }
 }
 
@@ -104,9 +100,7 @@ impl ManualWeakValue {
 
 impl Clone for ManualWeakValue {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr.clone(),
-        }
+        Self { ptr: self.ptr.clone() }
     }
 }
 
@@ -239,6 +233,10 @@ impl Clone for Value {
                 data: data.clone(),
             },
             Value::Tuple(t) => Value::Tuple(t.clone()),
+            Value::LabeledTuple { labels, values } => Value::LabeledTuple {
+                labels: labels.clone(),
+                values: values.clone(),
+            },
             Value::Dict(d) => Value::Dict(Arc::clone(d)),
             Value::FrozenDict(d) => Value::FrozenDict(d.clone()),
             Value::Lambda { params, body, env } => Value::Lambda {
@@ -282,7 +280,10 @@ impl Clone for Value {
             Value::EnumType { enum_name } => Value::EnumType {
                 enum_name: enum_name.clone(),
             },
-            Value::EnumVariantConstructor { enum_name, variant_name } => Value::EnumVariantConstructor {
+            Value::EnumVariantConstructor {
+                enum_name,
+                variant_name,
+            } => Value::EnumVariantConstructor {
                 enum_name: enum_name.clone(),
                 variant_name: variant_name.clone(),
             },
@@ -293,11 +294,7 @@ impl Clone for Value {
                 trait_name: trait_name.clone(),
                 inner: inner.clone(),
             },
-            Value::Unit {
-                value,
-                suffix,
-                family,
-            } => Value::Unit {
+            Value::Unit { value, suffix, family } => Value::Unit {
                 value: value.clone(),
                 suffix: suffix.clone(),
                 family: family.clone(),
@@ -338,6 +335,11 @@ impl PartialEq for Value {
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::LabeledTuple { labels: la, values: va }, Value::LabeledTuple { labels: lb, values: vb }) => {
+                la == lb && va == vb
+            }
+            (Value::Tuple(a), Value::LabeledTuple { values: b, .. })
+            | (Value::LabeledTuple { values: a, .. }, Value::Tuple(b)) => a == b,
             (Value::Dict(a), Value::Dict(b)) => a == b,
             (
                 Value::Lambda {
@@ -363,16 +365,7 @@ impl PartialEq for Value {
                     captured_env: eb,
                 },
             ) => na == nb && da == db && ea == eb,
-            (
-                Value::Object {
-                    class: ca,
-                    fields: fa,
-                },
-                Value::Object {
-                    class: cb,
-                    fields: fb,
-                },
-            ) => ca == cb && fa == fb,
+            (Value::Object { class: ca, fields: fa }, Value::Object { class: cb, fields: fb }) => ca == cb && fa == fb,
             (
                 Value::Enum {
                     enum_name: ea,
@@ -408,8 +401,16 @@ impl PartialEq for Value {
             ) => va == vb && sa == sb && fa == fb,
             (Value::NativeFunction(_), Value::NativeFunction(_)) => false,
             (
-                Value::Block { kind: ka, payload: pa, result: ra },
-                Value::Block { kind: kb, payload: pb, result: rb },
+                Value::Block {
+                    kind: ka,
+                    payload: pa,
+                    result: ra,
+                },
+                Value::Block {
+                    kind: kb,
+                    payload: pb,
+                    result: rb,
+                },
             ) => ka == kb && pa == pb && ra == rb,
             (Value::Nil, Value::Nil) => true,
             _ => false,

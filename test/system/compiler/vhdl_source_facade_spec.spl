@@ -202,6 +202,206 @@ describe "VHDL Source Facade":
         delete_file(src_path)
         delete_file(out_path)
 
+    it "aot_vhdl_file lowers hardware labeled tuple returns to output ports":
+        val src_path = "/tmp/sml_vhdl_source_facade_full_add.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_full_add.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn full_add(a: bool, b: bool, cin: bool) -> (sum: bool, cout: bool):\n    return (sum: a xor b xor cin, cout: (a and b) or (a and cin) or (b and cin))")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("entity full_add is"), output)
+        check_msg(output.contains("sum : out std_logic;"), output)
+        check_msg(output.contains("cout : out std_logic"), output)
+        check_msg(output.contains("sum <= a xor b xor cin;"), output)
+        check_msg(output.contains("cout <= (a and b) or (a and cin) or (b and cin);"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file hardware labeled tuple return passes GHDL analysis and elaboration":
+        val src_path = "/tmp/sml_vhdl_source_facade_full_add_ghdl.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_full_add_ghdl.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn full_add_ghdl(a: bool, b: bool, cin: bool) -> (sum: bool, cout: bool):\n    return (sum: a xor b xor cin, cout: (a and b) or (a and cin) or (b and cin))")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+
+        if not local_ghdl_available():
+            print "SKIP: GHDL not available"
+            delete_file(src_path)
+            delete_file(out_path)
+            return
+
+        check_msg(local_ghdl_analyze_and_elaborate(out_path, "full_add_ghdl"), "GHDL rejected hardware labeled tuple return VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file emits generic blocks for hardware entities":
+        val src_path = "/tmp/sml_vhdl_source_facade_generic.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_generic.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\n@generic(WIDTH: natural = 8)\nfn generic_passthrough(a: u8) -> u8:\n    a")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("generic ("), output)
+        check_msg(output.contains("WIDTH : natural := 8"), output)
+        check_msg(output.contains("a : in unsigned(7 downto 0);"), output)
+        check_msg(output.contains("result_out : out unsigned(7 downto 0)"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "generic_passthrough"), "GHDL rejected generic VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file emits clocked reset-aware processes":
+        val src_path = "/tmp/sml_vhdl_source_facade_clocked.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_clocked.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\n@clocked(clk, reset_n)\nfn reg1(clk: bool, reset_n: bool, d: bool) -> bool:\n    d")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("process(clk, reset_n)"), output)
+        check_msg(output.contains("if reset_n = '0' then"), output)
+        check_msg(output.contains("result_out <= '0';"), output)
+        check_msg(output.contains("elsif rising_edge(clk) then"), output)
+        check_msg(output.contains("result_out <= d;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "reg1"), "GHDL rejected clocked VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file emits active-high asynchronous reset when clocked metadata requests it":
+        val src_path = "/tmp/sml_vhdl_source_facade_clocked_active_high.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_clocked_active_high.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\n@clocked(clk, reset, active_high)\nfn reg_active_high(clk: bool, reset: bool, d: bool) -> bool:\n    d")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("process(clk, reset)"), output)
+        check_msg(output.contains("if reset = '1' then"), output)
+        check_msg(output.contains("elsif rising_edge(clk) then"), output)
+        check_msg(output.contains("result_out <= d;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "reg_active_high"), "GHDL rejected active-high reset VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file emits synchronous reset when clocked metadata requests it":
+        val src_path = "/tmp/sml_vhdl_source_facade_clocked_sync.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_clocked_sync.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\n@clocked(clk, reset_n, active_low, sync)\nfn reg_sync(clk: bool, reset_n: bool, d: bool) -> bool:\n    d")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("process(clk)"), output)
+        check_msg(output.contains("if rising_edge(clk) then"), output)
+        check_msg(output.contains("if reset_n = '0' then"), output)
+        check_msg(output.contains("else\n                result_out <= d;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "reg_sync"), "GHDL rejected synchronous reset VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file flattens labeled tuple input ports":
+        val src_path = "/tmp/sml_vhdl_source_facade_tuple_input.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_tuple_input.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn route(bus: (addr: u32, write: bool)) -> (addr: u32, we: bool):\n    return (addr: bus.addr, we: bus.write)")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("bus_addr : in unsigned(31 downto 0);"), output)
+        check_msg(output.contains("bus_write : in std_logic;"), output)
+        check_msg(output.contains("addr <= bus_addr;"), output)
+        check_msg(output.contains("we <= bus_write;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "route"), "GHDL rejected flattened tuple input VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file rejects enum declarations in the source facade":
+        val src_path = "/tmp/sml_vhdl_source_facade_enum_decl.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_enum_decl.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "enum State:\n    Idle\n    Busy\n\n@hardware\nfn active(state: State) -> bool:\n    true")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        expect(result.is_success()).to_equal(false)
+        expect(result.get_errors().join("\n")).to_contain("VHDL backend unsupported type id")
+        expect(rt_file_exists(out_path)).to_equal(false)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file rejects enum-like hardware port types until enum encoding exists":
+        val src_path = "/tmp/sml_vhdl_source_facade_enum_port.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_enum_port.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn active(state: State) -> bool:\n    true")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        expect(result.is_success()).to_equal(false)
+        expect(result.get_errors().join("\n")).to_contain("VHDL backend unsupported type id")
+        expect(rt_file_exists(out_path)).to_equal(false)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file flattens one nested labeled tuple input bundle":
+        val src_path = "/tmp/sml_vhdl_source_facade_nested_tuple_input.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_nested_tuple_input.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "@hardware\nfn route_nested(bus: (cmd: (addr: u32, valid: bool), rsp: (ready: bool))) -> (addr: u32, ok: bool):\n    return (addr: bus.cmd.addr, ok: bus.cmd.valid and bus.rsp.ready)")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("bus_cmd_addr : in unsigned(31 downto 0);"), output)
+        check_msg(output.contains("bus_cmd_valid : in std_logic;"), output)
+        check_msg(output.contains("bus_rsp_ready : in std_logic;"), output)
+        check_msg(output.contains("addr <= bus_cmd_addr;"), output)
+        check_msg(output.contains("ok <= bus_cmd_valid and bus_rsp_ready;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "route_nested"), "GHDL rejected nested flattened tuple input VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
     it "aot_vhdl_file supports all fixed-width integer facade port types":
         val src_path = "/tmp/sml_vhdl_source_facade_widths.spl"
         val out_path = "/tmp/sml_vhdl_source_facade_widths.vhd"
@@ -248,6 +448,61 @@ describe "VHDL Source Facade":
         check_msg(rt_file_exists(out_path), "VHDL output file was not created")
         val output = rt_file_read_text(out_path) ?? ""
         check_msg(output.contains("result_out <= shift_left(a, 2);"), output)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers single-level fixed-width bit slices":
+        val src_path = "/tmp/sml_vhdl_source_facade_slice.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_slice.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn high_byte(a: u16) -> u8:\n    a[15:8]")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("a : in unsigned(15 downto 0);"), output)
+        check_msg(output.contains("result_out : out unsigned(7 downto 0)"), output)
+        check_msg(output.contains("result_out <= a(15 downto 8);"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "high_byte"), "GHDL rejected bit-slice VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file lowers explicit fixed-width concat calls":
+        val src_path = "/tmp/sml_vhdl_source_facade_concat.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_concat.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn join_bytes(hi: u8, lo: u8) -> u16:\n    concat(hi, lo)")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("hi : in unsigned(7 downto 0);"), output)
+        check_msg(output.contains("lo : in unsigned(7 downto 0);"), output)
+        check_msg(output.contains("result_out : out unsigned(15 downto 0)"), output)
+        check_msg(output.contains("result_out <= hi & lo;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "join_bytes"), "GHDL rejected concat VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file rejects fixed-width bit slices with mismatched result width":
+        val src_path = "/tmp/sml_vhdl_source_facade_slice_error.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_slice_error.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "fn bad_slice(a: u16) -> u16:\n    a[15:8]")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(not result.is_success(), "expected bit-slice width mismatch to fail")
+        check_msg(result.get_errors().join("\n").contains("bit slice width does not match result type"), result.get_errors().join("\n"))
 
         delete_file(src_path)
         delete_file(out_path)

@@ -22,6 +22,7 @@ pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
         AstType::Generic { name, args } => name == param || args.iter().any(|a| type_uses_param(a, param)),
         AstType::Array { element, .. } => type_uses_param(element, param),
         AstType::Tuple(elems) => elems.iter().any(|e| type_uses_param(e, param)),
+        AstType::LabeledTuple(fields) => fields.iter().any(|field| type_uses_param(&field.ty, param)),
         AstType::Function { params, ret } => {
             params.iter().any(|p| type_uses_param(p, param)) || ret.as_ref().is_some_and(|r| type_uses_param(r, param))
         }
@@ -83,6 +84,12 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
             }
         }
         AstType::Tuple(elems) => ConcreteType::Tuple(elems.iter().map(|e| ast_type_to_concrete(e, bindings)).collect()),
+        AstType::LabeledTuple(fields) => ConcreteType::Tuple(
+            fields
+                .iter()
+                .map(|field| ast_type_to_concrete(&field.ty, bindings))
+                .collect(),
+        ),
         AstType::Array { element, size: _ } => ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings))),
         AstType::Function { params, ret } => ConcreteType::Function {
             params: params.iter().map(|p| ast_type_to_concrete(p, bindings)).collect(),

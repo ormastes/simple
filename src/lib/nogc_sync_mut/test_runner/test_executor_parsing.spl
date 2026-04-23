@@ -146,10 +146,17 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_failed = 0
     var total_skipped = 0
     var total_pending = 0
+    var summary_passed = -1
+    var summary_failed = -1
     val lines = output.split("\n")
     for line in lines:
         val clean = strip_ansi(line)
-        if clean.contains("examples") and clean.contains("failure"):
+        val trimmed = clean.trim()
+        if trimmed.starts_with("Passed:"):
+            summary_passed = extract_number_after_colon(trimmed, "Passed:")
+        elif trimmed.starts_with("Failed:"):
+            summary_failed = extract_number_after_colon(trimmed, "Failed:")
+        elif clean.contains("examples") and clean.contains("failure"):
             val examples_count = extract_number_before(clean, "examples")
             val failures_count = extract_number_before(clean, "failure")
             if examples_count >= 0 and failures_count >= 0:
@@ -170,7 +177,21 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             val skip_count2 = extract_number_before(clean, "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
+    if summary_passed >= 0 and summary_failed >= 0:
+        return (summary_passed, summary_failed, total_skipped, total_pending)
     (total_passed, total_failed, total_skipped, total_pending)
+
+fn output_has_zero_pass_summary(output: text) -> bool:
+    var saw_passed_zero = false
+    var saw_failed_zero = false
+    val lines = output.split("\n")
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+        if clean == "Passed: 0":
+            saw_passed_zero = true
+        elif clean == "Failed: 0":
+            saw_failed_zero = true
+    saw_passed_zero and saw_failed_zero
 
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
     val idx_opt = s.index_of(prefix)
@@ -243,6 +264,11 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
+            val filter = env_get("SIMPLE_TEST_FILTER")
+            if filter != "" and filter != nil:
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
+            if output_has_zero_pass_summary(combined):
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
             return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
         else:
             # Extract error message from output

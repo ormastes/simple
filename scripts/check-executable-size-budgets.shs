@@ -1,0 +1,103 @@
+#!/bin/sh
+# Check executable-size budgets for release and native-build artifacts.
+
+set -eu
+
+skip_missing=0
+paths=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --skip-missing)
+      skip_missing=1
+      ;;
+    --help|-h)
+      echo "usage: sh scripts/check-executable-size-budgets.shs [--skip-missing] [artifact ...]"
+      exit 0
+      ;;
+    *)
+      paths="${paths}
+$1"
+      ;;
+  esac
+  shift
+done
+
+if [ -z "${paths}" ]; then
+  paths='
+src/compiler_rust/target/bootstrap/simple
+src/compiler_rust/target/bootstrap/libsimple_runtime.a
+bin/simple
+bin/simple_mcp_server
+bin/simple_lsp_mcp_server
+'
+fi
+
+budget_for() {
+  case "$(basename "$1")" in
+    simple|simple.exe)
+      echo "${SIMPLE_SIZE_BUDGET_SIMPLE:-80000000}"
+      ;;
+    simple_mcp_server|simple_mcp_server.exe)
+      echo "${SIMPLE_SIZE_BUDGET_MCP:-25000000}"
+      ;;
+    simple_lsp_mcp_server|simple_lsp_mcp_server.exe)
+      echo "${SIMPLE_SIZE_BUDGET_LSP_MCP:-25000000}"
+      ;;
+    libsimple_runtime.a)
+      echo "${SIMPLE_SIZE_BUDGET_RUNTIME_A:-120000000}"
+      ;;
+    *)
+      echo "${SIMPLE_SIZE_BUDGET_NATIVE_EXE:-25000000}"
+      ;;
+  esac
+}
+
+failed=0
+checked=0
+
+while IFS= read -r artifact; do
+  [ -n "${artifact}" ] || continue
+  if [ ! -e "${artifact}" ]; then
+    if [ "${skip_missing}" -eq 1 ]; then
+      echo "[SKIP] ${artifact} missing"
+      continue
+    fi
+    echo "[FAIL] ${artifact} missing" >&2
+    exit 2
+  fi
+
+  bytes="$(wc -c < "${artifact}" | tr -d ' ')"
+  budget="$(budget_for "${artifact}")"
+  kind="$(file -b "${artifact}" 2>/dev/null || true)"
+  checked=$((checked + 1))
+
+  if [ "${bytes}" -gt "${budget}" ]; then
+    echo "[FAIL] ${artifact}: ${bytes} bytes > budget ${budget} (${kind})" >&2
+    failed=1
+  else
+    echo "[OK] ${artifact}: ${bytes} bytes <= budget ${budget} (${kind})"
+  fi
+
+  case "${artifact}" in
+    *bin/release/*|*build/bootstrap/mcp-package/*|*simple-bootstrap-*/bin/*)
+      case "${kind}" in
+        *ELF*not\ stripped*|*Mach-O*not\ stripped*)
+          echo "[FAIL] ${artifact}: release executable is not stripped (${kind})" >&2
+          failed=1
+          ;;
+      esac
+      ;;
+  esac
+done <<EOF
+${paths}
+EOF
+
+if [ "${failed}" -ne 0 ]; then
+  exit 1
+fi
+
+if [ "${checked}" -eq 0 ] && [ "${skip_missing}" -ne 1 ]; then
+  echo "[FAIL] no artifacts checked" >&2
+  exit 1
+fi

@@ -132,7 +132,9 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 |------|----------|--------|
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
-| Pure Simple source fallback | Conservative single-function scalar expression subset: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, and simple muxes | **supported** |
+| Pure Simple source fallback | Conservative single-function scalar expression subset: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, and labeled tuple output ports | **supported** |
+| Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
+| Anonymous hardware outputs | Distinct-type anonymous returns use positional tuple semantics in Simple; labeled outputs are required for stable VHDL public APIs | **partial** |
 | Full Simple source facade | Arbitrary source-to-MIR-to-VHDL path | **partial** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
@@ -140,12 +142,39 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | GHDL `--synth` | Synthesis | **supported** |
 | Yosys | Synthesis | **deferred** |
 
+## MIR Backend Source-of-Truth Parity Specs
+
+The MIR backend parity handoff is tracked by pending system specs until the
+Rust MIR-to-VHDL backend owns the behavior currently covered by the source
+facade compatibility tests:
+
+- `test/system/compiler/vhdl_mir_backend_multi_output_spec.spl` covers labeled
+  tuple return ABI ports, same-type labeled outputs, anonymous-output rejection,
+  sanitized collision diagnostics, and GHDL analyze/elaborate/synth acceptance.
+- `test/system/compiler/vhdl_mir_backend_call_port_map_spec.spl` covers direct
+  `@hardware` call instance emission, named `port map` wiring, deterministic
+  temp signals, field access over virtual aggregates, runtime tuple rejection,
+  and GHDL analyze/elaborate/synth acceptance.
+
+When those specs are promoted from pending to runnable, duplicate source-facade
+assertions should be reduced to compatibility smoke coverage.
+
 ## Simulation Targets
 
 | Target | Status | Notes |
 |--------|--------|-------|
 | `riscv32_sim_vhdl` | **deferred** | Quarantined per simulation milestone decision |
 | GHDL counter simulation | **partial** | CI smoke test exists |
+
+## Python-HDL Parity Backlog
+
+Pending SSpec coverage lives in
+`test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` and is surfaced by
+`bin/simple test --only-skipped --list-skip-features --pending`. The tracked
+gaps are clocked processes, reset/domain modeling, composite ports, fixed-width
+bit operations, VHDL subprogram emission, ROM/RAM inference, generics,
+interface bundles, enum encoding, payload enums, testbench conversion, source
+maps, and vendor synthesis smoke.
 
 ## Status Definitions
 

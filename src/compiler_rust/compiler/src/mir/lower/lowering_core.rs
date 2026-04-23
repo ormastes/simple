@@ -579,6 +579,7 @@ impl<'a> MirLowerer<'a> {
 
         let mut module = MirModule::new();
         module.name = hir.name.clone();
+        module.type_registry = hir.types.clone();
 
         // Copy extern function names from HIR to MIR
         module.extern_fn_names = hir.extern_fn_names.clone();

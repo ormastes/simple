@@ -134,6 +134,13 @@ impl Lowerer {
                 }
                 Ok(self.module.types.register(HirType::Tuple(type_ids)))
             }
+            Type::LabeledTuple(fields) => {
+                let mut hir_fields = Vec::new();
+                for field in fields {
+                    hir_fields.push((field.label.clone(), self.resolve_type(&field.ty)?));
+                }
+                Ok(self.module.types.register(HirType::LabeledTuple(hir_fields)))
+            }
             Type::Array { element, size } => {
                 let elem_id = self.resolve_type(element)?;
                 let size_val = size.as_ref().and_then(|e| {
@@ -490,6 +497,24 @@ impl Lowerer {
                         })
                     }
                 }
+                HirType::LabeledTuple(fields) => {
+                    if let Ok(idx) = field.parse::<usize>() {
+                        let elem_ty = fields.get(idx).map(|(_, ty)| *ty).unwrap_or(TypeId::ANY);
+                        Ok((idx, elem_ty))
+                    } else if let Some((idx, (_, field_ty))) =
+                        fields.iter().enumerate().find(|(_, (name, _))| name == field)
+                    {
+                        Ok((idx, *field_ty))
+                    } else if self.lenient_types {
+                        Ok((0, TypeId::ANY))
+                    } else {
+                        Err(LowerError::CannotInferFieldType {
+                            struct_name: "Tuple".to_string(),
+                            field: field.to_string(),
+                            available_fields: fields.iter().map(|(name, _)| name.clone()).collect(),
+                        })
+                    }
+                }
                 _ => {
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
@@ -599,6 +624,10 @@ impl Lowerer {
                 HirType::Tuple(types) => types
                     .first()
                     .copied()
+                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
+                HirType::LabeledTuple(fields) => fields
+                    .first()
+                    .map(|(_, ty)| *ty)
                     .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
                 // String type - indexing returns a single-char string

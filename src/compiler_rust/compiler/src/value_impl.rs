@@ -19,7 +19,7 @@ impl Value {
                     "type mismatch: cannot convert string to int",
                     ctx,
                 ))
-            },
+            }
             Value::Symbol(_) => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -28,7 +28,7 @@ impl Value {
                     "type mismatch: cannot convert symbol to int",
                     ctx,
                 ))
-            },
+            }
             Value::Nil => Ok(0),
             other => {
                 let actual_type = self.type_name();
@@ -39,7 +39,7 @@ impl Value {
                     format!("type mismatch: cannot convert {} to int", actual_type),
                     ctx,
                 ))
-            },
+            }
         }
     }
 
@@ -65,7 +65,7 @@ impl Value {
                     format!("type mismatch: cannot convert {} to float", actual_type),
                     ctx,
                 ))
-            },
+            }
         }
     }
 
@@ -100,6 +100,7 @@ impl Value {
             Value::FrozenArray(a) => !a.is_empty(),
             Value::FixedSizeArray { data, .. } => !data.is_empty(),
             Value::Tuple(t) => !t.is_empty(),
+            Value::LabeledTuple { values, .. } => !values.is_empty(),
             Value::Dict(d) => !d.is_empty(),
             Value::FrozenDict(d) => !d.is_empty(),
             Value::Nil => false,
@@ -156,6 +157,14 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 format!("({})", parts.join(", "))
             }
+            Value::LabeledTuple { labels, values } => {
+                let parts: Vec<String> = labels
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(label, value)| format!("{label}: {}", value.to_display_string()))
+                    .collect();
+                format!("({})", parts.join(", "))
+            }
             Value::Dict(map) => {
                 let parts: Vec<String> = map
                     .iter()
@@ -200,7 +209,11 @@ impl Value {
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
-            Value::Enum { enum_name, variant, payload } => {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } => {
                 if let Some(val) = payload {
                     format!("{}::{}({})", enum_name, variant, val.to_display_string())
                 } else {
@@ -249,7 +262,11 @@ impl Value {
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
-            Value::Enum { enum_name, variant, payload } => {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } => {
                 if let Some(val) = payload {
                     format!("{}::{}({})", enum_name, variant, val.to_debug_string())
                 } else {
@@ -299,7 +316,7 @@ impl Value {
             Value::Array(_) => "array",
             Value::FrozenArray(_) => "array",
             Value::FixedSizeArray { .. } => "array",
-            Value::Tuple(_) => "tuple",
+            Value::Tuple(_) | Value::LabeledTuple { .. } => "tuple",
             Value::Dict(_) => "dict",
             Value::FrozenDict(_) => "dict",
             Value::Lambda { .. } => "function",
@@ -347,7 +364,7 @@ impl Value {
             Value::Array(_) => ValueKind::Array,
             Value::FrozenArray(_) => ValueKind::Array,
             Value::FixedSizeArray { .. } => ValueKind::Array,
-            Value::Tuple(_) => ValueKind::Tuple,
+            Value::Tuple(_) | Value::LabeledTuple { .. } => ValueKind::Tuple,
             Value::Dict(_) => ValueKind::Dict,
             Value::FrozenDict(_) => ValueKind::Dict,
             Value::Lambda { .. } => ValueKind::Closure,
@@ -403,7 +420,7 @@ impl Value {
             // Array
             "array" | "Array" => matches!(self, Value::Array(_)),
             // Tuple
-            "tuple" | "Tuple" => matches!(self, Value::Tuple(_)),
+            "tuple" | "Tuple" => matches!(self, Value::Tuple(_) | Value::LabeledTuple { .. }),
             // Dict
             "dict" | "Dict" => matches!(self, Value::Dict(_)),
             // Unit types - match by suffix

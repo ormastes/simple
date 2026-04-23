@@ -468,6 +468,27 @@ fn greet(name: text):
     print "Hello, {name}!"
 ```
 
+### Multi-Return Tuples
+
+```simple
+fn div_rem(n: i64, d: i64) -> (quotient: i64, remainder: i64):
+    return (quotient: n / d, remainder: n % d)
+
+val r = div_rem(10, 3)
+print r.quotient
+print r.remainder
+```
+
+Anonymous tuple returns remain valid when the fields are not ambiguous:
+
+```simple
+fn bounds(x: i64) -> (i64, bool):
+    return (x, x == 0)
+```
+
+Functions may not return repeated same-type anonymous tuple fields such as
+`-> (u8, u8)`; label those fields instead.
+
 ### Default Parameters
 
 ```simple

@@ -56,6 +56,7 @@ class Engine2D:
     """
 
     backend: RenderBackend
+    baremetal_backend: BaremetalBackend?
     virtio_gpu_backend: VirtioGpuBackend?
     w: i32
     h: i32
@@ -97,37 +98,37 @@ class Engine2D:
         if backend_name == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                return Engine2D(backend: cuda, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: cuda, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
-                return Engine2D(backend: vulkan, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Engine2D(backend: opengl, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: opengl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
-                return Engine2D(backend: metal, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Engine2D(backend: rocm, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: rocm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Engine2D(backend: intel, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: intel, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         if backend_name == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
-                return Engine2D(backend: sw, virtio_gpu_backend: nil, w: width, h: height)
+                return Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -136,7 +137,7 @@ class Engine2D:
         # Fallback: CPU backend always succeeds
         var cpu = CpuBackend.create()
         cpu.init(width, height)
-        Engine2D(backend: cpu, virtio_gpu_backend: nil, w: width, h: height)
+        Engine2D(backend: cpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height)
 
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
         """Create engine with a pre-initialized BaremetalBackend.
@@ -150,13 +151,16 @@ class Engine2D:
         Returns:
             Engine2D using the baremetal backend
         """
-        Engine2D(backend: backend, virtio_gpu_backend: nil, w: backend.w, h: backend.h)
+        val bw = backend.w
+        val bh = backend.h
+        var cpu = CpuBackend.create()
+        Engine2D(backend: cpu, baremetal_backend: backend, virtio_gpu_backend: nil, w: bw, h: bh)
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
         var cpu = CpuBackend.create()
         cpu.init(1, 1)
-        Engine2D(backend: cpu, virtio_gpu_backend: backend, w: backend.w, h: backend.h)
+        Engine2D(backend: cpu, baremetal_backend: nil, virtio_gpu_backend: backend, w: backend.w, h: backend.h)
 
     # ========================================================================
     # Backend Discovery
@@ -281,6 +285,8 @@ class Engine2D:
         """Get the name of the active backend."""
         if val Some(vg) = self.virtio_gpu_backend:
             vg.name()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.name()
         else:
             self.backend.name()
 
@@ -298,31 +304,55 @@ class Engine2D:
         """Clear the framebuffer to a solid color."""
         if val Some(vg) = self.virtio_gpu_backend:
             vg.clear(color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.clear(color)
         else:
             self.backend.clear(color)
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         """Draw a rectangle outline."""
-        self.backend.draw_rect(x, y, w, h, color)
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_rect(x, y, w, h, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_rect(x, y, w, h, color)
+        else:
+            self.backend.draw_rect(x, y, w, h, color)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         """Draw a filled rectangle."""
         if val Some(vg) = self.virtio_gpu_backend:
             vg.draw_rect_filled(x, y, w, h, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_rect_filled(x, y, w, h, color)
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         """Draw a line between two points."""
-        self.backend.draw_line(x1, y1, x2, y2, color, thickness)
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_line(x1, y1, x2, y2, color, thickness)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_line(x1, y1, x2, y2, color, thickness)
+        else:
+            self.backend.draw_line(x1, y1, x2, y2, color, thickness)
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         """Draw a circle outline."""
-        self.backend.draw_circle(cx, cy, r, color)
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_circle(cx, cy, r, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_circle(cx, cy, r, color)
+        else:
+            self.backend.draw_circle(cx, cy, r, color)
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         """Draw a filled circle."""
-        self.backend.draw_circle_filled(cx, cy, r, color)
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.draw_circle_filled(cx, cy, r, color)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.draw_circle_filled(cx, cy, r, color)
+        else:
+            self.backend.draw_circle_filled(cx, cy, r, color)
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         """Draw a rounded rectangle outline."""
@@ -338,7 +368,10 @@ class Engine2D:
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw text using bitmap font."""
-        self.backend.draw_text(x, y, text_val, color, font_size)
+        if val Some(bm) = self.baremetal_backend:
+            bm.draw_text(x, y, text_val, color, font_size)
+        else:
+            self.backend.draw_text(x, y, text_val, color, font_size)
 
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         """Draw text with an explicit background colour per glyph cell.
@@ -351,7 +384,10 @@ class Engine2D:
         instead of pre-painting an opaque rect and then overlaying
         `draw_text`.
         """
-        self.backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        if val Some(bm) = self.baremetal_backend:
+            bm.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        else:
+            self.backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Blit a pixel array onto the framebuffer."""
@@ -359,22 +395,33 @@ class Engine2D:
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         """Set the clipping rectangle. Drawing outside this rect is discarded."""
-        self.backend.set_clip(x, y, w, h)
+        if val Some(bm) = self.baremetal_backend:
+            bm.set_clip(x, y, w, h)
+        else:
+            self.backend.set_clip(x, y, w, h)
 
     me clear_clip():
         """Remove the clipping rectangle."""
-        self.backend.clear_clip()
+        if val Some(bm) = self.baremetal_backend:
+            bm.clear_clip()
+        else:
+            self.backend.clear_clip()
 
     me present():
         """Flush the framebuffer to the screen / finalize the frame."""
         if val Some(vg) = self.virtio_gpu_backend:
             vg.present()
+        elif val Some(bm) = self.baremetal_backend:
+            bm.present()
         else:
             self.backend.present()
 
     fn read_pixels() -> [u32]:
         """Read the framebuffer contents as a flat u32 array."""
-        self.backend.read_pixels()
+        if val Some(bm) = self.baremetal_backend:
+            bm.read_pixels()
+        else:
+            self.backend.read_pixels()
 
     # ========================================================================
     # Lifecycle
@@ -382,4 +429,7 @@ class Engine2D:
 
     me shutdown():
         """Shut down the backend and release all resources."""
-        self.backend.shutdown()
+        if val Some(bm) = self.baremetal_backend:
+            bm.shutdown()
+        else:
+            self.backend.shutdown()

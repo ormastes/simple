@@ -2,56 +2,31 @@
 #
 # Minimal subset of gui_entry_engine2d.spl: creates Engine2D via
 # BaremetalBackend (proving Engine2D initializes in the baremetal guest),
-# then paints a 3-window verification scene via rt_gui_fill4 (direct MMIO
-# from C), then loops forever on serial prints.
-#
-# WHY rt_gui_fill4 instead of engine.draw_rect_filled?
-# ---------------------------------------------------
-# The bootstrap seed compiler has a method-resolution bug in --entry-closure
-# mode: `engine.draw_rect_filled(...)` where `self.backend` has no concrete
-# type lowers to a recursive call to `Engine2D.draw_rect_filled` itself
-# instead of `BaremetalBackend.draw_rect_filled`. See
-# doc/08_tracking/wm_compare/phase4_report.md section
-# "draw_rect_filled fix verified" for the disassembly. Similarly
-# `engine.clear(color)` picks up `rt_array_clear` as a spurious `.clear`
-# match. To get a non-blank framebuffer in QEMU we bypass the broken
-# dispatch layer and call the C-side `rt_gui_fill4` extern directly —
-# the same pattern used by desktop_entry.spl and wm_test_entry.spl.
+# then paints a 3-window verification scene through Engine2D primitives,
+# then loops forever on serial prints.
 #
 # This variant still:
 #   - initializes COM1 + BGA framebuffer
 #   - constructs FramebufferDriver.from_boot_info
 #   - calls create_fb_engine(fb) to construct Engine2D via BaremetalBackend
 #     (Phase 4's regression signal — proves Engine2D init works in the guest)
-#   - paints a 3-window verification scene to the BGA framebuffer
-#
-# This variant does NOT:
-#   - call any Engine2D method (engine.clear / engine.draw_rect_filled /
-#     engine.draw_text / engine.present) — all broken under --entry-closure
-#   - import Compositor / DesktopShell / PS2 drivers
+#   - paints a 3-window verification scene to the BGA framebuffer through
+#     Engine2D.clear, draw_rect_filled, and present
+#   - avoids importing Compositor / DesktopShell / PS2 drivers
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
-use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
-use os.compositor.engine2d_display.{create_fb_engine}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.compositor.engine2d_baremetal_core.{create_fb_engine_core}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
-extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
-
-fn pack(hi: i64, lo: i64) -> u64:
-    """Pack two i64 values into a u64 (hi in high 32 bits, lo in low 32)."""
-    val h = if hi < 0: 0 else: hi.to_u64()
-    val l = if lo < 0: 0 else: lo.to_u64()
-    (h << 32) | (l & 0xFFFFFFFF)
 
 fn spl_start():
-    """x86_64 GUI entry — Engine2D init + direct-MMIO verification frame.
+    """x86_64 GUI entry — Engine2D verification frame.
 
     Boots serial + BGA framebuffer, constructs an Engine2D via
-    BaremetalBackend (verification signal), paints a 3-window scene
-    via rt_gui_fill4 (bypassing broken method dispatch), then idles.
+    BaremetalBackend, paints a 3-window scene through Engine2D, then idles.
     """
     serial_init()
     serial_writeln("SimpleOS x86_64 Engine2D-min verification")
@@ -68,34 +43,32 @@ fn spl_start():
     var fb = FramebufferDriver.from_boot_info(fb_info)
     serial_println("[GUI] FramebufferDriver created")
 
-    serial_println("[E2D] create_fb_engine(fb) ...")
-    var engine = create_fb_engine(fb)
+    serial_println("[E2D] create_fb_engine_core(fb) ...")
+    var engine = create_fb_engine_core(0xFD000000, fb_info.width.to_i32(), fb_info.height.to_i32())
     serial_println("[E2D] Engine2D created")
 
-    # Paint the verification scene via rt_gui_fill4 (direct MMIO from C).
-    # Engine2D method dispatch is broken under --entry-closure mode, so we
-    # bypass it entirely. Engine2D was constructed above as the regression
-    # signal; drawing is via the same C path desktop_entry.spl uses.
+    serial_println("[E2D] clear ...")
+    engine.clear(0xFF0A2540)
 
-    serial_println("[E2D] clear (via rt_gui_fill4) ...")
-    rt_gui_fill4(pack(0, 0), pack(1024, 768), 0xFF0A2540, 0)
-
-    serial_println("[E2D] draw 3 window rects (via rt_gui_fill4) ...")
+    serial_println("[E2D] draw 3 window rects ...")
     # Window 1: body + red title bar
-    rt_gui_fill4(pack(60, 60), pack(280, 180), 0xFF1E1E2E, 0)
-    rt_gui_fill4(pack(60, 60), pack(280, 24), 0xFFE74C3C, 0)
+    engine.draw_rect_filled(60, 60, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(60, 60, 280, 24, 0xFFE74C3C)
     # Window 2: body + green title bar
-    rt_gui_fill4(pack(380, 120), pack(280, 180), 0xFF1E1E2E, 0)
-    rt_gui_fill4(pack(380, 120), pack(280, 24), 0xFF27AE60, 0)
+    engine.draw_rect_filled(380, 120, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(380, 120, 280, 24, 0xFF27AE60)
     # Window 3: body + blue title bar
-    rt_gui_fill4(pack(220, 320), pack(280, 180), 0xFF1E1E2E, 0)
-    rt_gui_fill4(pack(220, 320), pack(280, 24), 0xFF2980B9, 0)
+    engine.draw_rect_filled(220, 320, 280, 180, 0xFF1E1E2E)
+    engine.draw_rect_filled(220, 320, 280, 24, 0xFF2980B9)
+    engine.present()
 
     serial_println("[E2D] Engine2D verification frame painted")
 
     # Idle loop — keep the guest alive so QMP screendump can capture.
     serial_println("[GUI] Entering idle loop (no compositor, no shell)")
     var tick: u64 = 0
-    while tick < 1000000:
+    while true:
         tick = tick + 1
-    serial_println("[GUI] Idle tick budget exhausted — halting")
+        if tick == 100000000:
+            serial_println("[GUI] idle")
+            tick = 0

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::Visibility;
 
-use crate::hir::{LayoutPhase, TypeId};
+use crate::hir::{LayoutPhase, TypeId, TypeRegistry};
 
 use super::blocks::MirBlock;
 use super::effects::{EffectSet, LocalKind};
@@ -300,6 +300,9 @@ impl MirFunction {
 #[derive(Debug)]
 pub struct MirModule {
     pub name: Option<String>,
+    /// HIR type registry snapshot used by backends that need to interpret
+    /// TypeId metadata after HIR lowering.
+    pub type_registry: TypeRegistry,
     pub functions: Vec<MirFunction>,
     /// Global variables: (name, type_id, is_mutable)
     pub globals: Vec<(String, crate::hir::TypeId, bool)>,
@@ -326,6 +329,7 @@ impl MirModule {
     pub fn new() -> Self {
         Self {
             name: None,
+            type_registry: TypeRegistry::new(),
             functions: Vec::new(),
             globals: Vec::new(),
             global_init_values: std::collections::HashMap::new(),

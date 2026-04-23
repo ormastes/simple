@@ -1,6 +1,6 @@
 //! Linker selection, linking, system symbols, stub generation.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -100,6 +100,104 @@ impl NativeProjectBuilder {
                 }
             })
             .collect())
+    }
+
+    fn read_defined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
+        Ok(Self::read_global_symbol_types(obj)?
+            .into_iter()
+            .filter(|(kind, _)| kind != "U")
+            .map(|(_, name)| name)
+            .collect())
+    }
+
+    fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
+        let output = std::process::Command::new("nm")
+            .arg("-g")
+            .arg("-p")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("nm undefined: {e}"))?;
+        if !output.status.success() {
+            return Ok(HashSet::new());
+        }
+        let mut symbols = HashSet::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let raw_name = match parts.as_slice() {
+                [sym_type, name] if *sym_type == "U" => Some(*name),
+                [_addr, sym_type, name] if *sym_type == "U" => Some(*name),
+                _ => None,
+            };
+            if let Some(raw_name) = raw_name {
+                let name = if cfg!(target_os = "macos") {
+                    raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
+                } else {
+                    raw_name.to_string()
+                };
+                symbols.insert(name);
+            }
+        }
+        Ok(symbols)
+    }
+
+    pub(crate) fn runtime_retention_symbols(
+        object_paths: &[PathBuf],
+        main_o: &Path,
+        init_o: Option<&PathBuf>,
+        runtime_lib: &Path,
+        imports: &ModuleImports,
+    ) -> Result<Vec<String>, String> {
+        let runtime_defined = Self::read_defined_symbol_set(runtime_lib)?;
+        let mut required = BTreeSet::new();
+        for obj in object_paths.iter().map(|p| p.as_path()).chain(std::iter::once(main_o)) {
+            for sym in Self::read_undefined_symbol_set(obj)? {
+                if runtime_defined.contains(&sym) {
+                    required.insert(sym);
+                }
+            }
+        }
+        if let Some(init) = init_o {
+            for sym in Self::read_undefined_symbol_set(init)? {
+                if runtime_defined.contains(&sym) {
+                    required.insert(sym);
+                }
+            }
+        }
+
+        // These runtime roots are reached indirectly by generated dispatch,
+        // string lookup, or lifecycle code and may not appear as direct object
+        // undefineds in tiny native outputs.
+        for root in [
+            "__simple_runtime_init",
+            "__simple_runtime_shutdown",
+            "rt_set_args",
+            "rt_function_not_found",
+            "rt_string_new",
+            "rt_string_data",
+            "rt_string_len",
+            "rt_array_new",
+            "rt_array_len",
+        ] {
+            if runtime_defined.contains(root) {
+                required.insert(root.to_string());
+            }
+        }
+
+        for variants in imports.all_mangled.values() {
+            for sym in variants {
+                if runtime_defined.contains(sym) {
+                    required.insert(sym.clone());
+                }
+            }
+        }
+        Ok(required.into_iter().collect())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn add_elf_undefined_roots(cmd: &mut std::process::Command, symbols: &[String]) {
+        for sym in symbols {
+            cmd.arg(format!("-Wl,-u,{sym}"));
+        }
     }
 
     fn cached_global_symbols<'a>(
@@ -532,9 +630,21 @@ int main(int argc, char** argv) {
                 }
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 {
-                    cmd.arg("-Wl,--whole-archive");
-                    cmd.arg(runtime_lib);
-                    cmd.arg("-Wl,--no-whole-archive");
+                    if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
+                        cmd.arg("-Wl,--whole-archive");
+                        cmd.arg(runtime_lib);
+                        cmd.arg("-Wl,--no-whole-archive");
+                    } else {
+                        let roots = Self::runtime_retention_symbols(
+                            object_paths,
+                            &main_o,
+                            init_o.as_ref(),
+                            runtime_lib,
+                            imports,
+                        )?;
+                        Self::add_elf_undefined_roots(&mut cmd, &roots);
+                        cmd.arg(runtime_lib);
+                    }
                 }
             } else {
                 #[cfg(target_os = "macos")]

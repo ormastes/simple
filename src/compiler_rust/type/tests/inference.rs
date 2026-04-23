@@ -57,6 +57,25 @@ fn infers_tuple_literal() {
 }
 
 #[test]
+fn infers_labeled_tuple_literal_and_field() {
+    let items = parse_items("let t = (sum: 1, carry: true)\nlet x = t.sum\nmain = x");
+    check(&items).expect("type check ok");
+}
+
+#[test]
+fn rejects_repeated_same_type_anonymous_function_return() {
+    let items = parse_items("fn ambiguous() -> (u8, u8):\n    return (1, 2)\nmain = 0");
+    let err = check(&items).expect_err("anonymous repeated same-type returns should fail");
+    assert!(format!("{err:?}").contains("anonymous multi-return tuple"));
+}
+
+#[test]
+fn allows_same_type_labeled_function_return() {
+    let items = parse_items("fn ok() -> (lo: u8, hi: u8):\n    return (lo: 1, hi: 2)\nmain = 0");
+    check(&items).expect("labeled same-type returns are unambiguous");
+}
+
+#[test]
 fn infers_dict_literal() {
     let items = parse_items("let d = {\"a\": 1, \"b\": 2}\nmain = d[\"a\"]");
     check(&items).expect("type check ok");

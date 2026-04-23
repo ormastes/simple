@@ -72,6 +72,17 @@ impl Lowerer {
                     Ok(self.module.types.register(HirType::Tuple(types)))
                 }
             }
+            Expr::LabeledTuple(fields) => {
+                if fields.is_empty() {
+                    Ok(TypeId::VOID)
+                } else {
+                    let mut hir_fields = Vec::new();
+                    for field in fields {
+                        hir_fields.push((field.label.clone(), self.infer_type(&field.value, ctx)?));
+                    }
+                    Ok(self.module.types.register(HirType::LabeledTuple(hir_fields)))
+                }
+            }
             Expr::Array(exprs) => {
                 if let Some(first) = exprs.first() {
                     // Infer array type from first element

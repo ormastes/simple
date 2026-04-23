@@ -8,16 +8,11 @@
 
 impl TypeChecker {
     fn register_trait_impl(&mut self, impl_block: &ImplBlock) -> Result<(), TypeError> {
-        let is_default = impl_block
-            .attributes
-            .iter()
-            .any(|attr| attr.name == "default");
+        let is_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
 
         let Some(trait_name) = &impl_block.trait_name else {
             if is_default {
-                return Err(TypeError::Other(
-                    "#[default] is only valid on trait impls".to_string(),
-                ));
+                return Err(TypeError::Other("#[default] is only valid on trait impls".to_string()));
             }
             return Ok(());
         };
@@ -40,10 +35,7 @@ impl TypeChecker {
             _ => "unknown".to_string(),
         };
 
-        let registry = self
-            .trait_impls
-            .entry(trait_name.clone())
-            .or_default();
+        let registry = self.trait_impls.entry(trait_name.clone()).or_default();
 
         if is_blanket {
             if registry.blanket_impl {
@@ -52,8 +44,7 @@ impl TypeChecker {
                     trait_name
                 )));
             }
-            if !is_default && (!registry.specific_impls.is_empty() || registry.default_blanket_impl)
-            {
+            if !is_default && (!registry.specific_impls.is_empty() || registry.default_blanket_impl) {
                 return Err(TypeError::Other(format!(
                     "overlapping impls for trait `{}`: blanket impl conflicts with existing impls",
                     trait_name
@@ -257,17 +248,15 @@ impl TypeChecker {
                     // Module system nodes and embedded lean blocks don't introduce type bindings directly
                 }
                 // AOP nodes (declarative configuration, not type bindings)
-                Node::AopAdvice(_)
-                | Node::DiBinding(_)
-                | Node::ArchitectureRule(_)
-                | Node::MockDecl(_) => {
+                Node::AopAdvice(_) | Node::DiBinding(_) | Node::ArchitectureRule(_) | Node::MockDecl(_) => {
                     // AOP nodes are declarative and don't introduce type bindings
                 }
                 Node::InterfaceBinding(binding) => {
                     // Register interface binding for static polymorphism
                     // bind Logger = ConsoleLogger means Logger -> ConsoleLogger (static dispatch)
                     let impl_type = self.ast_type_to_type(&binding.impl_type);
-                    self.interface_bindings.insert(binding.interface_name.clone(), impl_type);
+                    self.interface_bindings
+                        .insert(binding.interface_name.clone(), impl_type);
                 }
                 Node::LiteralFunction(_) => {
                     // Literal functions don't introduce new type bindings
@@ -320,7 +309,8 @@ impl TypeChecker {
                                 _ => None,
                             };
                             if let Some(ref src_name) = source_type_name {
-                                let implements = self.trait_impls
+                                let implements = self
+                                    .trait_impls
                                     .get(trait_name)
                                     .is_some_and(|r| r.specific_impls.contains(src_name) || r.blanket_impl);
                                 if !implements {
@@ -359,6 +349,20 @@ impl TypeChecker {
                 Ok(())
             }
             Node::Function(func) => {
+                if let Some(AstType::Tuple(types)) = &func.return_type {
+                    for i in 0..types.len() {
+                        let left = self.ast_type_to_type(&types[i]);
+                        for right_ty in types.iter().skip(i + 1) {
+                            let right = self.ast_type_to_type(right_ty);
+                            if left == right {
+                                return Err(TypeError::Other(
+                                    "anonymous multi-return tuple contains repeated field types; add labels to disambiguate"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
                 // Register the function name in current scope (for nested functions)
                 let func_ty = self.fresh_var();
                 self.env.insert(func.name.clone(), func_ty.clone());

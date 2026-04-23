@@ -1,4 +1,4 @@
-use simple_parser::ast::{Node, Type};
+use simple_parser::ast::{Expr, Node, Type};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -65,6 +65,50 @@ fn parse_function_where_clause_multiple_params() {
 #[test]
 fn parse_named_arguments() {
     parse_ok("let x = foo(a = 1, b = 2)");
+}
+
+#[test]
+fn parse_labeled_tuple_return_type() {
+    let items = parse("fn div_rem(n: i64, d: i64) -> (quotient: i64, remainder: i64):\n    return (quotient: n / d, remainder: n % d)");
+    let Node::Function(f) = &items[0] else {
+        panic!("expected function");
+    };
+    let Some(Type::LabeledTuple(fields)) = &f.return_type else {
+        panic!("expected labeled tuple return type");
+    };
+    assert_eq!(fields[0].label, "quotient");
+    assert_eq!(fields[1].label, "remainder");
+}
+
+#[test]
+fn parse_labeled_tuple_expression() {
+    let items =
+        parse("fn full_add(a: bool, b: bool) -> (sum: bool, carry: bool):\n    return (sum: a or b, carry: a and b)");
+    let Node::Function(f) = &items[0] else {
+        panic!("expected function");
+    };
+    let Node::Return(ret) = &f.body.statements[0] else {
+        panic!("expected return");
+    };
+    let Some(Expr::LabeledTuple(fields)) = &ret.value else {
+        panic!("expected labeled tuple expression");
+    };
+    assert_eq!(fields[0].label, "sum");
+    assert_eq!(fields[1].label, "carry");
+}
+
+#[test]
+fn rejects_mixed_labeled_tuple_return_type() {
+    let mut parser = Parser::new("fn bad() -> (sum: bool, bool):\n    return (true, false)");
+    let err = parser.parse().expect_err("mixed tuple labels should fail");
+    assert!(format!("{err:?}").contains("expected"));
+}
+
+#[test]
+fn rejects_duplicate_labeled_tuple_return_type() {
+    let mut parser = Parser::new("fn bad() -> (sum: bool, sum: bool):\n    return (sum: true, sum: false)");
+    let err = parser.parse().expect_err("duplicate tuple labels should fail");
+    assert!(format!("{err:?}").contains("duplicate tuple field label"));
 }
 
 // Default parameters

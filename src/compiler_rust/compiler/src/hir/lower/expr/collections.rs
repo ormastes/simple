@@ -3,7 +3,7 @@
 //! This module contains expression lowering logic for collection literals:
 //! tuples, arrays, vector literals, struct initialization, and slice expressions.
 
-use simple_parser::Expr;
+use simple_parser::{Expr, TupleExprField};
 
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
@@ -24,6 +24,31 @@ impl Lowerer {
         }
 
         let tuple_ty = self.module.types.register(HirType::Tuple(types));
+
+        Ok(HirExpr {
+            kind: HirExprKind::Tuple(hir_exprs),
+            ty: tuple_ty,
+        })
+    }
+
+    /// Lower a labeled tuple literal to HIR.
+    ///
+    /// Runtime storage stays positional, while the HIR type carries labels so
+    /// `r.name` can lower to the corresponding tuple index.
+    pub(super) fn lower_labeled_tuple(
+        &mut self,
+        fields: &[TupleExprField],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let mut hir_exprs = Vec::new();
+        let mut hir_fields = Vec::new();
+        for field in fields {
+            let hir = self.lower_expr(&field.value, ctx)?;
+            hir_fields.push((field.label.clone(), hir.ty));
+            hir_exprs.push(hir);
+        }
+
+        let tuple_ty = self.module.types.register(HirType::LabeledTuple(hir_fields));
 
         Ok(HirExpr {
             kind: HirExprKind::Tuple(hir_exprs),

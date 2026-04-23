@@ -114,6 +114,23 @@ main = add(2, 3)
 }
 
 #[test]
+fn runner_evaluates_labeled_tuple_return_fields() {
+    run_expect(
+        r#"
+fn pair() -> (left: i64, right: i64):
+    return (left: 7, right: 11)
+
+fn pick() -> i64:
+    val r = pair()
+    return r.left + r.right + r.0
+
+main = pick()
+"#,
+        25,
+    );
+}
+
+#[test]
 fn runner_handles_class_methods() {
     run_expect(
         r#"

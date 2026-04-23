@@ -199,8 +199,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Start test run tracking (only for full suite — DB lock is expensive)
     let db_path = PathBuf::from("doc/test/test_db.sdn");
-    let test_run = if options.path.is_some() {
-        None // Skip DB tracking for targeted runs
+    let test_run = if options.path.is_some() || options.no_db {
+        None // Skip DB tracking for targeted runs and explicit no-db runs
     } else {
         match crate::test_db::start_test_run(&db_path) {
             Ok(run) => {
@@ -250,7 +250,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
 
     // Skip database updates in list mode or when running specific path (expensive I/O)
-    if !list_mode && all_tests_run {
+    if !list_mode && all_tests_run && !options.no_db {
         // Update feature database
         update_feature_database(&test_files, &mut results, &mut total_failed);
 
@@ -584,6 +584,8 @@ fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<Pat
         });
     }
 
+    test_files.retain(|path| platform_tags_match(path, &options.execution_mode));
+
     debug_log!(DebugLevel::Basic, "Discovery", "Found {} test files", test_files.len());
 
     // Apply tag filter
@@ -609,6 +611,33 @@ fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<Pat
     debug_log!(DebugLevel::Basic, "Discovery", "Final test count: {}", test_files.len());
 
     test_files
+}
+
+fn platform_tags_match(path: &Path, mode: &TestExecutionMode) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return true,
+    };
+    let tags: Vec<String> = content
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("# @platform:")
+                .map(|tag| tag.trim().to_string())
+        })
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    if tags.is_empty() {
+        return true;
+    }
+    tags.iter().any(|tag| platform_tag_matches_mode(tag, mode))
+}
+
+fn platform_tag_matches_mode(tag: &str, mode: &TestExecutionMode) -> bool {
+    match mode {
+        TestExecutionMode::Composite(spec) => tag == "composite" || spec.contains(tag),
+        _ => false,
+    }
 }
 
 /// Shuffle tests deterministically based on seed
@@ -654,7 +683,7 @@ fn execute_test_files(
 
     // Load result cache for incremental test runs (skip unchanged files)
     let mut result_cache = super::result_cache::ResultCache::load();
-    let use_cache = !options.force_rebuild && !options.coverage;
+    let use_cache = !options.force_rebuild && !options.coverage && !options.no_cache;
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
@@ -666,6 +695,24 @@ fn execute_test_files(
     }
 
     for (idx, path) in test_files.iter().enumerate() {
+        if is_skip_test_file(path) {
+            let skipped = count_skip_marker_cases(path);
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 0,
+                skipped,
+                ignored: 0,
+                duration_ms: 0,
+                error: None,
+                individual_results: vec![],
+            };
+            print_result(&result, quiet);
+            total_skipped += result.skipped;
+            results.push(result);
+            continue;
+        }
+
         // Check result cache — skip unchanged files
         if use_cache && !list_mode {
             if let Some(cached) = result_cache.check(path) {
@@ -889,6 +936,18 @@ fn execute_test_files(
     }
 
     (results, total_passed, total_failed, total_skipped, total_ignored)
+}
+
+fn count_skip_marker_cases(path: &Path) -> usize {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let count = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("skip \"") || trimmed.starts_with("skip '")
+        })
+        .count();
+    count.max(1)
 }
 
 /// Print individual test result

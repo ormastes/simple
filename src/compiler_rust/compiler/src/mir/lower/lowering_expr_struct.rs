@@ -164,11 +164,13 @@ impl<'a> MirLowerer<'a> {
         let receiver_ty = receiver.ty;
 
         // Check if the receiver is a tuple type — tuples are opaque runtime
-        // objects accessed via rt_tuple_get, not flat structs.
+        // objects accessed via rt_tuple_get, not flat structs. Labeled tuples
+        // use the same positional runtime representation; labels are type
+        // metadata used before MIR lowering.
         let is_tuple = self
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
-            .is_some_and(|t| matches!(t, HirType::Tuple(_)));
+            .is_some_and(|t| matches!(t, HirType::Tuple(_) | HirType::LabeledTuple(_)));
 
         if let Some(HirType::Bitfield { fields, .. }) = self.type_registry.and_then(|tr| tr.get(receiver_ty)) {
             if let Some(field) = fields.get(field_index) {
@@ -273,11 +275,12 @@ impl<'a> MirLowerer<'a> {
         let index_reg = self.lower_expr(index)?;
         let receiver_ty = receiver.ty;
 
-        // Check if the receiver is a tuple type
+        // Check if the receiver is a tuple type. Labeled tuple indexing also
+        // lowers through rt_tuple_get because MIR stores fields positionally.
         let is_tuple = self
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
-            .is_some_and(|t| matches!(t, crate::hir::HirType::Tuple(_)));
+            .is_some_and(|t| matches!(t, crate::hir::HirType::Tuple(_) | crate::hir::HirType::LabeledTuple(_)));
 
         let raw_result = if is_tuple {
             // Use rt_tuple_get(tuple_rv, index_u64) for tuples

@@ -6,8 +6,7 @@
 // - Argument matching
 
 /// Configuration for a mocked method
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MockMethodConfig {
     /// Return value when called (None means return Nil)
     pub return_value: Option<super::Value>,
@@ -16,7 +15,6 @@ pub struct MockMethodConfig {
     /// Argument matchers for conditional returns
     pub arg_matchers: Vec<(Vec<MatcherValue>, super::Value)>,
 }
-
 
 /// Record of a method call
 #[derive(Debug, Clone)]
@@ -90,7 +88,7 @@ impl MockValue {
         if let Some(ref method) = *configuring {
             let mut methods = self.methods.lock().unwrap();
             let config = methods.entry(method.clone()).or_default();
-            
+
             let args = self.configuring_args.lock().unwrap();
             if args.is_empty() {
                 config.return_value = Some(value);
@@ -127,14 +125,14 @@ impl MockValue {
             if !config.return_queue.is_empty() {
                 return config.return_queue.remove(0);
             }
-            
+
             // Check argument matchers
             for (matchers, return_val) in &config.arg_matchers {
                 if matchers_match(matchers, args) {
                     return return_val.clone();
                 }
             }
-            
+
             // Return default value
             if let Some(ref val) = config.return_value {
                 return val.clone();
@@ -158,15 +156,16 @@ impl MockValue {
     /// Check if a method was called with specific arguments
     pub fn was_called_with(&self, method: &str, expected_args: &[super::Value]) -> bool {
         let calls = self.calls.lock().unwrap();
-        calls.iter().any(|c| {
-            c.method == method && args_match(&c.args, expected_args)
-        })
+        calls
+            .iter()
+            .any(|c| c.method == method && args_match(&c.args, expected_args))
     }
 
     /// Get all calls to a method
     pub fn get_calls(&self, method: &str) -> Vec<Vec<super::Value>> {
         let calls = self.calls.lock().unwrap();
-        calls.iter()
+        calls
+            .iter()
             .filter(|c| c.method == method)
             .map(|c| c.args.clone())
             .collect()
@@ -237,7 +236,7 @@ impl MatcherValue {
                 super::Value::Int(v) => *v <= *n,
                 super::Value::Float(v) => *v <= (*n as f64),
                 _ => false,
-            }
+            },
             MatcherValue::Contains(s) => {
                 match value {
                     super::Value::Str(v) => v.contains(s),
@@ -330,20 +329,38 @@ fn values_equal(a: &super::Value, b: &super::Value) -> bool {
         (super::Value::Array(x), super::Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
         }
-        (super::Value::Enum { enum_name: en1, variant: v1, payload: p1 },
-         super::Value::Enum { enum_name: en2, variant: v2, payload: p2 }) => {
-            en1 == en2 && v1 == v2 && match (p1, p2) {
-                (Some(a), Some(b)) => values_equal(a, b),
-                (None, None) => true,
-                _ => false,
-            }
+        (
+            super::Value::Enum {
+                enum_name: en1,
+                variant: v1,
+                payload: p1,
+            },
+            super::Value::Enum {
+                enum_name: en2,
+                variant: v2,
+                payload: p2,
+            },
+        ) => {
+            en1 == en2
+                && v1 == v2
+                && match (p1, p2) {
+                    (Some(a), Some(b)) => values_equal(a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
         }
         (super::Value::Dict(x), super::Value::Dict(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| {
-                y.get(k).is_some_and(|yv| values_equal(v, yv))
-            })
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|yv| values_equal(v, yv)))
         }
         (super::Value::Tuple(x), super::Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
+        }
+        (
+            super::Value::LabeledTuple { labels: lx, values: vx },
+            super::Value::LabeledTuple { labels: ly, values: vy },
+        ) => lx == ly && vx.len() == vy.len() && vx.iter().zip(vy.iter()).all(|(a, b)| values_equal(a, b)),
+        (super::Value::Tuple(x), super::Value::LabeledTuple { values: y, .. })
+        | (super::Value::LabeledTuple { values: x, .. }, super::Value::Tuple(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
         }
         _ => false,

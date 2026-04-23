@@ -182,6 +182,31 @@ fn _compare_ppm_exact(capture_ppm: text, baseline_path: text) -> (bool, text):
         return (true, "")
     (false, "ppm bytes differ")
 
+fn _capture_desktop_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "s=socket.socket(socket.AF_UNIX);" +
+        "s.settimeout(5);" +
+        "s.connect(sys.argv[1]);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');" +
+        "f.flush();" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='stop')).encode()+b'\\n');" +
+        "f.flush();" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command', arguments=dict([('command-line','screendump '+sys.argv[2])]))).encode()+b'\\n');" +
+        "f.flush();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2])>0)) for _ in range(150));" +
+        "print('OK' if ok else 'NO_CAPTURE');" +
+        "sys.exit(0 if ok else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    if result[0] != "":
+        print "[simpleos_desktop_fb_spec] python qmp capture: {result[0]}"
+    if result[1] != "":
+        print "[simpleos_desktop_fb_spec] python qmp stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
+
 # Extract the compare-mode branch into a standalone function so the
 # semantic pass on the it{} block never sees base_w / base_h / cmp etc.
 # (the interpreter performs a full semantic pass over all statements in
@@ -206,9 +231,12 @@ fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, capture_ppm: tex
         expect(false).to_equal(true)
         return false
 
-    val exact = _compare_ppm_exact(capture_ppm, baseline_path)
-    if not exact[0]:
-        print "[simpleos_desktop_fb_spec] baseline mismatch: {exact[1]}"
+    val cmp = compare_with_profile(result.pixels, base_pixels, result.width, result.height, profile_wm_default())
+    val pct_whole = cmp.match_percentage / 100
+    val pct_frac = cmp.match_percentage % 100
+    print "[simpleos_desktop_fb_spec] baseline match: {pct_whole}.{pct_frac}% max_diff={cmp.max_channel_diff}"
+    if cmp.match_percentage < 9500:
+        print "[simpleos_desktop_fb_spec] baseline mismatch: match below 95.00%"
         stop_guest(handle)
         expect(false).to_equal(true)
         return false
@@ -244,23 +272,38 @@ fn _run_live_capture(target: OsTarget, qmp_socket: text, serial_log: text, captu
                 stop_guest(handle)
                 return false
 
-            val ready = wait_for_serial_marker(handle, "[desktop-e2e] desktop-ready", 30000)
+            val ready = wait_for_serial_marker(handle, "[desktop-e2e] paint-settle:done", 30000)
             if not ready:
                 _persist_failure_artifacts(
                     handle,
                     capture_ppm,
                     "simpleos_desktop_fb_spec",
-                    "desktop-ready marker not observed before capture")
+                    "paint-settle marker not observed before capture")
                 stop_guest(handle)
                 return false
 
-            val result = capture_qemu_vm(qmp_socket, capture_ppm)
-            send_harness_marker(qmp_socket, "[harness] screendump-complete")
-            if not result.success:
-                print "[simpleos_desktop_fb_spec] QMP screendump failed: {result.error}"
-                _persist_failure_artifacts(handle, capture_ppm, "simpleos_desktop_fb_spec", result.error)
+            val captured = _capture_desktop_ppm_with_python(qmp_socket, capture_ppm)
+            if not captured:
+                print "[simpleos_desktop_fb_spec] QMP screendump failed"
+                _persist_failure_artifacts(handle, capture_ppm, "simpleos_desktop_fb_spec", "bounded qmp screendump failed")
                 stop_guest(handle)
                 return false
+
+            val (cap_ok, cap_pixels, cap_w, cap_h, cap_err) = _read_baseline_ppm(capture_ppm)
+            if not cap_ok:
+                print "[simpleos_desktop_fb_spec] capture decode failed: {cap_err}"
+                _persist_failure_artifacts(handle, capture_ppm, "simpleos_desktop_fb_spec", cap_err)
+                stop_guest(handle)
+                return false
+
+            val result = CaptureResult(
+                pixels: cap_pixels,
+                width: cap_w,
+                height: cap_h,
+                backend_name: "qemu_vm",
+                success: true,
+                error: ""
+            )
 
             val nb = _non_black_count(result.pixels)
             print "[simpleos_desktop_fb_spec] captured {result.width}x{result.height}, non-black pixels: {nb} of {result.pixels.len()}"

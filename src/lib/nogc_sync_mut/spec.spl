@@ -41,6 +41,20 @@ var current_test_error = nil
 # NOTE: passed_test_names for pending_on dependency tracking is defined
 # inline in test files. Module vars can't be accessed from imported functions.
 
+fn _test_filter() -> text:
+    val filter = rt_env_get("SIMPLE_TEST_FILTER")
+    if filter == nil:
+        return ""
+    filter
+
+fn _run_test(kind: text) -> bool:
+    val filter = _test_filter()
+    if filter == "slow":
+        return kind == "slow"
+    if filter == "skipped":
+        return kind == "skipped"
+    kind != "skipped"
+
 # ================================================================
 # Test Suite Structure
 # ================================================================
@@ -66,7 +80,7 @@ fn context(name: text, block: fn()):
     indent_level = indent_level - 1
     current_context = saved_context
 
-fn it(name: text, block: fn()):
+fn _execute_it(name: text, block: fn()):
     val indent = "  ".repeat(indent_level)
     var full_name = "{current_suite} > {name}"
     if current_context != "":
@@ -96,6 +110,11 @@ fn it(name: text, block: fn()):
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
 
+fn it(name: text, block: fn()):
+    if not _run_test("normal"):
+        return
+    _execute_it(name, block)
+
 fn test(name: text, block: fn()):
     it(name, block)
 
@@ -106,8 +125,9 @@ fn specify(name: text, block: fn()):
     it(name, block)
 
 fn slow_it(name: text, block: fn()):
-    # Session sharing makes slow tests fast — run like regular it()
-    it(name, block)
+    if not _run_test("slow"):
+        return
+    _execute_it(name, block)
 
 fn _is_interpreter_mode() -> bool:
     """Check if running in interpreter mode via SIMPLE_RUNTIME_MODE env var."""
@@ -144,18 +164,24 @@ fn _target_arch() -> text:
     "host"
 
 fn skip_it(name: text, block: fn()):
+    if not _run_test("skipped"):
+        return
     # Skip in interpreter mode, run in compiled/smf/native modes
     if _is_interpreter_mode():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (compiled-only)"
     else:
-        it(name, block)
+        _execute_it(name, block)
 
 fn pending(name: text):
+    if not _run_test("skipped"):
+        return
     test_pending = test_pending + 1
     print "    it {name} ... pending"
 
 fn skip(name: text, reason: text):
+    if not _run_test("skipped"):
+        return
     test_skipped = test_skipped + 1
     print "    it {name} ... skipped ({reason})"
 

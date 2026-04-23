@@ -18,7 +18,13 @@ impl Lowerer {
         }
 
         match self.module.types.get(ty) {
-            Some(HirType::Array { .. } | HirType::Simd { .. } | HirType::Tuple(_) | HirType::String) => true,
+            Some(
+                HirType::Array { .. }
+                | HirType::Simd { .. }
+                | HirType::Tuple(_)
+                | HirType::LabeledTuple(_)
+                | HirType::String,
+            ) => true,
             Some(HirType::Pointer { inner, .. }) => self.index_type_must_be_integer(*inner),
             _ => false,
         }

@@ -1,14 +1,14 @@
 //! Code generation, JIT compilation, and object file emission.
 
 use simple_common::target::Target;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::path::Path;
 
 use super::core::CompilerPipeline;
 use crate::codegen::llvm::LlvmBackend;
 use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
-use crate::hir::{BinOp, UnaryOp};
+use crate::hir::{BinOp, HirType, TypeRegistry, UnaryOp};
 use crate::import_loader::load_module_with_imports;
 use crate::mir;
 use crate::mir::{CallTarget, MirFunction, MirInst, GpuMemoryScope, Terminator};
@@ -114,15 +114,17 @@ impl CompilerPipeline {
 // =============================================================================
 
 fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
+    let types = &module.type_registry;
+    let entity_table = vhdl_entity_table(module)?;
     let mut out = String::new();
     for func in &module.functions {
-        if func.name == "main" || func.name.starts_with("__") {
+        if !entity_table.contains_key(func.name.as_str()) {
             continue;
         }
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        emit_vhdl_function(&mut out, func)?;
+        emit_vhdl_function(&mut out, func, types, &entity_table)?;
     }
     if out.trim().is_empty() {
         return Err(CompileError::Codegen(
@@ -132,24 +134,65 @@ fn generate_vhdl(module: &mir::MirModule) -> Result<String, CompileError> {
     Ok(out)
 }
 
-fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), CompileError> {
+fn vhdl_entity_table<'a>(module: &'a mir::MirModule) -> Result<BTreeMap<&'a str, &'a MirFunction>, CompileError> {
+    let mut entities = BTreeMap::new();
+    let mut sanitized_names: HashMap<String, String> = HashMap::new();
+    for func in &module.functions {
+        if !is_vhdl_entity_function(func) {
+            continue;
+        }
+        let sanitized = sanitize_vhdl_ident(&func.name);
+        if let Some(previous) = sanitized_names.insert(sanitized.clone(), func.name.clone()) {
+            return Err(CompileError::Codegen(format!(
+                "VHDL entity identifier collision after sanitization: functions `{}` and `{}` both map to `{}`",
+                previous, func.name, sanitized
+            )));
+        }
+        entities.insert(func.name.as_str(), func);
+    }
+    Ok(entities)
+}
+
+fn is_vhdl_entity_function(func: &MirFunction) -> bool {
+    func.attributes.iter().any(|attr| attr == "hardware")
+}
+
+fn emit_vhdl_function(
+    out: &mut String,
+    func: &MirFunction,
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
+) -> Result<(), CompileError> {
     let entity = sanitize_vhdl_ident(&func.name);
     let mut state = VhdlLowerState::default();
-    let mut result_expr: Option<String> = None;
+    let mut return_assignments: Option<Vec<String>> = None;
+    let return_abi = vhdl_return_abi(func, types)?;
+    let mut ports = Vec::new();
+    for param in &func.params {
+        ports.push(VhdlPort::input(
+            sanitize_vhdl_ident(&param.name),
+            param.name.clone(),
+            param.ty,
+        ));
+    }
+    ports.extend(return_abi.ports().iter().cloned());
+    validate_vhdl_port_names(&entity, &func.name, &ports)?;
 
     out.push_str("library ieee;\n");
     out.push_str("use ieee.std_logic_1164.all;\n");
     out.push_str("use ieee.numeric_std.all;\n\n");
     out.push_str(&format!("entity {} is\n", entity));
     out.push_str("    port (\n");
-    for param in &func.params {
+    for (idx, port) in ports.iter().enumerate() {
+        let semicolon = if idx + 1 == ports.len() { "" } else { ";" };
         out.push_str(&format!(
-            "        {} : in {};\n",
-            sanitize_vhdl_ident(&param.name),
-            vhdl_type(param.ty)?
+            "        {} : {} {}{}\n",
+            port.name,
+            port.direction.as_vhdl(),
+            vhdl_type(port.ty, types)?,
+            semicolon
         ));
     }
-    out.push_str(&format!("        result_out : out {}\n", vhdl_type(func.return_type)?));
     out.push_str("    );\n");
     out.push_str(&format!("end entity {};\n\n", entity));
     out.push_str(&format!("architecture rtl of {} is\n", entity));
@@ -161,34 +204,40 @@ fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), Compil
             else_block,
         } = &entry.terminator
         {
-            lower_vhdl_block_instructions(func, &mut state, entry)?;
-            let cond_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *cond, crate::hir::TypeId::BOOL)?;
+            lower_vhdl_block_instructions(func, &mut state, entry, types, entity_table)?;
+            let cond_expr = reg_expr_for_type(
+                &state.reg_expr,
+                &state.reg_int_const,
+                *cond,
+                crate::hir::TypeId::BOOL,
+                types,
+            )?;
             let base_assign_len = state.assigns.len();
             let mut then_state = state.clone();
             let mut else_state = state.clone();
-            let then_expr = lower_vhdl_return_block(func, &mut then_state, *then_block)?;
-            let else_expr = lower_vhdl_return_block(func, &mut else_state, *else_block)?;
+            let then_exprs =
+                lower_vhdl_return_block(func, &mut then_state, *then_block, &return_abi, types, entity_table)?;
+            let else_exprs =
+                lower_vhdl_return_block(func, &mut else_state, *else_block, &return_abi, types, entity_table)?;
             let then_assigns = then_state.assigns.split_off(base_assign_len);
             let else_assigns = else_state.assigns.split_off(base_assign_len);
             state.signals.extend(then_state.signals);
             state.signals.extend(else_state.signals);
+            state.instances.extend(then_state.instances);
+            state.instances.extend(else_state.instances);
             state.assigns.extend(then_assigns);
             state.assigns.extend(else_assigns);
-            result_expr = Some(format!("{} when {} = '1' else {}", then_expr, cond_expr, else_expr));
+            return_assignments = Some(branch_return_assignments(func, then_exprs, else_exprs, &cond_expr)?);
         }
     }
 
-    if result_expr.is_none() {
+    if return_assignments.is_none() {
         for block in &func.blocks {
-            lower_vhdl_block_instructions(func, &mut state, block)?;
+            lower_vhdl_block_instructions(func, &mut state, block, types, entity_table)?;
             match &block.terminator {
                 Terminator::Return(Some(reg)) => {
-                    result_expr = Some(reg_expr_for_type(
-                        &state.reg_expr,
-                        &state.reg_int_const,
-                        *reg,
-                        func.return_type,
-                    )?);
+                    let exprs = return_output_exprs(func, &state, &return_abi, *reg, types)?;
+                    return_assignments = Some(push_return_assignments(exprs));
                 }
                 Terminator::Return(None) => {}
                 Terminator::Unreachable if block.instructions.is_empty() => {}
@@ -203,17 +252,150 @@ fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), Compil
     }
 
     for (name, ty) in &state.signals {
-        out.push_str(&format!("    signal {} : {};\n", name, vhdl_type(*ty)?));
+        out.push_str(&format!("    signal {} : {};\n", name, vhdl_type(*ty, types)?));
     }
     out.push_str("begin\n");
+    for instance in state.instances {
+        out.push_str(&instance);
+        out.push('\n');
+    }
     for assign in state.assigns {
         out.push_str(&assign);
         out.push('\n');
     }
-    if let Some(expr) = result_expr {
-        out.push_str(&format!("    result_out <= {};\n", expr));
+    if let Some(assignments) = return_assignments {
+        for assign in assignments {
+            out.push_str(&assign);
+            out.push('\n');
+        }
     }
     out.push_str("end architecture rtl;\n");
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VhdlPortDirection {
+    In,
+    Out,
+}
+
+impl VhdlPortDirection {
+    fn as_vhdl(&self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Out => "out",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlPort {
+    name: String,
+    source_name: String,
+    direction: VhdlPortDirection,
+    ty: crate::hir::TypeId,
+}
+
+impl VhdlPort {
+    fn input(name: String, source_name: String, ty: crate::hir::TypeId) -> Self {
+        Self {
+            name,
+            source_name,
+            direction: VhdlPortDirection::In,
+            ty,
+        }
+    }
+
+    fn output(name: String, source_name: String, ty: crate::hir::TypeId) -> Self {
+        Self {
+            name,
+            source_name,
+            direction: VhdlPortDirection::Out,
+            ty,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlReturnField {
+    port_name: String,
+    source_name: String,
+    ty: crate::hir::TypeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VhdlReturnAbi {
+    Scalar(VhdlReturnField),
+    AnonymousTuple(Vec<VhdlReturnField>),
+    LabeledTuple(Vec<VhdlReturnField>),
+}
+
+impl VhdlReturnAbi {
+    fn ports(&self) -> Vec<VhdlPort> {
+        self.fields()
+            .iter()
+            .map(|field| VhdlPort::output(field.port_name.clone(), field.source_name.clone(), field.ty))
+            .collect()
+    }
+
+    fn fields(&self) -> &[VhdlReturnField] {
+        match self {
+            Self::Scalar(fields) => std::slice::from_ref(fields),
+            Self::AnonymousTuple(fields) | Self::LabeledTuple(fields) => fields,
+        }
+    }
+}
+
+fn vhdl_return_abi(func: &MirFunction, types: &TypeRegistry) -> Result<VhdlReturnAbi, CompileError> {
+    match types.get(func.return_type) {
+        Some(HirType::Tuple(fields)) if fields.is_empty() => Err(CompileError::Codegen(format!(
+            "VHDL backend unsupported empty tuple return in {}",
+            func.name
+        ))),
+        Some(HirType::Tuple(fields)) => Ok(VhdlReturnAbi::AnonymousTuple(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| VhdlReturnField {
+                    port_name: format!("out{}", index),
+                    source_name: format!("out{}", index),
+                    ty: *ty,
+                })
+                .collect(),
+        )),
+        Some(HirType::LabeledTuple(fields)) if fields.is_empty() => Err(CompileError::Codegen(format!(
+            "VHDL backend unsupported empty labeled tuple return in {}",
+            func.name
+        ))),
+        Some(HirType::LabeledTuple(fields)) => Ok(VhdlReturnAbi::LabeledTuple(
+            fields
+                .iter()
+                .map(|(label, ty)| VhdlReturnField {
+                    port_name: sanitize_vhdl_ident(label),
+                    source_name: label.clone(),
+                    ty: *ty,
+                })
+                .collect(),
+        )),
+        _ => Ok(VhdlReturnAbi::Scalar(VhdlReturnField {
+            port_name: "result_out".to_string(),
+            source_name: "result_out".to_string(),
+            ty: func.return_type,
+        })),
+    }
+}
+
+fn validate_vhdl_port_names(entity: &str, source_entity: &str, ports: &[VhdlPort]) -> Result<(), CompileError> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    seen.insert(entity.to_string(), format!("entity `{}`", source_entity));
+    for port in ports {
+        if let Some(previous) = seen.insert(port.name.clone(), format!("port `{}`", port.source_name)) {
+            return Err(CompileError::Codegen(format!(
+                "VHDL identifier collision after sanitization: {} and port `{}` both map to `{}`",
+                previous, port.source_name, port.name
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -221,19 +403,40 @@ fn emit_vhdl_function(out: &mut String, func: &MirFunction) -> Result<(), Compil
 struct VhdlLowerState {
     reg_expr: HashMap<u32, String>,
     reg_ty: HashMap<u32, crate::hir::TypeId>,
+    reg_tuple_fields: HashMap<u32, Vec<VhdlTupleFieldExpr>>,
     reg_int_const: HashMap<u32, i64>,
     addr_local: HashMap<u32, usize>,
+    local_expr: HashMap<usize, String>,
+    local_ty: HashMap<usize, crate::hir::TypeId>,
+    local_tuple_fields: HashMap<usize, Vec<VhdlTupleFieldExpr>>,
     signals: BTreeSet<(String, crate::hir::TypeId)>,
+    instances: Vec<String>,
+    call_ordinal: usize,
     assigns: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlTupleFieldExpr {
+    index: usize,
+    ty: crate::hir::TypeId,
+    expr: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VhdlReturnOutputExpr {
+    port_name: String,
+    expr: String,
 }
 
 fn lower_vhdl_block_instructions(
     func: &MirFunction,
     state: &mut VhdlLowerState,
     block: &crate::mir::MirBlock,
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
 ) -> Result<(), CompileError> {
     for inst in &block.instructions {
-        lower_vhdl_instruction(func, state, inst)?;
+        lower_vhdl_instruction(func, state, inst, types, entity_table)?;
     }
     Ok(())
 }
@@ -242,17 +445,18 @@ fn lower_vhdl_return_block(
     func: &MirFunction,
     state: &mut VhdlLowerState,
     id: crate::mir::BlockId,
-) -> Result<String, CompileError> {
+    return_abi: &VhdlReturnAbi,
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
+) -> Result<Vec<VhdlReturnOutputExpr>, CompileError> {
     let block = func
         .blocks
         .iter()
         .find(|block| block.id == id)
         .ok_or_else(|| CompileError::Codegen(format!("VHDL backend missing block {:?}", id)))?;
-    lower_vhdl_block_instructions(func, state, block)?;
+    lower_vhdl_block_instructions(func, state, block, types, entity_table)?;
     match &block.terminator {
-        Terminator::Return(Some(reg)) => {
-            reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *reg, func.return_type)
-        }
+        Terminator::Return(Some(reg)) => return_output_exprs(func, state, return_abi, *reg, types),
         other => Err(CompileError::Codegen(format!(
             "VHDL backend only supports if/else branches whose arms return in {}: {:?}",
             func.name, other
@@ -260,7 +464,107 @@ fn lower_vhdl_return_block(
     }
 }
 
-fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: &MirInst) -> Result<(), CompileError> {
+fn return_output_exprs(
+    func: &MirFunction,
+    state: &VhdlLowerState,
+    return_abi: &VhdlReturnAbi,
+    reg: mir::VReg,
+    types: &TypeRegistry,
+) -> Result<Vec<VhdlReturnOutputExpr>, CompileError> {
+    match return_abi {
+        VhdlReturnAbi::Scalar(field) => Ok(vec![VhdlReturnOutputExpr {
+            port_name: field.port_name.clone(),
+            expr: reg_expr_for_type(&state.reg_expr, &state.reg_int_const, reg, field.ty, types)?,
+        }]),
+        VhdlReturnAbi::AnonymousTuple(fields) | VhdlReturnAbi::LabeledTuple(fields) => {
+            let tuple_fields = state.reg_tuple_fields.get(&reg.0).ok_or_else(|| {
+                CompileError::Codegen(format!(
+                    "VHDL backend expected tuple return value in {}, but v{} is not a virtual tuple",
+                    func.name, reg.0
+                ))
+            })?;
+            if tuple_fields.len() != fields.len() {
+                return Err(CompileError::Codegen(format!(
+                    "VHDL backend tuple return arity mismatch in {}: ABI has {} fields, v{} has {}",
+                    func.name,
+                    fields.len(),
+                    reg.0,
+                    tuple_fields.len()
+                )));
+            }
+            fields
+                .iter()
+                .zip(tuple_fields.iter())
+                .enumerate()
+                .map(|(index, (field, tuple_field))| {
+                    if tuple_field.index != index {
+                        return Err(CompileError::Codegen(format!(
+                            "VHDL backend tuple return field order mismatch in {} at field {}",
+                            func.name, index
+                        )));
+                    }
+                    if tuple_field.ty != field.ty {
+                        return Err(CompileError::Codegen(format!(
+                            "VHDL backend tuple return type mismatch in {}.{}",
+                            func.name, field.source_name
+                        )));
+                    }
+                    Ok(VhdlReturnOutputExpr {
+                        port_name: field.port_name.clone(),
+                        expr: tuple_field.expr.clone(),
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+fn push_return_assignments(exprs: Vec<VhdlReturnOutputExpr>) -> Vec<String> {
+    exprs
+        .into_iter()
+        .map(|expr| format!("    {} <= {};", expr.port_name, expr.expr))
+        .collect()
+}
+
+fn branch_return_assignments(
+    func: &MirFunction,
+    then_exprs: Vec<VhdlReturnOutputExpr>,
+    else_exprs: Vec<VhdlReturnOutputExpr>,
+    cond_expr: &str,
+) -> Result<Vec<String>, CompileError> {
+    if then_exprs.len() != else_exprs.len() {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend branch return arity mismatch in {}: then has {}, else has {}",
+            func.name,
+            then_exprs.len(),
+            else_exprs.len()
+        )));
+    }
+    then_exprs
+        .into_iter()
+        .zip(else_exprs)
+        .map(|(then_expr, else_expr)| {
+            if then_expr.port_name != else_expr.port_name {
+                return Err(CompileError::Codegen(format!(
+                    "VHDL backend branch return port mismatch in {}: then {}, else {}",
+                    func.name, then_expr.port_name, else_expr.port_name
+                )));
+            }
+            Ok(format!(
+                "    {} <= {} when {} = '1' else {};",
+                then_expr.port_name, then_expr.expr, cond_expr, else_expr.expr
+            ))
+        })
+        .collect()
+}
+
+fn lower_vhdl_instruction(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    inst: &MirInst,
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
+) -> Result<(), CompileError> {
     match inst {
         MirInst::LocalAddr { dest, local_index } => {
             state.addr_local.insert(dest.0, *local_index);
@@ -269,6 +573,18 @@ fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: 
             let local_index = state.addr_local.get(&addr.0).ok_or_else(|| {
                 CompileError::Codegen(format!("VHDL unsupported load from non-local address v{}", addr.0))
             })?;
+            if let Some(fields) = state.local_tuple_fields.get(local_index).cloned() {
+                state.reg_tuple_fields.insert(dest.0, fields);
+                state.reg_ty.insert(dest.0, *ty);
+                return Ok(());
+            }
+            if let Some(expr) = state.local_expr.get(local_index).cloned() {
+                state.reg_expr.insert(dest.0, expr);
+                state
+                    .reg_ty
+                    .insert(dest.0, state.local_ty.get(local_index).copied().unwrap_or(*ty));
+                return Ok(());
+            }
             let name = local_name(func, *local_index)?;
             state.reg_expr.insert(dest.0, sanitize_vhdl_ident(name));
             state.reg_ty.insert(dest.0, *ty);
@@ -284,8 +600,17 @@ fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: 
             state.reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
         }
         MirInst::Copy { dest, src } => {
-            let expr = reg_expr_for(&state.reg_expr, *src)?;
-            state.reg_expr.insert(dest.0, expr);
+            if let Some(expr) = state.reg_expr.get(&src.0).cloned() {
+                state.reg_expr.insert(dest.0, expr);
+            } else if !state.reg_tuple_fields.contains_key(&src.0) {
+                return Err(CompileError::Codegen(format!(
+                    "VHDL backend has no expression for copy source v{} in {}",
+                    src.0, func.name
+                )));
+            }
+            if let Some(fields) = state.reg_tuple_fields.get(&src.0).cloned() {
+                state.reg_tuple_fields.insert(dest.0, fields);
+            }
             if let Some(value) = state.reg_int_const.get(&src.0).copied() {
                 state.reg_int_const.insert(dest.0, value);
             }
@@ -306,8 +631,8 @@ fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: 
                 .copied()
                 .or_else(|| state.reg_ty.get(&left.0).copied())
                 .unwrap_or(func.return_type);
-            let left_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *left, left_ty)?;
-            let right_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *right, right_ty)?;
+            let left_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *left, left_ty, types)?;
+            let right_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *right, right_ty, types)?;
             let expr = vhdl_binop(op, &left_expr, &right_expr)?;
             let ty = binop_result_type(*op, left_ty);
             let sig = format!("tmp_{}", dest.0);
@@ -318,13 +643,65 @@ fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: 
         }
         MirInst::UnaryOp { dest, op, operand } => {
             let operand_ty = state.reg_ty.get(&operand.0).copied().unwrap_or(func.return_type);
-            let operand_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *operand, operand_ty)?;
+            let operand_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *operand, operand_ty, types)?;
             let expr = vhdl_unaryop(op, &operand_expr)?;
             let sig = format!("tmp_{}", dest.0);
             state.signals.insert((sig.clone(), operand_ty));
             state.assigns.push(format!("    {} <= {};", sig, expr));
             state.reg_expr.insert(dest.0, sig);
             state.reg_ty.insert(dest.0, operand_ty);
+        }
+        MirInst::BoxInt { dest, value } => {
+            let ty = state.reg_ty.get(&value.0).copied().unwrap_or(crate::hir::TypeId::I64);
+            let expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *value, ty, types)?;
+            state.reg_expr.insert(dest.0, expr);
+            state.reg_ty.insert(dest.0, ty);
+            if let Some(value) = state.reg_int_const.get(&value.0).copied() {
+                state.reg_int_const.insert(dest.0, value);
+            }
+        }
+        MirInst::TupleLit { dest, elements } => {
+            let mut fields = Vec::with_capacity(elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                let ty = state.reg_ty.get(&element.0).copied().ok_or_else(|| {
+                    CompileError::Codegen(format!(
+                        "VHDL backend cannot infer tuple field {} type for v{} in {}",
+                        index, element.0, func.name
+                    ))
+                })?;
+                fields.push(VhdlTupleFieldExpr {
+                    index,
+                    ty,
+                    expr: reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *element, ty, types)?,
+                });
+            }
+            state.reg_tuple_fields.insert(dest.0, fields);
+            state.reg_ty.insert(dest.0, func.return_type);
+        }
+        MirInst::Store { addr, value, ty } => {
+            let local_index = state.addr_local.get(&addr.0).copied().ok_or_else(|| {
+                CompileError::Codegen(format!("VHDL unsupported store to non-local address v{}", addr.0))
+            })?;
+            state.local_ty.insert(local_index, *ty);
+            if let Some(fields) = state.reg_tuple_fields.get(&value.0).cloned() {
+                state.local_tuple_fields.insert(local_index, fields);
+                state.local_expr.remove(&local_index);
+            } else {
+                let expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *value, *ty, types)?;
+                state.local_expr.insert(local_index, expr);
+                state.local_tuple_fields.remove(&local_index);
+            }
+        }
+        MirInst::Call { dest, target, args } => {
+            if target.name() == "rt_value_bool" {
+                lower_vhdl_value_bool(func, state, *dest, args)?;
+                return Ok(());
+            }
+            if target.name() == "rt_tuple_get" {
+                lower_vhdl_tuple_get(func, state, *dest, args)?;
+                return Ok(());
+            }
+            lower_vhdl_call(func, state, *dest, target, args, types, entity_table)?;
         }
         MirInst::Drop { .. } => {}
         other => {
@@ -334,6 +711,164 @@ fn lower_vhdl_instruction(func: &MirFunction, state: &mut VhdlLowerState, inst: 
             )))
         }
     }
+    Ok(())
+}
+
+fn lower_vhdl_value_bool(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    dest: Option<mir::VReg>,
+    args: &[mir::VReg],
+) -> Result<(), CompileError> {
+    let dest = dest.ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported void bool boxing call in {}",
+            func.name
+        ))
+    })?;
+    if args.len() != 1 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend bool boxing call in {} expects 1 argument, got {}",
+            func.name,
+            args.len()
+        )));
+    }
+    let arg = args[0];
+    let expr = reg_expr_for(&state.reg_expr, arg)?;
+    state.reg_expr.insert(dest.0, expr);
+    state.reg_ty.insert(dest.0, crate::hir::TypeId::BOOL);
+    Ok(())
+}
+
+fn lower_vhdl_tuple_get(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    dest: Option<mir::VReg>,
+    args: &[mir::VReg],
+) -> Result<(), CompileError> {
+    let dest = dest.ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported void tuple projection in {}",
+            func.name
+        ))
+    })?;
+    if args.len() != 2 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend tuple projection in {} expects 2 arguments, got {}",
+            func.name,
+            args.len()
+        )));
+    }
+    let tuple_reg = args[0];
+    let index_reg = args[1];
+    let index = state.reg_int_const.get(&index_reg.0).copied().ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported dynamic tuple index in {}: v{} is not a constant",
+            func.name, index_reg.0
+        ))
+    })?;
+    if index < 0 {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend tuple index out of range in {}: {}",
+            func.name, index
+        )));
+    }
+    let fields = state.reg_tuple_fields.get(&tuple_reg.0).ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported runtime tuple access in {}: v{} is not a virtual hardware aggregate",
+            func.name, tuple_reg.0
+        ))
+    })?;
+    let field = fields.get(index as usize).ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend tuple index out of range in {}: v{} has {} fields, requested {}",
+            func.name,
+            tuple_reg.0,
+            fields.len(),
+            index
+        ))
+    })?;
+    state.reg_expr.insert(dest.0, field.expr.clone());
+    state.reg_ty.insert(dest.0, field.ty);
+    Ok(())
+}
+
+fn lower_vhdl_call(
+    caller: &MirFunction,
+    state: &mut VhdlLowerState,
+    dest: Option<mir::VReg>,
+    target: &CallTarget,
+    args: &[mir::VReg],
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
+) -> Result<(), CompileError> {
+    let callee_name = target.name();
+    let callee = entity_table.get(callee_name).copied().ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported call in {}: `{}` is not an @hardware entity",
+            caller.name, callee_name
+        ))
+    })?;
+    if args.len() != callee.params.len() {
+        return Err(CompileError::Codegen(format!(
+            "VHDL backend call arity mismatch in {} calling {}: expected {}, got {}",
+            caller.name,
+            callee.name,
+            callee.params.len(),
+            args.len()
+        )));
+    }
+
+    let dest = dest.ok_or_else(|| {
+        CompileError::Codegen(format!(
+            "VHDL backend unsupported void hardware call in {} to {}",
+            caller.name, callee.name
+        ))
+    })?;
+    let return_abi = vhdl_return_abi(callee, types)?;
+    let callee_entity = sanitize_vhdl_ident(&callee.name);
+    let instance_name = format!("u_{}_{}", callee_entity, state.call_ordinal);
+    state.call_ordinal += 1;
+
+    let mut maps = Vec::new();
+    for (param, arg) in callee.params.iter().zip(args.iter()) {
+        let arg_expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *arg, param.ty, types)?;
+        maps.push((sanitize_vhdl_ident(&param.name), arg_expr));
+    }
+
+    match &return_abi {
+        VhdlReturnAbi::Scalar(field) => {
+            let signal = format!("{}_{}", instance_name, field.port_name);
+            state.signals.insert((signal.clone(), field.ty));
+            maps.push((field.port_name.clone(), signal.clone()));
+            state.reg_expr.insert(dest.0, signal);
+            state.reg_ty.insert(dest.0, field.ty);
+        }
+        VhdlReturnAbi::AnonymousTuple(fields) | VhdlReturnAbi::LabeledTuple(fields) => {
+            let mut virtual_fields = Vec::with_capacity(fields.len());
+            for (index, field) in fields.iter().enumerate() {
+                let signal = format!("{}_{}", instance_name, field.port_name);
+                state.signals.insert((signal.clone(), field.ty));
+                maps.push((field.port_name.clone(), signal.clone()));
+                virtual_fields.push(VhdlTupleFieldExpr {
+                    index,
+                    ty: field.ty,
+                    expr: signal,
+                });
+            }
+            state.reg_tuple_fields.insert(dest.0, virtual_fields);
+            state.reg_ty.insert(dest.0, callee.return_type);
+        }
+    }
+
+    let mut instance = format!("    {}: entity work.{}\n", instance_name, callee_entity);
+    instance.push_str("        port map (\n");
+    for (idx, (port, expr)) in maps.iter().enumerate() {
+        let comma = if idx + 1 == maps.len() { "" } else { "," };
+        instance.push_str(&format!("            {} => {}{}\n", port, expr, comma));
+    }
+    instance.push_str("        );");
+    state.instances.push(instance);
     Ok(())
 }
 
@@ -360,14 +895,15 @@ fn reg_expr_for_type(
     reg_int_const: &std::collections::HashMap<u32, i64>,
     reg: mir::VReg,
     ty: crate::hir::TypeId,
+    types: &TypeRegistry,
 ) -> Result<String, CompileError> {
     if let Some(value) = reg_int_const.get(&reg.0) {
-        return vhdl_int_literal(*value, ty);
+        return vhdl_int_literal(*value, ty, types);
     }
     reg_expr_for(reg_expr, reg)
 }
 
-fn vhdl_type(ty: crate::hir::TypeId) -> Result<&'static str, CompileError> {
+fn vhdl_type(ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<&'static str, CompileError> {
     if ty == crate::hir::TypeId::I32 {
         Ok("signed(31 downto 0)")
     } else if ty == crate::hir::TypeId::I64 {
@@ -375,24 +911,36 @@ fn vhdl_type(ty: crate::hir::TypeId) -> Result<&'static str, CompileError> {
     } else if ty == crate::hir::TypeId::BOOL {
         Ok("std_logic")
     } else {
+        let detail = types
+            .get(ty)
+            .map(format_vhdl_type_detail)
+            .unwrap_or_else(|| "unregistered".to_string());
         Err(CompileError::Codegen(format!(
-            "VHDL backend unsupported type id: {:?}",
-            ty
+            "VHDL backend unsupported type id: {:?} ({})",
+            ty, detail
         )))
     }
 }
 
-fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId) -> Result<String, CompileError> {
+fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<String, CompileError> {
     if ty == crate::hir::TypeId::I32 {
         Ok(format!("to_signed({}, 32)", value))
     } else if ty == crate::hir::TypeId::I64 {
         Ok(format!("to_signed({}, 64)", value))
     } else {
+        let detail = types
+            .get(ty)
+            .map(format_vhdl_type_detail)
+            .unwrap_or_else(|| "unregistered".to_string());
         Err(CompileError::Codegen(format!(
-            "VHDL backend cannot materialize integer literal for type id: {:?}",
-            ty
+            "VHDL backend cannot materialize integer literal for type id: {:?} ({})",
+            ty, detail
         )))
     }
+}
+
+fn format_vhdl_type_detail(ty: &HirType) -> String {
+    format!("{:?}", ty)
 }
 
 fn binop_result_type(op: BinOp, int_ty: crate::hir::TypeId) -> crate::hir::TypeId {
@@ -1289,7 +1837,7 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
 
     #[test]
     fn vhdl_emits_combinational_adder_from_simple_source() {
-        let source = "fn add(a: i32, b: i32) -> i32:\n    return a + b\n";
+        let source = "@hardware\nfn add(a: i32, b: i32) -> i32:\n    return a + b\n";
         let mut parser = Parser::new(source);
         let ast = parser.parse().expect("parse failed");
         let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
@@ -1315,15 +1863,19 @@ fn vector_add(a: i64, b: i64, out: i64, n: i64):
     #[test]
     fn vhdl_emits_typed_constants_unary_ops_and_const_compare() {
         let source = "\
+@hardware
 fn one() -> i32:
     return 1
 
+@hardware
 fn neg(a: i32) -> i32:
     return -a
 
+@hardware
 fn inv(a: bool) -> bool:
     return not a
 
+@hardware
 fn is_one(a: i32) -> bool:
     return a == 1
 ";
@@ -1348,6 +1900,7 @@ fn is_one(a: i32) -> bool:
     #[test]
     fn vhdl_emits_simple_if_else_return_mux() {
         let source = "\
+@hardware
 fn sel(flag: bool, a: i32, b: i32) -> i32:
     if flag:
         return a
@@ -1367,9 +1920,393 @@ fn sel(flag: bool, a: i32, b: i32) -> i32:
     }
 
     #[test]
+    fn vhdl_emits_only_hardware_functions() {
+        let source = "\
+fn helper(a: i32) -> i32:
+    return a + 1
+
+@hardware
+fn top(a: i32) -> i32:
+    return a
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(vhdl.contains("entity top is"), "expected top entity:\n{vhdl}");
+        assert!(
+            !vhdl.contains("entity helper is"),
+            "helper must not be emitted:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_lowers_scalar_hardware_call_to_entity_instance() {
+        let source = "\
+@hardware
+fn inc(a: i32) -> i32:
+    return a + 1
+
+@hardware
+fn top(a: i32) -> i32:
+    return inc(a)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("signal u_inc_0_result_out : signed(31 downto 0);"),
+            "expected deterministic scalar call output signal:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("u_inc_0: entity work.inc"),
+            "expected inc entity instance:\n{vhdl}"
+        );
+        assert!(vhdl.contains("a => a"), "expected input port map:\n{vhdl}");
+        assert!(
+            vhdl.contains("result_out => u_inc_0_result_out"),
+            "expected output port map:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("result_out <= u_inc_0_result_out;"),
+            "expected top return assignment from call signal:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_lowers_multi_output_hardware_call_to_named_port_map() {
+        let source = "\
+@hardware
+fn full_add(a: bool, b: bool) -> (sum: bool, cout: bool):
+    return (sum: a xor b, cout: a and b)
+
+@hardware
+fn top(a: bool, b: bool) -> (sum0: bool, carry: bool):
+    return (sum0: full_add(a, b).sum, carry: full_add(a, b).cout)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("signal u_full_add_0_sum : std_logic;"),
+            "expected deterministic sum temp signal:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("signal u_full_add_0_cout : std_logic;"),
+            "expected deterministic cout temp signal:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("u_full_add_0: entity work.full_add"),
+            "expected full_add entity instance:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("sum => u_full_add_0_sum"),
+            "expected sum port map:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("cout => u_full_add_0_cout"),
+            "expected cout port map:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("sum0 <= u_full_add_0_sum;"),
+            "expected sum projection:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("carry <= u_full_add_1_cout;"),
+            "expected carry projection from second call:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_decomposes_labeled_tuple_return_assignments() {
+        let source = "\
+@hardware
+fn full_add(a: bool, b: bool) -> (sum: bool, cout: bool):
+    return (sum: a, cout: b)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(vhdl.contains("sum : out std_logic;"), "expected sum output:\n{vhdl}");
+        assert!(vhdl.contains("cout : out std_logic"), "expected cout output:\n{vhdl}");
+        assert!(vhdl.contains("sum <= a;"), "expected sum assignment:\n{vhdl}");
+        assert!(vhdl.contains("cout <= b;"), "expected cout assignment:\n{vhdl}");
+        assert!(
+            !vhdl.contains("result_out"),
+            "tuple return should not use scalar result_out:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_decomposes_anonymous_tuple_return_assignments() {
+        let source = "\
+@hardware
+fn bounds(x: i32, zero: bool) -> (i32, bool):
+    return (x, zero)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("out0 : out signed(31 downto 0);"),
+            "expected out0 output:\n{vhdl}"
+        );
+        assert!(vhdl.contains("out1 : out std_logic"), "expected out1 output:\n{vhdl}");
+        assert!(vhdl.contains("out0 <= x;"), "expected out0 assignment:\n{vhdl}");
+        assert!(vhdl.contains("out1 <= zero;"), "expected out1 assignment:\n{vhdl}");
+    }
+
+    #[test]
+    fn vhdl_decomposes_labeled_tuple_branch_return_assignments() {
+        let source = "\
+@hardware
+fn choose(flag: bool, a: bool, b: bool) -> (sum: bool, cout: bool):
+    if flag:
+        return (sum: a, cout: b)
+    else:
+        return (sum: b, cout: a)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("sum <= a when flag = '1' else b;"),
+            "expected sum branch assignment:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("cout <= b when flag = '1' else a;"),
+            "expected cout branch assignment:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_lowers_labeled_hardware_call_field_access_to_output_signal() {
+        let source = "\
+@hardware
+fn pair(a: bool, b: bool) -> (left: bool, right: bool):
+    return (left: a, right: b)
+
+@hardware
+fn top(a: bool, b: bool) -> bool:
+    return pair(a, b).right
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl(&mir_module).expect("VHDL generation failed");
+
+        assert!(
+            vhdl.contains("right : out std_logic"),
+            "expected labeled tuple output port:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("signal u_pair_0_right : std_logic;"),
+            "expected deterministic field temp signal:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("right => u_pair_0_right"),
+            "expected pair output port map:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("result_out <= u_pair_0_right;"),
+            "expected tuple field projection to drive scalar return:\n{vhdl}"
+        );
+    }
+
+    #[test]
+    fn vhdl_return_abi_uses_labeled_tuple_ports() {
+        let mut types = TypeRegistry::new();
+        let return_ty = types.register(HirType::LabeledTuple(vec![
+            ("sum".to_string(), crate::hir::TypeId::BOOL),
+            ("carry-out".to_string(), crate::hir::TypeId::BOOL),
+        ]));
+        let func = MirFunction::new(
+            "full_add".to_string(),
+            return_ty,
+            simple_parser::ast::Visibility::Private,
+        );
+
+        let abi = vhdl_return_abi(&func, &types).expect("return ABI");
+        assert_eq!(
+            abi.ports()
+                .iter()
+                .map(|port| (port.name.as_str(), port.direction.as_vhdl(), port.ty))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sum", "out", crate::hir::TypeId::BOOL),
+                ("carry_out", "out", crate::hir::TypeId::BOOL),
+            ]
+        );
+    }
+
+    #[test]
+    fn vhdl_return_abi_uses_deterministic_anonymous_tuple_ports() {
+        let mut types = TypeRegistry::new();
+        let return_ty = types.register(HirType::Tuple(vec![crate::hir::TypeId::I32, crate::hir::TypeId::BOOL]));
+        let func = MirFunction::new("bounds".to_string(), return_ty, simple_parser::ast::Visibility::Private);
+
+        let abi = vhdl_return_abi(&func, &types).expect("return ABI");
+        assert_eq!(
+            abi.ports()
+                .iter()
+                .map(|port| (port.name.as_str(), port.direction.as_vhdl(), port.ty))
+                .collect::<Vec<_>>(),
+            vec![
+                ("out0", "out", crate::hir::TypeId::I32),
+                ("out1", "out", crate::hir::TypeId::BOOL),
+            ]
+        );
+    }
+
+    #[test]
+    fn vhdl_port_validation_rejects_sanitized_collisions() {
+        let ports = vec![
+            VhdlPort::input(
+                "carry_out".to_string(),
+                "carry-out".to_string(),
+                crate::hir::TypeId::BOOL,
+            ),
+            VhdlPort::output(
+                "carry_out".to_string(),
+                "carry_out".to_string(),
+                crate::hir::TypeId::BOOL,
+            ),
+        ];
+
+        let err = validate_vhdl_port_names("full_add", "full_add", &ports).expect_err("collision");
+        assert!(
+            format!("{err}").contains("VHDL identifier collision after sanitization"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn vhdl_rt_tuple_get_projects_constant_index_from_virtual_tuple() {
+        let types = TypeRegistry::new();
+        let func = MirFunction::new(
+            "uses_full_add".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        let mut state = VhdlLowerState::default();
+        state.reg_tuple_fields.insert(
+            1,
+            vec![
+                VhdlTupleFieldExpr {
+                    index: 0,
+                    ty: crate::hir::TypeId::BOOL,
+                    expr: "u_full_add_0_sum".to_string(),
+                },
+                VhdlTupleFieldExpr {
+                    index: 1,
+                    ty: crate::hir::TypeId::BOOL,
+                    expr: "u_full_add_0_cout".to_string(),
+                },
+            ],
+        );
+        state.reg_ty.insert(1, func.return_type);
+        state.reg_int_const.insert(2, 1);
+
+        lower_vhdl_instruction(
+            &func,
+            &mut state,
+            &MirInst::Call {
+                dest: Some(crate::mir::VReg(3)),
+                target: CallTarget::from_name("rt_tuple_get"),
+                args: vec![crate::mir::VReg(1), crate::mir::VReg(2)],
+            },
+            &types,
+            &BTreeMap::new(),
+        )
+        .expect("tuple projection");
+
+        assert_eq!(state.reg_expr.get(&3).map(String::as_str), Some("u_full_add_0_cout"));
+        assert_eq!(state.reg_ty.get(&3).copied(), Some(crate::hir::TypeId::BOOL));
+    }
+
+    #[test]
+    fn vhdl_rt_tuple_get_rejects_dynamic_index() {
+        let func = MirFunction::new(
+            "uses_full_add".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        let mut state = VhdlLowerState::default();
+        state.reg_tuple_fields.insert(
+            1,
+            vec![VhdlTupleFieldExpr {
+                index: 0,
+                ty: crate::hir::TypeId::BOOL,
+                expr: "u_full_add_0_sum".to_string(),
+            }],
+        );
+
+        let err = lower_vhdl_tuple_get(
+            &func,
+            &mut state,
+            Some(crate::mir::VReg(3)),
+            &[crate::mir::VReg(1), crate::mir::VReg(2)],
+        )
+        .expect_err("dynamic tuple index should be rejected");
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("unsupported dynamic tuple index"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn vhdl_rt_tuple_get_rejects_non_virtual_tuple_receiver() {
+        let func = MirFunction::new(
+            "uses_full_add".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        let mut state = VhdlLowerState::default();
+        state.reg_int_const.insert(2, 0);
+
+        let err = lower_vhdl_tuple_get(
+            &func,
+            &mut state,
+            Some(crate::mir::VReg(3)),
+            &[crate::mir::VReg(1), crate::mir::VReg(2)],
+        )
+        .expect_err("non-virtual tuple receiver should be rejected");
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("unsupported runtime tuple access"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn compile_file_to_vhdl_writes_vhdl_output() {
         let source_file = NamedTempFile::new().expect("temp source");
-        std::fs::write(source_file.path(), "fn add(a: i32, b: i32) -> i32:\n    return a + b\n").expect("write source");
+        std::fs::write(
+            source_file.path(),
+            "@hardware\nfn add(a: i32, b: i32) -> i32:\n    return a + b\n",
+        )
+        .expect("write source");
         let output_file = NamedTempFile::new().expect("temp vhdl");
 
         let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");

@@ -57,6 +57,27 @@ fn tuple_index_dispatch() {
 }
 
 #[test]
+fn labeled_tuple_field_access_dispatches_to_tuple_get() {
+    let mir =
+        compile_to_mir("fn test() -> i64:\n    val t = (left: 10, right: 32)\n    return t.left + t.right\n").unwrap();
+    let tuple_gets = count_inst(
+        &mir,
+        |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_tuple_get")),
+    );
+    assert_eq!(tuple_gets, 2);
+}
+
+#[test]
+fn labeled_tuple_numeric_access_dispatches_to_tuple_get() {
+    let mir = compile_to_mir("fn test() -> i64:\n    val t = (left: 10, right: 32)\n    return t[0] + t[1]\n").unwrap();
+    let tuple_gets = count_inst(
+        &mir,
+        |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_tuple_get")),
+    );
+    assert_eq!(tuple_gets, 2);
+}
+
+#[test]
 fn array_index_dispatch() {
     let mir = compile_to_mir("fn test():\n    val arr = [10, 20]\n    val x = arr[0]\n").unwrap();
     assert!(has_inst(&mir, |i| {

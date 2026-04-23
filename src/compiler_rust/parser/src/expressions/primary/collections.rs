@@ -1,4 +1,4 @@
-use crate::ast::{Expr, MoveMode};
+use crate::ast::{Expr, MoveMode, TupleExprField};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
@@ -49,13 +49,18 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
-        // Check for named tuple: (name: value, name2: value2)
+        // Check for labeled tuple: (name: value, name2: value2)
         // The `first` expr must be an Identifier and next token must be Colon
         if self.check(&TokenKind::Colon) {
             if let Expr::Identifier(field_name) = first {
                 self.advance(); // consume ':'
                 let value = self.parse_expression()?;
-                let mut fields = vec![(field_name, value)];
+                let mut labels = std::collections::HashSet::new();
+                labels.insert(field_name.clone());
+                let mut fields = vec![TupleExprField {
+                    label: field_name,
+                    value,
+                }];
                 // Skip whitespace
                 while matches!(
                     self.current.kind,
@@ -75,9 +80,18 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     let name = self.expect_identifier()?;
+                    if !labels.insert(name.clone()) {
+                        return Err(ParseError::syntax_error_with_span(
+                            format!("duplicate tuple field label `{}`", name),
+                            self.previous.span,
+                        ));
+                    }
                     self.expect(&TokenKind::Colon)?;
                     let val = self.parse_expression()?;
-                    fields.push((name, val));
+                    fields.push(TupleExprField {
+                        label: name,
+                        value: val,
+                    });
                     while matches!(
                         self.current.kind,
                         TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
@@ -86,11 +100,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
-                return Ok(Expr::StructInit {
-                    name: "".to_string(),
-                    fields,
-                    spread: None,
-                });
+                return Ok(Expr::LabeledTuple(fields));
             }
         }
 

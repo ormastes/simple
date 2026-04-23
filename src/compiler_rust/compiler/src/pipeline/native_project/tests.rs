@@ -318,6 +318,82 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_c = temp.path().join("runtime.c");
+    let app_c = temp.path().join("app.c");
+    let runtime_o = temp.path().join("runtime.o");
+    let app_o = temp.path().join("app.o");
+
+    std::fs::write(
+        &runtime_c,
+        r#"
+void rt_used(void) {}
+void rt_unused(void) {}
+void __simple_runtime_init(void) {}
+void __simple_runtime_shutdown(void) {}
+void rt_set_args(void) {}
+void rt_function_not_found(void) {}
+void rt_string_new(void) {}
+void rt_string_data(void) {}
+void rt_string_len(void) {}
+void rt_array_new(void) {}
+void rt_array_len(void) {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &app_c,
+        r#"
+extern void rt_used(void);
+void app_call(void) { rt_used(); }
+"#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&runtime_c)
+        .arg("-o")
+        .arg(&runtime_o)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&app_c)
+        .arg("-o")
+        .arg(&app_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        populate_global_struct_defs: false,
+    };
+
+    let roots =
+        NativeProjectBuilder::runtime_retention_symbols(&[app_o.clone()], &app_o, None, &runtime_o, &imports).unwrap();
+
+    assert!(roots.contains(&"rt_used".to_string()));
+    assert!(roots.contains(&"__simple_runtime_init".to_string()));
+    assert!(roots.contains(&"rt_function_not_found".to_string()));
+    assert!(!roots.contains(&"rt_unused".to_string()));
+}
+
 #[test]
 fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_compiler_rt_builtin_symbol("__adddf3"));
