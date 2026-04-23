@@ -10,6 +10,9 @@ Additional extracted skills:
 - Codex: `skill_command/skills/codex/<skill>/skill.md`
 - Gemini: `skill_command/skills/gemini/<skill>/skill.md`
 - Claude helpers: `skill_command/skills/claude/lib/<skill>/skill.md`
+- Feature experts: `feature_expert/<feature>/skill.md`
+- Layer experts: `layer_expert/<layer>/skill.md`
+- Templates: `template/feature_skill.md`, `template/layer_skill.md`
 
 Every extracted skill folder includes `tools.sdn` with `tools |id, type, name, purpose|`; `type` is `cli` or `mcp`.
 
