@@ -1,0 +1,120 @@
+use app.io.mod.{file_exists, file_read, file_write, dir_create_all}
+
+struct TestQualityFinding:
+    level: text
+    subject: text
+    message: text
+
+struct TestQualityReport:
+    scope: text
+    files: [text]
+    findings: [TestQualityFinding]
+    failures: i64
+    warnings: i64
+    passes: i64
+    status: text
+
+fn quality_finding(level: text, subject: text, message: text) -> TestQualityFinding:
+    TestQualityFinding(level: level, subject: subject, message: message)
+
+fn count_quality_findings(findings: [TestQualityFinding], level: text) -> i64:
+    var count = 0
+    for finding in findings:
+        if finding.level == level:
+            count = count + 1
+    count
+
+fn quality_status(findings: [TestQualityFinding]) -> text:
+    if count_quality_findings(findings, "FAIL") > 0:
+        return "FAIL"
+    if count_quality_findings(findings, "WARN") > 0:
+        return "WARN"
+    "PASS"
+
+fn compact_quality_source(content: text) -> text:
+    content.replace(" ", "").replace("\t", "").replace("\n", "").replace("\r", "")
+
+fn is_test_quality_file(path: text) -> bool:
+    path.ends_with("_spec.spl") or path.ends_with("_test.spl") or path.starts_with("test/") or path.contains("/test/")
+
+fn is_source_quality_file(path: text) -> bool:
+    path.ends_with(".spl") and not is_test_quality_file(path)
+
+fn check_test_quality(path: text, content: text) -> [TestQualityFinding]:
+    var findings: [TestQualityFinding] = []
+    val compact = compact_quality_source(content)
+    if compact.contains("expect(true).to_equal(true)") or compact.contains("expect(false).to_equal(false)"):
+        findings.push(quality_finding("FAIL", path, "tautological SSpec assertion"))
+    if content.contains("pass_todo") or content.contains("pass_do_nothing") or content.contains("pass_dn"):
+        findings.push(quality_finding("FAIL", path, "placeholder pass helper in test"))
+    if content.contains("@allow(sspec_") or content.contains("#![allow(sspec_"):
+        findings.push(quality_finding("FAIL", path, "local suppression of test quality lints"))
+    if content.lower().contains("print \"[skip]") and content.contains("return"):
+        findings.push(quality_finding("FAIL", path, "print-based skip placeholder"))
+    if compact.contains(").to_equal(true)") or compact.contains(").to_equal(false)"):
+        val expect_start = compact.contains("expect(code!=") or compact.contains("expect(code==") or compact.contains("expect(") and (compact.contains("!=") or compact.contains("==") or compact.contains(">") or compact.contains("<"))
+        if expect_start:
+            findings.push(quality_finding("FAIL", path, "boolean-wrapper assertion"))
+    if content.contains("    it ") and not content.contains("expect(") and not content.contains("skip:"):
+        findings.push(quality_finding("FAIL", path, "SSpec example has no real assertion"))
+    findings
+
+fn check_source_quality(path: text, content: text) -> [TestQualityFinding]:
+    var findings: [TestQualityFinding] = []
+    if content.contains("pass_todo"):
+        findings.push(quality_finding("FAIL", path, "explicit production placeholder"))
+    val compact = compact_quality_source(content)
+    if compact.contains("fnanswer(x:") and compact.ends_with("0"):
+        findings.push(quality_finding("FAIL", path, "trivial return with unused parameter"))
+    findings
+
+fn build_test_quality_verify_report(scope: text, files: [text], full_project: bool) -> TestQualityReport:
+    var findings: [TestQualityFinding] = []
+    var checked: [text] = []
+    for path in files:
+        if not file_exists(path):
+            continue
+        val content = file_read(path)
+        checked.push(path)
+        if is_test_quality_file(path):
+            findings = findings + check_test_quality(path, content)
+        elif is_source_quality_file(path):
+            findings = findings + check_source_quality(path, content)
+
+    if findings.len() == 0:
+        findings.push(quality_finding("PASS", scope, "No anti-dummy / anti-stub issues detected"))
+
+    val status = quality_status(findings)
+    TestQualityReport(
+        scope: scope,
+        files: checked,
+        findings: findings,
+        failures: count_quality_findings(findings, "FAIL"),
+        warnings: count_quality_findings(findings, "WARN"),
+        passes: count_quality_findings(findings, "PASS"),
+        status: status
+    )
+
+fn render_test_quality_verify_report(report: TestQualityReport) -> text:
+    var lines: [text] = []
+    lines.push("=== Verification Report: Test Quality ===")
+    lines.push("")
+    lines.push("Scope: {report.scope}")
+    lines.push("")
+    for finding in report.findings:
+        lines.push("[{finding.level}] {finding.subject} - {finding.message}")
+    lines.push("")
+    lines.push("STATUS: {report.status} ({report.failures} failures, {report.warnings} warnings)")
+    lines.join("\n")
+
+fn write_test_quality_verify_report(report: TestQualityReport, report_dir: text) -> text:
+    val _ = dir_create_all(report_dir)
+    val report_path = "{report_dir}/test_quality_verify_latest.md"
+    val ok = file_write(report_path, render_test_quality_verify_report(report))
+    if ok:
+        report_path
+    else:
+        ""
+
+export TestQualityFinding, TestQualityReport
+export build_test_quality_verify_report, render_test_quality_verify_report, write_test_quality_verify_report
