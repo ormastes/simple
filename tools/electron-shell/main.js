@@ -27,7 +27,10 @@ let wmReadyResolvers = [];
 const webContentsToWindowId = new Map();  // webContents.id → windowId (main only)
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
 const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
+const paintCapturePath = process.env.SIMPLE_ELECTRON_CAPTURE_PATH || '';
+const paintCaptureQuit = process.env.SIMPLE_ELECTRON_CAPTURE_QUIT === '1';
 const projectRoot = path.resolve(__dirname, '..', '..');
+let paintCaptureDone = false;
 
 function isNativeSmokeMode() {
     return process.argv.includes('--smoke-native-window') || process.env.SIMPLE_ELECTRON_NATIVE_SMOKE === '1';
@@ -51,6 +54,25 @@ function dumpRenderedHtml(html) {
     } catch (err) {
         debugLog(`failed to dump html: ${err.message}`);
     }
+}
+
+function schedulePaintCapture() {
+    if (!paintCapturePath || paintCaptureDone || !mainWindow || mainWindow.isDestroyed()) return;
+    paintCaptureDone = true;
+    setTimeout(async () => {
+        try {
+            fs.mkdirSync(path.dirname(paintCapturePath), { recursive: true });
+            const image = await mainWindow.webContents.capturePage();
+            fs.writeFileSync(paintCapturePath, image.toPNG());
+            debugLog(`captured paint canvas to ${paintCapturePath}`);
+        } catch (err) {
+            debugLog(`paint canvas capture failed: ${err.message}`);
+        } finally {
+            if (paintCaptureQuit) {
+                app.quit();
+            }
+        }
+    }, 600);
 }
 
 function browserWindowMap() {
@@ -426,11 +448,13 @@ function handleSimpleMessage(line) {
             // Canvas2D APIs.
             case 'paint_canvas':
                 if (mainWindow && !mainWindow.isDestroyed()) {
+                    debugLog(`paint_canvas ops=${Array.isArray(msg.ops) ? msg.ops.length : 0} size=${msg.width || 0}x${msg.height || 0}`);
                     mainWindow.webContents.send('paint-canvas', {
                         ops: Array.isArray(msg.ops) ? msg.ops : [],
                         width: msg.width || 0,
                         height: msg.height || 0
                     });
+                    schedulePaintCapture();
                 }
                 break;
 
