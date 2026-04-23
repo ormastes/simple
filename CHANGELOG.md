@@ -2,6 +2,39 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.6] - 2026-04-22
+
+### Added
+- **VHDL backend** — full `source`-facade subset with process/aggregate/switch lowering, casts/shifts/rem/bitnot, if-else result mux, goto-return chains, `@vhdl` compile support, source-to-VHDL combinational subset
+- **Driver framework (FR-DRIVER-0001..0006)** — `@driver` / `@native_lib` attribute sugar, `DrvManifest` section + encoder, `rt_dma_*` primitives for x86_64/x86/arm64/arm32/riscv64/riscv32, GPU-adapter forwarding with tolerant `init_all`
+- **SimpleOS** — x86_64 GUI hello-world boot path, aarch64 fs-exec bootstrap spawn/scheduler, APIC topology, compiler-driver + SPM request wiring, `rt_memcpy` ELF loader
+- **Window manager (v31–v50)** — desktop, dock, PS/2 input, vector/procedural/pixel-level paint, PPM decoder, terminal, browser window, focus + 12/15 shared-module rollout
+- **Browser platform** — `ui.browser` / `ui.web` / `ui.tui_web` wired to shared modules, Blink/Skia/cc/viz-style naming, WebGPU compute-draw extern, WebKit-style completions, WSS handshake + TLS v1.1/v1.2 hardening
+- **Font rendering** — TTF path end-to-end, `fontrasterizer` into `font_renderer`, glyph coverage for measurement, `SIMPLE_TTF_DYLIB`/`_PATH` env opt-ins
+- **Declarative UI access**, **Cocoa + Win32 hosted** surfaces, **Rust stage1 sysroot** (`x86_64-unknown-simpleos`)
+- **MDSOC+** default for userland (ECS business layer), **spostgre phase 9**, **traceability + bug_review** tooling
+- **`--compile` / `run_test_file_native_mode`** wiring, **package registry** scaffolding
+
+### Fixed
+- **aarch64 bootstrap** — remove x86 inline asm from `interrupt.spl`
+- **VHDL lowering** — switch return targets, goto-return chains, unsupported-stateful MIR diagnostic, tuple/enum aggregates, scalar source-facade width ops
+- **Cross-module fieldget crash** workaround, **MIR method dispatch** widening, **vtable ABI** + static dispatch
+- **Windows MCP server loading**, **MCP startup** rename/stabilization, **simple mcp + lsp diagnostics**
+- **virtio-net** vendor check + RX queue, **WebSocket handshake**
+- **Host + SimpleOS renderer** validation, **qemu timeout output** preservation, **resident desktop launch**
+- **Wrapper sentinel cache** + triple-quoted string use, **glyph coverage** use for match-arm canonicalization
+- **Submodule gitlink flips** (jj ↔ git), **watchdog memory limit** disable for long bootstraps
+
+### Changed
+- **Module splits to ≤800L** — `vulkan_graphics_runtime.rs` (2221→9), `linker/native_binary.rs` (2177→submodules), `codegen_instr_tests.rs` (2277→7 by instruction), `checker.rs` (2502→7), `html_tree_builder.spl` (2784→6) + `css_parser.spl` (1090→4), `winit_ffi.rs` (1767→6), `collections.rs` (4), `error.rs` factory, plus coverage-spec splits (string_core, math_repr, cbor, color_coverage, parsers/date/serialization)
+- **SimpleOS QEMU targets** routed through platform catalog, **shared platform console** extracted
+- **Host adapter contract** extracted, **host surface kinds** + **native event marker** centralized
+- **ELF loader** — per-byte segment copy replaced with `rt_memcpy` bulk primitive
+- **Untracked auto-generated artifacts** — launcher symlinks, platform-specific mcp/t32 links, setup-generated entries, binaries/build carryover
+- **Replace string dict keys** with enum/id variants in hot paths
+- **Share query helper parsing** across host and QEMU renderers
+- **Split `wm_entry`** by init phase; **unify WM rendering**
+
 ## [0.9.5] - 2026-03-29
 
 ### Added
