@@ -24,7 +24,7 @@ use os.services.launcher.launcher.{
     launcher_get_process_exit_code, launcher_get_process_window_count,
     launcher_get_process_is_headless, launcher_get_process_launch_seq,
     launcher_get_last_launch_pid,
-    launcher_process_uses_resident_manifest, launcher_process_is_process_backed,
+    launcher_process_is_process_backed,
     launcher_launch_path_with_args,
     launcher_record_process, launcher_note_window_opened,
     launcher_note_window_closed, launcher_mark_exited,
@@ -97,7 +97,6 @@ describe "Launcher registry":
         expect(launcher_get_process_window_count(0)).to_equal(0)
         expect(launcher_get_process_is_headless(0)).to_equal(true)
         expect(launcher_get_process_launch_seq(0)).to_equal(1)
-        expect(launcher_process_uses_resident_manifest(101)).to_equal(false)
         expect(launcher_process_is_process_backed(101)).to_equal(true)
 
         launcher_note_window_opened(101)
@@ -112,26 +111,20 @@ describe "Launcher registry":
         expect(launcher_get_process_window_count(0)).to_equal(0)
         expect(launcher_get_process_is_headless(0)).to_equal(true)
 
-    it "distinguishes resident-manifest fallback rows from real processes":
+    it "rejects synthetic and unknown pids as process-backed rows":
         launcher_init()
         launcher_register("Demo App", "/apps/demo", "D", 0x44, MOD_META)
-        expect(launcher_record_process(303, 5, "resident-manifest", 0, 0, true)).to_equal(true)
-        expect(launcher_process_uses_resident_manifest(303)).to_equal(true)
-        expect(launcher_process_is_process_backed(303)).to_equal(false)
-        expect(launcher_process_uses_resident_manifest(404)).to_equal(false)
         expect(launcher_process_is_process_backed(404)).to_equal(false)
         expect(launcher_record_process(0x40000010, -1, "running", 0, 0, true)).to_equal(true)
         expect(launcher_process_is_process_backed(0x40000010)).to_equal(false)
 
-    it "clears stale resident fallback state on init":
+    it "clears stale last launch state on init":
         launcher_init()
-        expect(launcher_record_process(0x40000000, 0, "resident-manifest", 0, 0, true)).to_equal(true)
-        expect(launcher_process_uses_resident_manifest(0x40000000)).to_equal(true)
+        expect(launcher_record_process(101, 0, "running", 0, 0, true)).to_equal(true)
         launcher_init()
         expect(launcher_get_last_launch_pid()).to_equal(0)
-        expect(launcher_process_uses_resident_manifest(0x40000000)).to_equal(false)
 
-    it "materializes seeded metadata before recording manifest fallback":
+    it "materializes seeded metadata before reporting spawn failure":
         launcher_init()
         launcher_unregister("Hello World")
         launcher_unregister("File Manager")
@@ -141,22 +134,14 @@ describe "Launcher registry":
         expect(launcher_get_app_count()).to_equal(0)
 
         val pid = launcher_launch_path_with_args("/sys/apps/browser_demo.smf", [])
-        expect(pid).to_be_greater_than(0)
+        expect(pid).to_be_less_than(0)
         expect(launcher_get_app_count()).to_equal(4)
         expect(launcher_get_app_name(3)).to_equal("Browser Demo")
         expect(launcher_get_app_path(3)).to_equal("/sys/apps/browser_demo.smf")
-        expect(launcher_get_pid(3)).to_equal(pid.to_u64())
-        expect(launcher_get_app_launch_state(3)).to_equal("resident-manifest")
+        expect(launcher_get_pid(3)).to_equal(0)
+        expect(launcher_get_app_launch_state(3)).to_equal("failed")
         expect(launcher_get_app_window_count(3)).to_equal(0)
-        expect(launcher_get_process_count()).to_equal(1)
-        expect(launcher_get_process_pid(0)).to_equal(pid.to_u64())
-        expect(launcher_get_process_app_index(0)).to_equal(3)
-        expect(launcher_get_process_name(0)).to_equal("Browser Demo")
-        expect(launcher_get_process_path(0)).to_equal("/sys/apps/browser_demo.smf")
-        expect(launcher_get_process_state(0)).to_equal("resident-manifest")
-        expect(launcher_get_process_window_count(0)).to_equal(0)
-        expect(launcher_process_uses_resident_manifest(pid.to_u64())).to_equal(true)
-        expect(launcher_process_is_process_backed(pid.to_u64())).to_equal(false)
+        expect(launcher_get_process_count()).to_equal(0)
 
     it "appends a new row when a kernel pid is reused after exit":
         launcher_init()
