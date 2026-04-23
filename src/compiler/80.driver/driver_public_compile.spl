@@ -98,7 +98,7 @@ fn aot_vhdl_file(path: text, output: text) -> CompileResult:
     if fallback_result.is_success():
         return fallback_result
     val fallback_errors = fallback_result.get_errors().join("\n")
-    if fallback_errors.contains("VHDL subset fallback bit slice") or fallback_errors.contains("VHDL subset fallback concat") or fallback_errors.contains("VHDL Python-HDL parity gap") or fallback_errors.contains("port collision after VHDL sanitization") or fallback_errors.contains("duplicate input port after VHDL sanitization"):
+    if fallback_errors.contains("VHDL subset fallback bit slice") or fallback_errors.contains("VHDL subset fallback concat") or fallback_errors.contains("VHDL Python-HDL parity gap") or fallback_errors.contains("anonymous hardware tuple outputs require labels") or fallback_errors.contains("port collision after VHDL sanitization") or fallback_errors.contains("duplicate input port after VHDL sanitization"):
         return fallback_result
     val external_result = _run_compile_to_path(path, output, ["--backend=vhdl"])
     if external_result.is_success() and _file_contains_vhdl_design(output):
@@ -468,6 +468,10 @@ fn _simple_resolve_type_alias(type_text: text, alias_names: [text], alias_types:
 fn _simple_is_labeled_tuple_type_alias(type_text: text, alias_names: [text], alias_types: [text]) -> bool:
     _simple_is_labeled_tuple_type(_simple_resolve_type_alias(type_text, alias_names, alias_types))
 
+fn _simple_is_anonymous_tuple_type_alias(type_text: text, alias_names: [text], alias_types: [text]) -> bool:
+    val resolved = _simple_resolve_type_alias(type_text, alias_names, alias_types).trim()
+    resolved.starts_with("(") and resolved.ends_with(")") and not _simple_is_labeled_tuple_type(resolved)
+
 fn _simple_labeled_tuple_labels_alias(type_text: text, alias_names: [text], alias_types: [text]) -> [text]:
     _simple_labeled_tuple_labels(_simple_resolve_type_alias(type_text, alias_names, alias_types))
 
@@ -498,6 +502,7 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     var header = ""
     var generic_text = ""
     var clocked_text = ""
+    var is_hardware = false
     var body_lines: [text] = []
     var i = 0
     while i < lines.len():
@@ -513,6 +518,7 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
                 i = i + 1
                 continue
             if line == "@hardware":
+                is_hardware = true
                 i = i + 1
                 continue
             if line.starts_with("type "):
@@ -551,6 +557,8 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
 
     if _simple_is_labeled_tuple_type_alias(return_type, aliases[0], aliases[1]):
         return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, [], [], [], [], aliases[0], aliases[1])
+    if is_hardware and _simple_is_anonymous_tuple_type_alias(return_type, aliases[0], aliases[1]):
+        return Err("VHDL subset fallback anonymous hardware tuple outputs require labels; write the return type as `(name: type, ...)` so VHDL output ports have a stable public API")
 
     val resolved_return_type = _simple_resolve_type_alias(return_type, aliases[0], aliases[1])
     val return_vhdl_type = _simple_type_to_vhdl(resolved_return_type)
@@ -732,6 +740,8 @@ fn _simple_function_record(header: text, body_lines: [text], generic_text: text,
 fn _simple_emit_vhdl_function(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
     if _simple_is_labeled_tuple_type_alias(return_type, alias_names, alias_types):
         return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    if _simple_is_anonymous_tuple_type_alias(return_type, alias_names, alias_types):
+        return Err("VHDL subset fallback anonymous hardware tuple outputs require labels; write the return type as `(name: type, ...)` so VHDL output ports have a stable public API")
     val return_vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(return_type, alias_names, alias_types))
     if return_vhdl_type == "":
         val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(return_type, alias_names, alias_types), "return type `{return_type}`")
