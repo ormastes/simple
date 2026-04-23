@@ -15,6 +15,8 @@
 #   var engine = Engine2D(backend: backend, w: 800, h: 600)
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.color.{color_a, blend, lerp_color}
+use std.gpu.engine2d.glyph.{glyph_data}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 
 # ============================================================================
@@ -266,35 +268,14 @@ impl RenderBackend for BaremetalBackend:
             return
         var row = 0
         while row < h:
-            val t_num = row
-            val t_den = h - 1
-            # Interpolate each channel
-            val tr = ((top_color >> 16) & 0xFF).to_i32()
-            val tg = ((top_color >> 8) & 0xFF).to_i32()
-            val tb = (top_color & 0xFF).to_i32()
-            val ta = ((top_color >> 24) & 0xFF).to_i32()
-            val br = ((bottom_color >> 16) & 0xFF).to_i32()
-            val bg_ch = ((bottom_color >> 8) & 0xFF).to_i32()
-            val bb = (bottom_color & 0xFF).to_i32()
-            val ba = ((bottom_color >> 24) & 0xFF).to_i32()
-            var ir = tr + (br - tr) * t_num / t_den
-            var ig = tg + (bg_ch - tg) * t_num / t_den
-            var ib = tb + (bb - tb) * t_num / t_den
-            var ia = ta + (ba - ta) * t_num / t_den
-            if t_den == 0:
-                ir = tr
-                ig = tg
-                ib = tb
-                ia = ta
-            val c = Color(r: ir.to_u8(), g: ig.to_u8(), b: ib.to_u8(), a: ia.to_u8())
+            val t = _bm_i32_to_f32(row) / _bm_i32_to_f32(h - 1)
+            val c = argb_to_color(lerp_color(top_color, bottom_color, t))
             _bm_hline(self, x, y + row, w, c)
             row = row + 1
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        """Draw text using the framebuffer's built-in 8x16 font."""
-        val fg = argb_to_color(color)
-        val bg = Color(r: 0, g: 0, b: 0, a: 0)  # Transparent background
-        self.fb.draw_text(x.to_u32(), y.to_u32(), text_val, fg, bg)
+        """Draw text using Engine2D's shared 5x7 glyph raster."""
+        _bm_render_text(self, x, y, text_val, color, font_size)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Blit a pixel array to the framebuffer."""
@@ -304,10 +285,14 @@ impl RenderBackend for BaremetalBackend:
             while col < w:
                 val src_idx = row * w + col
                 if src_idx < pixels.len():
-                    val c = argb_to_color(pixels[src_idx])
-                    val px = (x + col).to_u32()
-                    val py = (y + row).to_u32()
-                    self.fb.put_pixel(px, py, c)
+                    val px = x + col
+                    val py = y + row
+                    val c = pixels[src_idx]
+                    if color_a(c) == 255:
+                        _bm_put(self, px, py, argb_to_color(c))
+                    else if color_a(c) > 0:
+                        val dst = _bm_get_pixel(self, px, py)
+                        _bm_put(self, px, py, argb_to_color(blend(c, dst)))
                 col = col + 1
             row = row + 1
 
@@ -347,14 +332,13 @@ impl RenderBackend for BaremetalBackend:
         self.h
 
 impl Engine2DExtended for BaremetalBackend:
-    # Semi-native: the underlying FramebufferDriver.draw_text already
-    # accepts fg/bg `Color` values and renders the VGA 8x16 font with
-    # the background painted only where each glyph cell sits. Forward
-    # straight through — no pre-paint rect hack required.
+    # Use the same Engine2D glyph cell geometry as hosted backends.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        val fg_c = argb_to_color(fg)
-        val bg_c = argb_to_color(bg)
-        self.fb.draw_text(x.to_u32(), y.to_u32(), text_val, fg_c, bg_c)
+        val cell_w: i32 = 6 * font_size / 7
+        val cell_h: i32 = font_size
+        val tw: i32 = text_val.len().to_i32() * cell_w
+        self.draw_rect_filled(x, y, tw, cell_h, bg)
+        self.draw_text(x, y, text_val, fg, font_size)
 
 # ============================================================================
 # Internal Helpers
@@ -369,6 +353,44 @@ fn _bm_put(backend: BaremetalBackend, x: i32, y: i32, color: Color):
             y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
             return
     backend.fb.put_pixel(x.to_u32(), y.to_u32(), color)
+
+fn _bm_get_pixel(backend: BaremetalBackend, x: i32, y: i32) -> u32:
+    if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
+        return 0u32
+    val idx = y * backend.w + x
+    backend.fb.back_buffer[idx]
+
+fn _bm_render_text(backend: BaremetalBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    var scale = font_size / 7
+    if scale < 1:
+        scale = 1
+    var cursor_x = x
+    var idx = 0
+    while idx < text_val.len():
+        val ch = text_val.slice(idx, idx + 1)
+        _bm_render_glyph(backend, cursor_x, y, ch, color, scale)
+        cursor_x = cursor_x + 6 * scale
+        idx = idx + 1
+
+fn _bm_render_glyph(backend: BaremetalBackend, x: i32, y: i32, ch: text, color: u32, scale: i32):
+    val bitmap = glyph_data(ch)
+    val c = argb_to_color(color)
+    var row = 0
+    while row < 7:
+        val row_data = bitmap[row]
+        var col = 0
+        while col < 5:
+            val bit = (row_data >> (4 - col)) & 1
+            if bit != 0:
+                var sy = 0
+                while sy < scale:
+                    var sx = 0
+                    while sx < scale:
+                        _bm_put(backend, x + col * scale + sx, y + row * scale + sy, c)
+                        sx = sx + 1
+                    sy = sy + 1
+            col = col + 1
+        row = row + 1
 
 fn _bm_hline(backend: BaremetalBackend, x: i32, y: i32, length: i32, color: Color):
     """Draw a horizontal line."""
@@ -432,3 +454,6 @@ fn _bm_edge_x(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) -> i32:
     if dy == 0:
         return x1
     x1 + (x2 - x1) * (y - y1) / dy
+
+fn _bm_i32_to_f32(v: i32) -> f32:
+    v as f32

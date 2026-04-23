@@ -312,8 +312,9 @@ impl RenderBackend for VirtioGpuBackend:
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if self.direct_fb:
-            return
-        render_text_to_buffer(self.buf, self.w, self.h, x, y, text_val, color, font_size)
+            _vg_render_text_direct(self, x, y, text_val, color, font_size)
+        else:
+            render_text_to_buffer(self.buf, self.w, self.h, x, y, text_val, color, font_size)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
@@ -398,9 +399,7 @@ impl Engine2DExtended for VirtioGpuBackend:
         val cell_h: i32 = font_size
         val tw: i32 = text_val.len().to_i32() * cell_w
         self.draw_rect_filled(x, y, tw, cell_h, bg)
-        if self.direct_fb:
-            return
-        render_text_to_buffer(self.buf, self.w, self.h, x, y, text_val, fg, font_size)
+        self.draw_text(x, y, text_val, fg, font_size)
 
 # ============================================================================
 # Pixel Operations (Internal)
@@ -429,6 +428,37 @@ fn _vg_get_pixel(backend: VirtioGpuBackend, x: i32, y: i32) -> u32:
         mmio_read32(backend.fb_virt + (idx.to_u64() * 4))
     else:
         backend.buf[idx]
+
+fn _vg_render_text_direct(backend: VirtioGpuBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    var scale = font_size / 7
+    if scale < 1:
+        scale = 1
+    var cursor_x = x
+    var idx = 0
+    while idx < text_val.len():
+        val ch = text_val.slice(idx, idx + 1)
+        _vg_render_glyph_direct(backend, cursor_x, y, ch, color, scale)
+        cursor_x = cursor_x + 6 * scale
+        idx = idx + 1
+
+fn _vg_render_glyph_direct(backend: VirtioGpuBackend, x: i32, y: i32, ch: text, color: u32, scale: i32):
+    val bitmap = glyph_data(ch)
+    var row = 0
+    while row < 7:
+        val row_data = bitmap[row]
+        var col = 0
+        while col < 5:
+            val bit = (row_data >> (4 - col)) & 1
+            if bit != 0:
+                var sy = 0
+                while sy < scale:
+                    var sx = 0
+                    while sx < scale:
+                        _vg_set_pixel(backend, x + col * scale + sx, y + row * scale + sy, color)
+                        sx = sx + 1
+                    sy = sy + 1
+            col = col + 1
+        row = row + 1
 
 fn total_pixels_to_bytes(width: i32, height: i32) -> u64:
     if width <= 0 or height <= 0:

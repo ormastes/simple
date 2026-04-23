@@ -3,9 +3,30 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { loadThemePackage } = require('./theme_package');
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const wmSource = fs.readFileSync(path.join(projectRoot, 'src', 'app', 'ui.web', 'wm.js'), 'utf8');
+
+function assertHostThemeIsReadyBeforeRender() {
+    const previousTheme = process.env.SIMPLE_THEME;
+    process.env.SIMPLE_THEME = 'glass_obsidian_dark';
+    try {
+        const pkg = loadThemePackage();
+        if (pkg.id !== 'aetheric_dark') {
+            throw new Error(`host theme resolved to ${pkg.id}`);
+        }
+        if (!pkg.css.includes('--app-background-image') || !pkg.css.includes('.wm-window')) {
+            throw new Error('host theme CSS is incomplete before render event registration');
+        }
+    } finally {
+        if (previousTheme === undefined) {
+            delete process.env.SIMPLE_THEME;
+        } else {
+            process.env.SIMPLE_THEME = previousTheme;
+        }
+    }
+}
 
 class FakeElement {
     constructor(id = '') {
@@ -97,6 +118,8 @@ function createHarness(options = {}) {
 }
 
 async function main() {
+    assertHostThemeIsReadyBeforeRender();
+
     const embedded = createHarness();
     await embedded.manager._handleHostWindowCommand({
         action: 'spawn_native_window',

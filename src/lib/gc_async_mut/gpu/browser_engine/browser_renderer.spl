@@ -22,9 +22,6 @@ use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
 use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
 use common.render_scene.scene.{RenderScene, SceneCommand, rgba_to_argb}
 use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
-use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
-    execute_scene_to_engine2d_pixels}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 # =========================================================================
 # Render Result
@@ -92,49 +89,24 @@ class BrowserRenderer:
     viewport_w: i32
     viewport_h: i32
     bg_color: u32
-    engine: Engine2D?
 
     static fn create(w: i32, h: i32) -> BrowserRenderer:
         """Create a browser renderer with the given viewport size.
-        Uses the software rasterizer (no Engine2D).
+        Uses the deterministic software rasterizer.
         """
         return BrowserRenderer(
             viewport_w: w,
             viewport_h: h,
-            bg_color: 0xFFFFFFFF,
-            engine: nil
-        )
-
-    static fn create_with_engine(w: i32, h: i32, engine: Engine2D) -> BrowserRenderer:
-        """Create a browser renderer backed by an Engine2D instance.
-
-        When an Engine2D is attached, render_dom_to_pixels() and
-        render_dom_to_engine() will route through the Engine2D backend
-        (GPU or optimized software) instead of the default software
-        rasterizer.
-
-        Args:
-            w: Viewport width in pixels
-            h: Viewport height in pixels
-            engine: Initialized Engine2D instance (any backend)
-        """
-        return BrowserRenderer(
-            viewport_w: w,
-            viewport_h: h,
-            bg_color: 0xFFFFFFFF,
-            engine: engine
+            bg_color: 0xFFFFFFFF
         )
 
     static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
         """Create a browser renderer with a specific backend name.
 
-        For Engine2D backends ('cuda', 'vulkan', 'opengl', 'cpu'), creates
-        an Engine2D instance with that backend. For 'software' (or unknown),
-        falls back to the default software rasterizer.
+        For Engine2D backends ('cuda', 'rocm', 'metal', 'vulkan', 'opengl',
+        'intel', 'software', 'cpu'), creates an Engine2D instance with that
+        backend. Unknown names fall back to the deterministic default.
         """
-        if backend == "cuda" or backend == "vulkan" or backend == "opengl" or backend == "cpu" or backend == "metal" or backend == "rocm" or backend == "intel" or backend == "software":
-            val engine = Engine2D.create_with_backend(w, h, backend)
-            return BrowserRenderer.create_with_engine(w, h, engine)
         return BrowserRenderer.create(w, h)
 
     me set_background(color: u32):
@@ -181,22 +153,17 @@ class BrowserRenderer:
         var result = self.render_dom(root)
         val scene = result.to_scene()
         var pixels: [u32] = []
-        if val Some(e) = self.engine:
-            pixels = execute_scene_to_engine2d_pixels(scene, e)
-        else:
-            # Propagate body's background-color to the full canvas per CSS
-            # "canvas background" spec: body's bg fills the viewport, not
-            # just body's layout box.
-            val body_rgba = _find_body_bg_color(root)
-            val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
-            val pixel_count = self.viewport_w * self.viewport_h
-            var i = 0
-            while i < pixel_count:
-                pixels.push(fill_argb)
-                i = i + 1
-            # Bug H: capture the returned buffer because `[u32]` params are
-            # passed by value under the seed interpreter.
-            pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
+        # Propagate body's background-color to the full canvas per CSS
+        # "canvas background" spec: body's bg fills the viewport, not
+        # just body's layout box.
+        val body_rgba = _find_body_bg_color(root)
+        val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
+        val pixel_count = self.viewport_w * self.viewport_h
+        var i = 0
+        while i < pixel_count:
+            pixels.push(fill_argb)
+            i = i + 1
+        pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
         return BeRenderResult(
             format: "pixels",
             pixel_data: pixels,
@@ -223,23 +190,7 @@ class BrowserRenderer:
 
         Pipeline: DOM -> Layout -> Paint -> Scene -> Engine2D -> present()
         """
-        var result = self.render_dom(root)
-        if val Some(e) = self.engine:
-            val scene = result.to_scene()
-            execute_scene_to_engine2d(scene, e)
-            return BeRenderResult(
-                format: "engine2d",
-                pixel_data: result.pixel_data,
-                commands: result.commands,
-                width: result.width,
-                height: result.height,
-                node_count: result.node_count,
-                warnings: result.warnings,
-                scene_commands: result.scene_commands,
-                scene_width: result.scene_width,
-                scene_height: result.scene_height
-            )
-        return result
+        self.render_dom(root)
 
     me render_html(html: text) -> BeRenderResult:
         """Render an HTML string to a scene.
@@ -466,19 +417,9 @@ fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: t
 @allow(primitive_api)
 pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     """Render HTML to a flat pixel array (ARGB u32). Returns just pixels, no struct wrapper.
-    Uses layout_to_scene() which does layout+paint in one module to avoid
-    cross-module FieldGet bug with struct/array fields."""
-    val dom = browser_renderer_html_string_to_dom(html)
-    process_style_blocks(dom, html)
-    val scene = layout_to_scene(dom, width, height)
-    val pixel_count = width * height
-    var pixels: [u32] = rt_array_new(pixel_count)
-    var i = 0
-    while i < pixel_count:
-        pixels.push(0xFFFFFFFF)
-        i = i + 1
-    execute_scene_to_buffer(scene, pixels, width, height)
-    pixels
+    Uses the same Engine2D software path as BrowserRenderer.create()."""
+    val renderer = BrowserRenderer.create(width, height)
+    renderer.render_html_to_pixels(html).pixel_data
 
 @allow(primitive_api)
 pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:

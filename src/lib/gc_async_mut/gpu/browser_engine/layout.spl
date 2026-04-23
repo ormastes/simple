@@ -23,7 +23,6 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges, BoxShadow,
     be_default_style}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
-use common.text_layout.font_renderer.{FontRenderer}
 use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
     scene_gradient_rect, scene_blur_rect, rgba_to_argb}
@@ -140,7 +139,7 @@ fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
     if disp == "flex":
         return layout_flex(node, container, s)
     if be_dom_get_is_text(node):
-        return layout_text(node, container, parent_style)
+        return layout_text_node(node, container, parent_style)
     _ld("[LN] calling layout_block")
     return layout_block(node, container, s)
 
@@ -647,56 +646,7 @@ fn flex_distribute_x(boxes: [BeLayoutBox], start_x: i32, extra_per_item: i32, ga
 # Text Layout
 # =========================================================================
 
-# Shared font renderer for proportional text measurement
-var _layout_font_renderer: FontRenderer? = nil
-
-fn get_layout_font_renderer() -> FontRenderer:
-    if val Some(r) = _layout_font_renderer:
-        return r
-    val r = FontRenderer.new()
-    _layout_font_renderer = r
-    r
-
-class TextMeasureLayout:
-    max_width: i32
-    line_count: i32
-
-fn _measure_wrapped_text(renderer: FontRenderer, content: text, font_size: i32, max_width: i32) -> TextMeasureLayout:
-    if content.len() == 0:
-        return TextMeasureLayout(max_width: 0, line_count: 1)
-
-    if max_width <= 0:
-        return TextMeasureLayout(
-            max_width: renderer.measure_text_width(content, font_size),
-            line_count: 1
-        )
-
-    var current_width: i32 = 0
-    var max_line_width: i32 = 0
-    var line_count: i32 = 1
-    for ch in content:
-        val cp = ch.char_code_at(0)
-        if cp == 10:
-            if current_width > max_line_width:
-                max_line_width = current_width
-            current_width = 0
-            line_count = line_count + 1
-            continue
-        val glyph = renderer.get_glyph(cp, font_size)
-        val adv = if glyph.advance > 0: glyph.advance else: font_size * 55 / 100
-        if current_width > 0 and current_width + adv > max_width:
-            if current_width > max_line_width:
-                max_line_width = current_width
-            current_width = 0
-            line_count = line_count + 1
-            if cp == 32:
-                continue
-        current_width = current_width + adv
-    if current_width > max_line_width:
-        max_line_width = current_width
-    TextMeasureLayout(max_width: max_line_width, line_count: line_count)
-
-fn layout_text(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
+fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a text node using font renderer metrics.
     Uses vector/bitmap font with proportional width when available.
 
@@ -714,13 +664,16 @@ fn layout_text(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
     else:
         font_size + font_size / 5  # 1.2× (floor)
 
-    # Use font renderer for proportional width measurement
-    var renderer = get_layout_font_renderer()
     val node_txt = be_dom_get_text(node)
     val cont_cw = if container.content_width > 0: container.content_width else: 0
-    val measured = _measure_wrapped_text(renderer, node_txt, font_size, cont_cw)
-    val h = measured.line_count * line_h
-    val w = if cont_cw > 0 and measured.max_width > cont_cw: cont_cw else: measured.max_width
+    val char_w = text_char_width(font_size)
+    var raw_w = node_txt.len() * char_w
+    var line_count = 1
+    if cont_cw > 0 and raw_w > cont_cw:
+        line_count = (raw_w + cont_cw - 1) / cont_cw
+        raw_w = cont_cw
+    val h = line_count * line_h
+    val w = raw_w
 
     return BeLayoutBox(
         x: container.content_x, y: container.content_y,

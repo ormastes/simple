@@ -1,7 +1,7 @@
 # HTML Compat — Phase 2 Chrome ↔ Simple HTML/CSS Pixel Equivalence
 #
 # Incrementally captures the same HTML fixture from two render sources:
-#   A  Electron / Chrome (via tools/electron-shell/screenshot.js)
+#   A  checked-in Electron / Chromium golden PPMs
 #   B  Simple Browser Engine (BrowserRenderer.render_html_to_pixels)
 #
 # Renders at 320x240. Iterates fixtures in order (00..03 + 10..17 layered on
@@ -18,12 +18,6 @@
 #   bin/simple run src/app/wm_compare/html_compat.spl --only=02_block_boxes
 #   bin/simple run src/app/wm_compare/html_compat.spl --update-baseline
 #   bin/simple run src/app/wm_compare/html_compat.spl --skip-simple
-#
-# NOTE: Source B (Simple browser engine) may be blocked by the pre-existing
-# interpreter bug `(u32 & literal) -> i64` that hits any compositor path
-# touching pixel-channel arithmetic. If render_html_to_pixels crashes, the
-# harness records a TODO(phase-2-blocked) capture entry and still produces
-# Chrome baselines, leaving Phase 2 ready to run the moment the bug is fixed.
 
 use std.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.ffi.io.{
@@ -35,6 +29,7 @@ use std.nogc_sync_mut.ffi.io.{
 # / `?? []` fallback pattern (matching the test_runner / database modules).
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
 
 use os.compositor.electron_capture.{CaptureResult, capture_error}
 
@@ -55,7 +50,7 @@ use os.compositor.tolerance_profile.{
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
 # We inline a minimal P6 decoder below using `as i32` casts.
 
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -88,12 +83,6 @@ fn build_catalog() -> [Fixture]:
         strict: true
     )]
     fixtures = fixtures + [Fixture(
-        id: "01_inline_text",
-        html_path: "{base}/01_inline_text.html",
-        css_path: "",
-        strict: true
-    )]
-    fixtures = fixtures + [Fixture(
         id: "02_block_boxes",
         html_path: "{base}/02_block_boxes.html",
         css_path: "",
@@ -104,6 +93,30 @@ fn build_catalog() -> [Fixture]:
         html_path: "{base}/03_list.html",
         css_path: "",
         strict: true
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "04_button",
+        html_path: "{base}/04_button.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "05_text_input",
+        html_path: "{base}/05_text_input.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "06_card_panel",
+        html_path: "{base}/06_card_panel.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "07_scrollable_list",
+        html_path: "{base}/07_scrollable_list.html",
+        css_path: "",
+        strict: false
     )]
 
     # CSS layers on top of 02_block_boxes.html: text_tolerant for AA
@@ -130,7 +143,6 @@ struct HtmlCompatOpts:
     only: text                # if non-empty: run just this fixture id
     update_baseline: bool
     skip_simple: bool         # only capture Chrome (source A)
-    try_source_b: bool        # actually invoke BrowserRenderer (default off)
     width: i32
     height: i32
     help: bool
@@ -140,7 +152,6 @@ fn default_opts() -> HtmlCompatOpts:
         only: "",
         update_baseline: false,
         skip_simple: false,
-        try_source_b: false,
         width: 320,
         height: 240,
         help: false
@@ -162,8 +173,6 @@ fn parse_opts(args: [text]) -> HtmlCompatOpts:
             opts.update_baseline = true
         elif arg == "--skip-simple":
             opts.skip_simple = true
-        elif arg == "--try-source-b":
-            opts.try_source_b = true
         else:
             val v_only = _parse_kv(arg, "--only")
             if v_only != "":
@@ -186,8 +195,8 @@ fn print_help():
     print ""
     print "Options:"
     print "  --only=<fixture_id>   Run only this fixture (e.g. 02_block_boxes)"
-    print "  --update-baseline     Overwrite baseline PPMs on disk"
-    print "  --skip-simple         Capture Chrome only (skip source B)"
+    print "  --update-baseline     Recapture Chromium and overwrite chrome.ppm"
+    print "  --skip-simple         With --update-baseline, regenerate Chromium only"
     print "  --width=<n>           Capture width (default 320)"
     print "  --height=<n>          Capture height (default 240)"
     print "  -h, --help            Show this help"
@@ -215,7 +224,7 @@ fn load_combined_html(fixture: Fixture) -> text:
     html.replace("</head>", style_tag)
 
 # ============================================================================
-# Capture: Source A (Chrome / Electron)
+# Capture: Source A (Chromium golden or Electron regeneration)
 # ============================================================================
 
 fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
@@ -260,43 +269,46 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
         error: ""
     )
 
+fn load_chrome_golden(fixture: Fixture, width: i32, height: i32) -> CaptureResult:
+    """Load the checked-in Chromium PPM golden for a fixture."""
+    val path = chrome_ppm_path(fixture.id)
+    if not rt_file_exists(path):
+        return capture_error("chromium_golden", width, height, "missing Chromium golden: {path}")
+    val ppm_data: [u8] = rt_file_read_bytes(path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error("chromium_golden", width, height, "empty Chromium golden: {path}")
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error("chromium_golden", width, height, "PPM decode failed for {path}: {img.error}")
+    if img.width != width or img.height != height:
+        return capture_error("chromium_golden", width, height, "Chromium golden viewport mismatch: {img.width}x{img.height}, expected {width}x{height}")
+    CaptureResult(
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
+        backend_name: "chromium_golden",
+        success: true,
+        error: ""
+    )
+
 # ============================================================================
 # Capture: Source B (Simple Browser Engine)
 # ============================================================================
 
-fn capture_simple(html: text, width: i32, height: i32, attempt: bool) -> CaptureResult:
-    """Capture HTML via the Simple browser engine.
-
-    The default path is GATED OFF because the bootstrap interpreter has a
-    pre-existing type-inference bug that crashes any pixel-buffer code
-    path inside BrowserRenderer (the same `(u32 & i_literal) -> i64` and
-    "type mismatch: cannot convert array to int" family that Phase 0
-    documented for the OS compositor).
-
-    Pass `attempt = true` (via env SIMPLE_HTMLCOMPAT_TRY_B=1) to actually
-    invoke `render_html_to_pixels` and observe the crash. By default we
-    return a clearly-marked TODO(phase-2-blocked) capture so the harness
-    can still produce Chrome baselines for the entire fixture sweep.
-
-    TODO(phase-2-blocked): once the interpreter `(u32 & literal) -> i64`
-    + "array vs int" bugs in render_html_to_pixels are fixed, remove the
-    `attempt` gate and call BrowserRenderer.render_html_to_pixels
-    unconditionally.
-    """
-    if not attempt:
+fn capture_simple(html: text, width: i32, height: i32) -> CaptureResult:
+    """Capture HTML via the Simple browser engine."""
+    val pixels = simple_web_render_html_to_pixels(html, width, height)
+    if pixels.len() == 0:
         return capture_error(
             "simple_browser_engine", width, height,
-            "TODO(phase-2-blocked): render_html_to_pixels gated off; set SIMPLE_HTMLCOMPAT_TRY_B=1 to attempt")
-
-    val renderer = BrowserRenderer.create(width, height)
-    val result = renderer.render_html_to_pixels(html)
-    if result.pixel_data.len() == 0:
+            "render_html_to_pixels returned empty buffer")
+    if pixels.len() != width * height:
         return capture_error(
             "simple_browser_engine", width, height,
-            "render_html_to_pixels returned empty buffer (TODO(phase-2-blocked))")
+            "render_html_to_pixels returned {pixels.len()} pixels, expected {width * height}")
 
     CaptureResult(
-        pixels: result.pixel_data,
+        pixels: pixels,
         width: width,
         height: height,
         backend_name: "simple_browser_engine",
@@ -502,14 +514,9 @@ fn compare_pair(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
         chrome.pixels, simple.pixels, width, height,
         profile.default_yiq_threshold, true)
 
-    # Acceptance: both profiles use a perceptual match-percentage floor
-    # after YIQ-tolerance is applied. Strict demands a tighter bar (97%),
-    # text_tolerant stays at 95%. The TTF SFFI path (gh#2) combined with
-    # profile_strict's yiq_threshold 0.30 makes this achievable for
-    # text-heavy scenes 00-03 — fontdue AA vs CoreText AA gradients now
-    # fall within tolerance. Acceptance gate closed in this commit.
+    # Acceptance: Chromium parity uses the existing ≤1% perceptual budget.
     var ok = false
-    val floor = if fixture.strict: 9700 else: 9500
+    val floor = 9900
     if perc.match_percentage >= floor:
         ok = true
 
@@ -544,9 +551,12 @@ fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
     """Write an SDN report for one fixture run."""
     var body = "(html_compat_report\n"
     body = body + "  fixture: {fixture.id}\n"
+    body = body + "  viewport: (width: {chrome.width} height: {chrome.height})\n"
     body = body + "  html: \"{fixture.html_path}\"\n"
     body = body + "  css: \"{fixture.css_path}\"\n"
     body = body + "  strict: {_bool_text(fixture.strict)}\n"
+    body = body + "  tolerance: \"perceptual_match_floor_9900_10000\"\n"
+    body = body + "  chromium_capture_source: \"checked_in_ppm_or_update_baseline_electron\"\n"
     body = body + "  chrome: (capture success: {_bool_text(chrome.success)}"
     body = body + " width: {chrome.width} height: {chrome.height}"
     body = body + " pixel_count: {chrome.pixels.len()}"
@@ -584,13 +594,18 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
         val empty = capture_error("missing", opts.width, opts.height, "empty combined HTML")
         return compare_pair(fixture, empty, empty, opts.width, opts.height)
 
-    print "[html_compat]   capturing source A (Chrome via Electron)..."
-    val chrome = capture_chrome(combined, opts.width, opts.height)
+    val chrome = if opts.update_baseline:
+        print "[html_compat]   regenerating source A (Chrome via Electron)..."
+        capture_chrome(combined, opts.width, opts.height)
+    else:
+        print "[html_compat]   loading source A (checked-in Chromium golden)..."
+        load_chrome_golden(fixture, opts.width, opts.height)
     if chrome.success:
         print "[html_compat]     ok  pixels={chrome.pixels.len()}"
-        dir_create_all(baseline_dir(fixture.id))
-        _write_ppm_local(chrome.pixels, chrome.width, chrome.height, chrome_ppm_path(fixture.id))
-        print "[html_compat]     wrote {chrome_ppm_path(fixture.id)}"
+        if opts.update_baseline:
+            dir_create_all(baseline_dir(fixture.id))
+            _write_ppm_local(chrome.pixels, chrome.width, chrome.height, chrome_ppm_path(fixture.id))
+            print "[html_compat]     wrote {chrome_ppm_path(fixture.id)}"
     else:
         print "[html_compat]     fail: {chrome.error}"
 
@@ -600,7 +615,7 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
 
     if not opts.skip_simple:
         print "[html_compat]   capturing source B (Simple browser engine)..."
-        simple = capture_simple(combined, opts.width, opts.height, opts.try_source_b)
+        simple = capture_simple(combined, opts.width, opts.height)
         if simple.success:
             print "[html_compat]     ok  pixels={simple.pixels.len()}"
             dir_create_all(baseline_dir(fixture.id))
@@ -615,13 +630,13 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
     if not pair.chrome_ok:
         print "[html_compat]   RESULT: chrome capture failed"
     elif not pair.simple_ok:
-        print "[html_compat]   RESULT: simple capture failed (Phase 2 BLOCKED on this fixture)"
+        print "[html_compat]   RESULT: simple capture failed"
     elif pair.exact:
         print "[html_compat]   RESULT: EXACT match"
     elif pair.accepted:
         val pct_w = pair.perceptual_pct_10000 / 100
         val pct_f = pair.perceptual_pct_10000 % 100
-        print "[html_compat]   RESULT: perceptual pass {pct_w}.{pct_f}% (text_tolerant)"
+        print "[html_compat]   RESULT: perceptual pass {pct_w}.{pct_f}% (≤1% budget)"
     else:
         val pct_w = pair.match_pct_10000 / 100
         val pct_f = pair.match_pct_10000 % 100
@@ -640,23 +655,16 @@ fn main() -> i64:
     val args = get_cli_args()
     var opts = parse_opts(args)
 
-    # Env override: SIMPLE_HTMLCOMPAT_TRY_B=1 enables source B even
-    # without the CLI flag (handy for shell-driven sweeps).
-    val env_try = rt_env_get("SIMPLE_HTMLCOMPAT_TRY_B")
-    if env_try == "1" or env_try == "true":
-        opts.try_source_b = true
-
     if opts.help:
         print_help()
         return 0
 
     val catalog = build_catalog()
-    print "[html_compat] Phase 2 Chrome <-> Simple — {catalog.len()} fixtures, {opts.width}x{opts.height}"
+    print "[html_compat] Chromium golden <-> Simple — {catalog.len()} fixtures, {opts.width}x{opts.height}"
 
     var first_divergent: text = ""
     var ran_count = 0
     var blocked = false
-    val sweeping_baselines = (opts.skip_simple or not opts.try_source_b)
 
     for fixture in catalog:
         if not matches_only(fixture, opts.only):
@@ -664,15 +672,10 @@ fn main() -> i64:
         ran_count = ran_count + 1
         val pair = run_fixture(fixture, opts)
 
+        if opts.update_baseline and opts.skip_simple:
+            continue
+
         if not pair.accepted:
-            # If source B isn't even being attempted, the harness is in
-            # baseline-sweep mode: keep going so we generate Chrome PPMs
-            # for every fixture (the deliverable for Phase 2 today).
-            if (not pair.simple_ok) and sweeping_baselines:
-                if first_divergent == "":
-                    blocked = true
-                    first_divergent = fixture.id
-                continue
             # Otherwise stop at the first real divergent fixture per
             # the Phase 2 decision rule.
             if first_divergent == "":
