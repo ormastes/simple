@@ -4,6 +4,8 @@
 
 One lead agent owns the user conversation. It refines the request, identifies the target feature and layers, loads the relevant expert knowledge, and delegates bounded work to pipeline skill experts or subagents.
 
+The next process direction is LLM pair programming: the lead agent drives request refinement and final synthesis, while feature experts, layer experts, and pipeline stage experts act as navigators that draft research, plans, risks, and knowledge updates.
+
 Default feature pipeline: `/research` -> `/design` -> `/impl` -> `/verify` -> `/release`.
 
 For the next implementation step, use [pipeline_next_step_plan.md](pipeline_next_step_plan.md). The plan defines how to load feature expert knowledge, layer expert knowledge, and pipeline-stage skills before generating the next step plan doc.
