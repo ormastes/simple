@@ -1,23 +1,9 @@
+<!-- llm-process-gen: managed source=gemini_sync_skill source_sha256=2f9d4bf427a6a875f0e162661da3f31d4647be3f9159da54eec4e0a22e836efc content_sha256=1a3ccd8c61708f2e71ad6dbccba183feacd1828e3e80cfcb43957c5a239b61ff -->
 # sync
 
 Source: `.gemini/commands/sync.toml`
 
-# Rules
-# Workflow
-0. Pre-check: record baseline
-1. Commit local changes (if any)
-2. Fetch remote
-3. Rebase onto latest remote
-4. Post-rebase file count check
-5. Push
-# Worktree Sync
-# Safety
-
-## Description
-
 Pull, rebase, and push with file-count safety checks. Worktree-aware jj sync.
-
-## Prompt
 
 Sync the repository: fetch, rebase, push with safety guards.
 
@@ -48,7 +34,10 @@ FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 echo "File count after rebase: $FILE_COUNT_AFTER"
 if [ "$FILE_COUNT_AFTER" -lt "$FILE_COUNT_BEFORE" ]; then
   echo "WARNING: File count reduced ($FILE_COUNT_BEFORE -> $FILE_COUNT_AFTER)"
-  echo "Review with: jj diff --stat"
+  jj diff --stat
+  echo "Restore with: jj op restore <op_id>"
+  echo "Stopping before bookmark/push. Continue manually only after human review."
+  exit 1
 fi
 
 # 5. Push
@@ -57,8 +46,11 @@ jj git push --bookmark main
 ```
 
 ## Worktree Sync
-If on a jj workspace (not default), move to main workspace first, sync, then return.
+If on a jj workspace (not default), discover the workspace paths with
+`jj workspace list`, move to the default workspace path first, sync there,
+then return to the original workspace path and run `jj workspace update-stale`.
 
 ## Safety
-- If file count drops unexpectedly, show `jj diff --stat` and ask before continuing
+- If file count drops unexpectedly, show `jj diff --stat`, exit before bookmark/push, and require explicit human continuation outside the script block
 - Restore with: `jj op restore <op_id>` if rebase went wrong
+"""

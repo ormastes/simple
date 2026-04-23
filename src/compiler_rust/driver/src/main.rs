@@ -344,6 +344,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
+    CommandEntry {
+        name: "llm-process-gen",
+        app_path: "src/app/llm_process_gen/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: llm-process-gen app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Direct Tauri entry — lightweight path that outputs JSON IPC to stdout
     CommandEntry {
         name: "tauri-entry",
@@ -991,6 +1001,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
+        && app_relative_path != "src/app/llm_process_gen/main.spl"
     {
         return None;
     }

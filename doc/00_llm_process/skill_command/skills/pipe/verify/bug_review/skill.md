@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_verify_bug_review_skill source_sha256=218b67c086c8ae332a245fb58d6b0899aec590499fbf4a3b8684411ac146f28b content_sha256=218b67c086c8ae332a245fb58d6b0899aec590499fbf4a3b8684411ac146f28b -->
 ---
 name: bug_review
 description: Unified bug tracking — list, view, triage, fix from GitHub Issues + Jira. Routes to bug sub-skills.

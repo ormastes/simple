@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_design_skill source_sha256=f233a3f394bc92a029c2937e8f2e0bf405baac3d95714152e400190d70d92cce content_sha256=f233a3f394bc92a029c2937e8f2e0bf405baac3d95714152e400190d70d92cce -->
 # Design Skill — Detail Design
 
 ## Prerequisites

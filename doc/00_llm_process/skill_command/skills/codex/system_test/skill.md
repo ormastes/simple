@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_system_test_skill source_sha256=a161ad153f36670c5f69aaf3795e64cafdb5aec217ad3c2a692f7b549dbc0157 content_sha256=a161ad153f36670c5f69aaf3795e64cafdb5aec217ad3c2a692f7b549dbc0157 -->
 ---
 name: system_test
 description: "Codex system test design skill (Codex-specific strength). SSpec BDD test generation with built-in matchers only. REQ-NNN to test traceability. Test plan creation."

@@ -36,6 +36,14 @@ Uses `process_run` to execute shell commands for counting:
 - `grep -c` for pattern matching in databases
 - `wc -l` for line counting
 
+Owned-code counts exclude vendored and third-party runtime source:
+`*/vendor/*`, `*/third_party/*`, `*/external/*`, `miniaudio.h`,
+`stb_image.h`, and `stb_truetype.h`.
+
+File-count buckets are disjoint: `app` counts `src/app`, `lib` counts
+`src/lib`, `std` counts `src/std` plus `src/i18n`, `core` counts `src/core`,
+and `compiler` is the remaining owned `.spl` source under `src`.
+
 ### Future Modules (Prepared)
 
 - `types.spl` - Data structures for statistics

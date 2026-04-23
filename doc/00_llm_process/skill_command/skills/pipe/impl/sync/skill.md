@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_sync_skill source_sha256=8acf4f00e63984821bb9c1932260557a52fc2f864249e26c5a6115f4c75b978d content_sha256=8acf4f00e63984821bb9c1932260557a52fc2f864249e26c5a6115f4c75b978d -->
 # Sync Skill - Pull/Rebase/Push with Safety Checks
 
 ## Overview
@@ -41,8 +42,10 @@ FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 echo "File count after rebase: $FILE_COUNT_AFTER"
 if [ "$FILE_COUNT_AFTER" -lt "$FILE_COUNT_BEFORE" ]; then
   echo "WARNING: File count reduced ($FILE_COUNT_BEFORE -> $FILE_COUNT_AFTER)"
-  echo "Review with: jj diff --stat"
-  # Abort if unexpected — restore with: jj op restore <op_id>
+  jj diff --stat
+  echo "Restore with: jj op restore <op_id>"
+  echo "Stopping before bookmark/push. Continue manually only after human review."
+  exit 1
 fi
 
 # 6. Push
@@ -61,17 +64,18 @@ If currently on a jj workspace (not default), move to main first:
 CURRENT_WS=$(jj workspace list | grep '(current)' | awk '{print $1}')
 
 if [ "$CURRENT_WS" != "default" ]; then
-  # 2. Save current workspace name
+  # 2. Save current workspace name and discover workspace paths
   WS_NAME="$CURRENT_WS"
+  jj workspace list
 
-  # 3. Switch to main repo
-  cd /path/to/main/repo   # the default workspace directory
+  # 3. Switch to the discovered default workspace directory
+  cd "<default workspace path from jj workspace list>"
 
   # 4. Do sync (full workflow above)
   # ...
 
-  # 5. Return to worktree
-  cd /path/to/worktree
+  # 5. Return to the discovered original workspace directory
+  cd "<original workspace path from jj workspace list>"
   jj workspace update-stale
 fi
 ```
@@ -121,8 +125,10 @@ NEW_COUNT=$(git ls-files | wc -l | tr -d ' ')
 DIFF=$((NEW_COUNT - FILE_COUNT))
 if [ "$DIFF" -lt 0 ]; then
   echo "ALERT: $((DIFF * -1)) files lost after rebase!"
-  echo "Check with: git diff --stat HEAD~1"
+  jj diff --stat
   echo "Restore with: jj op restore <op_id>"
+  echo "Stopping before bookmark/push. Continue manually only after human review."
+  exit 1
 fi
 ```
 

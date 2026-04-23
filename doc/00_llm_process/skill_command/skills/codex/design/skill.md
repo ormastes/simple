@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_design_skill source_sha256=afdc7a9b578cf6054efdecd94448ad67b8cf879d88d9ebd69f44167a547f4aa3 content_sha256=afdc7a9b578cf6054efdecd94448ad67b8cf879d88d9ebd69f44167a547f4aa3 -->
 ---
 name: design
 description: "Codex design skill (Step 4 in cooperative pipeline). Architecture evaluation, pattern selection, MDSOC application, system test design with SSpec BDD. Self-sufficient — does UI design if Gemini step was skipped, does research if missing."

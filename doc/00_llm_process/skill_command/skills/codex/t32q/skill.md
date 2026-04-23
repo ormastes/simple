@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_t32q_skill source_sha256=9ac6fb52433ce42a4b3f91c98f5b141c82ca2760717b11d1ea5a0ee374568f0e content_sha256=9ac6fb52433ce42a4b3f91c98f5b141c82ca2760717b11d1ea5a0ee374568f0e -->
 ---
 name: t32q
 description: "TRACE32 container control skill. Use when the user wants to turn TRACE32 on or off, relaunch it, reopen the GUI container, inspect logs/status, or retry the repo-managed TRACE32 container flow."

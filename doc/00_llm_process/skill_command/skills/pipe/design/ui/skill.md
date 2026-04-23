@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_design_ui_skill source_sha256=8231c2d78b6d048c6e9d4365ca3f3d20676d146fd15f1cf31a41a7529ce4c1ef content_sha256=8231c2d78b6d048c6e9d4365ca3f3d20676d146fd15f1cf31a41a7529ce4c1ef -->
 # UI Skill — TUI/GUI Mockup Design
 
 ## Prerequisites

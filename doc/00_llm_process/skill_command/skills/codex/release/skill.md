@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_release_skill source_sha256=3d68961d63bc7661657f37fcf006fd8ba9990dfa5e64bcde7f06662736755a7d content_sha256=3d68961d63bc7661657f37fcf006fd8ba9990dfa5e64bcde7f06662736755a7d -->
 ---
 name: release
 description: "Codex release skill. Version bump (major/minor/patch/exact), CHANGELOG update, commit, tag, push (ask before push). Prerequisite: verify PASS."

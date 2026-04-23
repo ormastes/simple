@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_coding_skill source_sha256=992225248d2e51f42a523da7bc987a83ecaef1293d3fe8819e6f7cfb96514e60 content_sha256=992225248d2e51f42a523da7bc987a83ecaef1293d3fe8819e6f7cfb96514e60 -->
 ---
 name: coding
 description: "Simple language coding rules for Codex. Key syntax, generics, pattern binding, constructors, runtime limitations, reserved keywords. Reference: doc/07_guide/quick_reference/syntax_quick_reference.md."

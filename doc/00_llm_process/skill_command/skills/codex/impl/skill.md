@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_impl_skill source_sha256=5757449e22b9228ae8fd121e58082955fc604d7d6760eccc91de8dc3726fcb35 content_sha256=5757449e22b9228ae8fd121e58082955fc604d7d6760eccc91de8dc3726fcb35 -->
 ---
 name: impl
 description: "Codex implementation skill. 15-phase workflow from research through verification. Self-sufficient — if research, requirements, or design missing, creates them first. Code in .spl only, 80%+ branch coverage, stub prevention gate."

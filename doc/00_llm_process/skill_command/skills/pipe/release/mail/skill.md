@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_release_mail_skill source_sha256=591224c14d6a2bdc7e13ca4cca95e42e5ec36f333972905f0e5db36e38784315 content_sha256=591224c14d6a2bdc7e13ca4cca95e42e5ec36f333972905f0e5db36e38784315 -->
 ---
 name: mail
 description: Shell-based email client — Gmail-like CLI for IMAP/SMTP. Supports Gmail, Outlook, Yahoo, ProtonMail, Fastmail. Routes to mail sub-skills.

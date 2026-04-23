@@ -59,6 +59,18 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | **Stitch MCP** | Multi-file code editing and generation |
 | **Playwright CLI** | `npx playwright` — web scraping, browser automation, domain research |
 
+## Owned-Code Scope
+
+For code counts, reviews, verification scans, and summaries, ignore vendored or
+third-party runtime source unless the user explicitly asks to inspect it. Treat
+these paths as external code:
+
+- `src/compiler_rust/vendor/**`
+- `src/runtime/vendor/**`
+- `src/runtime/miniaudio.h`
+- `src/runtime/stb_image.h`
+- `src/runtime/stb_truetype.h`
+
 ---
 
 ## FreeBSD QEMU Bootstrap Check

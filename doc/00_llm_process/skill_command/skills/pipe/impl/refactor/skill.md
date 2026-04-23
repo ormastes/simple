@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_refactor_skill source_sha256=93a532e9e584b4d5a91c7ec7bf27cd84309a7e37ad3269f3164e9fa3fa1e5471 content_sha256=93a532e9e584b4d5a91c7ec7bf27cd84309a7e37ad3269f3164e9fa3fa1e5471 -->
 # Refactor Skill
 
 ## Phase 1: File Size & Structure

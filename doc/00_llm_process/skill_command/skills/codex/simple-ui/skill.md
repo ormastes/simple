@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_simple_ui_skill source_sha256=93a08f7d5b7cb00243b810550c13233569afd68fc4b319b76bbde20e7036a64d content_sha256=93a08f7d5b7cb00243b810550c13233569afd68fc4b319b76bbde20e7036a64d -->
 ---
 name: simple-ui
 description: "Operate repo-local Simple UI surfaces through the canonical UI access protocol: snapshot, surface, find, act, and history."

@@ -41,6 +41,10 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 - **NEVER over-engineer.** **DO NOT ADD REPORT TO GIT** unless requested
 - **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/mdsoc_architecture_tobe.md` (MDSOC+ section)
 
+## Owned-Code Scope
+- For code counts, reviews, verification scans, and summaries, ignore vendored or third-party runtime source unless the user explicitly asks to inspect it.
+- External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`.
+
 ## Detailed Rules & Reference
 - **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`
 - **Skills:** `.claude/skills/` — invoke `/skill-name` (`/sstack`, `/dev`, `/coding`, `/test`, `/debug`, etc.)

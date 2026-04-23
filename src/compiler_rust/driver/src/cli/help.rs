@@ -72,6 +72,8 @@ pub fn print_help() {
     eprintln!("  simple context <file.spl> --minimal     Only direct dependencies");
     eprintln!("  simple context <file.spl> --json        Output as JSON");
     eprintln!("  simple context <file.spl> --markdown    Output as Markdown");
+    eprintln!("  simple llm-process-gen check            Check managed LLM process files for drift");
+    eprintln!("  simple llm-process-gen generate         Regenerate unchanged managed LLM process files");
     eprintln!();
     eprintln!("Documentation Generation:");
     eprintln!("  simple sspec-docgen <files...>           Generate docs from SSpec test files");

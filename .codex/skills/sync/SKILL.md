@@ -30,7 +30,10 @@ jj rebase -d main@origin
 FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 if [ "$FILE_COUNT_AFTER" -lt "$FILE_COUNT_BEFORE" ]; then
   echo "WARNING: File count reduced ($FILE_COUNT_BEFORE -> $FILE_COUNT_AFTER)"
-  echo "Review with: jj diff --stat"
+  jj diff --stat
+  echo "Restore with: jj op restore <op_id>"
+  echo "Stopping before bookmark/push. Continue manually only after human review."
+  exit 1
 fi
 
 # 5. Push
@@ -39,8 +42,10 @@ jj git push --bookmark main
 ```
 
 ## Worktree Sync
-If on a jj workspace (not default), move to main workspace first, sync, then return.
+If on a jj workspace (not default), discover the workspace paths with
+`jj workspace list`, move to the default workspace path first, sync there,
+then return to the original workspace path and run `jj workspace update-stale`.
 
 ## Safety
-- If file count drops unexpectedly, show `jj diff --stat` and ask before continuing
+- If file count drops unexpectedly, show `jj diff --stat`, exit before bookmark/push, and require explicit human continuation outside the script block
 - Restore with: `jj op restore <op_id>` if rebase went wrong

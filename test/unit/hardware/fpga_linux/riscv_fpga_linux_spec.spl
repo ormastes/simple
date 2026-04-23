@@ -7,7 +7,7 @@ contract.
 
 import std.spec
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, FpgaPrepareManifest, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, FpgaPrepareManifest, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_read_text(path: text) -> text
@@ -51,39 +51,51 @@ describe "RISC-V FPGA Linux board profile":
         expect(errors).to_contain("vivado_mode must be batch")
 
 describe "RISC-V FPGA Linux lanes":
-    it "defines RV64 as upstream Linux with Sv39 and OpenSBI handoff":
+    it "defines RV64 as a generated RV64I core with future Sv39 Linux requirements":
         val lane = RiscvFpgaLane.rv64_default()
         expect(lane.xlen.to_text()).to_equal("rv64")
         expect(lane.xlen.bits()).to_equal(64)
+        expect(lane.top_module).to_equal("simple_rv64i_core")
+        expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.CoreGenerated)
         expect(lane.xlen.linux_policy()).to_equal("upstream")
         expect(lane.xlen.mmu_mode()).to_equal("sv39")
-        expect(lane.rtl_sim_backend).to_equal("cva6-verilator")
+        expect(lane.rtl_sim_backend).to_equal("ghdl-vhdl-2008")
         expect(lane.required_soc_blocks()).to_contain("sv39-mmu")
         expect(lane.required_soc_blocks()).to_contain("opensbi-handoff")
         expect(lane.expected_boot_markers()).to_contain("OpenSBI")
+        expect(lane.hardware_source_contract_errors().len()).to_equal(0)
+        expect(lane.hardware_source_spl()).to_contain("bitfield Rv64Instruction(u32):")
+        expect(lane.hardware_source_spl()).to_contain("@hardware")
+        expect(lane.hardware_source_spl()).to_contain("@clocked")
+        expect(lane.hardware_source_spl()).to_contain("inst.opcode -> imem_rdata(6 downto 0)")
 
-    it "defines RV32 as experimental Linux with Sv32":
+    it "defines RV32 as a generated RV32I core with future experimental Sv32 Linux requirements":
         val lane = RiscvFpgaLane.rv32_default()
         expect(lane.xlen.to_text()).to_equal("rv32")
         expect(lane.xlen.bits()).to_equal(32)
+        expect(lane.top_module).to_equal("simple_rv32i_core")
+        expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.CoreGenerated)
         expect(lane.xlen.linux_policy()).to_equal("experimental")
         expect(lane.xlen.mmu_mode()).to_equal("sv32")
-        expect(lane.rtl_sim_backend).to_equal("litex-vexriscv-verilator")
+        expect(lane.rtl_sim_backend).to_equal("ghdl-vhdl-2008")
         expect(lane.required_soc_blocks()).to_contain("sv32-mmu")
         expect(lane.expected_boot_markers()).to_contain("rv32-linux-experimental")
+        expect(lane.hardware_source_contract_errors().len()).to_equal(0)
+        expect(lane.hardware_source_spl()).to_contain("bitfield Rv32Instruction(u32):")
 
     it "requires Linux artifacts before boot validation passes":
         val lane = RiscvFpgaLane.rv64_default()
         val errors = lane.validate_for_linux_boot()
+        expect(errors).to_contain("rv64 readiness must be linux-boot-validated before claiming Linux boot")
         expect(errors).to_contain("rv64 linux kernel, rootfs, dtb, and toolchain must be configured")
         expect(errors).to_contain("rv64 linux requires OpenSBI or U-Boot firmware")
 
-    it "accepts configured RV64 Linux artifacts":
+    it "does not accept configured RV64 Linux artifacts without boot validation readiness":
         val lane = RiscvFpgaLane(
             xlen: RiscvXlen.Rv64,
-            top_module: "simple_rv64_linux_soc",
+            top_module: "simple_rv64i_core",
             rtl_dir: "build/fpga/rv64/rtl",
-            rtl_sim_backend: "cva6-verilator",
+            rtl_sim_backend: "ghdl-vhdl-2008",
             bootrom_path: "build/fpga/rv64/bootrom.bin",
             linux: LinuxArtifactSet(
                 kernel_image: "linux/arch/riscv/boot/Image",
@@ -94,7 +106,7 @@ describe "RISC-V FPGA Linux lanes":
                 toolchain_prefix: "riscv64-linux-gnu-"
             )
         )
-        expect(lane.validate_for_linux_boot().len()).to_equal(0)
+        expect(lane.validate_for_linux_boot()).to_contain("rv64 readiness must be linux-boot-validated before claiming Linux boot")
 
 describe "RISC-V FPGA Linux manifest":
     it "creates both RV32 and RV64 lanes for Xilinx prepare":
@@ -102,8 +114,9 @@ describe "RISC-V FPGA Linux manifest":
         expect(manifest.board.name).to_equal("xilinx_generic")
         expect(manifest.lanes.len()).to_equal(2)
         expect(manifest.validate_for_prepare().len()).to_equal(0)
-        expect(manifest.readiness_summary()).to_contain("rv32:experimental:sv32")
-        expect(manifest.readiness_summary()).to_contain("rv64:upstream:sv39")
+        expect(manifest.readiness_summary()).to_contain("rv32:core-generated:simple_rv32i_core")
+        expect(manifest.readiness_summary()).to_contain("rv64:core-generated:simple_rv64i_core")
+        expect(manifest.readiness_summary()).to_not_contain("linux-ready")
 
     it "generates a deterministic Vivado TCL plan":
         val manifest = create_default_riscv_fpga_linux_manifest()
@@ -114,35 +127,58 @@ describe "RISC-V FPGA Linux manifest":
         expect(tcl).to_contain("add_files constraints/xilinx_generic.xdc")
         expect(tcl).to_contain("add_files build/fpga/rv32/rtl")
         expect(tcl).to_contain("add_files build/fpga/rv64/rtl")
-        expect(tcl).to_contain("set_property top simple_rv32_linux_soc")
-        expect(tcl).to_contain("set_property top simple_rv64_linux_soc")
+        expect(tcl).to_contain("set_property top simple_rv32i_core")
+        expect(tcl).to_contain("set_property top simple_rv64i_core")
 
 describe "RISC-V FPGA Linux RTL generation":
     it "emits RV32 and RV64 top-level VHDL bundles":
         val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_rtl_spec")
         expect(result.is_ok()).to_equal(true)
         val bundle = result.ok().unwrap()
-        expect(bundle.generated_files.len()).to_equal(5)
+        expect(bundle.generated_files.len()).to_equal(7)
 
-        val rv32_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32_linux_pkg.vhd")
-        val rv32_soc = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32_linux_soc.vhd")
-        val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64_linux_pkg.vhd")
-        val rv64_soc = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64_linux_soc.vhd")
+        val rv32_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32i_core.spl")
+        val rv32_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32i_core_pkg.vhd")
+        val rv32_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv32/rtl/simple_rv32i_core.vhd")
+        val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64i_core.spl")
+        val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64i_core_pkg.vhd")
+        val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64i_core.vhd")
         val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
 
+        expect(rv32_source).to_contain("bitfield Rv32Instruction(u32):")
+        expect(rv32_source).to_contain("opcode: 7")
+        expect(rv32_source).to_contain("@hardware")
+        expect(rv32_source).to_contain("@clocked")
+        expect(rv32_source).to_not_contain("pass_todo")
         expect(rv32_pkg).to_contain("constant XLEN : natural := 32")
         expect(rv32_pkg).to_contain("constant RESET_VECTOR : xword_t := x\"80000000\"")
-        expect(rv32_soc).to_contain("entity simple_rv32_linux_soc is")
-        expect(rv32_soc).to_contain("boot_pc_debug : out xword_t")
+        expect(rv32_pkg).to_contain("-- generated-from: simple_rv32i_core.spl")
+        expect(rv32_core).to_contain("entity simple_rv32i_core is")
+        expect(rv32_core).to_contain("-- source-map: Rv32Instruction.opcode => imem_rdata(6 downto 0)")
+        expect(rv32_core).to_contain("imem_addr     : out xword_t")
+        expect(rv32_core).to_contain("dmem_we       : out std_logic")
+        expect(rv32_core).to_contain("type reg_file_t is array (0 to 31) of xword_t")
+        expect(rv32_core).to_contain("case imem_rdata(6 downto 0) is")
+        expect(rv32_core).to_contain("when \"0010011\" =>")
+        expect(rv32_core).to_contain("when \"0110011\" =>")
+        expect(rv32_core).to_contain("when \"0000011\" =>")
+        expect(rv32_core).to_contain("when \"0100011\" =>")
+        expect(rv32_core).to_contain("when \"1100011\" =>")
+        expect(rv32_core).to_contain("when \"1101111\" =>")
+        expect(rv64_source).to_contain("bitfield Rv64Instruction(u32):")
+        expect(rv64_source).to_contain("fn simple_rv64i_core")
         expect(rv64_pkg).to_contain("constant XLEN : natural := 64")
         expect(rv64_pkg).to_contain("constant RESET_VECTOR : xword_t := x\"0000000080000000\"")
-        expect(rv64_soc).to_contain("entity simple_rv64_linux_soc is")
-        expect(rv64_soc).to_contain("pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN))")
+        expect(rv64_core).to_contain("entity simple_rv64i_core is")
+        expect(rv64_core).to_contain("-- source-map: Rv64Instruction.rd => imem_rdata(11 downto 7)")
+        expect(rv64_core).to_contain("debug_pc      : out xword_t")
         expect(manifest_text).to_contain("arch = \"rv32\"")
         expect(manifest_text).to_contain("arch = \"rv64\"")
-        expect(manifest_text).to_contain("top = \"simple_rv64_linux_soc\"")
-        expect(manifest_text).to_contain("rtl_sim_backend = \"litex-vexriscv-verilator\"")
-        expect(manifest_text).to_contain("rtl_sim_backend = \"cva6-verilator\"")
+        expect(manifest_text).to_contain("source_file = \"/tmp/simple_riscv_fpga_rtl_spec/rv64/rtl/simple_rv64i_core.spl\"")
+        expect(manifest_text).to_contain("top = \"simple_rv64i_core\"")
+        expect(manifest_text).to_contain("readiness = \"core-generated\"")
+        expect(manifest_text).to_contain("rtl_sim_backend = \"ghdl-vhdl-2008\"")
+        expect(manifest_text).to_not_contain("linux-ready")
 
     slow_it "generated RV32 and RV64 VHDL analyze with GHDL when available":
         val probe = rt_process_run("which", ["ghdl"])
@@ -151,8 +187,10 @@ describe "RISC-V FPGA Linux RTL generation":
         val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_rtl_ghdl_spec")
         expect(result.is_ok()).to_equal(true)
         val cmd = "rm -f work-obj08.cf && " +
-            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32_linux_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32_linux_soc.vhd && " +
-            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64_linux_soc.vhd"
+            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32i_core_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv32/rtl/simple_rv32i_core.vhd && " +
+            "ghdl -e --std=08 simple_rv32i_core && " +
+            "ghdl -a --std=08 /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64i_core_pkg.vhd /tmp/simple_riscv_fpga_rtl_ghdl_spec/rv64/rtl/simple_rv64i_core.vhd && " +
+            "ghdl -e --std=08 simple_rv64i_core"
         val analyzed = rt_process_run("/bin/sh", ["-c", cmd])
         expect(analyzed[2]).to_equal(0)
 

@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_sstack_skill source_sha256=18d16a12ffb4c4cab1582f0bdc44e85660433a64a71fe38e63743698ed5571b1 content_sha256=18d16a12ffb4c4cab1582f0bdc44e85660433a64a71fe38e63743698ed5571b1 -->
 ---
 name: sstack
 description: SStack 8-phase BDD/TDD pipeline orchestrator with cooperative workflow (Codex/Gemini fallback). Use for any dev task — /dev is an alias.

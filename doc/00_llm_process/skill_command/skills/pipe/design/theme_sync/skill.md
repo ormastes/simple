@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_design_theme_sync_skill source_sha256=911afa3f9b83ffd4549ebbd69107de2b5a2ea05e3523a310aacca945521ac5a0 content_sha256=911afa3f9b83ffd4549ebbd69107de2b5a2ea05e3523a310aacca945521ac5a0 -->
 # Theme Sync Skill — Round-trip between Local Tokens and Stitch
 
 Synchronize the Simple OS glassmorphism design system between local `.spl` token files and live Stitch cloud design systems. Detects token drift, resolves conflicts, pushes updates to Stitch, and validates results with rendered screenshots.

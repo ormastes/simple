@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_dev_skill source_sha256=d0df8163a380c2334795d21db3ed31bd11047a2748862fcae048c9696a7e3ec2 content_sha256=d0df8163a380c2334795d21db3ed31bd11047a2748862fcae048c9696a7e3ec2 -->
 ---
 name: dev
 description: Alias for /sstack — same 8-phase BDD/TDD pipeline. Use for any dev task (bug fix, feature, refactor, TODO).

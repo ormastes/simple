@@ -1,0 +1,92 @@
+# @cover src/app/llm_process_gen/main.spl 80%
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn shell(command: text) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn run_gen(args: [text]) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("bin/simple", ["llm-process-gen"] + args)
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn root(name: text) -> text:
+    "/tmp/simple_llm_process_gen_" + name
+
+fn seed(root_path: text, mode: text):
+    val source_file = if mode == "gemini_toml_skill": "src/source.toml" else: "src/source.md"
+    val source_body = if mode == "gemini_toml_skill": "description = \"Demo command\"\nprompt = \"\"\"\nRun demo.\n\"\"\"\n" else: "hello source\n"
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process' '" + root_path + "/src' '" + root_path + "/out' && " +
+        "cat > '" + root_path + "/" + source_file + "' <<'SRC'\n" + source_body + "SRC\n" +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: sample_doc\n" +
+        "    kind: skill\n" +
+        "    owner: test\n" +
+        "    stage: test\n" +
+        "    source_path: " + source_file + "\n" +
+        "    target_path: out/generated.md\n" +
+        "    mode: " + mode + "\n" +
+        "EOF"
+    expect(shell(script).exit_code).to_equal(0)
+
+fn read_file(path: text) -> text:
+    rt_file_read_text(path)
+
+describe "llm-process-gen":
+    it "is registered in the command tables":
+        expect(shell("rg -n 'name: \"llm-process-gen\"' src/compiler_rust/driver/src/main.rs").exit_code).to_equal(0)
+        expect(shell("rg -n 'name: \"llm-process-gen\"' src/app/cli/dispatch/table.spl").exit_code).to_equal(0)
+
+    it "reports a missing manifest as check failure":
+        val r = root("missing")
+        shell("rm -rf '" + r + "' && mkdir -p '" + r + "'")
+        val result = run_gen(["check", "--root", r])
+        expect(result.exit_code).to_equal(1)
+        expect(result.stdout).to_contain("missing manifest")
+
+    it "creates a missing managed target and then check passes":
+        val r = root("create")
+        seed(r, "managed")
+        expect(run_gen(["check", "--root", r]).exit_code).to_equal(1)
+        expect(run_gen(["generate", "--root", r]).exit_code).to_equal(0)
+        expect(rt_file_exists(r + "/out/generated.md")).to_equal(true)
+        expect(run_gen(["check", "--root", r]).exit_code).to_equal(0)
+
+    it "refuses manual edits unless force is supplied":
+        val r = root("manual")
+        seed(r, "managed")
+        expect(run_gen(["generate", "--root", r]).exit_code).to_equal(0)
+        expect(shell("printf '\\nmanual edit\\n' >> '" + r + "/out/generated.md'").exit_code).to_equal(0)
+        val refused = run_gen(["generate", "--root", r])
+        expect(refused.exit_code).to_equal(1)
+        expect(refused.stdout).to_contain("refusing")
+        expect(run_gen(["generate", "--force", "--root", r]).exit_code).to_equal(0)
+        expect(read_file(r + "/out/generated.md").contains("manual edit")).to_equal(false)
+
+    it "renders Gemini TOML command files as managed skills":
+        val r = root("gemini")
+        seed(r, "gemini_toml_skill")
+        expect(run_gen(["generate", "--root", r]).exit_code).to_equal(0)
+        val content = read_file(r + "/out/generated.md")
+        expect(content).to_contain("llm-process-gen: managed")
+        expect(content).to_contain("Demo command")
+        expect(content).to_contain("Run demo.")
+
+    it "emits JSON drift status":
+        val r = root("json")
+        seed(r, "managed")
+        val result = run_gen(["check", "--root", r, "--json"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.stdout).to_contain("\"ok\":false")
+        expect(result.stdout).to_contain("sample_doc")

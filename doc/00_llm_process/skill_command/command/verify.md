@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=claude_verify_command source_sha256=c7cd43559bb142f553a84e220e5936e835dc24dc4287431b2c046ef64c98b7e8 content_sha256=c7cd43559bb142f553a84e220e5936e835dc24dc4287431b2c046ef64c98b7e8 -->
 # Verify Skill — Production Readiness Codex
 
 **Self-sufficient.** Any LLM (Claude, Codex, Gemini) can run verify independently. Does not depend on any other LLM having participated in prior steps.

@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_design_gemini_ui_design_skill source_sha256=33319765f616be9b36e20936c133771a643bd2717cd567e3740fc00cd512d384 content_sha256=33319765f616be9b36e20936c133771a643bd2717cd567e3740fc00cd512d384 -->
 # Gemini UI Design Skill — Step 3: TUI/GUI Design via Gemini + Stitch
 
 Delegate GUI/TUI design to Gemini API. Gemini generates designs; Stitch MCP renders them.

@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_architecture_skill source_sha256=9cc8b2fa86d07e8aa0ae3e99d5132c12f5c1b7a879a33db37ad582989ea1e20b content_sha256=9cc8b2fa86d07e8aa0ae3e99d5132c12f5c1b7a879a33db37ad582989ea1e20b -->
 ---
 name: architecture
 description: "Codex architecture skill (Codex-specific strength). MDSOC patterns, virtual capsules, feature transforms, module structure evaluation, ADR writing. Reference: doc/04_architecture/."

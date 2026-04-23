@@ -1,21 +1,11 @@
+<!-- llm-process-gen: managed source=gemini_refactor_skill source_sha256=6c2a39e43a4c8ceae357fca41e9ee119233d0cd03722995bb37fe05d3e11e114 content_sha256=3d3fa76cc02aae315e29ef3d1993f77933f3a5782f635e2768fc88067281fe84 -->
 # refactor
 
 Source: `.gemini/commands/refactor.toml`
 
-# Phase 1: File Size & Structure
-# Phase 2: Duplication Removal
-# Phase 3: Coupling Measurement
-# Phase 4: Big-O Analysis
-# Phase 5: Test Verification
-# Critical Rules
+Code quality refactoring workflow — 5 phases: file size, duplication, coupling, Big-O, test verification."
 
-## Description
-
-Code quality refactoring workflow — 5 phases: file size, duplication, coupling, Big-O, test verification.
-
-## Prompt
-
-Run a structured code quality refactoring. Execute each phase in order, running tests after each.
+un a structured code quality refactoring. Execute each phase in order, running tests after each.
 
 ## Phase 1: File Size & Structure
 - **800 lines max** per source file. Split oversized files with meaningful names (NOT `xx_1.spl`)
@@ -63,3 +53,4 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 - All code in `.spl` — no Python, no Bash
 - Generics: `<>` not `[]`
 - No inheritance — use composition, traits, mixins
+"""

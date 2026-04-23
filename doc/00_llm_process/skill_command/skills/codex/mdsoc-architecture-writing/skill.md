@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_mdsoc_architecture_writing_skill source_sha256=4667397c564e608f128591b0fec21d7fef2cf43e5ac41e816f3b4d3f66f8a841 content_sha256=4667397c564e608f128591b0fec21d7fef2cf43e5ac41e816f3b4d3f66f8a841 -->
 ---
 name: mdsoc-architecture-writing
 description: Write or refactor layered MDSOC-style architecture docs for this repo, especially for compiler, loader, interpreter, and shared tree-node visibility. Use when the task asks for layers, tree encapsulation, public-to-next-layer rules, common node extraction, or sibling-private/tree-private analysis.

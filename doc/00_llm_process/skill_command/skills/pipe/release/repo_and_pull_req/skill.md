@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_release_repo_and_pull_req_skill source_sha256=b0d8ff77e62a1f146b0cb5f61c09a80186698ae2321053ec11daaaa8f3ce8c45 content_sha256=b0d8ff77e62a1f146b0cb5f61c09a80186698ae2321053ec11daaaa8f3ce8c45 -->
 ---
 name: repo_and_pull_req
 description: GitHub and Jira/Confluence integration — setup, push, wiki, and autonomous PR review. Routes to sub-skills in git/ and jira/ directories.

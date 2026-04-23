@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_research_codex_skill source_sha256=a6b34de071e5cd5ffea60bc93b2fb96b4bad7b0a5d1115d83bcc9e46197de775 content_sha256=a6b34de071e5cd5ffea60bc93b2fb96b4bad7b0a5d1115d83bcc9e46197de775 -->
 # Research Skill (Codex) — Step 2: Forked Agent Research
 
 See `lib/research_common.md` for shared format and templates.

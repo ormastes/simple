@@ -1,12 +1,9 @@
+<!-- llm-process-gen: managed source=gemini_release_skill source_sha256=cba19ebd846a836863e557a9733f55fa347693bd2522e01a872056442e849c0e content_sha256=3bc49eb245e00ccad87d7567c95debd022cd586f6e4b303277282eec63d42d8c -->
 # release
 
 Source: `.gemini/commands/release.toml`
 
-## Description
-
 Version bump and release. Args: major/first, minor/second, patch/third (default), or exact X.Y.Z.
-
-## Prompt
 
 Perform a version bump and release.
 
@@ -30,3 +27,4 @@ Steps:
 7. Ask before push — do NOT push without user approval
 
 Prerequisite: /verify must show STATUS: PASS first.
+""

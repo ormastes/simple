@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_research_skill source_sha256=efe93daadcb797efb9dadac0f65cadf130250ff6a6e975228599e628bfa243e7 content_sha256=efe93daadcb797efb9dadac0f65cadf130250ff6a6e975228599e628bfa243e7 -->
 # Research Skill (Claude) — Step 1: Local + Domain Research
 
 See `lib/research_common.md` for shared format and templates.

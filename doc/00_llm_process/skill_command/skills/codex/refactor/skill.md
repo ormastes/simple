@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_refactor_skill source_sha256=d90301e55567abbad6e1e55b18f9ad3b412d81d618dc8c80b82c723c5b5a935f content_sha256=d90301e55567abbad6e1e55b18f9ad3b412d81d618dc8c80b82c723c5b5a935f -->
 ---
 name: refactor
 description: "Code quality refactoring workflow — 5 phases: file size, duplication, coupling, Big-O, test verification. Use when cleaning up code."

@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_design_arch_skill source_sha256=ccf0406b3430bd362871349d7f0bc5ded190806398c26ff281bc6bee9459b81d content_sha256=ccf0406b3430bd362871349d7f0bc5ded190806398c26ff281bc6bee9459b81d -->
 # Arch Skill — Architecture + System Test Design
 
 ## Prerequisites

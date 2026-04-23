@@ -1,14 +1,11 @@
+<!-- llm-process-gen: managed source=gemini_visual_test_skill source_sha256=6ae7b44e401ad75c3d54c566c944f87fa78797dd693dfd8f7b7a6d4457c62c13 content_sha256=f7ca124dce204caaec5677b0702de4a022dd1f046abf4197d142bd4bbea53541 -->
 # visual_test
 
 Source: `.gemini/commands/visual_test.toml`
 
-## Description
+Visual regression testing — screenshot comparison, layout validation, responsive checks, accessibility."
 
-Visual regression testing — screenshot comparison, layout validation, responsive checks, accessibility.
-
-## Prompt
-
-Run visual regression testing for the given UI feature or component. Requires Chrome MCP.
+un visual regression testing for the given UI feature or component. Requires Chrome MCP.
 
 Phase 1: Baseline Capture
 - Launch the UI (TUI via terminal capture, GUI via Chrome MCP)

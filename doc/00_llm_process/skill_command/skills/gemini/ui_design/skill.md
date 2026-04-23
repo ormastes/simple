@@ -1,17 +1,11 @@
+<!-- llm-process-gen: managed source=gemini_ui_design_skill source_sha256=7d25631b3c92fc0b3ee8bcda2f456d6446691371747f7201a634173759ddd4d1 content_sha256=0547aaa982e59c6478adee435297235625e3d800c01a773ec7092903b5972c49 -->
 # ui_design
 
 Source: `.gemini/commands/ui_design.toml`
 
-Cooperative Pipeline: Step 3 — UI/UX Design (Gemini primary)
-Can run standalone or after Step 1 (research) and Step 2 (requirements).
-
-## Description
-
 Create TUI/GUI mockups, wireframes, and interaction flows. Gemini's primary strength skill for visual design.
 
-## Prompt
-
-Create UI/UX design artifacts for the given feature. Self-sufficient — if no requirements exist, gather context first.
+reate UI/UX design artifacts for the given feature. Self-sufficient — if no requirements exist, gather context first.
 
 Check prerequisites:
 - doc/02_requirements/feature/<feature>.md (if missing, search src/ and doc/ for context)
@@ -50,3 +44,4 @@ Phase 5: Visual Reference (optional, if Chrome MCP available)
 
 If another LLM already created design artifacts, review and extend — never overwrite.
 All implementation code in .spl — no Python, no Bash.
+"""

@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_release_skill source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b -->
 # Release Skill
 
 Perform a version bump and release of the Simple Language compiler.

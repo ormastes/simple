@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_skill source_sha256=c6c144e29299457a809048843457d9c925e1c76ae1212c6d3d83bfb5ea405bd9 content_sha256=c6c144e29299457a809048843457d9c925e1c76ae1212c6d3d83bfb5ea405bd9 -->
 # Impl Skill -- 15-Phase Implementation Workflow
 
 ## Cooperative Phase
@@ -42,7 +43,7 @@ Before starting, check what exists — missing artifacts are created in phases 1
 | 12 | Duplication Check | review-agent | jscpd + semantic + stub scan |
 | 13 | Refactoring | code-agent | Files >800 lines split |
 | 14 | Full Test Suite | test-agent | All tests pass |
-| 15 | VCS Sync | main | `/git-jj-sync` + completion report |
+| 15 | VCS Sync | main | `/sync` + completion report |
 
 ## Agent Teams
 
@@ -101,7 +102,7 @@ bin/simple test && bin/simple build lint && bin/simple build check
 ```
 Run `/verify` (Claude) for production readiness verification.
 
-All pass -> `/git-jj-sync` -> `doc/09_report/<feature>_complete_<date>.md`
+All pass -> `/sync` -> `doc/09_report/<feature>_complete_<date>.md`
 Add/update guide docs in `doc/07_guide/` if needed.
 
 ## Per-Agent Checks

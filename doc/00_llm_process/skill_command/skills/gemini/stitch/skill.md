@@ -1,12 +1,9 @@
+<!-- llm-process-gen: managed source=gemini_stitch_skill source_sha256=9e92661b40ef1b8a76416531aef8d93f61b2170cc8cb88b2cd546b507c6e4dbd content_sha256=694d33a07747469a8c3a92c984c365ece0768042d9b49d84093c5d6e74c2794c -->
 # stitch
 
 Source: `.gemini/commands/stitch.toml`
 
-## Description
-
 Multi-file code generation and scaffolding using Stitch MCP. Creates module structures following Simple language rules.
-
-## Prompt
 
 Generate multi-file scaffolding for the given feature or module. Uses Stitch MCP for template-based generation.
 
@@ -41,3 +38,4 @@ Phase 4: Documentation Scaffolding
 All code in .spl files — no Python, no Bash.
 No pass_todo in generated code — use real placeholder implementations.
 Reference: doc/07_guide/quick_reference/syntax_quick_reference.md
+"""

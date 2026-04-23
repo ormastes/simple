@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=codex_research_skill source_sha256=880eeced2e3ae7bd4cd6181631566b4d6fa7ed60165383f9e33d27e9b02a67c9 content_sha256=880eeced2e3ae7bd4cd6181631566b4d6fa7ed60165383f9e33d27e9b02a67c9 -->
 ---
 name: research
 description: "Codex research skill (Step 2 in cooperative pipeline). Forked parallel research: spawn multiple research threads, generate requirement options with pros/cons/effort, user selection workflow. Self-sufficient — does local + domain research if prior steps missing."

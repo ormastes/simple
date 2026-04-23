@@ -1,17 +1,11 @@
+<!-- llm-process-gen: managed source=gemini_design_skill source_sha256=1a9de54c39ff8fc15d051cdedbebbac6af8ea47236db6380cf53e68e4ccba7b4 content_sha256=c5cefc3598cbe7fd5aa436cb33ba32259bc78a09cab6274cb680d2cf1429c66c -->
 # design
 
 Source: `.gemini/commands/design.toml`
 
-Cooperative Pipeline: Step 3 — UI/UX Design Primary (Gemini strengths: visual design, prototyping)
-Step 1: research (any LLM) -> Step 2: requirements (any LLM) -> Step 3: design (Gemini primary) -> Step 4: impl (any LLM)
+Create architecture, UI design, system tests, and detail design. Self-sufficient — if research/requirements missing, does them first."
 
-## Description
-
-Create architecture, UI design, system tests, and detail design. Self-sufficient — if research/requirements missing, does them first.
-
-## Prompt
-
-Run the design pipeline for the given feature. Self-sufficient — if prerequisites missing, create them.
+the design pipeline for the given feature. Self-sufficient — if prerequisites missing, create them.
 
 Check prerequisites:
 - doc/02_requirements/feature/<feature>.md (if missing, run research first)
@@ -35,3 +29,4 @@ Phase 5: Quality Check — verify SSpec quality, ask user if changes needed.
 
 If another LLM already created artifacts, review and extend — never overwrite.
 Treat full-tree scans, repeated file rereads, and per-request subprocesses as design risks unless explicitly justified.
+"""

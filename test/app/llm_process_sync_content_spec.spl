@@ -1,0 +1,41 @@
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn shell(command: text) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+describe "LLM process sync content":
+    it "does not reference the retired git-jj-sync command":
+        val result = shell("! rg -n '/git-jj-sync|git-jj-sync' doc/00_llm_process .codex/skills .agents/skills .gemini/commands .claude/commands")
+        expect(result.exit_code).to_equal(0)
+
+    it "stops file-count reduction blocks before any push":
+        val script = "python3 - <<'PY'\n" +
+            "from pathlib import Path\n" +
+            "roots=[Path('doc/00_llm_process'),Path('.codex/skills'),Path('.agents/skills'),Path('.gemini/commands'),Path('.claude/commands')]\n" +
+            "bad=[]\n" +
+            "for root in roots:\n" +
+            "    if not root.exists(): continue\n" +
+            "    for p in root.rglob('*'):\n" +
+            "        if not p.is_file(): continue\n" +
+            "        text=p.read_text(errors='ignore')\n" +
+            "        i=0\n" +
+            "        while True:\n" +
+            "            i=text.find('File count reduced', i)\n" +
+            "            if i < 0: break\n" +
+            "            push=text.find('jj git push', i)\n" +
+            "            stop=text.find('exit 1', i)\n" +
+            "            if push >= 0 and (stop < 0 or stop > push): bad.append(str(p))\n" +
+            "            i += 1\n" +
+            "if bad:\n" +
+            "    print('\\n'.join(sorted(set(bad))))\n" +
+            "    raise SystemExit(1)\n" +
+            "PY"
+        expect(shell(script).exit_code).to_equal(0)

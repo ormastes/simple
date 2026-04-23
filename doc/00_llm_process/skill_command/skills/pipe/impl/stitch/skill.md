@@ -1,3 +1,4 @@
+<!-- llm-process-gen: managed source=pipe_impl_stitch_skill source_sha256=935888fc52070adb5c56e30d5cc60625554fb013575a888f4da4a5d33c591162 content_sha256=935888fc52070adb5c56e30d5cc60625554fb013575a888f4da4a5d33c591162 -->
 # Stitch Skill -- Glassmorphism UI Screen Generation
 
 Generate desktop OS UI screens via Google Stitch MCP with a macOS-inspired glassmorphism design system. All CSS patterns are license-free (standard glassmorphism, no proprietary assets).

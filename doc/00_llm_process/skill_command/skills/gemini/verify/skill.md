@@ -1,12 +1,9 @@
+<!-- llm-process-gen: managed source=gemini_verify_skill source_sha256=cacfbb87838e7449142200065594b17d6ec133ae2cfd85f22688e1f288ffa272 content_sha256=5bc28a637a8b85fc0dff39ce221900d62a0985105df9ad2a051958281f8f2444 -->
 # verify
 
 Source: `.gemini/commands/verify.toml`
 
-## Description
-
 Production readiness verification. Checks tests, implementation, requirements, NFR, and docs.
-
-## Prompt
 
 Run production readiness verification. Self-sufficient — any LLM can run independently.
 
@@ -29,3 +26,4 @@ Must show STATUS: PASS before release.
 Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact.
 Audit hot request paths for repeated scans, repeated rereads, per-request subprocesses, and missing cache invalidation on writes.
 Require startup and representative request perf evidence for performance-sensitive tooling changes.
+"""

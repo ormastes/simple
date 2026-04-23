@@ -1,14 +1,11 @@
+<!-- llm-process-gen: managed source=gemini_impl_skill source_sha256=0d15bc66bf1fc5269b36338a708652ebc3bbcd7f278d03da039012248b8a4cf6 content_sha256=78b583be04f6d37e58462528ddf6b17ffd69270682f255cfc8a9dfca6703f6e5 -->
 # impl
 
 Source: `.gemini/commands/impl.toml`
 
-## Description
+Implement a feature end-to-end. Self-sufficient — if research/design missing, creates them first."
 
-Implement a feature end-to-end. Self-sufficient — if research/design missing, creates them first.
-
-## Prompt
-
-Implement the given feature. Self-sufficient — if prior artifacts missing, create them first.
+mplement the given feature. Self-sufficient — if prior artifacts missing, create them first.
 
 Check what exists and skip completed phases:
 - doc/01_research/local/<feature>.md → skip research
@@ -32,3 +29,4 @@ Production MCP or LSP wrappers must use cached compiled artifacts.
 Avoid full-tree scans and per-request subprocesses in hot request handlers when a cache or index is viable.
 If cached or indexed data depends on writable files, implement explicit invalidation on mutation paths.
 Add perf smoke checks for startup and representative tool requests when touching performance-sensitive tooling.
+"""

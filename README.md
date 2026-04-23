@@ -124,6 +124,18 @@ simple --version
 
 **Note:** The runtime is pre-compiled for performance, but the entire language implementation (compiler, stdlib, tools) is in Simple source code that you can read and modify!
 
+### Source Footprint
+
+Snapshot generated 2026-04-23 from existing tracked `.spl`, `.rs`, `.c`, `.h`, `.s`, `.S`, and `.asm` files. Blank lines and comment-only lines are excluded; `examples/` code is included; vendored and third-party source is excluded.
+
+| Language | Files | Non-comment LOC | `src/` LOC | `examples/` LOC | `test/` LOC | Other LOC |
+|---|---:|---:|---:|---:|---:|---:|
+| Simple | 13,286 | 1,780,334 | 887,121 | 158,796 | 712,254 | 22,163 |
+| Rust | 1,633 | 411,106 | 409,852 | 11 | 0 | 1,243 |
+| C | 158 | 73,854 | 14,953 | 58,859 | 36 | 6 |
+| Assembly | 60 | 4,758 | 1,554 | 3,173 | 31 | 0 |
+| Total | 15,137 | 2,270,052 | 1,313,480 | 220,839 | 712,321 | 23,412 |
+
 ### From Source (Developers Only)
 
 Only needed if you want to modify the runtime:

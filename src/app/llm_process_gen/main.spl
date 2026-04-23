@@ -1,0 +1,455 @@
+#![allow(unnamed_duplicate_typed_args)]
+# LLM process generator.
+
+use std.cli.cli_util (get_cli_args)
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_getpid() -> i64
+
+struct GeneratedFile:
+    id: text
+    source_path: text
+    target_path: text
+    mode: text
+
+struct Options:
+    action: text
+    root: text
+    json: bool
+    dry_run: bool
+    force: bool
+    usage_error: bool
+
+struct ResultSummary:
+    ok: bool
+    records: i64
+    failures: [text]
+
+fn main() -> i64:
+    val opts = parse_options(clean_args())
+    if opts.usage_error:
+        print_usage()
+        return 2
+    if opts.action == "help":
+        print_usage()
+        return 0
+    if opts.action == "check":
+        val r = check_all(opts.root)
+        emit_result(r, opts.json, "check")
+        return if r.ok: 0 else: 1
+    if opts.action == "generate":
+        val r = generate_all(opts.root, opts.dry_run, opts.force)
+        emit_result(r, opts.json, "generate")
+        return if r.ok: 0 else: 1
+    print_usage()
+    2
+
+fn print_usage():
+    print "Usage: simple llm-process-gen <check|generate> [options]"
+    print ""
+    print "Options:"
+    print "  --root <path>    Repository root (default: current directory)"
+    print "  --json           Machine-readable check output"
+    print "  --dry-run        For generate, report changes without writing"
+    print "  --force          For generate, overwrite manually edited managed outputs"
+    print "  -h, --help       Show this help"
+
+fn clean_args() -> [text]:
+    val raw = get_cli_args()
+    var out: [text] = []
+    var i = 0
+    if raw.len() > 0 and raw[0] == "llm-process-gen":
+        i = 1
+    while i < raw.len():
+        out.push(raw[i])
+        i = i + 1
+    out
+
+fn parse_options(args: [text]) -> Options:
+    var opts = Options(action: "", root: ".", json: false, dry_run: false, force: false, usage_error: false)
+    if args.len() == 0:
+        opts.usage_error = true
+        return opts
+    opts.action = args[0]
+    if opts.action == "-h" or opts.action == "--help":
+        opts.action = "help"
+        return opts
+    if opts.action != "check" and opts.action != "generate":
+        opts.usage_error = true
+        return opts
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json":
+            opts.json = true
+        elif arg == "--dry-run":
+            opts.dry_run = true
+        elif arg == "--force":
+            opts.force = true
+        elif arg == "--root":
+            if i + 1 >= args.len():
+                opts.usage_error = true
+                return opts
+            opts.root = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--root="):
+            opts.root = arg.slice("--root=".len(), arg.len())
+        elif arg == "-h" or arg == "--help":
+            opts.action = "help"
+            return opts
+        else:
+            opts.usage_error = true
+            return opts
+        i = i + 1
+    opts
+
+fn manifest_path(root: text) -> text:
+    path_join(root, "doc/00_llm_process/llm_process_manifest.sdn")
+
+fn check_all(root: text) -> ResultSummary:
+    val manifest = read_manifest(root)
+    var failures: [text] = []
+    if manifest == "":
+        failures.push("missing manifest: {manifest_path(root)}")
+        return ResultSummary(ok: false, records: 0, failures: failures)
+    for f in validate_tables(manifest):
+        failures.push(f)
+    val records = parse_records(manifest)
+    if records.len() == 0:
+        failures.push("manifest generated_files table has no records")
+    for rec in records:
+        for f in check_record(root, rec):
+            failures.push(f)
+    ResultSummary(ok: failures.len() == 0, records: records.len(), failures: failures)
+
+fn generate_all(root: text, dry_run: bool, force: bool) -> ResultSummary:
+    val manifest = read_manifest(root)
+    var failures: [text] = []
+    if manifest == "":
+        failures.push("missing manifest: {manifest_path(root)}")
+        return ResultSummary(ok: false, records: 0, failures: failures)
+    for f in validate_tables(manifest):
+        failures.push(f)
+    val records = parse_records(manifest)
+    if records.len() == 0:
+        failures.push("manifest generated_files table has no records")
+    for rec in records:
+        for f in generate_record(root, rec, dry_run, force):
+            failures.push(f)
+    ResultSummary(ok: failures.len() == 0, records: records.len(), failures: failures)
+
+fn read_manifest(root: text) -> text:
+    val path = manifest_path(root)
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path)
+
+fn validate_tables(manifest: text) -> [text]:
+    val tables = ["skills", "commands", "subagents", "tools", "expert_routes", "generated_files"]
+    var failures: [text] = []
+    for table in tables:
+        if not manifest.contains("\n{table}:") and not manifest.starts_with("{table}:"):
+            failures.push("manifest missing table: {table}")
+    failures
+
+fn parse_records(manifest: text) -> [GeneratedFile]:
+    var records: [GeneratedFile] = []
+    var rec = GeneratedFile(id: "", source_path: "", target_path: "", mode: "")
+    var in_generated = false
+    var have = false
+    for raw in manifest.split("\n"):
+        val line = raw.trim()
+        if line.ends_with(":") and not line.starts_with("- "):
+            if in_generated and have:
+                records.push(rec)
+                rec = GeneratedFile(id: "", source_path: "", target_path: "", mode: "")
+                have = false
+            in_generated = line == "generated_files:"
+            continue
+        if not in_generated:
+            continue
+        if line.starts_with("- id:"):
+            if have:
+                records.push(rec)
+            rec = GeneratedFile(id: value_after(line, "- id:"), source_path: "", target_path: "", mode: "")
+            have = true
+        elif have:
+            if line.starts_with("source_path:"):
+                rec.source_path = value_after(line, "source_path:")
+            elif line.starts_with("target_path:"):
+                rec.target_path = value_after(line, "target_path:")
+            elif line.starts_with("mode:"):
+                rec.mode = value_after(line, "mode:")
+    if in_generated and have:
+        records.push(rec)
+    records
+
+fn value_after(line: text, prefix: text) -> text:
+    var value = line.slice(prefix.len(), line.len()).trim()
+    if value.starts_with("\"") and value.ends_with("\"") and value.len() >= 2:
+        value = value.slice(1, value.len() - 1)
+    value
+
+fn check_record(root: text, rec: GeneratedFile) -> [text]:
+    var failures: [text] = []
+    val source = path_join(root, rec.source_path)
+    val target = path_join(root, rec.target_path)
+    if rec.id == "":
+        failures.push("generated_files record missing id")
+    if rec.source_path == "" or not rt_file_exists(source):
+        failures.push("{rec.id}: missing source {rec.source_path}")
+    if rec.target_path == "" or not rt_file_exists(target):
+        failures.push("{rec.id}: missing target {rec.target_path}")
+        return failures
+    val target_text = rt_file_read_text(target)
+    val first = first_line(target_text)
+    if not first.contains("llm-process-gen: managed"):
+        failures.push("{rec.id}: missing generated marker in {rec.target_path}")
+        return failures
+    val expected = render_content(root, rec)
+    if marker_field(first, "source_sha256") != hash_file(source):
+        failures.push("{rec.id}: stale source hash in {rec.target_path}")
+    if marker_field(first, "content_sha256") != hash_text(root, strip_marker(target_text)):
+        failures.push("{rec.id}: manual edit detected in {rec.target_path}")
+    if strip_marker(target_text) != expected:
+        failures.push("{rec.id}: generated content drift in {rec.target_path}")
+    for f in check_links(root, target, parent_dir(source)):
+        failures.push("{rec.id}: {f}")
+    failures
+
+fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -> [text]:
+    var failures: [text] = []
+    val source = path_join(root, rec.source_path)
+    val target = path_join(root, rec.target_path)
+    if rec.source_path == "" or not rt_file_exists(source):
+        failures.push("{rec.id}: missing source {rec.source_path}")
+        return failures
+    val body = render_content(root, rec)
+    val output = marker_for(rec, hash_file(source), hash_text(root, body)) + "\n" + body
+    if rt_file_exists(target):
+        val existing = rt_file_read_text(target)
+        val first = first_line(existing)
+        if first.contains("llm-process-gen: managed"):
+            if marker_field(first, "content_sha256") != hash_text(root, strip_marker(existing)) and not force:
+                failures.push("{rec.id}: refusing to overwrite manual edits in {rec.target_path}")
+                return failures
+        elif not force:
+            failures.push("{rec.id}: refusing unmarked target {rec.target_path}; rerun with --force")
+            return failures
+    if dry_run:
+        if rt_file_exists(target) and existing == output:
+            print "unchanged {rec.target_path}"
+        elif rt_file_exists(target):
+            print "would update {rec.target_path}"
+        else:
+            print "would create {rec.target_path}"
+        return failures
+    ensure_parent(target)
+    if not rt_file_write_text(target, output):
+        failures.push("{rec.id}: failed to write {rec.target_path}")
+    failures
+
+fn render_content(root: text, rec: GeneratedFile) -> text:
+    val source = path_join(root, rec.source_path)
+    val raw = rt_file_read_text(source)
+    if rec.mode == "gemini_toml_skill":
+        return render_gemini_skill(rec.source_path, raw)
+    raw
+
+fn render_gemini_skill(source_path: text, raw: text) -> text:
+    val desc = toml_string(raw, "description")
+    val prompt = toml_prompt(raw)
+    "# " + source_name(source_path) + "\n\nSource: `" + source_path + "`\n\n" + desc + "\n\n" + prompt
+
+fn source_name(path: text) -> text:
+    var name = path
+    val slash = name.last_index_of("/") ?? -1
+    if slash >= 0:
+        name = name.slice(slash + 1, name.len())
+    if name.ends_with(".toml"):
+        name = name.slice(0, name.len() - 5)
+    name
+
+fn toml_string(raw: text, key: text) -> text:
+    val prefix = key + " = \""
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with(prefix) and t.ends_with("\""):
+            return t.slice(prefix.len(), t.len() - 1)
+    ""
+
+fn toml_prompt(raw: text) -> text:
+    val start = raw.index_of("prompt = \"\"\"") ?? -1
+    if start < 0:
+        return ""
+    val body_start = start + "prompt = \"\"\"".len()
+    val tail = raw.slice(body_start, raw.len())
+    val end = tail.index_of("\"\"\"") ?? -1
+    if end < 0:
+        return tail.trim()
+    tail.slice(0, end).trim()
+
+fn marker_for(rec: GeneratedFile, source_hash: text, content_hash: text) -> text:
+    if rec.target_path.ends_with(".md"):
+        return "<!-- llm-process-gen: managed source={rec.id} source_sha256={source_hash} content_sha256={content_hash} -->"
+    "# llm-process-gen: managed source={rec.id} source_sha256={source_hash} content_sha256={content_hash}"
+
+fn first_line(content: text) -> text:
+    val idx = content.index_of("\n") ?? -1
+    if idx >= 0:
+        return content.slice(0, idx)
+    content
+
+fn strip_marker(content: text) -> text:
+    val first = first_line(content)
+    if not first.contains("llm-process-gen: managed"):
+        return content
+    val idx = content.index_of("\n") ?? -1
+    if idx >= 0:
+        return content.slice(idx + 1, content.len())
+    ""
+
+fn marker_field(line: text, field: text) -> text:
+    val needle = field + "="
+    val idx = line.index_of(needle) ?? -1
+    if idx < 0:
+        return ""
+    var end = idx + needle.len()
+    while end < line.len():
+        val ch = line.char_at(end)
+        if ch == " " or ch == ">":
+            break
+        end = end + 1
+    line.slice(idx + needle.len(), end)
+
+fn check_links(root: text, path: text, fallback_base: text) -> [text]:
+    var failures: [text] = []
+    if not path.ends_with(".md"):
+        return failures
+    val base = parent_dir(path)
+    for line in rt_file_read_text(path).split("\n"):
+        var rest = line
+        var guard = 0
+        while guard < 20:
+            val open = rest.index_of("](") ?? -1
+            if open < 0:
+                break
+            val after = rest.slice(open + 2, rest.len())
+            val close = after.index_of(")") ?? -1
+            if close < 0:
+                break
+            var link = after.slice(0, close)
+            if link.contains("#"):
+                val hash_idx = link.index_of("#") ?? -1
+                link = link.slice(0, hash_idx)
+            if should_check_link(link):
+                var exists = rt_file_exists(normalize_relative(base, link))
+                if not exists and fallback_base != "":
+                    exists = rt_file_exists(normalize_relative(fallback_base, link))
+                if not exists:
+                    exists = rt_file_exists(normalize_relative(root, link))
+                if not exists:
+                    failures.push("broken local link {link} in {path}")
+            rest = after.slice(close + 1, after.len())
+            guard = guard + 1
+    failures
+
+fn should_check_link(link: text) -> bool:
+    link != "" and not link.starts_with("#") and not link.starts_with("http:") and not link.starts_with("https:") and not link.starts_with("mailto:")
+
+fn hash_file(path: text) -> text:
+    val (out, err, code) = rt_process_run("sha256sum", [path])
+    if code != 0:
+        return ""
+    first_word(out)
+
+fn hash_text(root: text, content: text) -> text:
+    val tmp = path_join(root, ".llm-process-gen.tmp.{rt_getpid()}")
+    if not rt_file_write_text(tmp, content):
+        return ""
+    val digest = hash_file(tmp)
+    rt_file_delete(tmp)
+    digest
+
+fn first_word(s: text) -> text:
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\n" or ch == "\t":
+            return s.slice(0, i)
+        i = i + 1
+    s
+
+fn path_join(root: text, rel: text) -> text:
+    if rel.starts_with("/"):
+        return rel
+    if root == "" or root == ".":
+        return rel
+    if root.ends_with("/"):
+        return root + rel
+    root + "/" + rel
+
+fn parent_dir(path: text) -> text:
+    var last = -1
+    var i = 0
+    while i < path.len():
+        if path.char_at(i) == "/":
+            last = i
+        i = i + 1
+    if last <= 0:
+        return "."
+    path.slice(0, last)
+
+fn normalize_relative(base: text, link: text) -> text:
+    if link.starts_with("/"):
+        return link
+    val raw = path_join(base, link)
+    val (out, err, code) = rt_process_run("realpath", ["-m", raw])
+    if code == 0:
+        return out.trim()
+    raw
+
+fn ensure_parent(path: text):
+    val parent = parent_dir(path)
+    if parent != ".":
+        rt_process_run("mkdir", ["-p", parent])
+
+fn emit_result(r: ResultSummary, json: bool, label: text):
+    if json:
+        print result_json(r)
+    elif r.ok:
+        print "llm-process-gen: {label} OK ({r.records} records inspected)"
+    else:
+        print "llm-process-gen: {label} failed"
+        for f in r.failures:
+            print "- {f}"
+
+fn result_json(r: ResultSummary) -> text:
+    var out = "{\"ok\":" + (if r.ok: "true" else: "false") + ",\"records\":" + r.records.to_text() + ",\"failures\":["
+    var i = 0
+    while i < r.failures.len():
+        if i > 0:
+            out = out + ","
+        out = out + "\"" + json_escape(r.failures[i]) + "\""
+        i = i + 1
+    out + "]}"
+
+fn json_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        else:
+            out = out + ch
+        i = i + 1
+    out

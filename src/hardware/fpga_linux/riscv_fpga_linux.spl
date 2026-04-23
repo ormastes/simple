@@ -14,6 +14,20 @@ enum RiscvXlen:
     Rv32
     Rv64
 
+enum RiscvReadinessStatus:
+    Preparation
+    CoreGenerated
+    SocGenerated
+    LinuxBootValidated
+
+impl RiscvReadinessStatus:
+    fn to_text() -> text:
+        match self:
+            Preparation: "preparation"
+            CoreGenerated: "core-generated"
+            SocGenerated: "soc-generated"
+            LinuxBootValidated: "linux-boot-validated"
+
 impl RiscvXlen:
     fn bits() -> i64:
         match self:
@@ -132,9 +146,9 @@ impl RiscvFpgaLane:
     static fn rv64_default() -> RiscvFpgaLane:
         RiscvFpgaLane(
             xlen: RiscvXlen.Rv64,
-            top_module: "simple_rv64_linux_soc",
+            top_module: "simple_rv64i_core",
             rtl_dir: "build/fpga/rv64/rtl",
-            rtl_sim_backend: "cva6-verilator",
+            rtl_sim_backend: "ghdl-vhdl-2008",
             bootrom_path: "build/fpga/rv64/bootrom.bin",
             linux: LinuxArtifactSet.empty()
         )
@@ -142,9 +156,9 @@ impl RiscvFpgaLane:
     static fn rv32_default() -> RiscvFpgaLane:
         RiscvFpgaLane(
             xlen: RiscvXlen.Rv32,
-            top_module: "simple_rv32_linux_soc",
+            top_module: "simple_rv32i_core",
             rtl_dir: "build/fpga/rv32/rtl",
-            rtl_sim_backend: "litex-vexriscv-verilator",
+            rtl_sim_backend: "ghdl-vhdl-2008",
             bootrom_path: "build/fpga/rv32/bootrom.bin",
             linux: LinuxArtifactSet.empty()
         )
@@ -204,6 +218,8 @@ impl RiscvFpgaLane:
 
     fn validate_for_linux_boot() -> [text]:
         var errors = self.validate_for_prepare()
+        if self.readiness_status() != RiscvReadinessStatus.LinuxBootValidated:
+            errors.push("{self.xlen.to_text()} readiness must be linux-boot-validated before claiming Linux boot")
         if not self.linux.configured():
             errors.push("{self.xlen.to_text()} linux kernel, rootfs, dtb, and toolchain must be configured")
         if self.xlen == RiscvXlen.Rv64 and not self.linux.firmware_configured():
@@ -212,8 +228,19 @@ impl RiscvFpgaLane:
             errors.push("rv32 linux must remain marked experimental")
         errors
 
+    fn readiness_status() -> RiscvReadinessStatus:
+        RiscvReadinessStatus.CoreGenerated
+
+    fn hardware_source_file_name() -> text:
+        "{self.top_module}.spl"
+
+    fn instruction_bitfield_name() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "Rv32Instruction"
+        "Rv64Instruction"
+
     fn package_name() -> text:
-        "simple_{self.xlen.to_text()}_linux_pkg"
+        "simple_{self.xlen.to_text()}i_core_pkg"
 
     fn reset_vector_hex() -> text:
         if self.xlen == RiscvXlen.Rv32:
@@ -225,10 +252,74 @@ impl RiscvFpgaLane:
             return "4"
         "4"
 
+    fn hardware_source_spl() -> text:
+        val bitfield_name = self.instruction_bitfield_name()
+        "\"\"\"\n" +
+            "# {self.top_module} Hardware Source Contract\n\n" +
+            "Pure Simple source-of-truth sketch for the generated VHDL lane. The\n" +
+            "current bundle writes this next to RTL so backend work can replace the\n" +
+            "temporary emitter without inventing a RISC-V-specific bitfield language.\n" +
+            "\"\"\"\n\n" +
+            "bitfield {bitfield_name}(u32):\n" +
+            "    opcode: 7\n" +
+            "    rd: 5\n" +
+            "    funct3: 3\n" +
+            "    rs1: 5\n" +
+            "    rs2: 5\n" +
+            "    funct7: 7\n\n" +
+            "bitfield RiscvBranchImmediate(u32):\n" +
+            "    low: 4\n" +
+            "    high: 6\n" +
+            "    bit11: 1\n" +
+            "    bit12: 1\n" +
+            "    _: 20\n\n" +
+            "bitfield RiscvJumpImmediate(u32):\n" +
+            "    low10: 10\n" +
+            "    bit11: 1\n" +
+            "    high8: 8\n" +
+            "    bit20: 1\n" +
+            "    _: 12\n\n" +
+            "@hardware\n" +
+            "@clocked\n" +
+            "fn {self.top_module}(clk: bool, reset_n: bool, imem_rdata: u32, dmem_rdata: u{self.xlen.bits()}) -> u{self.xlen.bits()}:\n" +
+            "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    # VHDL lowering owns these bitfield reads as slices:\n" +
+            "    # inst.opcode -> imem_rdata(6 downto 0)\n" +
+            "    # inst.rd -> imem_rdata(11 downto 7)\n" +
+            "    # inst.rs1 -> imem_rdata(19 downto 15)\n" +
+            "    # inst.rs2 -> imem_rdata(24 downto 20)\n" +
+            "    imem_rdata as u{self.xlen.bits()}\n"
+
+    fn hardware_source_contract_errors() -> [text]:
+        val source = self.hardware_source_spl()
+        var errors: [text] = []
+        if not source.contains("bitfield {self.instruction_bitfield_name()}(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define instruction bitfield")
+        if not source.contains("opcode: 7"):
+            errors.push("{self.xlen.to_text()} hardware source must define seven-bit opcode")
+        if not source.contains("@hardware"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve @hardware metadata")
+        if not source.contains("@clocked"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve @clocked metadata")
+        if source.contains("pass_todo") or source.contains("todo("):
+            errors.push("{self.xlen.to_text()} hardware source must not contain stubs")
+        if source.contains("async ") or source.contains("spawn ") or source.contains("rt_file_"):
+            errors.push("{self.xlen.to_text()} hardware source uses unsupported hardware construct")
+        errors
+
+    fn source_map_header() -> text:
+        "-- generated-from: {self.hardware_source_file_name()}\n" +
+            "-- source-map: {self.instruction_bitfield_name()}.opcode => imem_rdata(6 downto 0)\n" +
+            "-- source-map: {self.instruction_bitfield_name()}.rd => imem_rdata(11 downto 7)\n" +
+            "-- source-map: {self.instruction_bitfield_name()}.rs1 => imem_rdata(19 downto 15)\n" +
+            "-- source-map: {self.instruction_bitfield_name()}.rs2 => imem_rdata(24 downto 20)\n" +
+            "-- readiness: {self.readiness_status().to_text()} linux-boot-validated=false\n\n"
+
     fn package_vhdl() -> text:
         val bits = self.xlen.bits()
         val package_name = self.package_name()
-        "library ieee;\n" +
+        self.source_map_header() +
+            "library ieee;\n" +
             "use ieee.std_logic_1164.all;\n" +
             "use ieee.numeric_std.all;\n\n" +
             "package {package_name} is\n" +
@@ -240,10 +331,11 @@ impl RiscvFpgaLane:
             "package body {package_name} is\n" +
             "end package body {package_name};\n"
 
-    fn soc_vhdl() -> text:
+    fn core_vhdl() -> text:
         val package_name = self.package_name()
         val top = self.top_module
-        "library ieee;\n" +
+        self.source_map_header() +
+            "library ieee;\n" +
             "use ieee.std_logic_1164.all;\n" +
             "use ieee.numeric_std.all;\n" +
             "use work.{package_name}.all;\n\n" +
@@ -251,27 +343,107 @@ impl RiscvFpgaLane:
             "    port (\n" +
             "        clk           : in  std_logic;\n" +
             "        reset_n       : in  std_logic;\n" +
-            "        uart_rx       : in  std_logic;\n" +
-            "        uart_tx       : out std_logic;\n" +
-            "        led_heartbeat : out std_logic;\n" +
-            "        boot_pc_debug : out xword_t\n" +
+            "        imem_addr     : out xword_t;\n" +
+            "        imem_rdata    : in  std_logic_vector(31 downto 0);\n" +
+            "        dmem_addr     : out xword_t;\n" +
+            "        dmem_wdata    : out xword_t;\n" +
+            "        dmem_rdata    : in  xword_t;\n" +
+            "        dmem_we       : out std_logic;\n" +
+            "        debug_pc      : out xword_t;\n" +
+            "        trap          : out std_logic;\n" +
+            "        halt          : out std_logic\n" +
             "    );\n" +
             "end entity {top};\n\n" +
             "architecture rtl of {top} is\n" +
+            "    type reg_file_t is array (0 to 31) of xword_t;\n" +
             "    signal pc_reg : xword_t := RESET_VECTOR;\n" +
-            "    signal tick   : unsigned(23 downto 0) := (others => '0');\n" +
+            "    signal regs : reg_file_t := (others => (others => '0'));\n" +
+            "    signal dmem_addr_reg : xword_t := (others => '0');\n" +
+            "    signal dmem_wdata_reg : xword_t := (others => '0');\n" +
+            "    signal dmem_we_reg : std_logic := '0';\n" +
+            "    signal trap_reg : std_logic := '0';\n" +
+            "    signal halt_reg : std_logic := '0';\n" +
             "begin\n" +
-            "    uart_tx <= '1';\n" +
-            "    led_heartbeat <= tick(23);\n" +
-            "    boot_pc_debug <= pc_reg;\n\n" +
+            "    imem_addr <= pc_reg;\n" +
+            "    dmem_addr <= dmem_addr_reg;\n" +
+            "    dmem_wdata <= dmem_wdata_reg;\n" +
+            "    dmem_we <= dmem_we_reg;\n" +
+            "    debug_pc <= pc_reg;\n" +
+            "    trap <= trap_reg;\n" +
+            "    halt <= halt_reg;\n\n" +
             "    process(clk, reset_n)\n" +
+            "        variable rd_i : integer range 0 to 31;\n" +
+            "        variable rs1_i : integer range 0 to 31;\n" +
+            "        variable rs2_i : integer range 0 to 31;\n" +
+            "        variable imm_i : signed(XLEN - 1 downto 0);\n" +
+            "        variable addr_i : unsigned(XLEN - 1 downto 0);\n" +
+            "        variable branch_i : signed(XLEN - 1 downto 0);\n" +
+            "        variable jump_i : signed(XLEN - 1 downto 0);\n" +
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
-            "            tick <= (others => '0');\n" +
+            "            regs <= (others => (others => '0'));\n" +
+            "            dmem_addr_reg <= (others => '0');\n" +
+            "            dmem_wdata_reg <= (others => '0');\n" +
+            "            dmem_we_reg <= '0';\n" +
+            "            trap_reg <= '0';\n" +
+            "            halt_reg <= '0';\n" +
             "        elsif rising_edge(clk) then\n" +
-            "            tick <= tick + 1;\n" +
-            "            pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "            dmem_we_reg <= '0';\n" +
+            "            if halt_reg = '0' and trap_reg = '0' then\n" +
+            "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
+            "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
+            "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
+            "                imm_i := resize(signed(imem_rdata(31 downto 20)), XLEN);\n" +
+            "                branch_i := resize(signed(imem_rdata(31) & imem_rdata(7) & imem_rdata(30 downto 25) & imem_rdata(11 downto 8) & '0'), XLEN);\n" +
+            "                jump_i := resize(signed(imem_rdata(31) & imem_rdata(19 downto 12) & imem_rdata(20) & imem_rdata(30 downto 21) & '0'), XLEN);\n" +
+            "                case imem_rdata(6 downto 0) is\n" +
+            "                    when \"0010011\" =>\n" +
+            "                        if imem_rdata(14 downto 12) = \"000\" and rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    when \"0110011\" =>\n" +
+            "                        if imem_rdata(14 downto 12) = \"000\" and rd_i /= 0 then\n" +
+            "                            if imem_rdata(30) = '1' then\n" +
+            "                                regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
+            "                            else\n" +
+            "                                regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
+            "                            end if;\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    when \"0000011\" =>\n" +
+            "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
+            "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= dmem_rdata;\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    when \"0100011\" =>\n" +
+            "                        imm_i := resize(signed(imem_rdata(31 downto 25) & imem_rdata(11 downto 7)), XLEN);\n" +
+            "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
+            "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                        dmem_wdata_reg <= regs(rs2_i);\n" +
+            "                        dmem_we_reg <= '1';\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    when \"1100011\" =>\n" +
+            "                        if imem_rdata(14 downto 12) = \"000\" and regs(rs1_i) = regs(rs2_i) then\n" +
+            "                            pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + branch_i));\n" +
+            "                        else\n" +
+            "                            pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"1101111\" =>\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + jump_i));\n" +
+            "                    when \"1110011\" =>\n" +
+            "                        halt_reg <= '1';\n" +
+            "                    when others =>\n" +
+            "                        trap_reg <= '1';\n" +
+            "                end case;\n" +
+            "                regs(0) <= (others => '0');\n" +
+            "            end if;\n" +
             "        end if;\n" +
             "    end process;\n" +
             "end architecture rtl;\n"
@@ -303,6 +475,9 @@ impl FpgaPrepareManifest:
             val lane_errors = lane.validate_for_prepare()
             for err in lane_errors:
                 errors.push("{lane.xlen.to_text()}: {err}")
+            val source_errors = lane.hardware_source_contract_errors()
+            for err in source_errors:
+                errors.push(err)
         errors
 
     fn vivado_tcl_plan() -> text:
@@ -318,7 +493,7 @@ impl FpgaPrepareManifest:
     fn readiness_summary() -> text:
         var out = "board={self.board.name} part={self.board.part} lanes={self.lanes.len()}"
         for lane in self.lanes:
-            out = out + " {lane.xlen.to_text()}:{lane.xlen.linux_policy()}:{lane.xlen.mmu_mode()}"
+            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.top_module}"
         out
 
     fn rtl_manifest_text(root_dir: text) -> text:
@@ -334,8 +509,10 @@ impl FpgaPrepareManifest:
             out = out + "rtl_dir = \"{lane_dir}\"\n"
             out = out + "rtl_sim_backend = \"{lane.rtl_sim_backend}\"\n"
             out = out + "package = \"{lane.package_name()}\"\n"
+            out = out + "source_file = \"{lane_dir}/{lane.hardware_source_file_name()}\"\n"
             out = out + "package_file = \"{lane_dir}/{lane.package_name()}.vhd\"\n"
-            out = out + "top_file = \"{lane_dir}/{lane.top_module}.vhd\"\n"
+            out = out + "core_file = \"{lane_dir}/{lane.top_module}.vhd\"\n"
+            out = out + "readiness = \"{lane.readiness_status().to_text()}\"\n"
             out = out + "linux_policy = \"{lane.xlen.linux_policy()}\"\n"
             out = out + "mmu = \"{lane.xlen.mmu_mode()}\"\n"
         out
@@ -366,11 +543,14 @@ fn generate_riscv_fpga_rtl_bundle(root_dir: text, manifest: FpgaPrepareManifest)
         if not rt_dir_create(lane_dir, true):
             return Err("failed to create rtl lane dir: {lane_dir}")
         val package_path = "{lane_dir}/{lane.package_name()}.vhd"
-        val soc_path = "{lane_dir}/{lane.top_module}.vhd"
+        val core_path = "{lane_dir}/{lane.top_module}.vhd"
+        val source_path = "{lane_dir}/{lane.hardware_source_file_name()}"
+        _write_text_file(source_path, lane.hardware_source_spl())?
         _write_text_file(package_path, lane.package_vhdl())?
-        _write_text_file(soc_path, lane.soc_vhdl())?
+        _write_text_file(core_path, lane.core_vhdl())?
+        generated.push(source_path)
         generated.push(package_path)
-        generated.push(soc_path)
+        generated.push(core_path)
 
     val manifest_path = "{root_dir}/riscv_fpga_rtl_manifest.sdn"
     _write_text_file(manifest_path, manifest.rtl_manifest_text(root_dir))?
