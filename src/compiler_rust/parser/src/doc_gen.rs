@@ -569,6 +569,14 @@ fn format_type(ty: &Type) -> String {
             None => format!("[{}]", format_type(element)),
         },
         Type::Tuple(types) => format!("({})", types.iter().map(format_type).collect::<Vec<_>>().join(", ")),
+        Type::LabeledTuple(fields) => format!(
+            "({})",
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.label, format_type(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Type::Optional(inner) => format!("{}?", format_type(inner)),
         Type::Function { params, ret } => {
             let params_str = params.iter().map(format_type).collect::<Vec<_>>().join(", ");

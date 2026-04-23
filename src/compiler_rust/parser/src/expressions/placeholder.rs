@@ -110,9 +110,6 @@ fn find_max_numbered(expr: &Expr) -> usize {
             else_branch.as_ref().map_or(m, |e| m.max(find_max_numbered(e)))
         }
         Expr::Tuple(items) | Expr::Array(items) => items.iter().fold(0, |acc, e| acc.max(find_max_numbered(e))),
-        Expr::LabeledTuple(fields) => fields
-            .iter()
-            .fold(0, |acc, field| acc.max(find_max_numbered(&field.value))),
         Expr::Dict(entries) => entries
             .iter()
             .fold(0, |acc, (k, v)| acc.max(find_max_numbered(k)).max(find_max_numbered(v))),
@@ -203,15 +200,6 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
             else_branch: else_branch.map(|e| Box::new(replace_numbered_placeholders(*e))),
         },
         Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(replace_numbered_placeholders).collect()),
-        Expr::LabeledTuple(fields) => Expr::LabeledTuple(
-            fields
-                .into_iter()
-                .map(|mut field| {
-                    field.value = replace_numbered_placeholders(field.value);
-                    field
-                })
-                .collect(),
-        ),
         Expr::Array(items) => Expr::Array(items.into_iter().map(replace_numbered_placeholders).collect()),
         Expr::Dict(entries) => Expr::Dict(
             entries
@@ -273,7 +261,6 @@ fn count_placeholders(expr: &Expr) -> usize {
                 + else_branch.as_ref().map_or(0, |e| count_placeholders(e))
         }
         Expr::Tuple(items) | Expr::Array(items) => items.iter().map(count_placeholders).sum(),
-        Expr::LabeledTuple(fields) => fields.iter().map(|field| count_placeholders(&field.value)).sum(),
         Expr::Dict(entries) => entries
             .iter()
             .map(|(k, v)| count_placeholders(k) + count_placeholders(v))
@@ -366,15 +353,6 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             else_branch: else_branch.map(|e| Box::new(replace_placeholders(*e, counter))),
         },
         Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(|e| replace_placeholders(e, counter)).collect()),
-        Expr::LabeledTuple(fields) => Expr::LabeledTuple(
-            fields
-                .into_iter()
-                .map(|mut field| {
-                    field.value = replace_placeholders(field.value, counter);
-                    field
-                })
-                .collect(),
-        ),
         Expr::Array(items) => Expr::Array(items.into_iter().map(|e| replace_placeholders(e, counter)).collect()),
         Expr::Dict(entries) => Expr::Dict(
             entries
