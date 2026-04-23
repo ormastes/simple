@@ -23,7 +23,7 @@ class Engine2DBaremetalCore:
         val base_addr: u64 = self.front_addr
         val stride: i32 = self.w
         val raw_color: u64 = color.to_u64()
-        val pixel_index: i32 = y * stride + x
+        val pixel_index: i32 = (y * stride) + x
         val offset: u64 = (pixel_index * 4).to_u64()
         val addr: u64 = base_addr + offset
         rt_mmio_write_u32_real(addr, raw_color)
@@ -52,12 +52,59 @@ class Engine2DBaremetalCore:
         while py < y1:
             var px: i32 = x0
             while px < x1:
-                val pixel_index: i32 = py * stride + px
+                val pixel_index: i32 = (py * stride) + px
                 val offset: u64 = (pixel_index * 4).to_u64()
                 val addr: u64 = base_addr + offset
                 rt_mmio_write_u32_real(addr, raw_color)
                 px = px + 1
             py = py + 1
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val idx = (row * w) + col
+                if idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[idx])
+                col = col + 1
+            row = row + 1
+
+    me draw_codes12_block(x: i32, y: i32, c0: i32, c1: i32, c2: i32, c3: i32, c4: i32, c5: i32, c6: i32, c7: i32, c8: i32, c9: i32, c10: i32, c11: i32, color: u32, scale: i32):
+        var sx = scale
+        if sx <= 0:
+            sx = 1
+        self.draw_code_slot(x, y, 0, c0, color, sx)
+        self.draw_code_slot(x, y, 1, c1, color, sx)
+        self.draw_code_slot(x, y, 2, c2, color, sx)
+        self.draw_code_slot(x, y, 3, c3, color, sx)
+        self.draw_code_slot(x, y, 4, c4, color, sx)
+        self.draw_code_slot(x, y, 5, c5, color, sx)
+        self.draw_code_slot(x, y, 6, c6, color, sx)
+        self.draw_code_slot(x, y, 7, c7, color, sx)
+        self.draw_code_slot(x, y, 8, c8, color, sx)
+        self.draw_code_slot(x, y, 9, c9, color, sx)
+        self.draw_code_slot(x, y, 10, c10, color, sx)
+        self.draw_code_slot(x, y, 11, c11, color, sx)
+
+    me draw_code_slot(x: i32, y: i32, slot: i32, code: i32, color: u32, scale: i32):
+        if code <= 0 or code == 32:
+            return
+        self.draw_char_block(x + (slot * (6 * scale)), y, code.to_u8(), color, scale)
+
+    me draw_char_block(x: i32, y: i32, code: u8, color: u32, scale: i32):
+        var row: i32 = 0
+        while row < 7:
+            val bits = _core_glyph_row(code, row)
+            var col: i32 = 0
+            while col < 5:
+                val mask = 1 << (4 - col)
+                if (bits & mask) != 0:
+                    self.draw_rect_filled(x + (col * scale), y + (row * scale), scale, scale, color)
+                col = col + 1
+            row = row + 1
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
@@ -126,10 +173,10 @@ class Engine2DBaremetalCore:
             self.put_pixel(cx + x, cy - y, color)
             y = y + 1
             if err <= 0:
-                err = err + 2 * y + 1
+                err = err + ((2 * y) + 1)
             if err > 0:
                 x = x - 1
-                err = err - 2 * x + 1
+                err = err - ((2 * x) + 1)
 
     me draw_circle_stroked(cx: i32, cy: i32, r: i32, color: u32):
         self.draw_circle(cx, cy, r, color)
@@ -139,3 +186,105 @@ class Engine2DBaremetalCore:
 
 fn create_fb_engine_core(front_addr: u64, width: i32, height: i32) -> Engine2DBaremetalCore:
     Engine2DBaremetalCore.create(front_addr, width, height)
+
+fn _core_glyph_row(code: u8, row: i32) -> i32:
+    if row < 0 or row >= 7:
+        return 0
+    if code == 32:
+        return 0
+    if code == 45:
+        return _core_glyph_pick(row, 0, 0, 0, 31, 0, 0, 0)
+    if code == 58:
+        return _core_glyph_pick(row, 0, 4, 4, 0, 4, 4, 0)
+    if code == 47:
+        return _core_glyph_pick(row, 1, 2, 2, 4, 8, 8, 16)
+    if code == 48:
+        return _core_glyph_pick(row, 14, 17, 19, 21, 25, 17, 14)
+    if code == 49:
+        return _core_glyph_pick(row, 4, 12, 4, 4, 4, 4, 14)
+    if code == 50:
+        return _core_glyph_pick(row, 14, 17, 1, 2, 4, 8, 31)
+    if code == 51:
+        return _core_glyph_pick(row, 30, 1, 1, 14, 1, 1, 30)
+    if code == 52:
+        return _core_glyph_pick(row, 2, 6, 10, 18, 31, 2, 2)
+    if code == 53:
+        return _core_glyph_pick(row, 31, 16, 30, 1, 1, 17, 14)
+    if code == 54:
+        return _core_glyph_pick(row, 6, 8, 16, 30, 17, 17, 14)
+    if code == 55:
+        return _core_glyph_pick(row, 31, 1, 2, 4, 8, 8, 8)
+    if code == 56:
+        return _core_glyph_pick(row, 14, 17, 17, 14, 17, 17, 14)
+    if code == 57:
+        return _core_glyph_pick(row, 14, 17, 17, 15, 1, 2, 12)
+    if code == 65:
+        return _core_glyph_pick(row, 14, 17, 17, 31, 17, 17, 17)
+    if code == 66:
+        return _core_glyph_pick(row, 30, 17, 17, 30, 17, 17, 30)
+    if code == 67:
+        return _core_glyph_pick(row, 14, 17, 16, 16, 16, 17, 14)
+    if code == 68:
+        return _core_glyph_pick(row, 30, 17, 17, 17, 17, 17, 30)
+    if code == 69:
+        return _core_glyph_pick(row, 31, 16, 16, 30, 16, 16, 31)
+    if code == 70:
+        return _core_glyph_pick(row, 31, 16, 16, 30, 16, 16, 16)
+    if code == 71:
+        return _core_glyph_pick(row, 14, 17, 16, 23, 17, 17, 14)
+    if code == 72:
+        return _core_glyph_pick(row, 17, 17, 17, 31, 17, 17, 17)
+    if code == 73:
+        return _core_glyph_pick(row, 14, 4, 4, 4, 4, 4, 14)
+    if code == 74:
+        return _core_glyph_pick(row, 7, 2, 2, 2, 18, 18, 12)
+    if code == 75:
+        return _core_glyph_pick(row, 17, 18, 20, 24, 20, 18, 17)
+    if code == 76:
+        return _core_glyph_pick(row, 16, 16, 16, 16, 16, 16, 31)
+    if code == 77:
+        return _core_glyph_pick(row, 17, 27, 21, 21, 17, 17, 17)
+    if code == 78:
+        return _core_glyph_pick(row, 17, 25, 21, 19, 17, 17, 17)
+    if code == 79:
+        return _core_glyph_pick(row, 14, 17, 17, 17, 17, 17, 14)
+    if code == 80:
+        return _core_glyph_pick(row, 30, 17, 17, 30, 16, 16, 16)
+    if code == 81:
+        return _core_glyph_pick(row, 14, 17, 17, 17, 21, 18, 13)
+    if code == 82:
+        return _core_glyph_pick(row, 30, 17, 17, 30, 20, 18, 17)
+    if code == 83:
+        return _core_glyph_pick(row, 15, 16, 16, 14, 1, 1, 30)
+    if code == 84:
+        return _core_glyph_pick(row, 31, 4, 4, 4, 4, 4, 4)
+    if code == 85:
+        return _core_glyph_pick(row, 17, 17, 17, 17, 17, 17, 14)
+    if code == 86:
+        return _core_glyph_pick(row, 17, 17, 17, 17, 17, 10, 4)
+    if code == 87:
+        return _core_glyph_pick(row, 17, 17, 17, 21, 21, 21, 10)
+    if code == 88:
+        return _core_glyph_pick(row, 17, 17, 10, 4, 10, 17, 17)
+    if code == 89:
+        return _core_glyph_pick(row, 17, 17, 10, 4, 4, 4, 4)
+    if code == 90:
+        return _core_glyph_pick(row, 31, 1, 2, 4, 8, 16, 31)
+    0
+
+fn _core_glyph_pick(row: i32, r0: i32, r1: i32, r2: i32, r3: i32, r4: i32, r5: i32, r6: i32) -> i32:
+    if row == 0:
+        return r0
+    if row == 1:
+        return r1
+    if row == 2:
+        return r2
+    if row == 3:
+        return r3
+    if row == 4:
+        return r4
+    if row == 5:
+        return r5
+    if row == 6:
+        return r6
+    0

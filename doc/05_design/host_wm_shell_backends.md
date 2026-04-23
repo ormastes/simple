@@ -63,6 +63,27 @@ logic, taskbar state, window-surface state, and native-feedback suppression
 rules remain Simple-owned. JavaScript-disabled environments are static
 snapshot/export targets only until a non-JavaScript transport is implemented.
 
+## Theme CSS Ownership
+
+Host macOS Electron WM uses the folder theme package as host chrome input, not
+the SimpleWeb app renderer as an indirect source of truth. The Electron preload
+loads the registry default from `config/themes/theme.sdn`, composes family
+shape CSS, family widget CSS, theme base CSS, and theme widget overrides once
+at shell boot, and exposes the result as host theme CSS to `index.html`.
+
+`tools/electron-shell/index.html` owns only structural rules for Electron host
+surfaces: `body`, `#wm-chrome`, `#wm-desktop`, `#wm-taskbar`, `.wm-window`,
+`.wm-titlebar`, `.wm-body`, and taskbar item layout. Visual values in those
+rules must come from theme custom properties such as `--app-background-image`,
+`--app-surface`, `--app-border`, `--ui-fg`, `--ui-accent-dim`, radius,
+spacing, blur, elevation, and font tokens.
+
+`SimpleWebAdapter` still consumes the same package CSS through the Simple
+renderer path for embedded browser surfaces. It must not become the authority
+for host-native Electron window chrome. This keeps the host Mac WM route
+usable when Electron is launched from `file://` with stdin/stdout IPC and no
+`/ui/login` WebSocket renderer.
+
 ## Current Limits
 
 Electron is advisory/dev-preview. Unit-level Simple state tests cover launch,

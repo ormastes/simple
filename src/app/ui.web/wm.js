@@ -28,6 +28,7 @@ class SimpleWindowManager {
   constructor(options = {}) {
     this.transport = options.transport || 'websocket';
     this.rendererModuleUrl = options.rendererModuleUrl || './retained_renderer.js';
+    this.nativeHostWindows = !!options.nativeHostWindows;
 
     // DOM roots (populated from server state, not local decisions).
     this.desktop  = document.getElementById('wm-desktop');
@@ -325,10 +326,14 @@ class SimpleWindowManager {
       if (action === 'launch' && el.dataset.appId) {
         this._sendLaunch(el.dataset.appId);
       } else if (action === 'focus' && el.dataset.windowIdHint) {
+        const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint);
         if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
           this._electronFocusWindow(el.dataset.windowIdHint);
         }
-        this._sendWindowCmd('focus', { window_id_hint: el.dataset.windowIdHint });
+        this._sendWindowCmd('focus', {
+          window_id_hint: el.dataset.windowIdHint,
+          ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+        });
       }
     });
   }
@@ -384,6 +389,10 @@ class SimpleWindowManager {
     const action = payload.action || '';
     const windowId = payload.window_id || '';
     try {
+      if (this.transport === 'electron-ipc' && !this.nativeHostWindows) {
+        this._handleEmbeddedHostWindowCommand(action, payload);
+        return;
+      }
       if (action === 'spawn_native_window' && api.spawnNativeWindow) {
         await this._runSuppressedNativeCommand(windowId, ['focus'], () =>
           api.spawnNativeWindow(
@@ -416,6 +425,61 @@ class SimpleWindowManager {
     } catch (err) {
       console.error('[WM] host window command failed:', action, err);
     }
+  }
+
+  _handleEmbeddedHostWindowCommand(action, payload) {
+    const windowId = payload.window_id || payload.windowId || payload.surface_id || '';
+    if (!windowId) return;
+    if (action === 'spawn_native_window') {
+      this._electronOpenWindow({
+        windowId,
+        title: payload.title || windowId,
+        x: payload.x || 80,
+        y: payload.y || 80,
+        width: payload.width || 800,
+        height: payload.height || 600,
+        html: this._embeddedHostWindowHtml(payload)
+      });
+      this._sendWindowCmd('focus', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'close_native_window') {
+      this._electronCloseWindow(windowId);
+      this._sendWindowCmd('close', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'focus_native_window') {
+      this._electronFocusWindow(windowId);
+      this._sendWindowCmd('focus', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'minimize_native_window') {
+      this._electronMinimizeWindow(windowId);
+      this._sendWindowCmd('minimize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'restore_native_window') {
+      this._electronFocusWindow(windowId);
+      this._sendWindowCmd('restore', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'move_native_window') {
+      this._electronMoveWindow(windowId, payload.x || 0, payload.y || 0);
+      this._sendWindowCmd('move', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE, x: payload.x || 0, y: payload.y || 0 });
+    } else if (action === 'resize_native_window') {
+      this._electronResizeWindow(windowId, payload.width || 800, payload.height || 600);
+      this._sendWindowCmd('resize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE, w: payload.width || 800, h: payload.height || 600 });
+    } else if (action === 'maximize_native_window') {
+      this._electronMaximizeWindow(windowId);
+      this._sendWindowCmd('maximize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'unmaximize_native_window') {
+      this._electronUnmaximizeWindow(windowId);
+      this._sendWindowCmd('unmaximize', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE });
+    } else if (action === 'set_native_window_title') {
+      this._electronSetWindowTitle(windowId, payload.title || '');
+      this._sendWindowCmd('set_title', { window_id_hint: windowId, source: HOST_NATIVE_EVENT_SOURCE, title: payload.title || '' });
+    }
+  }
+
+  _embeddedHostWindowHtml(payload) {
+    const url = payload.url || '';
+    if (url && !url.startsWith('/')) {
+      const safeUrl = _escapeAttr(url);
+      return `<iframe src="${safeUrl}" style="display:block;width:100%;height:100%;border:0;background:transparent;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>`;
+    }
+    const title = _escapeHtml(payload.title || payload.app_id || 'Simple App');
+    const appId = _escapeHtml(payload.app_id || '');
+    return `<div style="padding:20px"><h1>${title}</h1><p>${appId}</p></div>`;
   }
 
   _handleNativeWindowEvent(msg) {
@@ -595,7 +659,8 @@ class SimpleWindowManager {
       body,
       title,
       titleText: msg.title || windowId,
-      minimized: false
+      minimized: false,
+      restoreBounds: null
     });
     this._electronFocusWindow(windowId);
   }
@@ -651,6 +716,43 @@ class SimpleWindowManager {
     if (this._electronActiveWindowId === String(windowId || '')) {
       this._electronActiveWindowId = '';
     }
+    this._renderElectronTaskbar();
+  }
+
+  _electronMaximizeWindow(windowId) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry) return;
+    if (!entry.restoreBounds) {
+      entry.restoreBounds = {
+        left: entry.winEl.style.left,
+        top: entry.winEl.style.top,
+        width: entry.winEl.style.width,
+        height: entry.winEl.style.height
+      };
+    }
+    entry.winEl.style.left = '0px';
+    entry.winEl.style.top = '0px';
+    entry.winEl.style.width = '100%';
+    entry.winEl.style.height = '100%';
+    this._electronFocusWindow(windowId);
+  }
+
+  _electronUnmaximizeWindow(windowId) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry || !entry.restoreBounds) return;
+    entry.winEl.style.left = entry.restoreBounds.left;
+    entry.winEl.style.top = entry.restoreBounds.top;
+    entry.winEl.style.width = entry.restoreBounds.width;
+    entry.winEl.style.height = entry.restoreBounds.height;
+    entry.restoreBounds = null;
+    this._electronFocusWindow(windowId);
+  }
+
+  _electronSetWindowTitle(windowId, title) {
+    const entry = this._electronWindows.get(String(windowId || ''));
+    if (!entry) return;
+    entry.titleText = title || String(windowId || '');
+    entry.title.textContent = entry.titleText;
     this._renderElectronTaskbar();
   }
 
@@ -739,7 +841,10 @@ class SimpleWindowManager {
       this._electronFocusWindow(surfaceId);
     }
     // Bring to front request (server decides z-order).
-    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+    this._sendWindowCmd('focus', {
+      window_id_hint: surfaceId,
+      ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+    });
 
     const ghost = isElectronWindow ? null : this._createGhost(winEl);
     this.dragState = {
@@ -758,7 +863,10 @@ class SimpleWindowManager {
     if (isElectronWindow) {
       this._electronFocusWindow(surfaceId);
     }
-    this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+    this._sendWindowCmd('focus', {
+      window_id_hint: surfaceId,
+      ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+    });
 
     const ghost = isElectronWindow ? null : this._createGhost(winEl);
     const r = winEl.getBoundingClientRect();
@@ -820,6 +928,7 @@ class SimpleWindowManager {
       // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
       this._sendWindowCmd('move', {
         window_id_hint: ds.surfaceId,
+        ...(ds.isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {}),
         x: Math.round(newX),
         y: Math.round(newY)
       });
@@ -843,6 +952,7 @@ class SimpleWindowManager {
       }
       this._sendWindowCmd('resize', {
         window_id_hint: rs.surfaceId,
+        ...(rs.isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {}),
         w: Math.round(w),
         h: Math.round(h)
       });
@@ -875,10 +985,16 @@ class SimpleWindowManager {
       const win = e.target.closest('.wm-window');
       if (win) {
         const surfaceId = win.dataset.surfaceId ?? win.dataset.canonicalId ?? '';
+        const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId);
         if (this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId)) {
           this._electronFocusWindow(surfaceId);
         }
-        if (surfaceId) this._sendWindowCmd('focus', { window_id_hint: surfaceId });
+        if (surfaceId) {
+          this._sendWindowCmd('focus', {
+            window_id_hint: surfaceId,
+            ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+          });
+        }
       }
     });
 
@@ -893,10 +1009,15 @@ class SimpleWindowManager {
       if (this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId)) {
         if (action === 'close') this._electronCloseWindow(surfaceId);
         else if (action === 'minimize') this._electronMinimizeWindow(surfaceId);
+        else if (action === 'maximize') this._electronMaximizeWindow(surfaceId);
       }
-      if      (action === 'close')    this._sendWindowCmd('close',    { window_id_hint: surfaceId });
-      else if (action === 'minimize') this._sendWindowCmd('minimize', { window_id_hint: surfaceId });
-      else if (action === 'maximize') this._sendWindowCmd('maximize', { window_id_hint: surfaceId });
+      const commandPayload = {
+        window_id_hint: surfaceId,
+        ...(this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId) ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+      };
+      if      (action === 'close')    this._sendWindowCmd('close', commandPayload);
+      else if (action === 'minimize') this._sendWindowCmd('minimize', commandPayload);
+      else if (action === 'maximize') this._sendWindowCmd('maximize', commandPayload);
     });
 
     // Forward pointer events inside windows as input_event frames.
@@ -1016,6 +1137,19 @@ class SimpleWindowManager {
 
 function _modifiers(e) {
   return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+}
+
+function _escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _escapeAttr(value) {
+  return _escapeHtml(value).replace(/`/g, '&#96;');
 }
 
 // Global instance — initialized by inline boot script.

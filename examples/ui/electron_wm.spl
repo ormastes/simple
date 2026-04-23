@@ -1,12 +1,14 @@
 # Electron Window Manager
 #
 # Launches a desktop WM in Electron with system bar, dock, and
-# multiple application windows. Uses multi-window IPC to create
-# separate Electron BrowserWindow instances for each app.
+# multiple application windows. The Electron shell renders app windows
+# inside the main WM surface instead of creating separate BrowserWindows.
 
 use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_open_window, build_ipc_close_window, build_ipc_render_window, escape_ipc_json}
 use common.ui.widget.{UIEvent}
 use app.ui.web.html.{generate_css}
+use os.compositor.simple_web_window_renderer.{themed_simple_web_html_with_theme}
+use common.ui.theme_package.{default_theme_id, resolve_theme_alias}
 use common.ui.window.{WindowManager, WindowInfo, new_window_manager}
 
 extern fn rt_stdin_read_line() -> text?
@@ -14,13 +16,10 @@ extern fn rt_thread_sleep(ms: i64)
 extern fn rt_env_get(key: text) -> text
 
 fn _resolve_theme() -> text:
-    # Stitch-aligned themes. SIMPLE_THEME env var selects between dark and
-    # light; defaults to the Obsidian dark palette pulled from Stitch
-    # project 12496218458601315145.
     val env_val = rt_env_get("SIMPLE_THEME") ?? ""
-    if env_val == "light" or env_val == "glass_obsidian_light":
-        return "glass_obsidian_light"
-    return "glass_obsidian_dark"
+    if env_val == "":
+        return default_theme_id()
+    resolve_theme_alias(env_val)
 
 fn _build_desktop_html(css: text) -> text:
     """Build the desktop chrome (system bar + dock only). Floating windows
@@ -32,24 +31,10 @@ fn _build_desktop_html(css: text) -> text:
     return "<html><head><style>" + css + "</style></head><body>" + bar_html + dock_html + "</body></html>"
 
 fn _build_app_html(title: text, content: text, theme: text) -> text:
-    """Build HTML for an application window. Frosted-glass surface per the
-    Stitch Obsidian spec so the desktop gradient bleeds through windows.
-    Pass `content` as a raw HTML string (so callers may inject iframes or
-    widgets); text content should be pre-wrapped in a <pre> by the caller
-    if monospace/wrapping is desired."""
-    val is_light = theme == "glass_obsidian_light"
-    # Glass surface tokens from GlassColorTokens.obsidian_{dark,light}()
-    val body_bg = if is_light: "rgba(255,255,255,0.78)" else: "rgba(18,18,31,0.72)"
-    val body_fg = if is_light: "#1D1D1F" else: "#E3E0F3"
-    val title_fg = if is_light: "#7C69A3" else: "#C6C6C8"
-    val title_border = if is_light: "rgba(74,69,77,0.15)" else: "rgba(149,142,152,0.15)"
-    val title_grad = if is_light:
-        "linear-gradient(180deg,rgba(124,105,163,0.10),rgba(124,105,163,0.02))"
-    else:
-        "linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0.03))"
-    val glass_style = "background:" + body_bg + ";backdrop-filter:blur(28px) saturate(170%);-webkit-backdrop-filter:blur(28px) saturate(170%);"
-    val body = "<div style=\"display:flex;flex-direction:column;height:100vh;padding:0;margin:0;" + glass_style + "color:" + body_fg + ";font-family:'Space Grotesk','Manrope','Inter',-apple-system,sans-serif;\"><div style=\"padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:" + title_fg + ";font-weight:650;border-bottom:1px solid " + title_border + ";background:" + title_grad + ";\">" + title + "</div><div style=\"flex:1;overflow:hidden;display:flex;flex-direction:column;\">" + content + "</div></div>"
-    return "<html><head></head><body style=\"margin:0;background:transparent;\">" + body + "</body></html>"
+    """Build app-window HTML through the same theme wrapper used by the pure
+    Simple Web renderer. Electron/Chromium and Simple Web therefore consume
+    one resolved package CSS path."""
+    themed_simple_web_html_with_theme(theme, title, content)
 
 fn _pre_block(text_content: text, theme: text) -> text:
     """Wrap plain-text content in a padded <pre> so _build_app_html's body

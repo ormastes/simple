@@ -29,7 +29,7 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.compositor.engine2d_display.{create_fb_engine, create_gpu_engine}
-use common.ui.theme_package.{theme_numeric_colors}
+use common.ui.theme_package.{theme_numeric_colors, resolved_theme_css, ResolvedThemeColors}
 
 # ============================================================================
 # Theme Helpers
@@ -101,7 +101,7 @@ fn hex_digit(v: u32) -> text:
 # Apply Theme to DOM
 # ============================================================================
 
-fn apply_theme_to_dom(dom: BeDomNode, theme_name: text):
+fn apply_theme_to_dom(dom: BeDomNode, theme_name: text, colors: ResolvedThemeColors, theme_css: text):
     """Apply theme colors as CSS inline styles on the DOM root.
 
     Sets background-color, color (foreground), and a border-color
@@ -113,15 +113,20 @@ fn apply_theme_to_dom(dom: BeDomNode, theme_name: text):
       - "dark":  bg=#1e1e1e, fg=#ffffff, accent=#007acc
       - "light": bg=#ffffff, fg=#000000, accent=#0066cc
     """
-    val bg = theme_bg(theme_name)
-    val fg = theme_fg(theme_name)
-    val accent = theme_accent(theme_name)
-    val panel = theme_panel(theme_name)
-    val border = theme_border(theme_name)
+    val bg = colors.bg
+    val fg = colors.fg
+    val accent = colors.accent
+    val panel = colors.panel
+    val border = colors.border
 
     # Apply root background and text color
     dom.set_style("background-color", argb_to_css_hex(bg))
     dom.set_style("color", argb_to_css_hex(fg))
+    dom.set_style("border-color", argb_to_css_hex(border))
+    dom.set_attr("data-theme", theme_name)
+    dom.set_attr("data-theme-css", theme_css)
+    dom.set_attr("data-theme-accent", argb_to_css_hex(accent))
+    dom.set_attr("data-theme-panel", argb_to_css_hex(panel))
 
     # Apply accent as border-color for focusable children
     # The theme is propagated to child nodes via CSS inheritance
@@ -150,6 +155,8 @@ class BrowserBackend:
     height: i32
     pixel_buffer: [u32]
     theme_name: text
+    theme_colors: ResolvedThemeColors
+    theme_css: text
     initialized: bool
     engine: Engine2D?
 
@@ -160,16 +167,19 @@ impl BrowserBackend:
         Uses the software rasterizer (no Engine2D).
         """
         val buf_size = width * height
+        val colors = theme_numeric_colors(theme_name)
         var buf: [u32] = []
         var i = 0
         while i < buf_size:
-            buf = buf + [0xFF000000]
+            buf = buf + [colors.bg]
             i = i + 1
         BrowserBackend(
             width: width,
             height: height,
             pixel_buffer: buf,
             theme_name: theme_name,
+            theme_colors: colors,
+            theme_css: resolved_theme_css(theme_name),
             initialized: false,
             engine: nil
         )
@@ -188,16 +198,19 @@ impl BrowserBackend:
             engine: Initialized Engine2D instance
         """
         val buf_size = width * height
+        val colors = theme_numeric_colors(theme_name)
         var buf: [u32] = []
         var i = 0
         while i < buf_size:
-            buf = buf + [0xFF000000]
+            buf = buf + [colors.bg]
             i = i + 1
         BrowserBackend(
             width: width,
             height: height,
             pixel_buffer: buf,
             theme_name: theme_name,
+            theme_colors: colors,
+            theme_css: resolved_theme_css(theme_name),
             initialized: false,
             engine: engine
         )
@@ -248,7 +261,7 @@ impl BrowserBackend:
         val dom = ui_tree_to_dom(tree, state)
 
         # 2. Apply theme styles to the DOM root
-        apply_theme_to_dom(dom, self.theme_name)
+        apply_theme_to_dom(dom, self.theme_name, self.theme_colors, self.theme_css)
 
         # 3. Lay out via browser engine CSS box model
         val layout = layout_tree(dom, self.width, self.height)
@@ -264,7 +277,7 @@ impl BrowserBackend:
             self.pixel_buffer = execute_scene_to_engine2d_pixels(scene, e)
         else:
             # Clear pixel buffer to theme background
-            val bg = theme_bg(self.theme_name)
+            val bg = self.theme_colors.bg
             var i = 0
             while i < self.pixel_buffer.len():
                 self.pixel_buffer[i] = bg
@@ -282,7 +295,7 @@ impl BrowserBackend:
         var buf: [u32] = []
         var i = 0
         while i < buf_size:
-            buf = buf + [0xFF000000]
+            buf = buf + [self.theme_colors.bg]
             i = i + 1
         self.pixel_buffer = buf
 

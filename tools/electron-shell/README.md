@@ -13,6 +13,9 @@ Boot contract:
   `simpleWM.receiveElectronMessage(...)`; shared protocol frames are routed
   through `simpleWM.receiveFrame(...)`.
 - The renderer does not call `/ui/login` or `/ui/ws` from `file://` contexts.
+- Host-window commands render into the main WM surface by default. Set
+  `SIMPLE_ELECTRON_HOST_WINDOW_MODE=native` to spawn separate Electron
+  `BrowserWindow` instances for diagnostics.
 - Native `BrowserWindow` feedback is sent back as `window_cmd` frames with
   `source: "native_event"`.
 
@@ -27,6 +30,7 @@ Optional advisory host smoke:
 
 ```sh
 npm --prefix tools/electron-shell ci --no-audit --no-fund
+npm --prefix tools/electron-shell run smoke:embedded-host
 SIMPLE_ELECTRON_SMOKE=1 npm --prefix tools/electron-shell run smoke:host
 ```
 

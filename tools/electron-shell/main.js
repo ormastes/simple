@@ -36,6 +36,10 @@ function isNativeSmokeMode() {
     return process.argv.includes('--smoke-native-window') || process.env.SIMPLE_ELECTRON_NATIVE_SMOKE === '1';
 }
 
+function usesNativeHostWindows() {
+    return isNativeSmokeMode() || process.env.SIMPLE_ELECTRON_HOST_WINDOW_MODE === 'native';
+}
+
 function debugLog(message) {
     const line = `[${new Date().toISOString()}] ${message}\n`;
     try {
@@ -513,27 +517,55 @@ function handleSimpleMessage(line) {
                 }
                 break;
 
-            // Wave 5: spawn a real top-level BrowserWindow and load a URL.
+            // Wave 5: open a browser-backed app window. The default Electron
+            // WM embeds it into the main renderer; native BrowserWindow spawn
+            // is reserved for explicit diagnostic/native-host mode.
             // Contract paired with src/app/ui.electron/backend.spl:
             //   new_browser_window(window_id, url, w, h, title).
-            // Windows are tracked in `simpleBrowserWindows` keyed by windowId
-            // so close_browser_window can later destroy them.
             case 'new_browser_window':
                 try {
-                    spawnNativeWindow({
-                        windowId: msg.windowId,
-                        url: msg.url,
-                        width: msg.width,
-                        height: msg.height,
-                        title: msg.title
-                    });
+                    if (usesNativeHostWindows()) {
+                        spawnNativeWindow({
+                            windowId: msg.windowId,
+                            url: msg.url,
+                            width: msg.width,
+                            height: msg.height,
+                            title: msg.title
+                        });
+                    } else {
+                        sendEmbeddedHostWindowCommand('spawn_native_window', {
+                            window_id: msg.windowId,
+                            surface_id: msg.windowId,
+                            app_id: msg.appId || 'electron.browser_window',
+                            title: msg.title || 'Simple App',
+                            url: msg.url || '',
+                            x: msg.x || 80,
+                            y: msg.y || 80,
+                            width: msg.width || 800,
+                            height: msg.height || 600
+                        });
+                    }
                 } catch (err) {
                     debugLog(`new_browser_window failed: ${err.message}`);
                 }
                 break;
             case 'close_browser_window':
                 try {
-                    closeNativeWindow(msg.windowId);
+                    if (usesNativeHostWindows()) {
+                        closeNativeWindow(msg.windowId);
+                    } else {
+                        sendEmbeddedHostWindowCommand('close_native_window', {
+                            window_id: msg.windowId,
+                            surface_id: msg.windowId,
+                            app_id: msg.appId || 'electron.browser_window',
+                            title: msg.title || '',
+                            url: '',
+                            x: 0,
+                            y: 0,
+                            width: 0,
+                            height: 0
+                        });
+                    }
                 } catch (err) {
                     debugLog(`close_browser_window failed: ${err.message}`);
                 }
@@ -702,6 +734,18 @@ function sendNativeSmokeHostCommand(action, payload = {}) {
         t: 'host_window_command',
         v: 1,
         s: 'electron-smoke',
+        seq: null,
+        payload: { action, ...payload }
+    });
+    return true;
+}
+
+function sendEmbeddedHostWindowCommand(action, payload = {}) {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    mainWindow.webContents.send('wm-frame', {
+        t: 'host_window_command',
+        v: 1,
+        s: 'electron-ipc',
         seq: null,
         payload: { action, ...payload }
     });

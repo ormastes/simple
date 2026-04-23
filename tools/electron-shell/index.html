@@ -11,17 +11,11 @@
             padding: 0;
             box-sizing: border-box;
         }
-        /* Stitch Obsidian deep-space gradient (pulled from project 12496218458601315145).
-           #060612 top, #1A0830 bottom — matches StitchMetadata.obsidian overrides and
-           glass_obsidian_dark() in src/lib/common/ui/glass_theme.spl. */
         body {
-            background:
-                radial-gradient(circle at top left, rgba(255,255,255,0.08), transparent 42%),
-                radial-gradient(circle at 78% 10%, rgba(198,198,200,0.10), transparent 36%),
-                linear-gradient(180deg, #060612 0%, #0e0820 45%, #1A0830 100%);
-            color: #E3E0F3;
-            font-family: "Space Grotesk", "Manrope", "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
-            font-size: 15px;
+            background: var(--app-background-image, var(--app-bg, #131315));
+            color: var(--ui-fg, #e4e2e4);
+            font-family: var(--font-main, "Manrope", "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif);
+            font-size: var(--font-size-base, 14px);
             line-height: 1.5;
             overflow: hidden;
             width: 100vw;
@@ -39,9 +33,9 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            color: rgba(227, 224, 243, 0.86);
+            color: var(--ui-dim, rgba(227, 224, 243, 0.86));
             font-size: 16px;
-            letter-spacing: 0.01em;
+            letter-spacing: 0;
         }
         /* The WM draws here. electron_wm.spl ships the system bar / dock via
            the `render` IPC message; floating windows arrive via `wm-add-window`
@@ -102,6 +96,93 @@
         body.is-mac #sb-titlebar {
             display: block;
         }
+        .wm-window {
+            position: absolute;
+            display: flex;
+            flex-direction: column;
+            min-width: 280px;
+            min-height: 180px;
+            overflow: hidden;
+            background: var(--app-surface, rgba(31,31,33,0.80));
+            border: var(--border-width-hairline, 1px) solid var(--app-border, rgba(139,144,160,0.20));
+            border-radius: var(--radius-md, 12px);
+            box-shadow: var(--app-shadow, 0 20px 50px rgba(0,0,0,0.40));
+            color: var(--ui-fg, #e4e2e4);
+            backdrop-filter: blur(var(--blur-surface, 30px));
+            -webkit-backdrop-filter: blur(var(--blur-surface, 30px));
+        }
+        .wm-window.focused {
+            border-color: var(--app-border-strong, rgba(193,198,215,0.30));
+            box-shadow: var(--elevation-high, var(--app-shadow, 0 28px 76px rgba(0,0,0,0.46)));
+        }
+        .wm-titlebar {
+            height: 34px;
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm, 8px);
+            padding: 0 var(--spacing-md, 12px);
+            flex: 0 0 auto;
+            background: var(--glass-surface, rgba(19,19,21,0.75));
+            border-bottom: var(--border-width-hairline, 1px) solid var(--app-border, rgba(139,144,160,0.20));
+            user-select: none;
+        }
+        .wm-title {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--ui-fg, #e4e2e4);
+            font-weight: var(--font-weight-bold, 650);
+        }
+        .wm-traffic-lights {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            flex: 0 0 auto;
+        }
+        .wm-traffic-lights button {
+            width: 13px;
+            height: 13px;
+            padding: 0;
+            border: 0;
+            border-radius: var(--radius-pill, 999px);
+            color: transparent;
+            cursor: pointer;
+        }
+        .wm-traffic-lights button[data-action="close"] { background: #ff5f57; }
+        .wm-traffic-lights button[data-action="minimize"] { background: #ffbd2e; }
+        .wm-traffic-lights button[data-action="maximize"] { background: #28c840; }
+        .wm-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: auto;
+            background: color-mix(in srgb, var(--app-surface, rgba(31,31,33,0.80)) 78%, transparent);
+        }
+        .wm-taskbar-section {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .wm-taskbar-item,
+        .wm-taskbar-tray {
+            min-height: 30px;
+            max-width: 220px;
+            padding: 5px 10px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            border: var(--border-width-hairline, 1px) solid var(--app-border, rgba(139,144,160,0.20));
+            border-radius: var(--radius-sm, 8px);
+            background: var(--app-surface, rgba(31,31,33,0.80));
+            color: var(--ui-fg, #e4e2e4);
+            box-shadow: var(--elevation-low, 0 10px 28px rgba(0,0,0,0.24));
+            cursor: pointer;
+        }
+        .wm-taskbar-item.active {
+            border-color: var(--app-border-strong, rgba(193,198,215,0.30));
+            background: var(--ui-accent-dim, rgba(173,198,255,0.20));
+        }
     </style>
 </head>
 <body>
@@ -120,6 +201,7 @@
         const desktopEl = document.getElementById('wm-desktop');
         const taskbarEl = document.getElementById('wm-taskbar');
         const loadingEl = document.getElementById('wm-loading-text');
+        const hostThemeStyleId = 'simple-ui-host-theme';
         const runtimeStyleId = 'simple-ui-runtime-style';
         // navigator.platform is deprecated but reliable enough here to flip
         // the macOS title-bar drag region on without needing an IPC round-trip.
@@ -127,11 +209,28 @@
             document.body.classList.add('is-mac');
         }
 
+        function applyHostTheme() {
+            if (!window.simpleUI || !window.simpleUI.hostThemeCss) return;
+            var styleEl = document.getElementById(hostThemeStyleId);
+            if (!styleEl) {
+                styleEl = document.createElement('style');
+                styleEl.id = hostThemeStyleId;
+                document.head.insertBefore(styleEl, document.head.firstChild);
+            }
+            styleEl.textContent = window.simpleUI.hostThemeCss;
+            document.documentElement.dataset.theme = window.simpleUI.hostThemeId || 'default';
+            document.documentElement.dataset.hostSurface = 'electron-wm';
+            document.body.dataset.platform = window.simpleUI.platform || '';
+        }
+
+        applyHostTheme();
+
         // Electron keeps the Simple subprocess stdin/stdout transport while
         // reusing the shared wm.js frame dispatcher for taskbar/native frames.
         window.simpleWM = new SimpleWindowManager({
             transport: 'electron-ipc',
-            rendererModuleUrl: window.simpleUI && window.simpleUI.rendererModuleUrl
+            rendererModuleUrl: window.simpleUI && window.simpleUI.rendererModuleUrl,
+            nativeHostWindows: !!(window.simpleUI && window.simpleUI.nativeHostWindows)
         });
 
         function applyRuntimeStyle(cssText) {

@@ -5,12 +5,11 @@
 
 use common.ui.simple_theme.{SimpleTheme}
 use common.ui.glass.tokens.{GlassDesignTokens}
-use common.ui.style.{UITheme, ThemeColors, Spacing, BorderStyle, FontStyle}
-use common.ui.color.{Color}
+use common.ui.style.{UITheme, UIThemeColors, Spacing, BorderStyle, FontStyle}
+use common.ui.color.{UIColor}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_modified(path: text) -> i64
 
 val THEME_REGISTRY_PATH = "config/themes/theme.sdn"
 
@@ -24,20 +23,51 @@ class ResolvedThemeColors:
     button_hover: u32
     status: u32
 
+class ResolvedThemeGlassConfig:
+    surface_color: u32
+    surface_alpha: u8
+    blur_radius: u32
+    border_color: u32
+    border_alpha: u8
+    shadow_offset: i32
+    shadow_blur: u32
+    shadow_alpha: u8
+    accent_color: u32
+    accent2_color: u32
+    bg_top: u32
+    bg_bottom: u32
+
+class ResolvedThemeIcon:
+    role: text
+    icon_id: text
+    label: text
+    color_token: text
+    size_role: text
+
 class ResolvedThemePackage:
     id: text
     display_name: text
     family_id: text
+    registry_path: text
+    theme_path: text
+    family_path: text
     base_css: text
     shape_css: text
+    family_widget_css: text
+    theme_widget_css: text
     widget_css: text
     icon_css: text
     source_reference: text
     source_paths: [text]
+    fingerprint: text
     mtime_key: text
     tokens: GlassDesignTokens
-    ui_theme: UITheme
+    token_map: Dict<text, text>
+    widget_css_by_name: Dict<text, text>
+    icons: Dict<text, ResolvedThemeIcon>
     colors: ResolvedThemeColors
+    ui_theme: UITheme
+    glass_config: ResolvedThemeGlassConfig
 
 class ThemeValidationIssue:
     path: text
@@ -91,12 +121,19 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val base_css = _read_if_exists(base_path)
     val shape_css = _read_if_exists(shape_path)
     val icon_sdn = _read_if_exists(icons_path)
-    val widget_css = _load_widget_css(required_widgets, local_widget_dir, family_widget_dir)
-    val icon_css = _icons_to_css(icon_sdn)
+    val family_widget_css = _load_family_widget_css(required_widgets, family_widget_dir)
+    val theme_widget_css = _load_theme_widget_css(required_widgets, local_widget_dir)
+    val widget_css = "{family_widget_css}\n{theme_widget_css}"
+    val required_icons = _required_icon_roles(registry)
+    val icons = _resolved_icons(icon_sdn, required_icons)
+    val icon_css = _icons_to_css(icons, required_icons)
     val css_for_tokens = "{shape_css}\n{base_css}"
     val parsed = SimpleTheme.from_css(resolved_id, css_for_tokens)
-    val ui_theme = _ui_theme_from_css(resolved_id, base_css, shape_css)
     val colors = _resolved_colors_from_css(base_css)
+    val ui_theme = _ui_theme_from_css(resolved_id, base_css, colors)
+    val glass_cfg = _glass_config_from_colors(colors, shape_css)
+    val token_map = _token_map_from_css("{shape_css}\n{base_css}")
+    val widget_map = _load_widget_css_map(required_widgets, local_widget_dir, family_widget_dir)
 
     var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path]
     for widget in required_widgets:
@@ -114,23 +151,33 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
         id: resolved_id,
         display_name: _root_value(theme_sdn, "display_name"),
         family_id: family_id,
+        registry_path: THEME_REGISTRY_PATH,
+        theme_path: final_theme_path,
+        family_path: final_family_path,
         base_css: base_css,
         shape_css: shape_css,
+        family_widget_css: family_widget_css,
+        theme_widget_css: theme_widget_css,
         widget_css: widget_css,
         icon_css: icon_css,
         source_reference: _root_value(theme_sdn, "source_raw_reference"),
         source_paths: paths,
+        fingerprint: _mtime_key(paths),
         mtime_key: _mtime_key(paths),
         tokens: parsed.tokens,
+        token_map: token_map,
+        widget_css_by_name: widget_map,
+        icons: icons,
+        colors: colors,
         ui_theme: ui_theme,
-        colors: colors
+        glass_config: glass_cfg
     )
     _theme_package_cache[resolved_id] = pkg
     pkg
 
 fn resolved_theme_css(theme_id: text) -> text:
     val pkg = load_theme_package(theme_id)
-    "{pkg.shape_css}\n{pkg.base_css}\n{pkg.icon_css}\n{pkg.widget_css}\n"
+    "{pkg.shape_css}\n{pkg.family_widget_css}\n{pkg.base_css}\n{pkg.theme_widget_css}\n{pkg.icon_css}\n"
 
 fn theme_ui_theme(theme_id: text) -> UITheme:
     load_theme_package(theme_id).ui_theme
@@ -140,6 +187,12 @@ fn theme_design_tokens(theme_id: text) -> GlassDesignTokens:
 
 fn theme_numeric_colors(theme_id: text) -> ResolvedThemeColors:
     load_theme_package(theme_id).colors
+
+fn theme_glass_config(theme_id: text) -> ResolvedThemeGlassConfig:
+    load_theme_package(theme_id).glass_config
+
+fn theme_icon_defaults(theme_id: text) -> Dict<text, ResolvedThemeIcon>:
+    load_theme_package(theme_id).icons
 
 fn validate_default_theme_package() -> [ThemeValidationIssue]:
     validate_theme_package(THEME_REGISTRY_PATH)
@@ -196,12 +249,20 @@ fn validate_theme_package(registry_path: text) -> [ThemeValidationIssue]:
         if not rt_file_exists(local_path) and not rt_file_exists(family_path_for_widget) and not defaults_css.contains(class_name):
             issues = _push_issue(issues, registry_path, "required_widgets.{widget}", "missing widget CSS in local package or family defaults")
 
-    for app in ["Terminal", "Browser", "File Manager", "Editor", "Calculator"]:
-        if _section_value(icon_sdn, "apps", app) == "":
-            issues = _push_issue(issues, icons_path, "apps.{app}", "missing default app icon")
-    for key in ["close", "minimize", "maximize", "settings", "fallback_app", "fallback_file"]:
-        if _section_value(icon_sdn, "system", key) == "":
-            issues = _push_issue(issues, icons_path, "system.{key}", "missing default system icon")
+    val required_icons = _required_icon_roles(registry)
+    for role in required_icons:
+        val icon_id = _icon_id_for_role(icon_sdn, role)
+        if icon_id == "":
+            issues = _push_issue(issues, icons_path, "icons.{role}", "missing required default icon")
+        if _section_value(icon_sdn, "labels", role) == "":
+            issues = _push_issue(issues, icons_path, "labels.{role}", "missing required icon label")
+        val color_token = _section_value(icon_sdn, "colors", role)
+        if color_token == "":
+            issues = _push_issue(issues, icons_path, "colors.{role}", "missing required icon semantic color token")
+        elif not color_token.starts_with("var(--"):
+            issues = _push_issue(issues, icons_path, "colors.{role}", "icon color must reference a semantic CSS token")
+        if _section_value(icon_sdn, "sizes", role) == "":
+            issues = _push_issue(issues, icons_path, "sizes.{role}", "missing required icon size role")
 
     issues = issues + _validate_token_layers(base_path, base_css, shape_path, shape_css, local_widget_dir, family_widget_dir, widgets)
     issues = issues + _validate_var_refs(base_path, base_css, shape_path, shape_css, icons_path, icon_sdn, local_widget_dir, family_widget_dir, widgets)
@@ -230,7 +291,8 @@ fn _mtime_key(paths: [text]) -> text:
     var out = ""
     for path in paths:
         if path != "" and rt_file_exists(path):
-            out = "{out}{path}:{rt_file_modified(path)};"
+            val content = _read_if_exists(path)
+            out = "{out}{path}:{content.len()};"
         else:
             out = "{out}{path}:missing;"
     out
@@ -285,29 +347,78 @@ fn _section_items(content: text, section: text) -> [text]:
             items.push(_strip_value(trimmed[2:]))
     items
 
-fn _load_widget_css(widgets: [text], local_dir: text, family_dir: text) -> text:
+fn _load_family_widget_css(widgets: [text], family_dir: text) -> text:
     var css = _read_if_exists("{family_dir}/defaults.css")
     for widget in widgets:
         val family_path = "{family_dir}/{widget}.css"
-        val local_path = "{local_dir}/{widget}.css"
         val family_css = _read_if_exists(family_path)
         if family_css != "":
             css = "{css}\n{family_css}"
+    css
+
+fn _load_theme_widget_css(widgets: [text], local_dir: text) -> text:
+    var css = ""
+    for widget in widgets:
+        val local_path = "{local_dir}/{widget}.css"
         val local_css = _read_if_exists(local_path)
         if local_css != "":
             css = "{css}\n{local_css}"
     css
 
-fn _icons_to_css(icon_sdn: text) -> text:
+fn _load_widget_css_map(widgets: [text], local_dir: text, family_dir: text) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    val defaults_css = _read_if_exists("{family_dir}/defaults.css")
+    for widget in widgets:
+        val family_css = _read_if_exists("{family_dir}/{widget}.css")
+        val local_css = _read_if_exists("{local_dir}/{widget}.css")
+        var css = defaults_css
+        if family_css != "":
+            css = "{css}\n{family_css}"
+        if local_css != "":
+            css = "{css}\n{local_css}"
+        out[widget] = css
+    out
+
+fn _required_icon_roles(registry: text) -> [text]:
+    val roles = _section_items(registry, "required_icons")
+    if roles.len() > 0:
+        return roles
+    [
+        "terminal", "browser", "file_manager", "finder", "editor", "calculator", "settings", "generic_app",
+        "close", "minimize", "maximize", "restore", "fullscreen", "launcher", "search", "running_indicator", "fallback_app", "fallback_file",
+        "back", "forward", "refresh", "home", "new_window", "command_palette",
+        "folder", "file", "document", "image", "media", "archive", "executable", "unknown",
+        "info", "success", "warning", "error"
+    ]
+
+fn _icon_id_for_role(icon_sdn: text, role: text) -> text:
+    for section in ["apps", "system", "navigation", "content", "status"]:
+        val value = _section_value(icon_sdn, section, role)
+        if value != "":
+            return value
+    ""
+
+fn _resolved_icons(icon_sdn: text, roles: [text]) -> Dict<text, ResolvedThemeIcon>:
+    var out: Dict<text, ResolvedThemeIcon> = {}
+    for role in roles:
+        val icon_id = _icon_id_for_role(icon_sdn, role)
+        val label = _section_value(icon_sdn, "labels", role)
+        val color = _section_value(icon_sdn, "colors", role)
+        val size = _section_value(icon_sdn, "sizes", role)
+        out[role] = ResolvedThemeIcon(role: role, icon_id: icon_id, label: label, color_token: color, size_role: size)
+    out
+
+fn _icons_to_css(icons: Dict<text, ResolvedThemeIcon>, roles: [text]) -> text:
     var css = ":root {\n"
-    for line in icon_sdn.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.contains(":") and not trimmed.ends_with(":"):
-            val parts = trimmed.split(":")
-            if parts.len() >= 2:
-                val key = parts[0].trim().replace(" ", "-").to_lower()
-                val value = _strip_value(parts[1])
-                css = "{css}  --theme-icon-{key}: \"{value}\";\n"
+    for role in roles:
+        match icons.get(role):
+            case Some(icon):
+                val key = role.replace("_", "-")
+                css = "{css}  --theme-icon-{key}: \"{icon.icon_id}\";\n"
+                css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
+                css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
+                css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
+            case _: pass_dn
     css = "{css}\}\n"
     css
 
@@ -322,35 +433,6 @@ fn _css_var(css: text, name: text, fallback: text) -> text:
             return value
     fallback
 
-fn _ui_theme_from_css(theme_id: text, base_css: text, shape_css: text) -> UITheme:
-    val bg = _css_var(base_css, "--ui-bg", "#0e0e10")
-    val fg = _css_var(base_css, "--ui-fg", "#e4e2e4")
-    val accent = _css_var(base_css, "--ui-accent", "#adc6ff")
-    val error = _css_var(base_css, "--ui-error", "#ffb4ab")
-    val warning = _css_var(base_css, "--ui-warning", "#f4bd78")
-    val success = _css_var(base_css, "--ui-success", "#b1b1ff")
-    val panel = _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)")
-    val hover = _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)")
-    val border = _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)")
-    UITheme(
-        name: theme_id,
-        colors: ThemeColors(
-            background: Color.from_hex(bg),
-            foreground: Color.from_hex(fg),
-            border: border,
-            accent: Color.from_hex(accent),
-            panel_bg: panel,
-            hover_bg: hover,
-            error: Color.from_hex(error),
-            warning: Color.from_hex(warning),
-            success: Color.from_hex(success),
-            info: Color.from_hex(_css_var(base_css, "--ui-info", accent))
-        ),
-        spacing: Spacing(xs: 4, sm: 8, md: 12, lg: 16, xl: 24),
-        border: BorderStyle(width: 1, radius: 8, style: "solid"),
-        font: FontStyle(family: _css_var(base_css, "--font-main", "system-ui, sans-serif"), size: 14, weight: "normal", line_height: 1.5)
-    )
-
 fn _resolved_colors_from_css(base_css: text) -> ResolvedThemeColors:
     val bg = _argb_from_css(_css_var(base_css, "--ui-bg", "#0e0e10"), 0xFF0E0E10)
     val fg = _argb_from_css(_css_var(base_css, "--ui-fg", "#e4e2e4"), 0xFFE4E2E4)
@@ -359,6 +441,64 @@ fn _resolved_colors_from_css(base_css: text) -> ResolvedThemeColors:
     val border = _argb_from_css(_css_var(base_css, "--app-border", "#8B90A0"), 0xFF8B90A0)
     val hover = _argb_from_css(_css_var(base_css, "--app-surface-hover", "#353437"), 0xFF353437)
     ResolvedThemeColors(bg: bg, fg: fg, accent: accent, panel: panel, border: border, button: hover, button_hover: hover, status: panel)
+
+fn _token_map_from_css(css: text) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for line in css.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("--") and trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                out[key] = _css_var(css, key, "")
+    out
+
+fn _ui_theme_from_css(name: text, base_css: text, colors: ResolvedThemeColors) -> UITheme:
+    UITheme(
+        name: name,
+        colors: UIThemeColors(
+            background: UIColor.from_hex(_css_var(base_css, "--ui-bg", "#0e0e10")),
+            foreground: UIColor.from_hex(_css_var(base_css, "--ui-fg", "#e4e2e4")),
+            border: _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)"),
+            accent: UIColor.from_hex(_css_var(base_css, "--ui-accent", "#adc6ff")),
+            panel_bg: _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)"),
+            hover_bg: _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)"),
+            error: UIColor.from_hex(_css_var(base_css, "--ui-error", "#ffb4ab")),
+            warning: UIColor.from_hex(_css_var(base_css, "--ui-warning", "#f4bd78")),
+            success: UIColor.from_hex(_css_var(base_css, "--ui-success", "#b1b1ff")),
+            info: UIColor.from_hex(_css_var(base_css, "--ui-info", "#9bdcff"))
+        ),
+        spacing: Spacing.default_spacing(),
+        border: BorderStyle(width: 1, radius: _px_int(_css_var(base_css, "--widget-radius", "8px"), 8), style: "solid"),
+        font: FontStyle(
+            family: _css_var(base_css, "--font-main", "\"Inter\", sans-serif"),
+            size: _px_int(_css_var(base_css, "--font-size-base", "14px"), 14),
+            weight: _css_var(base_css, "--font-weight-normal", "400"),
+            line_height: 1.5
+        )
+    )
+
+fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> ResolvedThemeGlassConfig:
+    ResolvedThemeGlassConfig(
+        surface_color: colors.panel & 0x00FFFFFF,
+        surface_alpha: 190,
+        blur_radius: _px_int(_css_var(shape_css, "--blur-surface", "30px"), 30).to_u32(),
+        border_color: colors.border & 0x00FFFFFF,
+        border_alpha: 48,
+        shadow_offset: 4,
+        shadow_blur: 14,
+        shadow_alpha: 44,
+        accent_color: colors.accent & 0x00FFFFFF,
+        accent2_color: colors.accent & 0x00FFFFFF,
+        bg_top: colors.bg & 0x00FFFFFF,
+        bg_bottom: colors.panel & 0x00FFFFFF
+    )
+
+fn _px_int(value: text, fallback: i32) -> i32:
+    val trimmed = value.trim()
+    val v = trimmed.replace("px", "")
+    val parsed = v.to_i64() ?? fallback.to_i64()
+    parsed.to_i32()
 
 fn _argb_from_css(value: text, fallback: u32) -> u32:
     val v = value.trim()
@@ -464,7 +604,7 @@ fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
     lines.push("STATUS: FAIL ({issues.len()} failures, 0 warnings)")
     lines.join("\n")
 
-export ResolvedThemePackage, ResolvedThemeColors, ThemeValidationIssue
+export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedThemeIcon, ThemeValidationIssue
 export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
-export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors
+export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
 export validate_default_theme_package, validate_theme_package, render_theme_validation_report

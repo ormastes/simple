@@ -1,68 +1,98 @@
 # Detail Design: Simple Theme System
 
-## 1. File Format: `.simple-theme`
+## Registry Schema
 
-The format is a standard CSS file with a header comment for Stitch metadata.
+`config/themes/theme.sdn`:
 
-```css
-/*
-@stitch.project: 12496218458601315145
-@stitch.display_name: SimpleOS Obsidian
-@stitch.color_mode: DARK
-*/
-
-:root {
-  /* Core UI Variables */
-  --ui-bg: #12121f;
-  --ui-fg: #e3e0f3;
-  --ui-accent: #c6c6c8;
-  --ui-border-radius: 8px;
-
-  /* Glassmorphism Variables */
-  --glass-surface: rgba(18, 18, 31, 0.72);
-  --glass-blur: 20px;
-  --glass-border: rgba(149, 142, 152, 0.15);
-}
+```sdn
+default_theme: aetheric_dark
+families:
+    aetheric: config/themes/families/aetheric/theme.sdn
+themes:
+    aetheric_dark: config/themes/aetheric_dark/theme.sdn
+aliases:
+    glass_obsidian_dark: aetheric_dark
+required_widgets:
+    - panel
+required_icons:
+    - terminal
 ```
 
-## 2. SimpleTheme Class Implementation
+Family package:
 
-Located in `src/lib/common/ui/simple_theme.spl`.
-
-```simple
-class SimpleTheme:
-    name: text
-    metadata: StitchMetadata
-    tokens: GlassDesignTokens
-
-    static fn from_css(name: text, css: text) -> SimpleTheme:
-        # 1. Extract metadata from comments
-        # 2. Extract variables via regex/lexer
-        # 3. Construct objects
-        pass_todo("Implement CSS parser")
-
-    me to_css() -> text:
-        # 1. Emit metadata header
-        # 2. Emit :root block with variables
-        pass_todo("Implement CSS emitter")
+```sdn
+id: aetheric
+display_name: Aetheric
+shape_css: config/themes/families/aetheric/shape.css
+icons: config/themes/families/aetheric/icons.sdn
+widget_css_dir: config/themes/families/aetheric/widgets
 ```
 
-## 3. Integration with ThemeService
+Concrete theme package:
 
-The `ThemeService` will now support loading themes from files:
-
-```simple
-me load_theme_file(path: text):
-    val css = rt_file_read_text(path)
-    val name = path.filename_without_extension()
-    val theme = SimpleTheme.from_css(name, css)
-    self.active_theme = theme
-    self.notify_all()
+```sdn
+id: aetheric_dark
+display_name: Aetheric Dark
+family: aetheric
+base_css: config/themes/aetheric_dark/base.css
+widget_css_dir: config/themes/aetheric_dark/widgets
+source_raw_reference: config/themes/raw/simple_os_dark_refined_alignment/code.html
 ```
 
-## 4. Agent Tasks
+Icon package sections are `apps`, `system`, `navigation`, `content`, `status`, `labels`, `colors`, and `sizes`. Every `required_icons` role must resolve to an icon id, human label, semantic `var(--token)` color, and size role.
 
-- [ ] Task 1: Create `SimpleTheme` class and CSS parser/emitter.
-- [ ] Task 2: Update `ThemeService` to load `.simple-theme` files.
-- [ ] Task 3: Update `theme-sync` to pull/push using `.simple-theme` format.
-- [ ] Task 4: refactor `Compositor` to initialize from `SimpleTheme` tokens.
+## ResolvedThemePackage
+
+`ResolvedThemePackage` contains:
+
+- Identity: `id`, `display_name`, `family_id`, `registry_path`, `theme_path`, `family_path`.
+- CSS chunks: `shape_css`, `family_widget_css`, `base_css`, `theme_widget_css`, `icon_css`.
+- Maps: `token_map`, `widget_css_by_name`, `icons`.
+- Renderer values: numeric colors, `UITheme`, `GlassDesignTokens`, and `ResolvedThemeGlassConfig`.
+- Cache data: `source_paths`, `fingerprint`, `mtime_key`.
+
+Public helpers:
+
+- `default_theme_id()`
+- `resolve_theme_alias(id)`
+- `load_theme_package(id)`
+- `resolved_theme_css(id)`
+- `theme_ui_theme(id)`
+- `theme_design_tokens(id)`
+- `theme_numeric_colors(id)`
+- `theme_glass_config(id)`
+- `theme_icon_defaults(id)`
+
+## CSS Composition
+
+`resolved_theme_css(id)` emits:
+
+1. Family shape CSS.
+2. Family widget defaults and family widget CSS.
+3. Theme base CSS.
+4. Theme widget overrides.
+5. Icon custom properties.
+
+Renderer-generated CSS may add layout, reset, DOM, and interaction rules, but package CSS remains the final visual source for colors, shape, glass surfaces, widget styling, and icon defaults.
+
+## Shared GUI Backends
+
+`generate_css(theme)` is the shared CSS path for Electron/Chromium and pure Simple Web. Electron app windows use `themed_simple_web_html_with_theme`, the same wrapper as Simple Web app-window rendering, avoiding duplicated inline palettes.
+
+`BrowserBackend` resolves package colors and CSS at construction, stores them on the backend, and applies cached values to the DOM root during render.
+
+Hosted WM uses `theme_glass_config` for compositor and boot splash glass settings. Engine2D WM uses `theme_numeric_colors` and themed Simple Web HTML for its browser demo content.
+
+## Validation
+
+`simple lint` calls `validate_default_theme_package()` for `config/themes/**`. Validation fails on:
+
+- Missing registry, family, theme, shape, base, icon, or source files.
+- Missing required widget CSS in theme/family/defaults.
+- Missing required icon id, label, color, or size.
+- Icon colors that do not use semantic `var(--token)` references.
+- Undefined `var(--token)` references.
+- Shape tokens in theme base CSS or theme tokens in family shape/widget CSS.
+- Local widget CSS defining new tokens instead of consuming existing ones.
+
+Invalid default themes must fail verify with exact file/key/path diagnostics.

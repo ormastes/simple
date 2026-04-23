@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const CACHE_PATH: &str = ".simple/test-result-cache-rs.txt";
 
@@ -146,14 +146,28 @@ fn normalize_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
 
-    let canonical = absolute.canonicalize().unwrap_or(absolute);
+    let normalized = normalize_lexically(&absolute);
     if let Ok(cwd) = std::env::current_dir() {
-        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
-        if let Ok(stripped) = canonical.strip_prefix(&canonical_cwd) {
+        let normalized_cwd = normalize_lexically(&cwd);
+        if let Ok(stripped) = normalized.strip_prefix(&normalized_cwd) {
             return stripped.to_path_buf();
         }
     }
-    canonical
+    normalized
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            _ => out.push(component.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

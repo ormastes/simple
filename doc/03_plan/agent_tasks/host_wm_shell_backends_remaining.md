@@ -76,6 +76,30 @@ host window commands and inbound native feedback:
 - The browser/Electron client still uses JavaScript as the host API bridge
   because browser DOM, WebSocket, and Electron preload APIs are JavaScript
   APIs.
+- Host macOS Electron WM now loads the default folder theme package at preload
+  time and applies it directly to host chrome. The SimpleWeb renderer remains
+  an embedded surface renderer and is not the source of truth for Electron
+  native host theming.
+
+## Theme CSS Plan Detail
+
+The accepted plan for host theming is:
+
+1. Keep `config/themes/theme.sdn` as the only default-theme selector.
+2. Compose theme CSS once in `tools/electron-shell/preload.js` for the host
+   shell: family shape CSS, family widget CSS, theme base CSS, then theme
+   widget overrides.
+3. Apply that CSS before Electron renderer boot in
+   `tools/electron-shell/index.html`.
+4. Keep Electron host CSS structural and token-driven. Host classes such as
+   `.wm-window`, `.wm-titlebar`, `.wm-body`, and `.wm-taskbar-item` must use
+   theme variables instead of hardcoded palettes.
+5. Keep SimpleWeb app surfaces on the shared Simple renderer theme path. Do
+   not route Mac/Electron WM chrome through SimpleWeb just to pick up CSS.
+
+Verification for this slice is JavaScript syntax plus existing focused
+Electron/WM bridge tests. The opt-in live Electron smoke remains advisory and
+display-gated.
 
 ## Final Reality
 
