@@ -11,7 +11,7 @@ compiler source of truth. A feature is not considered pure-Simple-owned until a
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, payload-enum hard diagnostics, payload-free enum literal sanitization/collision checks, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for tagged-record payload enums, floats, pointers, unit lowering, unconstrained memories, unsupported MIR instructions, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, tagged-record payload enum ports/results and aggregate construction, payload-free enum literal sanitization/collision checks, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for payload enum matching/projection, floats, pointers, unit lowering, unconstrained memories, unsupported MIR instructions, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path.
 
 ## Type Support
 
@@ -193,7 +193,7 @@ source-facade or MIR backend slices.
 Deferred and migrated SSpec coverage is surfaced by
 `bin/simple test --only-skipped --list-skip-features --pending` where present.
 The remaining tracked gaps are milestone-out-of-scope broad HLS work:
-tagged-record payload enums, floats, pointers, unit lowering, unconstrained
+payload enum matching/projection, floats, pointers, unit lowering, unconstrained
 memories, unsupported MIR instructions, implicit-width behavior outside the
 supported source-facade subset, and the full pure-Simple compiler
 source-of-truth path. Runnable coverage for the selected milestone is in

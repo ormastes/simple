@@ -11,7 +11,7 @@
 - **REQ-VHDL-PARITY-005:** Source-facade interface tuples flatten deterministically from labeled fields, including one nested input bundle, and reject sanitized input/input and input/output VHDL port name collisions.
 - **REQ-VHDL-PARITY-006:** Named and nested interface bundles must lower through deterministic flattened VHDL names, named wiring, source-map anchors, and collision diagnostics.
 - **REQ-VHDL-PARITY-008:** Payload-free enums must lower in declaration order with sanitized VHDL literals, enum ports, literal assignments, and collision diagnostics.
-- **REQ-VHDL-PARITY-009:** Payload enum lowering remains out of scope and must fail before VHDL emission with enum/variant-specific diagnostics.
+- **REQ-VHDL-PARITY-009:** Payload enum lowering supports tagged-record representation for VHDL ports/results and enum aggregate construction; unsupported payload matching or projection must fail before incomplete VHDL emission.
 - **REQ-VHDL-PARITY-010:** Helper subprogram support must classify supported helpers, emit deterministic VHDL function/procedure declarations and bodies, wire direct calls, and reject post-sanitization name collisions.
 - **REQ-VHDL-PARITY-011:** ROM/RAM templates must support static ROM, registered ROM read, and explicit single-port synchronous RAM read-during-write policies; ambiguous, unconstrained, or unsupported memory patterns must fail before invalid VHDL emission.
 - **REQ-VHDL-PARITY-012:** Testbench conversion for the milestone must cover one-DUT artifacts and ordered multi-DUT/multi-phase suites with literal stimuli, optional clock/reset setup, named port maps, equality assertions, source-map anchors, and simulator pass/fail behavior via `severity failure`.
@@ -21,4 +21,4 @@
 
 ## Explicit Deferrals
 
-Tagged-record payload enum lowering, floats, pointers, unit lowering, unconstrained memories outside the explicit ROM/RAM templates, broad HLS helper inference, implicit-width Python-HDL behavior outside the supported source-facade subset, unsupported MIR instructions, and the full pure-Simple compiler source-of-truth path are not enabled by default in this pass. They must remain hard diagnostics or explicit deferral diagnostics rather than incomplete VHDL output. Anonymous hardware outputs are not a stable VHDL public API; labeled outputs remain required for deterministic public ports.
+Payload enum matching/projection, floats, pointers, unit lowering, unconstrained memories outside the explicit ROM/RAM templates, broad HLS helper inference, implicit-width Python-HDL behavior outside the supported source-facade subset, unsupported MIR instructions, and the full pure-Simple compiler source-of-truth path are not enabled by default in this pass. They must remain hard diagnostics or explicit deferral diagnostics rather than incomplete VHDL output. Anonymous hardware outputs are not a stable VHDL public API; labeled outputs remain required for deterministic public ports.

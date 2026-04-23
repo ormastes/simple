@@ -79,7 +79,7 @@
 ### L013: General stateful MIR is still unsupported
 **Severity:** High
 **Workaround:** Express hardware as statically-shaped combinational logic, explicit VHDL process instructions, records, arrays, ports, and return-oriented branch/switch logic.
-**Details:** Straight-line arithmetic, casts, local load/store-like value movement, aggregates, field access, return chains, computed `if` arms, and computed `switch` targets are supported. Computed branches and switches lower through compiler-generated combinational processes with process variables. Struct, array, tuple, and payloadless enum aggregates are also supported inside those processes. Payload-bearing enum aggregates, general stateful MIR, and dynamic memory remain unsupported and should fail with hard compile errors rather than silently generating unsynthesizable VHDL.
+**Details:** Straight-line arithmetic, casts, local load/store-like value movement, aggregates, field access, return chains, computed `if` arms, and computed `switch` targets are supported. Computed branches and switches lower through compiler-generated combinational processes with process variables. Struct, array, tuple, payloadless enum aggregates, and tagged-record payload enum aggregate construction are also supported inside those processes. Payload enum matching/projection, general stateful MIR, and dynamic memory remain unsupported and should fail with hard compile errors rather than silently generating unsynthesizable VHDL.
 
 ### L014: Dynamic address and call MIR are still unsupported
 **Severity:** Medium

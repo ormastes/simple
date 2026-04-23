@@ -3,7 +3,7 @@
 This matrix records the selected Python-HDL parity milestone. The 2026-04-23
 implementation batch closes `VHDL-PARITY-003` through `VHDL-PARITY-015` for
 the supported Simple/VHDL subset: reset/domain metadata, fixed-width operations,
-interface bundle flattening, payload-free enums, helper subprogram templates,
+interface bundle flattening, payload-free enums, tagged-record payload enum construction, helper subprogram templates,
 ROM/RAM templates, generated one-DUT and multi-DUT/multi-phase testbench
 artifacts, source-map sidecars, vendor smoke skip/report/log behavior, and
 documentation are implemented and verified.
@@ -35,7 +35,7 @@ completed lanes below.
 | VHDL-PARITY-006 | C | Complete | Interface bundles. | Named and nested bundle aliases lower through the source facade/system path with deterministic flattened names, named wiring, source-map anchors, and collision diagnostics. | `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl`; `ghdl -a --std=08 <generated>.vhdl` |
 | VHDL-PARITY-007 | C | Complete | Facade entity generics. | `@generic(...)` lowers to a VHDL entity `generic` block with default values; generated VHDL analyzes and elaborates with GHDL. | `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl` |
 | VHDL-PARITY-008 | C | Complete | Enum encoding. | Payload-free enum declarations, ports, literals, sanitized VHDL names, and collision diagnostics are supported in the current compiler layers. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl`; `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl` |
-| VHDL-PARITY-009 | C | Complete | Payload enums. | Payload enums remain milestone-out-of-scope and fail before VHDL emission with enum/variant-specific diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl` |
+| VHDL-PARITY-009 | C | Complete | Payload enums. | Payload enums lower to tagged-record VHDL types for ports/results and aggregate construction; payload matching/projection remains a hard diagnostic until source semantics are specified. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl`; `bin/simple test test/system/compiler/vhdl_source_facade_spec.spl` |
 | VHDL-PARITY-010 | D | Complete | VHDL subprogram emission. | Helper classification, deterministic helper names, function/procedure declarations and bodies, direct helper calls, package integration, and name collision diagnostics are covered. | `bin/simple test test/unit/compiler/backend/vhdl_backend_spec.spl`; `ghdl -a --std=08 <generated>.vhdl` |
 | VHDL-PARITY-011 | D | Complete | ROM/RAM inference. | Static ROM, registered ROM read, and explicit single-port synchronous RAM read-during-write policies render synthesizable templates; ambiguous, unconstrained, or unsupported memory forms fail with hard diagnostics. | `bin/simple test test/unit/compiler/backend/vhdl_memory_templates_spec.spl`; `ghdl --synth --std=08 <entity>` |
 | VHDL-PARITY-012 | D | Complete | Testbench conversion. | The renderer emits deterministic one-DUT testbenches and ordered multi-DUT/multi-phase suites with literal stimuli, optional clock/reset driving, named port maps, equality assertions, pass/fail `severity failure` behavior, and source-map anchors. | `bin/simple test test/unit/compiler/backend/vhdl_testbench_spec.spl` |
