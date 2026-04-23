@@ -84,9 +84,7 @@ var process_launch_seq: [u64; 64]
 var process_active: [bool; 64]
 var process_count: u64 = 0
 var process_sequence: u64 = 1
-var synthetic_pid_next: u64 = 0x40000000
 var launcher_last_launch_pid: u64 = 0
-var launcher_packaged_spawn_enabled: bool = false
 
 # ============================================================================
 # Modifier Flag Constants
@@ -115,52 +113,6 @@ fn _preferred_app_exec_path(path: text) -> text:
         return smf_path
     path
 
-fn _manifest_name_for_path(path: text) -> text:
-    match path:
-        case "/sys/apps/browser_demo":
-            "BROWSER.APP"
-        case "/sys/apps/browser_demo.smf":
-            "BROWSER.APP"
-        case "/sys/apps/hello_world":
-            "HELLO.APP"
-        case "/sys/apps/hello_world.smf":
-            "HELLO.APP"
-        case "/sys/apps/file_manager":
-            "FILEMAN.APP"
-        case "/sys/apps/file_manager.smf":
-            "FILEMAN.APP"
-        case "/sys/apps/shell":
-            "SHELL.APP"
-        case "/sys/apps/shell.smf":
-            "SHELL.APP"
-        case "/sys/apps/editor":
-            "EDITOR.APP"
-        case "/sys/apps/editor.smf":
-            "EDITOR.APP"
-        case _:
-            ""
-
-fn _manifest_present_for_path(path: text) -> bool:
-    val manifest_name = _manifest_name_for_path(path)
-    if manifest_name == "":
-        return false
-    if manifest_name == "BROWSER.APP" or manifest_name == "FILEMAN.APP" or manifest_name == "HELLO.APP" or manifest_name == "SHELL.APP" or manifest_name == "EDITOR.APP":
-        serial_println("[launcher] known packaged manifest path={path} file={manifest_name}")
-        return true
-    val content = g_vfs_read_file_text(manifest_name)
-    if content.trim() == "":
-        serial_println("[launcher] manifest read failed path={path} file={manifest_name}")
-        return false
-    true
-
-fn _should_use_resident_manifest_before_spawn(path: text) -> bool:
-    """Resident manifests are no longer a packaged-app launch fallback."""
-    val _path = path
-    false
-
-fn launcher_set_packaged_spawn_enabled(enabled: bool):
-    launcher_packaged_spawn_enabled = enabled
-
 fn _canonical_app_identity(path: text) -> text:
     match path:
         case "/sys/apps/browser_demo.smf":
@@ -175,11 +127,6 @@ fn _canonical_app_identity(path: text) -> text:
             "/sys/apps/editor"
         case _:
             path
-
-fn _alloc_synthetic_pid() -> u64:
-    val pid = synthetic_pid_next
-    synthetic_pid_next = synthetic_pid_next + 1
-    pid
 
 fn _is_synthetic_pid(pid: u64) -> bool:
     pid >= 0x40000000
@@ -416,10 +363,6 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         if seeded_index >= 0:
             _ensure_seeded_app_slot(slot, path)
         val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: app_name[slot]
-        if _should_use_resident_manifest_before_spawn(path):
-            val resident_pid = _try_resident_manifest_launch(slot, name, path, -38)
-            if resident_pid > 0:
-                return resident_pid
         serial_println("[launcher] posix_spawn begin name={name} path={path}")
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
         serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
@@ -673,9 +616,7 @@ fn launcher_init():
         p = p + 1
     process_count = 0
     process_sequence = 1
-    synthetic_pid_next = 0x40000000
     launcher_last_launch_pid = 0
-    launcher_packaged_spawn_enabled = false
 
     # Register default apps
     launcher_register("Hello World", _preferred_app_exec_path("/sys/apps/hello_world"), "H", 0x48, MOD_META)    # Meta+H
@@ -788,19 +729,6 @@ fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     if launcher_process_is_process_backed(pid):
         serial_println("[launcher] process-backed app_id={canonical_app_id} pid={pid}")
     pid.to_i64()
-
-fn _try_resident_manifest_launch(slot: u64, name: text, path: text, spawn_error: i64) -> i64:
-    val pid = _alloc_synthetic_pid()
-    if not _manifest_present_for_path(path):
-        return -1
-    serial_println("[launcher] posix_spawn unavailable for {name}: {spawn_error}; using disk manifest resident launch")
-    val launch_pid = _finalize_launch(slot, name, pid, path)
-    app_launch_state[slot] = "resident-manifest"
-    app_exit_code[slot] = 0
-    val process_idx = _process_index_by_pid(pid)
-    if process_idx >= 0:
-        process_state[process_idx.to_u64()] = "resident-manifest"
-    launch_pid
 
 fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, modifiers: u32) -> i64:
     """Launch one of the seeded desktop apps using canonical metadata.
@@ -1120,20 +1048,6 @@ fn launcher_find_process_by_pid(pid: u64) -> i64:
     """Find process record index by PID. Returns -1 if not found."""
     _process_index_by_pid(pid)
 
-fn launcher_process_uses_resident_manifest(pid: u64) -> bool:
-    """Return true for launcher processes using manifest fallback."""
-    val idx = _process_index_by_pid(pid)
-    if idx >= 0 and process_state[idx.to_u64()] == "resident-manifest":
-        return true
-
-    var app_idx: u64 = 0
-    while app_idx < app_count:
-        if (app_pid[app_idx] == pid or app_last_pid[app_idx] == pid) and app_launch_state[app_idx] == "resident-manifest":
-            return true
-        app_idx = app_idx + 1
-
-    _is_synthetic_pid(pid) and pid == launcher_last_launch_pid
-
 fn launcher_process_is_process_backed(pid: u64) -> bool:
     """Return true when a launcher row maps to a scheduler-owned PID."""
     val idx = _process_index_by_pid(pid)
@@ -1145,7 +1059,7 @@ fn launcher_process_is_process_backed(pid: u64) -> bool:
             if (app_pid[app_idx] == pid or app_last_pid[app_idx] == pid) and app_launch_state[app_idx] != "resident-manifest":
                 return true
             app_idx = app_idx + 1
-        return pid == launcher_last_launch_pid and not launcher_process_uses_resident_manifest(pid)
+        return pid == launcher_last_launch_pid
     val slot = idx.to_u64()
     _is_process_backed_record(process_pid[slot], process_state[slot])
 
