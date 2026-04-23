@@ -802,9 +802,11 @@ TOOL_DAEMON_SOURCE="${REPO_ROOT}/examples/10_tooling/trace32_tools/cmm_lsp/mcp_d
 TOOL_DAEMON_CACHE_FILE="${CACHE_ROOT}/mcp_daemon.smf"
 TOOL_RUNNER_BIN_DEFAULT="${REPO_ROOT}/bin/release/t32_lsp_mcp_tool_runner"
 mkdir -p "$CACHE_ROOT"
-if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
-  rm -f "$CACHE_FILE"
-  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+if [ "${SIMPLE_MCP_USE_CACHE:-0}" = "1" ]; then
+  if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
+    rm -f "$CACHE_FILE"
+    SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+  fi
 fi
 # Do not compile the optional daemon on startup. Claude waits on MCP health
 # checks, and even a detached compile job can keep extra wrapper processes
@@ -826,8 +828,11 @@ export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
-MAIN_ARTIFACT="$CACHE_FILE"
-if [ ! -f "$MAIN_ARTIFACT" ]; then MAIN_ARTIFACT="$ENTRY"; fi
+if [ "${SIMPLE_MCP_USE_CACHE:-0}" = "1" ] && [ -f "$CACHE_FILE" ]; then
+  MAIN_ARTIFACT="$CACHE_FILE"
+else
+  MAIN_ARTIFACT="$ENTRY"
+fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
   printf '%s cache=%s daemon_cache=%s runner_bin=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CACHE_FILE" "$TOOL_DAEMON_CACHE_FILE" "${T32_LSP_MCP_TOOL_RUNNER_BIN:-}" >>"$WRAPPER_LOG"
   RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$MAIN_ARTIFACT" "$@" 2>>"$ERROR_LOG"
