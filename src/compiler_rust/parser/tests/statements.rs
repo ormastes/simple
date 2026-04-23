@@ -52,6 +52,12 @@ fn parse_pass_todo_two_rationale_strings() {
     assert!(matches!(&items[0], Node::Pass(_)));
 }
 
+#[test]
+fn parse_todo_two_rationale_strings_as_pass() {
+    let items = parse("todo(\"implement retry backoff\", \"tracked by SIMPLE-123\")");
+    assert!(matches!(&items[0], Node::Pass(_)));
+}
+
 // Main binding
 #[test]
 fn parse_main_binding() {
