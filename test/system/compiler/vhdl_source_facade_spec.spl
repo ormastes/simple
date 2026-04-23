@@ -409,16 +409,37 @@ describe "VHDL Source Facade":
         delete_file(src_path)
         delete_file(out_path)
 
-    it "aot_vhdl_file rejects enum declarations in the source facade":
+    it "aot_vhdl_file lowers payload-free enum declarations in the source facade":
         val src_path = "/tmp/sml_vhdl_source_facade_enum_decl.spl"
         val out_path = "/tmp/sml_vhdl_source_facade_enum_decl.vhd"
         delete_file(src_path)
         delete_file(out_path)
-        write_file(src_path, "enum State:\n    Idle\n    Busy\n\n@hardware\nfn active(state: State) -> bool:\n    true")
+        write_file(src_path, "enum State:\n    Idle\n    Busy\n\n@hardware\nfn hold_state(state: State) -> State:\n    state")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("type State_t is (Idle, Busy);"), output)
+        check_msg(output.contains("state : in State_t;"), output)
+        check_msg(output.contains("result_out : out State_t"), output)
+        check_msg(output.contains("result_out <= state;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "hold_state"), "GHDL rejected payload-free enum VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file rejects payload enum declarations before VHDL output":
+        val src_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.spl"
+        val out_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "enum State:\n    Idle\n    Busy(code: u8)\n\n@hardware\nfn active(state: State) -> bool:\n    true")
 
         val result = aot_vhdl_file(src_path, out_path)
         expect(result.is_success()).to_equal(false)
-        expect(result.get_errors().join("\n")).to_contain("VHDL Python-HDL parity gap: enum encoding is not implemented in the pure Simple VHDL backend")
+        expect(result.get_errors().join("\n")).to_contain("payload enum lowering requires tagged-record representation support")
         expect(rt_file_exists(out_path)).to_equal(false)
 
         delete_file(src_path)
@@ -445,7 +466,7 @@ describe "VHDL Source Facade":
         delete_file(out_path)
         delete_file(map_path)
 
-    it "aot_vhdl_file rejects enum-like hardware port types until enum encoding exists":
+    it "aot_vhdl_file rejects undeclared enum-like hardware port types":
         val src_path = "/tmp/sml_vhdl_source_facade_enum_port.spl"
         val out_path = "/tmp/sml_vhdl_source_facade_enum_port.vhd"
         delete_file(src_path)
