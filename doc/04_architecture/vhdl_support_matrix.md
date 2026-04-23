@@ -11,7 +11,7 @@ compiler source of truth. A feature is not considered pure-Simple-owned until a
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, tagged-record payload enum ports/results, aggregate construction, payload field projection, tag-based switch matching, payload-free enum literal sanitization/collision checks, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for floats, pointers, unit lowering, unconstrained memories, unsupported MIR instructions, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, tagged-record payload enum ports/results, aggregate construction, payload field projection, tag-based switch matching, payload-free enum literal sanitization/collision checks, unit-return no-output entities, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates with memory deferrals, optional vendor-smoke skip/report/log coverage, and deterministic one-DUT plus multi-DUT/multi-phase testbench rendering. Broad HLS ownership remains deferred for floats, pointers, unconstrained memories, unsupported MIR instructions, implicit-width behavior outside the supported source-facade subset, and the pure-Simple compiler source-of-truth path.
 
 ## Type Support
 
@@ -31,9 +31,9 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Tuple | generated record type with `fN` fields | supported | stable | stable | supported | **supported** |
 | Struct | `record ... end record` | stable | stable | stable | supported | **stable** |
 | Payloadless Enum | `type T is (A, B, C)` and variant literal assignments; MIR literals are sanitized and checked for VHDL collisions | stable | stable | stable | supported | **stable** |
-| Payload Enum | — (enum/variant-specific hard diagnostic) | error | — | — | — | **deferred** |
+| Payload Enum | tagged record with `tag` plus deterministic payload fields | supported | stable | stable | supported for supported record operations | **supported** |
 | `f16/f32/f64` | — (unsupported-type diagnostic) | error | — | — | — | **deferred** |
-| `Unit` | — (unsupported-type diagnostic) | error | — | — | — | **deferred** |
+| `Unit` return | no output port | supported | stable | stable | supported | **supported** |
 | Pointer | — (unsupported-type diagnostic) | error | — | — | — | **deferred** |
 
 ## Constant Support
@@ -193,8 +193,8 @@ source-facade or MIR backend slices.
 Deferred and migrated SSpec coverage is surfaced by
 `bin/simple test --only-skipped --list-skip-features --pending` where present.
 The remaining tracked gaps are milestone-out-of-scope broad HLS work:
-floats, pointers, unit lowering, unconstrained memories, unsupported MIR
-instructions, implicit-width behavior outside the supported source-facade
+floats, pointers, unconstrained memories, unsupported MIR instructions,
+implicit-width behavior outside the supported source-facade
 subset, and the full pure-Simple compiler
 source-of-truth path. Runnable coverage for the selected milestone is in
 `test/unit/compiler/backend/vhdl_backend_spec.spl`,
