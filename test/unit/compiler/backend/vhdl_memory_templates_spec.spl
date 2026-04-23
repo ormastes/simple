@@ -1,4 +1,4 @@
-use compiler.backend.vhdl.{VhdlReadDuringWritePolicy, VhdlStaticRomTemplate, VhdlRegisteredRomReadTemplate, VhdlSinglePortSyncRamTemplate, render_static_rom_template, render_registered_rom_read_template, render_single_port_sync_ram_template}
+use compiler.backend.vhdl.{VhdlReadDuringWritePolicy, VhdlStaticRomTemplate, VhdlRegisteredRomReadTemplate, VhdlSinglePortSyncRamTemplate, VhdlConstrainedSignalMemoryTemplate, render_static_rom_template, render_registered_rom_read_template, render_single_port_sync_ram_template, render_constrained_signal_memory_template}
 
 describe "VHDL memory template renderer":
     """Focused ROM/RAM inference-template coverage."""
@@ -126,3 +126,45 @@ describe "VHDL memory template renderer":
         val diagnostic = result.unwrap_err()
         expect(diagnostic.code).to_equal("VHDL-MEM-RDW-AMBIGUOUS")
         expect(diagnostic.message).to_contain("Ambiguous read-during-write policy for sample_ram")
+
+    it "renders a constrained signal memory with a named array type":
+        val result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+            name: "line_buffer",
+            type_name: "line_buffer_memory_t",
+            data_type: "unsigned(7 downto 0)",
+            depth: 64,
+            initial_value: Some("to_unsigned(0, 8)")
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl).to_contain("type line_buffer_memory_t is array (0 to 63) of unsigned(7 downto 0);")
+        expect(vhdl).to_contain("signal line_buffer : line_buffer_memory_t := (others => to_unsigned(0, 8));")
+
+    it "rejects unconstrained signal memory before VHDL emission":
+        val result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+            name: "dynamic_buffer",
+            type_name: "dynamic_buffer_memory_t",
+            data_type: "std_logic_vector(7 downto 0)",
+            depth: 0,
+            initial_value: nil
+        ))
+
+        expect(result.is_err()).to_equal(true)
+        val diagnostic = result.unwrap_err()
+        expect(diagnostic.code).to_equal("VHDL-MEM-UNCONSTRAINED")
+        expect(diagnostic.message).to_contain("concrete positive depth")
+
+    it "rejects nested general memory before anonymous array VHDL":
+        val result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+            name: "matrix",
+            type_name: "matrix_memory_t",
+            data_type: "array (0 to 3) of unsigned(7 downto 0)",
+            depth: 4,
+            initial_value: nil
+        ))
+
+        expect(result.is_err()).to_equal(true)
+        val diagnostic = result.unwrap_err()
+        expect(diagnostic.code).to_equal("VHDL-MEM-GENERAL")
+        expect(diagnostic.message).to_contain("nested or general array element type")

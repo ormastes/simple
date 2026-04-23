@@ -38,6 +38,9 @@ fn make_u8() -> MirType:
 fn make_u32() -> MirType:
     MirType(kind: MirTypeKind.U32)
 
+fn make_u8_array(size: i64) -> MirType:
+    MirType(kind: MirTypeKind.Array(make_u8(), size))
+
 fn make_bool() -> MirType:
     MirType(kind: MirTypeKind.Bool)
 
@@ -463,6 +466,83 @@ describe "VHDL Backend - real backend compilation":
         val generated = normalize_vhdl(result.unwrap().vhdl)
         val expected = normalize_vhdl(rt_file_read_text("examples/09_embedded/vhdl/backend/golden/adder.vhd") ?? "")
         expect(generated).to_equal(expected)
+
+    it "declares fixed local arrays through constrained memory type templates":
+        val ret_local = make_return_local(1, make_i32())
+        val scratch_local = make_temp_local(2, "scratch", make_u8_array(8))
+        val answer_local = make_temp_local(3, "answer", make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Int(1), make_i32()),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 3)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 130),
+            name: "fixed_local_memory",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local, scratch_local, answer_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+
+        val result = make_simple_backend().compile(single_block_module("fixed_memory_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("type scratch_memory_t is array (0 to 7) of unsigned(7 downto 0);"))
+        check(vhdl.contains("signal scratch : scratch_memory_t;"))
+        check(not vhdl.contains("signal scratch : array (0 to 7)"))
+
+    it "rejects array ports before emitting anonymous array VHDL":
+        val arg_local = make_arg_local(1, 0, "data", make_u8_array(4))
+        val ret_local = make_return_local(2, make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 131),
+            name: "array_port",
+            signature: MirSignature(params: [make_u8_array(4)], return_type: make_i32(), is_variadic: false),
+            locals: [arg_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+
+        val result = make_simple_backend().compile(single_block_module("array_port_mod", func))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("VHDL-MEM-GENERAL"))
 
     it "compiles package declarations through the backend trait path":
         val point_type = MirTypeDef(

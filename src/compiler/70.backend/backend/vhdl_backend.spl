@@ -215,6 +215,18 @@ class VhdlBackend:
         Ok(())
 
     fn validate_module_supported_before_emit(module: MirModule, hardware_mode: bool) -> Result<(), CompileError>:
+        for symbol in module.types.keys():
+            val type_def_result = self.validate_type_def_supported_before_emit(module.types[symbol])
+            if type_def_result.is_err():
+                return Err(type_def_result.unwrap_err())
+        for symbol in module.constants.keys():
+            val constant = module.constants[symbol]
+            val constant_result = self.validate_vhdl_value_type_supported(constant.type_, "constant `{constant.name}`", nil)
+            if constant_result.is_err():
+                return Err(constant_result.unwrap_err())
+            val constant_value_result = self.validate_vhdl_constant_supported_before_emit(constant.value, constant.type_, "constant `{constant.name}`", nil)
+            if constant_value_result.is_err():
+                return Err(constant_value_result.unwrap_err())
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
             if hardware_mode:
@@ -232,7 +244,79 @@ class VhdlBackend:
                     return Err(result.unwrap_err())
         Ok(())
 
+    fn validate_type_def_supported_before_emit(type_def: MirTypeDef) -> Result<(), CompileError>:
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    val result = self.validate_vhdl_value_type_supported(field.type_, "field `{type_def.name}.{field.name}`", nil)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case Enum(variants):
+                for variant in variants:
+                    if variant.payload.?:
+                        return Err(self.backend_error(
+                            self.type_mapper.payload_enum_diagnostic(type_def.name, variant.name, "package emission")
+                        ))
+                Ok(())
+            case Union(members):
+                for member in members:
+                    val result = self.validate_vhdl_value_type_supported(member, "union member `{type_def.name}`", nil)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+
+    fn validate_vhdl_value_type_supported(ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
+        val unsupported = self.unsupported_type_error(ty, context, span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
+        match ty.kind:
+            case Array(element, _):
+                self.validate_vhdl_value_type_supported(element, context, span)
+            case Tuple(elements):
+                for element in elements:
+                    val result = self.validate_vhdl_value_type_supported(element, context, span)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case Union(members):
+                for member in members:
+                    val result = self.validate_vhdl_value_type_supported(member, context, span)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case _:
+                Ok(())
+
+    fn validate_vhdl_constant_supported_before_emit(value: MirConstValue, ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
+        val unsupported = self.unsupported_type_error(ty, context, span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
+        match value:
+            case Float(_):
+                Err(self.backend_error_at("VHDL backend does not support floating-point {context}; floating-point constants require explicit fixed-point or integer lowering before VHDL emission", span))
+            case _:
+                Ok(())
+
     fn validate_function_supported_before_emit(func: MirFunction, is_helper: bool) -> Result<(), CompileError>:
+        var idx = 0
+        while idx < func.signature.params.len():
+            val param_result = self.validate_vhdl_value_type_supported(func.signature.params[idx], "input port `arg{idx}`", Some(func.span))
+            if param_result.is_err():
+                return Err(param_result.unwrap_err())
+            idx = idx + 1
+        if func.signature.return_type.kind != MirTypeKind.Unit:
+            val return_result = self.validate_vhdl_value_type_supported(func.signature.return_type, "output port", Some(func.span))
+            if return_result.is_err():
+                return Err(return_result.unwrap_err())
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    val local_result = self.validate_vhdl_value_type_supported(local.type_, "local signal", Some(func.span))
+                    if local_result.is_err():
+                        return Err(local_result.unwrap_err())
+                case _:
+                    ()
         var blocks: Dict<i64, MirBlock> = {}
         for block in func.blocks:
             blocks = blocks.set(block.id.id, block)
@@ -1429,29 +1513,10 @@ class VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, value_result.unwrap())
 
             case Load(dest, ptr):
-                val value_result = self.process_operand_to_vhdl(ptr)
-                if value_result.is_err():
-                    return Err(value_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span))
 
             case Store(ptr, value):
-                val value_result = self.process_operand_to_vhdl(value)
-                if value_result.is_err():
-                    return Err(value_result.unwrap_err())
-                match ptr.kind:
-                    case Copy(local) | Move(local):
-                        val kind_result = self.local_kind(local)
-                        if kind_result.is_err():
-                            return Err(kind_result.unwrap_err())
-                        match kind_result.unwrap():
-                            case Var | Temp | Return:
-                                val assign_result = self.emit_process_dest_assign(builder, local, value_result.unwrap())
-                                if assign_result.is_err():
-                                    return Err(assign_result.unwrap_err())
-                            case Arg(_):
-                                return Err(self.backend_error("Synthesizable VHDL process cannot store to argument local {local.id}"))
-                    case _:
-                        return Err(self.backend_error("Synthesizable VHDL process store requires local destination"))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val left_name_result = self.process_operand_to_vhdl(left)
@@ -1693,22 +1758,10 @@ class VhdlBackend:
                 builder.emit_signal_assign(dest_name, src_name)
 
             case Load(dest, ptr):
-                val dest_name_result = self.local_to_vhdl(dest)
-                if dest_name_result.is_err():
-                    return Err(dest_name_result.unwrap_err())
-                val ptr_name_result = self.operand_to_vhdl(ptr)
-                if ptr_name_result.is_err():
-                    return Err(ptr_name_result.unwrap_err())
-                builder.emit_signal_assign(dest_name_result.unwrap(), ptr_name_result.unwrap())
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span))
 
             case Store(ptr, value):
-                val ptr_name_result = self.operand_to_vhdl(ptr)
-                if ptr_name_result.is_err():
-                    return Err(ptr_name_result.unwrap_err())
-                val value_name_result = self.operand_to_vhdl(value)
-                if value_name_result.is_err():
-                    return Err(value_name_result.unwrap_err())
-                builder.emit_signal_assign(ptr_name_result.unwrap(), value_name_result.unwrap())
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val dest_name_result = self.local_to_vhdl(dest)
