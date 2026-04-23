@@ -306,6 +306,9 @@ class VhdlBackend:
                 return Err(param_result.unwrap_err())
             idx = idx + 1
         if func.signature.return_type.kind != MirTypeKind.Unit:
+            val output_abi_result = self.validate_hardware_output_abi_supported(func)
+            if output_abi_result.is_err():
+                return Err(output_abi_result.unwrap_err())
             val return_result = self.validate_vhdl_value_type_supported(func.signature.return_type, "output port", Some(func.span))
             if return_result.is_err():
                 return Err(return_result.unwrap_err())
@@ -325,6 +328,25 @@ class VhdlBackend:
             if result.is_err():
                 return Err(result.unwrap_err())
         Ok(())
+
+    fn validate_hardware_output_abi_supported(func: MirFunction) -> Result<(), CompileError>:
+        if not vhdl_function_is_hardware_entity(func):
+            return Ok(())
+        match func.signature.return_type.kind:
+            case Tuple(elements):
+                if not func.has_vhdl_metadata:
+                    return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                val fields = func.vhdl_metadata.return_fields
+                if fields.len() < elements.len():
+                    return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                var field_index = 0
+                while field_index < elements.len():
+                    if fields[field_index].label.trim() == "":
+                        return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                    field_index = field_index + 1
+                Ok(())
+            case _:
+                Ok(())
 
     fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
         for inst in block.instructions:

@@ -21,6 +21,15 @@ fn get_coverage() -> Option<&'static std::sync::Mutex<coverage::CoverageCollecto
 }
 
 #[test]
+fn test_interpreter_todo_is_noop() {
+    let code = r#"todo("implement retry backoff", "tracked by SIMPLE-123")
+main = 7"#;
+
+    let result = run_interpreter(code).unwrap();
+    assert_eq!(result, 7);
+}
+
+#[test]
 fn test_line_coverage_basic() {
     if !check_coverage_enabled() {
         println!("Coverage disabled, skipping test");
