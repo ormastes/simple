@@ -1,8 +1,7 @@
 //! Attribute and decorator parsing
 //!
-//! This module handles parsing of attributes (@name) and decorators (@...).
-//! The legacy #[...] syntax has been removed from the parsing pipeline.
-//! The `parse_attribute()` method is retained but no longer called.
+//! This module handles parsing of attributes (@name and legacy #[...]) and decorators (@...).
+//! New code should prefer @name attributes, but #[...] remains accepted for compatibility.
 
 use crate::ast::*;
 use crate::error::ParseError;
