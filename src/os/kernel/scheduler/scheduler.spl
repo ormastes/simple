@@ -745,6 +745,7 @@ impl Scheduler:
         serial_println("[scheduler] create_user_task: image segments ok")
         val file_bytes = user_process_image_file_bytes(image)
         serial_println("[scheduler] create_user_task: image file_bytes ok")
+        serial_println("[scheduler] create_user_task: validate begin")
         if stack_top == 0:
             serial_println("[scheduler] create_user_task: stack_top zero")
             return 0
@@ -757,8 +758,11 @@ impl Scheduler:
         if (initial_stack_bytes.len() as u64) > stack_size:
             serial_println("[scheduler] create_user_task: initial stack too large")
             return 0
+        serial_println("[scheduler] create_user_task: validate ok")
 
+        serial_println("[scheduler] create_user_task: find slot begin")
         var slot = self._find_empty_slot()
+        serial_println("[scheduler] create_user_task: find slot returned")
         if slot < 0:
             if self.current.id == 0:
                 serial_println("[scheduler] create_user_task: bootstrap slot fallback")
@@ -767,18 +771,26 @@ impl Scheduler:
                 serial_println("[scheduler] create_user_task: no free slot")
                 return 0
 
+        serial_println("[scheduler] create_user_task: address space begin")
         val user_as: AddressSpace = create_user_address_space()
+        serial_println("[scheduler] create_user_task: address space ok")
 
+        serial_println("[scheduler] create_user_task: map begin")
         val map_result = if _address_space_can_map(user_as):
             _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         else:
             serial_println("[scheduler] create_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
             0
+        serial_println("[scheduler] create_user_task: map returned")
         if map_result < 0:
             destroy_user_address_space(user_as)
             serial_println("[scheduler] create_user_task: map failed")
             return 0
-        val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
+        val mapped_entry = if _scheduler_uses_direct_load_arena():
+            _scheduler_mapped_entry(user_as, file_bytes, entry)
+        else:
+            entry
+        serial_println("[scheduler] create_user_task: mapped entry ok")
         if mapped_entry != entry:
             serial_println("[scheduler] create_user_task: direct entry mapped")
             if not verify_direct_load_entry(user_as, file_bytes, entry):
@@ -786,17 +798,21 @@ impl Scheduler:
                 serial_println("[scheduler] create_user_task: direct entry verify failed")
                 return 0
         val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
+        serial_println("[scheduler] create_user_task: user context ok")
 
         # Dodge the `Scheduler.next_task_id` field-read stub by using a
         # module-level counter. The `self.next_task_id` read in the baremetal
         # build resolves to a weak stub that returns 0 and logs a WARN.
+        serial_println("[scheduler] create_user_task: pid alloc begin")
         var user_next_id = g_scheduler_next_task_id
         if user_next_id == 0 or user_next_id >= 0x40000000:
             serial_println("[scheduler] create_user_task: normalized next_task_id")
             user_next_id = 1
         g_scheduler_next_task_id = user_next_id + 1
         val id = TaskId(id: user_next_id)
+        serial_println("[scheduler] create_user_task: pid alloc ok")
 
+        serial_println("[scheduler] create_user_task: tcb build begin")
         val tcb = TaskControlBlock(
             id: id,
             name: "user-{id.id}",
@@ -817,20 +833,27 @@ impl Scheduler:
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
         )
+        serial_println("[scheduler] create_user_task: tcb built")
 
+        serial_println("[scheduler] create_user_task: task store begin")
         self.tasks[slot] = tcb
+        serial_println("[scheduler] create_user_task: task stored")
 
         # Register capability record so cap_check finds an explicit entry
         # instead of falling through to the (now-removed) default-ALLOW path.
+        serial_println("[scheduler] create_user_task: caps begin")
         cap_init_task_record(id, true)
+        serial_println("[scheduler] create_user_task: caps registered")
 
         # Skip `_find_slot` (which re-scans the whole tasks table and stalls
         # in the baremetal build when called with a TaskId matching a slot
         # we just wrote — see _enqueue_ready_at_slot below). We already have
         # the slot in-hand, so pass it in directly.
+        serial_println("[scheduler] create_user_task: enqueue begin")
         self._enqueue_ready_at_slot(id, slot)
+        serial_println("[scheduler] create_user_task: enqueue done")
 
-        user_next_id
+        return user_next_id
 
     me create_user_task(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> TaskId:
         """Compatibility wrapper for callers that use the typed task handle."""
