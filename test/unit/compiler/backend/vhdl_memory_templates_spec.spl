@@ -1,0 +1,128 @@
+use compiler.backend.vhdl.{VhdlReadDuringWritePolicy, VhdlStaticRomTemplate, VhdlRegisteredRomReadTemplate, VhdlSinglePortSyncRamTemplate, render_static_rom_template, render_registered_rom_read_template, render_single_port_sync_ram_template}
+
+describe "VHDL memory template renderer":
+    """Focused ROM/RAM inference-template coverage."""
+
+    it "renders a static ROM constant with explicit initializer values":
+        val result = render_static_rom_template(VhdlStaticRomTemplate(
+            name: "coeff_rom",
+            type_name: "coeff_rom_t",
+            data_type: "std_logic_vector(7 downto 0)",
+            depth: 4,
+            values: ["x\"11\"", "x\"22\""],
+            default_value: "x\"00\""
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl).to_contain("type coeff_rom_t is array (0 to 3) of std_logic_vector(7 downto 0);")
+        expect(vhdl).to_contain("constant coeff_rom : coeff_rom_t := (")
+        expect(vhdl).to_contain("0 => x\"11\",")
+        expect(vhdl).to_contain("1 => x\"22\",")
+        expect(vhdl).to_contain("others => x\"00\"")
+
+    it "renders a registered ROM read process":
+        val result = render_registered_rom_read_template(VhdlRegisteredRomReadTemplate(
+            name: "lookup_rom",
+            type_name: "lookup_rom_t",
+            data_type: "unsigned(15 downto 0)",
+            depth: 8,
+            values: ["to_unsigned(3, 16)", "to_unsigned(5, 16)"],
+            default_value: "to_unsigned(0, 16)",
+            clock: "clk",
+            address: "addr",
+            data_out: "q"
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val artifact = result.unwrap()
+        expect(artifact.declarations).to_contain("constant lookup_rom : lookup_rom_t := (")
+        expect(artifact.body).to_contain("lookup_rom_read: process(clk)")
+        expect(artifact.body).to_contain("if rising_edge(clk) then")
+        expect(artifact.body).to_contain("q <= lookup_rom(to_integer(unsigned(addr)));")
+
+    it "renders read-first single-port synchronous RAM policy":
+        val result = render_single_port_sync_ram_template(VhdlSinglePortSyncRamTemplate(
+            name: "sample_ram",
+            type_name: "sample_ram_t",
+            data_type: "std_logic_vector(31 downto 0)",
+            depth: 16,
+            clock: "clk",
+            write_enable: "we",
+            address: "addr",
+            write_data: "din",
+            read_data: "dout",
+            initial_value: "x\"00000000\"",
+            read_during_write: VhdlReadDuringWritePolicy.ReadFirst
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val artifact = result.unwrap()
+        expect(artifact.declarations).to_contain("signal sample_ram : sample_ram_t := (others => x\"00000000\");")
+        expect(artifact.body).to_contain("dout <= sample_ram(to_integer(unsigned(addr)));")
+        expect(artifact.body).to_contain("if we = '1' then")
+        expect(artifact.body).to_contain("sample_ram(to_integer(unsigned(addr))) <= din;")
+
+    it "renders write-first single-port synchronous RAM policy":
+        val result = render_single_port_sync_ram_template(VhdlSinglePortSyncRamTemplate(
+            name: "sample_ram",
+            type_name: "sample_ram_t",
+            data_type: "std_logic_vector(31 downto 0)",
+            depth: 16,
+            clock: "clk",
+            write_enable: "we",
+            address: "addr",
+            write_data: "din",
+            read_data: "dout",
+            initial_value: "x\"00000000\"",
+            read_during_write: VhdlReadDuringWritePolicy.WriteFirst
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val body = result.unwrap().body
+        expect(body).to_contain("sample_ram(to_integer(unsigned(addr))) <= din;")
+        expect(body).to_contain("dout <= din;")
+        expect(body).to_contain("else")
+        expect(body).to_contain("dout <= sample_ram(to_integer(unsigned(addr)));")
+
+    it "renders no-change single-port synchronous RAM policy":
+        val result = render_single_port_sync_ram_template(VhdlSinglePortSyncRamTemplate(
+            name: "sample_ram",
+            type_name: "sample_ram_t",
+            data_type: "std_logic_vector(31 downto 0)",
+            depth: 16,
+            clock: "clk",
+            write_enable: "we",
+            address: "addr",
+            write_data: "din",
+            read_data: "dout",
+            initial_value: "x\"00000000\"",
+            read_during_write: VhdlReadDuringWritePolicy.NoChange
+        ))
+
+        expect(result.is_ok()).to_equal(true)
+        val body = result.unwrap().body
+        expect(body).to_contain("if we = '1' then")
+        expect(body).to_contain("sample_ram(to_integer(unsigned(addr))) <= din;")
+        expect(body).to_contain("else")
+        expect(body).to_contain("dout <= sample_ram(to_integer(unsigned(addr)));")
+
+    it "rejects ambiguous read-during-write policies with diagnostics":
+        val result = render_single_port_sync_ram_template(VhdlSinglePortSyncRamTemplate(
+            name: "sample_ram",
+            type_name: "sample_ram_t",
+            data_type: "std_logic_vector(31 downto 0)",
+            depth: 16,
+            clock: "clk",
+            write_enable: "we",
+            address: "addr",
+            write_data: "din",
+            read_data: "dout",
+            initial_value: "x\"00000000\"",
+            read_during_write: VhdlReadDuringWritePolicy.Ambiguous("source did not choose old, new, or unchanged read data")
+        ))
+
+        expect(result.is_err()).to_equal(true)
+        val diagnostic = result.unwrap_err()
+        expect(diagnostic.code).to_equal("VHDL-MEM-RDW-AMBIGUOUS")
+        expect(diagnostic.message).to_contain("Ambiguous read-during-write policy for sample_ram")

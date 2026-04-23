@@ -189,6 +189,9 @@ class VhdlConstraintChecker:
             errors: []
         )
 
+    static fn empty_span() -> Span:
+        Span(start: 0, end_pos: 0, line: 1, col: 1)
+
     me add_constraint(c: VhdlConstraint):
         """Add a constraint to be checked."""
         self.constraints = self.constraints.push(c)
@@ -200,6 +203,25 @@ class VhdlConstraintChecker:
     me register_signal_domain(signal: text, domain: text):
         """Associate a signal with a clock domain."""
         self.signal_domains = self.signal_domains.set(signal, domain)
+
+    me add_implicit_cross_domain_constraint(source: text, dest: text, span: Span):
+        """Add a CDC constraint using registered source/destination domains."""
+        val source_domain = self.signal_domains.get(source)
+        val dest_domain = self.signal_domains.get(dest)
+        if source_domain.? and dest_domain.? and source_domain.unwrap() != dest_domain.unwrap():
+            self.add_constraint(VhdlConstraint.ClockDomainCrossing(
+                source: source,
+                dest: dest,
+                source_domain: self.domain_display_name(source_domain.unwrap()),
+                dest_domain: self.domain_display_name(dest_domain.unwrap()),
+                span: span
+            ))
+        else:
+            self.add_constraint(VhdlConstraint.SameClockDomain(
+                signal1: source,
+                signal2: dest,
+                span: span
+            ))
 
     me register_driver(signal: text, driver: text):
         """Register a driver for a signal."""
@@ -215,7 +237,7 @@ class VhdlConstraintChecker:
 
     fn check_all() -> Result<(), [VhdlConstraintError]>:
         """Run all registered constraints. Returns errors if any fail."""
-        var all_errors: [VhdlConstraintError] = []
+        var all_errors = self.check_registered_clock_domains()
 
         for c in self.constraints:
             val result = self.check_constraint(c)
@@ -270,9 +292,11 @@ class VhdlConstraintChecker:
                 val d1 = self.signal_domains.get(s1)
                 val d2 = self.signal_domains.get(s2)
                 if d1.? and d2.? and d1.unwrap() != d2.unwrap():
+                    val src_domain = self.domain_display_name(d1.unwrap())
+                    val dst_domain = self.domain_display_name(d2.unwrap())
                     Err(VhdlConstraintError(
                         code: "E0710",
-                        message: "clock domain crossing: '{s1}' ({d1.unwrap()}) and '{s2}' ({d2.unwrap()}) are in different domains",
+                        message: "clock domain crossing: source '{s1}' in domain '{src_domain}' reaches destination '{s2}' in domain '{dst_domain}'",
                         span: span,
                         kind: VhdlConstraintErrorKind.ClockDomainCrossing
                     ))
@@ -282,7 +306,7 @@ class VhdlConstraintChecker:
             case ClockDomainCrossing(source, dest, src_domain, dst_domain, span):
                 Err(VhdlConstraintError(
                     code: "E0710",
-                    message: "unsynchronized clock domain crossing: '{source}' ({src_domain}) -> '{dest}' ({dst_domain})",
+                    message: "unsynchronized clock domain crossing: source '{source}' in domain '{src_domain}' reaches destination '{dest}' in domain '{dst_domain}'",
                     span: span,
                     kind: VhdlConstraintErrorKind.ClockDomainCrossing
                 ))
@@ -369,6 +393,61 @@ class VhdlConstraintChecker:
                 else:
                     Ok(())
 
+    fn check_registered_clock_domains() -> [VhdlConstraintError]:
+        var result: [VhdlConstraintError] = []
+        var sanitized_to_original: Dict<text, text> = {}
+        for name in self.clock_domains.keys():
+            val domain = self.clock_domains[name]
+            if domain.name.trim() == "":
+                result = result.push(VhdlConstraintError(
+                    code: "E0711",
+                    message: "clock domain has an empty name",
+                    span: VhdlConstraintChecker.empty_span(),
+                    kind: VhdlConstraintErrorKind.InvalidClockDomain
+                ))
+            if domain.clock_signal.trim() == "":
+                result = result.push(VhdlConstraintError(
+                    code: "E0711",
+                    message: "clock domain '{domain.name}' has an empty clock signal",
+                    span: VhdlConstraintChecker.empty_span(),
+                    kind: VhdlConstraintErrorKind.InvalidClockDomain
+                ))
+            val sanitized = self.sanitize_clock_domain_name(domain.name)
+            val previous = sanitized_to_original.get(sanitized)
+            if previous.? and previous.unwrap() != domain.name:
+                result = result.push(VhdlConstraintError(
+                    code: "E0712",
+                    message: "duplicate clock domain after VHDL sanitization: '{previous.unwrap()}' and '{domain.name}' both map to '{sanitized}'",
+                    span: VhdlConstraintChecker.empty_span(),
+                    kind: VhdlConstraintErrorKind.ClockDomainNameCollision
+                ))
+            else:
+                sanitized_to_original[sanitized] = domain.name
+        result
+
+    fn domain_display_name(domain: text) -> text:
+        val registered = self.clock_domains.get(domain)
+        if registered.?:
+            registered.unwrap().name
+        else:
+            domain
+
+    fn sanitize_clock_domain_name(name: text) -> text:
+        var result = name.trim()
+        if result.len() == 0:
+            result = "clock_domain"
+        result = result.replace(" ", "_")
+        result = result.replace("-", "_")
+        result = result.replace(".", "_")
+        result = result.replace(":", "_")
+        result = result.replace("/", "_")
+        result = result.replace("\\", "_")
+        result = result.replace("(", "_")
+        result = result.replace(")", "_")
+        result = result.replace("[", "_")
+        result = result.replace("]", "_")
+        result
+
 # ============================================================================
 # VHDL Constraint Errors
 # ============================================================================
@@ -384,6 +463,8 @@ enum VhdlConstraintErrorKind:
     WidthMismatch           # E0700
     WidthOverflow           # E0701
     ClockDomainCrossing     # E0710
+    InvalidClockDomain      # E0711
+    ClockDomainNameCollision # E0712
     IncompleteSensitivity   # E0720
     CombinationalLoop       # E0721
     LatchInferred           # E0722
@@ -399,4 +480,3 @@ impl VhdlConstraintError:
 # ============================================================================
 # Export
 # ============================================================================
-

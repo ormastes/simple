@@ -2,21 +2,23 @@
 
 **Feature:** VHDL Python-HDL parity gaps `VHDL-PARITY-003` through `VHDL-PARITY-015`
 **Selected scope:** Parity gaps
-**Status:** Implemented slice with documented deferrals
+**Status:** Selected milestone complete with documented deferrals
 
 ## Requirements
 
-- **REQ-VHDL-PARITY-003:** VHDL lowering preserves structured clock/reset/domain metadata and emits supported async, sync, and no-reset clocked process shapes.
-- **REQ-VHDL-PARITY-004:** Fixed-width integer operations lower with explicit VHDL signedness, resize, slice, concat, shift, comparison, and width mismatch diagnostics.
-- **REQ-VHDL-PARITY-005:** Interface bundles flatten deterministically from labeled tuple fields and reject sanitized VHDL name collisions.
-- **REQ-VHDL-PARITY-006:** Payload-free enums lower in declaration order. Payload enums fail before VHDL emission with a payload-specific diagnostic until tagged-record lowering exists.
-- **REQ-VHDL-PARITY-010:** Pure helper subprograms remain deferred unless a helper classifier proves they are combinational and side-effect-free; public hardware still lowers as entities.
-- **REQ-VHDL-PARITY-011:** ROM/RAM inference remains explicit and conservative; unsupported memory patterns fail before invalid VHDL emission.
-- **REQ-VHDL-PARITY-012:** Supported testbench conversion slice covers one DUT, literal stimuli, named port maps, and `expect(...).to_equal(...)` as VHDL assertions.
-- **REQ-VHDL-PARITY-013:** VHDL generation emits a deterministic `.map.json` sidecar with generated entity and port anchors.
-- **REQ-VHDL-PARITY-014:** Vendor synthesis smoke is opt-in by `SIMPLE_VHDL_VENDOR_SMOKE=1` and skips clearly when disabled or unavailable.
+- **REQ-VHDL-PARITY-003:** Named domains, reset polarity/synchrony/no-reset metadata, duplicate sanitized domain diagnostics, unsupported crossing diagnostics, and reset-aware backend lowering must be supported for the selected VHDL subset.
+- **REQ-VHDL-PARITY-004:** Explicit fixed-width behavior must cover width propagation, resize/truncate/sign/zero extension, slice/concat, literal shifts, comparisons, and hard diagnostics for unsupported implicit-width cases.
+- **REQ-VHDL-PARITY-005:** Source-facade interface tuples flatten deterministically from labeled fields, including one nested input bundle, and reject sanitized input/input and input/output VHDL port name collisions.
+- **REQ-VHDL-PARITY-006:** Named and nested interface bundles must lower through deterministic flattened VHDL names, named wiring, source-map anchors, and collision diagnostics.
+- **REQ-VHDL-PARITY-008:** Payload-free enums must lower in declaration order with sanitized VHDL literals, enum ports, literal assignments, and collision diagnostics.
+- **REQ-VHDL-PARITY-009:** Payload enum lowering remains out of scope and must fail before VHDL emission with enum/variant-specific diagnostics.
+- **REQ-VHDL-PARITY-010:** Helper subprogram support must classify supported helpers, emit deterministic VHDL function/procedure declarations and bodies, wire direct calls, and reject post-sanitization name collisions.
+- **REQ-VHDL-PARITY-011:** ROM/RAM templates must support static ROM, registered ROM read, and explicit single-port synchronous RAM read-during-write policies; ambiguous or unsupported memory patterns must fail before invalid VHDL emission.
+- **REQ-VHDL-PARITY-012:** Testbench conversion for the milestone must cover one-DUT VHDL artifacts with literal stimuli, optional clock/reset setup, named port maps, equality assertions, source-map anchors, and simulator pass/fail behavior via `severity failure`.
+- **REQ-VHDL-PARITY-013:** VHDL generation emits deterministic `.map.json` sidecars with generated entity, port, testbench, port-map, expectation, and diagnostic source-location anchors where source spans are available.
+- **REQ-VHDL-PARITY-014:** Vendor synthesis smoke is opt-in by `SIMPLE_VHDL_VENDOR_SMOKE=1`, never blocks normal verification, and skips clearly with deterministic report/log paths when disabled or unavailable.
 - **REQ-VHDL-PARITY-015:** The support matrix and parity roadmap distinguish pure Simple source-of-truth support from compatibility source-facade coverage.
 
 ## Explicit Deferrals
 
-Tagged-record payload enum lowering, general helper-to-subprogram lowering, and broad ROM/RAM inference are not enabled by default in this pass. They must remain hard diagnostics rather than partial VHDL output.
+Tagged-record payload enum lowering, floats, pointers, unit lowering, unconstrained memories, broad HLS helper inference, implicit-width Python-HDL behavior outside the supported subset, and multi-DUT/multi-phase source-test conversion are not enabled by default in this pass. They must remain hard diagnostics or explicit unsupported paths rather than partial VHDL output.

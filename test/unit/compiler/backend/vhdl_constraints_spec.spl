@@ -1,4 +1,6 @@
 use compiler.backend.{VhdlConstraintChecker, VhdlConstraint, VhdlConstraintErrorKind}
+use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
+use compiler.mir.mir_data.{VhdlClockDomain, VhdlClockEdge}
 from lexer import {Span}
 
 fn test_span() -> Span:
@@ -51,10 +53,71 @@ describe "Vhdl Constraints":
         expect(errors.len()).to_equal(3)
         expect(errors[0].code).to_equal("E0710")
         expect(errors[0].kind).to_equal(VhdlConstraintErrorKind.ClockDomainCrossing)
+        expect(errors[0].message).to_contain("source 'sig_a'")
+        expect(errors[0].message).to_contain("domain 'clk_100'")
+        expect(errors[0].message).to_contain("destination 'sig_b'")
+        expect(errors[0].message).to_contain("domain 'clk_50'")
         expect(errors[1].code).to_equal("E0721")
         expect(errors[1].kind).to_equal(VhdlConstraintErrorKind.CombinationalLoop)
         expect(errors[2].code).to_equal("E0740")
         expect(errors[2].kind).to_equal(VhdlConstraintErrorKind.MultipleDrivers)
+
+    it "diagnoses implicit crossings with registered source and destination domains":
+        val checker = VhdlConstraintChecker.create()
+        checker.register_clock_domain(VhdlClockDomain(
+            name: "core-domain",
+            clock_signal: "clk_core",
+            reset_signal: nil,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.None_,
+            edge: VhdlClockEdge.Rising
+        ))
+        checker.register_clock_domain(VhdlClockDomain(
+            name: "io.domain",
+            clock_signal: "clk_io",
+            reset_signal: nil,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.None_,
+            edge: VhdlClockEdge.Rising
+        ))
+        checker.register_signal_domain("rx_data", "core-domain")
+        checker.register_signal_domain("tx_data", "io.domain")
+        checker.add_implicit_cross_domain_constraint("rx_data", "tx_data", test_span())
+
+        val errors = checker.check_all().unwrap_err()
+
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].code).to_equal("E0710")
+        expect(errors[0].message).to_contain("source 'rx_data' in domain 'core-domain'")
+        expect(errors[0].message).to_contain("destination 'tx_data' in domain 'io.domain'")
+
+    it "diagnoses duplicate sanitized clock domain names":
+        val checker = VhdlConstraintChecker.create()
+        checker.register_clock_domain(VhdlClockDomain(
+            name: "bus-domain",
+            clock_signal: "clk_a",
+            reset_signal: nil,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.None_,
+            edge: VhdlClockEdge.Rising
+        ))
+        checker.register_clock_domain(VhdlClockDomain(
+            name: "bus.domain",
+            clock_signal: "clk_b",
+            reset_signal: nil,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.None_,
+            edge: VhdlClockEdge.Rising
+        ))
+
+        val errors = checker.check_all().unwrap_err()
+
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].code).to_equal("E0712")
+        expect(errors[0].kind).to_equal(VhdlConstraintErrorKind.ClockDomainNameCollision)
+        expect(errors[0].message).to_contain("bus-domain")
+        expect(errors[0].message).to_contain("bus.domain")
+        expect(errors[0].message).to_contain("bus_domain")
 
     it "reports incomplete sensitivity and latch coverage":
         val checker = VhdlConstraintChecker.create()

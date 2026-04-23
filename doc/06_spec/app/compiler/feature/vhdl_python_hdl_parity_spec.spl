@@ -1,12 +1,69 @@
-# VHDL Python-HDL parity acceptance spec placeholder.
-#
-# Runnable coverage for this feature currently lives in:
-# - test/unit/compiler/backend/vhdl_backend_spec.spl
-# - test/system/compiler/vhdl_source_facade_spec.spl
-# - test/system/compiler/vhdl_vendor_synthesis_smoke_spec.spl
-
 use std.spec
+use compiler.backend.vhdl.{VhdlReadDuringWritePolicy, VhdlStaticRomTemplate, VhdlSinglePortSyncRamTemplate, render_static_rom_template, render_single_port_sync_ram_template}
+use compiler.backend.vhdl.vhdl_testbench.{VhdlTestbenchPort, VhdlTestbenchAssignment, VhdlTestbenchAssertion, VhdlTestbenchCase, render_vhdl_testbench}
 
 describe "VHDL Python-HDL parity acceptance":
-    it "has runnable backend and system coverage":
-        expect(true).to_equal(true)
+    """Acceptance smoke for the selected VHDL parity milestone."""
+
+    it "renders deterministic one-DUT testbench assertions and source-map anchors":
+        val artifact = render_vhdl_testbench(VhdlTestbenchCase(
+            testbench_name: "parity_tb",
+            dut_entity: "parity_gate",
+            test_name: "parity gate returns high",
+            test_source_line: 42,
+            ports: [
+                VhdlTestbenchPort(name: "a", direction: "in", type_name: "std_logic", source_line: 3),
+                VhdlTestbenchPort(name: "y", direction: "out", type_name: "std_logic", source_line: 3)
+            ],
+            stimuli: [
+                VhdlTestbenchAssignment(target: "a", literal: "'1'", source_line: 43)
+            ],
+            assertions: [
+                VhdlTestbenchAssertion(
+                    actual: "y",
+                    expected: "'1'",
+                    test_name: "parity gate returns high",
+                    expectation_index: 0,
+                    source_line: 44
+                )
+            ],
+            clock_name: "",
+            reset_name: "",
+            reset_asserted: ""
+        ))
+
+        expect(artifact.testbench_vhdl).to_contain("dut: entity work.parity_gate")
+        expect(artifact.testbench_vhdl).to_contain("assert y = '1'")
+        expect(artifact.testbench_vhdl).to_contain("severity failure;")
+        expect(artifact.source_map_json).to_contain("\"testbench\": \"parity_tb\"")
+        expect(artifact.source_map_json).to_contain("\"expectationIndex\":0")
+
+    it "renders supported ROM templates and rejects ambiguous RAM policy":
+        val rom = render_static_rom_template(VhdlStaticRomTemplate(
+            name: "parity_rom",
+            type_name: "parity_rom_t",
+            data_type: "std_logic_vector(1 downto 0)",
+            depth: 2,
+            values: ["\"00\"", "\"11\""],
+            default_value: "\"00\""
+        ))
+
+        expect(rom.is_ok()).to_equal(true)
+        expect(rom.unwrap().vhdl).to_contain("constant parity_rom : parity_rom_t := (")
+
+        val ram = render_single_port_sync_ram_template(VhdlSinglePortSyncRamTemplate(
+            name: "parity_ram",
+            type_name: "parity_ram_t",
+            data_type: "std_logic_vector(7 downto 0)",
+            depth: 4,
+            clock: "clk",
+            write_enable: "we",
+            address: "addr",
+            write_data: "din",
+            read_data: "dout",
+            initial_value: "x\"00\"",
+            read_during_write: VhdlReadDuringWritePolicy.Ambiguous("policy not selected")
+        ))
+
+        expect(ram.is_err()).to_equal(true)
+        expect(ram.unwrap_err().code).to_equal("VHDL-MEM-RDW-AMBIGUOUS")

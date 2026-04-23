@@ -807,8 +807,13 @@ impl<'a> Parser<'a> {
                 // Optional parenthesised argument: pass_todo("reason")
                 if self.check(&TokenKind::LParen) {
                     self.advance();
-                    if !self.check(&TokenKind::RParen) {
+                    while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                         let _ = self.parse_expression();
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
                     if self.check(&TokenKind::RParen) {
                         self.advance();

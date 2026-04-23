@@ -596,7 +596,7 @@ match value:
 match value:
     case 0: "zero"
     case 1: "one"
-    case _: "other"
+    case _("all remaining values use the fallback label"): "other"
 ```
 
 ### Pattern Guards

@@ -154,21 +154,27 @@ fn _manifest_present_for_path(path: text) -> bool:
     true
 
 fn _should_use_resident_manifest_before_spawn(path: text) -> bool:
-    """Return true when a seeded app has no VFS executable bytes to spawn.
-
-    The serial-only x86_64 QEMU desktop lane registers the same seeded app
-    manifests as the disk lane, but it has no NVMe/VirtIO block device. In that
-    environment, calling posix_spawn on the packaged `.smf` path can enter the
-    executable loader with no bytes and recover-fault forever. Use the shared
-    resident-manifest path before spawn only when the known packaged path has no
-    VFS payload; disk-backed lanes still use posix_spawn.
-    """
-    if _manifest_name_for_path(path) == "":
-        return false
-    not launcher_packaged_spawn_enabled
+    """Resident manifests are no longer a packaged-app launch fallback."""
+    val _path = path
+    false
 
 fn launcher_set_packaged_spawn_enabled(enabled: bool):
     launcher_packaged_spawn_enabled = enabled
+
+fn _canonical_app_identity(path: text) -> text:
+    match path:
+        case "/sys/apps/browser_demo.smf":
+            "/sys/apps/browser_demo"
+        case "/sys/apps/hello_world.smf":
+            "/sys/apps/hello_world"
+        case "/sys/apps/file_manager.smf":
+            "/sys/apps/file_manager"
+        case "/sys/apps/shell.smf":
+            "/sys/apps/shell"
+        case "/sys/apps/editor.smf":
+            "/sys/apps/editor"
+        case _:
+            path
 
 fn _alloc_synthetic_pid() -> u64:
     val pid = synthetic_pid_next
@@ -418,9 +424,6 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
         serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
         if pid_result < 0:
-            val resident_pid = _try_resident_manifest_launch(slot, name, path, pid_result)
-            if resident_pid > 0:
-                return resident_pid
             app_launch_state[slot] = "failed"
             app_exit_code[slot] = pid_result.to_i32()
             serial_println("[launcher] Failed to launch {name}: {pid_result}")
@@ -480,7 +483,7 @@ fn _is_running_state(state: text) -> bool:
 fn _default_app_identity(slot: u64) -> text:
     if slot >= app_count:
         return ""
-    app_path[slot]
+    _canonical_app_identity(app_path[slot])
 
 fn _classify_final_state(previous_state: text, exit_code: i32) -> text:
     if previous_state == "terminating":
@@ -779,8 +782,11 @@ fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     launcher_last_launch_pid = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
+    val canonical_app_id = _canonical_app_identity(app_id)
     serial_println("[launcher] Started {name} (PID {pid})")
     serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
+    if launcher_process_is_process_backed(pid):
+        serial_println("[launcher] process-backed app_id={canonical_app_id} pid={pid}")
     pid.to_i64()
 
 fn _try_resident_manifest_launch(slot: u64, name: text, path: text, spawn_error: i64) -> i64:
@@ -1173,7 +1179,7 @@ fn launcher_get_process_app_id(idx: u64) -> text:
     """Return stable app identity for a tracked process."""
     if idx >= process_count:
         return ""
-    process_path[idx]
+    _canonical_app_identity(process_path[idx])
 
 fn launcher_get_process_icon(idx: u64) -> text:
     if idx >= process_count:
@@ -1211,12 +1217,12 @@ fn launcher_get_process_app_id_for_pid(pid: u64) -> text:
     if idx >= 0:
         val slot = idx.to_u64()
         if process_path[slot] != "":
-            return process_path[slot]
+            return _canonical_app_identity(process_path[slot])
 
     val app_idx = _app_index_by_pid(pid)
     if app_idx < 0:
         return ""
-    app_path[app_idx.to_u64()]
+    _canonical_app_identity(app_path[app_idx.to_u64()])
 
 fn launcher_note_window_opened(pid: u64):
     """Increment the tracked window count for a launched process."""

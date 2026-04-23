@@ -499,6 +499,7 @@ impl LintChecker {
         } else {
             self.check_stub_placeholder_bodies(&source);
         }
+        self.check_required_comment_patterns(&source);
     }
 
     pub(super) fn is_test_like_path(source_file: &std::path::Path) -> bool {
@@ -585,6 +586,128 @@ impl LintChecker {
             || normalized.starts_with("pass_todo(")
             || normalized.starts_with("pass_do_nothing(")
             || normalized.starts_with("pass_dn(")
+    }
+
+    fn required_comment_is_weak(value: &str) -> bool {
+        let text = value.trim().to_lowercase();
+        text.is_empty()
+            || text.len() < 10
+            || matches!(
+                text.as_str(),
+                "todo" | "fix" | "later" | "unknown" | "because" | "n/a" | "na"
+            )
+    }
+
+    fn nth_string_arg(line: &str, ordinal: usize) -> Option<String> {
+        let mut strings = Vec::new();
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut current = String::new();
+        for ch in line.chars() {
+            if in_string {
+                if escaped {
+                    current.push(ch);
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    strings.push(current.clone());
+                    current.clear();
+                    in_string = false;
+                } else {
+                    current.push(ch);
+                }
+            } else if ch == '"' {
+                in_string = true;
+            }
+        }
+        strings.get(ordinal).cloned()
+    }
+
+    pub(super) fn check_required_comment_patterns(&mut self, source: &str) {
+        for (idx, line) in source.lines().enumerate() {
+            let line_num = idx + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let normalized = Self::normalize_quality_line(trimmed);
+            if normalized == "pass_todo" || normalized == "pass_do_nothing" || normalized == "pass_dn" {
+                self.emit(
+                    LintName::RequiredCommentPass,
+                    Span::new(0, 0, line_num, 1),
+                    "REQC001: pass_* used without a rationale".to_string(),
+                    Some("use pass_todo(\"what remains\", \"hint or issue\") or pass_do_nothing(\"why no-op is correct\")".to_string()),
+                );
+            }
+            if normalized.starts_with("pass_todo(")
+                || normalized.starts_with("pass_do_nothing(")
+                || normalized.starts_with("pass_dn(")
+            {
+                let reason = Self::nth_string_arg(trimmed, 0).unwrap_or_default();
+                if Self::required_comment_is_weak(&reason) {
+                    self.emit(
+                        LintName::RequiredCommentPass,
+                        Span::new(0, 0, line_num, 1),
+                        "REQC001: pass_* used without a useful rationale".to_string(),
+                        Some("use pass_todo(\"what remains\", \"hint or issue\") or pass_do_nothing(\"why no-op is correct\")".to_string()),
+                    );
+                }
+            }
+            if normalized.starts_with("todo(") || normalized.contains(":todo(") || normalized.contains("=todo(") {
+                let what = Self::nth_string_arg(trimmed, 0).unwrap_or_default();
+                let hint = Self::nth_string_arg(trimmed, 1).unwrap_or_default();
+                if Self::required_comment_is_weak(&what) || Self::required_comment_is_weak(&hint) {
+                    self.emit(
+                        LintName::RequiredCommentTodo,
+                        Span::new(0, 0, line_num, 1),
+                        "REQC003: todo used without what-remains and next-step strings".to_string(),
+                        Some("use todo(\"what remains\", \"hint or issue\")".to_string()),
+                    );
+                }
+            }
+            let dangerous_call = normalized.starts_with("dangerous_token_but_needs(")
+                || normalized.starts_with("loss(")
+                || normalized.starts_with("unsafe_cast(")
+                || normalized.starts_with("raw_pointer(")
+                || normalized.starts_with("unchecked(");
+            if dangerous_call {
+                let reason = Self::nth_string_arg(trimmed, 0).unwrap_or_default();
+                if Self::required_comment_is_weak(&reason) {
+                    self.emit(
+                        LintName::RequiredCommentDangerous,
+                        Span::new(0, 0, line_num, 1),
+                        "REQC002: dangerous keyword used without a useful rationale".to_string(),
+                        Some("add a first string argument explaining why the escape hatch is correct".to_string()),
+                    );
+                }
+            }
+            if normalized.starts_with("case_:")
+                || normalized.starts_with("case_->")
+                || normalized.starts_with("case_=>")
+                || normalized == "_=>"
+                || normalized == "_->"
+            {
+                self.emit(
+                    LintName::RequiredCommentWildcard,
+                    Span::new(0, 0, line_num, 1),
+                    "REQC004: wildcard match arm used without a rationale".to_string(),
+                    Some("use case _(\"why catch-all is correct\"):".to_string()),
+                );
+            }
+            if normalized.starts_with("case_(\"") {
+                let reason = Self::nth_string_arg(trimmed, 0).unwrap_or_default();
+                if Self::required_comment_is_weak(&reason) {
+                    self.emit(
+                        LintName::RequiredCommentWildcard,
+                        Span::new(0, 0, line_num, 1),
+                        "REQC004: wildcard match arm used without a useful rationale".to_string(),
+                        Some("use case _(\"why catch-all is correct\"):".to_string()),
+                    );
+                }
+            }
+        }
     }
 
     pub(super) fn check_sspec_placeholder_patterns(&mut self, source: &str) {

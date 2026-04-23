@@ -40,7 +40,8 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 Scan for stub patterns — any match is a **FAIL**:
 
 - `pass_todo` — unimplemented placeholder
-- `pass_do_nothing` / `pass_dn` without documentation — unjustified no-op
+- `pass_do_nothing("why no-op is correct")` / `pass_dn("why no-op is correct")` with weak or missing rationale
+- `todo("what remains", "hint or issue")` with weak or missing rationale
 - Hardcoded returns without logic
 - Empty function bodies
 - Commented-out code blocks

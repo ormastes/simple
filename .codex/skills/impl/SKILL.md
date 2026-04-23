@@ -74,7 +74,8 @@ bin/simple test && bin/simple build lint
 
 Before declaring implementation complete, verify:
 - No `pass_todo` anywhere in new/modified files
-- No `pass_do_nothing` / `pass_dn` unless intentional no-op (documented)
+- No `pass_do_nothing("why no-op is correct")` / `pass_dn("why no-op is correct")` unless intentional
+- Use `todo("what remains", "hint or issue")` only for explicit, tracked deferrals
 - No hardcoded returns without logic
 - No commented-out code blocks
 - No empty function bodies

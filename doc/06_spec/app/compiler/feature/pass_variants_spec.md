@@ -38,7 +38,7 @@ val result = pass  # evaluates to nil
 - ✅ pass evaluates to nil
 - ✅ pass with message evaluates to nil
 - ✅ pass_todo evaluates to nil
-- ✅ pass_todo with message evaluates to nil
+- ✅ pass_todo with what-remains and hint strings evaluates to nil
 - ✅ pass_do_nothing evaluates to nil
 - ✅ pass_do_nothing with message evaluates to nil
 - ✅ pass_dn evaluates to nil
@@ -64,11 +64,10 @@ val result = pass  # evaluates to nil
 ### Pass Variants with Messages
 
 - ✅ pass with descriptive message
-- ✅ pass_todo with reason
-- ✅ pass_do_nothing with explanation
-- ✅ pass_dn with context
+- ✅ pass_todo with what-remains and hint strings
+- ✅ pass_do_nothing with no-op rationale
+- ✅ pass_dn with no-op rationale
 ### Pass Variants Equivalence
 
 - ✅ all pass variants return same value
 - ✅ all pass variants are nil
-

@@ -123,6 +123,20 @@ impl VhdlTypeMapper:
         """Map to bit_vector with specific width."""
         "bit_vector({width - 1} downto 0)"
 
+    fn map_fixed_bits(width: i64, signed: bool) -> text:
+        """Map an explicit hardware bit lane to numeric_std signed/unsigned."""
+        if signed:
+            self.map_signed(width)
+        else:
+            self.map_unsigned(width)
+
+    fn fixed_width_diagnostic(width: i64) -> text?:
+        """Return a diagnostic for widths the current MIR/VHDL lane cannot emit."""
+        if width <= 0:
+            Some("VHDL fixed-width bit lanes require a positive concrete width, got {width}")
+        else:
+            nil
+
     fn map_record(fields: [(text, text)]) -> text:
         """
         Map struct to VHDL record type.
@@ -146,6 +160,32 @@ impl VhdlTypeMapper:
         Example: (Idle, Running, Done)
         """
         "({variants.join(', ')})"
+
+    fn payload_enum_diagnostic(type_name: text, variant_name: text, context: text) -> text:
+        """
+        Explain why a Simple payload enum cannot use VHDL scalar enum lowering.
+        """
+        "Payload enum `{type_name}.{variant_name}` is not supported by VHDL enum {context}; tagged-record lowering is not implemented"
+
+    fn unsupported_mir_type_diagnostic(ty: MirType, context: text) -> text?:
+        """Return a precise diagnostic for MIR types with no synthesizable VHDL value form."""
+        match ty.kind:
+            case F32:
+                Some("VHDL backend does not support f32 {context}; floating-point values require explicit fixed-point or integer lowering before VHDL emission")
+            case F64:
+                Some("VHDL backend does not support f64 {context}; floating-point values require explicit fixed-point or integer lowering before VHDL emission")
+            case Unit:
+                Some("VHDL backend does not support Unit {context}; Unit has no VHDL signal, port, or constant representation")
+            case Ptr(_, _):
+                Some("VHDL backend does not support pointer {context}; pointer addressing has no synthesizable VHDL value representation")
+            case Ref(_, _):
+                Some("VHDL backend does not support reference {context}; reference addressing has no synthesizable VHDL value representation")
+            case FuncPtr(_):
+                Some("VHDL backend does not support function pointer {context}; indirect calls have no synthesizable VHDL value representation")
+            case Slice(_):
+                Some("VHDL backend does not support slice {context}; slice fat pointers have no synthesizable VHDL value representation")
+            case _:
+                nil
 
     fn map_array_type(element_type: text, size: i64) -> text:
         """
@@ -197,6 +237,7 @@ impl VhdlTypeMapper:
             case I32 | U32: 32
             case I16 | U16: 16
             case I8 | U8: 8
+            case Bits(width, _): width
             case Bool: 1
             case Unit: 0
             case Array(elem, size): self.size_of(elem) * size

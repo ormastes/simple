@@ -19,3 +19,4 @@
 
 ;; Pass variants as TODO-like highlights
 ;; ("pass_todo") @keyword.control => @todo
+;; ("todo") @keyword.control => @todo

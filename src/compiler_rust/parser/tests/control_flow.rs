@@ -56,6 +56,11 @@ fn parse_match_with_guard() {
     parse_ok("match x:\n    n if n > 0 =>\n        y = 1\n    _ =>\n        y = 0");
 }
 
+#[test]
+fn parse_match_wildcard_rationale() {
+    parse_ok("match x:\n    case _(\"remaining values are logged by caller\"):\n        y = 0");
+}
+
 // Match patterns use full enum paths or simple identifiers
 #[test]
 fn parse_match_with_patterns() {

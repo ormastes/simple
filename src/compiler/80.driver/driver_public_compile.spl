@@ -97,7 +97,7 @@ fn aot_vhdl_file(path: text, output: text) -> CompileResult:
     if fallback_result.is_success():
         return fallback_result
     val fallback_errors = fallback_result.get_errors().join("\n")
-    if fallback_errors.contains("VHDL subset fallback bit slice") or fallback_errors.contains("VHDL subset fallback concat") or fallback_errors.contains("VHDL Python-HDL parity gap"):
+    if fallback_errors.contains("VHDL subset fallback bit slice") or fallback_errors.contains("VHDL subset fallback concat") or fallback_errors.contains("VHDL Python-HDL parity gap") or fallback_errors.contains("port collision after VHDL sanitization") or fallback_errors.contains("duplicate input port after VHDL sanitization"):
         return fallback_result
     val external_result = _run_compile_to_path(path, output, ["--backend=vhdl"])
     if external_result.is_success() and _file_contains_vhdl_design(output):
@@ -178,8 +178,8 @@ fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
 
 fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: text):
     val map_path = output + ".map.json"
-    val entities = _simple_vhdl_entities_for_source_map(vhdl)
-    val ports = _simple_vhdl_ports_for_source_map(vhdl)
+    val entities = _simple_vhdl_entities_for_source_map(vhdl, source)
+    val ports = _simple_vhdl_ports_for_source_map(vhdl, source)
     var json = "{\n"
     json = json + "  \"version\": 1,\n"
     json = json + "  \"source\": \"" + _json_escape(path) + "\",\n"
@@ -190,7 +190,7 @@ fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: t
     json = json + "}\n"
     rt_file_write_text(map_path, json)
 
-fn _simple_vhdl_entities_for_source_map(vhdl: text) -> text:
+fn _simple_vhdl_entities_for_source_map(vhdl: text, source: text) -> text:
     var entries: [text] = []
     val lines = vhdl.split("\n")
     var line_no = 1
@@ -200,14 +200,25 @@ fn _simple_vhdl_entities_for_source_map(vhdl: text) -> text:
             val rest = line.substring(7, line.len())
             val end_opt = rest.find(" ")
             val name = if end_opt.?: rest.substring(0, end_opt.unwrap()) else: rest
-            entries = entries.push("{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text() + "}")
+            val source_line = _simple_vhdl_source_entity_line(source, name)
+            var entry = "{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text()
+            if source_line > 0:
+                entry = entry + ",\"sourceLine\":" + source_line.to_text()
+            entry = entry + "}"
+            entries = entries.push(entry)
         line_no = line_no + 1
     entries.join(", ")
 
-fn _simple_vhdl_ports_for_source_map(vhdl: text) -> text:
+fn _simple_vhdl_ports_for_source_map(vhdl: text, source: text) -> text:
     var entries: [text] = []
+    val aliases = _simple_type_aliases_for_source(source)
+    val source_ports = _simple_vhdl_source_ports_for_map(source, aliases[0], aliases[1])
+    val original_names = source_ports[0].split("\n")
+    val sanitized_names = source_ports[1].split("\n")
+    val source_lines = source_ports[2].split("\n")
     val lines = vhdl.split("\n")
     var line_no = 1
+    var source_cursor = 0
     for raw in lines:
         val line = raw.trim()
         if (line.contains(" : in ") or line.contains(" : out ")) and not line.starts_with("signal "):
@@ -215,9 +226,193 @@ fn _simple_vhdl_ports_for_source_map(vhdl: text) -> text:
             if sep.?:
                 val original_name = line.substring(0, sep.unwrap()).trim()
                 val name = if original_name.ends_with(";"): original_name.substring(0, original_name.len() - 1) else: original_name
-                entries = entries.push("{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text() + "}")
+                var source_index = _text_list_index_from(sanitized_names, name, source_cursor)
+                if source_index < 0:
+                    source_index = _text_list_index(sanitized_names, name)
+                val source_original = if source_index >= 0 and source_index < original_names.len(): original_names[source_index] else: name
+                val source_line = if source_index >= 0 and source_index < source_lines.len(): _text_to_i64(source_lines[source_index]) else: 0
+                var entry = "{\"name\":\"" + _json_escape(name) + "\",\"originalName\":\"" + _json_escape(source_original) + "\",\"sanitizedName\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text()
+                if source_line > 0:
+                    entry = entry + ",\"sourceLine\":" + source_line.to_text()
+                entry = entry + "}"
+                entries = entries.push(entry)
+                if source_index >= 0:
+                    source_cursor = source_index + 1
         line_no = line_no + 1
     entries.join(", ")
+
+fn _simple_vhdl_source_entity_line(source: text, entity_name: text) -> i64:
+    val lines = source.split("\n")
+    var line_no = 1
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("fn "):
+            val after_fn = line.substring(3).trim()
+            val name_end = after_fn.find("(")
+            if name_end.?:
+                val fn_name = after_fn.substring(0, name_end.unwrap()).trim()
+                if _simple_vhdl_identifier(fn_name) == entity_name:
+                    return line_no
+        line_no = line_no + 1
+    0
+
+fn _simple_vhdl_source_ports_for_map(source: text, alias_names: [text], alias_types: [text]) -> [[text]]:
+    var originals: [text] = []
+    var sanitized: [text] = []
+    var source_lines: [text] = []
+    val lines = source.split("\n")
+    var pending_clocked = ""
+    var pending_clocked_line = 0
+    var line_no = 1
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("@clocked("):
+            pending_clocked = _simple_decorator_payload(line, "@clocked")
+            pending_clocked_line = line_no
+        elif line.starts_with("fn "):
+            val signature = _simple_source_signature_parts(line)
+            if signature.len() == 3:
+                val params_text = signature[1]
+                val return_type = signature[2]
+                val param_result = _simple_source_port_names_from_params(params_text, line_no, alias_names, alias_types)
+                originals = originals + param_result[0]
+                sanitized = sanitized + param_result[1]
+                source_lines = source_lines + param_result[2]
+                if pending_clocked != "":
+                    val clock_result = _simple_source_clock_port_names(pending_clocked, if pending_clocked_line > 0: pending_clocked_line else: line_no)
+                    originals = originals + clock_result[0]
+                    sanitized = sanitized + clock_result[1]
+                    source_lines = source_lines + clock_result[2]
+                val return_result = _simple_source_port_names_from_return(return_type, line_no, alias_names, alias_types)
+                originals = originals + return_result[0]
+                sanitized = sanitized + return_result[1]
+                source_lines = source_lines + return_result[2]
+            pending_clocked = ""
+            pending_clocked_line = 0
+        line_no = line_no + 1
+    [originals.join("\n"), sanitized.join("\n"), source_lines.join("\n")]
+
+fn _simple_source_signature_parts(line: text) -> [text]:
+    if not line.starts_with("fn "):
+        return []
+    val after_fn = line.substring(3).trim()
+    val name_end_opt = after_fn.find("(")
+    val ret_start_opt = after_fn.find("->")
+    if not name_end_opt.? or not ret_start_opt.?:
+        return []
+    val name_end = name_end_opt.unwrap()
+    val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
+    if not params_end_opt.?:
+        return []
+    val params_end = params_end_opt.unwrap()
+    val fn_name = after_fn.substring(0, name_end).trim()
+    val params_text = after_fn.substring(name_end + 1, params_end).trim()
+    var return_type = after_fn.substring(ret_start_opt.unwrap() + 2, after_fn.len()).trim()
+    if return_type.ends_with(":"):
+        return_type = return_type.substring(0, return_type.len() - 1).trim()
+    [fn_name, params_text, return_type]
+
+fn _simple_source_port_names_from_params(params_text: text, source_line: i64, alias_names: [text], alias_types: [text]) -> [[text]]:
+    var originals: [text] = []
+    var sanitized: [text] = []
+    var lines: [text] = []
+    if params_text.trim() != "":
+        val parts = _simple_split_top_level(params_text, ",")
+        for part in parts:
+            val param = part.trim()
+            val type_sep_opt = _simple_find_top_level(param, ":")
+            if type_sep_opt.?:
+                val param_name = param.substring(0, type_sep_opt.unwrap()).trim()
+                val param_type = param.substring(type_sep_opt.unwrap() + 1, param.len()).trim()
+                if _simple_is_labeled_tuple_type_alias(param_type, alias_names, alias_types):
+                    val flattened = _simple_flatten_source_tuple_port_names(param_name, param_type, alias_names, alias_types)
+                    for name in flattened:
+                        originals = originals.push(name)
+                        sanitized = sanitized.push(_simple_param_vhdl_name(name))
+                        lines = lines.push(source_line.to_text())
+                else:
+                    originals = originals.push(param_name)
+                    sanitized = sanitized.push(_simple_param_vhdl_name(param_name))
+                    lines = lines.push(source_line.to_text())
+    [originals, sanitized, lines]
+
+fn _simple_flatten_source_tuple_port_names(prefix: text, tuple_type: text, alias_names: [text], alias_types: [text]) -> [text]:
+    var names: [text] = []
+    val labels = _simple_labeled_tuple_labels_alias(tuple_type, alias_names, alias_types)
+    val types = _simple_labeled_tuple_types_alias(tuple_type, alias_names, alias_types)
+    var i = 0
+    while i < labels.len():
+        val source_name = prefix + "." + labels[i]
+        if i < types.len() and _simple_is_labeled_tuple_type_alias(types[i], alias_names, alias_types):
+            names = names + _simple_flatten_source_tuple_port_names(source_name, types[i], alias_names, alias_types)
+        else:
+            names = names.push(source_name)
+        i = i + 1
+    names
+
+fn _simple_source_clock_port_names(clocked_text: text, source_line: i64) -> [[text]]:
+    var originals: [text] = []
+    var sanitized: [text] = []
+    var lines: [text] = []
+    val parts = _simple_split_top_level(clocked_text, ",")
+    if parts.len() >= 1 and parts[0].trim() != "":
+        val clk = parts[0].trim()
+        originals = originals.push(clk)
+        sanitized = sanitized.push(_simple_param_vhdl_name(clk))
+        lines = lines.push(source_line.to_text())
+    if parts.len() >= 2 and parts[1].trim() != "":
+        val reset_name = parts[1].trim()
+        originals = originals.push(reset_name)
+        sanitized = sanitized.push(_simple_param_vhdl_name(reset_name))
+        lines = lines.push(source_line.to_text())
+    [originals, sanitized, lines]
+
+fn _simple_source_port_names_from_return(return_type: text, source_line: i64, alias_names: [text], alias_types: [text]) -> [[text]]:
+    var originals: [text] = []
+    var sanitized: [text] = []
+    var lines: [text] = []
+    if _simple_is_labeled_tuple_type_alias(return_type, alias_names, alias_types):
+        val labels = _simple_labeled_tuple_labels_alias(return_type, alias_names, alias_types)
+        for label in labels:
+            originals = originals.push(label)
+            sanitized = sanitized.push(_simple_vhdl_identifier(label))
+            lines = lines.push(source_line.to_text())
+    else:
+        originals = originals.push("result_out")
+        sanitized = sanitized.push("result_out")
+        lines = lines.push(source_line.to_text())
+    [originals, sanitized, lines]
+
+fn _text_to_i64(value: text) -> i64:
+    var out = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if _is_decimal_digit(ch):
+            out = out * 10 + _decimal_digit_value(ch)
+        i = i + 1
+    out
+
+fn _decimal_digit_value(ch: text) -> i64:
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    0
 
 fn _json_escape(value: text) -> text:
     var out = ""
@@ -235,6 +430,47 @@ fn _json_escape(value: text) -> text:
         i = i + 1
     out
 
+fn _simple_type_aliases_for_source(source: text) -> [[text]]:
+    var names: [text] = []
+    var types: [text] = []
+    val lines = source.split("\n")
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("type "):
+            val eq_opt = line.find("=")
+            if eq_opt.?:
+                val eq_index = eq_opt.unwrap()
+                val alias_name = line.substring(5, eq_index).trim()
+                val alias_type = line.substring(eq_index + 1, line.len()).trim()
+                if alias_name != "" and alias_type != "":
+                    names = names.push(alias_name)
+                    types = types.push(alias_type)
+    [names, types]
+
+fn _simple_resolve_type_alias(type_text: text, alias_names: [text], alias_types: [text]) -> text:
+    var resolved = type_text.trim()
+    var depth = 0
+    while depth < 32:
+        val index = _text_list_index(alias_names, resolved)
+        if index < 0 or index >= alias_types.len():
+            return resolved
+        resolved = alias_types[index].trim()
+        depth = depth + 1
+    resolved
+
+fn _simple_is_labeled_tuple_type_alias(type_text: text, alias_names: [text], alias_types: [text]) -> bool:
+    _simple_is_labeled_tuple_type(_simple_resolve_type_alias(type_text, alias_names, alias_types))
+
+fn _simple_labeled_tuple_labels_alias(type_text: text, alias_names: [text], alias_types: [text]) -> [text]:
+    _simple_labeled_tuple_labels(_simple_resolve_type_alias(type_text, alias_names, alias_types))
+
+fn _simple_labeled_tuple_types_alias(type_text: text, alias_names: [text], alias_types: [text]) -> [text]:
+    var out: [text] = []
+    val types = _simple_labeled_tuple_types(_simple_resolve_type_alias(type_text, alias_names, alias_types))
+    for type_name in types:
+        out = out.push(_simple_resolve_type_alias(type_name, alias_names, alias_types))
+    out
+
 fn _file_contains_vhdl_design(path: text) -> bool:
     val content = rt_file_read_text(path) ?? ""
     val trimmed = content.trim()
@@ -246,6 +482,7 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     if unsupported_gap != "":
         return Err(unsupported_gap)
 
+    val aliases = _simple_type_aliases_for_source(source)
     val multi_result = _simple_multi_hardware_vhdl_source_to_text(source)
     if not multi_result.is_err():
         return multi_result
@@ -269,6 +506,9 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
                 i = i + 1
                 continue
             if line == "@hardware":
+                i = i + 1
+                continue
+            if line.starts_with("type "):
                 i = i + 1
                 continue
             if line.starts_with("@"):
@@ -302,14 +542,18 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     if return_type.ends_with(":"):
         return_type = return_type.substring(0, return_type.len() - 1).trim()
 
-    if _simple_is_labeled_tuple_type(return_type):
-        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, [], [], [], [], [], [])
+    if _simple_is_labeled_tuple_type_alias(return_type, aliases[0], aliases[1]):
+        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, [], [], [], [], aliases[0], aliases[1])
 
-    val return_vhdl_type = _simple_type_to_vhdl(return_type)
+    val resolved_return_type = _simple_resolve_type_alias(return_type, aliases[0], aliases[1])
+    val return_vhdl_type = _simple_type_to_vhdl(resolved_return_type)
     if return_vhdl_type == "":
+        val implicit_width_error = _simple_implicit_width_type_error(resolved_return_type, "return type `{return_type}`")
+        if implicit_width_error != "":
+            return Err(implicit_width_error)
         return Err("VHDL subset fallback unsupported return type: {return_type}")
 
-    val param_result = _simple_param_context(params_text)
+    val param_result = _simple_param_context(params_text, aliases[0], aliases[1])
     if param_result.is_err():
         return Err(param_result.unwrap_err())
     val param_ctx = param_result.unwrap()
@@ -328,7 +572,7 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
             ports = ports.push(clock_port)
     ports = ports.push("        result_out : out {return_vhdl_type}")
 
-    val expr_result = _simple_body_to_vhdl(body_lines, return_type, param_names, param_types)
+    val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
     if expr_result.is_err():
         return Err(expr_result.unwrap_err())
     val expr = expr_result.unwrap()
@@ -345,13 +589,14 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     out = out + "architecture rtl of {fn_name} is\n"
     out = out + "begin\n"
     if clocked_text != "":
-        out = out + _simple_clocked_assignment(clocked_text, "result_out", return_type, expr)
+        out = out + _simple_clocked_assignment(clocked_text, "result_out", resolved_return_type, expr)
     else:
         out = out + "    result_out <= {expr};\n"
     out = out + "end architecture rtl;\n"
     Ok(out)
 
 fn _simple_multi_hardware_vhdl_source_to_text(source: text) -> Result<text, text>:
+    val aliases = _simple_type_aliases_for_source(source)
     val parse_result = _simple_parse_vhdl_functions(source)
     if parse_result.is_err():
         return Err(parse_result.unwrap_err())
@@ -382,7 +627,7 @@ fn _simple_multi_hardware_vhdl_source_to_text(source: text) -> Result<text, text
     while i < names.len():
         if hardware_flags[i] == "hardware":
             val body_lines = if bodies[i] == "": [] else: bodies[i].split("\n")
-            val entity_result = _simple_emit_vhdl_function(names[i], params[i], returns[i], body_lines, generics[i], clocked[i], names, params, returns, hardware_flags)
+            val entity_result = _simple_emit_vhdl_function(names[i], params[i], returns[i], body_lines, generics[i], clocked[i], names, params, returns, hardware_flags, aliases[0], aliases[1])
             if entity_result.is_err():
                 return Err(entity_result.unwrap_err())
             if out != "":
@@ -411,6 +656,9 @@ fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
         val raw = lines[i]
         val line = raw.trim()
         if line == "":
+            i = i + 1
+            continue
+        if line.starts_with("type "):
             i = i + 1
             continue
         if line.starts_with("@") or line.starts_with("fn "):
@@ -474,37 +722,46 @@ fn _simple_function_record(header: text, body_lines: [text], generic_text: text,
         return_type = return_type.substring(0, return_type.len() - 1).trim()
     Ok([fn_name, params_text, return_type, body_lines.join("\n"), generic_text, clocked_text, hardware_flag])
 
-fn _simple_emit_vhdl_function(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text]) -> Result<text, text>:
-    if _simple_is_labeled_tuple_type(return_type):
-        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, [], [])
-    val return_vhdl_type = _simple_type_to_vhdl(return_type)
+fn _simple_emit_vhdl_function(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    if _simple_is_labeled_tuple_type_alias(return_type, alias_names, alias_types):
+        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    val return_vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(return_type, alias_names, alias_types))
     if return_vhdl_type == "":
+        val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(return_type, alias_names, alias_types), "return type `{return_type}`")
+        if implicit_width_error != "":
+            return Err(implicit_width_error)
         return Err("VHDL subset fallback unsupported return type: {return_type}")
     return Err("VHDL subset fallback multi-function hardware currently requires labeled tuple returns")
 
-fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], _unused_a: [text], _unused_b: [text]) -> Result<text, text>:
-    val labels = _simple_labeled_tuple_labels(return_type)
-    val return_types = _simple_labeled_tuple_types(return_type)
+fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    val labels = _simple_labeled_tuple_labels_alias(return_type, alias_names, alias_types)
+    val return_types = _simple_labeled_tuple_types_alias(return_type, alias_names, alias_types)
     if labels.len() == 0 or labels.len() != return_types.len():
         return Err("VHDL subset fallback could not parse labeled tuple return type: {return_type}")
 
-    val param_result = _simple_param_context(params_text)
+    val param_result = _simple_param_context(params_text, alias_names, alias_types)
     if param_result.is_err():
         return Err(param_result.unwrap_err())
     val param_ctx = param_result.unwrap()
     var ports = param_ctx[0].split("\n")
     var param_names = param_ctx[1].split("\n")
     var param_types = param_ctx[2].split("\n")
+    var input_port_names = param_ctx[3].split("\n")
     if param_ctx[0] == "":
         ports = []
     if param_ctx[1] == "":
         param_names = []
     if param_ctx[2] == "":
         param_types = []
+    if param_ctx[3] == "":
+        input_port_names = []
     if clocked_text != "":
         val clock_ports = _simple_clock_ports(clocked_text, param_names)
         for clock_port in clock_ports:
             ports = ports.push(clock_port)
+            val clock_port_name = _simple_port_name_from_decl(clock_port)
+            if clock_port_name != "":
+                input_port_names = input_port_names.push(clock_port_name)
 
     var sanitized: [text] = []
     var i = 0
@@ -514,15 +771,22 @@ fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: tex
             return Err("VHDL subset fallback invalid output label: {labels[i]}")
         if _text_list_contains(sanitized, port_name):
             return Err("VHDL subset fallback duplicate output label after VHDL sanitization: {labels[i]}")
-        val vhdl_type = _simple_type_to_vhdl(return_types[i])
+        val input_collision_index = _text_list_index(input_port_names, port_name)
+        if input_collision_index >= 0:
+            val input_name = if input_collision_index < param_names.len(): param_names[input_collision_index] else: port_name
+            return Err("VHDL subset fallback input/output port collision after VHDL sanitization: input `{input_name}` and output `{labels[i]}` both map to `{port_name}`")
+        val vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(return_types[i], alias_names, alias_types))
         if vhdl_type == "":
+            val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(return_types[i], alias_names, alias_types), "output `{labels[i]}` type `{return_types[i]}`")
+            if implicit_width_error != "":
+                return Err(implicit_width_error)
             return Err("VHDL subset fallback unsupported output type: {return_types[i]}")
         sanitized = sanitized.push(port_name)
         val suffix = if i == labels.len() - 1: "" else: ";"
         ports = ports.push("        {port_name} : out {vhdl_type}{suffix}")
         i = i + 1
 
-    val lowering_result = _simple_labeled_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags)
+    val lowering_result = _simple_labeled_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
     if lowering_result.is_err():
         return Err(lowering_result.unwrap_err())
     val lowering = lowering_result.unwrap()
@@ -556,7 +820,7 @@ fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: tex
     out = out + "end architecture rtl;\n"
     Ok(out)
 
-fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names: [text], return_types: [text], param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text]) -> Result<[text], text>:
+fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names: [text], return_types: [text], param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     var local_names: [text] = []
     var local_field_names: [text] = []
     var local_field_types: [text] = []
@@ -570,7 +834,7 @@ fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names:
         if trimmed == "":
             continue
         if trimmed.starts_with("val "):
-            val call_result = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags)
+            val call_result = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
             if call_result.is_err():
                 return Err(call_result.unwrap_err())
             val lowered = call_result.unwrap()
@@ -598,7 +862,7 @@ fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names:
         return Err(assignment_result.unwrap_err())
     Ok([signal_decls.join("\n") + if signal_decls.len() > 0: "\n" else: "", instances.join(""), assignment_result.unwrap()])
 
-fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text]) -> Result<[text], text>:
+fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     val eq_opt = line.find("=")
     if not eq_opt.?:
         return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
@@ -614,12 +878,12 @@ fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names:
     if callee_index < 0 or hardware_flags[callee_index] != "hardware":
         return Err("VHDL subset fallback unsupported call to non-hardware function: {callee_name}")
     val callee_return = all_returns[callee_index]
-    if not _simple_is_labeled_tuple_type(callee_return):
+    if not _simple_is_labeled_tuple_type_alias(callee_return, alias_names, alias_types):
         return Err("VHDL subset fallback hardware local call requires labeled tuple callee return")
 
-    val callee_labels = _simple_labeled_tuple_labels(callee_return)
-    val callee_types = _simple_labeled_tuple_types(callee_return)
-    val callee_param_result = _simple_param_context(all_params[callee_index])
+    val callee_labels = _simple_labeled_tuple_labels_alias(callee_return, alias_names, alias_types)
+    val callee_types = _simple_labeled_tuple_types_alias(callee_return, alias_names, alias_types)
+    val callee_param_result = _simple_param_context(all_params[callee_index], alias_names, alias_types)
     if callee_param_result.is_err():
         return Err(callee_param_result.unwrap_err())
     val callee_param_ctx = callee_param_result.unwrap()
@@ -645,8 +909,11 @@ fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names:
     while i < callee_labels.len():
         val source_field = local_name + "." + callee_labels[i]
         val signal_name = _simple_param_vhdl_name(source_field)
-        val vhdl_type = _simple_type_to_vhdl(callee_types[i])
+        val vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(callee_types[i], alias_names, alias_types))
         if vhdl_type == "":
+            val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(callee_types[i], alias_names, alias_types), "hardware call output `{callee_labels[i]}` type `{callee_types[i]}`")
+            if implicit_width_error != "":
+                return Err(implicit_width_error)
             return Err("VHDL subset fallback unsupported hardware call output type: {callee_types[i]}")
         signal_decls = signal_decls.push("    signal {signal_name} : {vhdl_type};")
         field_names = field_names.push(source_field)
@@ -812,6 +1079,14 @@ fn _text_list_index(items: [text], item: text) -> i64:
         i = i + 1
     -1
 
+fn _text_list_index_from(items: [text], item: text, start: i64) -> i64:
+    var i = start
+    while i < items.len():
+        if items[i] == item:
+            return i
+        i = i + 1
+    -1
+
 fn _simple_if_block_to_vhdl(lines: [text], result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     val first = lines[0]
     if not first.starts_with("if "):
@@ -873,6 +1148,16 @@ fn _simple_type_to_vhdl(type_name: text) -> text:
         case "bool": "std_logic"
         case _: ""
 
+fn _simple_implicit_width_type_error(type_name: text, context: text) -> text:
+    val trimmed = type_name.trim()
+    if _simple_is_implicit_width_integer_type(trimmed):
+        return "VHDL Python-HDL parity gap: unsupported implicit-width integer type `{trimmed}` in source facade {context}; use explicit fixed-width i8/i16/i32/i64 or u8/u16/u32/u64"
+    ""
+
+fn _simple_is_implicit_width_integer_type(type_name: text) -> bool:
+    val lowered = type_name.trim().lower()
+    lowered == "int" or lowered == "uint" or lowered == "integer" or lowered == "usize" or lowered == "isize"
+
 fn _simple_expr_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     val trimmed = expr.trim()
     if _simple_is_wrapped_parenthesized(trimmed):
@@ -882,6 +1167,8 @@ fn _simple_expr_to_vhdl(expr: text, result_type: text, param_names: [text], para
         return inline_if_result
     val cast_result = _simple_cast_to_vhdl(trimmed, result_type, param_names, param_types)
     if not cast_result.is_err():
+        return cast_result
+    if trimmed.contains(" as "):
         return cast_result
     val slice_result = _simple_slice_to_vhdl(trimmed, result_type, param_names, param_types)
     if not slice_result.is_err():
@@ -1189,6 +1476,9 @@ fn _simple_cast_to_vhdl(expr: text, result_type: text, param_names: [text], para
             return Ok("'1' when {source_text} /= to_signed(0, {source_width}) else '0'")
         return Err("VHDL subset fallback unsupported cast source type: {source_type}")
     if target_width == "":
+        val implicit_width_error = _simple_implicit_width_type_error(target_type, "cast target type `{target_type}`")
+        if implicit_width_error != "":
+            return Err(implicit_width_error)
         return Err("VHDL subset fallback unsupported cast target type: {target_type}")
     if source_type == "bool":
         if target_type.starts_with("u"):
@@ -1414,7 +1704,7 @@ fn _simple_generic_default_to_vhdl(value: text, type_name: text) -> text:
             return "false"
     trimmed
 
-fn _simple_param_context(params_text: text) -> Result<[text], text>:
+fn _simple_param_context(params_text: text, alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     var ports: [text] = []
     var param_names: [text] = []
     var param_types: [text] = []
@@ -1429,8 +1719,9 @@ fn _simple_param_context(params_text: text) -> Result<[text], text>:
             val type_sep = type_sep_opt.unwrap()
             val param_name = param.substring(0, type_sep).trim()
             val param_type = param.substring(type_sep + 1, param.len()).trim()
-            if _simple_is_labeled_tuple_type(param_type):
-                val flatten_result = _simple_flatten_tuple_param(param_name, param_type)
+            val resolved_param_type = _simple_resolve_type_alias(param_type, alias_names, alias_types)
+            if _simple_is_labeled_tuple_type_alias(param_type, alias_names, alias_types):
+                val flatten_result = _simple_flatten_tuple_param(param_name, param_type, alias_names, alias_types)
                 if flatten_result.is_err():
                     return Err(flatten_result.unwrap_err())
                 val flattened = flatten_result.unwrap()
@@ -1451,8 +1742,11 @@ fn _simple_param_context(params_text: text) -> Result<[text], text>:
                     i = i + 1
             else:
                 val port_name = _simple_param_vhdl_name(param_name)
-                val vhdl_type = _simple_type_to_vhdl(param_type)
+                val vhdl_type = _simple_type_to_vhdl(resolved_param_type)
                 if vhdl_type == "":
+                    val implicit_width_error = _simple_implicit_width_type_error(resolved_param_type, "parameter `{param_name}` type `{param_type}`")
+                    if implicit_width_error != "":
+                        return Err(implicit_width_error)
                     return Err("VHDL subset fallback unsupported parameter type: {param_type}")
                 val collision_index = _text_list_index(port_names, port_name)
                 if collision_index >= 0:
@@ -1460,12 +1754,19 @@ fn _simple_param_context(params_text: text) -> Result<[text], text>:
                 ports = ports.push("        {port_name} : in {vhdl_type};")
                 port_names = port_names.push(port_name)
                 param_names = param_names.push(param_name)
-                param_types = param_types.push(param_type)
-    Ok([ports.join("\n"), param_names.join("\n"), param_types.join("\n")])
+                param_types = param_types.push(resolved_param_type)
+    Ok([ports.join("\n"), param_names.join("\n"), param_types.join("\n"), port_names.join("\n")])
 
-fn _simple_flatten_tuple_param(prefix: text, tuple_type: text) -> Result<[text], text>:
-    val labels = _simple_labeled_tuple_labels(tuple_type)
-    val types = _simple_labeled_tuple_types(tuple_type)
+fn _simple_port_name_from_decl(port_decl: text) -> text:
+    val trimmed = port_decl.trim()
+    val sep = trimmed.find(":")
+    if not sep.?:
+        return ""
+    trimmed.substring(0, sep.unwrap()).trim()
+
+fn _simple_flatten_tuple_param(prefix: text, tuple_type: text, alias_names: [text], alias_types: [text]) -> Result<[text], text>:
+    val labels = _simple_labeled_tuple_labels_alias(tuple_type, alias_names, alias_types)
+    val types = _simple_labeled_tuple_types_alias(tuple_type, alias_names, alias_types)
     if labels.len() == 0 or labels.len() != types.len():
         return Err("VHDL subset fallback could not parse tuple parameter type: {tuple_type}")
 
@@ -1475,8 +1776,9 @@ fn _simple_flatten_tuple_param(prefix: text, tuple_type: text) -> Result<[text],
     while i < labels.len():
         val source_name = prefix + "." + labels[i]
         val field_type = types[i]
-        if _simple_is_labeled_tuple_type(field_type):
-            val child_result = _simple_flatten_tuple_param(source_name, field_type)
+        val resolved_field_type = _simple_resolve_type_alias(field_type, alias_names, alias_types)
+        if _simple_is_labeled_tuple_type_alias(field_type, alias_names, alias_types):
+            val child_result = _simple_flatten_tuple_param(source_name, field_type, alias_names, alias_types)
             if child_result.is_err():
                 return Err(child_result.unwrap_err())
             val child = child_result.unwrap()
@@ -1488,11 +1790,14 @@ fn _simple_flatten_tuple_param(prefix: text, tuple_type: text) -> Result<[text],
                 flat_types = flat_types.push(child_types[child_i])
                 child_i = child_i + 1
         else:
-            val vhdl_type = _simple_type_to_vhdl(field_type)
+            val vhdl_type = _simple_type_to_vhdl(resolved_field_type)
             if vhdl_type == "":
+                val implicit_width_error = _simple_implicit_width_type_error(resolved_field_type, "tuple field `{source_name}` type `{field_type}`")
+                if implicit_width_error != "":
+                    return Err(implicit_width_error)
                 return Err("VHDL subset fallback unsupported tuple parameter field type: {field_type}")
             names = names.push(source_name)
-            flat_types = flat_types.push(field_type)
+            flat_types = flat_types.push(resolved_field_type)
         i = i + 1
     Ok([names.join("\n"), flat_types.join("\n")])
 

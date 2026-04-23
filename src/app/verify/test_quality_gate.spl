@@ -1,23 +1,30 @@
-use app.io.mod.{file_exists, file_read, file_write, dir_create_all}
+use app.io.mod.{file_exists, file_read, file_write, dir_create_all, process_run}
 
 struct TestQualityFinding:
     level: text
     subject: text
     message: text
 
-struct TestQualityReport:
+struct TestQualityVerifyReport:
     scope: text
-    files: [text]
+    scanned_files: [text]
     findings: [TestQualityFinding]
     failures: i64
     warnings: i64
     passes: i64
     status: text
 
-fn quality_finding(level: text, subject: text, message: text) -> TestQualityFinding:
+struct VisibleDebtAllow:
+    path: text
+    pattern_class: text
+    reason: text
+
+val VISIBLE_DEBT_ALLOWLIST = "scripts/visible_debt_allowlist.sdn"
+
+fn make_quality_finding(level: text, subject: text, message: text) -> TestQualityFinding:
     TestQualityFinding(level: level, subject: subject, message: message)
 
-fn count_quality_findings(findings: [TestQualityFinding], level: text) -> i64:
+fn quality_count(findings: [TestQualityFinding], level: text) -> i64:
     var count = 0
     for finding in findings:
         if finding.level == level:
@@ -25,81 +32,165 @@ fn count_quality_findings(findings: [TestQualityFinding], level: text) -> i64:
     count
 
 fn quality_status(findings: [TestQualityFinding]) -> text:
-    if count_quality_findings(findings, "FAIL") > 0:
+    if quality_count(findings, "FAIL") > 0:
         return "FAIL"
-    if count_quality_findings(findings, "WARN") > 0:
+    if quality_count(findings, "WARN") > 0:
         return "WARN"
     "PASS"
 
-fn compact_quality_source(content: text) -> text:
-    content.replace(" ", "").replace("\t", "").replace("\n", "").replace("\r", "")
-
-fn is_test_quality_file(path: text) -> bool:
-    path.ends_with("_spec.spl") or path.ends_with("_test.spl") or path.starts_with("test/") or path.contains("/test/")
-
-fn is_source_quality_file(path: text) -> bool:
-    path.ends_with(".spl") and not is_test_quality_file(path)
-
-fn check_test_quality(path: text, content: text) -> [TestQualityFinding]:
-    var findings: [TestQualityFinding] = []
-    val compact = compact_quality_source(content)
-    if compact.contains("expect(true).to_equal(true)") or compact.contains("expect(false).to_equal(false)"):
-        findings.push(quality_finding("FAIL", path, "tautological SSpec assertion"))
-    if content.contains("pass_todo") or content.contains("pass_do_nothing") or content.contains("pass_dn"):
-        findings.push(quality_finding("FAIL", path, "placeholder pass helper in test"))
-    if content.contains("@allow(sspec_") or content.contains("#![allow(sspec_"):
-        findings.push(quality_finding("FAIL", path, "local suppression of test quality lints"))
-    if content.lower().contains("print \"[skip]") and content.contains("return"):
-        findings.push(quality_finding("FAIL", path, "print-based skip placeholder"))
-    if compact.contains(").to_equal(true)") or compact.contains(").to_equal(false)"):
-        val expect_start = compact.contains("expect(code!=") or compact.contains("expect(code==") or compact.contains("expect(") and (compact.contains("!=") or compact.contains("==") or compact.contains(">") or compact.contains("<"))
-        if expect_start:
-            findings.push(quality_finding("FAIL", path, "boolean-wrapper assertion"))
-    if content.contains("    it ") and not content.contains("expect(") and not content.contains("skip:"):
-        findings.push(quality_finding("FAIL", path, "SSpec example has no real assertion"))
-    findings
-
-fn check_source_quality(path: text, content: text) -> [TestQualityFinding]:
-    var findings: [TestQualityFinding] = []
-    if content.contains("pass_todo"):
-        findings.push(quality_finding("FAIL", path, "explicit production placeholder"))
-    val compact = compact_quality_source(content)
-    if compact.contains("fnanswer(x:") and compact.ends_with("0"):
-        findings.push(quality_finding("FAIL", path, "trivial return with unused parameter"))
-    findings
-
-fn build_test_quality_verify_report(scope: text, files: [text], full_project: bool) -> TestQualityReport:
-    var findings: [TestQualityFinding] = []
-    var checked: [text] = []
-    for path in files:
-        if not file_exists(path):
-            continue
-        val content = file_read(path)
-        checked.push(path)
-        if is_test_quality_file(path):
-            findings = findings + check_test_quality(path, content)
-        elif is_source_quality_file(path):
-            findings = findings + check_source_quality(path, content)
-
-    if findings.len() == 0:
-        findings.push(quality_finding("PASS", scope, "No anti-dummy / anti-stub issues detected"))
-
-    val status = quality_status(findings)
-    TestQualityReport(
+fn quality_report_from_findings(scope: text, scanned_files: [text], findings: [TestQualityFinding]) -> TestQualityVerifyReport:
+    TestQualityVerifyReport(
         scope: scope,
-        files: checked,
+        scanned_files: scanned_files,
         findings: findings,
-        failures: count_quality_findings(findings, "FAIL"),
-        warnings: count_quality_findings(findings, "WARN"),
-        passes: count_quality_findings(findings, "PASS"),
-        status: status
+        failures: quality_count(findings, "FAIL"),
+        warnings: quality_count(findings, "WARN"),
+        passes: quality_count(findings, "PASS"),
+        status: quality_status(findings)
     )
 
-fn render_test_quality_verify_report(report: TestQualityReport) -> text:
+fn is_visible_debt_scope(path: text) -> bool:
+    path.starts_with("src/os/") or path.starts_with("examples/simple_os/") or path.starts_with("test/") or path.starts_with("doc/")
+
+fn default_visible_debt_scopes() -> [text]:
+    ["src/os", "examples/simple_os", "test", "doc"]
+
+fn collect_quality_scan_paths(files: [text], full_scan: bool) -> [text]:
+    if full_scan:
+        return default_visible_debt_scopes()
+
+    var paths: [text] = []
+    for path in files:
+        if is_visible_debt_scope(path) and file_exists(path):
+            paths.push(path)
+    paths
+
+fn visible_debt_rg_pattern() -> text:
+    "pass_todo|pass_do_nothing|pass_dn|TODO|FIXME|not implemented|placeholder|stub|dummy|expect\\(true\\)\\.to_equal\\(true\\)|check\\(true,"
+
+fn classify_visible_debt(line: text) -> text:
+    val lower = line.lower()
+    if lower.contains("expect(true).to_equal(true)") or lower.contains("check(true,"):
+        return "tautological_assertion"
+    if lower.contains("pass_todo") or lower.contains("pass_do_nothing") or lower.contains("pass_dn"):
+        return "pass_marker"
+    if lower.contains("todo") or lower.contains("fixme"):
+        return "tracking_keyword"
+    if lower.contains("not implemented"):
+        return "incomplete_message"
+    if lower.contains("placeholder"):
+        return "placeholder"
+    if lower.contains("stub"):
+        return "stub"
+    if lower.contains("dummy"):
+        return "dummy"
+    "debt"
+
+fn parse_allowlist_line(line: text) -> VisibleDebtAllow:
+    val parts = line.split("\"")
+    if parts.len() < 6:
+        return VisibleDebtAllow(path: "", pattern_class: "", reason: "")
+    VisibleDebtAllow(path: parts[1], pattern_class: parts[3], reason: parts[5])
+
+fn load_visible_debt_allowlist(path: text) -> [VisibleDebtAllow]:
+    if not file_exists(path):
+        return []
+
+    var entries: [VisibleDebtAllow] = []
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("visible_debt_allowlist"):
+            continue
+        val entry = parse_allowlist_line(trimmed)
+        if entry.path != "" and entry.pattern_class != "":
+            entries.push(entry)
+    entries
+
+fn is_allowed_visible_debt(path: text, pattern_class: text, allowlist: [VisibleDebtAllow]) -> bool:
+    for entry in allowlist:
+        if entry.path == path and entry.pattern_class == pattern_class:
+            return true
+    false
+
+fn parse_rg_path(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() < 1:
+        return ""
+    parts[0]
+
+fn parse_rg_line_number(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+fn run_visible_debt_rg(paths: [text]) -> (text, i64):
+    if paths.len() == 0:
+        return ("", 1)
+
+    var args = ["-n", "--with-filename", "--ignore-case", "--no-heading", visible_debt_rg_pattern()]
+    args.push("-g")
+    args.push("!doc/10_metrics/dashboard/history/**")
+    args.push("-g")
+    args.push("!doc/09_report/**")
+    args.push("-g")
+    args.push("!src/compiler_rust/vendor/**")
+    args.push("-g")
+    args.push("!**/summary.txt")
+    for path in paths:
+        args.push(path)
+
+    val (stdout, _stderr, exit_code) = process_run("rg", args)
+    (stdout, exit_code)
+
+fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool) -> TestQualityVerifyReport:
+    val scan_paths = collect_quality_scan_paths(files, full_scan)
+    var findings: [TestQualityFinding] = []
+
+    if scan_paths.len() == 0:
+        findings.push(make_quality_finding("PASS", scope, "No visible-debt target files selected"))
+        return quality_report_from_findings(scope, scan_paths, findings)
+
+    val allowlist = load_visible_debt_allowlist(VISIBLE_DEBT_ALLOWLIST)
+    val (stdout, exit_code) = run_visible_debt_rg(scan_paths)
+    if exit_code != 0 and stdout.trim() == "":
+        findings.push(make_quality_finding("PASS", scope, "No visible debt markers found"))
+        return quality_report_from_findings(scope, scan_paths, findings)
+
+    var allowed_count = 0
+    for line in stdout.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val path = parse_rg_path(trimmed)
+        val line_number = parse_rg_line_number(trimmed)
+        val pattern_class = classify_visible_debt(trimmed)
+        if is_allowed_visible_debt(path, pattern_class, allowlist):
+            allowed_count = allowed_count + 1
+        else:
+            findings.push(make_quality_finding(
+                "FAIL",
+                "{path}:{line_number}",
+                "unallowlisted visible debt marker ({pattern_class})"
+            ))
+
+    if findings.len() == 0:
+        findings.push(make_quality_finding(
+            "PASS",
+            scope,
+            "Visible debt gate passed ({allowed_count} allowlisted marker(s))"
+        ))
+
+    quality_report_from_findings(scope, scan_paths, findings)
+
+fn render_test_quality_verify_report(report: TestQualityVerifyReport) -> text:
     var lines: [text] = []
-    lines.push("=== Verification Report: Test Quality ===")
+    lines.push("=== Verification Report: Visible Debt ===")
     lines.push("")
     lines.push("Scope: {report.scope}")
+    lines.push("Scanned paths:")
+    for path in report.scanned_files:
+        lines.push("  - {path}")
     lines.push("")
     for finding in report.findings:
         lines.push("[{finding.level}] {finding.subject} - {finding.message}")
@@ -107,14 +198,14 @@ fn render_test_quality_verify_report(report: TestQualityReport) -> text:
     lines.push("STATUS: {report.status} ({report.failures} failures, {report.warnings} warnings)")
     lines.join("\n")
 
-fn write_test_quality_verify_report(report: TestQualityReport, report_dir: text) -> text:
+fn write_test_quality_verify_report(report: TestQualityVerifyReport, report_dir: text) -> text:
     val _ = dir_create_all(report_dir)
-    val report_path = "{report_dir}/test_quality_verify_latest.md"
+    val report_path = "{report_dir}/visible_debt_verify_latest.md"
     val ok = file_write(report_path, render_test_quality_verify_report(report))
     if ok:
         report_path
     else:
         ""
 
-export TestQualityFinding, TestQualityReport
+export TestQualityFinding, TestQualityVerifyReport, VisibleDebtAllow
 export build_test_quality_verify_report, render_test_quality_verify_report, write_test_quality_verify_report

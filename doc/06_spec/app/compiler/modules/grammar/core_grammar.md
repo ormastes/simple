@@ -43,9 +43,9 @@
 | `in` | control_flow | seed | Membership / iteration operator |  |
 | `loop` | control_flow | core | Infinite loop |  |
 | `pass` | control_flow | seed | No-op placeholder |  |
-| `pass_todo` | control_flow | seed | Unimplemented placeholder (TODO) |  |
-| `pass_do_nothing` | control_flow | seed | Intentional no-op |  |
-| `pass_dn` | control_flow | seed | Alias for pass_do_nothing |  |
+| `pass_todo` | control_flow | seed | Unimplemented placeholder with rationale | `pass_todo("what remains", "hint or issue")` |
+| `pass_do_nothing` | control_flow | seed | Intentional no-op with rationale | `pass_do_nothing("why no-op is correct")` |
+| `pass_dn` | control_flow | seed | Alias for pass_do_nothing | `pass_dn("why no-op is correct")` |
 | `and` | control_flow | seed | Logical AND | `if a and b: ...` |
 | `or` | control_flow | seed | Logical OR |  |
 | `not` | control_flow | seed | Logical NOT |  |

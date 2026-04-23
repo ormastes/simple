@@ -46,6 +46,12 @@ fn parse_static_mut_statement() {
     assert!(matches!(&items[0], Node::Static(_)));
 }
 
+#[test]
+fn parse_pass_todo_two_rationale_strings() {
+    let items = parse("pass_todo(\"implement retry backoff\", \"tracked by SIMPLE-123\")");
+    assert!(matches!(&items[0], Node::Pass(_)));
+}
+
 // Main binding
 #[test]
 fn parse_main_binding() {

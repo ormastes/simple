@@ -1,0 +1,238 @@
+# VHDL memory template renderer.
+#
+# Callers pass already-sanitized names and VHDL type/value expressions. This IR
+# keeps synthesis-template policy explicit so the backend does not silently infer
+# vendor-dependent RAM read-during-write behavior.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+enum VhdlReadDuringWritePolicy:
+    ReadFirst
+    WriteFirst
+    NoChange
+    Ambiguous(reason: text)
+
+struct VhdlMemoryTemplateDiagnostic:
+    code: text
+    message: text
+
+struct VhdlMemoryTemplateArtifact:
+    template_name: text
+    declarations: text
+    body: text
+    vhdl: text
+
+struct VhdlStaticRomTemplate:
+    name: text
+    type_name: text
+    data_type: text
+    depth: i64
+    values: [text]
+    default_value: text
+
+struct VhdlRegisteredRomReadTemplate:
+    name: text
+    type_name: text
+    data_type: text
+    depth: i64
+    values: [text]
+    default_value: text
+    clock: text
+    address: text
+    data_out: text
+
+struct VhdlSinglePortSyncRamTemplate:
+    name: text
+    type_name: text
+    data_type: text
+    depth: i64
+    clock: text
+    write_enable: text
+    address: text
+    write_data: text
+    read_data: text
+    initial_value: text
+    read_during_write: VhdlReadDuringWritePolicy
+
+struct VhdlConstrainedSignalMemoryTemplate:
+    name: text
+    type_name: text
+    data_type: text
+    depth: i64
+    initial_value: text?
+
+fn memory_template_diagnostic(code: text, message: text) -> VhdlMemoryTemplateDiagnostic:
+    VhdlMemoryTemplateDiagnostic(code: code, message: message)
+
+fn address_index(address: text) -> text:
+    "to_integer(unsigned({address}))"
+
+fn validate_constrained_memory_shape(name: text, depth: i64, data_type: text) -> Result<(), VhdlMemoryTemplateDiagnostic>:
+    if depth <= 0:
+        return Err(memory_template_diagnostic(
+            "VHDL-MEM-UNCONSTRAINED",
+            "Memory {name} must have a concrete positive depth before VHDL emission"
+        ))
+    if data_type.contains("array ("):
+        return Err(memory_template_diagnostic(
+            "VHDL-MEM-GENERAL",
+            "Memory {name} has nested or general array element type `{data_type}`; constrained nested memory lowering is not implemented"
+        ))
+    Ok(())
+
+fn render_rom_declarations(name: text, type_name: text, data_type: text, depth: i64, values: [text], default_value: text) -> text:
+    val builder = VhdlBuilder.create(name)
+    builder.emit_type_decl(type_name, "array (0 to {depth - 1}) of {data_type}")
+    builder.emit_line("constant {name} : {type_name} := (")
+    builder.indent_level = builder.indent_level + 1
+    var index = 0
+    for value in values:
+        builder.emit_line("{index} => {value},")
+        index = index + 1
+    builder.emit_line("others => {default_value}")
+    builder.indent_level = builder.indent_level - 1
+    builder.emit_line(");")
+    builder.build()
+
+fn render_static_rom_template(template: VhdlStaticRomTemplate) -> Result<VhdlMemoryTemplateArtifact, VhdlMemoryTemplateDiagnostic>:
+    """Render a synthesizable static ROM declaration template."""
+    val shape_result = validate_constrained_memory_shape(template.name, template.depth, template.data_type)
+    if shape_result.is_err():
+        return Err(shape_result.unwrap_err())
+    if template.values.len() > template.depth:
+        return Err(memory_template_diagnostic("VHDL-MEM-INIT", "ROM initializer has more values than depth for {template.name}"))
+
+    val declarations = render_rom_declarations(
+        template.name,
+        template.type_name,
+        template.data_type,
+        template.depth,
+        template.values,
+        template.default_value
+    )
+    Ok(VhdlMemoryTemplateArtifact(
+        template_name: template.name,
+        declarations: declarations,
+        body: "",
+        vhdl: declarations
+    ))
+
+fn render_registered_rom_read_template(template: VhdlRegisteredRomReadTemplate) -> Result<VhdlMemoryTemplateArtifact, VhdlMemoryTemplateDiagnostic>:
+    """Render a static ROM plus registered synchronous read process."""
+    val shape_result = validate_constrained_memory_shape(template.name, template.depth, template.data_type)
+    if shape_result.is_err():
+        return Err(shape_result.unwrap_err())
+    if template.values.len() > template.depth:
+        return Err(memory_template_diagnostic("VHDL-MEM-INIT", "ROM initializer has more values than depth for {template.name}"))
+
+    val declarations = render_rom_declarations(
+        template.name,
+        template.type_name,
+        template.data_type,
+        template.depth,
+        template.values,
+        template.default_value
+    )
+
+    val builder = VhdlBuilder.create("{template.name}_read")
+    builder.emit_clocked_process_begin(Some("{template.name}_read"), template.clock, nil)
+    builder.emit_process_body_begin()
+    builder.emit_rising_edge_check(template.clock)
+    builder.emit_signal_assign(template.data_out, "{template.name}({address_index(template.address)})")
+    builder.emit_if_end()
+    builder.emit_process_end(Some("{template.name}_read"))
+    val body = builder.build()
+
+    Ok(VhdlMemoryTemplateArtifact(
+        template_name: template.name,
+        declarations: declarations,
+        body: body,
+        vhdl: "{declarations}\n\n{body}"
+    ))
+
+fn render_single_port_sync_ram_template(template: VhdlSinglePortSyncRamTemplate) -> Result<VhdlMemoryTemplateArtifact, VhdlMemoryTemplateDiagnostic>:
+    """Render a single-port synchronous RAM with explicit read-during-write policy."""
+    val shape_result = validate_constrained_memory_shape(template.name, template.depth, template.data_type)
+    if shape_result.is_err():
+        return Err(shape_result.unwrap_err())
+
+    match template.read_during_write:
+        case Ambiguous(reason):
+            return Err(memory_template_diagnostic(
+                "VHDL-MEM-RDW-AMBIGUOUS",
+                "Ambiguous read-during-write policy for {template.name}: {reason}"
+            ))
+        case ReadFirst:
+            pass
+        case WriteFirst:
+            pass
+        case NoChange:
+            pass
+
+    val declarations_builder = VhdlBuilder.create(template.name)
+    declarations_builder.emit_type_decl(template.type_name, "array (0 to {template.depth - 1}) of {template.data_type}")
+    declarations_builder.emit_signal_decl(template.name, template.type_name, Some("(others => {template.initial_value})"))
+    val declarations = declarations_builder.build()
+
+    val builder = VhdlBuilder.create("{template.name}_rw")
+    builder.emit_clocked_process_begin(Some("{template.name}_rw"), template.clock, nil)
+    builder.emit_process_body_begin()
+    builder.emit_rising_edge_check(template.clock)
+
+    val index_expr = address_index(template.address)
+    match template.read_during_write:
+        case ReadFirst:
+            builder.emit_signal_assign(template.read_data, "{template.name}({index_expr})")
+            builder.emit_if_begin("{template.write_enable} = '1'")
+            builder.emit_signal_assign("{template.name}({index_expr})", template.write_data)
+            builder.emit_if_end()
+        case WriteFirst:
+            builder.emit_if_begin("{template.write_enable} = '1'")
+            builder.emit_signal_assign("{template.name}({index_expr})", template.write_data)
+            builder.emit_signal_assign(template.read_data, template.write_data)
+            builder.emit_else()
+            builder.emit_signal_assign(template.read_data, "{template.name}({index_expr})")
+            builder.emit_if_end()
+        case NoChange:
+            builder.emit_if_begin("{template.write_enable} = '1'")
+            builder.emit_signal_assign("{template.name}({index_expr})", template.write_data)
+            builder.emit_else()
+            builder.emit_signal_assign(template.read_data, "{template.name}({index_expr})")
+            builder.emit_if_end()
+        case Ambiguous(reason):
+            return Err(memory_template_diagnostic(
+                "VHDL-MEM-RDW-AMBIGUOUS",
+                "Ambiguous read-during-write policy for {template.name}: {reason}"
+            ))
+
+    builder.emit_if_end()
+    builder.emit_process_end(Some("{template.name}_rw"))
+    val body = builder.build()
+
+    Ok(VhdlMemoryTemplateArtifact(
+        template_name: template.name,
+        declarations: declarations,
+        body: body,
+        vhdl: "{declarations}\n\n{body}"
+    ))
+
+fn render_constrained_signal_memory_template(template: VhdlConstrainedSignalMemoryTemplate) -> Result<VhdlMemoryTemplateArtifact, VhdlMemoryTemplateDiagnostic>:
+    """Render a named fixed-depth memory type and signal declaration."""
+    val shape_result = validate_constrained_memory_shape(template.name, template.depth, template.data_type)
+    if shape_result.is_err():
+        return Err(shape_result.unwrap_err())
+
+    val builder = VhdlBuilder.create(template.name)
+    builder.emit_type_decl(template.type_name, "array (0 to {template.depth - 1}) of {template.data_type}")
+    if template.initial_value.?:
+        builder.emit_signal_decl(template.name, template.type_name, Some("(others => {template.initial_value.unwrap()})"))
+    else:
+        builder.emit_signal_decl(template.name, template.type_name, nil)
+    val declarations = builder.build()
+
+    Ok(VhdlMemoryTemplateArtifact(
+        template_name: template.name,
+        declarations: declarations,
+        body: "",
+        vhdl: declarations
+    ))

@@ -251,7 +251,14 @@ impl LintChecker {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();
-                        if let Some(lint) = LintName::from_str(lint_name) {
+                        if lint_name == "required_comment" {
+                            self.config.set_level(LintName::RequiredCommentPass, LintLevel::Allow);
+                            self.config
+                                .set_level(LintName::RequiredCommentDangerous, LintLevel::Allow);
+                            self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Allow);
+                            self.config
+                                .set_level(LintName::RequiredCommentWildcard, LintLevel::Allow);
+                        } else if let Some(lint) = LintName::from_str(lint_name) {
                             self.config.set_level(lint, LintLevel::Allow);
                         }
                     }
@@ -260,7 +267,14 @@ impl LintChecker {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();
-                        if let Some(lint) = LintName::from_str(lint_name) {
+                        if lint_name == "required_comment" {
+                            self.config.set_level(LintName::RequiredCommentPass, LintLevel::Deny);
+                            self.config
+                                .set_level(LintName::RequiredCommentDangerous, LintLevel::Deny);
+                            self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Deny);
+                            self.config
+                                .set_level(LintName::RequiredCommentWildcard, LintLevel::Deny);
+                        } else if let Some(lint) = LintName::from_str(lint_name) {
                             self.config.set_level(lint, LintLevel::Deny);
                         }
                     }
@@ -269,7 +283,14 @@ impl LintChecker {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();
-                        if let Some(lint) = LintName::from_str(lint_name) {
+                        if lint_name == "required_comment" {
+                            self.config.set_level(LintName::RequiredCommentPass, LintLevel::Warn);
+                            self.config
+                                .set_level(LintName::RequiredCommentDangerous, LintLevel::Warn);
+                            self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Warn);
+                            self.config
+                                .set_level(LintName::RequiredCommentWildcard, LintLevel::Warn);
+                        } else if let Some(lint) = LintName::from_str(lint_name) {
                             self.config.set_level(lint, LintLevel::Warn);
                         }
                     }

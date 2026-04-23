@@ -111,6 +111,9 @@ fn _emit_desktop_driver_summary():
         if line != "":
             serial_println(line)
 
+fn _canonical_e2e_app_path(app: text) -> text:
+    "/sys/apps/{app}"
+
 fn _paint_probe_scene(include_apps: bool):
     # Deterministic VGA-visible probe scene for framebuffer specs.
     # The full shell/compositor path is still exercised by the serial lane,
@@ -149,9 +152,8 @@ fn _latest_launcher_pid() -> u64:
 
 fn _log_process_backing(app: text, pid: u64):
     if launcher_process_is_process_backed(pid):
+        serial_println("[launcher] process-backed app_id={_canonical_e2e_app_path(app)} pid={pid}")
         serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
-    elif launcher_process_uses_resident_manifest(pid):
-        serial_println("[desktop-e2e] process-backed:resident app={app} pid={pid}")
     else:
         serial_println("[desktop-e2e] process-backed:unknown app={app} pid={pid}")
 
@@ -159,10 +161,7 @@ fn _materialize_or_mark_resident(shell: DesktopShell, title: text, app: text, pi
     if pid == 0:
         return false
     if g_desktop_e2e_vfs_mounted:
-        serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
-        return true
-    if _is_manifest_fallback_pid(pid):
-        serial_println("[desktop-e2e] process-backed:resident app={app} pid={pid}")
+        _log_process_backing(app, pid)
         return true
     if launcher_process_is_process_backed(pid):
         _log_process_backing(app, pid)
@@ -417,6 +416,10 @@ fn desktop_e2e_main() -> bool:
     # beyond a ~2s delay between desktop-ready and shortcut:ok.
     _paint_settle()
     serial_println("[desktop-e2e] paint-settle:done")
+    if not g_desktop_e2e_vfs_mounted:
+        serial_println("[desktop-e2e] storage-backed-launch:skip reason=no-vfs")
+        return true
+
     # ---- SYS-GUI-002: launcher shortcut + wm join ----
     # Dispatch Meta+B through the real launcher shortcut path. This is the
     # same code path the input handler uses for real keyboard events.

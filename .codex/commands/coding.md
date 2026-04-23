@@ -132,9 +132,11 @@ m{ x^2 + y^2 }                # Math block
 ### Pass Variants
 
 ```simple
-pass_todo                      # TODO marker (not yet implemented)
-pass_do_nothing                # Intentional no-op (documented)
-pass_dn                        # Alias for pass_do_nothing
+pass_todo("what remains", "hint or issue")
+pass_do_nothing("why no-op is correct")
+pass_dn("why no-op is correct")
+todo("what remains", "hint or issue")
+case _("why catch-all is correct"):
 pass                           # Generic no-op
 ```
 

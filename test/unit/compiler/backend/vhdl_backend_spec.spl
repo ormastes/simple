@@ -13,6 +13,7 @@ use compiler.backend.backend.backend_helpers.{available_backends, backend_for_na
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, compileoptions_default_options}
 use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.backend.common.type_mapper.PrimitiveType
+use compiler.common.attributes.{VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony, vhdl_hardware_metadata_default}
 use compiler.mir.mir_data.*
 from hir_types import {SymbolId}
 from lexer import {Span}
@@ -28,8 +29,23 @@ fn empty_span() -> Span:
 fn make_i32() -> MirType:
     MirType(kind: MirTypeKind.I32)
 
+fn make_i64() -> MirType:
+    MirType(kind: MirTypeKind.I64)
+
+fn make_u8() -> MirType:
+    MirType(kind: MirTypeKind.U8)
+
+fn make_u32() -> MirType:
+    MirType(kind: MirTypeKind.U32)
+
 fn make_bool() -> MirType:
     MirType(kind: MirTypeKind.Bool)
+
+fn make_bits(width: i64) -> MirType:
+    MirType.bits(width)
+
+fn make_sbits(width: i64) -> MirType:
+    MirType.sbits(width)
 
 fn make_tuple_i32_bool() -> MirType:
     MirType(kind: MirTypeKind.Tuple([make_i32(), make_bool()]))
@@ -46,6 +62,17 @@ fn make_temp_local(id: i64, name: text, ty: MirType) -> MirLocal:
 fn make_simple_backend() -> VhdlBackend:
     val options = compileoptions_default_options()
     VhdlBackend.create(CodegenTarget.Riscv32, options)
+
+fn make_hardware_meta():
+    var meta = vhdl_hardware_metadata_default()
+    meta.is_hardware = true
+    meta
+
+fn make_func_operand(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: make_i32(), is_variadic: false)))
+    ))
 
 fn make_payloadless_enum_type_def(symbol: SymbolId, name: text, variant_names: [text]) -> MirTypeDef:
     var variants: [MirVariantDef] = []
@@ -65,6 +92,36 @@ fn single_block_module(name: text, func: MirFunction) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[func.symbol] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn compile_single_vhdl_instruction(name: text, inst: MirInstKind):
+    val ret_local = make_return_local(1, make_i32())
+    val temp_local = make_temp_local(2, "tmp_sig", make_i32())
+    val block = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [MirInst(kind: inst, span: nil)],
+        terminator: MirTerminator.Return(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId(id: 9040),
+        name: name,
+        signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+        locals: [ret_local, temp_local],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil
+    )
+    val backend = make_simple_backend()
+    backend.compile(single_block_module("{name}_mod", func))
 
 fn normalize_vhdl(vhdl: text) -> text:
     var lines = vhdl.split("\n")
@@ -124,6 +181,24 @@ fn make_adder_function() -> MirFunction:
 # ============================================================================
 
 describe "VHDL Backend - registration":
+    it "preserves named clock domain metadata in MIR domain helpers":
+        val domain = vhdl_clock_domain_from_metadata(VhdlClockedMetadata(
+            clock_signal: "clk_core",
+            reset_signal: "rst_n",
+            has_reset: true,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.Sync,
+            domain: "core-domain",
+            is_valid: true,
+            validation_errors: []
+        ))
+
+        expect(domain.name).to_equal("core-domain")
+        expect(domain.clock_signal).to_equal("clk_core")
+        expect(domain.reset_signal.unwrap()).to_equal("rst_n")
+        expect(domain.reset_polarity).to_equal(VhdlResetPolarity.ActiveLow)
+        expect(domain.reset_synchrony).to_equal(VhdlResetSynchrony.Sync)
+
     it "resolves vhdl by backend name":
         val kind = backend_for_name("vhdl")
         expect(kind.?).to_equal(true)
@@ -487,7 +562,7 @@ describe "VHDL Backend - real backend compilation":
         val state_type = make_payloadless_enum_type_def(
             SymbolId(id: 55),
             "state_t",
-            ["Idle", "Running", "Done"]
+            ["Idle-State", "Running.Fast", "Done"]
         )
         var types: Dict<SymbolId, MirTypeDef> = {}
         types[state_type.symbol] = state_type
@@ -539,11 +614,77 @@ describe "VHDL Backend - real backend compilation":
         val compiled = result.unwrap()
         check(compiled.package_vhdl.?)
         val enum_pkg = compiled.package_vhdl.unwrap()
-        check(enum_pkg.contains("type state_t is (Idle, Running, Done);"))
+        check(enum_pkg.contains("type state_t is (Idle_State, Running_Fast, Done);"))
         check(compiled.vhdl.contains("result_out : out state_t"))
         check(compiled.vhdl.contains("signal state_sig : state_t;"))
-        check(compiled.vhdl.contains("state_sig <= Running;"))
+        check(compiled.vhdl.contains("state_sig <= Running_Fast;"))
         check(compiled.vhdl.contains("result_out <= state_sig;"))
+
+    it "compiles process enum aggregates to sanitized variant literals":
+        val state_type = make_payloadless_enum_type_def(
+            SymbolId(id: 59),
+            "process_state_t",
+            ["Needs-Reset", "Ready.State"]
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[state_type.symbol] = state_type
+        val ret_local = make_return_local(1, MirType(kind: MirTypeKind.Enum(state_type.symbol)))
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 1),
+                        AggregateKind.Enum(state_type.symbol, 0),
+                        []
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.Combinational([]),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 60),
+            name: "process_state_pack",
+            signature: MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Enum(state_type.symbol)), is_variadic: false),
+            locals: [ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "process_enum_mod", functions: functions, statics: {}, constants: {}, types: types)
+        val backend = make_simple_backend()
+        val result = backend.compile(module)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.unwrap().contains("type process_state_t is (Needs_Reset, Ready_State);"))
+        check(compiled.vhdl.contains("result_out <= Needs_Reset;"))
 
     it "rejects payload enum package emission with a specific diagnostic":
         val payload_symbol = SymbolId(id: 57)
@@ -563,7 +704,135 @@ describe "VHDL Backend - real backend compilation":
         val backend = make_simple_backend()
         val result = backend.compile(module)
         check(result.is_err())
-        check(result.unwrap_err().message.contains("Payload enum `maybe_t.Some` is not supported"))
+        check(result.unwrap_err().message.contains("Payload enum `maybe_t.Some` is not supported by VHDL enum package emission"))
+
+    it "rejects payload enum aggregate lowering with a variant-specific diagnostic":
+        val payload_symbol = SymbolId(id: 61)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_agg_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val ret_local = make_return_local(1, enum_type)
+        val state_local = make_temp_local(2, "state_sig", enum_type)
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 2),
+                        AggregateKind.Enum(payload_symbol, 0),
+                        []
+                    ),
+                    span: Some(Span(start: 40, end_pos: 45, line: 7, col: 9))
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 2)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 62),
+            name: "payload_state_pack",
+            signature: MirSignature(params: [], return_type: enum_type, is_variadic: false),
+            locals: [ret_local, state_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_agg_mod"), func)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Payload enum `maybe_agg_t.Some` is not supported by VHDL enum aggregate lowering"))
+        check(err.has_location)
+        check(err.location.contains("7:9"))
+
+    it "rejects payload enum process aggregate lowering with source location":
+        val payload_symbol = SymbolId(id: 63)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_proc_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val ret_local = make_return_local(1, enum_type)
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 1),
+                        AggregateKind.Enum(payload_symbol, 0),
+                        []
+                    ),
+                    span: Some(Span(start: 80, end_pos: 86, line: 12, col: 5))
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(VhdlProcessKind.Combinational([]), BlockId(id: 1)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 64),
+            name: "payload_process_state_pack",
+            signature: MirSignature(params: [], return_type: enum_type, is_variadic: false),
+            locals: [ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_proc_mod"), func)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Payload enum `maybe_proc_t.Some` is not supported by VHDL enum process aggregate lowering"))
+        check(err.has_location)
+        check(err.location.contains("12:5"))
 
     it "rejects enum literal VHDL name collisions after sanitization":
         val enum_symbol = SymbolId(id: 58)
@@ -708,26 +977,348 @@ describe "VHDL Backend - real backend compilation":
         check(compiled.vhdl.contains("process(src_in)"))
         check(compiled.vhdl.contains("result_out <= src_in;"))
 
-    it "fails fast on unsupported MIR instructions":
-        val ret_local = make_return_local(1, make_i32())
-        val temp_local = make_temp_local(2, "tmp_sig", make_i32())
+    it "rejects ambiguous fixed-width integer mismatches for bitwise operations":
+        val left_local = make_arg_local(1, 0, "a", make_i32())
+        val right_local = make_arg_local(2, 1, "b", make_i64())
+        val ret_local = make_return_local(3, make_i32())
+        val temp_local = make_temp_local(4, "masked", make_i32())
         val block = MirBlock(
             id: BlockId(id: 0),
             label: Some("entry"),
             instructions: [
                 MirInst(
-                    kind: MirInstKind.Alloc(LocalId(id: 2), make_i32()),
+                    kind: MirInstKind.BinOp(
+                        LocalId(id: 4),
+                        MirBinOp.BitAnd,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                    ),
                     span: nil
                 )
             ],
             terminator: MirTerminator.Return(nil)
         )
         val func = MirFunction(
-            symbol: SymbolId(id: 40),
-            name: "bad_alloc",
-            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
-            locals: [ret_local, temp_local],
+            symbol: SymbolId(id: 70),
+            name: "bad_width_bitand",
+            signature: MirSignature(params: [make_i32(), make_i64()], return_type: make_i32(), is_variadic: false),
+            locals: [left_local, right_local, ret_local, temp_local],
             blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bad_width_bitand_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Ambiguous VHDL integer width mismatch"))
+        check(err.message.contains("explicit cast or VhdlResize"))
+        check(err.phase.contains("vhdl"))
+
+    it "rejects ambiguous fixed-width integer mismatches for comparisons":
+        val left_local = make_arg_local(1, 0, "a", make_u8())
+        val right_local = make_arg_local(2, 1, "b", make_u32())
+        val ret_local = make_return_local(3, make_bool())
+        val cmp_local = make_temp_local(4, "cmp", make_bool())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.BinOp(
+                        LocalId(id: 4),
+                        MirBinOp.Lt,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 71),
+            name: "bad_width_cmp",
+            signature: MirSignature(params: [make_u8(), make_u32()], return_type: make_bool(), is_variadic: false),
+            locals: [left_local, right_local, ret_local, cmp_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bad_width_cmp_mod", func))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("Ambiguous VHDL integer width mismatch"))
+
+    it "preserves explicit casts before fixed-width comparisons":
+        val left_local = make_arg_local(1, 0, "a", make_i32())
+        val right_local = make_arg_local(2, 1, "b", make_i64())
+        val ret_local = make_return_local(3, make_bool())
+        val narrowed_local = make_temp_local(4, "b32", make_i32())
+        val cmp_local = make_temp_local(5, "cmp", make_bool())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Cast(
+                        LocalId(id: 4),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                        make_i32()
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.BinOp(
+                        LocalId(id: 5),
+                        MirBinOp.Eq,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 72),
+            name: "explicit_width_cmp",
+            signature: MirSignature(params: [make_i32(), make_i64()], return_type: make_bool(), is_variadic: false),
+            locals: [left_local, right_local, ret_local, narrowed_local, cmp_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("explicit_width_cmp_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("b32 <= resize(signed(b), 32);"))
+        check(vhdl.contains("cmp <= '1' when a = b32 else '0';"))
+
+    it "maps arbitrary unsigned fixed-width bit lanes to numeric_std unsigned":
+        val src_local = make_arg_local(1, 0, "a", make_bits(9))
+        val ret_local = make_return_local(2, make_bits(17))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlResize(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        17,
+                        false
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 73),
+            name: "bits_zero_extend",
+            signature: MirSignature(params: [make_bits(9)], return_type: make_bits(17), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bits_zero_extend_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("a : in unsigned(8 downto 0);"))
+        check(vhdl.contains("result_out : out unsigned(16 downto 0)"))
+        check(vhdl.contains("result_out <= resize(unsigned(a), 17);"))
+
+    it "maps arbitrary signed fixed-width bit lanes and sign-extends resize":
+        val src_local = make_arg_local(1, 0, "a", make_sbits(9))
+        val ret_local = make_return_local(2, make_sbits(17))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlResize(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        17,
+                        true
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 74),
+            name: "bits_sign_extend",
+            signature: MirSignature(params: [make_sbits(9)], return_type: make_sbits(17), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bits_sign_extend_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("a : in signed(8 downto 0);"))
+        check(vhdl.contains("result_out : out signed(16 downto 0)"))
+        check(vhdl.contains("result_out <= resize(signed(a), 17);"))
+
+    it "emits explicit unsigned resize for named truncation":
+        val src_local = make_arg_local(1, 0, "wide", make_bits(17))
+        val ret_local = make_return_local(2, make_bits(5))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlResize(
+                        LocalId(id: 2),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        5,
+                        false
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 75),
+            name: "bits_truncate",
+            signature: MirSignature(params: [make_bits(17)], return_type: make_bits(5), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bits_truncate_mod", func))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("wide : in unsigned(16 downto 0);"))
+        check(vhdl.contains("result_out : out unsigned(4 downto 0)"))
+        check(vhdl.contains("result_out <= resize(unsigned(wide), 5);"))
+
+    it "rejects non-positive fixed-width bit lanes before VHDL emission":
+        val src_local = make_arg_local(1, 0, "bad", make_bits(0))
+        val ret_local = make_return_local(2, make_bits(0))
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 76),
+            name: "bad_bits_width",
+            signature: MirSignature(params: [make_bits(0)], return_type: make_bits(0), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("bad_bits_width_mod", func))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("positive concrete width"))
+
+    it "emits active-low async reset condition for reset_n process domains":
+        val clk_local = make_arg_local(1, 0, "clk", make_bool())
+        val reset_local = make_arg_local(2, 1, "reset_n", make_bool())
+        val data_local = make_arg_local(3, 2, "data_in", make_i32())
+        val ret_local = make_return_local(4, make_i32())
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 4), LocalId(id: 3)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.AsyncReset(VhdlClockDomain(name: "core", clock_signal: "clk", reset_signal: Some("reset_n"), reset_polarity: VhdlResetPolarity.ActiveLow, reset_synchrony: VhdlResetSynchrony.Async, edge: VhdlClockEdge.Rising)),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 31),
+            name: "registered_low_reset",
+            signature: MirSignature(params: [make_bool(), make_bool(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [clk_local, reset_local, data_local, ret_local],
+            blocks: [entry_block, body_block],
             entry_block: BlockId.entry(),
             span: empty_span(),
             generic_params: [],
@@ -742,8 +1333,299 @@ describe "VHDL Backend - real backend compilation":
         )
 
         val backend = make_simple_backend()
-        val result = backend.compile(single_block_module("bad_mod", func))
+        val result = backend.compile(single_block_module("async_low_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("process(clk, reset_n)"))
+        check(compiled.vhdl.contains("if reset_n = '0' then"))
+        check(compiled.vhdl.contains("if rising_edge(clk) then"))
+        check(compiled.vhdl.contains("result_out <= data_in;"))
+
+    it "emits active-high async reset condition for plain reset process domains":
+        val clk_local = make_arg_local(1, 0, "clk", make_bool())
+        val reset_local = make_arg_local(2, 1, "rst", make_bool())
+        val data_local = make_arg_local(3, 2, "data_in", make_i32())
+        val ret_local = make_return_local(4, make_i32())
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 4), LocalId(id: 3)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.AsyncReset(VhdlClockDomain(name: "core", clock_signal: "clk", reset_signal: Some("rst"), reset_polarity: VhdlResetPolarity.ActiveHigh, reset_synchrony: VhdlResetSynchrony.Async, edge: VhdlClockEdge.Rising)),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 32),
+            name: "registered_high_reset",
+            signature: MirSignature(params: [make_bool(), make_bool(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [clk_local, reset_local, data_local, ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("async_high_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("process(clk, rst)"))
+        check(compiled.vhdl.contains("if rst = '1' then"))
+        check(compiled.vhdl.contains("if rising_edge(clk) then"))
+
+    it "emits clock-only process when clocked domain has no reset signal":
+        val clk_local = make_arg_local(1, 0, "clk", make_bool())
+        val data_local = make_arg_local(2, 1, "data_in", make_i32())
+        val ret_local = make_return_local(3, make_i32())
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 2)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.Clocked(VhdlClockDomain(name: "core", clock_signal: "clk", reset_signal: nil, reset_polarity: VhdlResetPolarity.ActiveLow, reset_synchrony: VhdlResetSynchrony.None_, edge: VhdlClockEdge.Rising)),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 33),
+            name: "registered_no_reset",
+            signature: MirSignature(params: [make_bool(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [clk_local, data_local, ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("clock_only_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("process(clk)"))
+        check(compiled.vhdl.contains("if rising_edge(clk) then"))
+        check(not compiled.vhdl.contains("async reset branch"))
+
+    it "fails fast on unsupported MIR instructions":
+        val alloc_result = compile_single_vhdl_instruction("bad_alloc", MirInstKind.Alloc(LocalId(id: 2), make_i32()))
+        check(alloc_result.is_err())
+        check(alloc_result.unwrap_err().message.contains("Alloc storage allocation"))
+
+        val gep_result = compile_single_vhdl_instruction(
+            "bad_gep",
+            MirInstKind.GetElementPtr(
+                LocalId(id: 2),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))]
+            )
+        )
+        check(gep_result.is_err())
+        check(gep_result.unwrap_err().message.contains("GetElementPtr lowering"))
+
+        val indirect_result = compile_single_vhdl_instruction(
+            "bad_call_indirect",
+            MirInstKind.CallIndirect(
+                Some(LocalId(id: 2)),
+                make_func_operand("dynamic_target"),
+                [],
+                MirSignature(params: [], return_type: make_i32(), is_variadic: false)
+            )
+        )
+        check(indirect_result.is_err())
+        check(indirect_result.unwrap_err().message.contains("CallIndirect lowering"))
+
+        val checked_result = compile_single_vhdl_instruction(
+            "bad_checked",
+            MirInstKind.CheckedBinOp(
+                LocalId(id: 2),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            )
+        )
+        check(checked_result.is_err())
+        val checked_err = checked_result.unwrap_err()
+        check(checked_err.message.contains("checked arithmetic MIR instruction"))
+        check(checked_err.phase.contains("vhdl"))
+
+    it "emits called pure combinational helpers as package functions":
+        val helper_a = make_arg_local(1, 0, "a", make_i32())
+        val helper_b = make_arg_local(2, 1, "b", make_i32())
+        val helper_ret = make_return_local(3, make_i32())
+        val helper_sum = make_temp_local(4, "sum-sig", make_i32())
+        val helper_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.BinOp(LocalId(id: 4), MirBinOp.Add, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)), span: nil)
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val helper = MirFunction(
+            symbol: SymbolId(id: 101),
+            name: "mix-add",
+            signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [helper_a, helper_b, helper_ret, helper_sum],
+            blocks: [helper_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val top_a = make_arg_local(11, 0, "left_in", make_i32())
+        val top_b = make_arg_local(12, 1, "right_in", make_i32())
+        val top_ret = make_return_local(13, make_i32())
+        val top_tmp = make_temp_local(14, "call_result", make_i32())
+        val top_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Call(Some(LocalId(id: 14)), make_func_operand("mix-add"), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 12)))]), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 13), LocalId(id: 14)), span: nil)
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val top = MirFunction(
+            symbol: SymbolId(id: 102),
+            name: "top_entity",
+            signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [top_a, top_b, top_ret, top_tmp],
+            blocks: [top_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil,
+            has_vhdl_metadata: true,
+            vhdl_metadata: make_hardware_meta()
+        )
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[helper.symbol] = helper
+        functions[top.symbol] = top
+        val result = make_simple_backend().compile(MirModule(name: "helper_mod", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val pkg = compiled.package_vhdl.unwrap()
+        check(pkg.contains("function mix_add(a : signed(31 downto 0); b : signed(31 downto 0)) return signed(31 downto 0);"))
+        check(pkg.contains("package body helper_mod_pkg is"))
+        check(pkg.contains("variable sum_sig : signed(31 downto 0);"))
+        check(pkg.contains("sum_sig := a + b;"))
+        check(pkg.contains("return return_value;"))
+        check(compiled.vhdl.contains("use work.helper_mod_pkg.all;"))
+        check(compiled.vhdl.contains("entity top_entity is"))
+        check(not compiled.vhdl.contains("entity mix-add is"))
+        check(compiled.vhdl.contains("call_result <= mix_add(left_in, right_in);"))
+
+    it "rejects helper name collisions after sanitization":
+        val a = make_adder_function()
+        val b = MirFunction(..a, symbol: SymbolId(id: 111), name: "dup-helper")
+        val c = MirFunction(..a, symbol: SymbolId(id: 112), name: "dup_helper")
+        val top = MirFunction(..a, symbol: SymbolId(id: 113), name: "hardware_top", has_vhdl_metadata: true, vhdl_metadata: make_hardware_meta())
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[b.symbol] = b
+        functions[c.symbol] = c
+        functions[top.symbol] = top
+        val result = make_simple_backend().compile(MirModule(name: "helper_collision_mod", functions: functions, statics: {}, constants: {}, types: {}))
         check(result.is_err())
-        val err = result.unwrap_err()
-        check(err.message.contains("Unsupported instruction"))
-        check(err.phase.contains("vhdl"))
+        check(result.unwrap_err().message.contains("Duplicate VHDL helper subprogram name after sanitization"))
+
+    it "rejects unsupported helper memory behavior with a specific diagnostic":
+        val bad_ret = make_return_local(1, make_i32())
+        val bad_tmp = make_temp_local(2, "tmp", make_i32())
+        val bad_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Alloc(LocalId(id: 2), make_i32()), span: nil)],
+            terminator: MirTerminator.Return(nil)
+        )
+        val bad = MirFunction(
+            symbol: SymbolId(id: 121),
+            name: "bad_helper",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [bad_ret, bad_tmp],
+            blocks: [bad_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val top = MirFunction(..make_adder_function(), symbol: SymbolId(id: 122), name: "hardware_top", has_vhdl_metadata: true, vhdl_metadata: make_hardware_meta())
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[bad.symbol] = bad
+        functions[top.symbol] = top
+        val result = make_simple_backend().compile(MirModule(name: "bad_helper_mod", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("Unsupported VHDL helper subprogram memory behavior"))

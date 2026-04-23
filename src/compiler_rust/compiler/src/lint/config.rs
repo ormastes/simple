@@ -63,15 +63,20 @@ impl LintConfig {
                     let lint_name = lint_name.trim();
                     let level_str = level_str.trim().trim_matches('"').trim_matches('\'');
 
-                    if let Some(lint) = LintName::from_str(lint_name) {
-                        if let Some(level) = LintLevel::from_str(level_str) {
+                    if let Some(level) = LintLevel::from_str(level_str) {
+                        if lint_name == "required_comment" {
+                            config.set_level(LintName::RequiredCommentPass, level);
+                            config.set_level(LintName::RequiredCommentDangerous, level);
+                            config.set_level(LintName::RequiredCommentTodo, level);
+                            config.set_level(LintName::RequiredCommentWildcard, level);
+                        } else if let Some(lint) = LintName::from_str(lint_name) {
                             config.set_level(lint, level);
                         } else {
-                            return Err(format!("Invalid lint level '{}' for lint '{}'", level_str, lint_name));
+                            // Unknown lint name - could be a warning in the future
+                            eprintln!("Warning: Unknown lint name '{}'", lint_name);
                         }
                     } else {
-                        // Unknown lint name - could be a warning in the future
-                        eprintln!("Warning: Unknown lint name '{}'", lint_name);
+                        return Err(format!("Invalid lint level '{}' for lint '{}'", level_str, lint_name));
                     }
                 }
             }
@@ -109,6 +114,11 @@ impl LintConfig {
                         if lint_name == "unknown_annotation" {
                             self.set_level(LintName::UnknownDecorator, level);
                             self.set_level(LintName::UnknownAttribute, level);
+                        } else if lint_name == "required_comment" {
+                            self.set_level(LintName::RequiredCommentPass, level);
+                            self.set_level(LintName::RequiredCommentDangerous, level);
+                            self.set_level(LintName::RequiredCommentTodo, level);
+                            self.set_level(LintName::RequiredCommentWildcard, level);
                         } else if let Some(lint) = LintName::from_str(lint_name) {
                             self.set_level(lint, level);
                         }

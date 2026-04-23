@@ -193,6 +193,38 @@ fn not_done(port: i64) -> i64:
     }
 
     #[test]
+    fn test_required_comment_pass_detected() {
+        let code = r#"
+fn not_done():
+    pass_todo
+"#;
+        let diagnostics = check_code_in_file("demo.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentPass));
+    }
+
+    #[test]
+    fn test_required_comment_todo_detected() {
+        let code = r#"
+fn not_done():
+    todo("fix")
+"#;
+        let diagnostics = check_code_in_file("demo.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentTodo));
+    }
+
+    #[test]
+    fn test_required_comment_wildcard_detected() {
+        let code = r#"
+fn classify(x: i64):
+    match x:
+        case 0: "zero"
+        case _: "other"
+"#;
+        let diagnostics = check_code_in_file("demo.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentWildcard));
+    }
+
+    #[test]
     fn test_allow_suppresses_sspec_placeholder_tests() {
         let code = r#"
 #[allow(sspec_placeholder_tests)]

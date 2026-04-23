@@ -137,6 +137,7 @@ enum VhdlResetPolarity:
 enum VhdlResetSynchrony:
     Async
     Sync
+    None_
 
 struct VhdlClockedMetadata:
     """Structured @clocked(...) metadata for hardware VHDL lowering."""
@@ -146,6 +147,8 @@ struct VhdlClockedMetadata:
     reset_polarity: VhdlResetPolarity
     reset_synchrony: VhdlResetSynchrony
     domain: text
+    is_valid: bool
+    validation_errors: [text]
 
 struct VhdlGenericMetadata:
     """Structured @generic(...) item preserved for VHDL entity generation."""
@@ -309,8 +312,10 @@ fn vhdl_clocked_metadata_default() -> VhdlClockedMetadata:
         reset_signal: "",
         has_reset: false,
         reset_polarity: VhdlResetPolarity.ActiveLow,
-        reset_synchrony: VhdlResetSynchrony.Async,
-        domain: ""
+        reset_synchrony: VhdlResetSynchrony.None_,
+        domain: "",
+        is_valid: true,
+        validation_errors: []
     )
 
 fn vhdl_hardware_metadata_default() -> VhdlHardwareMetadata:
@@ -386,7 +391,9 @@ fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
     var polarity = VhdlResetPolarity.ActiveLow
     var synchrony = VhdlResetSynchrony.Async
     var domain = ""
+    var errors: [text] = []
     var positional = 0
+    var has_explicit_synchrony = false
 
     for arg in args:
         match arg.kind:
@@ -397,20 +404,31 @@ fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
                 if key == "clock" or key == "clk":
                     clock_signal = value
                 elif key == "reset" or key == "rst":
-                    reset_signal = value
-                    has_reset = value != ""
+                    if _vhdl_clocked_value_is_no_reset(lower_value):
+                        reset_signal = ""
+                        has_reset = false
+                    else:
+                        reset_signal = value
+                        has_reset = value != ""
                 elif key == "domain":
                     domain = value
-                elif key == "polarity":
+                elif key == "polarity" or key == "reset_polarity":
                     if lower_value == "active_high" or lower_value == "high":
                         polarity = VhdlResetPolarity.ActiveHigh
                     elif lower_value == "active_low" or lower_value == "low":
                         polarity = VhdlResetPolarity.ActiveLow
-                elif key == "sync" or key == "synchrony":
+                    else:
+                        errors.push("unknown @clocked reset_polarity '{value}'")
+                elif key == "sync" or key == "synchrony" or key == "reset_sync":
+                    has_explicit_synchrony = true
                     if lower_value == "sync" or lower_value == "synchronous" or lower_value == "true":
                         synchrony = VhdlResetSynchrony.Sync
                     elif lower_value == "async" or lower_value == "asynchronous" or lower_value == "false":
                         synchrony = VhdlResetSynchrony.Async
+                    elif _vhdl_clocked_value_is_no_reset(lower_value):
+                        synchrony = VhdlResetSynchrony.None_
+                    else:
+                        errors.push("unknown @clocked reset_sync '{value}'")
             case _:
                 val token = extract_text_arg(arg)
                 val lower_token = token.lower()
@@ -426,11 +444,33 @@ fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
                         polarity = VhdlResetPolarity.ActiveLow
                     elif lower_token == "sync" or lower_token == "synchronous":
                         synchrony = VhdlResetSynchrony.Sync
+                        has_explicit_synchrony = true
                     elif lower_token == "async" or lower_token == "asynchronous":
                         synchrony = VhdlResetSynchrony.Async
+                        has_explicit_synchrony = true
+                    elif _vhdl_clocked_value_is_no_reset(lower_token):
+                        synchrony = VhdlResetSynchrony.None_
+                        has_explicit_synchrony = true
                     elif lower_token.starts_with("domain="):
                         domain = token.substring(7, token.len())
                 positional = positional + 1
+
+    if not has_reset and not has_explicit_synchrony:
+        synchrony = VhdlResetSynchrony.None_
+
+    if clock_signal.trim() == "":
+        errors.push("@clocked requires a clock signal")
+
+    if domain.trim() == "" and clock_signal.trim() != "":
+        domain = clock_signal
+
+    if domain.trim() != "" and not _vhdl_clocked_domain_name_is_valid(domain):
+        errors.push("@clocked domain '{domain}' contains unsupported characters")
+
+    if synchrony == VhdlResetSynchrony.None_ and has_reset:
+        errors.push("@clocked reset_sync 'none' cannot be used with a reset signal")
+    elif synchrony != VhdlResetSynchrony.None_ and not has_reset and has_explicit_synchrony:
+        errors.push("@clocked reset_sync '{_vhdl_reset_synchrony_name(synchrony)}' requires a reset signal")
 
     VhdlClockedMetadata(
         clock_signal: clock_signal,
@@ -438,8 +478,32 @@ fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
         has_reset: has_reset,
         reset_polarity: polarity,
         reset_synchrony: synchrony,
-        domain: domain
+        domain: domain,
+        is_valid: errors.len() == 0,
+        validation_errors: errors
     )
+
+fn _vhdl_clocked_value_is_no_reset(value: text) -> bool:
+    value == "" or value == "none" or value == "no_reset" or value == "no-reset"
+
+fn _vhdl_clocked_domain_name_is_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed.len() == 0:
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-" or ch == "."
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _vhdl_reset_synchrony_name(synchrony: VhdlResetSynchrony) -> text:
+    match synchrony:
+        case Async: "async"
+        case Sync: "sync"
+        case None_: "none"
 
 # ============================================================================
 # Function Attribute Types

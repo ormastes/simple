@@ -321,7 +321,7 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return ""  # ignored return — no config mapping
     if code == "BOOL001":
         return ""  # multiline bool — no config mapping
-    if code == "REQC001" or code == "REQC002":
+    if code == "REQC001" or code == "REQC002" or code == "REQC003" or code == "REQC004":
         return "required_comment"
     if code == "SAFE001" or code == "SAFE003":
         return ""  # safety — no config mapping
@@ -559,6 +559,10 @@ class Linter:
             "pass_* used without a comment string"))
         lints.push(Lint.new("REQC002", LintLevel.Warn, LintCategory.Warning,
             "Dangerous keyword used without a comment string"))
+        lints.push(Lint.new("REQC003", LintLevel.Warn, LintCategory.Warning,
+            "todo used without what-remains and next-step strings"))
+        lints.push(Lint.new("REQC004", LintLevel.Warn, LintCategory.Warning,
+            "Wildcard match arm used without a rationale"))
 
         # UI typed-API lints (UI00x rules)
         lints.push(Lint.new("UI001", LintLevel.Warn, LintCategory.Style,
@@ -712,8 +716,98 @@ class Linter:
                 "Explicit pass_todo placeholder in production code")
                 .with_fix("Replace pass_todo with a real implementation or return an explicit unsupported error")
             self.results.push(LintResult.new(path, line_num, 0, lint))
+        self.check_required_comment_source(path, line_num, trimmed)
         self.check_todo_format(path, line_num, trimmed)
         self.check_sdn_write(path, line_num, trimmed)
+
+    fn required_comment_is_weak(text_value: String) -> Bool:
+        val t = text_value.trim().lower()
+        if t == "":
+            return true
+        if t.len() < 10:
+            return true
+        if t == "todo" or t == "fix" or t == "later" or t == "unknown":
+            return true
+        if t == "because" or t == "n/a" or t == "na":
+            return true
+        false
+
+    fn first_string_arg(line: String) -> String:
+        val first_quote = line.find("\"")
+        if first_quote < 0:
+            return ""
+        val rest = line.slice(first_quote + 1)
+        val second_quote = rest.find("\"")
+        if second_quote < 0:
+            return ""
+        rest.slice(0, second_quote)
+
+    fn second_string_arg(line: String) -> String:
+        val first_quote = line.find("\"")
+        if first_quote < 0:
+            return ""
+        val rest = line.slice(first_quote + 1)
+        val second_quote = rest.find("\"")
+        if second_quote < 0:
+            return ""
+        val after_second = rest.slice(second_quote + 1)
+        val third_quote = after_second.find("\"")
+        if third_quote < 0:
+            return ""
+        val rest2 = after_second.slice(third_quote + 1)
+        val fourth_quote = rest2.find("\"")
+        if fourth_quote < 0:
+            return ""
+        rest2.slice(0, fourth_quote)
+
+    me check_required_comment_source(path: String, line_num: Int, line: String):
+        if line.starts_with("#"):
+            return
+        val normalized = line.replace(" ", "").replace("\t", "")
+        if normalized == "pass_todo" or normalized == "pass_do_nothing" or normalized == "pass_dn":
+            val lint = Lint.new("REQC001", LintLevel.Warn, LintCategory.Warning,
+                "pass_* used without a rationale")
+                .with_fix("Use pass_todo(\"what remains\", \"hint or issue\") or pass_do_nothing(\"why no-op is correct\")")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
+        if normalized.starts_with("pass_todo(") or normalized.starts_with("pass_do_nothing(") or normalized.starts_with("pass_dn("):
+            val reason = self.first_string_arg(line)
+            if self.required_comment_is_weak(reason):
+                val lint = Lint.new("REQC001", LintLevel.Warn, LintCategory.Warning,
+                    "pass_* used without a useful rationale")
+                    .with_fix("Use pass_todo(\"what remains\", \"hint or issue\") or pass_do_nothing(\"why no-op is correct\")")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+        if normalized.starts_with("todo(") or normalized.contains(":todo(") or normalized.contains("=todo("):
+            val what = self.first_string_arg(line)
+            val hint = self.second_string_arg(line)
+            if self.required_comment_is_weak(what) or self.required_comment_is_weak(hint):
+                val lint = Lint.new("REQC003", LintLevel.Warn, LintCategory.Warning,
+                    "todo used without what-remains and next-step strings")
+                    .with_fix("Use todo(\"what remains\", \"hint or issue\")")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+        val dangerous_call = normalized.starts_with("dangerous_token_but_needs(") or
+            normalized.starts_with("loss(") or
+            normalized.starts_with("unsafe_cast(") or
+            normalized.starts_with("raw_pointer(") or
+            normalized.starts_with("unchecked(")
+        if dangerous_call:
+            val reason = self.first_string_arg(line)
+            if self.required_comment_is_weak(reason):
+                val lint = Lint.new("REQC002", LintLevel.Warn, LintCategory.Warning,
+                    "dangerous keyword used without a useful rationale")
+                    .with_fix("Add a first string argument explaining why the escape hatch is correct")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+        if normalized.starts_with("case_:") or normalized.starts_with("case_->") or normalized.starts_with("case_=>"):
+            val lint = Lint.new("REQC004", LintLevel.Warn, LintCategory.Warning,
+                "wildcard match arm used without a rationale")
+                .with_fix("Use case _(\"why catch-all is correct\"):")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
+        if normalized.starts_with("case_(\""):
+            val reason = self.first_string_arg(line)
+            if self.required_comment_is_weak(reason):
+                val lint = Lint.new("REQC004", LintLevel.Warn, LintCategory.Warning,
+                    "wildcard match arm used without a useful rationale")
+                    .with_fix("Use case _(\"why catch-all is correct\"):")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
     
     fn extract_function_name(line: String) -> String:
         # Extract function name from "fn name(...)" pattern

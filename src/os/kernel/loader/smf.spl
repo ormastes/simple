@@ -8,6 +8,7 @@
 # executable stub, the kernel delegates that embedded image to the ELF loader.
 # Native SMF code-section mapping remains a later stage.
 
+use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.loader.elf64.{elf64_load}
 
@@ -24,6 +25,15 @@ val SMF_HEADER_TRAILER_SIZE: i64 = 128
 val SMF_ENTRY_POINT_OFFSET: i64  = 44  # offset within trailer
 val SMF_STUB_SIZE_OFFSET: i64    = 52  # offset within trailer
 val SMF_DATA_OFFSET_OFFSET: i64  = 56  # offset within trailer
+val SMF_ROLE_OFFSET: i64         = 60  # 0=unspecified, 1=executable, 2=library
+val SMF_ARCH_OFFSET: i64         = 61  # 0=unspecified, 1=x86_64, 2=x86, 3=arm64, 4=arm32, 5=rv64, 6=rv32
+val SMF_ABI_OFFSET: i64          = 62  # 0=unspecified, 1=simpleos
+
+val SMF_ERR_MALFORMED: text = "SMF_ERR_MALFORMED"
+val SMF_ERR_WRONG_ROLE: text = "SMF_ERR_WRONG_ROLE"
+val SMF_ERR_WRONG_ARCH: text = "SMF_ERR_WRONG_ARCH"
+val SMF_ERR_ABI_MISMATCH: text = "SMF_ERR_ABI_MISMATCH"
+val SMF_ERR_MISSING_ELF: text = "SMF_ERR_MISSING_ELF"
 
 # ============================================================================
 # Structs
@@ -36,6 +46,9 @@ struct SmfHeader:
     header_offset:   i64    # Absolute offset of parsed header
     stub_size:       i64    # v1.1 executable stub size
     smf_data_offset: i64    # v1.1 offset where SMF payload begins
+    role:            i64    # package role discriminator
+    arch:            i64    # package architecture discriminator
+    abi:             i64    # package ABI discriminator
 
 # ============================================================================
 # Internal helpers
@@ -113,12 +126,18 @@ fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
     val entry = _smf_read_u64_le(bytes, off + SMF_ENTRY_POINT_OFFSET)
     val stub_size = _smf_read_u32_le(bytes, off + SMF_STUB_SIZE_OFFSET)
     val smf_data_offset = _smf_read_u32_le(bytes, off + SMF_DATA_OFFSET_OFFSET)
+    val role = _smf_byte_at(bytes, off + SMF_ROLE_OFFSET) as i64
+    val arch = _smf_byte_at(bytes, off + SMF_ARCH_OFFSET) as i64
+    val abi = _smf_byte_at(bytes, off + SMF_ABI_OFFSET) as i64
     Some(SmfHeader(
         magic_ok: true,
         entry_point: entry,
         header_offset: off,
         stub_size: stub_size,
-        smf_data_offset: smf_data_offset
+        smf_data_offset: smf_data_offset,
+        role: role,
+        arch: arch,
+        abi: abi
     ))
 
 fn _smf_has_elf_magic(bytes: [u8]) -> bool:
@@ -134,6 +153,26 @@ fn _smf_copy_range(bytes: [u8], off: i64, size: i64) -> [u8]:
         i = i + 1
     out
 
+fn _smf_arch_code(arch: Architecture) -> i64:
+    match arch:
+        case Architecture.X86_64:
+            1
+        case Architecture.X86:
+            2
+        case Architecture.Arm64:
+            3
+        case Architecture.Arm32:
+            4
+        case Architecture.Riscv64:
+            5
+        case Architecture.Riscv32:
+            6
+        case _:
+            -1
+
+fn _smf_header_accepts_arch(hdr: SmfHeader, arch: Architecture) -> bool:
+    hdr.arch == 0 or hdr.arch == _smf_arch_code(arch)
+
 fn smf_extract_executable_stub(bytes: [u8]) -> Result<[u8], text>:
     """Return the embedded native executable stub from an SMF envelope.
 
@@ -141,17 +180,27 @@ fn smf_extract_executable_stub(bytes: [u8]) -> Result<[u8], text>:
     around a normal executable. Only ELF stubs are accepted; native SMF
     code-section mapping remains owned by a later mapper implementation.
     """
+    smf_extract_executable_stub_for_arch(bytes, Architecture.Unknown)
+
+fn smf_extract_executable_stub_for_arch(bytes: [u8], arch: Architecture) -> Result<[u8], text>:
+    """Return the embedded ELF stub after validating executable SMF metadata."""
     val hdr_opt = smf_parse_header(bytes)
     if hdr_opt == nil:
-        return Err("invalid SMF header")
+        return Err(SMF_ERR_MALFORMED)
     val hdr = hdr_opt.unwrap()
+    if hdr.role != 0 and hdr.role != 1:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if arch != Architecture.Unknown and not _smf_header_accepts_arch(hdr, arch):
+        return Err(SMF_ERR_WRONG_ARCH)
+    if hdr.abi != 0 and hdr.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
     if hdr.stub_size <= 0:
-        return Err("SMF has no executable stub")
+        return Err(SMF_ERR_MISSING_ELF)
     if hdr.stub_size > hdr.header_offset:
-        return Err("SMF executable stub exceeds package payload")
+        return Err(SMF_ERR_MALFORMED)
     val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
     if not _smf_has_elf_magic(stub):
-        return Err("SMF executable stub is not ELF")
+        return Err(SMF_ERR_MISSING_ELF)
     Ok(stub)
 
 fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:

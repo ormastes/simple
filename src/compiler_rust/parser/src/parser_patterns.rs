@@ -168,6 +168,20 @@ impl<'a> Parser<'a> {
         match &self.current.kind.clone() {
             TokenKind::Underscore => {
                 self.advance();
+                if self.check(&TokenKind::LParen) {
+                    self.advance();
+                    if !self.check(&TokenKind::RParen) {
+                        let _ = self.parse_expression();
+                        while self.check(&TokenKind::Comma) {
+                            self.advance();
+                            if self.check(&TokenKind::RParen) {
+                                break;
+                            }
+                            let _ = self.parse_expression();
+                        }
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                }
                 Ok(Pattern::Wildcard)
             }
             TokenKind::Mut => {

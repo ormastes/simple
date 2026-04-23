@@ -4,7 +4,7 @@
 
 - `test/unit/compiler/backend/vhdl_backend_spec.spl`
 - `test/system/compiler/vhdl_source_facade_spec.spl`
-- `test/system/compiler/vhdl_vendor_synthesis_smoke_spec.spl`
+- `test/unit/compiler/backend/vhdl_vendor_synthesis_smoke_spec.spl`
 - `test/integration/compiler/vhdl_backend_e2e_spec.spl`
 - `test/feature/usage/vhdl_spec.spl`
 

@@ -5,22 +5,26 @@
 #
 # REQC001: pass_* used without a comment string           WARNING
 # REQC002: Dangerous keyword call without a comment       WARNING
+# REQC003: todo(...) without useful rationale             WARNING
+# REQC004: wildcard match arm without rationale           WARNING
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast_expr.{
     EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    EXPR_CALL, EXPR_IDENT, EXPR_STRING_LIT,
-    expr_tag, expr_s_val, expr_left, expr_args
+    EXPR_CALL, EXPR_IDENT, EXPR_STRING_LIT, EXPR_MATCH,
+    EXPR_BINARY, EXPR_UNARY, EXPR_IF, EXPR_BLOCK,
+    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
 }
 use compiler.core.ast_stmt.{
     STMT_EXPR, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL,
-    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
     stmt_tag, stmt_expr, stmt_body
 }
 use compiler.core.ast.{
     DECL_FN,
-    decl_tag, decl_name, decl_body_stmts
+    decl_tag, decl_name, decl_body_stmts,
+    arm_get_pattern, arm_get_guard, arm_get_body, arm_get_rationale
 }
 use compiler.frontend.core.dangerous_keywords.{is_dangerous_keyword}
 
@@ -61,6 +65,18 @@ fn check_required_comment(decl_indices: [i64]) -> [RequiredCommentWarning]:
 
     warnings
 
+fn _is_weak_rationale(msg: text) -> bool:
+    val t = msg.trim().lower()
+    if t == "":
+        return true
+    if t.len() < 10:
+        return true
+    if t == "todo" or t == "fix" or t == "later" or t == "unknown":
+        return true
+    if t == "because" or t == "n/a" or t == "na":
+        return true
+    false
+
 # ============================================================================
 # Statement and Expression Walking
 # ============================================================================
@@ -93,6 +109,35 @@ fn _check_stmt(stmt_idx: i64, site_name: text, warnings: [RequiredCommentWarning
         val body = stmt_body[stmt_idx]
         for s in body:
             _check_stmt(s, site_name, warnings)
+    elif tag == STMT_MATCH:
+        val e = stmt_expr[stmt_idx]
+        _check_expr(e, site_name, warnings)
+        val arms = stmt_body[stmt_idx]
+        for arm_idx in arms:
+            _check_match_arm(arm_idx, site_name, warnings)
+
+fn _check_match_arm(arm_idx: i64, site_name: text, warnings: [RequiredCommentWarning]):
+    if arm_idx < 0:
+        return
+    val pattern = arm_get_pattern(arm_idx)
+    _check_expr(pattern, site_name, warnings)
+    val guard = arm_get_guard(arm_idx)
+    if guard >= 0:
+        _check_expr(guard, site_name, warnings)
+    if pattern >= 0 and expr_tag[pattern] == EXPR_IDENT and expr_s_val[pattern] == "_":
+        val rationale = arm_get_rationale(arm_idx)
+        if _is_weak_rationale(rationale):
+            warnings.push(RequiredCommentWarning(
+                code: "REQC004",
+                severity: "warn",
+                message: "wildcard match arm used without a rationale",
+                hint: "Use case _(\"why catch-all is correct\"):",
+                site_name: site_name,
+                line: 0
+            ))
+    val body = arm_get_body(arm_idx)
+    for s in body:
+        _check_stmt(s, site_name, warnings)
 
 fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning]):
     if expr_idx < 0:
@@ -108,25 +153,41 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
 
     if is_any_pass:
         val msg = expr_s_val[expr_idx]
-        if msg == "":
+        if _is_weak_rationale(msg):
             val w = RequiredCommentWarning(
                 code: "REQC001",
                 severity: "warn",
                 message: "pass_* used without a comment string",
-                hint: "Add a comment: pass_todo(\"reason\")",
+                hint: "Add a rationale: pass_todo(\"what remains\", \"hint or issue\")",
                 site_name: site_name,
                 line: 0
             )
             warnings.push(w)
         return
 
-    # Check dangerous keyword calls
     if tag == EXPR_CALL:
         val callee_idx = expr_left[expr_idx]
         if callee_idx >= 0:
             val callee_tag = expr_tag[callee_idx]
             if callee_tag == EXPR_IDENT:
                 val callee_name = expr_s_val[callee_idx]
+                if callee_name == "todo":
+                    val args = expr_args[expr_idx]
+                    var has_what = false
+                    var has_hint = false
+                    if args.len() > 0 and args[0] >= 0 and expr_tag[args[0]] == EXPR_STRING_LIT:
+                        has_what = not _is_weak_rationale(expr_s_val[args[0]])
+                    if args.len() > 1 and args[1] >= 0 and expr_tag[args[1]] == EXPR_STRING_LIT:
+                        has_hint = not _is_weak_rationale(expr_s_val[args[1]])
+                    if not has_what or not has_hint:
+                        warnings.push(RequiredCommentWarning(
+                            code: "REQC003",
+                            severity: "warn",
+                            message: "todo used without what-remains and next-step strings",
+                            hint: "Use todo(\"what remains\", \"hint or issue\")",
+                            site_name: site_name,
+                            line: 0
+                        ))
                 if is_dangerous_keyword(callee_name):
                     val args = expr_args[expr_idx]
                     var has_comment = false
@@ -136,7 +197,7 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
                             val first_tag = expr_tag[first_arg]
                             if first_tag == EXPR_STRING_LIT:
                                 val first_val = expr_s_val[first_arg]
-                                if first_val != "":
+                                if not _is_weak_rationale(first_val):
                                     has_comment = true
                     if not has_comment:
                         val w = RequiredCommentWarning(
@@ -148,3 +209,28 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
                             line: 0
                         )
                         warnings.push(w)
+        val args2 = expr_args[expr_idx]
+        for arg in args2:
+            _check_expr(arg, site_name, warnings)
+        return
+
+    if tag == EXPR_MATCH:
+        _check_expr(expr_left[expr_idx], site_name, warnings)
+        val arms = expr_args[expr_idx]
+        for arm_idx in arms:
+            _check_match_arm(arm_idx, site_name, warnings)
+        return
+
+    if tag == EXPR_BINARY:
+        _check_expr(expr_left[expr_idx], site_name, warnings)
+        _check_expr(expr_right[expr_idx], site_name, warnings)
+    elif tag == EXPR_UNARY:
+        _check_expr(expr_left[expr_idx], site_name, warnings)
+    elif tag == EXPR_IF:
+        _check_expr(expr_left[expr_idx], site_name, warnings)
+        _check_expr(expr_right[expr_idx], site_name, warnings)
+        _check_expr(expr_extra[expr_idx], site_name, warnings)
+    elif tag == EXPR_BLOCK:
+        val body = expr_stmts[expr_idx]
+        for s in body:
+            _check_stmt(s, site_name, warnings)

@@ -1,0 +1,118 @@
+# Optional VHDL vendor synthesis smoke coverage.
+#
+# This file lives outside test/system because the repository ignores any
+# path component named "system". Keep opt-in skip behavior trackable here.
+
+use std.spec
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+struct VhdlVendorSmokeReport:
+    enabled: bool
+    vendor: text
+    tool: text
+    report_path: text
+    log_path: text
+    diagnostic: text
+
+fn env_value(name: text) -> text:
+    rt_env_get(name) ?? ""
+
+fn vendor_smoke_report_path(vendor: text) -> text:
+    val override_path = env_value("SIMPLE_VHDL_VENDOR_REPORT_PATH")
+    if override_path != "":
+        return override_path
+    "build/vhdl/vendor-smoke/" + vendor + "-report.sdn"
+
+fn vendor_smoke_log_path(vendor: text) -> text:
+    val override_path = env_value("SIMPLE_VHDL_VENDOR_LOG_PATH")
+    if override_path != "":
+        return override_path
+    "build/vhdl/vendor-smoke/" + vendor + ".log"
+
+fn selected_vendor_tool(vendor: text) -> text:
+    if vendor == "vivado":
+        "vivado"
+    elif vendor == "quartus":
+        "quartus_sh"
+    elif vendor == "yosys":
+        "yosys"
+    else:
+        "ghdl"
+
+fn tool_available(name: text) -> bool:
+    val (_stdout, _stderr, code) = rt_process_run(name, ["--version"])
+    code == 0
+
+fn build_vendor_smoke_report() -> VhdlVendorSmokeReport:
+    val enabled = env_value("SIMPLE_VHDL_VENDOR_SMOKE") == "1"
+    val requested_vendor = env_value("SIMPLE_VHDL_VENDOR")
+    val vendor = if requested_vendor != "": requested_vendor else: "ghdl"
+    val tool = selected_vendor_tool(requested_vendor)
+    val report_path = vendor_smoke_report_path(vendor)
+    val log_path = vendor_smoke_log_path(vendor)
+    if not enabled:
+        return VhdlVendorSmokeReport(
+            enabled: false,
+            vendor: vendor,
+            tool: tool,
+            report_path: report_path,
+            log_path: log_path,
+            diagnostic: "SKIP: SIMPLE_VHDL_VENDOR_SMOKE is not 1; report_path=" + report_path + "; log_path=" + log_path
+        )
+    if not tool_available(tool):
+        return VhdlVendorSmokeReport(
+            enabled: true,
+            vendor: vendor,
+            tool: tool,
+            report_path: report_path,
+            log_path: log_path,
+            diagnostic: "SKIP: selected VHDL vendor tool is missing: " + tool + "; report_path=" + report_path + "; log_path=" + log_path
+        )
+    VhdlVendorSmokeReport(
+        enabled: true,
+        vendor: vendor,
+        tool: tool,
+        report_path: report_path,
+        log_path: log_path,
+        diagnostic: "READY: selected VHDL vendor tool is available: " + tool + "; report_path=" + report_path + "; log_path=" + log_path
+    )
+
+describe "VHDL vendor synthesis smoke":
+    it "skips clearly when vendor smoke is disabled":
+        val report = build_vendor_smoke_report()
+        if not report.enabled:
+            print report.diagnostic
+            expect(report.diagnostic).to_contain("SIMPLE_VHDL_VENDOR_SMOKE is not 1")
+            expect(report.report_path).to_contain("build/vhdl/vendor-smoke/")
+            expect(report.log_path).to_contain("build/vhdl/vendor-smoke/")
+            return
+        expect(report.enabled).to_equal(true)
+
+    it "maps supported vendor names to executable tools":
+        expect(selected_vendor_tool("vivado")).to_equal("vivado")
+        expect(selected_vendor_tool("quartus")).to_equal("quartus_sh")
+        expect(selected_vendor_tool("yosys")).to_equal("yosys")
+        expect(selected_vendor_tool("")).to_equal("ghdl")
+        expect(selected_vendor_tool("unknown")).to_equal("ghdl")
+
+    it "reports deterministic vendor smoke output paths":
+        val report = build_vendor_smoke_report()
+        expect(report.report_path).to_contain("-report.sdn")
+        expect(report.log_path).to_contain(".log")
+        expect(report.diagnostic).to_contain("report_path=")
+        expect(report.diagnostic).to_contain("log_path=")
+
+    it "skips clearly when the selected vendor tool is missing":
+        val report = build_vendor_smoke_report()
+        if not report.enabled:
+            print report.diagnostic
+            expect(report.diagnostic).to_contain("SIMPLE_VHDL_VENDOR_SMOKE is not 1")
+            return
+        if not tool_available(report.tool):
+            print report.diagnostic
+            expect(report.diagnostic).to_contain("selected VHDL vendor tool is missing")
+            expect(report.diagnostic).to_contain(report.tool)
+            return
+        expect(tool_available(report.tool)).to_equal(true)

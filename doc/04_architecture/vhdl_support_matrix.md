@@ -11,7 +11,7 @@ compiler source of truth. A feature is not considered pure-Simple-owned until a
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 parity slice adds deterministic source-map sidecars, payload-enum hard diagnostics, enum literal collision checks, and optional vendor-smoke skip coverage. Full broad HLS ownership remains deferred for helper subprogram inference, ROM/RAM inference, tagged-record payload enums, and generated testbench conversion.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 selected parity milestone adds reset/domain metadata, deterministic source-map sidecars, source-facade bundle and port collision diagnostics, payload-enum hard diagnostics, payload-free enum literal sanitization/collision checks, conservative fixed-width operations, helper subprogram support, conservative ROM/RAM templates, optional vendor-smoke skip/report coverage, and deterministic one-DUT testbench rendering. Broad HLS ownership remains deferred for tagged-record payload enums, floats, pointers, unit lowering, unconstrained memories, implicit-width behavior outside the supported subset, and multi-DUT/multi-phase source-test conversion.
 
 ## Type Support
 
@@ -30,8 +30,8 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `Array(elem, N)` | `array (0 to N-1) of T` | stable | stable | stable | supported | **stable** |
 | Tuple | generated record type with `fN` fields | supported | stable | stable | supported | **supported** |
 | Struct | `record ... end record` | stable | stable | stable | supported | **stable** |
-| Payloadless Enum | `type T is (A, B, C)` and variant literal assignments | stable | stable | stable | supported | **stable** |
-| Payload Enum | — | error | — | — | — | **deferred** |
+| Payloadless Enum | `type T is (A, B, C)` and variant literal assignments; MIR literals are sanitized and checked for VHDL collisions | stable | stable | stable | supported | **stable** |
+| Payload Enum | — (enum/variant-specific hard diagnostic) | error | — | — | — | **deferred** |
 | `f16/f32/f64` | — | error | — | — | — | **deferred** |
 | `Unit` | — | error | — | — | — | **deferred** |
 | Pointer | — | error | — | — | — | **deferred** |
@@ -99,9 +99,10 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Combinational | Explicit list | **stable** |
 | Compiler-generated combinational branch process | `process(all)` | **stable** |
 | Process-local struct/array aggregates | Variables and aggregate expressions inside process | **stable** |
-| Clocked (rising edge) | Clock signal | **stable** |
+| Clocked (rising edge) | Clock signal, with no-reset clock-only emission when reset metadata is absent | **stable** |
 | Clocked (falling edge) | Clock signal | **stable** |
-| Async reset | Clock + reset | **stable** |
+| Async reset | Clock + reset; active-low names ending in `_n`, otherwise active-high | **stable** |
+| Source-facade sync reset | Clock only sensitivity with reset branch under `rising_edge` | **supported** |
 
 ## Entity Structure
 
@@ -113,6 +114,7 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Package generation | **stable** |
 | Record type in package | **stable** |
 | Enum type in package | **stable** |
+| Helper function/procedure declarations and bodies | **supported** |
 | Constant in package | **stable** |
 | Component instantiation | **stable** |
 | Generic parameters | **supported** |
@@ -138,22 +140,24 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
 | VHDL source-map sidecar | `<output>.map.json` with generated entity and port anchors | **supported** |
-| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, selected `@generic`/`@clocked` forms, nested tuple input flattening, and narrow slice/concat support. This is not yet the structured pure Simple compiler source of truth. | **partial** |
+| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, selected `@generic`/`@clocked` forms, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, and narrow slice/concat support. This is not yet the structured pure Simple compiler source of truth. | **supported** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
 | Anonymous hardware outputs | Distinct-type anonymous returns use positional tuple semantics in Simple; labeled outputs are required for stable VHDL public APIs | **partial** |
-| Full pure Simple compiler VHDL path | Structured AST/HIR/MIR metadata to VHDL without source-facade parsing or Rust-only source-of-truth behavior | **deferred** |
+| Full pure Simple compiler VHDL path | Structured AST/HIR/MIR metadata for broad HLS behavior without source-facade compatibility parsing or Rust-only source-of-truth behavior | **deferred** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **supported** |
 | GHDL `--synth` | Synthesis | **supported** |
-| Optional vendor synthesis smoke | `SIMPLE_VHDL_VENDOR_SMOKE=1`, clear skip when disabled or tool missing | **supported** |
+| Optional vendor synthesis smoke | `SIMPLE_VHDL_VENDOR_SMOKE=1`, clear skip diagnostics with deterministic report/log paths when disabled or tool missing | **supported** |
+| Minimal VHDL testbench renderer | One DUT, literal stimuli, optional clock/reset driving, named port maps, equality assertions with `severity failure`, and source-map anchors for test name, ports, port-map lines, and expectations | **supported** |
+| ROM/RAM template renderer | Static ROM, registered ROM read, and single-port synchronous RAM with explicit read-during-write policy; ambiguous memory semantics reject before VHDL output | **supported** |
 | Yosys | Synthesis | **deferred** |
 
 ## MIR Backend Source-of-Truth Parity Specs
 
-The Rust MIR backend parity handoff is tracked by pending system specs as a
-reference implementation path. These specs do not by themselves satisfy the
-pure Simple compiler source-of-truth requirement:
+The Rust MIR backend parity handoff remains a reference implementation path.
+These specs do not by themselves satisfy the broad pure Simple compiler
+source-of-truth requirement:
 
 - `test/system/compiler/vhdl_mir_backend_multi_output_spec.spl` covers labeled
   tuple return ABI ports, same-type labeled outputs, anonymous-output rejection,
@@ -168,36 +172,38 @@ assertions should be reduced to compatibility smoke coverage.
 
 ## Pure Simple Source-of-Truth Specs
 
-The pure Simple compiler parity handoff is tracked separately by:
+The broad pure Simple compiler handoff is tracked separately by:
 
 - `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
 
-This file covers the implementation-worker acceptance surface for structured
-pure Simple metadata, return ABI, direct hardware-call `port map` lowering,
-fixed-width operations, reset/domain metadata, diagnostics, and GHDL
-analyze/elaborate/synth checks. The examples remain pending until the behavior
-is implemented in `src/compiler/**/*.spl` rather than only in Rust codegen or
-the source facade.
+This file covers behavior beyond the selected milestone: structured pure Simple
+metadata, broad HLS ownership, direct hardware-call `port map` lowering, and
+GHDL analyze/elaborate/synth checks that are not already covered by the
+source-facade or MIR backend slices.
 
 ## Simulation Targets
 
 | Target | Status | Notes |
 |--------|--------|-------|
 | `riscv32_sim_vhdl` | **deferred** | Quarantined per simulation milestone decision |
-| GHDL counter simulation | **partial** | CI smoke test exists |
+| GHDL counter simulation | **supported** | CI smoke test exists |
 
 ## Python-HDL Parity Backlog
 
-Pending and migrated SSpec coverage lives in
-`test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` and is surfaced by
-`bin/simple test --only-skipped --list-skip-features --pending`. The tracked
-gaps are clocked processes, reset/domain modeling, composite ports, fixed-width
-bit operations, VHDL subprogram emission, ROM/RAM inference, generics,
-interface bundles, enum encoding, payload enums, testbench conversion, source
-maps, and vendor synthesis smoke. Runnable coverage for the implemented slice
-is in `test/unit/compiler/backend/vhdl_backend_spec.spl`,
+Deferred and migrated SSpec coverage is surfaced by
+`bin/simple test --only-skipped --list-skip-features --pending` where present.
+The remaining tracked gaps are milestone-out-of-scope broad HLS work:
+tagged-record payload enums, floats, pointers, unit lowering, unconstrained
+memories, implicit-width behavior outside the supported subset, multi-DUT and
+multi-phase source-test conversion, and full vendor synthesis execution
+logging. Runnable coverage for the selected milestone is in
+`test/unit/compiler/backend/vhdl_backend_spec.spl`,
+`test/unit/compiler/backend/vhdl_type_mapper_spec.spl`,
+`test/unit/compiler/backend/vhdl_constraints_spec.spl`,
+`test/unit/compiler/backend/vhdl_memory_templates_spec.spl`,
+`test/unit/compiler/backend/vhdl_testbench_spec.spl`,
 `test/system/compiler/vhdl_source_facade_spec.spl`, and
-`test/system/compiler/vhdl_vendor_synthesis_smoke_spec.spl`.
+`test/unit/compiler/backend/vhdl_vendor_synthesis_smoke_spec.spl`.
 
 ## Status Definitions
 

@@ -9,8 +9,10 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.hardware_codegen_types.{HardwareCodegen}
 use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
 
 # ============================================================================
 # VHDL Return ABI
@@ -66,6 +68,8 @@ class VhdlBackend:
     active_tuple_type_shapes: Dict<text, [MirType]>
     active_tuple_type_order: [text]
     active_return_abi: VhdlReturnAbi
+    active_function_by_name: Dict<text, MirFunction>
+    active_helper_name_by_source: Dict<text, text>
 
     static fn empty_span() -> Span:
         Span(start: 0, end_pos: 0, line: 1, col: 1)
@@ -84,7 +88,9 @@ class VhdlBackend:
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
             active_tuple_type_order: [],
-            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: [])
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
+            active_function_by_name: {},
+            active_helper_name_by_source: {}
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -101,23 +107,41 @@ class VhdlBackend:
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
             active_tuple_type_order: [],
-            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: [])
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
+            active_function_by_name: {},
+            active_helper_name_by_source: {}
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
         """Compile MIR module to VHDL."""
         val builder = VhdlBuilder.create(module.name)
         self.active_type_defs = {}
+        self.active_function_by_name = {}
+        self.active_helper_name_by_source = {}
         for symbol in module.types.keys():
             self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            self.active_function_by_name = self.active_function_by_name.set(func.name, func)
         self.prepare_tuple_types_for_module(module)
+        val hardware_mode = self.module_has_vhdl_hardware(module)
+        if hardware_mode:
+            val helper_plan_result = self.prepare_helper_subprograms(module)
+            if helper_plan_result.is_err():
+                return Err(helper_plan_result.unwrap_err())
+        val supported_result = self.validate_module_supported_before_emit(module, hardware_mode)
+        if supported_result.is_err():
+            return Err(supported_result.unwrap_err())
 
         # Emit library header
         builder.emit_library_header()
+        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
+            builder.emit_use_package("work", "{module.name}_pkg")
+            builder.emit_raw("")
 
         # Generate package for types/constants
         var pkg_vhdl = ""
-        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0:
+        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
             val pkg_builder = VhdlBuilder.create(module.name)
             pkg_builder.emit_library_header()
             val pkg_result = self.compile_package_into(pkg_builder, module)
@@ -130,6 +154,8 @@ class VhdlBackend:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
+            if hardware_mode and not vhdl_function_is_hardware_entity(func):
+                continue
             val result = self.compile_function(builder, func)
             match result:
                 case Ok(entity):
@@ -148,6 +174,155 @@ class VhdlBackend:
 
     fn backend_error(message: text) -> CompileError:
         compileerror_backend_error(BackendKind.Vhdl, message)
+
+    fn backend_error_at(message: text, span: Span?) -> CompileError:
+        var err = self.backend_error(message)
+        if span.?:
+            err.has_location = true
+            err.location = span.unwrap().to_range_string()
+        err
+
+    fn unsupported_type_error(ty: MirType, context: text, span: Span?) -> CompileError?:
+        val diagnostic = self.type_mapper.unsupported_mir_type_diagnostic(ty, context)
+        if diagnostic.?:
+            Some(self.backend_error_at(diagnostic.unwrap(), span))
+        else:
+            nil
+
+    fn module_has_vhdl_hardware(module: MirModule) -> bool:
+        for symbol in module.functions.keys():
+            if vhdl_function_is_hardware_entity(module.functions[symbol]):
+                return true
+        false
+
+    fn prepare_helper_subprograms(module: MirModule) -> Result<(), CompileError>:
+        var used: Dict<text, text> = {}
+        self.active_helper_name_by_source = {}
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if vhdl_function_is_hardware_entity(func):
+                continue
+            val safe_name = vhdl_sanitize_identifier(func.name)
+            val prior = used.get(safe_name)
+            if prior.?:
+                return Err(self.backend_error(vhdl_helper_collision_message(safe_name, prior.unwrap(), func.name)))
+            used[safe_name] = func.name
+            self.active_helper_name_by_source = self.active_helper_name_by_source.set(func.name, safe_name)
+        Ok(())
+
+    fn validate_module_supported_before_emit(module: MirModule, hardware_mode: bool) -> Result<(), CompileError>:
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if hardware_mode:
+                if vhdl_function_is_hardware_entity(func):
+                    val entity_result = self.validate_function_supported_before_emit(func, false)
+                    if entity_result.is_err():
+                        return Err(entity_result.unwrap_err())
+                elif self.active_helper_name_by_source.get(func.name).?:
+                    val helper_result = self.validate_function_supported_before_emit(func, true)
+                    if helper_result.is_err():
+                        return Err(helper_result.unwrap_err())
+            else:
+                val result = self.validate_function_supported_before_emit(func, false)
+                if result.is_err():
+                    return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_function_supported_before_emit(func: MirFunction, is_helper: bool) -> Result<(), CompileError>:
+        var blocks: Dict<i64, MirBlock> = {}
+        for block in func.blocks:
+            blocks = blocks.set(block.id.id, block)
+        for block in func.blocks:
+            val result = self.validate_block_supported_before_emit(block, blocks, is_helper)
+            if result.is_err():
+                return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+        for inst in block.instructions:
+            val result = self.validate_instruction_supported_before_emit(inst, blocks, is_helper)
+            if result.is_err():
+                return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_instruction_supported_before_emit(inst: MirInst, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+        if is_helper:
+            match inst.kind:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                    Ok(())
+                case Call(_, func, _):
+                    self.validate_call_supported_before_emit(func)
+                case _:
+                    Err(self.unsupported_vhdl_helper_instruction_error(inst))
+        else:
+            match inst.kind:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | UnaryOp(_, _, _) | Load(_, _) | Store(_, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) | VhdlPortMap(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                    Ok(())
+                case VhdlProcess(_, body_block):
+                    val block = blocks.get(body_block.id)
+                    if block.?:
+                        self.validate_block_supported_before_emit(block.unwrap(), blocks, false)
+                    else:
+                        Err(self.backend_error("VHDL process references unknown block BB{body_block.id}"))
+                case Call(_, func, _):
+                    self.validate_call_supported_before_emit(func)
+                case _:
+                    Err(self.unsupported_vhdl_instruction_error(inst))
+
+    fn validate_call_supported_before_emit(func: MirOperand) -> Result<(), CompileError>:
+        val target_result = self.call_target_name(func)
+        if target_result.is_err():
+            return Err(target_result.unwrap_err())
+        val target = target_result.unwrap()
+        val helper_name = self.active_helper_name_by_source.get(target)
+        if not helper_name.?:
+            val known = self.active_function_by_name.get(target)
+            if known.? and vhdl_function_is_hardware_entity(known.unwrap()):
+                return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+            return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
+        Ok(())
+
+    fn unsupported_vhdl_helper_instruction_error(inst: MirInst) -> CompileError:
+        match inst.kind:
+            case Load(_, _) | Store(_, _) | Alloc(_, _) | GetElementPtr(_, _, _):
+                self.backend_error("Unsupported VHDL helper subprogram memory behavior: {inst.kind}; helpers must be pure combinational")
+            case CallIndirect(_, _, _, _):
+                self.backend_error("Unsupported VHDL helper subprogram indirect call behavior: {inst.kind}; helpers must use direct planned calls")
+            case VhdlProcess(_, _) | VhdlPortMap(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _):
+                self.backend_error("Unsupported VHDL helper subprogram hardware behavior: {inst.kind}; keep public hardware as entity lowering")
+            case Intrinsic(_, name, _):
+                self.backend_error("Unsupported VHDL helper subprogram intrinsic `{name}`; helpers must be pure combinational")
+            case _:
+                self.backend_error("Unsupported VHDL helper subprogram instruction: {inst.kind}")
+
+    fn unsupported_vhdl_instruction_error(inst: MirInst) -> CompileError:
+        match inst.kind:
+            case Alloc(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support Alloc storage allocation")
+            case GetElementPtr(_, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support pointer GetElementPtr lowering")
+            case CallIndirect(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support CallIndirect lowering")
+            case CheckedBinOp(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support checked arithmetic MIR instruction: {inst.kind}")
+            case Intrinsic(_, name, _):
+                self.backend_error("Synthesizable VHDL backend does not support intrinsic '{name}'")
+            case SimdAddF32x4(_, _, _) | SimdSubF32x4(_, _, _) | SimdMulF32x4(_, _, _) | SimdDivF32x4(_, _, _) | SimdFmaF32x4(_, _, _, _) | SimdAddF32x8(_, _, _) | SimdSubF32x8(_, _, _) | SimdMulF32x8(_, _, _) | SimdDivF32x8(_, _, _) | SimdFmaF32x8(_, _, _, _) | SimdAddF64x4(_, _, _) | SimdSubF64x4(_, _, _) | SimdMulF64x4(_, _, _) | SimdDivF64x4(_, _, _) | SimdFmaF64x4(_, _, _, _) | SimdAddI32x4(_, _, _) | SimdSubI32x4(_, _, _) | SimdMulI32x4(_, _, _) | SimdAddI32x8(_, _, _) | SimdSubI32x8(_, _, _) | SimdMulI32x8(_, _, _) | SimdHaddF32x4(_, _) | SimdHmaxF32x4(_, _) | SimdHminF32x4(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support SIMD MIR instruction: {inst.kind}")
+            case InlineAsm(_, _, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support inline assembly MIR instruction")
+            case PipeForward(_, _, _) | Compose(_, _, _, _) | Parallel(_, _) | LayerConnect(_, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support functional pipeline MIR instruction: {inst.kind}")
+            case DebugValue(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support debug metadata MIR instruction: {inst.kind}")
+            case CreatePromise(_, _, _) | Await(_, _) | Yield(_) | Spawn(_, _, _) | Send(_, _) | Receive(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support async or actor MIR instruction: {inst.kind}")
+            case Ref(_, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support borrow/reference MIR instruction: {inst.kind}")
+            case GpuKernelDef(_) | GpuLaunch(_) | GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBlockDim(_, _) | GpuGridDim(_, _) | GpuBarrier(_) | GpuMemFence(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support GPU MIR instruction: {inst.kind}")
+            case _:
+                self.backend_error("Synthesizable VHDL backend does not support MIR instruction: {inst.kind}")
 
     fn compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
         """Compile type and constant definitions into a VHDL package."""
@@ -191,7 +366,7 @@ class VhdlBackend:
                     for v in variants:
                         if v.payload.?:
                             return Err(self.backend_error(
-                                "Payload enum `{type_def.name}.{v.name}` is not supported by VHDL enum encoding; tagged-record lowering is not implemented"
+                                self.type_mapper.payload_enum_diagnostic(type_def.name, v.name, "package emission")
                             ))
                         val safe_name = self.sanitize_vhdl_identifier(v.name)
                         if used_names.get(safe_name).?:
@@ -222,7 +397,31 @@ class VhdlBackend:
             val vhdl_value = vhdl_value_result.unwrap()
             builder.emit_constant_decl(constant.name, vhdl_type, vhdl_value)
 
+        for source_name in self.active_helper_name_by_source.keys():
+            val func_result = self.helper_function_by_name(source_name)
+            if func_result.is_err():
+                return Err(func_result.unwrap_err())
+            val decl_result = self.emit_helper_declaration(builder, func_result.unwrap())
+            if decl_result.is_err():
+                return Err(decl_result.unwrap_err())
+
         builder.emit_package_end(module.name)
+
+        if self.active_helper_name_by_source.len() > 0:
+            builder.emit_library_header()
+            builder.emit_line("package body {module.name}_pkg is")
+            builder.indent_level = builder.indent_level + 1
+            for source_name in self.active_helper_name_by_source.keys():
+                val func_result = self.helper_function_by_name(source_name)
+                if func_result.is_err():
+                    return Err(func_result.unwrap_err())
+                val body_result = self.emit_helper_body(builder, func_result.unwrap())
+                if body_result.is_err():
+                    return Err(body_result.unwrap_err())
+            builder.indent_level = builder.indent_level - 1
+            builder.emit_line("end package body {module.name}_pkg;")
+            builder.emit_raw("")
+
         Ok(())
 
     fn prepare_tuple_types_for_module(module: MirModule):
@@ -418,7 +617,7 @@ class VhdlBackend:
 
         var idx = 0
         while idx < func.signature.params.len():
-            val param_type_result = self.mir_type_to_vhdl(func.signature.params[idx])
+            val param_type_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
             if param_type_result.is_err():
                 return Err(param_type_result.unwrap_err())
             ports = ports.push(VhdlPortSpec(
@@ -433,7 +632,7 @@ class VhdlBackend:
             return Err(abi_result.unwrap_err())
         val abi = abi_result.unwrap()
         for field in abi.fields:
-            val return_type_result = self.mir_type_to_vhdl(field.type_)
+            val return_type_result = self.mir_type_to_vhdl_at(field.type_, Some(func.span))
             if return_type_result.is_err():
                 return Err(return_type_result.unwrap_err())
             ports = ports.push(VhdlPortSpec(
@@ -443,6 +642,316 @@ class VhdlBackend:
             ))
 
         Ok(ports)
+
+    fn helper_function_by_name(name: text) -> Result<MirFunction, CompileError>:
+        val found = self.active_function_by_name.get(name)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("VHDL helper subprogram `{name}` was planned but no function body is available"))
+
+    fn helper_vhdl_name(func: MirFunction) -> Result<text, CompileError>:
+        val found = self.active_helper_name_by_source.get(func.name)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("Function `{func.name}` is not a planned VHDL helper subprogram"))
+
+    fn helper_param_name(func: MirFunction, index: i64) -> text:
+        for local in func.locals:
+            match local.kind:
+                case Arg(idx):
+                    if idx == index:
+                        if local.name.?:
+                            return vhdl_sanitize_identifier(local.name.unwrap())
+                case _:
+                    ()
+        "arg{index}"
+
+    fn helper_local_name(local: MirLocal) -> text:
+        match local.kind:
+            case Arg(idx):
+                if local.name.?:
+                    vhdl_sanitize_identifier(local.name.unwrap())
+                else:
+                    "arg{idx}"
+            case Return:
+                "return_value"
+            case Var | Temp:
+                if local.name.?:
+                    vhdl_sanitize_identifier(local.name.unwrap())
+                else:
+                    "v_{local.id.id}"
+
+    fn helper_param_list(func: MirFunction) -> Result<text, CompileError>:
+        var params: [text] = []
+        var idx = 0
+        while idx < func.signature.params.len():
+            val ty_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
+            if ty_result.is_err():
+                return Err(ty_result.unwrap_err())
+            params = params.push("{self.helper_param_name(func, idx)} : {ty_result.unwrap()}")
+            idx = idx + 1
+        Ok(params.join("; "))
+
+    fn helper_signature(func: MirFunction, with_semicolon: bool) -> Result<text, CompileError>:
+        val name_result = self.helper_vhdl_name(func)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        val params_result = self.helper_param_list(func)
+        if params_result.is_err():
+            return Err(params_result.unwrap_err())
+        val params = params_result.unwrap()
+        val suffix = if with_semicolon: ";" else: ""
+        val maybe_params = if params.len() > 0: "({params})" else: ""
+        if vhdl_helper_is_procedure(func):
+            return Ok("procedure {name_result.unwrap()}{maybe_params}{suffix}")
+        val ret_type_result = self.mir_type_to_vhdl_at(func.signature.return_type, Some(func.span))
+        if ret_type_result.is_err():
+            return Err(ret_type_result.unwrap_err())
+        Ok("function {name_result.unwrap()}{maybe_params} return {ret_type_result.unwrap()}{suffix}")
+
+    fn emit_helper_declaration(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        val sig_result = self.helper_signature(func, true)
+        if sig_result.is_err():
+            return Err(sig_result.unwrap_err())
+        builder.emit_line(sig_result.unwrap())
+        Ok(())
+
+    fn prepare_helper_context(func: MirFunction):
+        self.active_local_names = {}
+        self.active_local_types = {}
+        self.active_local_kinds = {}
+        self.active_blocks = {}
+        for block in func.blocks:
+            self.active_blocks = self.active_blocks.set(block.id.id, block)
+        for local in func.locals:
+            self.active_local_names = self.active_local_names.set(local.id.id, self.helper_local_name(local))
+            self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
+            self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
+
+    fn emit_helper_body(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        self.prepare_helper_context(func)
+        val sig_result = self.helper_signature(func, false)
+        if sig_result.is_err():
+            return Err(sig_result.unwrap_err())
+        builder.emit_line(sig_result.unwrap() + " is")
+        builder.indent_level = builder.indent_level + 1
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp | Return:
+                    if local.kind == LocalKind.Return and vhdl_helper_is_procedure(func):
+                        continue
+                    val ty_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
+                    if ty_result.is_err():
+                        return Err(ty_result.unwrap_err())
+                    builder.emit_line("variable {self.helper_local_name(local)} : {ty_result.unwrap()};")
+                case _:
+                    ()
+        builder.indent_level = builder.indent_level - 1
+        builder.emit_line("begin")
+        builder.indent_level = builder.indent_level + 1
+        val block_result = self.emit_helper_block(builder, func, func.entry_block)
+        if block_result.is_err():
+            return Err(block_result.unwrap_err())
+        builder.indent_level = builder.indent_level - 1
+        val name_result = self.helper_vhdl_name(func)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        if vhdl_helper_is_procedure(func):
+            builder.emit_line("end procedure {name_result.unwrap()};")
+        else:
+            builder.emit_line("end function {name_result.unwrap()};")
+        builder.emit_raw("")
+        Ok(())
+
+    fn emit_helper_block(builder: VhdlBuilder, func: MirFunction, block_id: BlockId) -> Result<(), CompileError>:
+        val block_result = self.block_by_id(block_id)
+        if block_result.is_err():
+            return Err(block_result.unwrap_err())
+        val block = block_result.unwrap()
+        for inst in block.instructions:
+            val inst_result = self.compile_helper_instruction(builder, inst)
+            if inst_result.is_err():
+                return Err(inst_result.unwrap_err())
+        match block.terminator:
+            case Return(value):
+                if value.?:
+                    val value_result = self.helper_operand_to_vhdl(value.unwrap())
+                    if value_result.is_err():
+                        return Err(value_result.unwrap_err())
+                    builder.emit_line("return {value_result.unwrap()};")
+                elif not vhdl_helper_is_procedure(func):
+                    builder.emit_line("return return_value;")
+                Ok(())
+            case _:
+                Err(self.backend_error("Unsupported VHDL helper subprogram terminator: {block.terminator}; helpers must be single-block pure combinational returns"))
+
+    fn helper_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.local_to_vhdl(local)
+            case Const(value, ty):
+                self.const_value_to_vhdl(value, ty)
+
+    fn emit_helper_dest_assign(builder: VhdlBuilder, dest: LocalId, expr: text) -> Result<(), CompileError>:
+        val kind_result = self.local_kind(dest)
+        if kind_result.is_err():
+            return Err(kind_result.unwrap_err())
+        match kind_result.unwrap():
+            case Arg(_):
+                Err(self.backend_error("VHDL helper subprogram cannot assign argument local {dest.id}"))
+            case _:
+                val dest_name = self.local_to_vhdl(dest)
+                if dest_name.is_err():
+                    return Err(dest_name.unwrap_err())
+                builder.emit_var_assign(dest_name.unwrap(), expr)
+                Ok(())
+
+    fn call_target_name(func: MirOperand) -> Result<text, CompileError>:
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        Ok(name)
+                    case _:
+                        Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering; only direct planned pure combinational helpers can be called"))
+            case _:
+                Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering; only direct planned pure combinational helpers can be called"))
+
+    fn helper_call_expr(func: MirOperand, args: [MirOperand], in_helper: bool) -> Result<text, CompileError>:
+        val call_result = self.validate_call_supported_before_emit(func)
+        if call_result.is_err():
+            return Err(call_result.unwrap_err())
+        val target_result = self.call_target_name(func)
+        if target_result.is_err():
+            return Err(target_result.unwrap_err())
+        val target = target_result.unwrap()
+        val helper_name = self.active_helper_name_by_source.get(target)
+        if not helper_name.?:
+            val known = self.active_function_by_name.get(target)
+            if known.? and vhdl_function_is_hardware_entity(known.unwrap()):
+                return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+            return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
+        var arg_exprs: [text] = []
+        for arg in args:
+            val arg_result = if in_helper: self.helper_operand_to_vhdl(arg) else: self.operand_to_vhdl(arg)
+            if arg_result.is_err():
+                return Err(arg_result.unwrap_err())
+            arg_exprs = arg_exprs.push(arg_result.unwrap())
+        if arg_exprs.len() == 0:
+            Ok(helper_name.unwrap())
+        else:
+            Ok("{helper_name.unwrap()}({arg_exprs.join(\", \")})")
+
+    fn emit_entity_helper_call(builder: VhdlBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
+        val expr_result = self.helper_call_expr(func, args, false)
+        if expr_result.is_err():
+            return Err(expr_result.unwrap_err())
+        if dest.?:
+            val dest_name = self.local_to_vhdl(dest.unwrap())
+            if dest_name.is_err():
+                return Err(dest_name.unwrap_err())
+            builder.emit_signal_assign(dest_name.unwrap(), expr_result.unwrap())
+        else:
+            builder.emit_line("{expr_result.unwrap()};")
+        Ok(())
+
+    fn compile_helper_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
+        match inst.kind:
+            case Const(dest, value, ty):
+                val value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, value_result.unwrap())
+            case Copy(dest, src) | Move(dest, src):
+                val value_result = self.helper_operand_to_vhdl(MirOperand(kind: MirOperandKind.Copy(src)))
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, value_result.unwrap())
+            case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
+                val left_name = self.helper_operand_to_vhdl(left)
+                if left_name.is_err():
+                    return Err(left_name.unwrap_err())
+                val right_name = self.helper_operand_to_vhdl(right)
+                if right_name.is_err():
+                    return Err(right_name.unwrap_err())
+                val left_type = self.operand_type(left)
+                if left_type.is_err():
+                    return Err(left_type.unwrap_err())
+                val right_type = self.operand_type(right)
+                if right_type.is_err():
+                    return Err(right_type.unwrap_err())
+                val expr = self.binop_to_vhdl(op, left_name.unwrap(), left_type.unwrap(), right_name.unwrap(), right_type.unwrap(), right)
+                if expr.is_err():
+                    return Err(expr.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, expr.unwrap())
+            case UnaryOp(dest, op, operand):
+                val src_name = self.helper_operand_to_vhdl(operand)
+                if src_name.is_err():
+                    return Err(src_name.unwrap_err())
+                val expr = self.unaryop_to_vhdl(op, src_name.unwrap())
+                if expr.is_err():
+                    return Err(expr.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, expr.unwrap())
+            case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                val src_name = self.helper_operand_to_vhdl(operand)
+                if src_name.is_err():
+                    return Err(src_name.unwrap_err())
+                val src_type = self.operand_type(operand)
+                if src_type.is_err():
+                    return Err(src_type.unwrap_err())
+                val expr = self.cast_to_vhdl(src_name.unwrap(), src_type.unwrap(), target)
+                if expr.is_err():
+                    return Err(expr.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, expr.unwrap())
+            case Aggregate(dest, kind, operands):
+                val dest_type = self.local_type(dest)
+                if dest_type.is_err():
+                    return Err(dest_type.unwrap_err())
+                val expr = self.aggregate_to_vhdl_helper(kind, operands, dest_type.unwrap(), inst.span)
+                if expr.is_err():
+                    return Err(expr.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, expr.unwrap())
+            case GetField(dest, base, field):
+                val base_name = self.helper_operand_to_vhdl(base)
+                if base_name.is_err():
+                    return Err(base_name.unwrap_err())
+                val field_name = self.field_name_for_operand(base, field)
+                if field_name.is_err():
+                    return Err(field_name.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, "{base_name.unwrap()}.{field_name.unwrap()}")
+            case Call(dest, func, args):
+                val expr = self.helper_call_expr(func, args, true)
+                if expr.is_err():
+                    return Err(expr.unwrap_err())
+                if dest.?:
+                    self.emit_helper_dest_assign(builder, dest.unwrap(), expr.unwrap())
+                else:
+                    builder.emit_line("{expr.unwrap()};")
+                    Ok(())
+            case VhdlResize(dest, operand, new_width, signed):
+                val src_name = self.helper_operand_to_vhdl(operand)
+                if src_name.is_err():
+                    return Err(src_name.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, "resize({src_name.unwrap()}, {new_width})")
+            case VhdlSlice(dest, signal, hi, lo):
+                val src_name = self.helper_operand_to_vhdl(signal)
+                if src_name.is_err():
+                    return Err(src_name.unwrap_err())
+                self.emit_helper_dest_assign(builder, dest, "{src_name.unwrap()}({hi} downto {lo})")
+            case VhdlConcat(dest, parts):
+                var part_names: [text] = []
+                for part in parts:
+                    val part_name = self.helper_operand_to_vhdl(part)
+                    if part_name.is_err():
+                        return Err(part_name.unwrap_err())
+                    part_names = part_names.push(part_name.unwrap())
+                self.emit_helper_dest_assign(builder, dest, part_names.join(" & "))
+            case Nop:
+                Ok(())
+            case _:
+                Err(self.unsupported_vhdl_helper_instruction_error(inst))
 
     fn emit_return_assign(builder: VhdlBuilder, value: MirOperand) -> Result<(), CompileError>:
         val value_name_result = self.operand_to_vhdl(value)
@@ -502,7 +1011,7 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
                     if vhdl_type_result.is_err():
                         return Err(vhdl_type_result.unwrap_err())
                     val vhdl_type = vhdl_type_result.unwrap()
@@ -728,7 +1237,7 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
                     if vhdl_type_result.is_err():
                         return Err(vhdl_type_result.unwrap_err())
                     val name = self.default_local_name(local)
@@ -827,7 +1336,7 @@ class VhdlBackend:
     fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
-                val value_result = self.const_value_to_vhdl(value, ty)
+                val value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
                 if value_result.is_err():
                     return Err(value_result.unwrap_err())
                 self.emit_process_dest_assign(builder, dest, value_result.unwrap())
@@ -897,7 +1406,7 @@ class VhdlBackend:
                 val dest_type_result = self.local_type(dest)
                 if dest_type_result.is_err():
                     return Err(dest_type_result.unwrap_err())
-                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap())
+                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap(), inst.span)
                 if aggregate_result.is_err():
                     return Err(aggregate_result.unwrap_err())
                 self.emit_process_dest_assign(builder, dest, aggregate_result.unwrap())
@@ -941,8 +1450,10 @@ class VhdlBackend:
                 val src_name_result = self.process_operand_to_vhdl(operand)
                 if src_name_result.is_err():
                     return Err(src_name_result.unwrap_err())
-                val expr = "resize({src_name_result.unwrap()}, {new_width})"
-                self.emit_process_dest_assign(builder, dest, expr)
+                val expr_result = self.resize_expr_to_vhdl(src_name_result.unwrap(), signed, new_width)
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
 
             case VhdlSlice(dest, signal, hi, lo):
                 val src_name_result = self.process_operand_to_vhdl(signal)
@@ -1015,6 +1526,13 @@ class VhdlBackend:
                 return Err(result.unwrap_err())
         Ok(())
 
+    fn reset_asserted_literal(domain: VhdlClockDomain) -> text:
+        match domain.reset_polarity:
+            case ActiveLow:
+                "'0'"
+            case ActiveHigh:
+                "'1'"
+
     fn compile_process_into(builder: VhdlBuilder, kind: compiler.mir.mir_data.VhdlProcessKind, block: MirBlock) -> Result<(), CompileError>:
         val label = builder.alloc_label()
         match kind:
@@ -1026,23 +1544,32 @@ class VhdlBackend:
                     return Err(block_result.unwrap_err())
                 builder.emit_process_end(Some(label))
             case Clocked(domain):
-                builder.emit_clocked_process_begin(Some(label), domain.clock_signal, domain.reset_signal)
+                val sensitivity_reset: text? = if domain.reset_synchrony == VhdlResetSynchrony.Async: domain.reset_signal else: nil
+                builder.emit_clocked_process_begin(Some(label), domain.clock_signal, sensitivity_reset)
                 builder.emit_process_body_begin()
                 match domain.edge:
                     case Rising:
                         builder.emit_rising_edge_check(domain.clock_signal)
                     case Falling:
                         builder.emit_falling_edge_check(domain.clock_signal)
+                if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
+                    val reset_signal = domain.reset_signal.unwrap()
+                    builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
+                    builder.emit_comment("sync reset branch")
+                    builder.emit_else()
                 val block_result = self.compile_block_instructions(builder, block)
                 if block_result.is_err():
                     return Err(block_result.unwrap_err())
+                if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
+                    builder.emit_if_end()
                 builder.emit_if_end()
                 builder.emit_process_end(Some(label))
             case AsyncReset(domain):
                 builder.emit_clocked_process_begin(Some(label), domain.clock_signal, domain.reset_signal)
                 builder.emit_process_body_begin()
                 if domain.reset_signal.?:
-                    builder.emit_if_begin("{domain.reset_signal.unwrap()} = '1'")
+                    val reset_signal = domain.reset_signal.unwrap()
+                    builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
                     builder.emit_comment("async reset branch")
                     builder.emit_else()
                 match domain.edge:
@@ -1066,7 +1593,7 @@ class VhdlBackend:
                 val dest_name_result = self.local_to_vhdl(dest)
                 if dest_name_result.is_err():
                     return Err(dest_name_result.unwrap_err())
-                val vhdl_value_result = self.const_value_to_vhdl(value, ty)
+                val vhdl_value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
                 if vhdl_value_result.is_err():
                     return Err(vhdl_value_result.unwrap_err())
                 val dest_name = dest_name_result.unwrap()
@@ -1147,7 +1674,7 @@ class VhdlBackend:
                 val dest_type_result = self.local_type(dest)
                 if dest_type_result.is_err():
                     return Err(dest_type_result.unwrap_err())
-                val aggregate_result = self.aggregate_to_vhdl(kind, operands, dest_type_result.unwrap())
+                val aggregate_result = self.aggregate_to_vhdl(kind, operands, dest_type_result.unwrap(), inst.span)
                 if aggregate_result.is_err():
                     return Err(aggregate_result.unwrap_err())
                 builder.emit_signal_assign(dest_name_result.unwrap(), aggregate_result.unwrap())
@@ -1246,8 +1773,10 @@ class VhdlBackend:
                 if src_name_result.is_err():
                     return Err(src_name_result.unwrap_err())
                 val dest_name = dest_name_result.unwrap()
-                val src_name = src_name_result.unwrap()
-                builder.emit_resize(dest_name, src_name, new_width, signed)
+                val expr_result = self.resize_expr_to_vhdl(src_name_result.unwrap(), signed, new_width)
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                builder.emit_signal_assign(dest_name, expr_result.unwrap())
 
             case VhdlSlice(dest, signal, hi, lo):
                 val dest_name_result = self.local_to_vhdl(dest)
@@ -1276,23 +1805,13 @@ class VhdlBackend:
             case Nop:
                 ()
 
-            case Alloc(_, _):
-                return Err(self.backend_error("Synthesizable VHDL backend does not support Alloc storage allocation"))
-
-            case GetElementPtr(_, _, _):
-                return Err(self.backend_error("Synthesizable VHDL backend does not support pointer GetElementPtr lowering"))
-
-            case Call(_, _, _):
-                return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering; use VhdlPortMap for component instances"))
-
-            case CallIndirect(_, _, _, _):
-                return Err(self.backend_error("Synthesizable VHDL backend does not support CallIndirect lowering"))
-
-            case Intrinsic(_, name, _):
-                return Err(self.backend_error("Synthesizable VHDL backend does not support intrinsic '{name}'"))
+            case Call(dest, func, args):
+                val call_result = self.emit_entity_helper_call(builder, dest, func, args)
+                if call_result.is_err():
+                    return Err(call_result.unwrap_err())
 
             case _:
-                return Err(self.backend_error("Unsupported instruction: {inst.kind}"))
+                return Err(self.unsupported_vhdl_instruction_error(inst))
 
         Ok(())
 
@@ -1409,10 +1928,68 @@ class VhdlBackend:
             case I32 | U32: Some(32)
             case I16 | U16: Some(16)
             case I8 | U8: Some(8)
+            case Bits(width, _): Some(width)
             case _: nil
+
+    fn validate_concrete_bit_width(width: i64) -> Result<(), CompileError>:
+        val diagnostic = self.type_mapper.fixed_width_diagnostic(width)
+        if diagnostic.?:
+            return Err(self.backend_error(diagnostic.unwrap()))
+        Ok(())
+
+    fn is_signed_integer_type(ty: MirType) -> bool:
+        match ty.kind:
+            case I64 | I32 | I16 | I8: true
+            case Bits(_, signed): signed
+            case _: false
+
+    fn is_unsigned_integer_type(ty: MirType) -> bool:
+        match ty.kind:
+            case U64 | U32 | U16 | U8: true
+            case Bits(_, signed): not signed
+            case _: false
+
+    fn resize_expr_to_vhdl(operand: text, signed: bool, new_width: i64) -> Result<text, CompileError>:
+        val width_result = self.validate_concrete_bit_width(new_width)
+        if width_result.is_err():
+            return Err(width_result.unwrap_err())
+        if signed:
+            Ok("resize(signed({operand}), {new_width})")
+        else:
+            Ok("resize(unsigned({operand}), {new_width})")
+
+    fn require_matching_fixed_integer_widths(op: MirBinOp, left_ty: MirType, right_ty: MirType) -> Result<(), CompileError>:
+        val left_width = self.integer_width(left_ty)
+        val right_width = self.integer_width(right_ty)
+        if left_width.?:
+            val left_width_result = self.validate_concrete_bit_width(left_width.unwrap())
+            if left_width_result.is_err():
+                return Err(left_width_result.unwrap_err())
+        if right_width.?:
+            val right_width_result = self.validate_concrete_bit_width(right_width.unwrap())
+            if right_width_result.is_err():
+                return Err(right_width_result.unwrap_err())
+        if left_width.? and right_width.?:
+            if left_width.unwrap() != right_width.unwrap():
+                return Err(self.backend_error("Ambiguous VHDL integer width mismatch for {op}: left {left_ty.kind} is {left_width.unwrap()} bits, right {right_ty.kind} is {right_width.unwrap()} bits; insert an explicit cast or VhdlResize"))
+        Ok(())
+
+    fn binop_with_matching_integer_widths(op: MirBinOp, left: text, left_ty: MirType, right: text, right_ty: MirType, expr: text) -> Result<text, CompileError>:
+        val width_result = self.require_matching_fixed_integer_widths(op, left_ty, right_ty)
+        if width_result.is_err():
+            Err(width_result.unwrap_err())
+        else:
+            Ok(expr)
 
     fn mir_type_to_vhdl(ty: MirType) -> Result<text, CompileError>:
         """Convert MIR type to VHDL type string."""
+        self.mir_type_to_vhdl_at(ty, nil)
+
+    fn mir_type_to_vhdl_at(ty: MirType, span: Span?) -> Result<text, CompileError>:
+        """Convert MIR type to VHDL type string with an optional diagnostic span."""
+        val unsupported = self.unsupported_type_error(ty, "type emission", span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
         match ty.kind:
             case I64: Ok("signed(63 downto 0)")
             case I32: Ok("signed(31 downto 0)")
@@ -1422,13 +1999,19 @@ class VhdlBackend:
             case U32: Ok("unsigned(31 downto 0)")
             case U16: Ok("unsigned(15 downto 0)")
             case U8: Ok("unsigned(7 downto 0)")
+            case Bits(width, signed):
+                val width_result = self.validate_concrete_bit_width(width)
+                if width_result.is_err():
+                    Err(width_result.unwrap_err())
+                else:
+                    Ok(self.type_mapper.map_fixed_bits(width, signed))
             case Bool:
                 if self.use_resolved:
                     Ok("std_logic")
                 else:
                     Ok("bit")
             case Array(elem, size):
-                val elem_type_result = self.mir_type_to_vhdl(elem)
+                val elem_type_result = self.mir_type_to_vhdl_at(elem, span)
                 if elem_type_result.is_err():
                     Err(elem_type_result.unwrap_err())
                 else:
@@ -1448,12 +2031,10 @@ class VhdlBackend:
                     Err(type_def_result.unwrap_err())
                 else:
                     Ok(type_def_result.unwrap().name)
-            case Unit:
-                Err(self.backend_error("Unit values cannot be lowered to a VHDL signal type"))
             case _:
-                Err(self.backend_error("Unsupported VHDL type: {ty.kind}"))
+                Err(self.backend_error_at("Unsupported VHDL type: {ty.kind}", span))
 
-    fn aggregate_to_vhdl(kind: AggregateKind, operands: [MirOperand], dest_type: MirType) -> Result<text, CompileError>:
+    fn aggregate_to_vhdl(kind: AggregateKind, operands: [MirOperand], dest_type: MirType, span: Span?) -> Result<text, CompileError>:
         match kind:
             case Tuple:
                 match dest_type.kind:
@@ -1516,20 +2097,13 @@ class VhdlBackend:
                 val type_def = type_def_result.unwrap()
                 match type_def.kind:
                     case Enum(variants):
-                        if variant < 0 or variant >= variants.len():
-                            return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
-                        if variants.len() == 0:
-                            return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
-                        for candidate in variants:
-                            if candidate.payload.?:
-                                return Err(self.backend_error("Enum aggregate lowering only supports payloadless enums; {type_def.name} has payload variants"))
-                        Ok(variants[variant].name)
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "aggregate", span)
                     case _:
                         Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("Unsupported VHDL aggregate kind: {kind}"))
 
-    fn aggregate_to_vhdl_process(kind: AggregateKind, operands: [MirOperand], dest_type: MirType) -> Result<text, CompileError>:
+    fn aggregate_to_vhdl_process(kind: AggregateKind, operands: [MirOperand], dest_type: MirType, span: Span?) -> Result<text, CompileError>:
         match kind:
             case Tuple:
                 match dest_type.kind:
@@ -1592,18 +2166,93 @@ class VhdlBackend:
                 val type_def = type_def_result.unwrap()
                 match type_def.kind:
                     case Enum(variants):
-                        if variant < 0 or variant >= variants.len():
-                            return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
-                        if variants.len() == 0:
-                            return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
-                        for candidate in variants:
-                            if candidate.payload.?:
-                                return Err(self.backend_error("Enum aggregate lowering only supports payloadless enums; {type_def.name} has payload variants"))
-                        Ok(variants[variant].name)
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "process aggregate", span)
                     case _:
                         Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("Unsupported VHDL process aggregate kind: {kind}"))
+
+    fn aggregate_to_vhdl_helper(kind: AggregateKind, operands: [MirOperand], dest_type: MirType, span: Span?) -> Result<text, CompileError>:
+        match kind:
+            case Tuple:
+                match dest_type.kind:
+                    case Tuple(elements):
+                        if elements.len() != operands.len():
+                            return Err(self.backend_error("Tuple aggregate expects {elements.len()} operands, got {operands.len()}"))
+                        if elements.len() == 0:
+                            return Err(self.backend_error("Empty tuple aggregates are not supported by the VHDL backend"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.helper_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
+            case Struct(symbol):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Struct(fields):
+                        if operands.len() != fields.len():
+                            return Err(self.backend_error("Struct aggregate {type_def.name} expects {fields.len()} operands, got {operands.len()}"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.helper_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("{fields[idx].name} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Aggregate Struct target {type_def.name} is not a struct type"))
+            case Array(_):
+                match dest_type.kind:
+                    case Array(_, size):
+                        if operands.len() != size:
+                            return Err(self.backend_error("Array aggregate expects {size} operands, got {operands.len()}"))
+                        var entries: [text] = []
+                        var idx = 0
+                        for operand in operands:
+                            val value_result = self.helper_operand_to_vhdl(operand)
+                            if value_result.is_err():
+                                return Err(value_result.unwrap_err())
+                            entries = entries.push("{idx} => {value_result.unwrap()}")
+                            idx = idx + 1
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
+            case Enum(symbol, variant):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Enum(variants):
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "helper aggregate", span)
+                    case _:
+                        Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
+            case _:
+                Err(self.backend_error("Unsupported VHDL helper aggregate kind: {kind}"))
+
+    fn enum_aggregate_literal_to_vhdl(type_def: MirTypeDef, variants: [MirVariantDef], variant: i64, lowering_context: text, span: Span?) -> Result<text, CompileError>:
+        if variant < 0 or variant >= variants.len():
+            return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
+        if variants.len() == 0:
+            return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
+        for candidate in variants:
+            if candidate.payload.?:
+                return Err(self.backend_error_at(
+                    self.type_mapper.payload_enum_diagnostic(type_def.name, candidate.name, "{lowering_context} lowering"),
+                    span
+                ))
+        Ok(self.sanitize_vhdl_identifier(variants[variant].name))
 
     fn field_name_for_operand(base: MirOperand, field: i64) -> Result<text, CompileError>:
         val type_result = self.operand_type(base)
@@ -1627,20 +2276,35 @@ class VhdlBackend:
 
     fn const_value_to_vhdl(value: MirConstValue, ty: MirType) -> Result<text, CompileError>:
         """Convert a constant value to VHDL literal."""
+        self.const_value_to_vhdl_at(value, ty, nil)
+
+    fn const_value_to_vhdl_at(value: MirConstValue, ty: MirType, span: Span?) -> Result<text, CompileError>:
+        """Convert a constant value to VHDL literal with an optional diagnostic span."""
+        val unsupported = self.unsupported_type_error(ty, "constant emission", span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
         match value:
             case Int(v):
                 val width = self.integer_width(ty)
                 if not width.?:
-                    return Err(self.backend_error("Integer constant requires fixed-width integer type, got {ty.kind}"))
+                    return Err(self.backend_error_at("Integer constant requires fixed-width integer type, got {ty.kind}", span))
+                val width_result = self.validate_concrete_bit_width(width.unwrap())
+                if width_result.is_err():
+                    return Err(width_result.unwrap_err())
                 match ty.kind:
                     case I64 | I32 | I16 | I8:
                         Ok("to_signed({v}, {width.unwrap()})")
                     case U64 | U32 | U16 | U8:
                         Ok("to_unsigned({v}, {width.unwrap()})")
+                    case Bits(_, signed):
+                        if signed:
+                            Ok("to_signed({v}, {width.unwrap()})")
+                        else:
+                            Ok("to_unsigned({v}, {width.unwrap()})")
                     case _:
-                        Err(self.backend_error("Unsupported integer literal target type: {ty.kind}"))
+                        Err(self.backend_error_at("Unsupported integer literal target type: {ty.kind}", span))
             case Float(v):
-                Err(self.backend_error("Floating-point constant {v} is not synthesizable for the VHDL backend"))
+                Err(self.backend_error_at("Floating-point constant {v} is not synthesizable for the VHDL backend", span))
             case Bool(v):
                 Ok(if v: "'1'" else: "'0'")
             case Str(v):
@@ -1648,7 +2312,7 @@ class VhdlBackend:
             case Zero:
                 Ok("(others => '0')")
             case _:
-                Err(self.backend_error("Unsupported VHDL constant: {value}"))
+                Err(self.backend_error_at("Unsupported VHDL constant: {value}", span))
 
     fn binop_to_vhdl(op: MirBinOp, left: text, left_ty: MirType, right: text, right_ty: MirType, right_operand: MirOperand) -> Result<text, CompileError>:
         """Convert binary operation to VHDL expression."""
@@ -1658,15 +2322,15 @@ class VhdlBackend:
             case Mul: Ok("{left} * {right}")
             case Div: Ok("{left} / {right}")
             case Rem: Ok("{left} mod {right}")
-            case Eq: Ok("'1' when {left} = {right} else '0'")
-            case Ne: Ok("'1' when {left} /= {right} else '0'")
-            case Lt: Ok("'1' when {left} < {right} else '0'")
-            case Le: Ok("'1' when {left} <= {right} else '0'")
-            case Gt: Ok("'1' when {left} > {right} else '0'")
-            case Ge: Ok("'1' when {left} >= {right} else '0'")
-            case BitAnd: Ok("{left} and {right}")
-            case BitOr: Ok("{left} or {right}")
-            case BitXor: Ok("{left} xor {right}")
+            case Eq: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} = {right} else '0'")
+            case Ne: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} /= {right} else '0'")
+            case Lt: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} < {right} else '0'")
+            case Le: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} <= {right} else '0'")
+            case Gt: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} > {right} else '0'")
+            case Ge: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "'1' when {left} >= {right} else '0'")
+            case BitAnd: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "{left} and {right}")
+            case BitOr: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "{left} or {right}")
+            case BitXor: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "{left} xor {right}")
             case Shl:
                 val shift_count_result = self.shift_count_to_vhdl(right, right_ty, right_operand)
                 if shift_count_result.is_err():
@@ -1704,32 +2368,46 @@ class VhdlBackend:
         val source_width = self.integer_width(source)
         val target_width = self.integer_width(target)
         if target_width.?:
+            val target_width_result = self.validate_concrete_bit_width(target_width.unwrap())
+            if target_width_result.is_err():
+                return Err(target_width_result.unwrap_err())
             match target.kind:
                 case I64 | I32 | I16 | I8:
                     match source.kind:
                         case Bool:
                             Ok("to_signed(1, {target_width.unwrap()}) when {operand} = '1' else to_signed(0, {target_width.unwrap()})")
                         case _:
-                            Ok("resize(signed({operand}), {target_width.unwrap()})")
+                            self.resize_expr_to_vhdl(operand, true, target_width.unwrap())
                 case U64 | U32 | U16 | U8:
                     match source.kind:
                         case Bool:
                             Ok("to_unsigned(1, {target_width.unwrap()}) when {operand} = '1' else to_unsigned(0, {target_width.unwrap()})")
                         case _:
-                            Ok("resize(unsigned({operand}), {target_width.unwrap()})")
+                            self.resize_expr_to_vhdl(operand, false, target_width.unwrap())
+                case Bits(_, signed):
+                    match source.kind:
+                        case Bool:
+                            if signed:
+                                Ok("to_signed(1, {target_width.unwrap()}) when {operand} = '1' else to_signed(0, {target_width.unwrap()})")
+                            else:
+                                Ok("to_unsigned(1, {target_width.unwrap()}) when {operand} = '1' else to_unsigned(0, {target_width.unwrap()})")
+                        case _:
+                            self.resize_expr_to_vhdl(operand, signed, target_width.unwrap())
                 case _:
                     Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
         else:
             match target.kind:
                 case Bool:
                     if source_width.?:
-                        match source.kind:
-                            case U64 | U32 | U16 | U8:
-                                Ok("'1' when {operand} /= to_unsigned(0, {source_width.unwrap()}) else '0'")
-                            case I64 | I32 | I16 | I8:
-                                Ok("'1' when {operand} /= to_signed(0, {source_width.unwrap()}) else '0'")
-                            case _:
-                                Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
+                        val source_width_result = self.validate_concrete_bit_width(source_width.unwrap())
+                        if source_width_result.is_err():
+                            return Err(source_width_result.unwrap_err())
+                        if self.is_unsigned_integer_type(source):
+                            Ok("'1' when {operand} /= to_unsigned(0, {source_width.unwrap()}) else '0'")
+                        elif self.is_signed_integer_type(source):
+                            Ok("'1' when {operand} /= to_signed(0, {source_width.unwrap()}) else '0'")
+                        else:
+                            Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
                     else:
                         match source.kind:
                             case Bool:

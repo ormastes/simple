@@ -207,16 +207,28 @@ fn is_enabled() -> bool: true
 ### STUB003: Explicit Placeholder Function Body In Production Code (ERROR)
 
 Fires when non-test source uses a single whole-function placeholder body such as
-`pass_todo(...)`, `pass_do_nothing`, or `pass_dn`.
+`pass_todo(...)`, `pass_do_nothing(...)`, or `pass_dn(...)`.
 
 ```simple
 fn not_done(port: i64) -> i64:
-    pass_todo("implement driver")
+    pass_todo("implement driver read path", "tracked by SIMPLE-123")
 ```
 
 ```simple
 fn noop_handler(event: text):
-    pass_do_nothing
+    pass_do_nothing("event is intentionally ignored by this sink")
+```
+
+### Required Comment Lints (REQC001-REQC004)
+
+Required-comment lints are warning-first migration diagnostics for dangerous
+escape hatches:
+
+```simple
+pass_todo("what remains", "hint or issue")
+pass_do_nothing("why no-op is correct")
+todo("what remains", "hint or issue")
+case _("why catch-all is correct"):
 ```
 
 ---
@@ -334,12 +346,12 @@ fn gc_malloc(size: i64) -> i64: 0
 
 # After (suppressed) — intentional no-op
 fn gc_malloc(size: i64) -> i64:
-    pass_do_nothing  # Runtime uses refcounting, GC not needed
+    pass_do_nothing("runtime uses refcounting, GC is not needed")
     0
 
 # After (suppressed) — not yet implemented
 fn gc_malloc(size: i64) -> i64:
-    pass_todo("implement GC allocation")
+    pass_todo("implement GC allocation", "tracked by SIMPLE-123")
     0
 ```
 

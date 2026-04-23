@@ -91,7 +91,12 @@
   "pass_todo"       ; tier: core
   "pass_do_nothing" ; tier: core
   "pass_dn"         ; tier: core
+  "todo"            ; tier: core
 ] @keyword.control
+
+((call_expression
+  function: (identifier) @keyword.control)
+ (#eq? @keyword.control "todo"))
 
 ;; Exception Handling
 [

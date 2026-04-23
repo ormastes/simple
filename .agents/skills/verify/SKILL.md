@@ -21,7 +21,7 @@ description: Production readiness verification. Checks SSpec tests for stubs/dum
 - Every REQ-NNN has test coverage
 
 ### 2. Implementation
-- No stub functions (`pass_todo`, `pass_do_nothing`, `pass_dn`)
+- No stub functions (`pass_todo`, weak `pass_do_nothing(...)`, weak `pass_dn(...)`, weak `todo(...)`)
 - No hardcoded returns without logic
 - Error handling complete, no commented-out code
 

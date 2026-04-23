@@ -54,6 +54,14 @@ pub enum LintName {
     SSpecBooleanWrapperAssertions,
     /// Explicit placeholder implementation body in production code
     StubImpl,
+    /// pass_* used without a useful rationale
+    RequiredCommentPass,
+    /// Dangerous keyword used without a useful rationale
+    RequiredCommentDangerous,
+    /// todo used without what-remains and next-step strings
+    RequiredCommentTodo,
+    /// Wildcard match arm used without a useful rationale
+    RequiredCommentWildcard,
     /// Positional arguments for parameters that share a type with other parameters
     UnnamedDuplicateTypedArgs,
     /// Resource types not properly closed within scope
@@ -92,6 +100,10 @@ impl LintName {
             LintName::SSpecEmptyExamples => "sspec_empty_examples",
             LintName::SSpecBooleanWrapperAssertions => "sspec_boolean_wrapper_assertions",
             LintName::StubImpl => "stub_impl",
+            LintName::RequiredCommentPass => "REQC001",
+            LintName::RequiredCommentDangerous => "REQC002",
+            LintName::RequiredCommentTodo => "REQC003",
+            LintName::RequiredCommentWildcard => "REQC004",
             LintName::UnnamedDuplicateTypedArgs => "unnamed_duplicate_typed_args",
             LintName::ResourceLeak => "resource_leak",
             LintName::WildcardMatch => "wildcard_match",
@@ -121,6 +133,10 @@ impl LintName {
             "sspec_empty_examples" => Some(LintName::SSpecEmptyExamples),
             "sspec_boolean_wrapper_assertions" => Some(LintName::SSpecBooleanWrapperAssertions),
             "stub_impl" => Some(LintName::StubImpl),
+            "required_comment" | "REQC001" => Some(LintName::RequiredCommentPass),
+            "REQC002" => Some(LintName::RequiredCommentDangerous),
+            "REQC003" => Some(LintName::RequiredCommentTodo),
+            "REQC004" => Some(LintName::RequiredCommentWildcard),
             "unnamed_duplicate_typed_args" => Some(LintName::UnnamedDuplicateTypedArgs),
             "resource_leak" => Some(LintName::ResourceLeak),
             "wildcard_match" => Some(LintName::WildcardMatch),
@@ -156,6 +172,10 @@ impl LintName {
             LintName::SSpecEmptyExamples => LintLevel::Deny,
             LintName::SSpecBooleanWrapperAssertions => LintLevel::Deny,
             LintName::StubImpl => LintLevel::Deny,
+            LintName::RequiredCommentPass
+            | LintName::RequiredCommentDangerous
+            | LintName::RequiredCommentTodo
+            | LintName::RequiredCommentWildcard => LintLevel::Warn,
             LintName::UnnamedDuplicateTypedArgs => LintLevel::Warn,
             LintName::ResourceLeak => LintLevel::Warn,
             LintName::WildcardMatch => LintLevel::Allow,
@@ -423,6 +443,10 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SSpecEmptyExamples => "Lint: sspec_empty_examples\nLevel: deny\n\nDetects SSpec examples that have no real assertion or sanctioned skip.".to_string(),
             LintName::SSpecBooleanWrapperAssertions => "Lint: sspec_boolean_wrapper_assertions\nLevel: deny\n\nDetects boolean-wrapper assertions like expect(a != b).to_equal(true).".to_string(),
             LintName::StubImpl => "Lint: stub_impl\nLevel: deny\n\nDetects explicit placeholder implementation bodies in production code.".to_string(),
+            LintName::RequiredCommentPass => "Lint: REQC001\nLevel: warn\n\nWarns when pass_* is used without a useful rationale.".to_string(),
+            LintName::RequiredCommentDangerous => "Lint: REQC002\nLevel: warn\n\nWarns when a dangerous keyword is used without a useful rationale.".to_string(),
+            LintName::RequiredCommentTodo => "Lint: REQC003\nLevel: warn\n\nWarns when todo lacks what-remains and next-step strings.".to_string(),
+            LintName::RequiredCommentWildcard => "Lint: REQC004\nLevel: warn\n\nWarns when a wildcard match arm lacks a useful rationale.".to_string(),
             LintName::UnnamedDuplicateTypedArgs => r#"Lint: unnamed_duplicate_typed_args
 Level: warn (default)
 
@@ -805,6 +829,10 @@ Group related parameters into a struct:
             LintName::SSpecEmptyExamples,
             LintName::SSpecBooleanWrapperAssertions,
             LintName::StubImpl,
+            LintName::RequiredCommentPass,
+            LintName::RequiredCommentDangerous,
+            LintName::RequiredCommentTodo,
+            LintName::RequiredCommentWildcard,
             LintName::UnnamedDuplicateTypedArgs,
             LintName::ResourceLeak,
             LintName::WildcardMatch,
