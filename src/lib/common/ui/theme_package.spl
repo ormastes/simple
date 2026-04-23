@@ -1,0 +1,467 @@
+# Folder-based UI theme packages.
+#
+# Loads config/themes/theme.sdn plus family/theme folders once, validates the
+# package graph, and exposes resolved CSS/tokens/numeric colors to renderers.
+
+use common.ui.simple_theme.{SimpleTheme}
+use common.ui.glass.tokens.{GlassDesignTokens}
+use common.ui.style.{UITheme, ThemeColors, Spacing, BorderStyle, FontStyle}
+use common.ui.color.{Color}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_modified(path: text) -> i64
+
+val THEME_REGISTRY_PATH = "config/themes/theme.sdn"
+
+class ResolvedThemeColors:
+    bg: u32
+    fg: u32
+    accent: u32
+    panel: u32
+    border: u32
+    button: u32
+    button_hover: u32
+    status: u32
+
+class ResolvedThemePackage:
+    id: text
+    display_name: text
+    family_id: text
+    base_css: text
+    shape_css: text
+    widget_css: text
+    icon_css: text
+    source_reference: text
+    source_paths: [text]
+    mtime_key: text
+    tokens: GlassDesignTokens
+    ui_theme: UITheme
+    colors: ResolvedThemeColors
+
+class ThemeValidationIssue:
+    path: text
+    key: text
+    message: text
+
+var _theme_package_cache: Dict<text, ResolvedThemePackage> = {}
+
+fn default_theme_id() -> text:
+    val content = _read_if_exists(THEME_REGISTRY_PATH)
+    val value = _root_value(content, "default_theme")
+    if value == "":
+        return "aetheric_dark"
+    value
+
+fn resolve_theme_alias(theme_id: text) -> text:
+    val requested = if theme_id == "": default_theme_id() else: theme_id
+    val content = _read_if_exists(THEME_REGISTRY_PATH)
+    val alias = _section_value(content, "aliases", requested)
+    if alias != "":
+        return alias
+    requested
+
+fn load_default_theme_package() -> ResolvedThemePackage:
+    load_theme_package(default_theme_id())
+
+fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
+    val resolved_id = resolve_theme_alias(theme_id)
+    match _theme_package_cache.get(resolved_id):
+        case Some(cached):
+            val fresh_key = _mtime_key(cached.source_paths)
+            if fresh_key == cached.mtime_key:
+                return cached
+        case _: pass_dn
+
+    val registry = _read_if_exists(THEME_REGISTRY_PATH)
+    val theme_path = _section_value(registry, "themes", resolved_id)
+    val final_theme_path = if theme_path == "": "config/themes/{resolved_id}/theme.sdn" else: theme_path
+    val theme_sdn = _read_if_exists(final_theme_path)
+    val family_id = _root_value(theme_sdn, "family")
+    val family_path = _section_value(registry, "families", family_id)
+    val final_family_path = if family_path == "": "config/themes/families/{family_id}/theme.sdn" else: family_path
+    val family_sdn = _read_if_exists(final_family_path)
+
+    val base_path = _root_value(theme_sdn, "base_css")
+    val shape_path = _root_value(family_sdn, "shape_css")
+    val icons_path = _root_value(family_sdn, "icons")
+    val local_widget_dir = _root_value(theme_sdn, "widget_css_dir")
+    val family_widget_dir = _root_value(family_sdn, "widget_css_dir")
+    val required_widgets = _section_items(registry, "required_widgets")
+    val base_css = _read_if_exists(base_path)
+    val shape_css = _read_if_exists(shape_path)
+    val icon_sdn = _read_if_exists(icons_path)
+    val widget_css = _load_widget_css(required_widgets, local_widget_dir, family_widget_dir)
+    val icon_css = _icons_to_css(icon_sdn)
+    val css_for_tokens = "{shape_css}\n{base_css}"
+    val parsed = SimpleTheme.from_css(resolved_id, css_for_tokens)
+    val ui_theme = _ui_theme_from_css(resolved_id, base_css, shape_css)
+    val colors = _resolved_colors_from_css(base_css)
+
+    var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path]
+    for widget in required_widgets:
+        val local_path = "{local_widget_dir}/{widget}.css"
+        val family_path_for_widget = "{family_widget_dir}/{widget}.css"
+        val family_default = "{family_widget_dir}/defaults.css"
+        if rt_file_exists(local_path):
+            paths = paths.push(local_path)
+        elif rt_file_exists(family_path_for_widget):
+            paths = paths.push(family_path_for_widget)
+        elif rt_file_exists(family_default):
+            paths = paths.push(family_default)
+
+    val pkg = ResolvedThemePackage(
+        id: resolved_id,
+        display_name: _root_value(theme_sdn, "display_name"),
+        family_id: family_id,
+        base_css: base_css,
+        shape_css: shape_css,
+        widget_css: widget_css,
+        icon_css: icon_css,
+        source_reference: _root_value(theme_sdn, "source_raw_reference"),
+        source_paths: paths,
+        mtime_key: _mtime_key(paths),
+        tokens: parsed.tokens,
+        ui_theme: ui_theme,
+        colors: colors
+    )
+    _theme_package_cache[resolved_id] = pkg
+    pkg
+
+fn resolved_theme_css(theme_id: text) -> text:
+    val pkg = load_theme_package(theme_id)
+    "{pkg.shape_css}\n{pkg.base_css}\n{pkg.icon_css}\n{pkg.widget_css}\n"
+
+fn theme_ui_theme(theme_id: text) -> UITheme:
+    load_theme_package(theme_id).ui_theme
+
+fn theme_design_tokens(theme_id: text) -> GlassDesignTokens:
+    load_theme_package(theme_id).tokens
+
+fn theme_numeric_colors(theme_id: text) -> ResolvedThemeColors:
+    load_theme_package(theme_id).colors
+
+fn validate_default_theme_package() -> [ThemeValidationIssue]:
+    validate_theme_package(THEME_REGISTRY_PATH)
+
+fn validate_theme_package(registry_path: text) -> [ThemeValidationIssue]:
+    var issues: [ThemeValidationIssue] = []
+    if not rt_file_exists(registry_path):
+        return [ThemeValidationIssue(path: registry_path, key: "registry", message: "theme registry file is missing")]
+
+    val registry = rt_file_read_text(registry_path)
+    val default_id = _root_value(registry, "default_theme")
+    if default_id == "":
+        issues = _push_issue(issues, registry_path, "default_theme", "default_theme is required")
+    val theme_id = if default_id == "": "aetheric_dark" else: default_id
+    val theme_path = _section_value(registry, "themes", theme_id)
+    if theme_path == "":
+        issues = _push_issue(issues, registry_path, "themes.{theme_id}", "default theme is not listed in themes")
+        return issues
+    if not rt_file_exists(theme_path):
+        issues = _push_issue(issues, theme_path, "themes.{theme_id}", "theme package file is missing")
+        return issues
+
+    val theme_sdn = rt_file_read_text(theme_path)
+    val family_id = _root_value(theme_sdn, "family")
+    val family_path = _section_value(registry, "families", family_id)
+    if family_id == "":
+        issues = _push_issue(issues, theme_path, "family", "theme family is required")
+    elif family_path == "":
+        issues = _push_issue(issues, registry_path, "families.{family_id}", "theme references an unknown family")
+    elif not rt_file_exists(family_path):
+        issues = _push_issue(issues, family_path, "families.{family_id}", "family package file is missing")
+
+    val family_sdn = if family_path != "" and rt_file_exists(family_path): rt_file_read_text(family_path) else: ""
+    issues = _require_file(issues, theme_path, "base_css", _root_value(theme_sdn, "base_css"))
+    issues = _require_file(issues, family_path, "shape_css", _root_value(family_sdn, "shape_css"))
+    issues = _require_file(issues, family_path, "icons", _root_value(family_sdn, "icons"))
+    issues = _require_file(issues, theme_path, "source_raw_reference", _root_value(theme_sdn, "source_raw_reference"))
+
+    val base_path = _root_value(theme_sdn, "base_css")
+    val shape_path = _root_value(family_sdn, "shape_css")
+    val icons_path = _root_value(family_sdn, "icons")
+    val base_css = _read_if_exists(base_path)
+    val shape_css = _read_if_exists(shape_path)
+    val icon_sdn = _read_if_exists(icons_path)
+    val local_widget_dir = _root_value(theme_sdn, "widget_css_dir")
+    val family_widget_dir = _root_value(family_sdn, "widget_css_dir")
+    val widgets = _section_items(registry, "required_widgets")
+    val defaults_css = _read_if_exists("{family_widget_dir}/defaults.css")
+    for widget in widgets:
+        val local_path = "{local_widget_dir}/{widget}.css"
+        val family_path_for_widget = "{family_widget_dir}/{widget}.css"
+        val class_name = ".widget-{widget.replace(\"_\", \"-\")}"
+        if not rt_file_exists(local_path) and not rt_file_exists(family_path_for_widget) and not defaults_css.contains(class_name):
+            issues = _push_issue(issues, registry_path, "required_widgets.{widget}", "missing widget CSS in local package or family defaults")
+
+    for app in ["Terminal", "Browser", "File Manager", "Editor", "Calculator"]:
+        if _section_value(icon_sdn, "apps", app) == "":
+            issues = _push_issue(issues, icons_path, "apps.{app}", "missing default app icon")
+    for key in ["close", "minimize", "maximize", "settings", "fallback_app", "fallback_file"]:
+        if _section_value(icon_sdn, "system", key) == "":
+            issues = _push_issue(issues, icons_path, "system.{key}", "missing default system icon")
+
+    issues = issues + _validate_token_layers(base_path, base_css, shape_path, shape_css, local_widget_dir, family_widget_dir, widgets)
+    issues = issues + _validate_var_refs(base_path, base_css, shape_path, shape_css, icons_path, icon_sdn, local_widget_dir, family_widget_dir, widgets)
+    issues
+
+fn _read_if_exists(path: text) -> text:
+    if path == "":
+        return ""
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path)
+
+fn _push_issue(issues: [ThemeValidationIssue], path: text, key: text, message: text) -> [ThemeValidationIssue]:
+    var out = issues
+    out.push(ThemeValidationIssue(path: path, key: key, message: message))
+    out
+
+fn _require_file(issues: [ThemeValidationIssue], owner: text, key: text, path: text) -> [ThemeValidationIssue]:
+    if path == "":
+        return _push_issue(issues, owner, key, "{key} is required")
+    if not rt_file_exists(path):
+        return _push_issue(issues, path, key, "referenced file is missing")
+    issues
+
+fn _mtime_key(paths: [text]) -> text:
+    var out = ""
+    for path in paths:
+        if path != "" and rt_file_exists(path):
+            out = "{out}{path}:{rt_file_modified(path)};"
+        else:
+            out = "{out}{path}:missing;"
+    out
+
+fn _strip_value(value: text) -> text:
+    var v = value.trim()
+    if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
+        v = v[1:v.len() - 1]
+    v
+
+fn _root_value(content: text, key: text) -> text:
+    val prefix = "{key}:"
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return _strip_value(trimmed[prefix.len():])
+    ""
+
+fn _section_value(content: text, section: text, key: text) -> text:
+    var current = ""
+    val section_header = "{section}:"
+    val prefix = "{key}:"
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not line.starts_with(" ") and trimmed.ends_with(":"):
+            current = trimmed[0:trimmed.len() - 1]
+            continue
+        if trimmed == section_header:
+            current = section
+            continue
+        if current == section and trimmed.starts_with(prefix):
+            return _strip_value(trimmed[prefix.len():])
+    ""
+
+fn _section_items(content: text, section: text) -> [text]:
+    var items: [text] = []
+    var current = ""
+    val section_header = "{section}:"
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == section_header:
+            current = section
+            continue
+        if not line.starts_with(" ") and trimmed.ends_with(":"):
+            current = trimmed[0:trimmed.len() - 1]
+            continue
+        if current == section and trimmed.starts_with("- "):
+            items.push(_strip_value(trimmed[2:]))
+    items
+
+fn _load_widget_css(widgets: [text], local_dir: text, family_dir: text) -> text:
+    var css = _read_if_exists("{family_dir}/defaults.css")
+    for widget in widgets:
+        val family_path = "{family_dir}/{widget}.css"
+        val local_path = "{local_dir}/{widget}.css"
+        val family_css = _read_if_exists(family_path)
+        if family_css != "":
+            css = "{css}\n{family_css}"
+        val local_css = _read_if_exists(local_path)
+        if local_css != "":
+            css = "{css}\n{local_css}"
+    css
+
+fn _icons_to_css(icon_sdn: text) -> text:
+    var css = ":root {\n"
+    for line in icon_sdn.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.contains(":") and not trimmed.ends_with(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val key = parts[0].trim().replace(" ", "-").to_lower()
+                val value = _strip_value(parts[1])
+                css = "{css}  --theme-icon-{key}: \"{value}\";\n"
+    css = "{css}}\n"
+    css
+
+fn _css_var(css: text, name: text, fallback: text) -> text:
+    val prefix = "{name}:"
+    for line in css.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            var value = trimmed[prefix.len():].trim()
+            if value.ends_with(";"):
+                value = value[0:value.len() - 1].trim()
+            return value
+    fallback
+
+fn _ui_theme_from_css(theme_id: text, base_css: text, shape_css: text) -> UITheme:
+    val bg = _css_var(base_css, "--ui-bg", "#0e0e10")
+    val fg = _css_var(base_css, "--ui-fg", "#e4e2e4")
+    val accent = _css_var(base_css, "--ui-accent", "#adc6ff")
+    val error = _css_var(base_css, "--ui-error", "#ffb4ab")
+    val warning = _css_var(base_css, "--ui-warning", "#f4bd78")
+    val success = _css_var(base_css, "--ui-success", "#b1b1ff")
+    val panel = _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)")
+    val hover = _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)")
+    val border = _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)")
+    UITheme(
+        name: theme_id,
+        colors: ThemeColors(
+            background: Color.from_hex(bg),
+            foreground: Color.from_hex(fg),
+            border: border,
+            accent: Color.from_hex(accent),
+            panel_bg: panel,
+            hover_bg: hover,
+            error: Color.from_hex(error),
+            warning: Color.from_hex(warning),
+            success: Color.from_hex(success),
+            info: Color.from_hex(_css_var(base_css, "--ui-info", accent))
+        ),
+        spacing: Spacing(xs: 4, sm: 8, md: 12, lg: 16, xl: 24),
+        border: BorderStyle(width: 1, radius: 8, style: "solid"),
+        font: FontStyle(family: _css_var(base_css, "--font-main", "system-ui, sans-serif"), size: 14, weight: "normal", line_height: 1.5)
+    )
+
+fn _resolved_colors_from_css(base_css: text) -> ResolvedThemeColors:
+    val bg = _argb_from_css(_css_var(base_css, "--ui-bg", "#0e0e10"), 0xFF0E0E10)
+    val fg = _argb_from_css(_css_var(base_css, "--ui-fg", "#e4e2e4"), 0xFFE4E2E4)
+    val accent = _argb_from_css(_css_var(base_css, "--ui-accent", "#adc6ff"), 0xFFADC6FF)
+    val panel = _argb_from_css(_css_var(base_css, "--app-surface", "#1F1F21"), 0xFF1F1F21)
+    val border = _argb_from_css(_css_var(base_css, "--app-border", "#8B90A0"), 0xFF8B90A0)
+    val hover = _argb_from_css(_css_var(base_css, "--app-surface-hover", "#353437"), 0xFF353437)
+    ResolvedThemeColors(bg: bg, fg: fg, accent: accent, panel: panel, border: border, button: hover, button_hover: hover, status: panel)
+
+fn _argb_from_css(value: text, fallback: u32) -> u32:
+    val v = value.trim()
+    if not v.starts_with("#") or v.len() < 7:
+        return fallback
+    val hex = v[1:7]
+    val r = _hex_digit(hex[0].to_i64()) * 16 + _hex_digit(hex[1].to_i64())
+    val g = _hex_digit(hex[2].to_i64()) * 16 + _hex_digit(hex[3].to_i64())
+    val b = _hex_digit(hex[4].to_i64()) * 16 + _hex_digit(hex[5].to_i64())
+    0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+
+fn _hex_digit(ch: i64) -> i64:
+    if ch >= 48 and ch <= 57:
+        return ch - 48
+    if ch >= 97 and ch <= 102:
+        return ch - 87
+    if ch >= 65 and ch <= 70:
+        return ch - 55
+    0
+
+fn _validate_token_layers(base_path: text, base_css: text, shape_path: text, shape_css: text, local_widget_dir: text, family_widget_dir: text, widgets: [text]) -> [ThemeValidationIssue]:
+    var issues: [ThemeValidationIssue] = []
+    for forbidden in ["--ui-", "--app-", "--font-", "--motion-"]:
+        if shape_css.contains(forbidden):
+            issues = _push_issue(issues, shape_path, forbidden, "family shape CSS must only define shape tokens")
+    for forbidden in ["--radius-", "--spacing-", "--blur-", "--border-width-", "--elevation-"]:
+        if base_css.contains(forbidden):
+            issues = _push_issue(issues, base_path, forbidden, "theme base CSS must not define family shape tokens")
+    for widget in widgets:
+        val local_path = "{local_widget_dir}/{widget}.css"
+        val family_path = "{family_widget_dir}/{widget}.css"
+        val local_css = _read_if_exists(local_path)
+        val family_css = _read_if_exists(family_path)
+        if local_css.contains("--"):
+            issues = _push_issue(issues, local_path, widget, "local widget CSS must use existing var(--token) references instead of defining tokens")
+        if family_css.contains("--ui-") or family_css.contains("--app-"):
+            issues = _push_issue(issues, family_path, widget, "family widget CSS must not define theme color tokens")
+    issues
+
+fn _defined_tokens(css: text) -> [text]:
+    var tokens: [text] = []
+    for line in css.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("--") and trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            tokens.push(parts[0].trim())
+    tokens
+
+fn _has_token(tokens: [text], token: text) -> bool:
+    for item in tokens:
+        if item == token:
+            return true
+    false
+
+fn _validate_refs_in_css(issues: [ThemeValidationIssue], path: text, css: text, tokens: [text]) -> [ThemeValidationIssue]:
+    var out = issues
+    var rest = css
+    while rest.contains("var(--"):
+        val parts = rest.split("var(")
+        if parts.len() < 2:
+            return out
+        val tail = parts[1]
+        val end_parts = tail.split(")")
+        if end_parts.len() < 1:
+            return out
+        val token = end_parts[0].trim()
+        if not _has_token(tokens, token):
+            out = _push_issue(out, path, token, "unresolved CSS token reference")
+        rest = tail
+        if end_parts.len() > 1:
+            rest = end_parts[1]
+        else:
+            return out
+    out
+
+fn _validate_var_refs(base_path: text, base_css: text, shape_path: text, shape_css: text, icons_path: text, icon_sdn: text, local_widget_dir: text, family_widget_dir: text, widgets: [text]) -> [ThemeValidationIssue]:
+    var issues: [ThemeValidationIssue] = []
+    val tokens = _defined_tokens(base_css) + _defined_tokens(shape_css)
+    issues = _validate_refs_in_css(issues, base_path, base_css, tokens)
+    issues = _validate_refs_in_css(issues, shape_path, shape_css, tokens)
+    issues = _validate_refs_in_css(issues, icons_path, icon_sdn, tokens)
+    issues = _validate_refs_in_css(issues, "{family_widget_dir}/defaults.css", _read_if_exists("{family_widget_dir}/defaults.css"), tokens)
+    for widget in widgets:
+        val local_path = "{local_widget_dir}/{widget}.css"
+        val family_path = "{family_widget_dir}/{widget}.css"
+        issues = _validate_refs_in_css(issues, local_path, _read_if_exists(local_path), tokens)
+        issues = _validate_refs_in_css(issues, family_path, _read_if_exists(family_path), tokens)
+    issues
+
+fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
+    var lines: [text] = []
+    lines.push("=== Verification Report: Theme Packages ===")
+    if issues.len() == 0:
+        lines.push("[PASS] config/themes/theme.sdn - theme package graph is valid")
+        lines.push("")
+        lines.push("STATUS: PASS (0 failures, 0 warnings)")
+        return lines.join("\n")
+    for issue in issues:
+        lines.push("[FAIL] {issue.path} {issue.key} - {issue.message}")
+    lines.push("")
+    lines.push("STATUS: FAIL ({issues.len()} failures, 0 warnings)")
+    lines.join("\n")
+
+export ResolvedThemePackage, ResolvedThemeColors, ThemeValidationIssue
+export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
+export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors
+export validate_default_theme_package, validate_theme_package, render_theme_validation_report
