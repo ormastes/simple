@@ -255,9 +255,9 @@ class VhdlBackend:
             case Enum(variants):
                 for variant in variants:
                     if variant.payload.?:
-                        return Err(self.backend_error(
-                            self.type_mapper.payload_enum_diagnostic(type_def.name, variant.name, "package emission")
-                        ))
+                        val result = self.validate_vhdl_value_type_supported(variant.payload.unwrap(), "payload `{type_def.name}.{variant.name}`", nil)
+                        if result.is_err():
+                            return Err(result.unwrap_err())
                 Ok(())
             case Union(members):
                 for member in members:
@@ -475,22 +475,9 @@ class VhdlBackend:
                     builder.emit_type_decl(type_def.name, record_def)
 
                 case Enum(variants):
-                    var names: [text] = []
-                    var used_names: Dict<text, bool> = {}
-                    for v in variants:
-                        if v.payload.?:
-                            return Err(self.backend_error(
-                                self.type_mapper.payload_enum_diagnostic(type_def.name, v.name, "package emission")
-                            ))
-                        val safe_name = self.sanitize_vhdl_identifier(v.name)
-                        if used_names.get(safe_name).?:
-                            return Err(self.backend_error(
-                                "Duplicate VHDL enum literal after sanitization in `{type_def.name}`: `{safe_name}`"
-                            ))
-                        used_names[safe_name] = true
-                        names = names.push(safe_name)
-                    val enum_def = self.type_mapper.map_enum_type(names)
-                    builder.emit_type_decl(type_def.name, enum_def)
+                    val enum_result = self.emit_enum_type_decls(builder, type_def, variants)
+                    if enum_result.is_err():
+                        return Err(enum_result.unwrap_err())
 
                 case _:
                     return Err(self.backend_error(
@@ -536,6 +523,43 @@ class VhdlBackend:
             builder.emit_line("end package body {module.name}_pkg;")
             builder.emit_raw("")
 
+        Ok(())
+
+    fn emit_enum_type_decls(builder: VhdlBuilder, type_def: MirTypeDef, variants: [MirVariantDef]) -> Result<(), CompileError>:
+        var names: [text] = []
+        var used_names: Dict<text, bool> = {}
+        var has_payload = false
+        for v in variants:
+            val safe_name = self.sanitize_vhdl_identifier(v.name)
+            if used_names.get(safe_name).?:
+                return Err(self.backend_error(
+                    "Duplicate VHDL enum literal after sanitization in `{type_def.name}`: `{safe_name}`"
+                ))
+            used_names[safe_name] = true
+            names = names.push(safe_name)
+            if v.payload.?:
+                has_payload = true
+        if not has_payload:
+            val enum_def = self.type_mapper.map_enum_type(names)
+            builder.emit_type_decl(type_def.name, enum_def)
+            return Ok(())
+
+        builder.emit_type_decl("{type_def.name}_tag_t", self.type_mapper.map_enum_type(names))
+        var record_fields: [(text, text)] = [("tag", "{type_def.name}_tag_t")]
+        var used_payload_fields: Dict<text, bool> = {"tag": true}
+        for v in variants:
+            if v.payload.?:
+                val field_name = self.payload_enum_field_name(v)
+                if used_payload_fields.get(field_name).?:
+                    return Err(self.backend_error(
+                        "Duplicate VHDL payload enum field after sanitization in `{type_def.name}`: `{field_name}`"
+                    ))
+                used_payload_fields[field_name] = true
+                val payload_type_result = self.mir_type_to_vhdl(v.payload.unwrap())
+                if payload_type_result.is_err():
+                    return Err(payload_type_result.unwrap_err())
+                record_fields = record_fields.push((field_name, payload_type_result.unwrap()))
+        builder.emit_type_decl(type_def.name, self.type_mapper.map_record(record_fields))
         Ok(())
 
     fn prepare_tuple_types_for_module(module: MirModule):
