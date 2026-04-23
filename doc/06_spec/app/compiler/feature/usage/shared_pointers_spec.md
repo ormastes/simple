@@ -42,7 +42,7 @@ memory management through reference counting.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/shared_pointers/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/shared_pointers/result.json` |
 
 ## Scenarios
 

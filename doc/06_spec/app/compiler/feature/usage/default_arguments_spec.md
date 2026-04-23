@@ -47,7 +47,7 @@ greet("Bob", "Hi")       # Override: "Hi, Bob!"
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/default_arguments/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/default_arguments/result.json` |
 
 ## Scenarios
 

@@ -37,7 +37,7 @@ order mistakes at call sites by encouraging explicit naming.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/unnamed_duplicate_typed_args/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/unnamed_duplicate_typed_args/result.json` |
 
 ## Scenarios
 

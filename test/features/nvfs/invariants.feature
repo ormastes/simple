@@ -2,8 +2,8 @@
 # QuickCheck-style state generator (see research doc §4.4).
 #
 # Anchors:
-# - Formal model: formal/nvfs/Nvfs/Invariants.lean (I1..I10)
-# - Preservation theorems: formal/nvfs/Nvfs/Theorems.lean
+# - Formal model: verification/formal/nvfs/Nvfs/Invariants.lean (I1..I10)
+# - Preservation theorems: verification/formal/nvfs/Nvfs/Theorems.lean
 # - Research: doc/01_research/nvfs_formal_verification.md
 #
 # Each scenario below is a *property*, not a fixture.  The NVFS language

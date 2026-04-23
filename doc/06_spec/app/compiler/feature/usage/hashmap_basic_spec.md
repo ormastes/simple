@@ -47,7 +47,7 @@ hashmap.rs (0%→40%), collections FFI
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/hashmap_basic/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/hashmap_basic/result.json` |
 
 ## Scenarios
 

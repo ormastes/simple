@@ -91,7 +91,7 @@ public fn public_fn(): pass
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/module_visibility/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/module_visibility/result.json` |
 
 ## Scenarios
 

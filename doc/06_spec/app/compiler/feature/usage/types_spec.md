@@ -43,7 +43,7 @@ Note: Advanced features (unit types, capability effects, suspension operators) a
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/types/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/types/result.json` |
 
 ## Scenarios
 

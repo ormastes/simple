@@ -36,7 +36,7 @@ Verifies dictionary creation, access, modification, and iteration.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/dictionary_types/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/dictionary_types/result.json` |
 
 ## Scenarios
 

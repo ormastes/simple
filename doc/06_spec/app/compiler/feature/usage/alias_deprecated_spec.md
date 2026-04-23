@@ -277,7 +277,7 @@ fn public_api = internal_impl
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/alias_deprecated/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/alias_deprecated/result.json` |
 
 ## Scenarios
 

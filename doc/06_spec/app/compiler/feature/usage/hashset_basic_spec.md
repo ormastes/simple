@@ -38,7 +38,7 @@ and remove, collection mutations like clear, and array conversion via to_vec.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/hashset_basic/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/hashset_basic/result.json` |
 
 ## Scenarios
 

@@ -41,7 +41,7 @@ including arithmetic, comparison, logical, bitwise, and special operators.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_operators/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_operators/result.json` |
 
 ## Scenarios
 

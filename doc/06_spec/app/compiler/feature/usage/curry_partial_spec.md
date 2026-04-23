@@ -39,7 +39,7 @@ Standard library functions for currying and partial application.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/curry_partial/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/curry_partial/result.json` |
 
 ## Scenarios
 

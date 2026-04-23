@@ -63,7 +63,7 @@ val result = m @ v  # [50, 122]
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/matrix_multiplication/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/matrix_multiplication/result.json` |
 
 ## Scenarios
 

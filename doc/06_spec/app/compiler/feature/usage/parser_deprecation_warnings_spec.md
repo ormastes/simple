@@ -46,7 +46,7 @@ deprecation warning concepts using observable behavior instead.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_deprecation_warnings/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_deprecation_warnings/result.json` |
 
 ## Scenarios
 

@@ -48,7 +48,7 @@ val restored = math.tensor_to_vecs(arr)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/tensor_bridge/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/tensor_bridge/result.json` |
 
 ## Scenarios
 

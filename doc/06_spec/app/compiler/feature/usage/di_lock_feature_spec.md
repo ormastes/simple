@@ -57,7 +57,7 @@ and full system test.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/di_lock_feature/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/di_lock_feature/result.json` |
 
 ## Scenarios
 

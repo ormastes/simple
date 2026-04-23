@@ -39,7 +39,7 @@ marks the old one as moved internally.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/unique_pointers/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/unique_pointers/result.json` |
 
 ## Scenarios
 

@@ -38,7 +38,7 @@ and reserved fields.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/bitfield_runtime_compat/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/bitfield_runtime_compat/result.json` |
 
 ## Scenarios
 

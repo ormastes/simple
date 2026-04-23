@@ -49,7 +49,7 @@ and the runtime should produce clear error messages for bad input.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cli_args_error/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cli_args_error/result.json` |
 
 ## Scenarios
 

@@ -58,7 +58,7 @@ cli:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cli_args_subcommand/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cli_args_subcommand/result.json` |
 
 ## Scenarios
 

@@ -7,6 +7,7 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(name: text) -> text
 
 fn file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -44,7 +45,8 @@ fn write_server_config(path: text, listen: text, fixture_dir: text, require_clie
         "  require_client_auth: " + auth_text + "\n" +
         "  fixture_dir: \"" + fixture_dir + "\"\n" +
         "  greeting: \"Hello from rustls TLS 1.3\"\n"
-    process_run("/bin/sh", ["-c", "mkdir -p build/tls_hosted_interop"])
+    val parent_dir = path_parent(path)
+    process_run("/bin/sh", ["-c", "mkdir -p '" + parent_dir + "'"])
     rt_file_write_text(path, content)
 
 fn spawn_server(config_path: text) -> i64:
@@ -64,3 +66,42 @@ fn run_simple_client(config_path: text) -> (text, text, i64):
 
 fn seed_fixture_dir(fixture_dir: text):
     process_run("/bin/sh", ["-c", "mkdir -p '" + fixture_dir + "' && cp -f build/tls_test_server/* '" + fixture_dir + "/' 2>/dev/null || true"])
+
+fn make_temp_fixture_dir(name: text) -> text:
+    val base = temp_base_dir()
+    val created = process_run("/bin/sh", ["-c", "mktemp -d '" + base + "/simple_tls_hosted_interop_" + name + ".XXXXXX'"])
+    val path = created.0.trim()
+    if created.2 == 0 and path != "":
+        return path
+    "/tmp/simple_tls_hosted_interop_" + name
+
+fn cleanup_fixture_dir(fixture_dir: text):
+    process_run("/bin/sh", ["-c", "rm -rf '" + fixture_dir + "'"])
+
+fn temp_base_dir() -> text:
+    val tmpdir = rt_env_get("TMPDIR")
+    if tmpdir != "" and tmpdir != nil:
+        return strip_trailing_slash(tmpdir)
+    val tmp = rt_env_get("TMP")
+    if tmp != "" and tmp != nil:
+        return strip_trailing_slash(tmp)
+    val temp = rt_env_get("TEMP")
+    if temp != "" and temp != nil:
+        return strip_trailing_slash(temp)
+    "/tmp"
+
+fn strip_trailing_slash(path: text) -> text:
+    var result = path
+    while result.len() > 1 and result[result.len() - 1] == "/":
+        result = result.slice(0, result.len() - 1)
+    result
+
+fn path_parent(path: text) -> text:
+    var idx = path.len() - 1
+    while idx >= 0:
+        if path[idx] == "/":
+            if idx == 0:
+                return "/"
+            return path.slice(0, idx)
+        idx = idx - 1
+    "."

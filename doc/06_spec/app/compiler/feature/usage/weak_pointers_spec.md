@@ -39,7 +39,7 @@ to zero), weak references return -1 on upgrade.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/weak_pointers/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/weak_pointers/result.json` |
 
 ## Scenarios
 

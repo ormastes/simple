@@ -55,7 +55,7 @@ Use explicit if/else or match instead of operators in these contexts.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/null_coalescing_try_operator/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/null_coalescing_try_operator/result.json` |
 
 ## Scenarios
 

@@ -1,7 +1,7 @@
 # NVFS Formal Verification — Prior Art & Scoping for Lean 4
 
 > **Phase:** research prelude to the Lean 4 state-model at
-> `/home/ormastes/dev/pub/simple/formal/nvfs/`.
+> `/home/ormastes/dev/pub/simple/verification/formal/nvfs/`.
 > **Audience:** anyone adding or revising NVFS invariants, ops or
 > crash-consistency proofs.
 > **Scope of this document.** Brief survey of filesystem formal
@@ -302,7 +302,7 @@ and `unmount` are proof-closed (trivially); the rest are
 ### 4.4 File layout (actual, as shipped)
 
 ```
-formal/nvfs/
+verification/formal/nvfs/
 ├── lakefile.toml              # Lake project config (no mathlib).
 ├── lean-toolchain             # leanprover/lean4:v4.29.1
 ├── Nvfs.lean                  # Re-export facade.

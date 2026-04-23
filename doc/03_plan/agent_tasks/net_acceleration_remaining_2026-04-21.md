@@ -97,7 +97,7 @@ Completed in the 2026-04-21 implementation slice:
    - Feature request: `FR-NET-0007`
    - Files:
      - `test/perf/`
-     - `bench/` or existing benchmark runner
+     - `test/perf/bench/` or existing benchmark runner
    - Acceptance:
      - Reports connection setup latency, p50/p95 request latency, throughput,
        and RSS.

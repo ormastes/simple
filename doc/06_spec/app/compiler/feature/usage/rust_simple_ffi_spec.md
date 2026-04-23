@@ -66,7 +66,7 @@ Total: 562+ FFI functions across 50+ modules.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/rust_simple_ffi/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/rust_simple_ffi/result.json` |
 
 ## Scenarios
 

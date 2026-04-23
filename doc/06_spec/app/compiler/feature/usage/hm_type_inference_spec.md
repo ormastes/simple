@@ -64,7 +64,7 @@ NOTE: Full tests require self-hosting compiler modules (simple/compiler/*).
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/hm_type_inference/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/hm_type_inference/result.json` |
 
 ## Scenarios
 

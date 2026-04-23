@@ -39,7 +39,7 @@ environment variable-based system test locking via SIMPLE_SYSTEM_TEST/SIMPLE_DI_
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/di_error_cases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/di_error_cases/result.json` |
 
 ## Scenarios
 

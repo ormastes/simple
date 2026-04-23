@@ -380,7 +380,7 @@ fn test():
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/static_const_declarations/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/static_const_declarations/result.json` |
 
 ## Scenarios
 

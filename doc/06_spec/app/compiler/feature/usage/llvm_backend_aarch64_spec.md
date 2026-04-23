@@ -36,7 +36,7 @@ Validates that the LLVM backend correctly generates code for AArch64 (ARM 64-bit
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/llvm_backend_aarch64/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/llvm_backend_aarch64/result.json` |
 
 ## Scenarios
 

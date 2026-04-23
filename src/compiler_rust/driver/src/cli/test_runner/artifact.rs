@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::types::{IndividualTestResult, TestFileResult};
 
-const ARTIFACT_ROOT: &str = "target/test-artifacts";
+const ARTIFACT_ROOT: &str = "build/test-artifacts";
 
 pub struct ExecutionArtifacts<'a> {
     pub stdout: Option<&'a str>,

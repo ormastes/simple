@@ -49,7 +49,7 @@ val p = Point.origin()
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/static_method_resolution/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/static_method_resolution/result.json` |
 
 ## Scenarios
 

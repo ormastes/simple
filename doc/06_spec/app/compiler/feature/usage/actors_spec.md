@@ -48,4 +48,4 @@ val result = counter.ask(GetCount())
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/actors/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/actors/result.json` |

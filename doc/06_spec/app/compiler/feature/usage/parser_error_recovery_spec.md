@@ -59,7 +59,7 @@ are documented; actual parser error recovery is tested via compiled mode.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_error_recovery/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_error_recovery/result.json` |
 
 ## Scenarios
 

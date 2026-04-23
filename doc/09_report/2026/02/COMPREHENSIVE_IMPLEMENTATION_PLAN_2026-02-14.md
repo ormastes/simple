@@ -148,14 +148,14 @@ We'll spawn 6 specialized agents working in parallel:
 4. **Integration & Benchmarks** (2 days)
    - Integrate into backend pipeline
    - Benchmarks: array sum, dot product, matrix multiply, image blur
-   - Tests: test/bench/simd_bench.spl (20 benchmarks)
+   - Tests: test/perf/bench/simd_bench.spl (20 benchmarks)
 
 **Deliverables:**
 - src/compiler/backend/native/x86_64_simd.spl (~800 lines)
 - src/compiler/backend/native/arm_neon.spl (~700 lines)
 - src/compiler/mir_opt/auto_vectorize.spl (complete ~1200 lines)
 - test/unit/compiler/simd/ (240 tests)
-- test/bench/simd_bench.spl (20 benchmarks)
+- test/perf/bench/simd_bench.spl (20 benchmarks)
 - doc/07_guide/simd_programming.md
 
 **Estimated Time:** 14 days

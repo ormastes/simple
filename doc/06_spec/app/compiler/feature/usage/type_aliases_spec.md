@@ -64,7 +64,7 @@ type StringMap = {str: str}
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/type_aliases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/type_aliases/result.json` |
 
 ## Scenarios
 

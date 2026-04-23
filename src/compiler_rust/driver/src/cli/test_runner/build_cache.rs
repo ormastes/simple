@@ -14,7 +14,7 @@ use simple_compiler::CompilerPipeline;
 use simple_compiler::linker::NativeBinaryOptions;
 
 /// Cache directory for compiled test artifacts
-const CACHE_DIR: &str = "target/test_cache";
+const CACHE_DIR: &str = "tmp/test_cache";
 
 /// Build cache for test compilation artifacts.
 ///

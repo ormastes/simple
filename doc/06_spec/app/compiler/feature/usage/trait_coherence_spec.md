@@ -47,7 +47,7 @@ Tests trait coherence rules including:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/trait_coherence/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/trait_coherence/result.json` |
 
 ## Scenarios
 

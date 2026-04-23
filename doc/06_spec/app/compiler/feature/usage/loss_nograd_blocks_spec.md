@@ -40,8 +40,8 @@ semantics are covered by `math_autograd_runtime_spec.spl`.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
-| `summary.txt` | Text artifact | `target/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
 
 ## Scenarios
 

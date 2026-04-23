@@ -50,7 +50,7 @@ return x + 1
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/decorators/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/decorators/result.json` |
 
 ## Scenarios
 

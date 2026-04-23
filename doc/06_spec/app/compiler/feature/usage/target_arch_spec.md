@@ -58,7 +58,7 @@ Multi-architecture support for bare-metal development including:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/target_arch/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/target_arch/result.json` |
 
 ## Scenarios
 

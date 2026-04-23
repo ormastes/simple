@@ -40,7 +40,7 @@ lock/unlock behavior.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/di_extensions_feature/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/di_extensions_feature/result.json` |
 
 ## Scenarios
 

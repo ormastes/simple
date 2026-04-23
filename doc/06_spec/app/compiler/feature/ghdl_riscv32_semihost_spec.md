@@ -32,8 +32,8 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/ghdl_riscv32_semihost/result.json` |
-| `summary.txt` | Text artifact | `target/test-artifacts/feature/baremetal/ghdl_riscv32_semihost/summary.txt` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/baremetal/ghdl_riscv32_semihost/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/baremetal/ghdl_riscv32_semihost/summary.txt` |
 
 ## Scenarios
 

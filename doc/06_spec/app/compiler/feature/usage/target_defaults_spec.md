@@ -63,7 +63,7 @@ expect dict["b"] == 2
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/target_defaults/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/target_defaults/result.json` |
 
 ## Scenarios
 

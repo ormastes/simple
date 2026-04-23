@@ -40,7 +40,6 @@ function escapeHtml(value: string): string {
 function collectArtifactRoots(workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined): string[] {
     const roots = new Set<string>();
     for (const folder of workspaceFolders ?? []) {
-        roots.add(path.join(folder.uri.fsPath, 'target', 'test-artifacts'));
         roots.add(path.join(folder.uri.fsPath, 'build', 'test-artifacts'));
     }
     return Array.from(roots).filter((root) => fs.existsSync(root));

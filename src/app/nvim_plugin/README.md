@@ -182,7 +182,7 @@ Use `:SimpleMathToggle` to toggle math rendering, or call `require("simple.test_
 ## Test Workspace
 
 `SimpleTestWorkspace` opens a scratch buffer that lists the latest structured
-test-runner artifacts from `target/test-artifacts/` or `build/test-artifacts/`.
+test-runner artifacts from `build/test-artifacts/`.
 
 Inside the workspace:
 

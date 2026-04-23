@@ -39,7 +39,7 @@ Tests for advanced indexing features including:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/advanced_indexing/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/advanced_indexing/result.json` |
 
 ## Scenarios
 

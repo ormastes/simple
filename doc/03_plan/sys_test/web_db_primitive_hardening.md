@@ -1,7 +1,7 @@
 # System Test Plan - Web DB Primitive Hardening
 
 ## Scope
-- `tests/app/ui.web/backpressure_test.spl`
+- `test/app/ui.web/backpressure_test.spl`
 - `test/system/database/database_system_spec.spl`
 - `test/unit/std/improved/http_unit_spec.spl`
 - `test/system/net_http_sendfile_routing_spec.spl`

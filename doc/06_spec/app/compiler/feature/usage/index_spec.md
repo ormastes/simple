@@ -43,7 +43,7 @@ computing index paths, and searching.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/index/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/index/result.json` |
 
 ## Scenarios
 

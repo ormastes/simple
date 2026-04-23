@@ -735,7 +735,7 @@ link_specializations |id, template, type_args, generated_name|
 | ID | Task | File | Language |
 |----|------|------|----------|
 | 6.1 | End-to-end integration tests | `test/system/features/inference/link_inference_spec.spl` | Simple |
-| 6.2 | Performance benchmarks | `test/bench/inference_bench.spl` | Simple |
+| 6.2 | Performance benchmarks | `test/perf/bench/inference_bench.spl` | Simple |
 | 6.3 | Update SMF spec doc | `doc/format/smf_specification.md` | Markdown |
 | 6.4 | Migration guide | `doc/07_guide/inference_migration.md` | Markdown |
 

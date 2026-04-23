@@ -39,7 +39,7 @@ arrays), and combining method references with placeholder lambdas.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/method_reference/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/method_reference/result.json` |
 
 ## Scenarios
 

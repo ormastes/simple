@@ -312,7 +312,7 @@ Latest proven state:
   - `certpk ok`
 - the guest reaches `CertificateVerify` with a real 32-byte Ed25519 public key:
   - `pubkey_len=32`
-- the extracted key matches the current `build/tls_test_server/server.pem` public key
+- the extracted key matches the current `tmp/tls_test_server/server.pem` public key
 - `cv_hash` is also a full non-zero 32-byte value
 
 Most recent live evidence:
@@ -422,7 +422,7 @@ Current exact-lane result:
 - the handshake still fails at server `CertificateVerify`
 - the values printed in the exact serial are still not host-truth values
 - in particular:
-  - the extracted Ed25519 pubkey no longer matches `build/tls_test_server/server.pem`
+  - the extracted Ed25519 pubkey no longer matches `tmp/tls_test_server/server.pem`
   - the extracted 64-byte `CertificateVerify` signature does not line up with a
     valid server-side verification input
   - signing the guest's current `cv_hash` off-guest with the deterministic server

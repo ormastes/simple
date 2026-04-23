@@ -56,7 +56,7 @@ allow pc{ depend(within(api.**), within(core.**)) } "Allowed exception"
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/aop_architecture_rules/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/aop_architecture_rules/result.json` |
 
 ## Scenarios
 

@@ -51,7 +51,7 @@ with resource as alias:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/context_managers/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/context_managers/result.json` |
 
 ## Scenarios
 

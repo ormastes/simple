@@ -49,7 +49,7 @@ suite('GUI - Test Workspace', function () {
         if (!workspaceRoot) {
             throw new Error('No workspace folder available');
         }
-        const artifactDir = path.join(workspaceRoot, 'target', 'test-artifacts', 'workspace-demo');
+        const artifactDir = path.join(workspaceRoot, 'build', 'test-artifacts', 'workspace-demo');
         fs.mkdirSync(artifactDir, { recursive: true });
         rootDirs.push(path.join(workspaceRoot, 'target'));
         const resultJson = {
@@ -78,7 +78,7 @@ suite('GUI - Test Workspace', function () {
         }
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (workspaceRoot) {
-            const artifactRoot = path.join(workspaceRoot, 'target', 'test-artifacts', 'workspace-demo');
+            const artifactRoot = path.join(workspaceRoot, 'build', 'test-artifacts', 'workspace-demo');
             fs.rmSync(artifactRoot, { recursive: true, force: true });
         }
         await testUtils_1.TestUtils.closeAllEditors();

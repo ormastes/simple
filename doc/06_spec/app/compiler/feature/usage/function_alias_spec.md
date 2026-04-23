@@ -61,7 +61,7 @@ Preferred:             fn println(msg: text): print(msg)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/function_alias/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/function_alias/result.json` |
 
 ## Scenarios
 

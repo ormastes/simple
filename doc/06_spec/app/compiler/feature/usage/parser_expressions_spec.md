@@ -50,7 +50,7 @@ arr[0], arr[i], arr[1:3]
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_expressions/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_expressions/result.json` |
 
 ## Scenarios
 

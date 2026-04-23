@@ -157,7 +157,7 @@ pub struct ModuleResolver {
     pub(super) source_root: PathBuf,
     /// Additional source roots available for native multi-root builds.
     pub(super) extra_source_roots: Vec<PathBuf>,
-    /// Project-scoped logical type root (project_root/type)
+    /// Project-scoped logical type root (project_root/src/type)
     pub(super) type_root: PathBuf,
     /// Default owned domain used for bare type imports
     pub(super) default_type_domain: String,
@@ -183,7 +183,7 @@ impl ModuleResolver {
         let stdlib_root = if stdlib_root.exists() { Some(stdlib_root) } else { None };
 
         Self {
-            type_root: project_root.join("type"),
+            type_root: project_root.join("src").join("type"),
             project_root,
             source_root,
             extra_source_roots: Vec::new(),
@@ -270,7 +270,7 @@ impl ModuleResolver {
         };
 
         Self {
-            type_root: project_root.join("type"),
+            type_root: project_root.join("src").join("type"),
             project_root,
             source_root,
             extra_source_roots: Vec::new(),

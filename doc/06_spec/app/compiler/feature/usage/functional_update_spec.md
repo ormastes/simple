@@ -68,7 +68,7 @@ items->map(\x: x - 5)             # items is now [5, 10, 15]
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/functional_update/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/functional_update/result.json` |
 
 ## Scenarios
 

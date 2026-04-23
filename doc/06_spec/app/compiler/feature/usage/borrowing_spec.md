@@ -39,7 +39,7 @@ mutable access restrictions, and isolation guarantees.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/borrowing/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/borrowing/result.json` |
 
 ## Scenarios
 

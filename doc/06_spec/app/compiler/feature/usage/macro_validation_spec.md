@@ -46,7 +46,7 @@ Tests that macros can be validated without full expansion in LL(1) parsing:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/macro_validation/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/macro_validation/result.json` |
 
 ## Scenarios
 

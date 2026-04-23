@@ -36,7 +36,7 @@ Verifies that {"key": value} syntax works correctly.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/dict_grammar/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/dict_grammar/result.json` |
 
 ## Scenarios
 

@@ -49,7 +49,7 @@ Component system with ComponentType enum, Component trait, and ComponentManager.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/component/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/component/result.json` |
 
 ## Scenarios
 

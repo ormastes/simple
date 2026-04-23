@@ -39,7 +39,7 @@ custom literal expressions.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/custom_literal/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/custom_literal/result.json` |
 
 ## Scenarios
 

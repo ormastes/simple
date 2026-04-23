@@ -128,7 +128,7 @@ val cubed = 2 ** 3       # 8
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/operators_arithmetic/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/operators_arithmetic/result.json` |
 
 ## Scenarios
 

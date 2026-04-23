@@ -54,7 +54,7 @@ self.value = self.value + 1
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/class_invariant/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/class_invariant/result.json` |
 
 ## Scenarios
 

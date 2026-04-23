@@ -119,7 +119,7 @@ items.filter \x: x > 0
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/trailing_blocks/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/trailing_blocks/result.json` |
 
 ## Scenarios
 

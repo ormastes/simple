@@ -53,7 +53,7 @@ Tests GHDL and Yosys availability and wrapper functions.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/vhdl/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/vhdl/result.json` |
 
 ## Scenarios
 

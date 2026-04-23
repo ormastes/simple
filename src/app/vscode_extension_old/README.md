@@ -327,10 +327,7 @@ Command Palette shortcuts:
 - `Simple: Open Test Workspace`
 - `Simple: Open Latest Test Artifacts`
 
-It reads structured artifacts from:
-
-- `target/test-artifacts/`
-- `build/test-artifacts/`
+It reads structured artifacts from `build/test-artifacts/`.
 
 This is a companion view. Source edits and reruns still flow through the
 normal `.spl` file and the Simple test runner.

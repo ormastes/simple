@@ -40,7 +40,7 @@ runtime linked and a compatible GPU.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/gpu_kernel_launch/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/gpu_kernel_launch/result.json` |
 
 ## Scenarios
 

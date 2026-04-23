@@ -99,7 +99,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/format_string_with/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/format_string_with/result.json` |
 
 ## Scenarios
 

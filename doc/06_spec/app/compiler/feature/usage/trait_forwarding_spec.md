@@ -59,7 +59,7 @@ these tests exercise that generated delegation pattern directly.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/trait_forwarding/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/trait_forwarding/result.json` |
 
 ## Scenarios
 

@@ -74,7 +74,7 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/aop/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/aop/result.json` |
 
 ## Scenarios
 

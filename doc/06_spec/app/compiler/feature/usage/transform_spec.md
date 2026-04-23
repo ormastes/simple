@@ -50,7 +50,7 @@ Transform (f32) and Transformd (f64) combining position, rotation, and scale.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/transform/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/transform/result.json` |
 
 ## Scenarios
 

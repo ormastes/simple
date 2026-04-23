@@ -32,7 +32,7 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/app/codegen_parity_completion/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/app/codegen_parity_completion/result.json` |
 
 ## Scenarios
 

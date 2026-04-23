@@ -140,7 +140,7 @@ val size = 1024_bytes
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/basic_types_integer_literals/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/basic_types_integer_literals/result.json` |
 
 ## Scenarios
 

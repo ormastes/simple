@@ -72,7 +72,7 @@ val c = Config { port: 9000 }  # host uses default
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/structs/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/structs/result.json` |
 
 ## Scenarios
 

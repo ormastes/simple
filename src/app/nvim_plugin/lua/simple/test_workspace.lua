@@ -12,7 +12,6 @@ local function artifact_roots()
   local roots = {}
   local cwd = vim.fn.getcwd()
   local candidates = {
-    cwd .. "/target/test-artifacts",
     cwd .. "/build/test-artifacts",
   }
   for _, root in ipairs(candidates) do

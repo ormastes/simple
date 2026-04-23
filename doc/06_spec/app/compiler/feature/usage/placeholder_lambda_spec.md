@@ -66,7 +66,7 @@ val result = [1, 2, 3, 4, 5].filter(_ > 2).map(_ * 2)  # => [6, 8, 10]
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/placeholder_lambda/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/placeholder_lambda/result.json` |
 
 ## Scenarios
 

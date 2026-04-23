@@ -52,7 +52,7 @@ Simple uses Python-like indentation with type annotations and explicit execution
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/syntax/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/syntax/result.json` |
 
 ## Scenarios
 

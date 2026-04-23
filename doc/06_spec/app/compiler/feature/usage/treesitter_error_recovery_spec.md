@@ -46,7 +46,7 @@ val outline = ts.parse_outline()
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/treesitter_error_recovery/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/treesitter_error_recovery/result.json` |
 
 ## Scenarios
 

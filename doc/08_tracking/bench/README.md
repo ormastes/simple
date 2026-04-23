@@ -17,7 +17,7 @@ fs_driver_mount_table_baseline_2026-04-17.csv
 ## How to Capture
 
 ```bash
-bin/simple run bench/run_all.spl > doc/08_tracking/bench/run_all_baseline_$(date +%F).csv
+bin/simple run test/perf/bench/run_all.spl > doc/08_tracking/bench/run_all_baseline_$(date +%F).csv
 ```
 
 ## How to Compare
@@ -32,5 +32,5 @@ The CSV header row is: `label,iters,p50_ticks,p99_ticks,p99_9_ticks,min_ticks,ma
 ## Disclaimer
 
 Current baselines measure **tick counts** (loop-counter proxy), not real
-nanoseconds. See `bench/README.md` for the full disclaimer and
+nanoseconds. See `test/perf/bench/README.md` for the full disclaimer and
 FR-BENCH-CLOCK-001 (real CLOCK_MONOTONIC binding).

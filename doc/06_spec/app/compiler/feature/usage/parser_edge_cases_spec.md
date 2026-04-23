@@ -64,7 +64,7 @@ val c = (a xor b) @ 2       # xor first, then @
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_edge_cases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_edge_cases/result.json` |
 
 ## Scenarios
 

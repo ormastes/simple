@@ -57,7 +57,7 @@ actual GPU testing requires a compiled binary with GPU runtime linked.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/gpu_basic/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/gpu_basic/result.json` |
 
 ## Scenarios
 

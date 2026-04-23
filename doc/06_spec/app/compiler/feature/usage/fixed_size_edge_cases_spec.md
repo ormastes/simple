@@ -61,7 +61,7 @@ val big = arr.filter(\x: x > 3)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/fixed_size_edge_cases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/fixed_size_edge_cases/result.json` |
 
 ## Scenarios
 

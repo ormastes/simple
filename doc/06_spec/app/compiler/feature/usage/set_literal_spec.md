@@ -52,7 +52,7 @@ Test set literal syntax: s{1, 2, 3}
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/set_literal/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/set_literal/result.json` |
 
 ## Scenarios
 

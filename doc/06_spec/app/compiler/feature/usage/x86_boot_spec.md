@@ -39,7 +39,7 @@ Tests for the x86 bare-metal boot infrastructure including:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/x86_boot/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/x86_boot/result.json` |
 
 ## Scenarios
 

@@ -50,7 +50,7 @@ Vec3 (f32) and Vec3d (f64) 3D vector types with arithmetic, geometric, and utili
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/vec3/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/vec3/result.json` |
 
 ## Scenarios
 

@@ -32,7 +32,7 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/_temp_diag4/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/_temp_diag4/result.json` |
 
 ## Scenarios
 

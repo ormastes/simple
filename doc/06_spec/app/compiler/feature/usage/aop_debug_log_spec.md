@@ -57,7 +57,7 @@ Uses array concat (items = items + [x]) instead of .push() because
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/aop_debug_log/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/aop_debug_log/result.json` |
 
 ## Scenarios
 

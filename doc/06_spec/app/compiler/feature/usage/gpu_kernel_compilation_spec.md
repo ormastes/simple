@@ -40,7 +40,7 @@ from Simple source to GPU-ready output. No GPU hardware required.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/gpu_kernel_compilation/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/gpu_kernel_compilation/result.json` |
 
 ## Scenarios
 

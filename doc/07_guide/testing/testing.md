@@ -135,8 +135,8 @@ Embed markdown documentation in test files using triple-quoted strings. The `sim
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 If those fields are omitted, `sspec-docgen` will also auto-discover evidence under the standard screenshot tree `doc/spec/image/<spec-relative-path>/` when files already exist there.
-The generated Evidence section now renders a compact category summary plus per-category tables with item name, evidence kind, and path. For non-image evidence, prefer `target/test-artifacts/<spec-relative-path>/` so logs, ANSI captures, JSON summaries, and text artifacts can be discovered automatically too.
-For CI/publication, use `simple sspec-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `target/test-artifacts/`.
+The generated Evidence section now renders a compact category summary plus per-category tables with item name, evidence kind, and path. For non-image evidence, prefer `build/test-artifacts/<spec-relative-path>/` so logs, ANSI captures, JSON summaries, and text artifacts can be discovered automatically too.
+For CI/publication, use `simple sspec-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `build/test-artifacts/`.
 
 ```simple
 """

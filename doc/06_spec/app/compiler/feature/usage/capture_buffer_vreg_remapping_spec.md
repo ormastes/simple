@@ -65,7 +65,7 @@ execution.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/capture_buffer_vreg_remapping/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/capture_buffer_vreg_remapping/result.json` |
 
 ## Scenarios
 

@@ -713,12 +713,12 @@ mod tests {
             feature_ids: vec![],
             metadata: FeatureMetadata {
                 artifacts: vec![
-                    "target/test-artifacts/app/web_dashboard/tmux_rest_api/result.json".to_string(),
-                    "target/test-artifacts/app/web_dashboard/tmux_rest_api/notes.txt".to_string(),
+                    "build/test-artifacts/app/web_dashboard/tmux_rest_api/result.json".to_string(),
+                    "build/test-artifacts/app/web_dashboard/tmux_rest_api/notes.txt".to_string(),
                 ],
                 screenshots: vec!["doc/spec/image/app/web_dashboard/tmux_rest_api/shot.png".to_string()],
-                tui_captures: vec!["target/test-artifacts/app/web_dashboard/tmux_rest_api/terminal.ansi".to_string()],
-                logs: vec!["target/test-artifacts/app/web_dashboard/tmux_rest_api/run.log".to_string()],
+                tui_captures: vec!["build/test-artifacts/app/web_dashboard/tmux_rest_api/terminal.ansi".to_string()],
+                logs: vec!["build/test-artifacts/app/web_dashboard/tmux_rest_api/run.log".to_string()],
                 ..Default::default()
             },
         };

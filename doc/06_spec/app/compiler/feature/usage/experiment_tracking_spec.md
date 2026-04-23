@@ -49,7 +49,7 @@ and querying.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/experiment_tracking/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/experiment_tracking/result.json` |
 
 ## Scenarios
 

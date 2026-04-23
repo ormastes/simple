@@ -87,7 +87,7 @@ full type/return table.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/exists_check_value_return/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/exists_check_value_return/result.json` |
 
 ## Scenarios
 

@@ -49,7 +49,7 @@ return "completed"
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_skip_basic/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_skip_basic/result.json` |
 
 ## Scenarios
 

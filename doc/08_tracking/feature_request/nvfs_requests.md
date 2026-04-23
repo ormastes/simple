@@ -469,7 +469,7 @@ append under this heading.
 - **Implemented-on:** 2026-04-18
 - **Implemented-by:** bench-clock-baremetal agent
 - **Requested-semantics:**
-  Bench harness in `bench/lib/timing.spl` calls `extern fn rt_time_now_ns() -> i64`
+  Bench harness in `test/perf/bench/lib/timing.spl` calls `extern fn rt_time_now_ns() -> i64`
   but the symbol was absent from both hosted and baremetal runtimes.
   Hosted: backed by `clock_gettime(CLOCK_MONOTONIC)`.
   Baremetal (SimpleOS x86_64): backed by TSC calibrated at boot against PIT
@@ -859,22 +859,22 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **Requested-semantics:**
   After FR-BENCH-CLOCK-001 wired `rt_time_now_nanos()`, run all 5 bench scripts
   (`fs_driver_mount_table.spl`, `nvfs_arena_throughput.spl`, `spostgre_wal_append.spl`,
-  `run_all.spl`, `bench/lib/timing.spl`) with the bootstrap binary and record ns-level
-  baseline numbers in `bench/BASELINE.md`.
+  `run_all.spl`, `test/perf/bench/lib/timing.spl`) with the bootstrap binary and record ns-level
+  baseline numbers in `test/perf/bench/BASELINE.md`.
 - **Acceptance-criteria:**
-  - [x] `bench/lib/timing.spl` updated to use `extern fn rt_time_now_nanos() -> i64`
+  - [x] `test/perf/bench/lib/timing.spl` updated to use `extern fn rt_time_now_nanos() -> i64`
         (real CLOCK_MONOTONIC, not loop-counter proxy)
   - [x] WAL bench (`spostgre_wal_append.spl`) ran successfully; real ns numbers recorded
-        in `bench/BASELINE.md` (p50 wal_append ≈ 23 µs, wal_recover_tail ≈ 5.6 ms)
+        in `test/perf/bench/BASELINE.md` (p50 wal_append ≈ 23 µs, wal_recover_tail ≈ 5.6 ms)
   - [x] NVFS arena bench: iter counts reduced (FR-BENCH-ARENA-ITER-001); all 4 scenarios
-        completed (Wave 10 re-run, 2026-04-18). Numbers in `bench/BASELINE.md §Wave 10`.
+        completed (Wave 10 re-run, 2026-04-18). Numbers in `test/perf/bench/BASELINE.md §Wave 10`.
   - [x] fs_driver + run_all: parse now clean (namespace rename done); bench times out at
         10k×resolve iterations — interpreter-budget limit, not keyword error. Documented.
   - [x] FR-BENCH-BASELINE-001 appended to `nvfs_requests.md`
   - [x] `#### 9-bench-baseline` appended to `.sstack/spostgre-nvfs-storage/state.md`
   - [x] `#### 9-bench-rerun` appended to `.sstack/spostgre-nvfs-storage/state.md`
 - **Related-upfront:** FR-BENCH-CLOCK-001
-- **Related-design-doc:** `bench/BASELINE.md`
+- **Related-design-doc:** `test/perf/bench/BASELINE.md`
 - **Related-issue:** FR-BENCH-ARENA-ITER-001
 - **Notes:** WAL numbers are interpreter-mode costs (~23 µs p50 append). Native-compiled
   expected < 1 µs. Real NVMe FUA dominates at 50–200 µs on actual hardware.
@@ -911,9 +911,9 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] A3: outer 100→10, fill 100→10, clone_len 200KB→20KB
   - [x] A4: outer 100→10
   - [x] All 4 scenarios produce timing output (no SIGTERM)
-  - [x] Numbers appended to `bench/BASELINE.md` under "Wave 10 re-run"
+  - [x] Numbers appended to `test/perf/bench/BASELINE.md` under "Wave 10 re-run"
 - **Related-upfront:** none
-- **Related-design-doc:** `bench/BASELINE.md §Wave 10 re-run`
+- **Related-design-doc:** `test/perf/bench/BASELINE.md §Wave 10 re-run`
 - **Related-issue:** FR-BENCH-BASELINE-001
 - **Notes:** Long-term fix is native-compile (FR-COMPILER-001/002); at native speed all
   benches complete in < 1s and original iter counts are appropriate. The iter reductions
@@ -1037,7 +1037,7 @@ not applicable for the structural reasons above. Verification:
   - [x] Also fixed `case Aes128GcmResult.Ok(data: plaintext):` → positional pattern in `encryption.spl`
   - [x] Bench exits via interpreter-budget (SIGTERM) rather than parse error — confirmed
 - **Related-upfront:** none
-- **Related-design-doc:** `bench/BASELINE.md`
+- **Related-design-doc:** `test/perf/bench/BASELINE.md`
 - **Related-issue:** none
 - **Notes:** The module rename (`namespace` → `ns_tree`) is required because `namespace`
   appears as a path segment in `use` statements, which the parser also flags. The `Namespace`

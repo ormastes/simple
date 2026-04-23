@@ -70,7 +70,7 @@ expect await f == 60                     # future with await
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/futures_promises/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/futures_promises/result.json` |
 
 ## Scenarios
 

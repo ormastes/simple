@@ -39,7 +39,7 @@ Math language features for Simple:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/math_language/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_language/result.json` |
 
 ## Scenarios
 

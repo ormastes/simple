@@ -50,7 +50,7 @@ f.read()
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/resource_cleanup/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/resource_cleanup/result.json` |
 
 ## Scenarios
 

@@ -36,7 +36,7 @@ Validates that the LLVM backend correctly generates code for ARM 32-bit (ARMv7) 
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/llvm_backend_arm32/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/llvm_backend_arm32/result.json` |
 
 ## Scenarios
 

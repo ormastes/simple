@@ -49,7 +49,7 @@ Actor model for game entities with Vec3 positions and message-passing.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/actor_model/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/actor_model/result.json` |
 
 ## Scenarios
 

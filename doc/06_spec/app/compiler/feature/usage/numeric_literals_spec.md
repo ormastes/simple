@@ -47,7 +47,7 @@ val sep = 1_000_000    # Underscores for readability
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/numeric_literals/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/numeric_literals/result.json` |
 
 ## Scenarios
 

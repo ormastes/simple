@@ -45,7 +45,7 @@ by writing the equivalent hand-expanded code.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/method_alias/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/method_alias/result.json` |
 
 ## Scenarios
 

@@ -68,7 +68,7 @@ val result = transfer(100, "checking" from, "savings" to)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/call_site_label/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/call_site_label/result.json` |
 
 ## Scenarios
 

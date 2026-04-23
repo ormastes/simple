@@ -65,7 +65,7 @@ frozen_dict.keys()                 # read-only access to keys
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/freeze_unfreeze/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/freeze_unfreeze/result.json` |
 
 ## Scenarios
 

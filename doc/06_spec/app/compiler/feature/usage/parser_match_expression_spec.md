@@ -50,7 +50,7 @@ After rebuild, uncomment skipped tests in Group 3 below.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_match_expression/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_match_expression/result.json` |
 
 ## Scenarios
 

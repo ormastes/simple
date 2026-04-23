@@ -36,7 +36,7 @@ Verifies generic function definitions, generic struct/class types, and type boun
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/generics/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/generics/result.json` |
 
 ## Scenarios
 

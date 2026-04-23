@@ -90,7 +90,7 @@ val result = gpu(vector_add, vec_a, vec_b)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/gpu_kernels/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/gpu_kernels/result.json` |
 
 ## Scenarios
 

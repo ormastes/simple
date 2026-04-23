@@ -53,7 +53,7 @@ All types, traits, and functions are defined locally.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/trait_keyword_all_phases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/trait_keyword_all_phases/result.json` |
 
 ## Scenarios
 

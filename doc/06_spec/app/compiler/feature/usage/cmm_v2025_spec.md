@@ -36,7 +36,7 @@ Tests for CMM v2025 version support and command database updates.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cmm_lsp/cmm_v2025/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cmm_lsp/cmm_v2025/result.json` |
 
 ## Scenarios
 

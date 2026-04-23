@@ -49,13 +49,18 @@ fn normalize_type_parts(parts: &[String]) -> Option<Vec<String>> {
     }
 
     if parts.len() >= 2 && parts[0].contains('-') {
-        let mut normalized = vec!["type".to_string(), domain_to_dir(&parts[0])];
+        let mut normalized = vec!["src".to_string(), "type".to_string(), domain_to_dir(&parts[0])];
         normalized.extend(parts[1..].iter().cloned());
         return Some(normalized);
     }
 
     if parts.len() == 1 {
-        return Some(vec!["type".to_string(), "simple_lang".to_string(), parts[0].clone()]);
+        return Some(vec![
+            "src".to_string(),
+            "type".to_string(),
+            "simple_lang".to_string(),
+            parts[0].clone(),
+        ]);
     }
 
     None
@@ -1404,7 +1409,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("src");
         let nested = src.join("app");
-        let type_dir = temp.path().join("type").join("simple_lang");
+        let type_dir = temp.path().join("src").join("type").join("simple_lang");
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
@@ -1419,7 +1424,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("src");
         let nested = src.join("app");
-        let type_dir = temp.path().join("type").join("simple_lang");
+        let type_dir = temp.path().join("src").join("type").join("simple_lang");
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();

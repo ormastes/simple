@@ -38,7 +38,7 @@ Self-contained: all I/O functions defined inline via extern fn declarations.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/file_io_extended/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/file_io_extended/result.json` |
 
 ## Scenarios
 

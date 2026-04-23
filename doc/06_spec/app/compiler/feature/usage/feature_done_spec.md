@@ -53,7 +53,7 @@ The feature completion tracking system provides:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/feature_done/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/feature_done/result.json` |
 
 ## Scenarios
 

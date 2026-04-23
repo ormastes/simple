@@ -53,7 +53,7 @@ val propagated = fallible_operation()?       # Early return on Err
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/result_type/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/result_type/result.json` |
 
 ## Scenarios
 

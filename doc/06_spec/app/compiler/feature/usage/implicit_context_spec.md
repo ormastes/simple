@@ -58,7 +58,7 @@ directly using module-level var semantics.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/implicit_context/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/implicit_context/result.json` |
 
 ## Scenarios
 

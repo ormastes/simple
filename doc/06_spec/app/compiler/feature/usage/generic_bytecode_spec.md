@@ -44,7 +44,7 @@ fn identity<T>(x: T) -> T: x
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/generic_bytecode/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/generic_bytecode/result.json` |
 
 ## Scenarios
 

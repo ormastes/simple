@@ -69,7 +69,7 @@ data
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/effect_system/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/effect_system/result.json` |
 
 ## Scenarios
 

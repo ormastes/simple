@@ -74,7 +74,7 @@ arr.any_truthy()        # Any element truthy?
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/collection_utilities/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/collection_utilities/result.json` |
 
 ## Scenarios
 

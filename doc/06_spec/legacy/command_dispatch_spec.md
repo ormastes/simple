@@ -13,11 +13,11 @@ Documentation was generated from executable SSpec scenarios.
 
 ### Artifacts
 
-- target/test-artifacts/unit/app/tooling/command_dispatch/summary.txt
+- build/test-artifacts/unit/app/tooling/command_dispatch/summary.txt
 
 ### Logs
 
-- target/test-artifacts/unit/app/tooling/command_dispatch/output.log
+- build/test-artifacts/unit/app/tooling/command_dispatch/output.log
 
 ## Test Summary
 

@@ -84,7 +84,7 @@ print(result.stdout)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/sandboxing/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/sandboxing/result.json` |
 
 ## Scenarios
 

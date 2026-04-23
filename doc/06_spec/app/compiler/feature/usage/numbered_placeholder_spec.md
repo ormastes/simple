@@ -40,7 +40,7 @@ with numbered placeholders.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/numbered_placeholder/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/numbered_placeholder/result.json` |
 
 ## Scenarios
 

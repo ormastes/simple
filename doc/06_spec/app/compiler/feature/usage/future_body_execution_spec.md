@@ -70,7 +70,7 @@ expect await f2 == 20
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/future_body_execution/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/future_body_execution/result.json` |
 
 ## Scenarios
 

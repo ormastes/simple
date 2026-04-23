@@ -52,7 +52,7 @@ default()
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/elif_val_pattern_binding/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/elif_val_pattern_binding/result.json` |
 
 ## Scenarios
 

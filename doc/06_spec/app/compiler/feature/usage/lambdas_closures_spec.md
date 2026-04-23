@@ -43,7 +43,7 @@ Lambdas (anonymous functions) and closures enable functional programming pattern
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/lambdas_closures/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/lambdas_closures/result.json` |
 
 ## Scenarios
 

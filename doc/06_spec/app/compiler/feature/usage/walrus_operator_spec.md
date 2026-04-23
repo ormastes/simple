@@ -54,7 +54,7 @@ x := value is equivalent to val x = value (immutable binding)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/walrus_operator/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/walrus_operator/result.json` |
 
 ## Scenarios
 

@@ -51,7 +51,7 @@ val result = make_ten!()
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/macro_hygiene/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/macro_hygiene/result.json` |
 
 ## Scenarios
 

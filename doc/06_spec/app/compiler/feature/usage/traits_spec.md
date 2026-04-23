@@ -73,7 +73,7 @@ print("({x}, {y})")
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/traits/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/traits/result.json` |
 
 ## Scenarios
 

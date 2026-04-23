@@ -57,7 +57,7 @@ val sum = 1 + 2 + \
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/multiline_syntax/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/multiline_syntax/result.json` |
 
 ## Scenarios
 

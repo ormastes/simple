@@ -85,7 +85,7 @@ Loop constructs:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/loops/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loops/result.json` |
 
 ## Scenarios
 

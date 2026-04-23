@@ -47,7 +47,6 @@ function escapeHtml(value) {
 function collectArtifactRoots(workspaceFolders) {
     const roots = new Set();
     for (const folder of workspaceFolders ?? []) {
-        roots.add(path.join(folder.uri.fsPath, 'target', 'test-artifacts'));
         roots.add(path.join(folder.uri.fsPath, 'build', 'test-artifacts'));
     }
     return Array.from(roots).filter((root) => fs.existsSync(root));

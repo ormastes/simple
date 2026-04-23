@@ -85,7 +85,7 @@ as files (or vice versa).
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cmm_lsp/bulk_validate/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cmm_lsp/bulk_validate/result.json` |
 
 ## Scenarios
 

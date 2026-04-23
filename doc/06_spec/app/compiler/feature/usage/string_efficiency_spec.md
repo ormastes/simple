@@ -77,7 +77,7 @@ cases that would have been noticeably slow with the old O(n²) approach.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cmm_lsp/string_efficiency/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cmm_lsp/string_efficiency/result.json` |
 
 ## Scenarios
 

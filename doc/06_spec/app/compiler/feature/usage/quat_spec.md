@@ -50,7 +50,7 @@ Quat (f32) and Quatd (f64) quaternion types for 3D rotations.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/quat/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/quat/result.json` |
 
 ## Scenarios
 

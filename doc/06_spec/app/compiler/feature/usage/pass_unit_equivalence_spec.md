@@ -72,7 +72,7 @@ count = count + 1
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/pass_unit_equivalence/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/pass_unit_equivalence/result.json` |
 
 ## Scenarios
 

@@ -101,7 +101,7 @@ val strings = ["a", "b", "c"]  # [String]
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/type_inference/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/type_inference/result.json` |
 
 ## Scenarios
 

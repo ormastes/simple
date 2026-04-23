@@ -65,7 +65,7 @@ val regex = r"pattern: \d+"     # Backslashes not escaped, no interpolation
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/string_interpolation/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/string_interpolation/result.json` |
 
 ## Scenarios
 

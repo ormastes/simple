@@ -63,7 +63,7 @@ instead of TargetArch.parse() static method (not supported in interpreter)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/architecture/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/architecture/result.json` |
 
 ## Scenarios
 

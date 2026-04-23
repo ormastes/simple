@@ -58,7 +58,7 @@ hardware - they only verify the text output of the code generator.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/gpu_ptx_gen/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/gpu_ptx_gen/result.json` |
 
 ## Scenarios
 

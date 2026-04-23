@@ -13,11 +13,11 @@ Documentation was generated from executable SSpec scenarios.
 
 ### Artifacts
 
-- target/test-artifacts/unit/app/tooling/test_runner_simple/summary.txt
+- build/test-artifacts/unit/app/tooling/test_runner_simple/summary.txt
 
 ### Logs
 
-- target/test-artifacts/unit/app/tooling/test_runner_simple/output.log
+- build/test-artifacts/unit/app/tooling/test_runner_simple/output.log
 
 ## Test Summary
 
@@ -57,7 +57,7 @@ Documentation was generated from executable SSpec scenarios.
 - falls back to exit code when no output parsed
 - marks non-zero exit as failure when no output parsed
 - tracks skipped count separately
-- writes summaries under target/test-artifacts
+- writes summaries under build/test-artifacts
 - writes safe-mode subprocess output to output.log
 - converts seconds to milliseconds
 - detects timeout by exit_code -1

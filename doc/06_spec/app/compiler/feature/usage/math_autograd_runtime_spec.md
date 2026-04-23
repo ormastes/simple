@@ -39,8 +39,8 @@ automatic gradient computation, nograd gradient suppression, and loss/nograd int
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/math_autograd_runtime/result.json` |
-| `summary.txt` | Text artifact | `target/test-artifacts/feature/usage/math_autograd_runtime/summary.txt` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_autograd_runtime/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_autograd_runtime/summary.txt` |
 
 ## Scenarios
 

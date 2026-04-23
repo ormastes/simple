@@ -251,7 +251,7 @@ fn strip_ansi_codes(s: &str) -> String {
 
 pub(crate) fn artifact_dir_for_test(path: &Path) -> PathBuf {
     // Strip absolute prefix (relative to CWD) so that PathBuf::join doesn't
-    // discard "target/test-artifacts/" when given an absolute path.
+    // discard "build/test-artifacts/" when given an absolute path.
     let path = if path.is_absolute() {
         std::env::current_dir()
             .ok()

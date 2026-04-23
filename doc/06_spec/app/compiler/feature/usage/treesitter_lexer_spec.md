@@ -45,7 +45,7 @@ val token = lexer_next_token(lexer)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/treesitter_lexer/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/treesitter_lexer/result.json` |
 
 ## Scenarios
 

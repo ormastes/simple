@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::types::SspecDoc;
 
 const SCREENSHOT_ROOT: &str = "doc/spec/image";
-const ARTIFACT_ROOT: &str = "target/test-artifacts";
+const ARTIFACT_ROOT: &str = "build/test-artifacts";
 
 pub fn enrich_with_discovered_evidence(sspec_doc: &mut SspecDoc) {
     let mut screenshots = Vec::new();
@@ -159,7 +159,7 @@ mod tests {
         let dir = artifact_dir_for_spec(Path::new("test/app/web_dashboard/tmux_rest_api_spec.spl"));
         assert_eq!(
             dir.to_string_lossy().replace('\\', "/"),
-            "target/test-artifacts/app/web_dashboard/tmux_rest_api"
+            "build/test-artifacts/app/web_dashboard/tmux_rest_api"
         );
     }
 
@@ -169,10 +169,10 @@ mod tests {
         let (_tempdir, _cwd_guard) = with_temp_cwd();
 
         let screenshot_path = PathBuf::from("doc/spec/image/app/web_dashboard/tmux_rest_api/shot.png");
-        let tui_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/terminal.ansi");
-        let log_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/run.log");
-        let artifact_json_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/result.json");
-        let artifact_txt_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/notes.txt");
+        let tui_path = PathBuf::from("build/test-artifacts/app/web_dashboard/tmux_rest_api/terminal.ansi");
+        let log_path = PathBuf::from("build/test-artifacts/app/web_dashboard/tmux_rest_api/run.log");
+        let artifact_json_path = PathBuf::from("build/test-artifacts/app/web_dashboard/tmux_rest_api/result.json");
+        let artifact_txt_path = PathBuf::from("build/test-artifacts/app/web_dashboard/tmux_rest_api/notes.txt");
 
         for path in [
             &screenshot_path,

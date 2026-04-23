@@ -44,7 +44,7 @@ types and functions have been instantiated during compilation.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/note_sdn_feature/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/note_sdn_feature/result.json` |
 
 ## Scenarios
 

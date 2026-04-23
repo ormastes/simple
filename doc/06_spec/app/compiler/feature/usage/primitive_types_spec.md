@@ -47,7 +47,7 @@ fn identity<T>(x: T) -> T: x              # Generic function
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/primitive_types/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/primitive_types/result.json` |
 
 ## Scenarios
 

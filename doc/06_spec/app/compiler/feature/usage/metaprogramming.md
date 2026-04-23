@@ -46,7 +46,7 @@ are not yet fully implemented.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/metaprogramming/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/metaprogramming/result.json` |
 
 ## Scenarios
 

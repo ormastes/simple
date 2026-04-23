@@ -61,7 +61,7 @@ var (a, b) = (1, 2)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/variables_let_bindings/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/variables_let_bindings/result.json` |
 
 ## Scenarios
 

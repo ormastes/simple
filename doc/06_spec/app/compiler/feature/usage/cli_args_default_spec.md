@@ -52,7 +52,7 @@ cli:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cli_args_default/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cli_args_default/result.json` |
 
 ## Scenarios
 

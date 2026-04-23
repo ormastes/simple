@@ -72,7 +72,7 @@ dict.clear()               # remove all entries
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/mutable_by_default/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/mutable_by_default/result.json` |
 
 ## Scenarios
 

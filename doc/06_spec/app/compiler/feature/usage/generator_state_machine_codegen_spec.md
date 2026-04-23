@@ -97,7 +97,7 @@ i = i + 1
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/generator_state_machine_codegen/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/generator_state_machine_codegen/result.json` |
 
 ## Scenarios
 

@@ -39,7 +39,7 @@ Each math block is a self-contained DSL expression that returns a Block value.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/math_blocks/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_blocks/result.json` |
 
 ## Scenarios
 

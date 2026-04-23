@@ -54,7 +54,7 @@ These tests require Vulkan SDK to be available.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/vulkan/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/vulkan/result.json` |
 
 ## Scenarios
 

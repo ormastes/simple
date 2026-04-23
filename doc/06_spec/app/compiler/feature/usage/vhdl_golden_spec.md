@@ -55,7 +55,7 @@ checked-in reference .vhd files in examples/09_embedded/vhdl/builder/golden/.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/vhdl_golden/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/vhdl_golden/result.json` |
 
 ## Scenarios
 

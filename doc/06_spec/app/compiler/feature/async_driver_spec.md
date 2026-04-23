@@ -32,7 +32,7 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/io/async_driver/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/io/async_driver/result.json` |
 
 ## Scenarios
 

@@ -50,4 +50,4 @@ val result = await fetch_data("https://example.com")
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/async_effects/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/async_effects/result.json` |

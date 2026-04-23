@@ -57,7 +57,7 @@ a compiled binary with CUDA runtime linked.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cuda/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cuda/result.json` |
 
 ## Scenarios
 

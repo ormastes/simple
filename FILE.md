@@ -19,8 +19,12 @@
 | **test/** | Test suites | Testing & verification |
 | **examples/** | Example programs | Learning Simple |
 | **doc/** | Documentation | Guides, specs, reports |
+| **config/** | Project configuration | Runtime, packaging, theme, Docker, MCP, and tooling config |
 | **scripts/** | Automation scripts | Build, test, migration |
 | **tools/** | Development tools | Seed compiler, Docker |
+| **verification/** | Formal verification source | Lean models and proofs |
+| **build/** | Generated build artifacts | Compiled output, test evidence, reports |
+| **tmp/** | Local transient cache | Runtime scratch, relocated target/cache output |
 
 ---
 
@@ -153,6 +157,7 @@ src/
 ├── app/        # Applications (cli, build, mcp, test_runner, desugar)
 ├── lib/        # Standard library (common, nogc_sync_mut, nogc_async_mut, gc_async_mut)
 ├── compiler/   # Unified compiler (00.common → 99.loader, numbered layers)
+├── type/       # Named primitive type facade modules (logical type.simple_lang imports)
 ├── runtime/    # Native runtime and support libraries
 └── i18n/       # Internationalization
 ```
@@ -170,7 +175,8 @@ test/
 ├── unit/           # Unit tests (3,500+ tests)
 ├── integration/    # Integration tests
 ├── system/         # System tests (LLM, end-to-end)
-└── benchmarks/     # Performance benchmarks
+├── perf/           # Performance and benchmark tests
+└── perf/bench/     # Runnable benchmark programs and baselines
 ```
 
 **Run tests:** `bin/simple test test/unit/spec.spl`
@@ -247,10 +253,35 @@ test/
 - `bootstrap/` - Bootstrap stages
 - `coverage/` - Coverage reports
 - `dist/` - Distribution packages
+- `test-artifacts/` - Generated non-image test evidence
 
 **Note:** Generated during build, not committed to version control.
 
 **See:** [build/FILE.md](build/FILE.md)
+
+---
+
+### tmp/ (Transient Local Scratch)
+**Purpose:** Local-only generated output that should not be committed
+
+**Contents:**
+- `target/` - Relocated root-level target/test cache output from older runs
+- `test_cache/` - Compiled test cache
+- `tls_test_server/` - Generated TLS cert fixtures for hosted TLS tests
+- Other short-lived runtime scratch data
+
+**Note:** `tmp/` is ignored and may be deleted at any time.
+
+---
+
+### verification/ (Formal Verification)
+**Purpose:** Lean models, proofs, and verification fixtures
+
+**Contents:**
+- `formal/` - Formal models that used to live at root `formal/`
+- Feature-specific Lean verification projects
+
+These are source artifacts, not generated build output. Generated proof/build output should stay under Lean/build-specific ignored directories or `build/`/`tmp/`.
 
 ---
 
@@ -344,7 +375,7 @@ bin/simple test path/to/spec.spl   # Single file
 bin/simple test test/unit/              # Unit tests (3,500+)
 bin/simple test test/integration/       # Integration tests
 bin/simple test test/system/            # System tests
-bin/simple test test/benchmarks/        # Performance benchmarks
+bin/simple run test/perf/bench/run_all.spl  # Performance benchmarks
 ```
 
 ### Container Testing
@@ -394,12 +425,15 @@ docker-compose -f config/docker-compose.yml up all-tests
 ---
 
 ### config/ (Project Configuration)
-**Purpose:** Build and deployment configurations
+**Purpose:** Build, runtime, packaging, and tool configurations
 
 **Contents:**
 - `docker-compose.yml` - Container orchestration
+- `bootstrap.sdn`, `di.sdn`, `traceability.sdn` - Project configuration inputs
 - `packaging/` - Package specs (Debian, Homebrew, RPM, Windows)
-- `simple.sdn` - Project settings (SDN format)
+- `mcp/` - MCP startup and installation helpers
+- `t32/` - TRACE32 container and target configuration
+- `themes/` - UI theme definitions
 
 ---
 

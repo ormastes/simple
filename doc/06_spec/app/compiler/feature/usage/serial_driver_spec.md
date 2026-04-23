@@ -58,7 +58,7 @@ UART serial driver for bare-metal systems supporting:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/serial_driver/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/serial_driver/result.json` |
 
 ## Scenarios
 

@@ -36,7 +36,7 @@ Verifies correct evaluation of conditions and execution of appropriate branches.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/control_flow_if_else/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/control_flow_if_else/result.json` |
 
 ## Scenarios
 

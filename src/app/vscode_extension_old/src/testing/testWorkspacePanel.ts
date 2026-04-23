@@ -275,7 +275,6 @@ function collectArtifactRoots(workspaceFolders: readonly vscode.WorkspaceFolder[
     const roots: string[] = [];
     for (const folder of workspaceFolders ?? []) {
         const fsPath = folder.uri.fsPath;
-        roots.push(path.join(fsPath, 'target', 'test-artifacts'));
         roots.push(path.join(fsPath, 'build', 'test-artifacts'));
     }
     return roots.filter((root) => fs.existsSync(root));

@@ -37,7 +37,7 @@ This includes target triple generation, datalayout, native integer types, and CP
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/llvm_backend_i686/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/llvm_backend_i686/result.json` |
 
 ## Scenarios
 

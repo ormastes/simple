@@ -459,7 +459,7 @@ class ModuleLoader:
 | 6.1 | E2E: compile → link → run | `test/system/features/inference/e2e_spec.spl` | 8h |
 | 6.2 | E2E: cross-module generics | `test/system/features/inference/cross_module_spec.spl` | 4h |
 | 6.3 | E2E: link-time instantiation | `test/system/features/inference/link_instantiate_spec.spl` | 4h |
-| 6.4 | Performance benchmarks | `test/bench/inference_bench.spl` | 4h |
+| 6.4 | Performance benchmarks | `test/perf/bench/inference_bench.spl` | 4h |
 | 6.5 | Update SMF spec | `doc/format/smf_specification.md` | 4h |
 | 6.6 | Write migration guide | `doc/07_guide/inference_migration.md` | 4h |
 | 6.7 | Update CLAUDE.md | `CLAUDE.md` | 1h |

@@ -63,7 +63,7 @@ The interpreter provides:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/interpreter_interface/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/interpreter_interface/result.json` |
 
 ## Scenarios
 

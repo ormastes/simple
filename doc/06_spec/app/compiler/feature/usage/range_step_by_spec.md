@@ -57,7 +57,7 @@ print i    # 0, 2, 4, 6, 8
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/range_step_by/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/range_step_by/result.json` |
 
 ## Scenarios
 

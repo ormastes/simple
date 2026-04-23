@@ -50,7 +50,7 @@ fn with_skip(): skip; return 42
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/parser_skip_keyword/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/parser_skip_keyword/result.json` |
 
 ## Scenarios
 

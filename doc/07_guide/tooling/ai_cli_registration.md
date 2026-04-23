@@ -10,7 +10,7 @@ How to package and register Simple Language skills/plugins/extensions on their r
 |----------|----------|----------------|-------------|
 | **Claude Code** | Local marketplace (already done) | N/A | Plugin install via `claude plugin` |
 | **Gemini CLI** | geminicli.com/extensions gallery | Yes (GitHub topic) | Add topic only |
-| **MCP Server** | registry.modelcontextprotocol.io | No | npm publish + mcp-publisher |
+| **MCP Server** | registry.modelcontextprotocol.io | No | npm publish + `mcp-publisher` |
 
 Related: `doc/07_guide/tooling/ai_command_parity.md` documents the shared workflow names used across Claude, Codex, and Gemini.
 
@@ -176,9 +176,8 @@ npm publish --access public
 #### Step D: Register with MCP Registry
 
 ```bash
-npx @anthropic-ai/mcp-publisher register \
-  --server-json tools/mcp-registry/server.json
-# Opens GitHub OAuth for authentication
+mcp-publisher login github
+mcp-publisher publish tools/mcp-registry/server.json
 ```
 
 #### Step E: Verify

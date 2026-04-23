@@ -15,6 +15,46 @@ do
   fi
 done
 
+browser_launch_requested() {
+  case "${1:-}" in
+    browser)
+      return 0
+      ;;
+    run)
+      case "${2:-}" in
+        src/app/ui.browser/main.spl|"$repo_root/src/app/ui.browser/main.spl")
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+binary_has_winit_runtime() {
+  [[ -x "$1" ]] || return 1
+  LC_ALL=C grep -aq "rt_winit_event_loop_new" "$1"
+}
+
+if browser_launch_requested "$@"; then
+  for candidate in \
+    "$repo_root/src/compiler_rust/target/gui/debug/simple" \
+    "$repo_root/src/compiler_rust/target/debug/simple" \
+    "$repo_root/src/compiler_rust/target/release/simple" \
+    "$repo_root/src/compiler_rust/target/bootstrap/simple"
+  do
+    if binary_has_winit_runtime "$candidate"; then
+      if [[ "${1:-}" == "browser" ]]; then
+        exec "$candidate" run "$repo_root/src/app/ui.browser/main.spl" "${@:2}"
+      fi
+      exec "$candidate" "$@"
+    fi
+  done
+  echo "error: Simple browser requires a GUI-enabled driver." >&2
+  echo "hint: cd \"$repo_root/src/compiler_rust\" && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui" >&2
+  exit 1
+fi
+
 release_bin=""
 
 platform_candidates=()
@@ -63,8 +103,6 @@ case "$host_os:$norm_arch" in
 esac
 
 for candidate in \
-  "$repo_root/src/compiler_rust/target/release/simple" \
-  "$repo_root/src/compiler_rust/target/release/simple.exe" \
   "${platform_candidates[@]}" \
   "$repo_root/bin/release/x86_64-unknown-linux-gnu/simple" \
   "$repo_root/bin/release/aarch64-unknown-linux-gnu/simple" \
@@ -75,7 +113,9 @@ for candidate in \
   "$repo_root/bin/release/aarch64-pc-windows-msvc/simple.exe" \
   "$repo_root/bin/release/aarch64-pc-windows-gnu/simple.exe" \
   "$repo_root/bin/release/simple.exe" \
-  "$repo_root/bin/release/simple"
+  "$repo_root/bin/release/simple" \
+  "$repo_root/src/compiler_rust/target/release/simple" \
+  "$repo_root/src/compiler_rust/target/release/simple.exe"
 do
   if [[ -x "$candidate" ]]; then
     release_bin="$candidate"

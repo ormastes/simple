@@ -124,7 +124,7 @@ call arg1, arg2, arg3
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/no_paren_calls/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/no_paren_calls/result.json` |
 
 ## Scenarios
 

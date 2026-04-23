@@ -218,7 +218,7 @@ describe "Timer Operations":
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/inline_asm_integration/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/baremetal/inline_asm_integration/result.json` |
 
 ## Scenarios
 

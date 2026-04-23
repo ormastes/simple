@@ -48,7 +48,7 @@ are detected via generation mismatch.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/handle_pointers/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/handle_pointers/result.json` |
 
 ## Scenarios
 

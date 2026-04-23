@@ -267,7 +267,7 @@ fn emit_neon_load_f32x4(reg_dest: i64, base_reg: i64, offset: i64):
 - Edge cases: alignment, remainder handling (40 tests)
 - Platform-specific (30 tests)
 
-**`test/bench/simd_bench.spl`** (New, ~20 benchmarks)
+**`test/perf/bench/simd_bench.spl`** (New, ~20 benchmarks)
 - Scalar vs SIMD array operations
 - Auto-vectorization effectiveness
 - Memory bandwidth utilization
@@ -735,7 +735,7 @@ fn array_add_simd(a: [f32], b: [f32]) -> [f32]:
 
 **Tests:**
 - `test/unit/std/simd_spec.spl` - SIMD intrinsics tests
-- `test/bench/simd_bench.spl` - Performance benchmarks
+- `test/perf/bench/simd_bench.spl` - Performance benchmarks
 
 **Documentation:**
 - `doc/07_guide/simd_programming.md` - User guide

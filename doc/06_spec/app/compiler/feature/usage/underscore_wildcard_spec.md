@@ -40,7 +40,7 @@ Tests for underscore (_) as a wildcard placeholder in various contexts:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/underscore_wildcard/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/underscore_wildcard/result.json` |
 
 ## Scenarios
 

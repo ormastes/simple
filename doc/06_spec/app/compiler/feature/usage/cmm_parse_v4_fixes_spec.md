@@ -35,7 +35,7 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cmm_lsp/cmm_parse_v4_fixes/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cmm_lsp/cmm_parse_v4_fixes/result.json` |
 
 ## Scenarios
 

@@ -54,7 +54,7 @@ result unwrap or_return: default_on_err   # Early return with default
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/safe_unwrap_operators/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/safe_unwrap_operators/result.json` |
 
 ## Scenarios
 

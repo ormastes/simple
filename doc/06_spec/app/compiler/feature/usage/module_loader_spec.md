@@ -70,7 +70,7 @@ val addr = registry.resolve_symbol("my_func")
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/module_loader/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/module_loader/result.json` |
 
 ## Scenarios
 

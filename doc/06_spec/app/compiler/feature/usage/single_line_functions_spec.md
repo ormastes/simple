@@ -54,7 +54,7 @@ fn name(param: Type) -> ReturnType: expr
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/single_line_functions/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/single_line_functions/result.json` |
 
 ## Scenarios
 

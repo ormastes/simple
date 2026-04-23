@@ -61,7 +61,7 @@ val sum = arr.reduce(0, \acc, x: acc + x)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/fixed_size_arrays/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/fixed_size_arrays/result.json` |
 
 ## Scenarios
 

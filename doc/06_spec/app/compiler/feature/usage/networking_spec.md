@@ -58,7 +58,7 @@ Ok(handle)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/networking/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/networking/result.json` |
 
 ## Scenarios
 

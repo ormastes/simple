@@ -40,7 +40,7 @@ and render to nvim-friendly Unicode. Covers all 27 DL equations found in
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/math_dl_equations/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_dl_equations/result.json` |
 
 ## Scenarios
 

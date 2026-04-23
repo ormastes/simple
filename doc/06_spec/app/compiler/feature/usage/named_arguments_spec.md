@@ -70,7 +70,7 @@ val user3 = create_user("Charlie", email="charlie@example.com", age=35)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/named_arguments/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/named_arguments/result.json` |
 
 ## Scenarios
 

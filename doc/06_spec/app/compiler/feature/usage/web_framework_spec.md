@@ -68,7 +68,7 @@ dom.getElementById("btn").addEventListener("click", increment)
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/web_framework/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/web_framework/result.json` |
 
 ## Scenarios
 

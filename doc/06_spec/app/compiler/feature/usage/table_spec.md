@@ -39,7 +39,7 @@ Table/DataFrame-like data structure for tabular data:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/table/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/table/result.json` |
 
 ## Scenarios
 

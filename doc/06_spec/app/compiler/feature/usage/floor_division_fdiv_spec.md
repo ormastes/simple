@@ -82,7 +82,7 @@ Properties:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/floor_division_fdiv/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/floor_division_fdiv/result.json` |
 
 ## Scenarios
 

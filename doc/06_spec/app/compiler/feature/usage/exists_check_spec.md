@@ -85,7 +85,7 @@ pattern binding (`if val x = expr.?:`) and nil coalescing (`expr.? ?? default`).
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/exists_check/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/exists_check/result.json` |
 
 ## Scenarios
 

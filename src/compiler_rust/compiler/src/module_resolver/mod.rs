@@ -160,7 +160,7 @@ mod tests {
     fn test_resolve_bare_type_import_from_project_type_root() {
         let dir = create_test_project();
         let src = dir.path().join("src");
-        let type_dir = dir.path().join("type").join("simple_lang");
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
 
@@ -177,7 +177,7 @@ mod tests {
     fn test_resolve_owned_domain_type_import_from_project_type_root() {
         let dir = create_test_project();
         let src = dir.path().join("src");
-        let type_dir = dir.path().join("type").join("simple_lang");
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
         fs::create_dir_all(&type_dir).unwrap();
         fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
 
@@ -231,7 +231,7 @@ auto import router.route
     #[test]
     fn test_manifest_glob_export_exposes_public_child_modules() {
         let dir = create_test_project();
-        let type_dir = dir.path().join("type").join("simple_lang");
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
         fs::create_dir_all(&type_dir).unwrap();
 
         let manifest_source = r#"

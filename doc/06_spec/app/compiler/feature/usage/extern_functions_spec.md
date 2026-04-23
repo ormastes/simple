@@ -63,7 +63,7 @@ val args = sys_get_args()           # returns program arguments
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/extern_functions/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/extern_functions/result.json` |
 
 ## Scenarios
 

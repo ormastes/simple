@@ -69,7 +69,7 @@ DiContainer has:
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/di_lock_all_phases/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/di_lock_all_phases/result.json` |
 
 ## Scenarios
 

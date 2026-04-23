@@ -54,7 +54,7 @@ obj?.field?.nested?.deep # Safe chaining - short-circuits on None
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/optional_chaining/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/optional_chaining/result.json` |
 
 ## Scenarios
 

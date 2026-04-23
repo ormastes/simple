@@ -313,7 +313,7 @@ simple test test/compiler/mir_opt_spec.spl
 ### 2. Create First Benchmark
 
 ```simple
-# bench/opt/fibonacci.spl
+# test/perf/bench/opt/fibonacci.spl
 fn fib(n: i64) -> i64:
     if n <= 1:
         return n
@@ -331,15 +331,15 @@ fn main():
 
 ```bash
 # Unoptimized
-simple build bench/opt/fibonacci.spl -O0
+simple build test/perf/bench/opt/fibonacci.spl -O0
 time ./fibonacci  # Record
 
 # Speed optimization
-simple build bench/opt/fibonacci.spl -O2
+simple build test/perf/bench/opt/fibonacci.spl -O2
 time ./fibonacci  # Should be faster
 
 # Aggressive
-simple build bench/opt/fibonacci.spl -O3
+simple build test/perf/bench/opt/fibonacci.spl -O3
 time ./fibonacci  # Should be fastest
 ```
 

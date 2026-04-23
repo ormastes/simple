@@ -43,7 +43,7 @@ without errors.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/cmm_lsp/cmm_lexer/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/cmm_lsp/cmm_lexer/result.json` |
 
 ## Scenarios
 

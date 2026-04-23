@@ -50,7 +50,7 @@ Mat4 (f32) and Mat4d (f64) 4x4 transformation matrices with column-major storage
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/mat4/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/mat4/result.json` |
 
 ## Scenarios
 

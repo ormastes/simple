@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::types::IndividualTestResult;
 
-const ARTIFACT_ROOT: &str = "target/test-artifacts";
+const ARTIFACT_ROOT: &str = "build/test-artifacts";
 const SCENARIO_ROOT: &str = "scenarios";
 const MANIFEST_FILE: &str = "manifest.txt";
 
@@ -290,24 +290,24 @@ mod tests {
 
         assert_eq!(
             plan.spec_root.to_string_lossy().replace('\\', "/"),
-            "target/test-artifacts/app/web_dashboard/tmux_rest_api"
+            "build/test-artifacts/app/web_dashboard/tmux_rest_api"
         );
         assert_eq!(
             plan.scenario_root.to_string_lossy().replace('\\', "/"),
-            "target/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios"
+            "build/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios"
         );
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].index, 1);
         assert_eq!(plan.entries[0].slug, "rendering-shows-dashboard");
         assert_eq!(
             plan.entries[0].directory.to_string_lossy().replace('\\', "/"),
-            "target/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios/001-rendering-shows-dashboard"
+            "build/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios/001-rendering-shows-dashboard"
         );
     }
 
     #[test]
     fn planned_artifacts_include_future_capture_slots() {
-        let artifacts = planned_artifacts(Path::new("target/test-artifacts/demo/scenarios/001-demo"));
+        let artifacts = planned_artifacts(Path::new("build/test-artifacts/demo/scenarios/001-demo"));
         let filenames: Vec<String> = artifacts
             .iter()
             .map(|item| item.path.file_name().unwrap().to_string_lossy().to_string())

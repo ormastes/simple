@@ -32,7 +32,7 @@ Documentation was generated from executable SSpec scenarios.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/app/mcp_protocol_gap_matrix/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/app/mcp_protocol_gap_matrix/result.json` |
 
 ## Scenarios
 

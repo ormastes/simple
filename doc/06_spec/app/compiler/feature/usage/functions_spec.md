@@ -36,7 +36,7 @@ Verifies function parameters, return types, implicit returns, and various callin
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/functions/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/functions/result.json` |
 
 ## Scenarios
 

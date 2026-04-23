@@ -47,7 +47,7 @@ implicit multiplication, and LaTeX-style commands.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/math_render/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_render/result.json` |
 
 ## Scenarios
 

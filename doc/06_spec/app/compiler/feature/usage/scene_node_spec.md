@@ -48,7 +48,7 @@ SceneNode trait using Transformd for transform hierarchy.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/scene_node/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/scene_node/result.json` |
 
 ## Scenarios
 

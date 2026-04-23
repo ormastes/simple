@@ -38,7 +38,7 @@ Tests focus on scenarios not covered by unit tests.
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/di_injection/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/di_injection/result.json` |
 
 ## Scenarios
 

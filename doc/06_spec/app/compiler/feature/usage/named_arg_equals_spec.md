@@ -54,7 +54,7 @@ greet("Hello", name="World")
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/named_arg_equals/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/named_arg_equals/result.json` |
 
 ## Scenarios
 

@@ -74,7 +74,7 @@ val mapped = maybe_value.map(\x: x * 2)        # Transform if Some
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/option_type/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/option_type/result.json` |
 
 ## Scenarios
 

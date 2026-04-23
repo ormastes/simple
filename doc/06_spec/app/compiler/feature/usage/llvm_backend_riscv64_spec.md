@@ -36,7 +36,7 @@ Validates that the LLVM backend correctly generates code for RISC-V 64-bit targe
 
 | Item | Kind | Path |
 |------|------|------|
-| `result.json` | JSON artifact | `target/test-artifacts/feature/usage/llvm_backend_riscv64/result.json` |
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/llvm_backend_riscv64/result.json` |
 
 ## Scenarios
 
