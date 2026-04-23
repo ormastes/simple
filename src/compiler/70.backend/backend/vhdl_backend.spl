@@ -1504,7 +1504,7 @@ class VhdlBackend:
                     builder.emit_if_end()
                     Ok(())
                 case Switch(value, targets, default):
-                    val value_expr_result = self.process_operand_to_vhdl(value)
+                    val value_expr_result = self.switch_value_expr_to_vhdl(value, true)
                     if value_expr_result.is_err():
                         return Err(value_expr_result.unwrap_err())
                     val value_type_result = self.operand_type(value)
@@ -2040,7 +2040,7 @@ class VhdlBackend:
 
     fn compile_switch_return_terminator(builder: VhdlBuilder, value: MirOperand, targets: [SwitchCase], default: BlockId) -> Result<(), CompileError>:
         """Compile a switch whose reachable targets resolve to return values."""
-        val value_expr_result = self.operand_to_vhdl(value)
+        val value_expr_result = self.switch_value_expr_to_vhdl(value, false)
         if value_expr_result.is_err():
             return Err(value_expr_result.unwrap_err())
         val value_type_result = self.operand_type(value)
@@ -2072,8 +2072,47 @@ class VhdlBackend:
         match ty.kind:
             case Bool:
                 Ok(if value == 0: "'0'" else: "'1'")
+            case Enum(symbol):
+                self.enum_variant_literal_for_discriminant(symbol, value)
             case _:
                 self.const_value_to_vhdl(MirConstValue.Int(value), ty)
+
+    fn switch_value_expr_to_vhdl(value: MirOperand, in_process: bool) -> Result<text, CompileError>:
+        val expr_result = if in_process: self.process_operand_to_vhdl(value) else: self.operand_to_vhdl(value)
+        if expr_result.is_err():
+            return Err(expr_result.unwrap_err())
+        val type_result = self.operand_type(value)
+        if type_result.is_err():
+            return Err(type_result.unwrap_err())
+        match type_result.unwrap().kind:
+            case Enum(symbol):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                match type_def_result.unwrap().kind:
+                    case Enum(variants):
+                        if self.enum_has_payload(variants):
+                            Ok("{expr_result.unwrap()}.tag")
+                        else:
+                            Ok(expr_result.unwrap())
+                    case _:
+                        Err(self.backend_error("Switch target symbol {symbol.id} is not an enum type"))
+            case _:
+                Ok(expr_result.unwrap())
+
+    fn enum_variant_literal_for_discriminant(symbol: SymbolId, discriminant: i64) -> Result<text, CompileError>:
+        val type_def_result = self.type_def_by_symbol(symbol)
+        if type_def_result.is_err():
+            return Err(type_def_result.unwrap_err())
+        val type_def = type_def_result.unwrap()
+        match type_def.kind:
+            case Enum(variants):
+                for variant in variants:
+                    if variant.discriminant == discriminant:
+                        return Ok(self.sanitize_vhdl_identifier(variant.name))
+                Err(self.backend_error("Enum switch discriminant {discriminant} is not a variant of `{type_def.name}`"))
+            case _:
+                Err(self.backend_error("Switch target symbol {symbol.id} is not an enum type"))
 
     fn compile_return_block(builder: VhdlBuilder, block_id: BlockId) -> Result<text, CompileError>:
         self.compile_return_block_seen(builder, block_id, [])
@@ -2524,6 +2563,24 @@ class VhdlBackend:
                         Ok(fields[field].name)
                     case _:
                         Err(self.backend_error("Field access target {type_def.name} is not a struct type"))
+            case Enum(symbol):
+                val type_def_result = self.type_def_by_symbol(symbol)
+                if type_def_result.is_err():
+                    return Err(type_def_result.unwrap_err())
+                val type_def = type_def_result.unwrap()
+                match type_def.kind:
+                    case Enum(variants):
+                        if field == 0:
+                            return Ok("tag")
+                        var payload_index = 1
+                        for variant in variants:
+                            if variant.payload.?:
+                                if field == payload_index:
+                                    return Ok(self.payload_enum_field_name(variant))
+                                payload_index = payload_index + 1
+                        Err(self.backend_error("Enum payload field index {field} out of range for {type_def.name}"))
+                    case _:
+                        Err(self.backend_error("Field access target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("VHDL field access requires a struct operand"))
 
