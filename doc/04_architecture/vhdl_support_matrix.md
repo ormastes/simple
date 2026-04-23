@@ -1,6 +1,6 @@
 # VHDL Backend Support Matrix
 
-**Date:** 2026-04-22
+**Date:** 2026-04-23
 **Status:** Active
 **Canonical reference for VHDL backend support claims.**
 
@@ -11,7 +11,7 @@ compiler source of truth. A feature is not considered pure-Simple-owned until a
 
 ## Quick Summary
 
-The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend and a Simple-side source facade. The pure Simple compiler is the target source of truth, but full pure-Simple source-to-VHDL ownership remains pending until structured metadata, return ABI, hardware-call `port map` lowering, fixed-width semantics, and clock-domain semantics are implemented in `src/compiler/**/*.spl`.
+The VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008 and validates generated designs through GHDL analysis, elaboration, synthesis, and simulation proof where available. Existing coverage is split across the Rust MIR backend, the Simple MIR VHDL backend, and a Simple-side source facade. The 2026-04-23 parity slice adds deterministic source-map sidecars, payload-enum hard diagnostics, enum literal collision checks, and optional vendor-smoke skip coverage. Full broad HLS ownership remains deferred for helper subprogram inference, ROM/RAM inference, tagged-record payload enums, and generated testbench conversion.
 
 ## Type Support
 
@@ -137,6 +137,7 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 |------|----------|--------|
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
+| VHDL source-map sidecar | `<output>.map.json` with generated entity and port anchors | **supported** |
 | Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, selected `@generic`/`@clocked` forms, nested tuple input flattening, and narrow slice/concat support. This is not yet the structured pure Simple compiler source of truth. | **partial** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
 | Anonymous hardware outputs | Distinct-type anonymous returns use positional tuple semantics in Simple; labeled outputs are required for stable VHDL public APIs | **partial** |
@@ -145,6 +146,7 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **supported** |
 | GHDL `--synth` | Synthesis | **supported** |
+| Optional vendor synthesis smoke | `SIMPLE_VHDL_VENDOR_SMOKE=1`, clear skip when disabled or tool missing | **supported** |
 | Yosys | Synthesis | **deferred** |
 
 ## MIR Backend Source-of-Truth Parity Specs
@@ -186,13 +188,16 @@ the source facade.
 
 ## Python-HDL Parity Backlog
 
-Pending SSpec coverage lives in
+Pending and migrated SSpec coverage lives in
 `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` and is surfaced by
 `bin/simple test --only-skipped --list-skip-features --pending`. The tracked
 gaps are clocked processes, reset/domain modeling, composite ports, fixed-width
 bit operations, VHDL subprogram emission, ROM/RAM inference, generics,
 interface bundles, enum encoding, payload enums, testbench conversion, source
-maps, and vendor synthesis smoke.
+maps, and vendor synthesis smoke. Runnable coverage for the implemented slice
+is in `test/unit/compiler/backend/vhdl_backend_spec.spl`,
+`test/system/compiler/vhdl_source_facade_spec.spl`, and
+`test/system/compiler/vhdl_vendor_synthesis_smoke_spec.spl`.
 
 ## Status Definitions
 

@@ -101,6 +101,9 @@ fn aot_vhdl_file(path: text, output: text) -> CompileResult:
         return fallback_result
     val external_result = _run_compile_to_path(path, output, ["--backend=vhdl"])
     if external_result.is_success() and _file_contains_vhdl_design(output):
+        val source = rt_file_read_text(path) ?? ""
+        val vhdl = rt_file_read_text(output) ?? ""
+        _write_simple_vhdl_source_map(path, output, source, vhdl)
         return external_result
     external_result
 
@@ -166,10 +169,71 @@ fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
     val vhdl_result = _simple_vhdl_source_to_text(source)
     if vhdl_result.is_err():
         return CompileResult.RuntimeError(vhdl_result.unwrap_err())
-    if rt_file_write_text(output, vhdl_result.unwrap()):
+    val vhdl = vhdl_result.unwrap()
+    if rt_file_write_text(output, vhdl):
+        _write_simple_vhdl_source_map(path, output, source, vhdl)
         CompileResult.Success(output)
     else:
         CompileResult.RuntimeError("failed to write VHDL output: {output}")
+
+fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: text):
+    val map_path = output + ".map.json"
+    val entities = _simple_vhdl_entities_for_source_map(vhdl)
+    val ports = _simple_vhdl_ports_for_source_map(vhdl)
+    var json = "{\n"
+    json = json + "  \"version\": 1,\n"
+    json = json + "  \"source\": \"" + _json_escape(path) + "\",\n"
+    json = json + "  \"generated\": \"" + _json_escape(output) + "\",\n"
+    json = json + "  \"backend\": \"simple-vhdl-source-facade\",\n"
+    json = json + "  \"entities\": [" + entities + "],\n"
+    json = json + "  \"ports\": [" + ports + "]\n"
+    json = json + "}\n"
+    rt_file_write_text(map_path, json)
+
+fn _simple_vhdl_entities_for_source_map(vhdl: text) -> text:
+    var entries: [text] = []
+    val lines = vhdl.split("\n")
+    var line_no = 1
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("entity ") and line.contains(" is"):
+            val rest = line.substring(7, line.len())
+            val end_opt = rest.find(" ")
+            val name = if end_opt.?: rest.substring(0, end_opt.unwrap()) else: rest
+            entries = entries.push("{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text() + "}")
+        line_no = line_no + 1
+    entries.join(", ")
+
+fn _simple_vhdl_ports_for_source_map(vhdl: text) -> text:
+    var entries: [text] = []
+    val lines = vhdl.split("\n")
+    var line_no = 1
+    for raw in lines:
+        val line = raw.trim()
+        if (line.contains(" : in ") or line.contains(" : out ")) and not line.starts_with("signal "):
+            val sep = line.find(":")
+            if sep.?:
+                val original_name = line.substring(0, sep.unwrap()).trim()
+                val name = if original_name.ends_with(";"): original_name.substring(0, original_name.len() - 1) else: original_name
+                entries = entries.push("{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text() + "}")
+        line_no = line_no + 1
+    entries.join(", ")
+
+fn _json_escape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        else:
+            out = out + ch
+        i = i + 1
+    out
 
 fn _file_contains_vhdl_design(path: text) -> bool:
     val content = rt_file_read_text(path) ?? ""

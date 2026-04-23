@@ -53,6 +53,50 @@ run_request() {
   fi
 }
 
+validate_tool_response() {
+  local name="$1"
+  local out_file="$TMP_DIR/${name}.out"
+  python3 - "$name" "$out_file" <<'PY'
+import json
+import re
+import sys
+
+name = sys.argv[1]
+path = sys.argv[2]
+raw = open(path, "rb").read().decode("utf-8", "replace").strip()
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"{name}_json_valid=false error={exc}")
+    sys.exit(1)
+
+tools = data.get("result", {}).get("tools", [])
+if not isinstance(tools, list):
+    print(f"{name}_schema_valid=false error=result.tools is not a list")
+    sys.exit(1)
+
+name_re = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+for tool in tools:
+    tool_name = tool.get("name", "")
+    schema = tool.get("inputSchema", {})
+    props = schema.get("properties")
+    required = schema.get("required")
+    if not name_re.match(tool_name):
+        print(f"{name}_schema_valid=false error=invalid tool name {tool_name!r}")
+        sys.exit(1)
+    if schema.get("type") != "object" or not isinstance(props, dict) or not isinstance(required, list):
+        print(f"{name}_schema_valid=false error=invalid schema for {tool_name}")
+        sys.exit(1)
+    missing = [param for param in required if param not in props]
+    if missing:
+        print(f"{name}_schema_valid=false error=missing required properties for {tool_name}: {','.join(missing)}")
+        sys.exit(1)
+
+print(f"{name}_json_valid=true")
+print(f"{name}_schema_valid=true tools={len(tools)}")
+PY
+}
+
 build_native_servers() {
   section "Build Native Servers"
   "$BUILD_BIN" native-build --clean --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl -o "$MCP_BIN"
@@ -175,6 +219,8 @@ main() {
   run_request "$MCP_BIN" "mcp_tools" "$TOOLS_BODY"
   run_request "$LSP_BIN" "lsp_init" "$INIT_BODY"
   run_request "$LSP_BIN" "lsp_tools" "$TOOLS_BODY"
+  validate_tool_response "mcp_tools"
+  validate_tool_response "lsp_tools"
 
   run_probes
   classify

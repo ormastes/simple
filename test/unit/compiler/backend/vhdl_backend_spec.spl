@@ -545,6 +545,46 @@ describe "VHDL Backend - real backend compilation":
         check(compiled.vhdl.contains("state_sig <= Running;"))
         check(compiled.vhdl.contains("result_out <= state_sig;"))
 
+    it "rejects payload enum package emission with a specific diagnostic":
+        val payload_symbol = SymbolId(id: 57)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[payload_symbol] = payload_enum
+        val module = MirModule(name: "payload_enum_mod", functions: {}, statics: {}, constants: {}, types: types)
+        val backend = make_simple_backend()
+        val result = backend.compile(module)
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("Payload enum `maybe_t.Some` is not supported"))
+
+    it "rejects enum literal VHDL name collisions after sanitization":
+        val enum_symbol = SymbolId(id: 58)
+        val bad_enum = MirTypeDef(
+            symbol: enum_symbol,
+            name: "bad_enum_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "Needs-Reset", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Needs_Reset", discriminant: 1, payload: nil)
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[enum_symbol] = bad_enum
+        val module = MirModule(name: "bad_enum_mod", functions: {}, statics: {}, constants: {}, types: types)
+        val backend = make_simple_backend()
+        val result = backend.compile(module)
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("Duplicate VHDL enum literal after sanitization"))
+
     it "keeps generic call lowering and unsupported terminators as hard errors":
         val ret_local = make_return_local(1, make_i32())
         val block = MirBlock(

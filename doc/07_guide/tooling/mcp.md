@@ -61,6 +61,61 @@ echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
 SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
 ```
 
+### Repair Broken Tool Discovery
+
+If an MCP client starts the server but refuses to load tools, first verify the
+native protocol output instead of reinstalling blindly:
+
+```bash
+SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+```
+
+The common failure in April 2026 was a malformed static `tools/list` fallback:
+some tools listed required arguments, but `inputSchema.properties` was empty.
+Strict clients reject that schema because every required argument must also be
+declared under `properties`.
+
+Expected smoke output includes:
+
+```text
+mcp_tools_json_valid=true
+mcp_tools_schema_valid=true
+lsp_tools_json_valid=true
+lsp_tools_schema_valid=true
+```
+
+If schema validation fails:
+
+1. Run the detailed diagnostic and keep its failing `*_schema_valid=false`
+   line:
+
+   ```bash
+   sh scripts/mcp_native_diag.shs
+   ```
+
+2. Check `src/app/mcp/main.spl` static schema helpers. Any parameter added to a
+   required list in the static fallback must be emitted in
+   `inputSchema.properties`.
+
+3. Check `src/app/mcp/tool_table.spl` for the authoritative table-driven tool
+   metadata. Static fallback schemas should stay conservative and valid; rich
+   per-tool schemas belong in the tool table.
+
+4. Rebuild and rerun the native smoke:
+
+   ```bash
+   SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+   ```
+
+5. If the npm package or registry wrapper changed, also run:
+
+   ```bash
+   sh scripts/check-mcp-package-smoke.shs
+   ```
+
+Do not publish npm, registry metadata, or plugin bundles while either
+`*_json_valid` or `*_schema_valid` is false.
+
 ---
 
 ## Architecture
