@@ -359,6 +359,8 @@ pub enum Type {
         inner: Box<Type>,
     },
     Tuple(Vec<Type>),
+    /// Labeled tuple type: `(sum: bool, carry: bool)`.
+    LabeledTuple(Vec<TupleTypeField>),
     Array {
         element: Box<Type>,
         size: Option<Box<Expr>>,
@@ -552,6 +554,8 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     Tuple(Vec<Expr>),
+    /// Labeled tuple expression: `(sum: a xor b, carry: a and b)`.
+    LabeledTuple(Vec<TupleExprField>),
     Array(Vec<Expr>),
     /// Array repetition: [value; count] creates array with `count` copies of `value`
     /// Example: [0; 10] creates [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -802,6 +806,18 @@ pub struct TensorSlice {
     pub dim_name: String,
     pub dim_value: i64,
     pub content: TensorSliceContent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleTypeField {
+    pub label: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleExprField {
+    pub label: String,
+    pub value: Expr,
 }
 
 /// Content of a tensor slice - can be nested slices or grid rows

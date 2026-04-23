@@ -43,10 +43,7 @@ impl TypeChecker {
                     let _ = self.infer_expr(expr)?;
                 }
                 if !self.available_macros.contains(name) {
-                    return Err(TypeError::Other(format!(
-                        "macro '{}' must be defined before use",
-                        name
-                    )));
+                    return Err(TypeError::Other(format!("macro '{}' must be defined before use", name)));
                 }
                 let macro_def = self
                     .macros
@@ -63,24 +60,14 @@ impl TypeChecker {
 
                 match op {
                     // Arithmetic operators: both operands should be numeric, result is numeric
-                    BinOp::Add
-                    | BinOp::Sub
-                    | BinOp::Mul
-                    | BinOp::Div
-                    | BinOp::Mod
-                    | BinOp::Pow
-                    | BinOp::MatMul => { // Simple Math #1930-#1939: matrix multiplication
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow | BinOp::MatMul => {
+                        // Simple Math #1930-#1939: matrix multiplication
                         // Unify operands to ensure they're compatible
                         let _ = self.unify(&left_ty, &right_ty);
                         Ok(self.resolve(&left_ty))
                     }
                     // Comparison operators: result is always Bool
-                    BinOp::Eq
-                    | BinOp::NotEq
-                    | BinOp::Lt
-                    | BinOp::LtEq
-                    | BinOp::Gt
-                    | BinOp::GtEq => {
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
                         // Operands should be comparable (same type)
                         let _ = self.unify(&left_ty, &right_ty);
                         Ok(Type::Bool)
@@ -92,11 +79,7 @@ impl TypeChecker {
                         Ok(Type::Bool)
                     }
                     // Bitwise operators: both operands should be Int
-                    BinOp::BitAnd
-                    | BinOp::BitOr
-                    | BinOp::BitXor
-                    | BinOp::ShiftLeft
-                    | BinOp::ShiftRight => {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::ShiftLeft | BinOp::ShiftRight => {
                         let _ = self.unify(&left_ty, &Type::Int);
                         let _ = self.unify(&right_ty, &Type::Int);
                         Ok(Type::Int)
@@ -116,9 +99,7 @@ impl TypeChecker {
                     }
                     // Parallel operator (// ): executes both sides in parallel
                     // Result type is typically a tuple of both results
-                    BinOp::Parallel => {
-                        Ok(Type::Tuple(vec![left_ty, right_ty]))
-                    }
+                    BinOp::Parallel => Ok(Type::Tuple(vec![left_ty, right_ty])),
                     // Compose (>>): function composition, result is a function
                     BinOp::Compose => {
                         // f >> g creates \x: g(f(x)), result type depends on composed functions
@@ -294,10 +275,7 @@ impl TypeChecker {
                 }
             }
             Expr::MethodCall {
-                receiver,
-                method,
-                args,
-                ..
+                receiver, method, args, ..
             } => {
                 let inferred_recv = self.infer_expr(receiver)?;
                 for arg in args {
@@ -336,13 +314,6 @@ impl TypeChecker {
                     let _ = self.infer_expr(spread_expr)?;
                 }
                 Ok(self.fresh_var())
-            }
-            Expr::LabeledTuple(fields) => {
-                let mut typed_fields = Vec::new();
-                for field in fields {
-                    typed_fields.push((field.label.clone(), self.infer_expr(&field.value)?));
-                }
-                Ok(Type::LabeledTuple(typed_fields))
             }
             Expr::Path(_) => Ok(self.fresh_var()),
             Expr::Range { start, end, .. } => {

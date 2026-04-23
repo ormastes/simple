@@ -333,6 +333,12 @@ impl TypeChecker {
             Type::Tuple(types) => Type::Tuple(
                 types.iter().map(|t| self.instantiate_type(t, var_map)).collect()
             ),
+            Type::LabeledTuple(fields) => Type::LabeledTuple(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), self.instantiate_type(ty, var_map)))
+                    .collect(),
+            ),
             Type::Dict { key, value } => Type::Dict {
                 key: Box::new(self.instantiate_type(key, var_map)),
                 value: Box::new(self.instantiate_type(value, var_map)),
@@ -380,6 +386,11 @@ impl TypeChecker {
             }
             Type::Tuple(types) => {
                 for t in types {
+                    self.collect_free_vars(t, vars);
+                }
+            }
+            Type::LabeledTuple(fields) => {
+                for (_, t) in fields {
                     self.collect_free_vars(t, vars);
                 }
             }
