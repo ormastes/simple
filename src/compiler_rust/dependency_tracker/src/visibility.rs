@@ -1,7 +1,7 @@
 //! # Visibility and Export Model
 //!
 //! This module implements the visibility and export rules from
-//! `verification/visibility_export/src/VisibilityExport.lean`.
+//! `src/verification/visibility_export/src/VisibilityExport.lean`.
 //!
 //! ## Proven Properties (Lean theorems)
 //!

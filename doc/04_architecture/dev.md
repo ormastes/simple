@@ -106,7 +106,7 @@ pub enum Value {
 
 ## Formal Verification (Lean 4)
 
-The `verification/` directory contains Lean 4 proofs for key safety invariants. Each model has a corresponding Rust implementation that exactly matches the Lean definitions.
+The `src/verification/` directory contains Lean 4 proofs for key safety invariants. Each model has a corresponding Rust implementation that exactly matches the Lean definitions.
 
 ### Model-Implementation Correspondence
 
@@ -125,7 +125,7 @@ The `verification/` directory contains Lean 4 proofs for key safety invariants. 
 curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
 
 # Build individual proof
-cd verification/manual_pointer_borrow && lake build
+cd src/verification/manual_pointer_borrow && lake build
 
 # All proofs verified with Lean 4.x
 ```

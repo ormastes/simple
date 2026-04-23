@@ -49,7 +49,7 @@ Both features are now **production-ready** with comprehensive documentation, tes
 - `simple/std_lib/example/ml/tensor_dimensions_demo.spl` (350 LOC)
 
 **Verification**:
-- `verification/tensor_dimensions/` - Lean 4 project
+- `src/verification/tensor_dimensions/` - Lean 4 project
 - Status: Generated, needs Lean 4 syntax fixes (non-blocking)
 
 ### Example Usage
@@ -127,12 +127,12 @@ fn compute() -> Int:
 5. Multiple iteration documents (archived)
 
 **Lean Verification** (296 LOC):
-- `verification/gpu_types/lakefile.lean`
-- `verification/gpu_types/GpuTypes.lean`
-- `verification/gpu_types/GpuTypes/Basic.lean` (86 LOC)
-- `verification/gpu_types/GpuTypes/Safety.lean` (78 LOC)
-- `verification/gpu_types/GpuTypes/Inference.lean` (132 LOC)
-- `verification/gpu_types/README.md`
+- `src/verification/gpu_types/lakefile.lean`
+- `src/verification/gpu_types/GpuTypes.lean`
+- `src/verification/gpu_types/GpuTypes/Basic.lean` (86 LOC)
+- `src/verification/gpu_types/GpuTypes/Safety.lean` (78 LOC)
+- `src/verification/gpu_types/GpuTypes/Inference.lean` (132 LOC)
+- `src/verification/gpu_types/README.md`
 
 **Examples** (10 KB):
 - `examples/gpu_type_inference_demo.spl` (10 KB) - 7 comprehensive examples
@@ -166,7 +166,7 @@ fn compute() -> Int:
 ### Build Verification
 
 ```bash
-$ cd verification/gpu_types && lake build
+$ cd src/verification/gpu_types && lake build
 Build completed successfully (0 jobs).
 ✅ All theorems verified
 ```
@@ -432,7 +432,7 @@ Similar concepts:
 - Examples: `simple/std_lib/example/ml/tensor_dimensions_*.spl`
 
 **Verification**:
-- Lean Project: `verification/tensor_dimensions/`
+- Lean Project: `src/verification/tensor_dimensions/`
 
 ### GPU Type Inference
 
@@ -442,7 +442,7 @@ Similar concepts:
 - Completion Report: `doc/09_report/gpu_type_inference_completion.md`
 
 **Verification**:
-- Lean Project: `verification/gpu_types/`
+- Lean Project: `src/verification/gpu_types/`
 - All theorems verified ✅
 
 **Examples**:

@@ -2303,9 +2303,9 @@ The `decreases` keyword is reserved in Simple for contract syntax (`decreases:`)
 **Root Cause:** The `Decreases` token is a reserved keyword (TokenKind::Decreases) used for contract declarations. When used as a class name, field name, or parameter name, the parser expected an identifier but found the keyword token, causing "Unexpected token: expected identifier, found Decreases" errors.
 
 **Affected Files:**
-- `verification/models/contracts.spl` - `DecreasesClause` class name, `decreases` field
-- `verification/lean/codegen.spl` - `decreases` field in LeanFunction
-- `verification/lean/emitter.spl` - `decreases` parameter in emit_function_data()
+- `src/verification/models/contracts.spl` - `DecreasesClause` class name, `decreases` field
+- `src/verification/lean/codegen.spl` - `decreases` field in LeanFunction
+- `src/verification/lean/emitter.spl` - `decreases` parameter in emit_function_data()
 
 **Fix Applied:**
 1. Renamed `DecreasesClause` → `TerminationClause` (contracts.spl line 158)
@@ -2343,8 +2343,8 @@ error=Unexpected token: expected identifier, found Decreases
 # ...
 # [14/15] regenerate_tensor_dimensions... ✓
 # [15/15] regenerate_tensor_memory... ✓
-# Generated: verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes)
-# Generated: verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes)
+# Generated: src/verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes)
+# Generated: src/verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes)
 # All files validated successfully!
 ```
 

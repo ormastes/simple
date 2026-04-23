@@ -99,7 +99,7 @@ These are the highest-impact exclusions. A single scan of these can waste hundre
 |----------|----------|-----|
 | **Auto-generated reports** | `doc/report/` | Regenerated each test run |
 | **Generated source** | `src/compiler_cpp/*.c` | Generated C from Simple source |
-| **Lean verification** | `verification/**/.lake/` | Academic toolchain, not main code |
+| **Lean verification** | `src/verification/**/.lake/` | Academic toolchain, not main code |
 | **QEMU resources** | `resources/qemu/` | Downloaded binaries |
 | **Media/binaries** | `*.png`, `*.jpg`, `*.mp4` | Not code context |
 | **Packages** | `*.tar.gz`, `*.zip`, `*.deb` | Release artifacts |
@@ -132,7 +132,7 @@ Excluding `.next/` alone in a Next.js project saves 30-40%. Excluding `node_modu
 |-----------|------|-------|
 | `src/compiler_rust/target/` | ~439 GB | Rust build artifacts |
 | `build/` | ~14 GB | CMake/Ninja output |
-| `verification/**/.lake/` | ~4.8 GB | Lean 4 build artifacts |
+| `src/verification/**/.lake/` | ~4.8 GB | Lean 4 build artifacts |
 | `.git/` | ~1.2 GB | VCS internals |
 | `bin/release/*` | ~674 MB | Compiled binaries |
 | `tmp/` | ~431 MB | Temporary test files |

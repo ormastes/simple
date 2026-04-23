@@ -44,7 +44,7 @@ The Simple language project spans **two interconnected codebases**:
 **B. Compiler Crate Overcrowding**
 - 65 root-level .rs files (should be ~15-20)
 - Poor module cohesion
-- Needs logical grouping: analysis/, build/, di_aop/, testing/, verification/
+- Needs logical grouping: analysis/, build/, di_aop/, testing/, src/verification/
 
 **C. Large Rust Files** (>1000 lines):
 | File | Lines | Should Split Into |
@@ -167,7 +167,7 @@ simple/
 
 | File | Lines | Issue |
 |------|-------|-------|
-| verification/regenerate.spl | 2,555 | Should split per verification project |
+| src/verification/regenerate.spl | 2,555 | Should split per verification project |
 | host/async_nogc_mut/io/fs.spl | 1,044 | Filesystem API - split by functionality |
 | host/async_gc_mut/io/fs.spl | 1,057 | Duplicate variant - extract common base |
 | ml/torch/distributed.spl | 881 | Distributed training - split by strategy |
@@ -460,7 +460,7 @@ mv test/ archive/legacy_2024/test_old/
 
 #### Split Top 3 Largest Simple Files
 
-**verification/regenerate.spl (2,555 lines) →**
+**src/verification/regenerate.spl (2,555 lines) →**
 ```
 simple/std_lib/src/verification/regenerate/
 ├── __init__.spl              # Main entry (100 lines)
@@ -557,7 +557,7 @@ src/compiler/src/
 │   ├── coverage.rs
 │   ├── mock.rs
 │   └── spec_coverage.rs
-├── verification/             # NEW: Formal verification
+├── src/verification/             # NEW: Formal verification
 │   ├── verification_checker.rs
 │   └── contract_check.rs
 ├── runtime_bridge/           # NEW: Runtime integration

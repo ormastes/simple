@@ -158,7 +158,7 @@ Successfully implemented dyn trait type inference with formal Lean 4 verificatio
 ### Lean 4 Proofs
 
 ```bash
-$ cd verification/type_inference_compile
+$ cd src/verification/type_inference_compile
 $ lake build
 Build completed successfully (3 jobs).
 ```
@@ -428,12 +428,12 @@ $ cargo build -p simple-type
 
 ### Code Locations
 **Lean:**
-- `verification/type_inference_compile/src/DynTrait.lean` - NEW
-- `verification/type_inference_compile/src/Classes.lean` - Modified
-- `verification/type_inference_compile/src/Traits.lean` - Modified
-- `verification/type_inference_compile/src/Mixins.lean` - Modified
-- `verification/type_inference_compile/src/ClassTraitIntegration.lean` - Modified
-- `verification/type_inference_compile/src/Soundness.lean` - Replaced
+- `src/verification/type_inference_compile/src/DynTrait.lean` - NEW
+- `src/verification/type_inference_compile/src/Classes.lean` - Modified
+- `src/verification/type_inference_compile/src/Traits.lean` - Modified
+- `src/verification/type_inference_compile/src/Mixins.lean` - Modified
+- `src/verification/type_inference_compile/src/ClassTraitIntegration.lean` - Modified
+- `src/verification/type_inference_compile/src/Soundness.lean` - Replaced
 
 **Rust:**
 - `src/rust/type/src/lib.rs` - MixinInfo.required_mixins
@@ -446,7 +446,7 @@ $ cargo build -p simple-type
 ### Commands
 ```bash
 # Build Lean proofs
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 # Build Rust library
 cargo build -p simple-type
@@ -455,7 +455,7 @@ cargo build -p simple-type
 cargo test -p simple-type --lib
 
 # Count sorry placeholders
-cd verification/type_inference_compile && grep -r "sorry" src/ | wc -l
+cd src/verification/type_inference_compile && grep -r "sorry" src/ | wc -l
 
 # Measure coverage
 cargo tarpaulin -p simple-type --out Html

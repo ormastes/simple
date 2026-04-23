@@ -137,7 +137,7 @@ function launch(serverName, serverConfig, opts = {}) {
   // For native binary, entry is not used — exec the binary directly
   const args = runtimeKind === 'native'
     ? [...(opts.passthrough || [])]
-    : [entry, ...(opts.passthrough || [])];
+    : ['run', entry, ...(opts.passthrough || [])];
 
   // Step 6: Build environment
   const vars = {

@@ -103,9 +103,9 @@ let mem = estimate_memory(cnn_input, 4)  // Float32
 ## 📁 Key Files
 
 ### Implementation
-- `verification/models/tensor_dimensions.spl` (450 LOC) - Core model
+- `src/verification/models/tensor_dimensions.spl` (450 LOC) - Core model
 - `ml/torch/typed_tensor.spl` (350 LOC) - TypedTensor class
-- `verification/regenerate/tensor_dimensions.spl` (200 LOC) - Lean generator
+- `src/verification/regenerate/tensor_dimensions.spl` (200 LOC) - Lean generator
 
 ### Documentation
 - `doc/07_guide/tensor_dimensions_guide.md` (500 lines) - User guide

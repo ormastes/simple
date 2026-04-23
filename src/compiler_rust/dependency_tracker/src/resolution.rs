@@ -1,7 +1,7 @@
 //! # Module Resolution
 //!
 //! This module implements the module path resolution semantics from
-//! `verification/module_resolution/src/ModuleResolution.lean`.
+//! `src/verification/module_resolution/src/ModuleResolution.lean`.
 //!
 //! ## Proven Properties (Lean theorems)
 //!

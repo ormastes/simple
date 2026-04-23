@@ -301,7 +301,7 @@ Use Simple's differentiators in two tiers:
 
 Parallel sub-agents were used for this audit and returned useful, non-duplicative findings in three clusters:
 
-- verification/testing
+- src/verification/testing
 - runtime/backend/platform
 - language/tooling/architecture
 

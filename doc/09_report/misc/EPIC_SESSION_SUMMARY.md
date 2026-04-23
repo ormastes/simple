@@ -38,7 +38,7 @@ class User with Timestamped:
 - **Architecture:** Fully designed
 
 ### Phase 4: Lean Verification Stub (5%) ✅
-- **File:** `verification/type_inference_compile/src/Mixins.lean`
+- **File:** `src/verification/type_inference_compile/src/Mixins.lean`
 - **Status:** Basic structures, compiles
 - **Ready for:** Full expansion after Phase 2
 
@@ -265,7 +265,7 @@ Overall: ████░░░░░░░░░░░░░░░░  20% Compl
 - `examples/test_mixin_parse.rs` (50 lines)
 
 ### Verification
-- `verification/type_inference_compile/src/Mixins.lean` (27 lines)
+- `src/verification/type_inference_compile/src/Mixins.lean` (27 lines)
 
 ## 🎯 Success Metrics
 

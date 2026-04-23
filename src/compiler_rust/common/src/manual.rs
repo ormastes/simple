@@ -90,7 +90,7 @@ pub fn gc_state_verify_safe(s: &GcStateVerify) -> bool {
 // Borrow Tracking (for formal verification)
 //==============================================================================
 // This module provides explicit borrow tracking that maps directly to the
-// Lean 4 formal verification model in `verification/manual_pointer_borrow/`.
+// Lean 4 formal verification model in `src/verification/manual_pointer_borrow/`.
 //
 // The Lean model is:
 //   structure BorrowState where
@@ -347,7 +347,7 @@ impl ValidBorrowState {
 // GC State Tracking (for formal verification)
 //==============================================================================
 // This module provides explicit GC state tracking that maps directly to the
-// Lean 4 formal verification model in `verification/gc_manual_borrow/`.
+// Lean 4 formal verification model in `src/verification/gc_manual_borrow/`.
 //
 // The Lean model is:
 //   structure GcState where

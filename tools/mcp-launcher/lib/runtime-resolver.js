@@ -10,10 +10,10 @@ const { execFileSync } = require('child_process');
  */
 function resolveRuntime(repoRoot, diag) {
   const candidates = [
+    { path: path.join(repoRoot, 'src', 'compiler_rust', 'target', 'bootstrap', 'simple'), kind: 'rust-bootstrap' },
     { path: path.join(repoRoot, 'bin', 'simple'), kind: 'bin-simple' },
     { path: path.join(repoRoot, 'bin', 'release', 'simple'), kind: 'bin-release' },
     { path: path.join(repoRoot, 'src', 'compiler_rust', 'target', 'release', 'simple'), kind: 'rust-release' },
-    { path: path.join(repoRoot, 'src', 'compiler_rust', 'target', 'bootstrap', 'simple'), kind: 'rust-bootstrap' },
   ];
 
   // On Windows, try .exe variants

@@ -23,7 +23,7 @@ Created `tests/mixin_type_inference.spl` with comprehensive test cases:
 
 ### 2. Lean Verification Updates
 
-Updated `verification/type_inference_compile/src/MixinVerificationGenerated.lean`:
+Updated `src/verification/type_inference_compile/src/MixinVerificationGenerated.lean`:
 
 #### Fixed Type Definitions
 
@@ -140,7 +140,7 @@ axiom mixin_dependency_transitive : True
 All Lean verification files build successfully:
 
 ```bash
-$ cd verification/type_inference_compile
+$ cd src/verification/type_inference_compile
 $ lake build
 Build completed successfully (7 jobs).
 ```
@@ -229,7 +229,7 @@ To complete the full mixin implementation:
 
 - **Type System Research:** `doc/01_research/mixin_type_system.md`
 - **Implementation Plan:** `doc/plans/mixin_implementation.md`
-- **Lean Verification:** `verification/type_inference_compile/src/Mixins.lean`
+- **Lean Verification:** `src/verification/type_inference_compile/src/Mixins.lean`
 - **Test Cases:** `tests/mixin_type_inference.spl`
 - **Feature Tracking:** `doc/features/mixin.md`
 

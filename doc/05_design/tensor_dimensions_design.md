@@ -16,7 +16,7 @@ Tensor dimension inference is a compile-time type system feature that tracks N-d
 simple/std_lib/
 ├── src/
 │   ├── ml/torch/typed_tensor.spl          # TypedTensor class (blocked by module system)
-│   └── verification/
+│   └── src/verification/
 │       ├── models/tensor_dimensions.spl    # Core dimension inference model
 │       └── regenerate/tensor_dimensions.spl # Lean proof generator
 ├── test/unit/ml/torch/
@@ -211,14 +211,14 @@ let mem = estimate_memory(shape, 4)  # Float32
 
 ### ✅ Complete
 
-- **Core Model**: `verification/models/tensor_dimensions.spl` (450 LOC)
+- **Core Model**: `src/verification/models/tensor_dimensions.spl` (450 LOC)
   - Dimension types (Literal, Named, Var, Unknown, Broadcast)
   - Unification algorithm
   - Shape inference for matmul, reshape
   - Memory estimation
   - Error types and handling
 
-- **Lean Verification**: `verification/regenerate/tensor_dimensions.spl` (200 LOC)
+- **Lean Verification**: `src/verification/regenerate/tensor_dimensions.spl` (200 LOC)
   - Proof generator for shape inference correctness
   - Memory bounds validity proofs
   - Unification algorithm verification

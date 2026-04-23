@@ -12,7 +12,7 @@ Successfully implemented **complete formal verification** of the Simple language
 
 ### 1. Reference Capability Verification (#1104)
 
-**Location:** `verification/memory_capabilities/src/MemoryCapabilities.lean` (350+ lines)
+**Location:** `src/verification/memory_capabilities/src/MemoryCapabilities.lean` (350+ lines)
 
 **Key Definitions:**
 
@@ -62,7 +62,7 @@ theorem actor_mode_safety :
 
 ### 2. SC-DRF Memory Model Verification (#1105)
 
-**Location:** `verification/memory_model_drf/src/MemoryModelDRF.lean` (510+ lines)
+**Location:** `src/verification/memory_model_drf/src/MemoryModelDRF.lean` (510+ lines)
 
 **Key Definitions:**
 
@@ -112,7 +112,7 @@ axiom channelSynchronization :
 
 ### 3. Capability-DRF Integration (#1106)
 
-**Location:** Integrated in `verification/memory_model_drf/src/MemoryModelDRF.lean`
+**Location:** Integrated in `src/verification/memory_model_drf/src/MemoryModelDRF.lean`
 
 **Key Definitions:**
 
@@ -284,13 +284,13 @@ pub extern "C" fn rt_rwlock_set(rwlock: RuntimeValue, value: RuntimeValue) -> i6
 ### New Files
 
 **Verification:**
-- `verification/memory_capabilities/lakefile.lean` - Project config
-- `verification/memory_capabilities/src/MemoryCapabilities.lean` - Capability verification (350+ lines)
-- `verification/memory_capabilities/src/Main.lean` - Entry point
+- `src/verification/memory_capabilities/lakefile.lean` - Project config
+- `src/verification/memory_capabilities/src/MemoryCapabilities.lean` - Capability verification (350+ lines)
+- `src/verification/memory_capabilities/src/Main.lean` - Entry point
 - `doc/09_report/MEMORY_VERIFICATION_COMPLETE.md` - This document
 
 **Updated Files:**
-- `verification/memory_model_drf/src/MemoryModelDRF.lean` - Added capability integration (120+ lines)
+- `src/verification/memory_model_drf/src/MemoryModelDRF.lean` - Added capability integration (120+ lines)
 - `doc/features/feature.md` - Added features #1104-1106, renumbered concurrency modes
 - `CLAUDE.md` - Updated status and verification directory listing
 

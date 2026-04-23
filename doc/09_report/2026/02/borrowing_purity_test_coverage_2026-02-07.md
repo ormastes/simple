@@ -195,15 +195,15 @@ apply_pure(double, 5)                            # OK
 ## Lean Verification (Section 11)
 
 **No verification files for:**
-- ❌ `verification/purity/effect_propagation.lean` (Obligation 1)
-- ❌ `verification/purity/fixed_point.lean` (Obligation 2)
-- ❌ `verification/purity/total_soundness.lean` (Obligation 3)
-- ❌ `verification/borrow/no_escape.lean` (Obligation 4)
-- ❌ `verification/borrow/exclusivity.lean` (Obligation 5)
-- ❌ `verification/borrow/release.lean` (Obligation 6)
-- ❌ `verification/borrow/passing_sound.lean` (Obligation 7)
+- ❌ `src/verification/purity/effect_propagation.lean` (Obligation 1)
+- ❌ `src/verification/purity/fixed_point.lean` (Obligation 2)
+- ❌ `src/verification/purity/total_soundness.lean` (Obligation 3)
+- ❌ `src/verification/borrow/no_escape.lean` (Obligation 4)
+- ❌ `src/verification/borrow/exclusivity.lean` (Obligation 5)
+- ❌ `src/verification/borrow/release.lean` (Obligation 6)
+- ❌ `src/verification/borrow/passing_sound.lean` (Obligation 7)
 
-**Directory**: `verification/` exists but no purity/borrow proofs
+**Directory**: `src/verification/` exists but no purity/borrow proofs
 
 ---
 
@@ -218,7 +218,7 @@ apply_pure(double, 5)                            # OK
 | 5 | Purity-borrow rule | `test/compiler/purity_borrow_rule_spec.spl` | ❌ Missing |
 | 6 | Lambda purity | `test/compiler/lambda_purity_spec.spl` | ❌ Missing |
 | Examples | Comprehensive | `test/system/features/borrowing_purity_examples_spec.spl` | ❌ Missing |
-| Verification | Lean proofs | `verification/purity/*.lean`, `verification/borrow/*.lean` | ❌ Missing |
+| Verification | Lean proofs | `src/verification/purity/*.lean`, `src/verification/borrow/*.lean` | ❌ Missing |
 
 **Total**: 0/8 test suites exist (0% coverage)
 

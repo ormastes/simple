@@ -53,7 +53,7 @@ All 8 Lean models have been **verified**. Five models have exact Rust implementa
 
 ### 1. Manual Pointer Borrow Model ✅ VERIFIED
 
-**Lean Model** (`verification/manual_pointer_borrow/src/ManualPointerBorrow.lean`):
+**Lean Model** (`src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean`):
 ```lean
 structure BorrowState where
   exclusive : Bool := false
@@ -108,7 +108,7 @@ This design makes invalid states (exclusive AND shared) unrepresentable at compi
 
 ### 2. GC Manual Borrow Model ✅ VERIFIED
 
-**Lean Model** (`verification/gc_manual_borrow/src/GcManualBorrow.lean`):
+**Lean Model** (`src/verification/gc_manual_borrow/src/GcManualBorrow.lean`):
 ```lean
 structure GcState where
   live : List Nat := []
@@ -161,7 +161,7 @@ def collectSafe (s : GcState) (id : Nat) : GcState :=
 In the Simple language:
 - `async fn` - non-blocking function guaranteed not to contain blocking operations
 
-**Lean Model** (`verification/async_compile/src/AsyncCompile.lean`):
+**Lean Model** (`src/verification/async_compile/src/AsyncCompile.lean`):
 ```lean
 inductive Effect
   | compute   -- Pure computation, always async-safe
@@ -216,7 +216,7 @@ pub fn is_async(e: AsyncEffect) -> bool {
 
 ### 4. NoGC Compile Model ✅ VERIFIED
 
-**Lean Model** (`verification/nogc_compile/src/NogcCompile.lean`):
+**Lean Model** (`src/verification/nogc_compile/src/NogcCompile.lean`):
 ```lean
 inductive Instr
   | const (n : Nat)

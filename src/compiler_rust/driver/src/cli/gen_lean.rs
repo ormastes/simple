@@ -3,7 +3,7 @@
 //! Commands:
 //! - generate: Generate all Lean files from verification module
 //! - compare:  Compare generated with existing files
-//! - write:    Write generated files to verification/
+//! - write:    Write generated files to src/verification/
 //! - verify:   Run Lean on known verification projects
 
 use std::collections::{HashMap, HashSet};
@@ -29,7 +29,7 @@ impl GenLeanOptions {
                 .position(|a| a == "--output")
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("verification")),
+                .unwrap_or_else(|| PathBuf::from("src/verification")),
             project: args
                 .iter()
                 .position(|a| a == "--project")
@@ -75,12 +75,12 @@ fn print_gen_lean_help() {
 Commands:
   generate           Generate Lean files (output to stdout)
   compare            Compare generated with existing files and check completeness
-  write              Write generated files to verification/
+  write              Write generated files to src/verification/
   verify             Run Lean on known verification projects and fail on errors/sorry
   memory-safety      Generate memory safety Lean 4 verification from source file
 
 Options:
-  --output <dir>     Output directory (default: verification/)
+  --output <dir>     Output directory (default: src/verification/)
   --project <name>   Generate specific project only
   --force            Overwrite existing files without confirmation
   --diff             Show detailed diff and missing/new definitions
@@ -98,7 +98,7 @@ Examples:
   simple gen-lean write --force                     # Regenerate all Lean files
   simple gen-lean generate --project memory         # Generate memory projects only
   simple gen-lean memory-safety --file src/main.spl # Generate memory safety verification
-  simple gen-lean memory-safety --file src/main.spl --out verification/generated/Main/MemorySafety.lean
+  simple gen-lean memory-safety --file src/main.spl --out build/verification/generated/Main/MemorySafety.lean
   simple gen-lean verify                            # Check known Lean proofs with `lean`
 "#
     );
@@ -151,7 +151,10 @@ fn is_lean_available() -> bool {
 }
 
 fn relative_output_path(rel_path: &str) -> &str {
-    rel_path.strip_prefix("verification/").unwrap_or(rel_path)
+    rel_path
+        .strip_prefix("src/verification/")
+        .or_else(|| rel_path.strip_prefix("verification/"))
+        .unwrap_or(rel_path)
 }
 
 fn resolve_output_path(project_root: &std::path::Path, output_dir: &std::path::Path, rel_path: &str) -> PathBuf {
@@ -187,91 +190,91 @@ fn supported_regeneration_modules() -> &'static [RegenerationModuleSpec] {
     &[
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/nogc_compile.spl",
-            output_path: "verification/nogc_compile/src/NogcCompile.lean",
+            output_path: "src/verification/nogc_compile/src/NogcCompile.lean",
             function_name: "regenerate_nogc_compile",
             description: "NoGC compilation verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/async_compile.spl",
-            output_path: "verification/async_compile/src/AsyncCompile.lean",
+            output_path: "src/verification/async_compile/src/AsyncCompile.lean",
             function_name: "regenerate_async_compile",
             description: "Async effect tracking verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/gc_manual_borrow.spl",
-            output_path: "verification/gc_manual_borrow/src/GcManualBorrow.lean",
+            output_path: "src/verification/gc_manual_borrow/src/GcManualBorrow.lean",
             function_name: "regenerate_gc_manual_borrow",
             description: "GC manual borrow verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/manual_pointer_borrow.spl",
-            output_path: "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
+            output_path: "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
             function_name: "regenerate_manual_pointer_borrow",
             description: "Manual pointer borrow verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/module_resolution.spl",
-            output_path: "verification/module_resolution/src/ModuleResolution.lean",
+            output_path: "src/verification/module_resolution/src/ModuleResolution.lean",
             function_name: "regenerate_module_resolution",
             description: "Module resolution verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/visibility_export.spl",
-            output_path: "verification/visibility_export/src/VisibilityExport.lean",
+            output_path: "src/verification/visibility_export/src/VisibilityExport.lean",
             function_name: "regenerate_visibility_export",
             description: "Visibility and export verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/macro_auto_import.spl",
-            output_path: "verification/macro_auto_import/src/MacroAutoImport.lean",
+            output_path: "src/verification/macro_auto_import/src/MacroAutoImport.lean",
             function_name: "regenerate_macro_auto_import",
             description: "Macro auto-import verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/type_inference.spl",
-            output_path: "verification/type_inference_compile/src/TypeInferenceCompile.lean",
+            output_path: "src/verification/type_inference_compile/src/TypeInferenceCompile.lean",
             function_name: "regenerate_type_inference_compile",
             description: "Type inference verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/contracts.spl",
-            output_path: "verification/type_inference_compile/src/Contracts.lean",
+            output_path: "src/verification/type_inference_compile/src/Contracts.lean",
             function_name: "regenerate_contracts",
             description: "Contract translation verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/async_effect_inference.spl",
-            output_path: "verification/type_inference_compile/src/AsyncEffectInference.lean",
+            output_path: "src/verification/type_inference_compile/src/AsyncEffectInference.lean",
             function_name: "regenerate_async_effect_inference",
             description: "Async effect inference verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/generics.spl",
-            output_path: "verification/type_inference_compile/src/Generics.lean",
+            output_path: "src/verification/type_inference_compile/src/Generics.lean",
             function_name: "regenerate_generics",
             description: "Generic monomorphization verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/memory_capabilities.spl",
-            output_path: "verification/memory_capabilities/src/MemoryCapabilities.lean",
+            output_path: "src/verification/memory_capabilities/src/MemoryCapabilities.lean",
             function_name: "regenerate_memory_capabilities",
             description: "Reference capability verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/memory_model_drf.spl",
-            output_path: "verification/memory_model_drf/src/MemoryModelDRF.lean",
+            output_path: "src/verification/memory_model_drf/src/MemoryModelDRF.lean",
             function_name: "regenerate_memory_model_drf",
             description: "SC-DRF memory model verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/tensor_dimensions.spl",
-            output_path: "verification/tensor_dimensions/src/TensorDimensions.lean",
+            output_path: "src/verification/tensor_dimensions/src/TensorDimensions.lean",
             function_name: "regenerate_tensor_dimensions",
             description: "Tensor dimension verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/tensor_dimensions.spl",
-            output_path: "verification/tensor_dimensions/src/TensorMemory.lean",
+            output_path: "src/verification/tensor_dimensions/src/TensorMemory.lean",
             function_name: "regenerate_tensor_memory",
             description: "Tensor memory verification",
         },
@@ -464,16 +467,16 @@ fn main() -> Int:
     }
 }
 
-/// Find the repository root that contains verification/
+/// Find the repository root that contains src/verification/
 fn find_verification_root() -> Result<PathBuf, String> {
     let mut current = std::env::current_dir().map_err(|e| e.to_string())?;
     loop {
-        let candidate = current.join("verification");
+        let candidate = current.join("src").join("verification");
         if candidate.exists() {
             return Ok(current);
         }
         if !current.pop() {
-            return Err("Could not find verification/ directory. Run from project root.".to_string());
+            return Err("Could not find src/verification/ directory. Run from project root.".to_string());
         }
     }
 }
@@ -1179,7 +1182,7 @@ pub fn run_verification_regenerate() -> i32 {
     };
 
     let opts = GenLeanOptions {
-        output_dir: PathBuf::from("verification"),
+        output_dir: PathBuf::from("src/verification"),
         project: None,
         force: true,
         show_diff: false,
@@ -1189,7 +1192,7 @@ pub fn run_verification_regenerate() -> i32 {
     if code == 0 {
         println!(
             "Regeneration complete under {}",
-            project_root.join("verification").display()
+            project_root.join("src").join("verification").display()
         );
     }
     code
@@ -1197,7 +1200,7 @@ pub fn run_verification_regenerate() -> i32 {
 
 pub fn run_verification_check() -> i32 {
     let opts = GenLeanOptions {
-        output_dir: PathBuf::from("verification"),
+        output_dir: PathBuf::from("src/verification"),
         project: None,
         force: false,
         show_diff: false,
@@ -1247,9 +1250,9 @@ mod tests {
     fn known_lean_files_cover_all_regenerated_projects() {
         let files = get_known_lean_files();
         assert_eq!(files.len(), 15);
-        assert!(files.contains(&"verification/nogc_compile/src/NogcCompile.lean"));
-        assert!(files.contains(&"verification/type_inference_compile/src/Generics.lean"));
-        assert!(files.contains(&"verification/tensor_dimensions/src/TensorMemory.lean"));
+        assert!(files.contains(&"src/verification/nogc_compile/src/NogcCompile.lean"));
+        assert!(files.contains(&"src/verification/type_inference_compile/src/Generics.lean"));
+        assert!(files.contains(&"src/verification/tensor_dimensions/src/TensorMemory.lean"));
     }
 
     #[test]

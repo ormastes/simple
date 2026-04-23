@@ -13,7 +13,7 @@ The tensor dimension inference feature now has **90% formal verification** with 
 ### Build Status
 
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ⚠ [2/5] Replayed TensorDimensions
 warning: src/TensorDimensions.lean:169:8: declaration uses 'sorry'
 Build completed successfully (5 jobs).
@@ -76,7 +76,7 @@ Build completed successfully (5 jobs).
 
 ### 1. `min_le_max_elements` ✅
 
-**File**: `verification/tensor_dimensions/src/TensorDimensions.lean:214-256`
+**File**: `src/verification/tensor_dimensions/src/TensorDimensions.lean:214-256`
 
 **Theorem**:
 ```lean
@@ -101,7 +101,7 @@ theorem min_le_max_elements (s : TensorShape) :
 
 ### 2. `tensor_memory_bounds_valid` ✅
 
-**File**: `verification/tensor_dimensions/src/TensorMemory.lean:171-195`
+**File**: `src/verification/tensor_dimensions/src/TensorMemory.lean:171-195`
 
 **Theorem**:
 ```lean
@@ -265,14 +265,14 @@ sorry
 
 ## Files Modified This Session
 
-### verification/tensor_dimensions/src/TensorDimensions.lean
+### src/verification/tensor_dimensions/src/TensorDimensions.lean
 - **Lines 214-256**: Completed `min_le_max_elements` proof
   - Added structural induction
   - Pattern matching on dimension types
   - Multiplication monotonicity
   - Contradiction handling for non-literal dims
 
-### verification/tensor_dimensions/src/TensorMemory.lean
+### src/verification/tensor_dimensions/src/TensorMemory.lean
 - **Lines 171-195**: Completed `tensor_memory_bounds_valid` proof
   - Match expression decomposition
   - Application of `min_le_max_elements`
@@ -348,7 +348,7 @@ sorry
    ```yaml
    - name: Verify Lean Proofs
      run: |
-       cd verification/tensor_dimensions
+       cd src/verification/tensor_dimensions
        lake build
        # Passes: build succeeds
        # Warns: one sorry remains
@@ -459,6 +459,6 @@ The tensor dimension inference feature has achieved **90% formal verification** 
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-10
 **Session**: Lean Proof Completion
-**Build Command**: `cd verification/tensor_dimensions && lake build`
+**Build Command**: `cd src/verification/tensor_dimensions && lake build`
 **Status**: ✅ **Success** (Build: 100%, Proofs: 90%)
 **Next Steps**: Optional completion of `unifyDim_success_eq` or deployment

@@ -188,7 +188,7 @@ class Promise[T]:
 - **Implementation**: Complete async-by-default system
 - **Documentation**: `doc/async_by_default.md`
 - **Tests**: `src/type/tests/async_default_integration.rs`
-- **Verification**: `verification/type_inference_compile/src/AsyncEffectInference.lean`
+- **Verification**: `src/verification/type_inference_compile/src/AsyncEffectInference.lean`
 
 ---
 

@@ -12,10 +12,10 @@ Successfully implemented comprehensive Lean 4 verification of type inference for
 ### Phase 1: DynTrait Type Model in Lean ✅
 
 **Files Modified:**
-- `verification/type_inference_compile/src/Classes.lean` - Added `dynTrait` constructor to `Ty`
-- `verification/type_inference_compile/src/DynTrait.lean` (NEW - 160 lines) - Dyn trait coercion and dispatch
-- `verification/type_inference_compile/src/Traits.lean` - Extended unification for `dynTrait`
-- `verification/type_inference_compile/lakefile.lean` - Registered DynTrait module
+- `src/verification/type_inference_compile/src/Classes.lean` - Added `dynTrait` constructor to `Ty`
+- `src/verification/type_inference_compile/src/DynTrait.lean` (NEW - 160 lines) - Dyn trait coercion and dispatch
+- `src/verification/type_inference_compile/src/Traits.lean` - Extended unification for `dynTrait`
+- `src/verification/type_inference_compile/lakefile.lean` - Registered DynTrait module
 
 **Theorems Proven:** 7/7
 - ✅ `dynCoercion_sound` - Coercion preserves trait implementation
@@ -29,7 +29,7 @@ Successfully implemented comprehensive Lean 4 verification of type inference for
 ### Phase 2: Transitive Mixin Resolution in Lean ✅
 
 **Files Modified:**
-- `verification/type_inference_compile/src/Mixins.lean` - Added transitive resolution via BFS
+- `src/verification/type_inference_compile/src/Mixins.lean` - Added transitive resolution via BFS
 
 **Functions Added:**
 - `resolveTransitiveMixins` - BFS-based dependency resolution with deduplication
@@ -45,8 +45,8 @@ Successfully implemented comprehensive Lean 4 verification of type inference for
 ### Phase 3: Mixin-Trait-DynTrait Integration ✅
 
 **Files Modified:**
-- `verification/type_inference_compile/src/ClassTraitIntegration.lean` - Extended method resolution
-- `verification/type_inference_compile/src/Mixins.lean` - Added mixin method source
+- `src/verification/type_inference_compile/src/ClassTraitIntegration.lean` - Extended method resolution
+- `src/verification/type_inference_compile/src/Mixins.lean` - Added mixin method source
 
 **Extensions:**
 - Extended `MethodSource` inductive with `mixinMethod` constructor
@@ -61,7 +61,7 @@ Successfully implemented comprehensive Lean 4 verification of type inference for
 ### Phase 4: Extended Soundness Proofs ✅
 
 **Files Modified:**
-- `verification/type_inference_compile/src/Soundness.lean` (REPLACED) - Extended type system
+- `src/verification/type_inference_compile/src/Soundness.lean` (REPLACED) - Extended type system
 
 **Extensions:**
 - New `ExprExt` with `methodCall`, `fieldAccess`, `dynCoerce`
@@ -165,7 +165,7 @@ test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ### Lean Verification: ✅ Compiles Successfully
 
 ```
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 Build completed successfully (3 jobs).
 ```

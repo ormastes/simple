@@ -61,7 +61,7 @@ Successfully implemented visibility and export rules algorithm with full Lean th
 
 ## Lean Theorem Validation
 
-All 7 theorems from `verification/visibility_export/src/VisibilityExport.lean` validated:
+All 7 theorems from `src/verification/visibility_export/src/VisibilityExport.lean` validated:
 
 ### Theorem 1: `private_stays_private`
 

@@ -202,13 +202,13 @@ Tests integration between:
 
 Phase 3 graph algorithms support the following Lean-verified theorems:
 
-**From verification/module_resolution/ (4 theorems):**
+**From src/verification/module_resolution/ (4 theorems):**
 - ✅ wellformed_not_ambiguous
 - ✅ unique_path_form
 - ✅ unique_implies_exists
 - ✅ notfound_means_neither
 
-**From verification/visibility_export/ (7 theorems):**
+**From src/verification/visibility_export/ (7 theorems):**
 - ✅ private_stays_private
 - ✅ private_module_restricts
 - ✅ must_be_exported
@@ -216,7 +216,7 @@ Phase 3 graph algorithms support the following Lean-verified theorems:
 - ✅ any_private_means_private
 - ✅ all_public_means_public
 
-**From verification/macro_auto_import/ (6 theorems):**
+**From src/verification/macro_auto_import/ (6 theorems):**
 - ✅ glob_doesnt_leak_macros_wf
 - ✅ nonmacros_always_globbed
 - ✅ auto_imported_in_glob

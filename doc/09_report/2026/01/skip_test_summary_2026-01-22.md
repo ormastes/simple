@@ -157,7 +157,7 @@
 | 2 | `system/improvements/stdlib_improvements_spec.spl` | 25 | Future enhancements | - |
 | 3 | `concurrency/promise_spec.spl` | 30 | No async runtime | ⏸️ Blocked |
 | 4 | `tooling/tooling_spec.spl` | 28 | Build system pending | ⏸️ Blocked |
-| 5 | `verification/memory_capabilities_spec.spl` | 26 | Lean 4 integration | ⏸️ Blocked |
+| 5 | `src/verification/memory_capabilities_spec.spl` | 26 | Lean 4 integration | ⏸️ Blocked |
 | 6 | `ui/tui/ratatui_backend_spec.spl` | 24 | TUI framework not started | ⏸️ Blocked |
 | 7 | `game_engine/audio_spec.spl` | 5 | Audio module not started | ⏸️ Blocked |
 | 8 | `game_engine/physics_spec.spl` | 5 | Physics module not started | ⏸️ Blocked |

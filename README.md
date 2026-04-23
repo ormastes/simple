@@ -954,7 +954,7 @@ simple/
 │   ├── design/              # Design documents
 │   └── report/              # Session reports
 │
-└── verification/             # Lean 4 formal verification
+└── src/verification/             # Lean 4 formal verification
 ```
 
 ---

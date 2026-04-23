@@ -53,8 +53,8 @@ MixinApplication ::= 'use' TypeRef
 **Files Created/Modified:**
 - `src/type/src/mixin.rs`
 - `src/type/src/lib.rs`
-- `verification/lean/simple/TypeSystem/Mixins.lean`
-- `verification/lean/simple/TypeInference.lean`
+- `src/verification/lean/simple/TypeSystem/Mixins.lean`
+- `src/verification/lean/simple/TypeInference.lean`
 
 **Type Checking Rules:**
 ```
@@ -187,8 +187,8 @@ theorem mixin_application_preserves_type_safety
 ```
 
 **Files:**
-- `verification/lean/simple/TypeSystem/Mixins.lean`
-- `verification/lean/simple/TypeInference.lean`
+- `src/verification/lean/simple/TypeSystem/Mixins.lean`
+- `src/verification/lean/simple/TypeInference.lean`
 
 ## Testing Strategy (Phase 4)
 
@@ -277,8 +277,8 @@ Legend: ✅ Full support, ⚠️ Partial, ❌ Not supported
 - `specs/features/mixins/basic_mixin.feature` - BDD specifications
 
 ### Verification
-- `verification/lean/simple/TypeSystem/Mixins.lean` - Type system proofs
-- `verification/lean/simple/TypeInference.lean` - Inference proofs
+- `src/verification/lean/simple/TypeSystem/Mixins.lean` - Type system proofs
+- `src/verification/lean/simple/TypeInference.lean` - Inference proofs
 
 ### Source Code
 - `src/parser/src/statements/mixins.rs` - Parser

@@ -35,7 +35,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 **Implementation:** `src/parser/src/ast.rs`, MIR effects
 - `let` (immutable) vs `let mut` (mutable)
 - Effect tracking in MIR
-- Formal verification: `verification/nogc_compile/`
+- Formal verification: `src/verification/nogc_compile/`
 
 ### #4: Variables & Let Bindings ✅
 **Status:** COMPLETE  
@@ -220,7 +220,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 **Implementation:** `src/compiler/src/effects.rs`
 - Immutable borrows tracked
 - Mutable borrow exclusivity
-- Formal verification: `verification/manual_pointer_borrow/`
+- Formal verification: `src/verification/manual_pointer_borrow/`
 
 ### #30: Actors ✅
 **Status:** COMPLETE  
@@ -245,7 +245,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Async function tracking
 - Effect propagation
 - MIR effect annotations
-- Formal verification: `verification/async_compile/`
+- Formal verification: `src/verification/async_compile/`
 
 ### #33: Stackless Coroutine Actors ✅
 **Status:** COMPLETE  
@@ -624,7 +624,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 ### Formal Verification ✅
 **Status:** COMPLETE (models)  
-**Implementation:** `verification/`
+**Implementation:** `src/verification/`
 - Borrow checker model
 - GC safety model
 - Effect tracking model

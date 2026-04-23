@@ -39,7 +39,7 @@ Total ignored doc-tests: 31
 
 ## Slow Test Fixes
 
-**Issue**: Parse error in `verification/regenerate/__init__.spl`
+**Issue**: Parse error in `src/verification/regenerate/__init__.spl`
 - **Error**: Line 83: `fs.exists(dir_path)` - function doesn't exist
 - **Fix**: Changed to `fs.path_exists(dir_path)` (correct function name)
 - **Status**: ✅ Parse error resolved

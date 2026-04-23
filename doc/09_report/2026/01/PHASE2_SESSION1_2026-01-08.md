@@ -284,7 +284,7 @@ HIR `MethodCall` lowered to:
 
 ### 4. Lean Verification ✅
 
-**File:** `verification/type_inference_compile/src/Traits.lean`
+**File:** `src/verification/type_inference_compile/src/Traits.lean`
 
 Proven theorems:
 - `default_dispatch_is_dynamic` ✅
@@ -308,4 +308,4 @@ Proven theorems:
 4. `src/compiler/src/hir/types/expressions.rs` - DispatchMode enum, MethodCall variant
 5. `src/compiler/src/mir/lower/lowering_expr.rs` - MethodCall lowering
 6. `src/compiler/src/codegen/instr/closures_structs.rs` - Fixed imports
-7. `verification/type_inference_compile/src/Traits.lean` - Dispatch mode theorems
+7. `src/verification/type_inference_compile/src/Traits.lean` - Dispatch mode theorems

@@ -13,7 +13,7 @@ This session successfully improved tensor dimension inference formal verificatio
 ### Final Results
 
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ⚠ [2/5] Replayed TensorDimensions
 warning: src/TensorDimensions.lean:169:8: declaration uses 'sorry'
 Build completed successfully (5 jobs).
@@ -27,7 +27,7 @@ Build completed successfully (5 jobs).
 
 ### 1. `min_le_max_elements` (43 lines)
 
-**File**: `verification/tensor_dimensions/src/TensorDimensions.lean:214-256`
+**File**: `src/verification/tensor_dimensions/src/TensorDimensions.lean:214-256`
 
 **Theorem**:
 ```lean
@@ -45,7 +45,7 @@ theorem min_le_max_elements (s : TensorShape) :
 
 ### 2. `tensor_memory_bounds_valid` (25 lines)
 
-**File**: `verification/tensor_dimensions/src/TensorMemory.lean:171-195`
+**File**: `src/verification/tensor_dimensions/src/TensorMemory.lean:171-195`
 
 **Theorem**:
 ```lean
@@ -278,11 +278,11 @@ split at h
 
 ## Files Modified
 
-### verification/tensor_dimensions/src/TensorDimensions.lean
+### src/verification/tensor_dimensions/src/TensorDimensions.lean
 - **Lines added**: 46 (proof for `min_le_max_elements`)
 - **Status**: 80% proven (4/5 theorems)
 
-### verification/tensor_dimensions/src/TensorMemory.lean
+### src/verification/tensor_dimensions/src/TensorMemory.lean
 - **Lines added**: 25 (proof for `tensor_memory_bounds_valid`)
 - **Status**: 100% proven (5/5 theorems)
 

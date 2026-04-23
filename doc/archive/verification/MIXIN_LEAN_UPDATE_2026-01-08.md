@@ -110,15 +110,15 @@ The Lean verification connects to the compiler's type inference through:
 
 ## Files Modified
 
-- `verification/type_inference_compile/src/Mixins.lean` - Core mixin verification (265 lines)
-- `verification/type_inference_compile/src/MixinVerificationGenerated.lean` - Test cases (185 lines)
-- `verification/type_inference_compile/lakefile.lean` - Build configuration
+- `src/verification/type_inference_compile/src/Mixins.lean` - Core mixin verification (265 lines)
+- `src/verification/type_inference_compile/src/MixinVerificationGenerated.lean` - Test cases (185 lines)
+- `src/verification/type_inference_compile/lakefile.lean` - Build configuration
 
 ## Build Commands
 
 ```bash
 # Build all Lean verification
-cd verification/type_inference_compile
+cd src/verification/type_inference_compile
 lake build
 
 # Build specific modules

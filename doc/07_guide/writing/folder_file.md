@@ -271,7 +271,7 @@ bin/
 ### Infrastructure (Edit with Caution)
 
 - `.github/workflows/` - CI/CD workflows
-- `verification/` - Formal verification code
+- `src/verification/` - Formal verification code
 
 ---
 

@@ -24,7 +24,7 @@ This session focused on improving the Lean 4 formal verification for tensor dime
 ### Build Output
 
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ⚠ [2/5] Replayed TensorDimensions
 warning: src/TensorDimensions.lean:169:8: declaration uses 'sorry'
 warning: src/TensorDimensions.lean:213:8: declaration uses 'sorry'
@@ -313,7 +313,7 @@ Complete remaining proofs for 100% verification:
 ```yaml
 - name: Verify Lean Proofs
   run: |
-    cd verification/tensor_dimensions
+    cd src/verification/tensor_dimensions
     lake build
     # Fails if any proof has syntax errors
     # Allows sorry but warns
@@ -334,13 +334,13 @@ Complete remaining proofs for 100% verification:
 
 ### This Session
 
-1. **verification/tensor_dimensions/src/TensorDimensions.lean**
+1. **src/verification/tensor_dimensions/src/TensorDimensions.lean**
    - Added `dimEq_refl` theorem (complete proof)
    - Fixed `shapesCompatible_refl` theorem (complete proof)
    - Simplified `unifyDim_success_eq` (documented gap)
    - Simplified `min_le_max_elements` (documented gap)
 
-2. **verification/tensor_dimensions/src/TensorMemory.lean**
+2. **src/verification/tensor_dimensions/src/TensorMemory.lean**
    - Fixed module doc comment syntax (`/-!` format)
    - Fixed `mnist_fits_in_4mb` proof (complete with `decide`)
    - Simplified `tensor_memory_bounds_valid` (documented gap)
@@ -348,7 +348,7 @@ Complete remaining proofs for 100% verification:
 ### Build Artifacts
 
 ```
-verification/tensor_dimensions/
+src/verification/tensor_dimensions/
 ├── .lake/build/
 │   ├── lib/lean/TensorDimensions.olean  ✅ Built
 │   ├── lib/lean/TensorMemory.olean      ✅ Built
@@ -404,5 +404,5 @@ The tensor dimension inference feature now has **working Lean 4 verification** w
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-10
 **Session**: Lean Proof Improvement
-**Build Command**: `cd verification/tensor_dimensions && lake build`
+**Build Command**: `cd src/verification/tensor_dimensions && lake build`
 **Status**: ✅ **Success** (Build: 100%, Proofs: 62.5%)

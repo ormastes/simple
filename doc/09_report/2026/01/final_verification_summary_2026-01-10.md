@@ -48,7 +48,7 @@ fn compute() -> Int:
 
 **Build Status**:
 ```bash
-$ cd verification/gpu_types && lake build
+$ cd src/verification/gpu_types && lake build
 Build completed successfully (0 jobs).
 ✅ No warnings, no errors
 ```
@@ -102,7 +102,7 @@ Build completed successfully (0 jobs).
 1. `doc/05_design/simplified_gpu_types.md` (26 KB) - Complete design spec
 2. `doc/05_design/gpu_type_inference_plan.md` - Implementation plan
 3. `doc/09_report/gpu_type_inference_completion.md` - Completion report
-4. `verification/gpu_types/README.md` - Verification guide
+4. `src/verification/gpu_types/README.md` - Verification guide
 5. `examples/gpu_type_inference_demo.spl` (10 KB) - 7 comprehensive examples
 
 ---
@@ -140,7 +140,7 @@ let h1 = infer_matmul_shape(input, w1)?  // [batch:1..64, 256]
 
 **Build Status**:
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ⚠ warning: src/TensorDimensions.lean:169:8: declaration uses 'sorry'
 ⚠ warning: src/TensorDimensions.lean:214:8: declaration uses 'sorry'
 ⚠ warning: src/TensorMemory.lean:171:8: declaration uses 'sorry'
@@ -268,7 +268,7 @@ sorry  -- Complex proof involving match expression decomposition
 1. `doc/07_guide/tensor_dimensions_guide.md` (500 lines) - User guide
 2. `doc/05_design/tensor_dimensions_design.md` (600 lines) - Design documentation
 3. `doc/09_report/tensor_dimensions_completion_report.md` - Completion report
-4. `verification/tensor_dimensions/README.md` - Verification guide
+4. `src/verification/tensor_dimensions/README.md` - Verification guide
 
 ---
 
@@ -356,11 +356,11 @@ sorry  -- Complex proof involving match expression decomposition
 **Build Commands**:
 ```bash
 # GPU Types (100% verified)
-cd verification/gpu_types && lake build
+cd src/verification/gpu_types && lake build
 # Output: Build completed successfully (0 jobs).
 
 # Tensor Dimensions (62.5% verified, 100% building)
-cd verification/tensor_dimensions && lake build
+cd src/verification/tensor_dimensions && lake build
 # Output: Build completed successfully (5 jobs).
 # 3 warnings for documented 'sorry' placeholders
 ```
@@ -368,8 +368,8 @@ cd verification/tensor_dimensions && lake build
 ### Code Generation
 
 **Lean Files Generated**: Auto-generated from Simple models
-- `verification/tensor_dimensions/src/TensorDimensions.lean` (296 LOC before manual fixes)
-- `verification/tensor_dimensions/src/TensorMemory.lean` (183 LOC)
+- `src/verification/tensor_dimensions/src/TensorDimensions.lean` (296 LOC before manual fixes)
+- `src/verification/tensor_dimensions/src/TensorMemory.lean` (183 LOC)
 
 **Manual Refinements**:
 - Fixed Lean 3 → Lean 4 syntax (`ℕ` → `Nat`)
@@ -437,12 +437,12 @@ cd verification/tensor_dimensions && lake build
 - `doc/09_report/gpu_type_inference_completion.md`
 
 **Verification** (296 LOC):
-- `verification/gpu_types/lakefile.lean`
-- `verification/gpu_types/GpuTypes.lean`
-- `verification/gpu_types/GpuTypes/Basic.lean` (86 LOC)
-- `verification/gpu_types/GpuTypes/Safety.lean` (78 LOC)
-- `verification/gpu_types/GpuTypes/Inference.lean` (132 LOC)
-- `verification/gpu_types/README.md`
+- `src/verification/gpu_types/lakefile.lean`
+- `src/verification/gpu_types/GpuTypes.lean`
+- `src/verification/gpu_types/GpuTypes/Basic.lean` (86 LOC)
+- `src/verification/gpu_types/GpuTypes/Safety.lean` (78 LOC)
+- `src/verification/gpu_types/GpuTypes/Inference.lean` (132 LOC)
+- `src/verification/gpu_types/README.md`
 
 **Examples** (10 KB):
 - `examples/gpu_type_inference_demo.spl`
@@ -465,11 +465,11 @@ cd verification/tensor_dimensions && lake build
 - `simple/std_lib/example/ml/tensor_dimensions_demo.spl` (350 LOC)
 
 **Verification** (479 LOC after fixes):
-- `verification/tensor_dimensions/lakefile.lean`
-- `verification/tensor_dimensions/GpuTypes.lean`
-- `verification/tensor_dimensions/src/TensorDimensions.lean` (264 LOC)
-- `verification/tensor_dimensions/src/TensorMemory.lean` (183 LOC)
-- `verification/tensor_dimensions/README.md`
+- `src/verification/tensor_dimensions/lakefile.lean`
+- `src/verification/tensor_dimensions/GpuTypes.lean`
+- `src/verification/tensor_dimensions/src/TensorDimensions.lean` (264 LOC)
+- `src/verification/tensor_dimensions/src/TensorMemory.lean` (183 LOC)
+- `src/verification/tensor_dimensions/README.md`
 
 #### Session Reports
 
@@ -545,7 +545,7 @@ All pushed to main branch ✅
    ```yaml
    - name: Verify Lean Proofs
      run: |
-       cd verification/gpu_types && lake build
+       cd src/verification/gpu_types && lake build
        cd ../tensor_dimensions && lake build
    ```
    - **Impact**: Catch regressions in verified properties

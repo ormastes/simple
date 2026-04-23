@@ -407,7 +407,7 @@ error: lean verification failed
 ### Example 1: Pure Verification Module
 
 ```simple
-# verification/list_proofs.spl
+# src/verification/list_proofs.spl
 
 lean {
     namespace ListProofs

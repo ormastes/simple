@@ -1,7 +1,7 @@
 //! # Macro Auto-Import Model
 //!
 //! This module implements the macro import/export and `auto import` semantics from
-//! `verification/macro_auto_import/src/MacroAutoImport.lean`.
+//! `src/verification/macro_auto_import/src/MacroAutoImport.lean`.
 //!
 //! ## Proven Properties (Lean theorems)
 //!

@@ -112,7 +112,7 @@ ENTRYPOINT ["/usr/local/bin/simple"]
 **Excluded categories:**
 1. Version control (`.git/`, `.jj/`, `.github/`)
 2. Build artifacts (`bin/debug/`, `*.o`, `*.a`, `*.so`)
-3. Test results (`doc/test/`, `verification/`)
+3. Test results (`doc/test/`, `src/verification/`)
 4. Node modules (`node_modules/`)
 5. IDE files (`.vscode/`, `.idea/`, `*.swp`)
 6. Temporary files (`tmp/`, `*.log`, `*.tmp`)

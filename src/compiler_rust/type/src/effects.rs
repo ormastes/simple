@@ -2,7 +2,7 @@
 //!
 //! Implements automatic async/sync effect detection based on function body analysis.
 //! This module maps directly to the Lean 4 verification model in:
-//! `verification/type_inference_compile/src/AsyncEffectInference.lean`
+//! `src/verification/type_inference_compile/src/AsyncEffectInference.lean`
 //!
 //! Key Properties (Formally Verified):
 //! 1. Effect Determinism: Each function has exactly one inferred effect

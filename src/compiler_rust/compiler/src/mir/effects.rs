@@ -4,8 +4,8 @@
 //!
 //! ## Section 1: Lean-Aligned Core (for formal verification)
 //! Types and functions that map EXACTLY to the Lean 4 formal models:
-//! - `AsyncEffect`, `is_async()`, `pipeline_safe()` → `verification/async_compile/`
-//! - `NogcInstr`, `nogc()` → `verification/nogc_compile/`
+//! - `AsyncEffect`, `is_async()`, `pipeline_safe()` → `src/verification/async_compile/`
+//! - `NogcInstr`, `nogc()` → `src/verification/nogc_compile/`
 //!
 //! ## Section 2: Production Helpers
 //! Convenience types for production use that build on the core:

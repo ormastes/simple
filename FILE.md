@@ -22,7 +22,6 @@
 | **config/** | Project configuration | Runtime, packaging, theme, Docker, MCP, and tooling config |
 | **scripts/** | Automation scripts | Build, test, migration |
 | **tools/** | Development tools | Seed compiler, Docker |
-| **verification/** | Formal verification source | Lean models and proofs |
 | **build/** | Generated build artifacts | Compiled output, test evidence, reports |
 | **tmp/** | Local transient cache | Runtime scratch, relocated target/cache output |
 
@@ -158,6 +157,7 @@ src/
 ├── lib/        # Standard library (common, nogc_sync_mut, nogc_async_mut, gc_async_mut)
 ├── compiler/   # Unified compiler (00.common → 99.loader, numbered layers)
 ├── type/       # Named primitive type facade modules (logical type.simple_lang imports)
+├── verification/ # Lean proof/model sources
 ├── runtime/    # Native runtime and support libraries
 └── i18n/       # Internationalization
 ```
@@ -274,14 +274,17 @@ test/
 
 ---
 
-### verification/ (Formal Verification)
-**Purpose:** Lean models, proofs, and verification fixtures
+### src/verification/ (Formal Verification)
+**Purpose:** Checked-in Lean models and proofs
 
 **Contents:**
 - `formal/` - Formal models that used to live at root `formal/`
 - Feature-specific Lean verification projects
 
-These are source artifacts, not generated build output. Generated proof/build output should stay under Lean/build-specific ignored directories or `build/`/`tmp/`.
+These are source artifacts, not build output. Verification tests belong under
+`test/unit/compiler/verification/` or `test/system/verification/`; transient
+generated proof units belong under `build/verification/generated/`; Lean/Lake
+build outputs such as `.lake/`, `.olean`, and `.ilean` are ignored.
 
 ---
 

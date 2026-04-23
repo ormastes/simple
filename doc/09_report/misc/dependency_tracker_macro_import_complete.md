@@ -57,7 +57,7 @@ Successfully implemented macro auto-import algorithm with Lean theorem validatio
 
 ## Lean Theorem Validation
 
-All 6 theorems from `verification/macro_auto_import/src/MacroAutoImport.lean` implemented and validated:
+All 6 theorems from `src/verification/macro_auto_import/src/MacroAutoImport.lean` implemented and validated:
 
 ### Theorem 1: `glob_doesnt_leak_macros_wf`
 

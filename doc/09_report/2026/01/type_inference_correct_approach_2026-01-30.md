@@ -56,7 +56,7 @@ class TypeChecker:
 
 **Embedded Lean Verification:**
 ```simple
-lean import "verification/.../Classes.lean" {
+lean import "src/verification/.../Classes.lean" {
     theorem unify_symmetric ...
     theorem unify_idempotent ...
     theorem transitive_resolution_terminates ...
@@ -101,10 +101,10 @@ coverage:
 # Generate Lean4 from Simple
 simple gen-lean generate \
   --file src/lib/std/src/type_checker/type_inference.spl \
-  --out verification/type_inference_compile/src/TypeInference.lean
+  --out src/verification/type_inference_compile/src/TypeInference.lean
 
 # Verify generated Lean4
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 # Run SSpec tests with coverage
 simple test test/lib/std/type_checker/type_inference_spec.spl \
@@ -268,7 +268,7 @@ theorem occurs_check_prevents_infinite (checker : TypeChecker) (var : Nat) (ty :
 
 | File | Source | Purpose |
 |------|--------|---------|
-| `verification/.../TypeInference.lean` | Generated from .spl | Lean4 verification |
+| `src/verification/.../TypeInference.lean` | Generated from .spl | Lean4 verification |
 
 ## Advantages of Correct Approach
 
@@ -290,7 +290,7 @@ theorem occurs_check_prevents_infinite (checker : TypeChecker) (var : Nat) (ty :
 ```bash
 simple gen-lean generate \
   --file src/lib/std/src/type_checker/type_inference.spl \
-  --out verification/type_inference_compile/src/TypeInference.lean \
+  --out src/verification/type_inference_compile/src/TypeInference.lean \
   --mode types
 ```
 
@@ -304,7 +304,7 @@ simple gen-lean generate \
 ### Phase 2: Verify Lean4 ✅ READY
 
 ```bash
-cd verification/type_inference_compile
+cd src/verification/type_inference_compile
 lake build
 ```
 

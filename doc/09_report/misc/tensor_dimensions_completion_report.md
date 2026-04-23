@@ -84,7 +84,7 @@ The tensor dimension inference feature has been **successfully implemented, docu
 - Workarounds and recommendations
 - Verification test cases
 
-**Verification Directory**: `verification/tensor_dimensions/`
+**Verification Directory**: `src/verification/tensor_dimensions/`
 - Lean 4 setup complete
 - `TensorDimensions.lean` (7699 bytes)
 - `TensorMemory.lean` (6229 bytes)
@@ -158,8 +158,8 @@ All integration tests completed successfully!
 ### Files Created/Modified
 | File | LOC | Status |
 |------|-----|--------|
-| `verification/models/tensor_dimensions.spl` | 450 | Complete |
-| `verification/regenerate/tensor_dimensions.spl` | 200 | Complete |
+| `src/verification/models/tensor_dimensions.spl` | 450 | Complete |
+| `src/verification/regenerate/tensor_dimensions.spl` | 200 | Complete |
 | `ml/torch/typed_tensor.spl` | 350 | Complete (blocked by module bug) |
 | `test/spec/tensor_dimensions_spec.spl` | 350 | Complete, all tests pass |
 | `test/integration/ml/tensor_inference_integration.spl` | 300 | Complete, all tests pass |
@@ -369,7 +369,7 @@ The tensor dimension inference feature is **fully implemented and tested**. All 
 - Complete Demo: `simple/std_lib/example/ml/tensor_dimensions_complete.spl`
 
 ### Verification
-- Lean Project: `verification/tensor_dimensions/`
+- Lean Project: `src/verification/tensor_dimensions/`
 - Theorems: `TensorDimensions.lean`, `TensorMemory.lean`
 
 ---

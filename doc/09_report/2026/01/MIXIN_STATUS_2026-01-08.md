@@ -86,8 +86,8 @@
 - `src/compiler/src/codegen/lean/types.rs`
 
 ### Verification (~400 lines)
-- `verification/lean/simple/TypeSystem/Mixins.lean`
-- `verification/lean/simple/TypeInference.lean`
+- `src/verification/lean/simple/TypeSystem/Mixins.lean`
+- `src/verification/lean/simple/TypeInference.lean`
 
 ### Documentation (~4,000 lines)
 - `doc/01_research/mixins_strongly_typed.md`

@@ -471,7 +471,7 @@ simple/std_lib/src/verification/
 │   ├── contracts.spl         # Contract → Prop/theorem translation
 │   ├── expressions.spl       # Expression translation
 │   └── emitter.spl           # Lean syntax emission
-├── models/                   # Verification models (mirrors verification/)
+├── models/                   # Verification models (mirrors src/verification/)
 │   ├── __init__.spl
 │   ├── memory_capabilities.spl   # RefCapability, CapType, Reference
 │   ├── memory_model_drf.spl      # SC-DRF model
@@ -515,7 +515,7 @@ The Simple implementation must be able to regenerate all existing Lean files:
 import verification.lean.codegen as codegen
 import verification.models.memory_capabilities as memcap
 
-# Regenerate verification/memory_capabilities/src/MemoryCapabilities.lean
+# Regenerate src/verification/memory_capabilities/src/MemoryCapabilities.lean
 fn regenerate_memory_capabilities() -> String:
     gen = codegen.LeanCodegen.new()
 
@@ -548,13 +548,13 @@ describe "Lean Regeneration":
     context "memory_capabilities":
         it "generates identical MemoryCapabilities.lean":
             generated = regenerate_memory_capabilities()
-            expected = File.read("verification/memory_capabilities/src/MemoryCapabilities.lean")
+            expected = File.read("src/verification/memory_capabilities/src/MemoryCapabilities.lean")
             expect(generated).to_equal(expected)
 
     context "contracts":
         it "generates identical Contracts.lean":
             generated = regenerate_contracts()
-            expected = File.read("verification/type_inference_compile/src/Contracts.lean")
+            expected = File.read("src/verification/type_inference_compile/src/Contracts.lean")
             expect(generated).to_equal(expected)
 ```
 

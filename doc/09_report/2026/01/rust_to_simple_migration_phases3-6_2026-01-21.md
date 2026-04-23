@@ -172,8 +172,8 @@ Successfully migrated 6 pure utility modules from Rust to Simple, focusing on co
 - **Lean Alignment:** ⭐⭐⭐⭐⭐ **Perfect 1:1 mapping**
 
 **Critical:** This module maps **exactly** to Lean 4 formal models:
-- `AsyncEffect` → `verification/async_compile/AsyncCompile.lean`
-- `NogcInstr` → `verification/nogc_compile/NogcCompile.lean`
+- `AsyncEffect` → `src/verification/async_compile/AsyncCompile.lean`
+- `NogcInstr` → `src/verification/nogc_compile/NogcCompile.lean`
 
 #### AsyncEffect System
 

@@ -54,7 +54,7 @@ Pointcuts: NamePattern, Annotation, Module, All. Advice: Before, After, Around. 
 | `src/compiler/` | lib, std |
 | `src/lib/` | no deps on compiler/app |
 
-## Lean Verification (`verification/`)
+## Lean Verification (`src/verification/`)
 Projects: type_inference, memory_capabilities, SC-DRF, borrow checker, GC safety, async, module resolution.
 Commands: `simple gen-lean generate|compare|write`
 

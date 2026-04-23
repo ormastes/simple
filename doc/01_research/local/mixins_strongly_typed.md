@@ -969,4 +969,4 @@ This design strikes a balance between expressiveness and simplicity, making mixi
 2. `doc/implementation_summary_phase2_mixin_types.md`
 3. `doc/implementation_summary_phase3_mixin_hir.md`
 4. `doc/implementation_summary_phase4_mixin_testing.md`
-5. `verification/lean/simple/TypeSystem/Mixins.lean`
+5. `src/verification/lean/simple/TypeSystem/Mixins.lean`

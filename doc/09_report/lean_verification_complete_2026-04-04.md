@@ -34,7 +34,7 @@ Completed the Lean verification product workflow for the Simple language compile
 - **LeanBlock model**: embedded Lean 4 code with automatic theorem name extraction, import extraction, placement levels (module/function/type), namespace support
 - **Collision detection**: detects duplicate theorem names between generated obligations and handwritten lean{} blocks
 - **Import deduplication**: lean{} block imports merged with generator defaults without duplicates; import lines stripped from block body
-- **Proof reference resolution**: `proof uses:` references resolved against external Lean modules in `verification/proofs/`
+- **Proof reference resolution**: `proof uses:` references resolved against external Lean modules in `src/verification/proofs/`
 - **Codegen integration**: `LeanCodegen.add_lean_block()` pipeline with block content emission and source attribution comments
 
 ### Phase 3: Toolchain and Proof Check Path
@@ -71,7 +71,7 @@ Completed the Lean verification product workflow for the Simple language compile
 - **Block integration tests**: `lean_block_integration_spec.spl` tests lean{} parsing, codegen integration, import dedup, collision detection
 - **Workflow unit tests**: `lean_workflow_spec.spl` tests LeanCheckResult, VerificationSummary, proof obligations, regeneration inventory, strict checker
 - **Regeneration models**: 15 verification domain models (nogc_compile, type_inference, memory_capabilities, memory_model_drf, tensor_dimensions, etc.)
-- **18 verification subdirectories** in `verification/` with Lake projects
+- **18 verification subdirectories** in `src/verification/` with Lake projects
 
 ### Phase 7: Public Documentation
 
@@ -168,7 +168,7 @@ Completed the Lean verification product workflow for the Simple language compile
 | `doc/07_guide/lean_verification_workflow.md` | User guide |
 | `doc/09_report/lean_verification_complete_2026-04-04.md` | This completion report |
 
-### Verification Projects (`verification/`)
+### Verification Projects (`src/verification/`)
 
 18 Lake project directories: `async_compile`, `effect_system`, `gc_manual_borrow`, `gpu_types`, `macro_auto_import`, `manual_pointer_borrow`, `memory_capabilities`, `memory_model_drf`, `mixin_verification`, `module_resolution`, `monomorphization`, `nogc_compile`, `pattern_matching`, `static_dispatch_verification`, `tensor_dimensions`, `type_inference_compile`, `visibility_export`, `generated`
 

@@ -48,7 +48,7 @@ enum UserStatus:
 ```bash
 simple gen-lean generate --project types   # Generate Lean
 simple gen-lean compare                    # Check alignment
-cd verification/type_inference_compile && lake build  # Run proofs
+cd src/verification/type_inference_compile && lake build  # Run proofs
 ```
 
 ### Verification Levels

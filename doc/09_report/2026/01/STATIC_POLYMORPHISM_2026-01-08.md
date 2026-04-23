@@ -79,7 +79,7 @@ impl TypeChecker {
 
 ### 3. Lean Verification Model
 
-**File:** `verification/type_inference_compile/src/Traits.lean`
+**File:** `src/verification/type_inference_compile/src/Traits.lean`
 
 **Key Definitions:**
 ```lean
@@ -124,7 +124,7 @@ theorem dispatch_mode_deterministic :
 | `src/type/src/checker_check.rs` | Modified | Process InterfaceBinding, add DispatchMode |
 | `src/compiler/src/codegen/lean/traits.rs` | Modified | Removed BindingMode |
 | `src/compiler/src/codegen/lean/mod.rs` | Modified | Simplified binding generation |
-| `verification/type_inference_compile/src/Traits.lean` | Modified | Added dispatch mode theorems |
+| `src/verification/type_inference_compile/src/Traits.lean` | Modified | Added dispatch mode theorems |
 
 ## Verification Status
 

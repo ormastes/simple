@@ -490,7 +490,7 @@ Unified cross-platform rendering abstraction supporting multiple backends (OpenG
 - `doc/features/feature.md` - Main feature tracking (588 features)
 - `doc/plans/30_pending_features.md` - Pending features planning document
 - `doc/06_spec/macro.md` - Macro specification
-- `verification/memory_capabilities/` - Lean 4 capability verification (#1104)
-- `verification/memory_model_drf/` - Lean 4 SC-DRF verification (#1105-1106)
+- `src/verification/memory_capabilities/` - Lean 4 capability verification (#1104)
+- `src/verification/memory_model_drf/` - Lean 4 SC-DRF verification (#1105-1106)
 
 **Note on Memory Model:** The happens-before partial order and SC-DRF guarantee are already complete (✅) and tracked as #1099, #1100, and #1105 in feature.md. These were previously verified in Lean 4 and implemented with runtime race detection APIs.

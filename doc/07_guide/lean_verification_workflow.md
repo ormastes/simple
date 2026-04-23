@@ -160,7 +160,7 @@ lean {
 
 ### External Proof References (proof uses:)
 
-Reference a theorem defined in an external Lean file under `verification/proofs/`.
+Reference a theorem defined in an external Lean file under `src/verification/proofs/`.
 
 ```simple
 @verify
@@ -188,7 +188,7 @@ All commands use the `simple` binary. No subprocess calls are needed.
 | Command | Purpose |
 |---------|---------|
 | `simple gen-lean generate` | Output generated Lean code to stdout (does not write files) |
-| `simple gen-lean write` | Write generated Lean files to `verification/` directory |
+| `simple gen-lean write` | Write generated Lean files to `src/verification/` directory |
 | `simple gen-lean compare` | Diff generated vs existing Lean files; check completeness |
 | `simple gen-lean verify` | Run Lean/Lake on generated files and fail on errors/sorry |
 
@@ -432,4 +432,4 @@ The status command reports Lean availability, version match against `lean-toolch
 - **Support matrix:** Section 5 of the contract document
 - **Verification checker rules:** V-UNSAFE, V-EFFECT, V-REFLECT, V-GHOST, V-TRUSTED, V-PARTIAL
 - **Cache directory:** `build/verification-cache/`
-- **Generated Lean output:** `verification/` subdirectories
+- **Generated Lean output:** `src/verification/` subdirectories

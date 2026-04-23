@@ -100,8 +100,8 @@ Completed a highly productive migration session with **3 sub-sessions** migratin
 **Purpose:** Effect tracking for async safety and GC allocation checking
 
 **Lean Mapping:**
-- `AsyncEffect` → `verification/async_compile/AsyncCompile.lean`
-- `NogcInstr` → `verification/nogc_compile/NogcCompile.lean`
+- `AsyncEffect` → `src/verification/async_compile/AsyncCompile.lean`
+- `NogcInstr` → `src/verification/nogc_compile/NogcCompile.lean`
 
 **Theorems Encoded:**
 ```lean

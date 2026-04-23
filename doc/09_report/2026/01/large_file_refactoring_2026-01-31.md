@@ -60,7 +60,7 @@ These files are single types with many methods. Simple doesn't support splitting
 
 | File | Lines | Status |
 |------|-------|--------|
-| verification/models/tensor_dimensions.spl | 957 | Pending |
+| src/verification/models/tensor_dimensions.spl | 957 | Pending |
 | tooling/compiler/build_system.spl | 944 | Pending |
 | tooling/core/errors.spl | 931 | Pending |
 | host/common/io/term_style.spl | 918 | Pending |

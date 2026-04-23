@@ -135,7 +135,7 @@
 **High Priority (Critical for self-hosting):**
 1. `extern_registry.spl` - Registry of extern functions (~400 lines, 1 day)
 2. `ffi_bridge.spl` - FFI dispatch + type conversions (~500 lines, 2 days)
-3. `value.spl` - RuntimeValue verification/sync (~500 lines, 1 day)
+3. `value.spl` - RuntimeValue src/verification/sync (~500 lines, 1 day)
 4. `import_loader.spl` - Import resolution (~600 lines, 2 days)
 5. `module_cache.spl` - Module caching (~300 lines, 1 day)
 6. `runtime_bridge.spl` - Compiler ↔ Runtime bridge (~400 lines, 2 days)

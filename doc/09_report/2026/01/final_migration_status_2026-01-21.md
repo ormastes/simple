@@ -47,8 +47,8 @@
 ### ✅ 100% READY: effects_core.spl
 
 **Maps 1:1 to existing Lean files:**
-- `verification/async_compile/src/AsyncCompile.lean` ✅
-- `verification/nogc_compile/src/NogcCompile.lean` ✅
+- `src/verification/async_compile/src/AsyncCompile.lean` ✅
+- `src/verification/nogc_compile/src/NogcCompile.lean` ✅
 
 **4 Theorems Encoded:**
 
@@ -282,8 +282,8 @@ Total: **16 migration patterns** documented
 **Goal:** Create Lean models for tensor and graph algorithms
 
 **Tasks:**
-1. Create `verification/tensor_broadcast/src/TensorBroadcast.lean`
-2. Create `verification/cfg_analysis/src/ControlFlowGraph.lean`
+1. Create `src/verification/tensor_broadcast/src/TensorBroadcast.lean`
+2. Create `src/verification/cfg_analysis/src/ControlFlowGraph.lean`
 3. Prove 5+ theorems (broadcasting, DFS, SCC, topological order)
 
 **Deliverable:** 2 new Lean models, 5+ theorems proven

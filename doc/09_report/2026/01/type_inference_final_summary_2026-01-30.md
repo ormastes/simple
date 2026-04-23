@@ -97,7 +97,7 @@ test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ### Lean Verification: ✅ Compiles Successfully
 
 ```bash
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 Build completed successfully (3 jobs).
 ```
@@ -312,7 +312,7 @@ Source Code → Parser → AST → [TYPE CHECK] → HIR → MIR → Codegen → 
 ### Build & Test
 ```bash
 # Build Lean verification
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 # Build Rust type checker
 cargo build -p simple-type

@@ -141,7 +141,7 @@ The `simple verify` commands complement existing `simple gen-lean` commands:
 
 | Verify Command | Gen-Lean Equivalent | Status |
 |----------------|---------------------|--------|
-| `verify status` | Check verification/ dir | ✅ Works |
+| `verify status` | Check src/verification/ dir | ✅ Works |
 | `verify regenerate` | `gen-lean generate` | Redirects |
 | `verify check` | `gen-lean verify` | Redirects |
 | `verify list` | Parse @verify annotations | Phase 6 |

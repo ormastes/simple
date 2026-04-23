@@ -43,7 +43,7 @@ simple gen-lean compare --diff              # Show differences
 
 When modifying type inference:
 1. Update `src/compiler/30.types/`
-2. Update Lean theorems in `verification/type_inference_compile/`
+2. Update Lean theorems in `src/verification/type_inference_compile/`
 3. Run `lake build` in verification project
 4. Run `simple gen-lean compare`
 

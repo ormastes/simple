@@ -145,7 +145,7 @@ simple/std_lib/example/ml/tensor_dimensions_standalone_demo.spl
 
 ### Lean 4 Project
 ```
-verification/tensor_dimensions/
+src/verification/tensor_dimensions/
   ├── lakefile.lean (163 bytes)
   ├── lean-toolchain (24 bytes)
   ├── lake-manifest.json (165 bytes)
@@ -173,13 +173,13 @@ verification/tensor_dimensions/
 ```
 ml/torch/typed_tensor.spl
   └── imports from: device.spl, dtype.spl, tensor_ffi.spl
-  └── imports from: verification/models/tensor_dimensions.spl
+  └── imports from: src/verification/models/tensor_dimensions.spl
 
-verification/models/tensor_dimensions.spl
+src/verification/models/tensor_dimensions.spl
   └── standalone, no dependencies
 
-verification/regenerate/tensor_dimensions.spl
-  └── depends on: verification/models/tensor_dimensions.spl
+src/verification/regenerate/tensor_dimensions.spl
+  └── depends on: src/verification/models/tensor_dimensions.spl
 
 test/spec/tensor_dimensions_spec.spl
   └── standalone (workaround for module bug)
@@ -219,7 +219,7 @@ example/ml/tensor_dimensions_*.spl
 ./target/debug/simple simple/std_lib/example/ml/tensor_dimensions_complete.spl
 
 # Verify Lean proofs (has syntax errors currently)
-cd verification/tensor_dimensions && ./verify.sh
+cd src/verification/tensor_dimensions && ./verify.sh
 ```
 
 ## Next Steps

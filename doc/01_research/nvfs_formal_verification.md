@@ -302,7 +302,7 @@ and `unmount` are proof-closed (trivially); the rest are
 ### 4.4 File layout (actual, as shipped)
 
 ```
-verification/formal/nvfs/
+src/verification/formal/nvfs/
 ├── lakefile.toml              # Lake project config (no mathlib).
 ├── lean-toolchain             # leanprover/lean4:v4.29.1
 ├── Nvfs.lean                  # Re-export facade.

@@ -41,7 +41,7 @@ This represents tests that are not yet implemented or blocked on missing feature
 | `concurrency/promise_spec.spl` | 30 | Async runtime not implemented |
 | `tooling/tooling_spec.spl` | 28 | Build tooling pending |
 | `spec/arch_spec.spl` | 27 | Architecture tests deferred |
-| `verification/memory_capabilities_spec.spl` | 26 | Lean 4 verification pending |
+| `src/verification/memory_capabilities_spec.spl` | 26 | Lean 4 verification pending |
 | `improvements/stdlib_improvements_spec.spl` | 25 | Future stdlib enhancements |
 | `ui/tui/ratatui_backend_spec.spl` | 24 | TUI framework not started |
 | `property/generators_spec.spl` | 23 | Property testing generators |

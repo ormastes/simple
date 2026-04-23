@@ -14,7 +14,7 @@ After extensive verification work including **4 serious proof attempts**, the te
 ### Final Build Status
 
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ⚠ [2/5] Built TensorDimensions (1.1s)
 warning: src/TensorDimensions.lean:169:8: declaration uses 'sorry'
 ✔ [4/5] Built TensorMemory (542ms)
@@ -458,5 +458,5 @@ The tensor dimension inference feature has:
 
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-10
-**Build**: `cd verification/tensor_dimensions && lake build`
+**Build**: `cd src/verification/tensor_dimensions && lake build`
 **Result**: ✅ Success (90% proven, 100% safety-critical properties verified)

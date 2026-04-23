@@ -34,7 +34,7 @@ Successfully implemented complete async-by-default semantics for the Simple prog
 **Scope**: Automatic Sync/Async detection
 **Files Modified**: 1 new, 1 updated
 - `src/type/src/effects.rs` - Complete effect inference system (350+ lines)
-- `verification/type_inference_compile/src/AsyncEffectInference.lean` - Formal verification
+- `src/verification/type_inference_compile/src/AsyncEffectInference.lean` - Formal verification
 
 **Key Algorithms**:
 - Effect inference with suspension detection

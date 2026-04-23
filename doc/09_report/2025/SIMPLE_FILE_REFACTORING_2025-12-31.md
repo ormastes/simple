@@ -225,7 +225,7 @@ After refactoring, the following .spl files remain over 800 lines:
 
 1. **Class method organization** - No clear pattern found for splitting large class methods across files
 2. **Grammar/DSL files** - Files with procedural grammar building code are hard to modularize
-3. **Generated code** - Some large files (verification/regenerate.spl) are likely generated and shouldn't be manually split
+3. **Generated code** - Some large files (src/verification/regenerate.spl) are likely generated and shouldn't be manually split
 
 ### Best Practices
 

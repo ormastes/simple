@@ -163,7 +163,7 @@ To finish the remaining 5%:
 - **Day 4-5:** ffi_bridge.spl (FFI dispatch + type conversions)
 
 ### Week 2: Compiler + Interpreter Completion
-- **Day 1:** value.spl verification/sync
+- **Day 1:** value.spl src/verification/sync
 - **Day 2-3:** import_loader.spl (Import resolution)
 - **Day 4-5:** runtime_bridge.spl (Compiler ↔ Runtime bridge)
 

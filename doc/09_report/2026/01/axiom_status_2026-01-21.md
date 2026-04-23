@@ -15,7 +15,7 @@ The Simple language verification codebase has been extensively audited for axiom
 
 ### MonomorphizationCorrectness.lean
 
-**Location:** `verification/monomorphization/src/MonomorphizationCorrectness.lean:255`
+**Location:** `src/verification/monomorphization/src/MonomorphizationCorrectness.lean:255`
 
 **Axiom:**
 ```lean

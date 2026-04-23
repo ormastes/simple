@@ -220,7 +220,7 @@ impl BindingEnv {
 **Required Lean modules:**
 
 ```lean
--- verification/type_inference_compile/src/InterfaceBinding.lean
+-- src/verification/type_inference_compile/src/InterfaceBinding.lean
 
 inductive DispatchMode where
   | dynamic | static_ | auto
@@ -369,7 +369,7 @@ class UserRepo:
 **Improvement:** `simple gen-lean` generates Lean models
 
 ```bash
-simple gen-lean src/ -o verification/generated/
+simple gen-lean src/ -o src/verification/generated/
 ```
 
 **Generated Lean:**

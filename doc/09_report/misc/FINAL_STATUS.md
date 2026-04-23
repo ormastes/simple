@@ -9,9 +9,9 @@
 ## ✅ All Tasks Complete
 
 ### 1. Core Implementation ✅
-- ✅ `verification/models/tensor_dimensions.spl` (450 LOC) - Dimension inference engine
+- ✅ `src/verification/models/tensor_dimensions.spl` (450 LOC) - Dimension inference engine
 - ✅ `ml/torch/typed_tensor.spl` (350 LOC) - TypedTensor class
-- ✅ `verification/regenerate/tensor_dimensions.spl` (200 LOC) - Lean proof generator
+- ✅ `src/verification/regenerate/tensor_dimensions.spl` (200 LOC) - Lean proof generator
 
 ### 2. Tests ✅
 - ✅ Executable specification (350 LOC) - 4 scenarios, all passing

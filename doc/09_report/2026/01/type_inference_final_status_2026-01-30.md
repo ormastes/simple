@@ -31,13 +31,13 @@ test result: ok. 88 passed; 0 failed; 0 ignored
 
 ### 2. Lean4 Verification (Hand-Written)
 - **Status:** ✅ Compiles successfully
-- **Location:** `verification/type_inference_compile/`
+- **Location:** `src/verification/type_inference_compile/`
 - **Files:** 7 Lean modules
 - **Theorems:** 20 defined (8 proven, 12 with sorry placeholders)
 
 **Build Status:**
 ```
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 Build completed successfully (3 jobs).
 ```
 
@@ -147,10 +147,10 @@ describe "Feature Name":
 # 1. Generate Lean from Simple
 simple gen-lean generate \
   --file src/lib/std/src/type_checker/type_inference.spl \
-  --out verification/.../TypeInference.lean
+  --out src/verification/.../TypeInference.lean
 
 # 2. Verify generated Lean
-cd verification/type_inference_compile && lake build
+cd src/verification/type_inference_compile && lake build
 
 # 3. Run SSpec tests with coverage
 simple test test/lib/.../type_inference_spec.spl --coverage
@@ -193,7 +193,7 @@ simple test test/lib/.../type_inference_spec.spl --coverage
          ↓
 ┌────────────────────────────────┐
 │ Hand-Written Lean4             │
-│ verification/type_inference... │
+│ src/verification/type_inference... │
 │ ✅ Compiles                    │
 │ ✅ 8 theorems proven           │
 │ ⏳ 12 theorems with sorry      │
@@ -297,12 +297,12 @@ simple test test/lib/.../type_inference_spec.spl --coverage
 ### Verification (Lean4) - ✅ Compiles
 | File | Status | Theorems |
 |------|--------|----------|
-| `verification/.../Classes.lean` | ✅ Modified | Base types |
-| `verification/.../DynTrait.lean` | ✅ New | 7 proven |
-| `verification/.../Traits.lean` | ✅ Modified | Unification |
-| `verification/.../Mixins.lean` | ✅ Modified | 4 defined |
-| `verification/.../ClassTraitIntegration.lean` | ✅ Modified | 3 defined |
-| `verification/.../Soundness.lean` | ✅ Replaced | 8 defined |
+| `src/verification/.../Classes.lean` | ✅ Modified | Base types |
+| `src/verification/.../DynTrait.lean` | ✅ New | 7 proven |
+| `src/verification/.../Traits.lean` | ✅ Modified | Unification |
+| `src/verification/.../Mixins.lean` | ✅ Modified | 4 defined |
+| `src/verification/.../ClassTraitIntegration.lean` | ✅ Modified | 3 defined |
+| `src/verification/.../Soundness.lean` | ✅ Replaced | 8 defined |
 
 ### Documentation - ✅ Complete
 | File | Pages | Status |

@@ -41,7 +41,7 @@ This document summarizes the comprehensive testing and formal verification added
 
 ## Formal Verification (Lean 4)
 
-### 3. Mixin Verification (`verification/type_inference_compile/src/Mixins.lean`)
+### 3. Mixin Verification (`src/verification/type_inference_compile/src/Mixins.lean`)
 
 Already exists with comprehensive coverage:
 - **Type Definitions**: MixinDef, MixinRef, MixinEnv
@@ -56,7 +56,7 @@ Already exists with comprehensive coverage:
   - Field/method access after application
   - Substitution consistency
 
-### 4. Mixin Tests (`verification/type_inference_compile/src/MixinsTest.lean`)
+### 4. Mixin Tests (`src/verification/type_inference_compile/src/MixinsTest.lean`)
 
 Existing test suite with 12 concrete examples:
 - Basic mixin with fields
@@ -67,7 +67,7 @@ Existing test suite with 12 concrete examples:
 - Field/method overrides
 - Dependent mixins
 
-### 5. Static Polymorphism Verification (`verification/type_inference_compile/src/StaticPolymorphism.lean`) **NEW**
+### 5. Static Polymorphism Verification (`src/verification/type_inference_compile/src/StaticPolymorphism.lean`) **NEW**
 
 **Type Definitions**:
 - `DispatchMode` (reused from Traits.lean): static | dynamic
@@ -102,7 +102,7 @@ Existing test suite with 12 concrete examples:
 - Bind constraint checking is complete
 - Sized types enable stack allocation
 
-### 6. Static Polymorphism Tests (`verification/type_inference_compile/src/StaticPolymorphismTest.lean`) **NEW**
+### 6. Static Polymorphism Tests (`src/verification/type_inference_compile/src/StaticPolymorphismTest.lean`) **NEW**
 
 **15 Test Cases** (all passing ✓):
 1. ✓ Static bind with single trait bound
@@ -191,11 +191,11 @@ This generates markdown documentation from the Gherkin scenarios, providing:
 ### New Files
 - `specs/features/mixin_advanced.feature` (5.2 KB, 11 scenarios)
 - `specs/features/static_polymorphism.feature` (8.1 KB, 15 scenarios)
-- `verification/type_inference_compile/src/StaticPolymorphism.lean` (11.3 KB)
-- `verification/type_inference_compile/src/StaticPolymorphismTest.lean` (8.9 KB)
+- `src/verification/type_inference_compile/src/StaticPolymorphism.lean` (11.3 KB)
+- `src/verification/type_inference_compile/src/StaticPolymorphismTest.lean` (8.9 KB)
 
 ### Modified Files
-- `verification/type_inference_compile/lakefile.lean` (added 2 lean_lib entries)
+- `src/verification/type_inference_compile/lakefile.lean` (added 2 lean_lib entries)
 
 ### Total Addition
 - **33.5 KB** of formal specifications and verification

@@ -35,13 +35,13 @@ The current type system has:
 
 ### 2.2 Trait System (Lean4 Models)
 
-**`verification/type_inference_compile/src/Traits.lean`** models:
+**`src/verification/type_inference_compile/src/Traits.lean`** models:
 - `TraitDef`: Trait definition with methods and associated types
 - `TraitImpl`: Implementation for a concrete type
 - `inferTraitMethodCall`: Type inference for trait method calls
 - `checkCoherence`: No overlapping implementations
 
-**`verification/type_inference_compile/src/Classes.lean`** models:
+**`src/verification/type_inference_compile/src/Classes.lean`** models:
 - `ClassDef`: Class with fields, methods, type parameters
 - `inferFieldAccess`, `inferMethodCall`: Type inference
 - `isSubtype`: Inheritance checking
@@ -592,7 +592,7 @@ class FileLogger impl Logger:
         return 2
 ```
 
-**Generated Lean4 (`verification/generated/InfraLog.lean`):**
+**Generated Lean4 (`src/verification/generated/InfraLog.lean`):**
 ```lean
 /-
   Auto-generated from infra/log.spl
@@ -634,7 +634,7 @@ mod app:
     bind Logger = ConsoleLogger
 ```
 
-**Generated Lean4 (`verification/generated/AppBindings.lean`):**
+**Generated Lean4 (`src/verification/generated/AppBindings.lean`):**
 ```lean
 /-
   Auto-generated from app/__init__.spl
@@ -670,10 +670,10 @@ The generator produces proofs for:
 
 ```bash
 # Generate Lean from a single file
-simple --gen-lean src/infra/log.spl -o verification/generated/
+simple --gen-lean src/infra/log.spl -o src/verification/generated/
 
 # Generate Lean from entire project
-simple --gen-lean . -o verification/generated/
+simple --gen-lean . -o src/verification/generated/
 
 # Generate and verify in one step
 simple --verify src/  # Generates Lean, runs lake build, reports results
@@ -773,7 +773,7 @@ fn test_binding():
 ### 8.3 Lean Verification Tests
 
 ```bash
-cd verification/interface_binding
+cd src/verification/interface_binding
 lake build  # Should succeed with all theorems proven
 ```
 
@@ -825,6 +825,6 @@ lake build  # Should succeed with all theorems proven
 
 - `doc/06_spec/traits.md` - Trait system specification
 - `doc/import_export_and__init__.md` - Module system specification
-- `verification/type_inference_compile/src/Traits.lean` - Trait Lean model
-- `verification/type_inference_compile/src/Classes.lean` - Class Lean model
+- `src/verification/type_inference_compile/src/Traits.lean` - Trait Lean model
+- `src/verification/type_inference_compile/src/Classes.lean` - Class Lean model
 - User design document (provided in conversation)

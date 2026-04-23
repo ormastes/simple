@@ -209,7 +209,7 @@ grep -r '\\n' test/unit/ test/compiler/ --include="*.spl" --exclude="newline_con
 - parser/treesitter_parser_real_spec.spl
 - source_position_spec.spl
 - type_checker/type_inference_executable_spec.spl
-- verification/unified_attrs_spec.spl
+- src/verification/unified_attrs_spec.spl
 
 ### test/unit/compiler_core_legacy/ (10 files)
 - branch_coverage_26_spec.spl

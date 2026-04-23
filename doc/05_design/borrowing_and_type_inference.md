@@ -569,13 +569,13 @@ Extended: Effect = { async: bool, io: bool, console: bool, mutation: bool }
 
 | File | Proves |
 |------|--------|
-| `verification/purity/effect_propagation.lean` | Obligation 1 |
-| `verification/purity/fixed_point.lean` | Obligation 2 |
-| `verification/purity/total_soundness.lean` | Obligation 3 |
-| `verification/borrow/no_escape.lean` | Obligation 4 |
-| `verification/borrow/exclusivity.lean` | Obligation 5 |
-| `verification/borrow/release.lean` | Obligation 6 |
-| `verification/borrow/passing_sound.lean` | Obligation 7 |
+| `src/verification/purity/effect_propagation.lean` | Obligation 1 |
+| `src/verification/purity/fixed_point.lean` | Obligation 2 |
+| `src/verification/purity/total_soundness.lean` | Obligation 3 |
+| `src/verification/borrow/no_escape.lean` | Obligation 4 |
+| `src/verification/borrow/exclusivity.lean` | Obligation 5 |
+| `src/verification/borrow/release.lean` | Obligation 6 |
+| `src/verification/borrow/passing_sound.lean` | Obligation 7 |
 
 ---
 

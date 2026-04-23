@@ -22,7 +22,7 @@ pub use tagged_union::{TaggedUnion, UnionVariant};
 // Pure Type Inference (for formal verification)
 //==============================================================================
 // This module provides a pure, total inference function that maps directly to
-// the Lean 4 formal verification model in `verification/type_inference_compile/`.
+// the Lean 4 formal verification model in `src/verification/type_inference_compile/`.
 //
 // The Lean model is:
 //   def infer : Expr → Option Ty

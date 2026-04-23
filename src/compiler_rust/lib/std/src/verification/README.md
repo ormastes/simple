@@ -5,7 +5,7 @@ Self-hosted Simple implementation for generating Lean 4 verification code.
 ## Overview
 
 This module provides:
-- **Verification Models**: Simple implementations mirroring Lean proofs in `verification/`
+- **Verification Models**: Simple implementations mirroring Lean proofs in `src/verification/`
 - **Lean Code Generation**: Generate Lean 4 syntax from Simple models
 - **Proof Obligation Management**: Track and check proof obligations
 - **Regeneration**: Regenerate all existing Lean files from Simple
@@ -13,10 +13,10 @@ This module provides:
 ## Module Structure
 
 ```
-verification/
+src/compiler_rust/lib/std/src/verification/
 ├── __init__.spl              # Module exports
 ├── regenerate.spl            # Main regeneration entry point
-├── models/                   # Verification models (mirrors verification/*.lean)
+├── models/                   # Verification models (mirrors src/verification/*.lean)
 │   ├── memory_capabilities   # RefCapability, CapType, Reference
 │   ├── memory_model_drf      # SC-DRF memory model
 │   ├── contracts             # Contract checking semantics
@@ -106,27 +106,27 @@ bin/simple verify check
 
 Expected current state in this checkout:
 
-- `gen-lean write --force` regenerates the full supported verification tree under `verification/`
+- `gen-lean write --force` regenerates the full supported verification tree under `src/verification/`
 - `verify list` reports the authoritative artifact inventory
 - `verify check` passes with all generated Lean files green
 
 As of 2026-04-19, the supported generated tree is fully green:
 
-- `verification/nogc_compile/src/NogcCompile.lean`
-- `verification/async_compile/src/AsyncCompile.lean`
-- `verification/gc_manual_borrow/src/GcManualBorrow.lean`
-- `verification/manual_pointer_borrow/src/ManualPointerBorrow.lean`
-- `verification/module_resolution/src/ModuleResolution.lean`
-- `verification/visibility_export/src/VisibilityExport.lean`
-- `verification/macro_auto_import/src/MacroAutoImport.lean`
-- `verification/type_inference_compile/src/TypeInferenceCompile.lean`
-- `verification/type_inference_compile/src/Contracts.lean`
-- `verification/type_inference_compile/src/AsyncEffectInference.lean`
-- `verification/type_inference_compile/src/Generics.lean`
-- `verification/memory_capabilities/src/MemoryCapabilities.lean`
-- `verification/memory_model_drf/src/MemoryModelDRF.lean`
-- `verification/tensor_dimensions/src/TensorDimensions.lean`
-- `verification/tensor_dimensions/src/TensorMemory.lean`
+- `src/verification/nogc_compile/src/NogcCompile.lean`
+- `src/verification/async_compile/src/AsyncCompile.lean`
+- `src/verification/gc_manual_borrow/src/GcManualBorrow.lean`
+- `src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean`
+- `src/verification/module_resolution/src/ModuleResolution.lean`
+- `src/verification/visibility_export/src/VisibilityExport.lean`
+- `src/verification/macro_auto_import/src/MacroAutoImport.lean`
+- `src/verification/type_inference_compile/src/TypeInferenceCompile.lean`
+- `src/verification/type_inference_compile/src/Contracts.lean`
+- `src/verification/type_inference_compile/src/AsyncEffectInference.lean`
+- `src/verification/type_inference_compile/src/Generics.lean`
+- `src/verification/memory_capabilities/src/MemoryCapabilities.lean`
+- `src/verification/memory_model_drf/src/MemoryModelDRF.lean`
+- `src/verification/tensor_dimensions/src/TensorDimensions.lean`
+- `src/verification/tensor_dimensions/src/TensorMemory.lean`
 
 ### Work with Proof Obligations
 

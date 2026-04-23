@@ -936,7 +936,7 @@ vim test/system/features/dyn_traits/dyn_traits_spec.spl
 ./target/debug/simple_old test test/system/features/dyn_traits/
 
 # 7. Verify Lean proofs build
-cd verification/type_inference_compile
+cd src/verification/type_inference_compile
 lake build
 # Check for errors, count sorrys
 grep -r "sorry" src/ | wc -l

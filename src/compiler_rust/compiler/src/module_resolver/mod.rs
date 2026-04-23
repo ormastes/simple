@@ -274,7 +274,7 @@ export use type.simple_lang.*
     #[test]
     fn test_effective_visibility_formal_model() {
         // This test demonstrates the integration with the formal verification model
-        // from verification/visibility_export/
+        // from src/verification/visibility_export/
         let dir = create_test_project();
         let src = dir.path().join("src");
         let http = src.join("http");
@@ -312,7 +312,7 @@ export use router.Router
     #[test]
     fn test_macro_auto_import_formal_model() {
         // This test demonstrates the integration with the formal verification model
-        // from verification/macro_auto_import/
+        // from src/verification/macro_auto_import/
         let dir = create_test_project();
         let src = dir.path().join("src");
         let http = src.join("http");

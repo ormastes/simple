@@ -178,6 +178,7 @@ if errorlevel 1 (
         codex mcp remove chrome-devtools >nul 2>&1
         codex mcp add chrome-devtools -- node "%REPO_ROOT%\bin\codex_chrome_devtools_mcp.js" >nul
         codex mcp remove stitch-mcp >nul 2>&1
+        codex mcp remove stitch >nul 2>&1
         codex mcp add stitch-mcp -- node "%REPO_ROOT%\bin\codex_stitch_mcp.js" >nul
         echo   Registered global Codex MCP launchers: chrome-devtools, stitch-mcp
     )

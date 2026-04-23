@@ -56,7 +56,7 @@ There are at least four independent `Effect` enums, each in a different module, 
 
 | File | Purpose |
 |------|---------|
-| `verification/type_inference_compile/src/AsyncEffectInference.lean` | Lean 4 formal model proving: effect determinism, suspension implies async, sync safety, async propagation, no double-wrap for promises, await inference soundness, effect join algebra. |
+| `src/verification/type_inference_compile/src/AsyncEffectInference.lean` | Lean 4 formal model proving: effect determinism, suspension implies async, sync safety, async propagation, no double-wrap for promises, await inference soundness, effect join algebra. |
 
 ### 1.2 What Is Missing
 
@@ -517,7 +517,7 @@ The following test files exercise effect infrastructure (all use standalone plac
 | `src/compiler/00.common/effects_solver.spl` | `test_single_function`, `test_async_function`, `test_call_chain`, `test_mixed_functions`, `test_convergence` |
 | `src/compiler/00.common/effects_scanner.spl` | `test_literals`, `test_suspend_operators`, `test_function_calls`, `test_control_flow`, `test_nested` |
 | `src/compiler/00.common/effects_promises.spl` | `test_basic_types`, `test_promise_wrap`, `test_promise_unwrap`, `test_suspend_validation`, `test_nested_promises`, `test_function_types` |
-| `verification/type_inference_compile/src/AsyncEffectInference.lean` | 13 formal theorems: determinism, suspension_implies_async, sync_safety, async_propagation, no_double_wrap, await_inference_sound, promise_unwrap_correct, effect_join algebra (commutative, idempotent, absorbing, identity) |
+| `src/verification/type_inference_compile/src/AsyncEffectInference.lean` | 13 formal theorems: determinism, suspension_implies_async, sync_safety, async_propagation, no_double_wrap, await_inference_sound, promise_unwrap_correct, effect_join algebra (commutative, idempotent, absorbing, identity) |
 
 ## Appendix B: Key File Paths
 
@@ -577,7 +577,7 @@ src/lib/nogc_async_mut/effects.spl
 src/compiler/80.driver/driver.spl
 
 # Formal verification
-verification/type_inference_compile/src/AsyncEffectInference.lean
+src/verification/type_inference_compile/src/AsyncEffectInference.lean
 ```
 
 ## Appendix C: Simple Language Syntax Examples

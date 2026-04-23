@@ -50,7 +50,7 @@ Automatic Sync/Async detection based on function body analysis.
    - Calls async functions
 4. Otherwise, function is Sync
 
-**Formal Verification**: `verification/type_inference_compile/src/AsyncEffectInference.lean`
+**Formal Verification**: `src/verification/type_inference_compile/src/AsyncEffectInference.lean`
 
 **Properties (Proven)**:
 - Effect Determinism: Each function has exactly one inferred effect
@@ -347,7 +347,7 @@ fn fetch_and_process(id: Int) -> Promise[Result]:
 
 ## References
 
-- Formal Verification: `verification/type_inference_compile/src/AsyncEffectInference.lean`
+- Formal Verification: `src/verification/type_inference_compile/src/AsyncEffectInference.lean`
 - Effect System: `src/type/src/effects.rs`
 - Promise Implementation: `simple/std_lib/src/concurrency/promise.spl`
 - Parser Support: `src/parser/src/`

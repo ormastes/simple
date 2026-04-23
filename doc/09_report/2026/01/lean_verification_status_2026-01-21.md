@@ -31,8 +31,8 @@ After migrating 9 Rust modules to Simple (990 Rust LOC → 1,550 Simple LOC, 294
 **Status:** 100% ready for Lean proof extraction
 
 **Lean Correspondence:**
-- Maps to: `verification/async_compile/src/AsyncCompile.lean`
-- Maps to: `verification/nogc_compile/src/NogcCompile.lean`
+- Maps to: `src/verification/async_compile/src/AsyncCompile.lean`
+- Maps to: `src/verification/nogc_compile/src/NogcCompile.lean`
 
 **Encoded Theorems (4 total):**
 
@@ -95,7 +95,7 @@ After migrating 9 Rust modules to Simple (990 Rust LOC → 1,550 Simple LOC, 294
 **Status:** 60% ready (needs Lean model creation)
 
 **Existing Lean Files:**
-- `verification/tensor_dimensions/src/TensorMemory.lean` - Related but different focus
+- `src/verification/tensor_dimensions/src/TensorMemory.lean` - Related but different focus
 - Covers memory estimation, not broadcasting semantics
 - No direct correspondence to broadcasting algorithm
 
@@ -143,7 +143,7 @@ After migrating 9 Rust modules to Simple (990 Rust LOC → 1,550 Simple LOC, 294
 - Critical for ML compiler verification
 
 **Next Steps:**
-1. Create `verification/tensor_broadcast/src/TensorBroadcast.lean`
+1. Create `src/verification/tensor_broadcast/src/TensorBroadcast.lean`
 2. Define broadcasting rules in Lean
 3. Prove 3 core properties (associativity, commutativity, round-trip)
 4. Add to verification suite
@@ -205,7 +205,7 @@ After migrating 9 Rust modules to Simple (990 Rust LOC → 1,550 Simple LOC, 294
 - Critical for loop optimization proofs
 
 **Next Steps:**
-1. Create `verification/cfg_analysis/src/ControlFlowGraph.lean`
+1. Create `src/verification/cfg_analysis/src/ControlFlowGraph.lean`
 2. Define CFG structure in Lean
 3. Prove DFS and SCC algorithms
 4. Add dominator tree tests and proofs
@@ -370,7 +370,7 @@ The following modules are pure and suitable for verification but require Lean mo
 
 ### Current Lean Projects
 
-Based on `verification/` directory:
+Based on `src/verification/` directory:
 
 | Project | Status | Relation to Migration |
 |---------|--------|----------------------|

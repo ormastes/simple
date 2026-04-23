@@ -2,7 +2,7 @@
 //!
 //! This crate implements module resolution, visibility control, and macro auto-import
 //! semantics for the Simple language. The implementation follows formally verified
-//! Lean 4 models in `verification/`.
+//! Lean 4 models in `src/verification/`.
 //!
 //! ## Formal Verification Models
 //!

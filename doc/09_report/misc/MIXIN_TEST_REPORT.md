@@ -71,9 +71,9 @@ Mixin-specific tests:
 - [x] Well-formedness conditions
 
 **Files:**
-- `verification/lean/simple/TypeSystem/Mixins.lean` (195 lines)
-- `verification/lean/simple/TypeInference.lean` (updated)
-- `verification/lean/simple/TypeSystem.lean` (updated)
+- `src/verification/lean/simple/TypeSystem/Mixins.lean` (195 lines)
+- `src/verification/lean/simple/TypeInference.lean` (updated)
+- `src/verification/lean/simple/TypeSystem.lean` (updated)
 
 **Verification Status:**
 ```lean

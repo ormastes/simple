@@ -424,7 +424,7 @@ New helper methods for type lookup:
 
 ```bash
 # Check all Lean proofs
-for dir in verification/*/; do
+for dir in src/verification/*/; do
     (cd "$dir" && lake build)
 done
 

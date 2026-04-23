@@ -12,7 +12,7 @@ Successfully implemented formal verification of the SC-DRF (Sequential Consisten
 
 ### 1. Lean 4 Formalization
 
-**Location:** `verification/memory_model_drf/src/MemoryModelDRF.lean` (650+ lines)
+**Location:** `src/verification/memory_model_drf/src/MemoryModelDRF.lean` (650+ lines)
 
 **Key Definitions:**
 
@@ -139,9 +139,9 @@ impl HappensBeforeGraph {
 
 ### New Files
 
-- `verification/memory_model_drf/lakefile.lean` - Lean project config
-- `verification/memory_model_drf/src/MemoryModelDRF.lean` - Formal verification
-- `verification/memory_model_drf/src/Main.lean` - Entry point
+- `src/verification/memory_model_drf/lakefile.lean` - Lean project config
+- `src/verification/memory_model_drf/src/MemoryModelDRF.lean` - Formal verification
+- `src/verification/memory_model_drf/src/Main.lean` - Entry point
 - `doc/09_report/SC_DRF_VERIFICATION_COMPLETE.md` - This document
 
 ### Modified Files

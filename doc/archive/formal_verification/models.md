@@ -4,7 +4,7 @@ Part of [Formal Verification](formal_verification.md).
 
 ### 5. Type Inference Compile Model ✅ VERIFIED
 
-**Lean Model** (`verification/type_inference_compile/src/TypeInferenceCompile.lean`):
+**Lean Model** (`src/verification/type_inference_compile/src/TypeInferenceCompile.lean`):
 ```lean
 inductive Ty
   | nat
@@ -73,7 +73,7 @@ LeanExpr::Add(a, b) => {
 
 **Purpose:** Verifies that module path resolution is unambiguous and deterministic. Based on `doc/depedency_tracking.md` (v5).
 
-**Lean Model** (`verification/module_resolution/src/ModuleResolution.lean`):
+**Lean Model** (`src/verification/module_resolution/src/ModuleResolution.lean`):
 ```lean
 /-- Module can be either a file or a directory with __init__.spl. -/
 inductive FileKind
@@ -118,7 +118,7 @@ def wellFormed (fs : FileSystem) (root : String) : Prop :=
 
 **Purpose:** Verifies visibility and export rules. A symbol's effective visibility is the intersection of its declaration visibility and all ancestor visibilities. Based on `doc/depedency_tracking.md` (v5).
 
-**Lean Model** (`verification/visibility_export/src/VisibilityExport.lean`):
+**Lean Model** (`src/verification/visibility_export/src/VisibilityExport.lean`):
 ```lean
 /-- Visibility of a declaration or module. -/
 inductive Visibility
@@ -167,7 +167,7 @@ def ancestorVisibility (path : List Visibility) : Visibility :=
 
 **Purpose:** Verifies macro import/export and `auto import` semantics. Macros are NOT included in glob imports by default; only macros listed in `auto import` participate. Based on `doc/depedency_tracking.md` (v5).
 
-**Lean Model** (`verification/macro_auto_import/src/MacroAutoImport.lean`):
+**Lean Model** (`src/verification/macro_auto_import/src/MacroAutoImport.lean`):
 ```lean
 /-- Symbol kind distinguishes macros from other symbols. -/
 inductive SymKind
@@ -209,14 +209,14 @@ def explicitImport (exports : ModuleExports) (name : String) : Option Symbol :=
 
 ## Verification Models
 
-- `verification/gc_manual_borrow/`: models GC + manual borrows. Invariant `safe` states borrowed objects stay in the GC live set; lemmas show borrow/collect steps preserve it.
-- `verification/manual_pointer_borrow/`: borrow-discipline model for manual pointers. Valid states forbid mixing exclusive and shared borrows; lemmas show taking/releasing borrows keeps validity.
-- `verification/async_compile/`: **async-safety verification**. Verifies that `async` functions (non-blocking) contain no blocking operations (`wait`, `join`, `recv`, `sleep`). The `pipelineSafe` property ensures functions are safe to call from async code. This is preserved by function composition (concatenation).
-- `verification/nogc_compile/`: no-GC compile-time check. Programs are instruction lists; property `nogc` asserts absence of `gcAlloc` and composes across concatenation.
-- `verification/type_inference_compile/`: miniature type inference. A toy `infer` function on a lambda/if/add language; determinism lemma states inference returns at most one type.
-- `verification/module_resolution/`: module path resolution semantics. Verifies that module paths resolve unambiguously (no conflict between `foo.spl` and `foo/__init__.spl` in well-formed filesystems).
-- `verification/visibility_export/`: visibility and export rules. Proves that effective visibility is the intersection of declaration and ancestor visibilities; private symbols cannot be made public.
-- `verification/macro_auto_import/`: macro auto-import semantics. Proves that glob imports only include macros explicitly listed in `auto import`; explicit imports always work for public macros.
+- `src/verification/gc_manual_borrow/`: models GC + manual borrows. Invariant `safe` states borrowed objects stay in the GC live set; lemmas show borrow/collect steps preserve it.
+- `src/verification/manual_pointer_borrow/`: borrow-discipline model for manual pointers. Valid states forbid mixing exclusive and shared borrows; lemmas show taking/releasing borrows keeps validity.
+- `src/verification/async_compile/`: **async-safety verification**. Verifies that `async` functions (non-blocking) contain no blocking operations (`wait`, `join`, `recv`, `sleep`). The `pipelineSafe` property ensures functions are safe to call from async code. This is preserved by function composition (concatenation).
+- `src/verification/nogc_compile/`: no-GC compile-time check. Programs are instruction lists; property `nogc` asserts absence of `gcAlloc` and composes across concatenation.
+- `src/verification/type_inference_compile/`: miniature type inference. A toy `infer` function on a lambda/if/add language; determinism lemma states inference returns at most one type.
+- `src/verification/module_resolution/`: module path resolution semantics. Verifies that module paths resolve unambiguously (no conflict between `foo.spl` and `foo/__init__.spl` in well-formed filesystems).
+- `src/verification/visibility_export/`: visibility and export rules. Proves that effective visibility is the intersection of declaration and ancestor visibilities; private symbols cannot be made public.
+- `src/verification/macro_auto_import/`: macro auto-import semantics. Proves that glob imports only include macros explicitly listed in `auto import`; explicit imports always work for public macros.
 
 ## Rust Implementation Mappings
 

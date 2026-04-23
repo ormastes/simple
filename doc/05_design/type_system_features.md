@@ -151,7 +151,7 @@ class User {
 - `src/type/src/mixin.rs` - Type representation
 - `src/compiler/src/hir/types/type_system.rs` - HIR types
 - `src/compiler/src/hir/lower/module_lowering.rs` - Lowering
-- `verification/lean/simple/TypeSystem/Mixins.lean` - Formal verification
+- `src/verification/lean/simple/TypeSystem/Mixins.lean` - Formal verification
 - `doc/01_research/mixins_strongly_typed.md` - Complete design document
 - `doc/implementation_summary_phase{1,2,3,4}_mixin_{parser,types,hir,testing}.md`
 

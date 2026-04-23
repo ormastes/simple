@@ -76,7 +76,7 @@ Placeholder tests awaiting language feature implementation:
 
 #### Physics/Verification (7 items)
 - `physics/collision/__init__.spl` (3 items) - Sphere casting, BVH
-- `verification/lean/expressions.spl` (1 item) - Module prefix matching
+- `src/verification/lean/expressions.spl` (1 item) - Module prefix matching
 - `ml/torch/checkpoint.spl` (1 item) - Deserialization
 
 #### Tests/Validation (8 items)

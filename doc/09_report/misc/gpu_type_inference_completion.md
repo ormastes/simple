@@ -82,7 +82,7 @@ let x = add(10, 20)  # Type: Gpu[Int, Primary] (inferred!)
 
 **Project Structure**:
 ```
-verification/gpu_types/
+src/verification/gpu_types/
 ├── lakefile.lean           # Lean project config
 ├── GpuTypes.lean           # Main module
 ├── GpuTypes/
@@ -114,7 +114,7 @@ verification/gpu_types/
 **Verification**: All proofs pass ✅
 
 ```bash
-$ cd verification/gpu_types
+$ cd src/verification/gpu_types
 $ lake build
 # Output:
 # Building GpuTypes.Basic
@@ -144,7 +144,7 @@ $ lake build
    - Error messages
    - Implementation notes
 
-3. **Verification Guide** (`verification/gpu_types/README.md`)
+3. **Verification Guide** (`src/verification/gpu_types/README.md`)
    - Theorem descriptions
    - Building instructions
    - Correspondence with Simple code

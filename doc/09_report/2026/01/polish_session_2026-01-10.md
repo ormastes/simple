@@ -23,8 +23,8 @@ Both features are now fully documented with Lean 4 syntax fixes applied.
 **Problem**: Generated Lean files used Lean 3 syntax (`ℕ`) incompatible with Lean 4.
 
 **Files Updated**:
-- `verification/tensor_dimensions/src/TensorDimensions.lean`
-- `verification/tensor_dimensions/src/TensorMemory.lean`
+- `src/verification/tensor_dimensions/src/TensorDimensions.lean`
+- `src/verification/tensor_dimensions/src/TensorMemory.lean`
 
 **Changes**:
 - Fixed module-level doc comment (changed `/--` to `/-!` format)
@@ -92,16 +92,16 @@ Both features are now fully documented with Lean 4 syntax fixes applied.
 
 ## Lean 4 Verification Status
 
-### GPU Types (verification/gpu_types/)
+### GPU Types (src/verification/gpu_types/)
 ```bash
-$ cd verification/gpu_types && lake build
+$ cd src/verification/gpu_types && lake build
 Build completed successfully (0 jobs).
 ```
 ✅ **All 20+ theorems verified**
 
-### Tensor Dimensions (verification/tensor_dimensions/)
+### Tensor Dimensions (src/verification/tensor_dimensions/)
 ```bash
-$ cd verification/tensor_dimensions && lake build
+$ cd src/verification/tensor_dimensions && lake build
 ✖ Building TensorDimensions (syntax errors fixed)
 ```
 **Status**:
@@ -181,11 +181,11 @@ python3 scripts/spec_gen.py --input simple/std_lib/test/spec/tensor_dimensions_s
 ## File Changes
 
 ### Modified Files
-1. `verification/tensor_dimensions/src/TensorDimensions.lean`
+1. `src/verification/tensor_dimensions/src/TensorDimensions.lean`
    - Fixed module doc comment
    - 7 `ℕ` → `Nat` replacements
 
-2. `verification/tensor_dimensions/src/TensorMemory.lean`
+2. `src/verification/tensor_dimensions/src/TensorMemory.lean`
    - 7 `ℕ` → `Nat` replacements
 
 3. `doc/02_requirements/feature/feature_db.sdn`

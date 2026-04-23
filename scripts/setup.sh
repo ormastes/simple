@@ -903,6 +903,7 @@ if command -v codex >/dev/null 2>&1; then
     codex mcp remove chrome-devtools >/dev/null 2>&1 || true
     codex mcp add chrome-devtools -- node "${repo_root}/bin/codex_chrome_devtools_mcp.js" >/dev/null
     codex mcp remove stitch-mcp >/dev/null 2>&1 || true
+    codex mcp remove stitch >/dev/null 2>&1 || true
     codex mcp add stitch-mcp -- node "${repo_root}/bin/codex_stitch_mcp.js" >/dev/null
     echo "Registered Codex MCP launchers globally: chrome-devtools, stitch-mcp"
   else

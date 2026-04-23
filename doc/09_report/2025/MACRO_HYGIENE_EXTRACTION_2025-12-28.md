@@ -148,7 +148,7 @@ let hygienic_node = apply_macro_hygiene_node(node, &mut hygiene_ctx);
 
 ## References
 
-- **Lean 4 Verification**: Macro safety model verified in `verification/memory_capabilities/`
+- **Lean 4 Verification**: Macro safety model verified in `src/verification/memory_capabilities/`
 - **Macro Documentation**: `doc/06_spec/macro.md`
 - **Status Tracking**: `doc/status/macros.md`
 - **Feature**: Macro hygiene (#1306 - variable capture prevention)

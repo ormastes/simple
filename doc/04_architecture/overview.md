@@ -38,7 +38,7 @@ simple/
 │   ├── plans/               # Implementation plans
 │   └── research/            # Research notes
 │
-├── verification/            # Lean 4 formal verification
+├── src/verification/            # Lean 4 formal verification
 │   ├── manual_pointer_borrow/   # Borrow checker proofs
 │   ├── gc_manual_borrow/        # GC safety proofs
 │   ├── async_compile/           # Async safety proofs (non-blocking verification)

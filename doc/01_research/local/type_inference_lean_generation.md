@@ -25,7 +25,7 @@ This document describes the proper workflow for implementing and verifying type 
 │ - TypeChecker (full inference engine)                       │
 │                                                             │
 │ Embedded Lean blocks:                                       │
-│   lean import "verification/.../Classes.lean" {             │
+│   lean import "src/verification/.../Classes.lean" {             │
 │     theorem unify_symmetric ...                            │
 │     theorem transitive_resolution_terminates ...           │
 │   }                                                         │
@@ -36,7 +36,7 @@ This document describes the proper workflow for implementing and verifying type 
 ┌─────────────────────────────────────────────────────────────┐
 │ GENERATED LEAN4 CODE                                        │
 ├─────────────────────────────────────────────────────────────┤
-│ verification/type_inference_compile/src/TypeInference.lean │
+│ src/verification/type_inference_compile/src/TypeInference.lean │
 │                                                             │
 │ - inductive Type                                            │
 │ - structure TypeUnifier                                     │
@@ -105,11 +105,11 @@ cd
 
 simple gen-lean generate \
   --file src/lib/std/src/type_checker/type_inference.spl \
-  --out verification/type_inference_compile/src/TypeInference.lean \
+  --out src/verification/type_inference_compile/src/TypeInference.lean \
   --mode types
 
 # Output:
-# Generated verification/type_inference_compile/src/TypeInference.lean
+# Generated src/verification/type_inference_compile/src/TypeInference.lean
 # - 5 inductive types
 # - 12 function definitions
 # - 8 theorem statements (from lean{} blocks and contracts)
@@ -120,7 +120,7 @@ simple gen-lean generate \
 
 ```bash
 # Build verification project
-cd verification/type_inference_compile
+cd src/verification/type_inference_compile
 lake build
 
 # Expected output:
@@ -167,8 +167,8 @@ simple test \
 ```bash
 # Compare generated Lean with hand-written version
 simple gen-lean compare \
-  --generated verification/type_inference_compile/src/TypeInference.lean \
-  --existing verification/type_inference_compile/src/DynTrait.lean \
+  --generated src/verification/type_inference_compile/src/TypeInference.lean \
+  --existing src/verification/type_inference_compile/src/DynTrait.lean \
   --diff
 
 # Output:
@@ -184,7 +184,7 @@ simple gen-lean compare \
 
 | Simple Source | Generated Lean4 | Purpose |
 |---------------|-----------------|---------|
-| `src/lib/std/src/type_checker/type_inference.spl` | `verification/type_inference_compile/src/TypeInference.lean` | Main type inference logic |
+| `src/lib/std/src/type_checker/type_inference.spl` | `src/verification/type_inference_compile/src/TypeInference.lean` | Main type inference logic |
 | `lean{} blocks` in .spl | `theorem` statements in .lean | Embedded theorems |
 | `requires`/`ensures` contracts | Proof obligations | Generated from function contracts |
 | SSpec tests | Lean property tests | Executable specifications |
@@ -231,7 +231,7 @@ theorem unify_idempotent (checker : TypeChecker) (t : Type) :
 ### Lean Block Translation
 
 ```simple
-lean import "verification/.../Classes.lean" {
+lean import "src/verification/.../Classes.lean" {
     theorem dyntrait_unify (name1 name2 : String) :
         (name1 = name2) ↔ (unify (DynTrait name1) (DynTrait name2) = Ok Unit) := by
         sorry
@@ -369,7 +369,7 @@ simple test test/lib/std/type_checker/type_inference_spec.spl \
 
 1. **Implement missing Simple features** (if any)
 2. **Run generation**: `simple gen-lean generate ...`
-3. **Verify Lean build**: `cd verification/... && lake build`
+3. **Verify Lean build**: `cd src/verification/... && lake build`
 4. **Run SSpec tests**: `simple test ... --coverage`
 5. **Achieve 100% coverage**
 6. **Fill in proof sorrys** (optional, for full verification)

@@ -163,9 +163,9 @@ fn compute() -> Int:  # Declared as Int
    ```
 
 **Files:**
-- `verification/gpu_types/GpuTypes.lean` - Type definitions
-- `verification/gpu_types/DeviceSafety.lean` - Safety proofs
-- `verification/gpu_types/Inference.lean` - Inference proofs
+- `src/verification/gpu_types/GpuTypes.lean` - Type definitions
+- `src/verification/gpu_types/DeviceSafety.lean` - Safety proofs
+- `src/verification/gpu_types/Inference.lean` - Inference proofs
 
 ### Phase 4: Integration Examples ✅ (This session)
 
@@ -268,7 +268,7 @@ let x = compute()  # Type inferred: Gpu[Int, Primary]
 ### File Structure
 
 ```
-verification/gpu_types/
+src/verification/gpu_types/
 ├── GpuTypes.lean           # Type definitions
 ├── DeviceSafety.lean       # Device safety proofs
 ├── Inference.lean          # Type inference proofs

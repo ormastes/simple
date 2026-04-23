@@ -60,7 +60,7 @@ simple/std_lib/src/verification/
 
 ### 1. Verification Models (models/)
 
-All 9 verification models from `verification/` implemented in Simple:
+All 9 verification models from `src/verification/` implemented in Simple:
 
 | Model | Features | Lines |
 |-------|----------|-------|

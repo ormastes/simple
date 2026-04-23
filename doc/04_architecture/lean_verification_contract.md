@@ -23,7 +23,7 @@ All agents and implementation phases work against this contract. Public document
 | `old()` expressions | `out(ret): ret > old(self.x)` | supported_with_qualifiers |
 | Proof references | `proof uses: theorem_name` | supported_with_qualifiers |
 | `lean{}` blocks | `lean { theorem ... }` | supported_with_qualifiers |
-| External Lean modules | Import from `verification/proofs/` | stable |
+| External Lean modules | Import from `src/verification/proofs/` | stable |
 | Ghost/spec-only functions | Pure, no side effects, erased at runtime | stable |
 | Ghost erasure (MIR) | Ghost params/locals removed before codegen | stable |
 | Lean code generation | Deterministic module emission | stable |
@@ -111,7 +111,7 @@ Any change in these inputs marks the unit `stale`.
 | Runtime contract checking | `in:`/`out:` compiled to runtime checks | Cranelift IR with `simple_contract_check()` |
 | Generated proof obligations | `@verify` + contracts -> Lean theorems | `.lean` files with `theorem` + `sorry` stubs |
 | Embedded Lean authoring | `lean{}` blocks | Verbatim Lean in generated modules |
-| External Lean proofs | `proof uses:` references | Import from `verification/proofs/` |
+| External Lean proofs | `proof uses:` references | Import from `src/verification/proofs/` |
 | Ghost/spec code | `@ghost` functions, spec-only params | Erased at MIR level, present in Lean |
 
 Runtime and verification concerns are independent:
@@ -144,7 +144,7 @@ Runtime and verification concerns are independent:
 | Command | Purpose |
 |---------|---------|
 | `simple gen-lean generate` | Output Lean code to stdout |
-| `simple gen-lean write` | Write generated Lean files to `verification/` |
+| `simple gen-lean write` | Write generated Lean files to `src/verification/` |
 | `simple gen-lean compare` | Diff generated vs existing, check completeness |
 | `simple gen-lean verify` | Run Lean and fail on errors/sorry |
 | `simple verify status` | Show Lean availability and artifact inventory |

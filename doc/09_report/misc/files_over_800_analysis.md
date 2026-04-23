@@ -67,7 +67,7 @@ These files have standalone functions, multiple types, or clear module boundarie
 | File | Lines | Type | Refactoring Potential |
 |------|-------|------|----------------------|
 | `mcp/multi_lang/rust.spl` | 978 | Multi-lang support | ⚠️ Medium |
-| `verification/models/tensor_dimensions.spl` | 957 | Verification | ⚠️ Medium |
+| `src/verification/models/tensor_dimensions.spl` | 957 | Verification | ⚠️ Medium |
 | `tooling/compiler/build_system.spl` | 944 | Build system | ✅ Medium |
 | `tooling/core/errors.spl` | 931 | Error handling | ✅ Medium |
 | `host/common/io/term_style.spl` | 918 | Terminal styling | ⚠️ Low - Close to target |

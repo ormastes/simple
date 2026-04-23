@@ -64,7 +64,7 @@ mixin Name<T>
 ### ✅ Phase 2: Lean Verification (100% Complete)
 
 **Files Created/Updated:**
-1. **`verification/type_inference_compile/src/Mixins.lean`** - Core mixin definitions
+1. **`src/verification/type_inference_compile/src/Mixins.lean`** - Core mixin definitions
    - `MixinDef` structure
    - `MixinRef` for application
    - `applyMixinToClass` function
@@ -72,7 +72,7 @@ mixin Name<T>
    - Coherence checking
    - Trait requirement validation
 
-2. **`verification/type_inference_compile/src/MixinsTest.lean`** - Comprehensive tests
+2. **`src/verification/type_inference_compile/src/MixinsTest.lean`** - Comprehensive tests
    - 12 test cases covering all mixin features
    - Basic mixins with fields
    - Generic mixins with type parameters
@@ -82,7 +82,7 @@ mixin Name<T>
    - Field/method overrides
    - Dependent mixins
 
-3. **`verification/type_inference_compile/src/MixinVerificationGenerated.lean`** - Type safety theorems
+3. **`src/verification/type_inference_compile/src/MixinVerificationGenerated.lean`** - Type safety theorems
    - 10 verification theorems
    - Field type safety
    - Method signature preservation
@@ -92,7 +92,7 @@ mixin Name<T>
 
 **Build Status:**
 ```bash
-$ cd verification/type_inference_compile && lake build
+$ cd src/verification/type_inference_compile && lake build
 ⚠ [2/3] Replayed TypeInferenceCompile
 warning: src/TypeInferenceCompile.lean:31:9: unused variable `h_name`
 Build completed successfully (3 jobs).

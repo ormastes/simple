@@ -59,8 +59,8 @@ Regenerating Lean verification files...
  ...
  [14/15] regenerate_tensor_dimensions... ✓
  [15/15] regenerate_tensor_memory... ✓
-Generated: verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes)
-Generated: verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes)
+Generated: src/verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes)
+Generated: src/verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes)
 All files validated successfully!
 ```
 
@@ -77,7 +77,7 @@ All files validated successfully!
 error: semantic: undefined variable: codegen
 ```
 
-**Fix:** Added `make_nat_type()` helper function to `verification/lean/codegen.spl`:
+**Fix:** Added `make_nat_type()` helper function to `src/verification/lean/codegen.spl`:
 
 ```simple
 # Create a nat type representation
@@ -240,21 +240,21 @@ All files validated successfully!
 ```
 
 **Generated Files:**
-- verification/nogc_compile/src/NogcCompile.lean (1424 bytes)
-- verification/async_compile/src/AsyncCompile.lean (1217 bytes)
-- verification/gc_manual_borrow/src/GcManualBorrow.lean (2724 bytes)
-- verification/manual_pointer_borrow/src/ManualPointerBorrow.lean (3839 bytes)
-- verification/module_resolution/src/ModuleResolution.lean (4149 bytes)
-- verification/visibility_export/src/VisibilityExport.lean (3484 bytes)
-- verification/macro_auto_import/src/MacroAutoImport.lean (3584 bytes)
-- verification/type_inference_compile/src/TypeInferenceCompile.lean (4333 bytes)
-- verification/type_inference_compile/src/Generics.lean (21738 bytes)
-- verification/type_inference_compile/src/Contracts.lean (1676 bytes)
-- verification/memory_capabilities/src/MemoryCapabilities.lean (13058 bytes)
-- verification/memory_model_drf/src/MemoryModelDRF.lean (20291 bytes)
-- verification/type_inference_compile/src/AsyncEffectInference.lean (10857 bytes)
-- verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes) ✅ NEW
-- verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes) ✅ NEW
+- src/verification/nogc_compile/src/NogcCompile.lean (1424 bytes)
+- src/verification/async_compile/src/AsyncCompile.lean (1217 bytes)
+- src/verification/gc_manual_borrow/src/GcManualBorrow.lean (2724 bytes)
+- src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean (3839 bytes)
+- src/verification/module_resolution/src/ModuleResolution.lean (4149 bytes)
+- src/verification/visibility_export/src/VisibilityExport.lean (3484 bytes)
+- src/verification/macro_auto_import/src/MacroAutoImport.lean (3584 bytes)
+- src/verification/type_inference_compile/src/TypeInferenceCompile.lean (4333 bytes)
+- src/verification/type_inference_compile/src/Generics.lean (21738 bytes)
+- src/verification/type_inference_compile/src/Contracts.lean (1676 bytes)
+- src/verification/memory_capabilities/src/MemoryCapabilities.lean (13058 bytes)
+- src/verification/memory_model_drf/src/MemoryModelDRF.lean (20291 bytes)
+- src/verification/type_inference_compile/src/AsyncEffectInference.lean (10857 bytes)
+- src/verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes) ✅ NEW
+- src/verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes) ✅ NEW
 
 ---
 

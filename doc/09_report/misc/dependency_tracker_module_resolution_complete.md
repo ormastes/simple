@@ -54,7 +54,7 @@ Successfully implemented module path resolution algorithm with full Lean theorem
 
 ## Lean Theorem Validation
 
-All 4 theorems from `verification/module_resolution/src/ModuleResolution.lean` validated:
+All 4 theorems from `src/verification/module_resolution/src/ModuleResolution.lean` validated:
 
 ### Theorem 1: `wellformed_not_ambiguous`
 

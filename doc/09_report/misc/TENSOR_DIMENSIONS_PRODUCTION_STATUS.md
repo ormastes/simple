@@ -283,7 +283,7 @@ let tensor = TypedTensor.randn([
 The tensor dimension inference feature is **production-ready** using standalone implementations:
 
 **What to deploy**:
-1. `verification/models/tensor_dimensions.spl` - Core model (450 LOC)
+1. `src/verification/models/tensor_dimensions.spl` - Core model (450 LOC)
 2. Executable specification - Working tests (350 LOC)
 3. Integration tests - Real workflows (300 LOC)
 4. Examples - Demonstrations (1,077 LOC)

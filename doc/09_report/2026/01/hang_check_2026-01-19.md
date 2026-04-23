@@ -98,7 +98,7 @@ Based on the test name and location, this is likely related to:
 3. Possible infinite loop or deadlock in the regeneration logic
 4. Potential external Lean 4 process hanging or not responding
 
-The test is in the verification/regeneration module, which suggests it's testing the Lean code regeneration feature.
+The test is in the src/verification/regeneration module, which suggests it's testing the Lean code regeneration feature.
 
 ### Passing Tests Summary
 
