@@ -199,6 +199,14 @@ impl TypeRegistry {
                     None
                 }
             }
+            Some(HirType::LabeledTuple(elements)) if !elements.is_empty() => {
+                let first = elements[0].1;
+                if elements.iter().all(|(_, e)| *e == first) {
+                    Some(first)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -241,6 +249,9 @@ impl TypeRegistry {
             // Tuples are safe if all elements are safe
             Some(HirType::Tuple(elements)) => {
                 elements.iter().all(|e| self.is_snapshot_safe(*e))
+            }
+            Some(HirType::LabeledTuple(elements)) => {
+                elements.iter().all(|(_, e)| self.is_snapshot_safe(*e))
             }
 
             // Arrays are safe if elements are safe (assuming immutable array)

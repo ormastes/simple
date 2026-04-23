@@ -299,6 +299,8 @@ pub enum Type {
     Named(String),
     /// Tuple type: (A, B, C)
     Tuple(Vec<Type>),
+    /// Labeled tuple type: (name: A, other: B)
+    LabeledTuple(Vec<(String, Type)>),
     /// Dictionary type: {K: V}
     Dict {
         key: Box<Type>,
@@ -354,6 +356,12 @@ impl Type {
                 args: args.iter().map(|a| a.apply_subst(subst)).collect(),
             },
             Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.apply_subst(subst)).collect()),
+            Type::LabeledTuple(fields) => Type::LabeledTuple(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.apply_subst(subst)))
+                    .collect(),
+            ),
             Type::Dict { key, value } => Type::Dict {
                 key: Box::new(key.apply_subst(subst)),
                 value: Box::new(value.apply_subst(subst)),
@@ -385,6 +393,12 @@ impl Type {
                 args: args.iter().map(|a| a.substitute_type_params(subst)).collect(),
             },
             Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.substitute_type_params(subst)).collect()),
+            Type::LabeledTuple(fields) => Type::LabeledTuple(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.substitute_type_params(subst)))
+                    .collect(),
+            ),
             Type::Dict { key, value } => Type::Dict {
                 key: Box::new(key.substitute_type_params(subst)),
                 value: Box::new(value.substitute_type_params(subst)),
@@ -416,6 +430,7 @@ impl Type {
             Type::Union(types) => types.iter().any(|t| t.contains_var(var_id)),
             Type::Generic { args, .. } => args.iter().any(|a| a.contains_var(var_id)),
             Type::Tuple(types) => types.iter().any(|t| t.contains_var(var_id)),
+            Type::LabeledTuple(fields) => fields.iter().any(|(_, t)| t.contains_var(var_id)),
             Type::Dict { key, value } => key.contains_var(var_id) || value.contains_var(var_id),
             Type::Optional(inner) => inner.contains_var(var_id),
             Type::Borrow(inner) => inner.contains_var(var_id),

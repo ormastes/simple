@@ -29,11 +29,7 @@ impl TypeChecker {
             // Named types match by name
             (Type::Named(n1), Type::Named(n2)) if n1 == n2 => Ok(()),
             (Type::Bitfield(n1), Type::Bitfield(n2)) if n1 == n2 => Ok(()),
-            (Type::Bitfield(n1), Type::Named(n2)) | (Type::Named(n1), Type::Bitfield(n2))
-                if n1 == n2 =>
-            {
-                Ok(())
-            }
+            (Type::Bitfield(n1), Type::Named(n2)) | (Type::Named(n1), Type::Bitfield(n2)) if n1 == n2 => Ok(()),
 
             // Arrays unify if elements unify
             (Type::Array(e1), Type::Array(e2)) => self.unify(e1, e2),
@@ -47,16 +43,9 @@ impl TypeChecker {
             }
 
             // Functions unify if params and return types unify
-            (
-                Type::Function {
-                    params: p1,
-                    ret: r1,
-                },
-                Type::Function {
-                    params: p2,
-                    ret: r2,
-                },
-            ) if p1.len() == p2.len() => {
+            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 })
+                if p1.len() == p2.len() =>
+            {
                 for (a, b) in p1.iter().zip(p2.iter()) {
                     self.unify(a, b)?;
                 }
@@ -135,8 +124,12 @@ impl TypeChecker {
                         Ok(())
                     } else {
                         Err(TypeError::Mismatch {
-                            expected: Type::ConstKeySet { keys: expected_keys.clone() },
-                            found: Type::ConstKeySet { keys: resolved_keys.clone() },
+                            expected: Type::ConstKeySet {
+                                keys: expected_keys.clone(),
+                            },
+                            found: Type::ConstKeySet {
+                                keys: resolved_keys.clone(),
+                            },
                         })
                     }
                 } else {
@@ -156,8 +149,12 @@ impl TypeChecker {
                         Ok(())
                     } else {
                         Err(TypeError::Mismatch {
-                            expected: Type::ConstKeySet { keys: expected_keys.clone() },
-                            found: Type::ConstKeySet { keys: resolved_keys.clone() },
+                            expected: Type::ConstKeySet {
+                                keys: expected_keys.clone(),
+                            },
+                            found: Type::ConstKeySet {
+                                keys: resolved_keys.clone(),
+                            },
                         })
                     }
                 } else {
@@ -184,18 +181,16 @@ impl TypeChecker {
                         }
                     }
                     // If either is unresolvable, treat as compatible
-                    _ => Ok(())
+                    _ => Ok(()),
                 }
             }
 
             // DynTrait types unify only with same trait name
             (Type::DynTrait(n1), Type::DynTrait(n2)) if n1 == n2 => Ok(()),
-            (Type::DynTrait(_), _) | (_, Type::DynTrait(_)) => {
-                Err(TypeError::Mismatch {
-                    expected: t1.clone(),
-                    found: t2.clone(),
-                })
-            }
+            (Type::DynTrait(_), _) | (_, Type::DynTrait(_)) => Err(TypeError::Mismatch {
+                expected: t1.clone(),
+                found: t2.clone(),
+            }),
 
             // Mismatch
             _ => Err(TypeError::Mismatch {
@@ -223,9 +218,7 @@ impl TypeChecker {
                 }
                 // Map common type names
                 match name.as_str() {
-                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => {
-                        Type::Int
-                    }
+                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => Type::Int,
                     "f32" | "f64" | "float" | "Float" => Type::Float,
                     "bool" | "Bool" => Type::Bool,
                     "str" | "String" | "Str" => Type::Str,
@@ -234,8 +227,7 @@ impl TypeChecker {
                 }
             }
             AstType::Generic { name, args } => {
-                let converted_args: Vec<Type> =
-                    args.iter().map(|a| self.ast_type_to_type(a)).collect();
+                let converted_args: Vec<Type> = args.iter().map(|a| self.ast_type_to_type(a)).collect();
                 Type::Generic {
                     name: name.clone(),
                     args: converted_args,
@@ -251,12 +243,8 @@ impl TypeChecker {
             }
             AstType::Array { element, .. } => Type::Array(Box::new(self.ast_type_to_type(element))),
             AstType::Function { params, ret } => {
-                let param_types: Vec<Type> =
-                    params.iter().map(|p| self.ast_type_to_type(p)).collect();
-                let ret_type = ret
-                    .as_ref()
-                    .map(|r| self.ast_type_to_type(r))
-                    .unwrap_or(Type::Nil);
+                let param_types: Vec<Type> = params.iter().map(|p| self.ast_type_to_type(p)).collect();
+                let ret_type = ret.as_ref().map(|r| self.ast_type_to_type(r)).unwrap_or(Type::Nil);
                 Type::Function {
                     params: param_types,
                     ret: Box::new(ret_type),
@@ -342,47 +330,22 @@ impl TypeChecker {
             (Type::Array(e1), Type::Array(e2)) => self.types_compatible(e1, e2),
             // Tuples match if all elements match
             (Type::Tuple(t1), Type::Tuple(t2)) => {
-                t1.len() == t2.len()
-                    && t1
-                        .iter()
-                        .zip(t2.iter())
-                        .all(|(a, b)| self.types_compatible(a, b))
+                t1.len() == t2.len() && t1.iter().zip(t2.iter()).all(|(a, b)| self.types_compatible(a, b))
             }
             // Union types: check if either is a subset
-            (Type::Union(members), other) | (other, Type::Union(members)) => {
-                self.type_matches_union(other, members)
-            }
+            (Type::Union(members), other) | (other, Type::Union(members)) => self.type_matches_union(other, members),
             // Generic types match if name and all args match
             (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 }) => {
-                n1 == n2
-                    && a1.len() == a2.len()
-                    && a1
-                        .iter()
-                        .zip(a2.iter())
-                        .all(|(x, y)| self.types_compatible(x, y))
+                n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2.iter()).all(|(x, y)| self.types_compatible(x, y))
             }
             // Functions match if params and return types match
-            (
-                Type::Function {
-                    params: p1,
-                    ret: r1,
-                },
-                Type::Function {
-                    params: p2,
-                    ret: r2,
-                },
-            ) => {
+            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 }) => {
                 p1.len() == p2.len()
-                    && p1
-                        .iter()
-                        .zip(p2.iter())
-                        .all(|(a, b)| self.types_compatible(a, b))
+                    && p1.iter().zip(p2.iter()).all(|(a, b)| self.types_compatible(a, b))
                     && self.types_compatible(r1, r2)
             }
             // Optional types
-            (Type::Optional(inner1), Type::Optional(inner2)) => {
-                self.types_compatible(inner1, inner2)
-            }
+            (Type::Optional(inner1), Type::Optional(inner2)) => self.types_compatible(inner1, inner2),
             // Dict types
             (Type::Dict { key: k1, value: v1 }, Type::Dict { key: k2, value: v2 }) => {
                 self.types_compatible(k1, k2) && self.types_compatible(v1, v2)
@@ -391,13 +354,9 @@ impl TypeChecker {
             (Type::TypeParam(n1), Type::TypeParam(n2)) => n1 == n2,
             // Borrow types
             (Type::Borrow(inner1), Type::Borrow(inner2)) => self.types_compatible(inner1, inner2),
-            (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => {
-                self.types_compatible(inner1, inner2)
-            }
+            (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
             // &mut T is compatible with &T (mutable borrow can be used where immutable is expected)
-            (Type::Borrow(inner1), Type::BorrowMut(inner2)) => {
-                self.types_compatible(inner1, inner2)
-            }
+            (Type::Borrow(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
             // Const key sets are compatible if they have the same keys
             (Type::ConstKeySet { keys: k1 }, Type::ConstKeySet { keys: k2 }) => {
                 let mut s1: Vec<_> = k1.clone();
