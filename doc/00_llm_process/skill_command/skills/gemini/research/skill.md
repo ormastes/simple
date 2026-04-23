@@ -1,0 +1,26 @@
+# research
+
+Source: `.gemini/commands/research.toml`
+
+## Description
+
+Run local + domain research for a feature. Self-sufficient — does not depend on any prior step.
+
+## Prompt
+
+Run the research pipeline for the given feature. Self-sufficient — do all steps yourself.
+
+Phase 1: Search src/ and doc/ for related code, types, call chains, prior research, ADRs.
+Output: doc/01_research/local/<feature>.md
+
+Phase 2: Web search for external knowledge, papers, prior art.
+Output: doc/01_research/domain/<feature>.md
+
+Phase 3: Generate requirement options with pros/cons/effort.
+Feature: doc/02_requirements/feature/<feature>_options.md
+NFR: doc/02_requirements/nfr/<feature>_options.md
+
+Phase 4: Ask user to select, then write final requirements.
+
+If another LLM already did research, extend it — never overwrite.
+All code in .spl — no Python, no Bash.

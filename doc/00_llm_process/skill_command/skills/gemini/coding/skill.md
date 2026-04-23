@@ -1,0 +1,68 @@
+# coding
+
+Source: `.gemini/commands/coding.toml`
+
+## Description
+
+Simple language coding rules and syntax reference. Key patterns, runtime limitations, and style guidelines.
+
+## Prompt
+
+description = "Simple language coding rules and syntax reference. Key patterns, runtime limitations, and style guidelines."
+prompt = '''
+Apply Simple language coding rules when writing or reviewing code. Reference this skill for syntax and conventions.
+
+Core Syntax Rules:
+- val name = "value"          # Immutable (preferred)
+- name := "value"             # Walrus operator (val synonym)
+- var count = 0               # Mutable
+- fn square(x): x * x         # Implicit return
+- print "Hello, {name}!"      # String interpolation (default)
+- print r"raw: \d+"           # Raw string (no interpolation)
+
+Type System:
+- Generics: Option<T>, List<Int>, Map<String, Int> — use <> not []
+- Type alias: type Point2D = Point
+- Class alias: alias Optional = Option
+- Result<T, E> + ? operator for error handling (no try/catch/throw)
+
+Classes:
+- class Point:
+    x: i64
+    y: i64
+    fn get_x() -> i64: self.x       # Immutable method
+    me move(dx: i64):                # Mutable method ('me' keyword)
+        self.x = self.x + dx
+    static fn origin() -> Point:     # Static method
+        Point(x: 0, y: 0)           # Constructor — NOT .new()
+- NO inheritance: class Child(Parent) is NOT supported
+- Use composition, alias forwarding, traits, or mixins instead
+
+Pattern Matching:
+- if val x = optional_value:   # Pattern binding — NOT if let
+- match value:
+    Some(x): process(x)
+    nil: ()                    # Unit value
+
+Operators & Lambdas:
+- user?.name ?? "Anonymous"    # Optional chaining + coalescing
+- items.map(\x: x * 2)        # Lambda
+- items.map(_ * 2)             # Placeholder lambda
+- [for x in 0..10 if x % 2 == 0: x]  # Comprehension
+- |> pipe, >> compose, ~> layer connect, ** power
+
+Runtime Limitations (CRITICAL):
+- Chained methods broken — use intermediate var
+- Nested closure capture: can READ outer vars, CANNOT MODIFY
+- Multi-line booleans: wrap in parentheses
+- Reserved keywords: gen, val, def, exists, actor, assert, join, pass_todo, pass_do_nothing, pass_dn
+- ? is operator only — never in names
+
+File Rules:
+- ALL code in .spl or .shs — no Python, no Bash
+- SDN format for config/data files, not JSON/YAML
+- No pass_todo in final code — implement or delete entirely
+- Never convert TODO/FIXME to NOTE
+
+Full reference: doc/07_guide/quick_reference/syntax_quick_reference.md
+'''
