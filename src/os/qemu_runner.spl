@@ -20,6 +20,7 @@ use os.port.simpleos_multiplatform_build.{
     simpleos_platform_kernel_output,
     simpleos_platform_target_by_name
 }
+use os.drivers.desktop_driver_summary.{desktop_driver_summary_accepts_complete_qemu}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -1817,10 +1818,55 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
     val serial_output = stdout + stderr
     print "[test] serial output:\n{serial_output}"
-    val success = serial_output.contains("TEST PASSED") and (exit_code == 0 or exit_code == 1)
+    val accepted = if scenario.name == "x64-desktop-uefi":
+        desktop_uefi_serial_accepts_completion(serial_output)
+    else:
+        serial_output.contains("TEST PASSED")
+    val success = accepted and (exit_code == 0 or exit_code == 1)
     if not success:
-        print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
+        if scenario.name == "x64-desktop-uefi":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
+            print_desktop_uefi_missing_markers(serial_output)
+        else:
+            print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
     success
+
+fn desktop_uefi_serial_accepts_completion(serial_output: text) -> bool:
+    """Accept live x64 desktop UEFI serial only when it satisfies the driver summary contract."""
+    desktop_driver_summary_accepts_complete_qemu(serial_output)
+
+fn desktop_uefi_required_marker_fragments() -> [text]:
+    """Serial marker families required by x64-desktop-uefi live acceptance.
+
+    The driver summary itself is validated by desktop_driver_summary_accepts_complete_qemu.
+    These fragments document the process/VFS/network evidence that must also be
+    present in the same serial stream for actionable live-QEMU diagnostics:
+      [desktop-e2e] process-backed:ok app=<app> pid=<pid>
+      [desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=<n>
+      [desktop-e2e] virtio-net:mac=<mac>
+      [desktop-e2e] virtio-net:rx-queue=ok queue=0
+      [desktop-e2e] virtio-net:tx-queue=ok queue=0
+      [desktop-e2e] network-smoke:bounded ok packets=<n> timeout_ms=<ms>
+    """
+    [
+        "[desktop-e2e] process-backed:ok app=browser_demo pid=",
+        "[desktop-e2e] process-backed:ok app=hello_world pid=",
+        "[desktop-e2e] process-backed:ok app=editor pid=",
+        "[desktop-e2e] process-backed:ok app=terminal pid=",
+        "[desktop-e2e] process-backed:ok app=file_manager pid=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=",
+        "[desktop-e2e] virtio-net:mac=",
+        "[desktop-e2e] virtio-net:rx-queue=ok queue=0",
+        "[desktop-e2e] virtio-net:tx-queue=ok queue=0",
+        "[desktop-e2e] network-smoke:bounded ok packets="
+    ]
+
+fn print_desktop_uefi_missing_markers(serial_output: text):
+    if not desktop_driver_summary_accepts_complete_qemu(serial_output):
+        print "[test] missing/invalid: complete desktop driver summary contract"
+    for marker in desktop_uefi_required_marker_fragments():
+        if not serial_output.contains(marker):
+            print "[test] missing marker fragment: {marker}"
 
 fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     """Return a realistic smoke-test timeout for a named QEMU scenario."""

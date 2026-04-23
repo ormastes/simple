@@ -411,3 +411,71 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("__ZN4llvm2cl6OptionE"));
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
+
+#[test]
+fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let boot_c = temp.path().join("boot.c");
+    let simple_c = temp.path().join("simple.c");
+    let boot_o = temp.path().join("boot.o");
+    let simple_o = temp.path().join("simple.o");
+
+    std::fs::write(
+        &boot_c,
+        r#"
+        __attribute__((weak)) long spl_handle_enter_user_blocking(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+            (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+            return -38;
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &simple_c,
+        r#"
+        long kernel__abi__syscall_shim__spl_handle_enter_user_blocking(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+            (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+            return 14;
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&boot_c)
+        .arg("-o")
+        .arg(&boot_o)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&simple_c)
+        .arg("-o")
+        .arg(&simple_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        populate_global_struct_defs: false,
+    };
+
+    let aliases = NativeProjectBuilder::freestanding_weak_boot_defsyms(&[simple_o], &[boot_o], &imports).unwrap();
+
+    assert_eq!(
+        aliases,
+        vec![(
+            "spl_handle_enter_user_blocking".to_string(),
+            "kernel__abi__syscall_shim__spl_handle_enter_user_blocking".to_string()
+        )]
+    );
+}

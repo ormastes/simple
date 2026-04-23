@@ -63,6 +63,20 @@ needed once the compiler toolchain is corrected.
 
 Parallel Codex compiler agent. Fix branch: none (jj, work directly on main).
 
+## Update 2026-04-23
+
+Compiler-side mitigation landed in
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`: freestanding
+linking now adds a strong `--defsym` alias when a weak boot symbol has a
+strong Simple object symbol with the same exported suffix, even when the import
+map does not list that raw exported name. The regression is covered by
+`test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match` in
+`src/compiler_rust/compiler/src/pipeline/native_project/tests.rs`.
+
+Remaining verification: rerun the live x86_64 desktop disk or UEFI lane and
+confirm syscall 13/14 markers route through the strong Simple handlers with no
+`resident-manifest` fallback markers.
+
 ## References
 
 - FR-SOS-024:

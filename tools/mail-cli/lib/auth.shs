@@ -24,6 +24,7 @@ cmd_auth() {
       echo "FLAGS"
       echo "  --account NAME      Account name (default: 'default')"
       echo "  --provider PRESET   gmail, outlook, yahoo, protonmail, fastmail, other"
+      echo "  username defaults to the email address when left blank"
       ;;
   esac
 }
@@ -66,6 +67,11 @@ cmd_auth_login() {
   echo "? Email address:"
   printf "  > "
   read -r email
+
+  echo "? Login username (optional, default: email address):"
+  printf "  > "
+  read -r username
+  [ -z "$username" ] && username="$email"
 
   echo "? Display name (optional):"
   printf "  > "
@@ -151,7 +157,7 @@ cmd_auth_login() {
   esac
   local test_result
   test_result=$(curl -s --url "$imap_url" \
-    --user "${email}:${password}" \
+    --user "${username}:${password}" \
     --request "NOOP" "${imap_extra_args[@]}" -o /dev/null -w "%{http_code}" 2>&1)
   local test_exit=$?
 
@@ -168,6 +174,7 @@ cmd_auth_login() {
   account_json=$(jq -n \
     --arg provider "$provider" \
     --arg email "$email" \
+    --arg username "$username" \
     --arg display "$display_name" \
     --arg imap "$imap_server" \
     --arg iport "$imap_port" \
@@ -178,6 +185,7 @@ cmd_auth_login() {
     '{
       provider: $provider,
       email: $email,
+      username: $username,
       display_name: $display,
       imap_server: $imap,
       imap_port: ($iport | tonumber),
@@ -252,8 +260,9 @@ cmd_auth_status() {
   echo "$accounts" | while read -r name; do
     local acc
     acc=$(mail_config_get_account "$name")
-    local email provider
+    local email username provider
     email=$(echo "$acc" | jq -r '.email')
+    username=$(echo "$acc" | jq -r '.username // .email')
     provider=$(echo "$acc" | jq -r '.provider')
     local imap_server imap_port tls_mode
     imap_server=$(echo "$acc" | jq -r '.imap_server')
@@ -283,11 +292,9 @@ cmd_auth_status() {
         imap_url="imaps://${imap_server}:${imap_port}/"
         ;;
     esac
-    curl -s --url "$imap_url" \
-      --user "${email}:$(echo "$acc" | jq -r '.password')" \
-      --request "NOOP" "${imap_extra_args[@]}" -o /dev/null 2>/dev/null
-    test_exit=$?
-    if [ $test_exit -eq 0 ]; then
+    if curl -s --url "$imap_url" \
+      --user "${username}:$(echo "$acc" | jq -r '.password')" \
+      --request "NOOP" "${imap_extra_args[@]}" -o /dev/null 2>/dev/null; then
       echo "  ✓ Connection OK"
     else
       echo "  ✗ Connection failed"

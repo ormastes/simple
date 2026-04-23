@@ -1,0 +1,153 @@
+# SimpleOS app-runtime process filesystem namespace contract.
+#
+# This module is intentionally side-effect free: it models the paths visible to
+# a process and returns canonical candidates for later VFS-backed probing.
+
+struct AppNamespace:
+    root: text
+    cwd: text
+    mount_view: [text]
+    cap_dirs: [text]
+    library_paths: [text]
+
+fn _join_root(root: text, path: text) -> text:
+    if root == "/" or root == "":
+        return path
+    if path == "/":
+        return root
+    "{root}{path}"
+
+fn _normalize_absolute(path: text) -> text?:
+    var parts: [text] = []
+    for raw_part in path.split("/"):
+        val part = raw_part.trim()
+        if part == "" or part == ".":
+            pass
+        else:
+            if part == "..":
+                if parts.len() == 0:
+                    return nil
+                var next_parts: [text] = []
+                var i = 0
+                while i < parts.len() - 1:
+                    next_parts = next_parts + [parts[i]]
+                    i = i + 1
+                parts = next_parts
+            else:
+                parts = parts + [part]
+
+    var resolved = "/"
+    var idx = 0
+    while idx < parts.len():
+        if idx == 0:
+            resolved = "/{parts[idx]}"
+        else:
+            resolved = "{resolved}/{parts[idx]}"
+        idx = idx + 1
+    Some(resolved)
+
+fn _candidate_from_dir(dir: text, name: text) -> text:
+    if dir == "/" or dir == "":
+        return "/{name}"
+    "{dir}/{name}"
+
+fn app_namespace_default() -> AppNamespace:
+    AppNamespace(
+        root: "/",
+        cwd: "/",
+        mount_view: ["/bin", "/usr/bin", "/sys/apps", "/lib", "/usr/lib", "/tmp", "/home", "/svc"],
+        cap_dirs: ["/svc"],
+        library_paths: ["/lib", "/usr/lib", "/usr/lib/simple"]
+    )
+
+fn app_namespace_create(
+    root: text,
+    cwd: text,
+    mount_view: [text],
+    cap_dirs: [text],
+    library_paths: [text]
+) -> AppNamespace?:
+    val clean_root_opt = _normalize_absolute(root)
+    if clean_root_opt == nil:
+        return nil
+    val clean_root = clean_root_opt.unwrap()
+
+    val seeded = AppNamespace(
+        root: clean_root,
+        cwd: "/",
+        mount_view: mount_view,
+        cap_dirs: cap_dirs,
+        library_paths: library_paths
+    )
+    app_namespace_with_cwd(seeded, cwd)
+
+fn app_namespace_with_cwd(ns: AppNamespace, cwd: text) -> AppNamespace?:
+    val resolved_opt = app_namespace_resolve_path(ns, cwd)
+    if resolved_opt == nil:
+        return nil
+    val resolved = resolved_opt.unwrap()
+
+    var process_cwd = resolved
+    if ns.root != "/" and resolved.starts_with(ns.root):
+        process_cwd = resolved.slice(ns.root.len(), resolved.len())
+        if process_cwd == "":
+            process_cwd = "/"
+
+    Some(AppNamespace(
+        root: ns.root,
+        cwd: process_cwd,
+        mount_view: ns.mount_view,
+        cap_dirs: ns.cap_dirs,
+        library_paths: ns.library_paths
+    ))
+
+fn app_namespace_resolve_path(ns: AppNamespace, path: text) -> text?:
+    val root_opt = _normalize_absolute(ns.root)
+    if root_opt == nil:
+        return nil
+    val root = root_opt.unwrap()
+
+    var process_path = path
+    if process_path == "":
+        process_path = "."
+
+    if not process_path.starts_with("/"):
+        if ns.cwd == "/" or ns.cwd == "":
+            process_path = "/{process_path}"
+        else:
+            process_path = "{ns.cwd}/{process_path}"
+
+    val normalized_opt = _normalize_absolute(process_path)
+    if normalized_opt == nil:
+        return nil
+    val normalized = normalized_opt.unwrap()
+
+    Some(_join_root(root, normalized))
+
+fn app_namespace_library_candidates(ns: AppNamespace, soname: text, manifest_paths: [text]) -> [text]:
+    var candidates: [text] = []
+
+    if soname.starts_with("/"):
+        val resolved_opt = app_namespace_resolve_path(ns, soname)
+        if resolved_opt != nil:
+            candidates = candidates + [resolved_opt.unwrap()]
+    else:
+        var lib_idx = 0
+        while lib_idx < ns.library_paths.len():
+            val resolved_opt = app_namespace_resolve_path(ns, _candidate_from_dir(ns.library_paths[lib_idx], soname))
+            if resolved_opt != nil:
+                candidates = candidates + [resolved_opt.unwrap()]
+            lib_idx = lib_idx + 1
+
+    var manifest_idx = 0
+    while manifest_idx < manifest_paths.len():
+        val manifest_path = manifest_paths[manifest_idx]
+        var manifest_candidate = manifest_path
+        if not manifest_path.starts_with("/"):
+            manifest_candidate = _candidate_from_dir(ns.cwd, manifest_path)
+        val resolved_manifest_opt = app_namespace_resolve_path(ns, manifest_candidate)
+        if resolved_manifest_opt != nil:
+            candidates = candidates + [resolved_manifest_opt.unwrap()]
+        manifest_idx = manifest_idx + 1
+
+    candidates

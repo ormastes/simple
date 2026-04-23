@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Smoke-test the repo-local mail and Jira/Confluence CLIs against disposable
+# local servers. This does not use personal credentials or mutate real accounts.
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIL_BIN="${ROOT}/tools/mail-cli/bin/mail"
+JIRA_BIN="${ROOT}/tools/jira-cli/bin/jira"
+MAIL_CONTAINER=""
+MAIL_HOME_DIR=""
+JIRA_HOME_DIR=""
+JIRA_STUB_FILE=""
+JIRA_STUB_PID=""
+
+cleanup() {
+  if [ -n "${MAIL_CONTAINER}" ]; then
+    docker rm -f "${MAIL_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+  [ -z "${MAIL_HOME_DIR}" ] || rm -rf "${MAIL_HOME_DIR}"
+  if [ -n "${JIRA_STUB_PID}" ]; then
+    kill "${JIRA_STUB_PID}" >/dev/null 2>&1 || true
+  fi
+  [ -z "${JIRA_HOME_DIR}" ] || rm -rf "${JIRA_HOME_DIR}"
+  [ -z "${JIRA_STUB_FILE}" ] || rm -f "${JIRA_STUB_FILE}"
+}
+trap cleanup EXIT
+
+fail() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+info() {
+  echo "[INFO] $*"
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"
+}
+
+assert_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  case "$haystack" in
+    *"$needle"*) ;;
+    *) fail "${label}: expected output to contain '${needle}'" ;;
+  esac
+}
+
+run_mail_smoke() {
+  if ! command -v docker >/dev/null 2>&1; then
+    info "mail smoke skipped: docker is not installed"
+    return 0
+  fi
+
+  local image="${GREENMAIL_IMAGE:-greenmail/standalone:latest}"
+  MAIL_CONTAINER="simple-mailcli-smoke-$$"
+  MAIL_HOME_DIR="$(mktemp -d /tmp/simple-mailcli-smoke.XXXXXX)"
+
+  info "starting GreenMail container"
+  docker run -d --name "${MAIL_CONTAINER}" \
+    -p 127.0.0.1::3025 \
+    -p 127.0.0.1::3143 \
+    -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=test:password@localhost' \
+    "${image}" >/dev/null
+
+  local smtp_port="" imap_port=""
+  for _ in $(seq 1 30); do
+    smtp_port="$(docker port "${MAIL_CONTAINER}" 3025/tcp 2>/dev/null | sed 's/.*://')"
+    imap_port="$(docker port "${MAIL_CONTAINER}" 3143/tcp 2>/dev/null | sed 's/.*://')"
+    if [ -n "${smtp_port}" ] && [ -n "${imap_port}" ]; then
+      break
+    fi
+    sleep 1
+  done
+  [ -n "${smtp_port}" ] || fail "GreenMail SMTP port was not assigned"
+  [ -n "${imap_port}" ] || fail "GreenMail IMAP port was not assigned"
+
+  mkdir -p "${MAIL_HOME_DIR}/.config/mail-cli"
+  jq -n \
+    --arg smtp "${smtp_port}" \
+    --arg imap "${imap_port}" \
+    '{
+      default_account: "greenmail",
+      accounts: {
+        greenmail: {
+          provider: "other",
+          email: "test@localhost",
+          username: "test",
+          display_name: "GreenMail Test",
+          imap_server: "127.0.0.1",
+          imap_port: ($imap | tonumber),
+          smtp_server: "127.0.0.1",
+          smtp_port: ($smtp | tonumber),
+          password: "password",
+          tls: "none"
+        }
+      }
+    }' > "${MAIL_HOME_DIR}/.config/mail-cli/config.json"
+  chmod 600 "${MAIL_HOME_DIR}/.config/mail-cli/config.json"
+
+  local send_out inbox_out search_out read_out folder_out auth_out
+  auth_out=""
+  for _ in $(seq 1 30); do
+    if auth_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" auth status 2>&1)" &&
+      case "${auth_out}" in *"Connection OK"*) true ;; *) false ;; esac; then
+      break
+    fi
+    sleep 1
+  done
+  assert_contains "${auth_out}" "Connection OK" "mail auth status"
+
+  send_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" send --to test@localhost --subject 'Simple mail-cli smoke' --body 'hello from smoke')"
+  assert_contains "${send_out}" "Sent to test@localhost" "mail send"
+
+  inbox_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" inbox --limit 5)"
+  assert_contains "${inbox_out}" "Simple mail-cli smoke" "mail inbox"
+  case "${inbox_out}" in
+    *$'\r'*|*'INBOX"'*) fail "mail inbox/folder output contains raw protocol artifacts" ;;
+  esac
+
+  search_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" search 'mail-cli' --limit 5)"
+  assert_contains "${search_out}" "Simple mail-cli smoke" "mail search"
+
+  read_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" read 1)"
+  assert_contains "${read_out}" "hello from smoke" "mail read"
+  assert_contains "${read_out}" "test@localhost" "mail read address"
+
+  folder_out="$(HOME="${MAIL_HOME_DIR}" "${MAIL_BIN}" folder list)"
+  assert_contains "${folder_out}" "INBOX" "mail folder list"
+  case "${folder_out}" in
+    *$'\r'*|*'"'*) fail "mail folder list output contains raw protocol artifacts" ;;
+  esac
+
+  info "mail smoke passed"
+}
+
+run_jira_smoke() {
+  local port
+  JIRA_HOME_DIR="$(mktemp -d /tmp/simple-jira-cli-smoke.XXXXXX)"
+  JIRA_STUB_FILE="$(mktemp /tmp/simple-jira-stub.XXXXXX.py)"
+  port="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+
+  cat > "${JIRA_STUB_FILE}" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import os
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def json(self, value):
+        data = json.dumps(value).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/rest/api/3/myself":
+            self.json({"displayName": "Stub User", "emailAddress": "tester@example.test", "accountId": "abc", "active": True, "timeZone": "UTC"})
+        elif path == "/rest/api/3/project/search":
+            self.json({"values": [{"key": "SMP", "name": "Simple", "projectTypeKey": "software", "lead": {"displayName": "Lead"}}]})
+        elif path == "/wiki/rest/api/content":
+            self.json({"results": [{"id": "42", "title": "Home", "space": {"key": "DOC"}, "version": {"number": 1}, "_links": {"webui": "/spaces/DOC/pages/42/Home"}}]})
+        elif path == "/wiki/rest/api/space":
+            self.json({"results": [{"key": "DOC", "name": "Docs", "type": "global"}]})
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(path.encode())
+
+HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
+PY
+
+  PORT="${port}" python3 "${JIRA_STUB_FILE}" &
+  JIRA_STUB_PID=$!
+  sleep 1
+
+  mkdir -p "${JIRA_HOME_DIR}/.config/jira-cli"
+  jq -n --arg server "http://127.0.0.1:${port}" '{
+    server: $server,
+    email: "tester@example.test",
+    token: "token",
+    default_project: "SMP",
+    default_space: "DOC"
+  }' > "${JIRA_HOME_DIR}/.config/jira-cli/config.json"
+  chmod 600 "${JIRA_HOME_DIR}/.config/jira-cli/config.json"
+
+  local me_out project_out wiki_out space_out
+  me_out="$(HOME="${JIRA_HOME_DIR}" "${JIRA_BIN}" me)"
+  assert_contains "${me_out}" "Stub User" "jira me"
+
+  project_out="$(HOME="${JIRA_HOME_DIR}" "${JIRA_BIN}" project list)"
+  assert_contains "${project_out}" "SMP" "jira project list"
+  assert_contains "${project_out}" "software" "jira project list"
+
+  wiki_out="$(HOME="${JIRA_HOME_DIR}" "${JIRA_BIN}" wiki list)"
+  assert_contains "${wiki_out}" "Home" "jira wiki list"
+
+  space_out="$(HOME="${JIRA_HOME_DIR}" "${JIRA_BIN}" wiki space list)"
+  assert_contains "${space_out}" "DOC" "jira wiki space list"
+
+  info "jira/confluence smoke passed"
+}
+
+main() {
+  need jq
+  need python3
+  bash -n "${MAIL_BIN}" "${ROOT}"/tools/mail-cli/lib/*.shs
+  bash -n "${JIRA_BIN}" "${ROOT}"/tools/jira-cli/lib/*.shs
+
+  run_mail_smoke
+  run_jira_smoke
+  info "mail/jira CLI smoke passed"
+}
+
+main "$@"

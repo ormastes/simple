@@ -41,7 +41,7 @@ impl NativeProjectBuilder {
         Ok(symbols)
     }
 
-    fn freestanding_weak_boot_defsyms(
+    pub(crate) fn freestanding_weak_boot_defsyms(
         object_paths: &[PathBuf],
         boot_objects: &[PathBuf],
         imports: &ModuleImports,
@@ -59,8 +59,12 @@ impl NativeProjectBuilder {
         }
 
         let mut simple_defined = HashSet::new();
+        let mut simple_strong_defined = HashSet::new();
         for obj in object_paths {
-            for (_kind, name) in Self::read_global_symbol_types(obj)? {
+            for (kind, name) in Self::read_global_symbol_types(obj)? {
+                if !matches!(kind.as_str(), "W" | "w" | "V" | "v" | "U") {
+                    simple_strong_defined.insert(name.clone());
+                }
                 simple_defined.insert(name);
             }
         }
@@ -73,6 +77,21 @@ impl NativeProjectBuilder {
             if let Some(target) = variants
                 .iter()
                 .find(|candidate| *candidate != raw && simple_defined.contains(*candidate))
+            {
+                aliases.insert(raw.clone(), target.clone());
+            }
+        }
+
+        for raw in &boot_weak {
+            if aliases.contains_key(raw) {
+                continue;
+            }
+            let suffix = format!("__{}", raw);
+            if let Some(target) = simple_strong_defined
+                .iter()
+                .filter(|candidate| *candidate != raw)
+                .filter(|candidate| candidate.ends_with(&suffix))
+                .min()
             {
                 aliases.insert(raw.clone(), target.clone());
             }

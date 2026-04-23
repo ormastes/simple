@@ -441,8 +441,9 @@ fn _simple_type_aliases_for_source(source: text) -> [[text]]:
     var names: [text] = []
     var types: [text] = []
     val lines = source.split("\n")
-    for raw in lines:
-        val line = raw.trim()
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
         if line.starts_with("type "):
             val eq_opt = line.find("=")
             if eq_opt.?:
@@ -452,6 +453,26 @@ fn _simple_type_aliases_for_source(source: text) -> [[text]]:
                 if alias_name != "" and alias_type != "":
                     names = names.push(alias_name)
                     types = types.push(alias_type)
+        elif line.starts_with("enum "):
+            val name_result = _simple_enum_name_from_header(line)
+            if name_result != "":
+                var variants: [text] = []
+                i = i + 1
+                while i < lines.len():
+                    val variant_line = lines[i].trim()
+                    if variant_line == "":
+                        break
+                    if variant_line.starts_with("@") or variant_line.starts_with("fn ") or variant_line.starts_with("type ") or variant_line.starts_with("enum "):
+                        i = i - 1
+                        break
+                    val variant_name = _simple_enum_variant_name(variant_line)
+                    if variant_name != "":
+                        variants = variants.push(_simple_vhdl_identifier(variant_name))
+                    i = i + 1
+                if variants.len() > 0:
+                    names = names.push(name_result)
+                    types = types.push("enum:" + _simple_vhdl_identifier(name_result) + ":" + variants.join(", "))
+        i = i + 1
     [names, types]
 
 fn _simple_resolve_type_alias(type_text: text, alias_names: [text], alias_types: [text]) -> text:
@@ -509,6 +530,9 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
         val raw_line = lines[i]
         val line = raw_line.trim()
         if line != "":
+            if line.starts_with("enum "):
+                i = _simple_skip_enum_block(lines, i)
+                continue
             if line.starts_with("@generic("):
                 generic_text = _simple_decorator_payload(line, "@generic")
                 i = i + 1
@@ -673,6 +697,9 @@ fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
         if line == "":
             i = i + 1
             continue
+        if line.starts_with("enum "):
+            i = _simple_skip_enum_block(lines, i)
+            continue
         if line.starts_with("type "):
             i = i + 1
             continue
@@ -742,13 +769,58 @@ fn _simple_emit_vhdl_function(fn_name: text, params_text: text, return_type: tex
         return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
     if _simple_is_anonymous_tuple_type_alias(return_type, alias_names, alias_types):
         return Err("VHDL subset fallback anonymous hardware tuple outputs require labels; write the return type as `(name: type, ...)` so VHDL output ports have a stable public API")
-    val return_vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(return_type, alias_names, alias_types))
+    return _simple_single_output_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, alias_names, alias_types)
+
+fn _simple_single_output_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    val resolved_return_type = _simple_resolve_type_alias(return_type, alias_names, alias_types)
+    val return_vhdl_type = _simple_type_to_vhdl(resolved_return_type)
     if return_vhdl_type == "":
-        val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(return_type, alias_names, alias_types), "return type `{return_type}`")
+        val implicit_width_error = _simple_implicit_width_type_error(resolved_return_type, "return type `{return_type}`")
         if implicit_width_error != "":
             return Err(implicit_width_error)
         return Err("VHDL subset fallback unsupported return type: {return_type}")
-    return Err("VHDL subset fallback multi-function hardware currently requires labeled tuple returns")
+
+    val param_result = _simple_param_context(params_text, alias_names, alias_types)
+    if param_result.is_err():
+        return Err(param_result.unwrap_err())
+    val param_ctx = param_result.unwrap()
+    var ports = param_ctx[0].split("\n")
+    var param_names = param_ctx[1].split("\n")
+    var param_types = param_ctx[2].split("\n")
+    if param_ctx[0] == "":
+        ports = []
+    if param_ctx[1] == "":
+        param_names = []
+    if param_ctx[2] == "":
+        param_types = []
+    if clocked_text != "":
+        val clock_ports = _simple_clock_ports(clocked_text, param_names)
+        for clock_port in clock_ports:
+            ports = ports.push(clock_port)
+    ports = ports.push("        result_out : out {return_vhdl_type}")
+
+    val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
+    if expr_result.is_err():
+        return Err(expr_result.unwrap_err())
+    val expr = expr_result.unwrap()
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    out = out + "entity {fn_name} is\n"
+    out = out + _simple_entity_generic_block(generic_text)
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    out = out + "begin\n"
+    if clocked_text != "":
+        out = out + _simple_clocked_assignment(clocked_text, "result_out", resolved_return_type, expr)
+    else:
+        out = out + "    result_out <= {expr};\n"
+    out = out + "end architecture rtl;\n"
+    Ok(out)
 
 fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
     val labels = _simple_labeled_tuple_labels_alias(return_type, alias_names, alias_types)

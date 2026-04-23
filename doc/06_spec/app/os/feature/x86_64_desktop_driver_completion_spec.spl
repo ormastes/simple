@@ -7,35 +7,107 @@ use os.drivers.desktop_driver_summary.{
     desktop_driver_summary_for_uefi_qemu,
     desktop_driver_summary_text
 }
+use os.qemu_runner.{
+    desktop_uefi_required_marker_fragments,
+    desktop_uefi_serial_accepts_completion
+}
+
+fn complete_lane_evidence() -> text:
+    "[desktop-e2e] process-backed:ok app=browser_demo pid=11\n" +
+        "[desktop-e2e] process-backed:ok app=hello_world pid=12\n" +
+        "[desktop-e2e] process-backed:ok app=editor pid=13\n" +
+        "[desktop-e2e] process-backed:ok app=terminal pid=14\n" +
+        "[desktop-e2e] process-backed:ok app=file_manager pid=15\n" +
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=4096\n" +
+        "[desktop-e2e] virtio-net:mac=52:54:00:12:34:56\n" +
+        "[desktop-e2e] virtio-net:rx-queue=ok queue=0\n" +
+        "[desktop-e2e] virtio-net:tx-queue=ok queue=0\n" +
+        "[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500\n"
+
+fn complete_driver_summary() -> text:
+    val complete = desktop_driver_summary_for_uefi_qemu(
+        true,
+        5,
+        "nvme",
+        "virtio-gpu",
+        "virtio-gpu",
+        true,
+        "virtio-net"
+    )
+    desktop_driver_summary_text(complete) + "\n" + complete_lane_evidence()
 
 describe "x86_64 desktop driver completion marker contract":
-    it "accepts the complete QEMU desktop driver summary":
-        val complete = desktop_driver_summary_for_uefi_qemu(
-            true,
-            5,
-            "nvme",
-            "virtio-gpu",
-            "virtio-gpu",
-            true,
-            "virtio-net"
-        )
-        val summary = desktop_driver_summary_text(complete) + "\n[desktop-e2e] process-backed:ok app=browser_demo pid=1\n"
+    it "accepts only the complete QEMU desktop driver summary":
+        val summary = complete_driver_summary()
         expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(true)
 
     it "rejects resident process fallback as incomplete":
         val complete = desktop_driver_summary_for_uefi_qemu(true, 5, "nvme", "bga", "framebuffer", false, "virtio-net")
         val summary = desktop_driver_summary_text(complete) + "\n" +
+            complete_lane_evidence() +
             "[desktop-e2e] process-backed:resident app=browser_demo pid=10737\n"
         expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(false)
 
     it "rejects false VGA acceleration claims":
         val complete = desktop_driver_summary_for_uefi_qemu(true, 5, "nvme", "vga", "vga", true, "virtio-net")
-        val summary = desktop_driver_summary_text(complete)
+        val summary = desktop_driver_summary_text(complete) + "\n" + complete_lane_evidence()
         expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(false)
+
+    it "rejects zero PCI enumeration even with later evidence":
+        val complete = desktop_driver_summary_for_uefi_qemu(true, 0, "nvme", "virtio-gpu", "virtio-gpu", true, "virtio-net")
+        val summary = desktop_driver_summary_text(complete) + "\n" + complete_lane_evidence()
+        expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(false)
+
+    it "rejects absent storage display dma interrupt input or network evidence":
+        val no_storage = desktop_driver_summary_for_uefi_qemu(true, 5, "none", "virtio-gpu", "virtio-gpu", true, "virtio-net")
+        val no_display = desktop_driver_summary_for_uefi_qemu(true, 5, "nvme", "none", "none", false, "virtio-net")
+        val no_network = desktop_driver_summary_for_uefi_qemu(true, 5, "nvme", "virtio-gpu", "virtio-gpu", true, "unsupported")
+        expect(desktop_driver_summary_accepts_complete_qemu(desktop_driver_summary_text(no_storage) + "\n" + complete_lane_evidence())).to_equal(false)
+        expect(desktop_driver_summary_accepts_complete_qemu(desktop_driver_summary_text(no_display) + "\n" + complete_lane_evidence())).to_equal(false)
+        expect(desktop_driver_summary_accepts_complete_qemu(desktop_driver_summary_text(no_network) + "\n" + complete_lane_evidence())).to_equal(false)
+
+    it "requires all process-backed desktop app markers":
+        val summary = complete_driver_summary().replace(
+            "[desktop-e2e] process-backed:ok app=file_manager pid=15\n",
+            ""
+        )
+        expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(false)
+
+    it "requires generic VFS app-read and virtio-net queue smoke evidence":
+        val missing_vfs = complete_driver_summary().replace(
+            "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=4096\n",
+            ""
+        )
+        val missing_rx = complete_driver_summary().replace(
+            "[desktop-e2e] virtio-net:rx-queue=ok queue=0\n",
+            ""
+        )
+        val missing_bounded_smoke = complete_driver_summary().replace(
+            "[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500\n",
+            ""
+        )
+        expect(desktop_driver_summary_accepts_complete_qemu(missing_vfs)).to_equal(false)
+        expect(desktop_driver_summary_accepts_complete_qemu(missing_rx)).to_equal(false)
+        expect(desktop_driver_summary_accepts_complete_qemu(missing_bounded_smoke)).to_equal(false)
+
+    it "wires the runner UEFI serial acceptance to the completion contract":
+        val summary = complete_driver_summary()
+        expect(desktop_uefi_serial_accepts_completion(summary)).to_equal(true)
+        expect(desktop_uefi_serial_accepts_completion(summary.replace(
+            "[desktop-e2e] virtio-net:tx-queue=ok queue=0\n",
+            ""
+        ))).to_equal(false)
+        expect(desktop_uefi_required_marker_fragments()).to_contain("[desktop-e2e] network-smoke:bounded ok packets=")
+
+    it "rejects hidden copy and resident VFS fallbacks":
+        val hidden_copy = complete_driver_summary() + "[desktop-e2e] dma:hidden-copy fallback=true\n"
+        val resident_vfs = complete_driver_summary() + "[desktop-e2e] vfs-app-read:resident path=/sys/apps/browser_demo\n"
+        expect(desktop_driver_summary_accepts_complete_qemu(hidden_copy)).to_equal(false)
+        expect(desktop_driver_summary_accepts_complete_qemu(resident_vfs)).to_equal(false)
 
     it "does not treat the current direct QEMU lane as UEFI-complete":
         val direct = desktop_driver_summary_for_qemu_direct(true)
-        val summary = desktop_driver_summary_text(direct)
+        val summary = desktop_driver_summary_text(direct) + "\n" + complete_lane_evidence()
         expect(summary.contains("boot=qemu-direct")).to_equal(true)
         expect(summary.contains("storage=nvme")).to_equal(true)
         expect(desktop_driver_summary_accepts_complete_qemu(summary)).to_equal(false)
