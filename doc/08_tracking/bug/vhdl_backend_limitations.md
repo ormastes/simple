@@ -72,7 +72,7 @@
 ### L012: Full Simple source-to-VHDL facade is still partial
 **Severity:** High
 **Workaround:** Use the CLI VHDL path for the conservative synthesizable subset, MIR-backed VHDL backend tests, or explicit backend APIs.
-**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes the CLI `simple compile --backend=vhdl` path and the pure Simple fallback for conservative single-function scalar expressions: fixed-width integer and bool ports/results, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, and simple if/mux expressions. Arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the public source path covers the full required surface.
+**Details:** The backend lowering is substantially more complete than the public source facade. Current support includes the CLI `simple compile --backend=vhdl` path and the pure Simple fallback for conservative scalar and labeled-output hardware: fixed-width integer and bool ports/results, payload-free enum ports/results, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple if/mux expressions, labeled tuple outputs, scalar multi-function hardware entities, and deterministic bundle flattening. Arbitrary Simple source-to-MIR-to-VHDL compilation is not yet a complete public path. The existing Rust/runtime bridge remains in place and should not be removed until the public source path covers the full required surface.
 
 ## MIR Lowering Limitations
 
