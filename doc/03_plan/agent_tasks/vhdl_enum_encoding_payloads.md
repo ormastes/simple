@@ -49,11 +49,11 @@ ghdl -r --std=08 <testbench>
 
 ## VHDL-PARITY-009: Payload Enums
 
-Payload enums need an explicit hardware representation. Until that is
-implemented, hardware lowering must reject them with a specific diagnostic
-instead of emitting partial or invalid VHDL.
+Payload enums now use an explicit tagged-record hardware representation. Any
+payload enum behavior outside the supported MIR/source-facade subset must still
+reject with a specific diagnostic instead of emitting partial or invalid VHDL.
 
-Preferred representation when implemented:
+Implemented representation:
 
 - Lower payload enums to a tagged record representation.
 - The tag uses the same stable declaration-order encoding as payload-free enums.
@@ -63,13 +63,6 @@ Preferred representation when implemented:
   implementation.
 - Pattern matching lowers to tag comparisons plus payload field extraction.
 
-Required interim rejection:
-
-- Any payload enum crossing a hardware port boundary is a hard error.
-- Any payload enum local value, return value, or match inside `@hardware` is a
-  hard error until tagged-record lowering exists.
-- The diagnostic must include `payload enum` and identify the enum or variant.
-
 Facade slice status:
 
 - The current Simple-side VHDL source facade cannot support enum-like constants
@@ -77,15 +70,16 @@ Facade slice status:
   declaration and has no top-level enum table or variant metadata.
 - Runnable facade coverage now locks in rejection for enum declarations in the
   source text and for enum-like custom port types such as `State`.
-- Precise `payload enum` diagnostics remain part of the real enum lowering
-  task, where the compiler has access to enum declarations and payload shape.
+- Precise `payload enum` diagnostics remain required for enum lowering paths
+  where the compiler cannot prove a supported payload shape.
 
 Acceptance criteria:
 
-- Payload enum ports are rejected before VHDL emission with a precise diagnostic.
-- Payload enum locals and returns are rejected before VHDL emission.
-- Once tagged-record lowering is implemented, GHDL analysis and simulation cover
-  tag selection, payload extraction, and inactive-field behavior.
+- Payload enum ports/results lower as tagged records.
+- Payload enum locals and returns lower through aggregate construction,
+  projection, and tag-based switch matching where MIR shape is supported.
+- GHDL analysis and simulation cover tag selection, payload extraction, and
+  inactive-field behavior.
 
 Verification:
 
