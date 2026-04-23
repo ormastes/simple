@@ -211,7 +211,6 @@ source-of-truth path. Runnable coverage for the selected milestone is in
 |--------|---------|
 | **stable** | Fully implemented, tested, and verified. Covered by unit tests and golden file regression. |
 | **supported** | Implemented and working. May have limited test coverage. |
-| **partial** | Partially implemented. Known gaps documented. |
 | **deferred** | Explicitly out of scope for current milestone. Unsupported input produces hard compile error. |
 
 ## See Also

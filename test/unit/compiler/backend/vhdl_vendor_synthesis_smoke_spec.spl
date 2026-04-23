@@ -7,10 +7,6 @@ use std.spec
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 fn env_value(name: text) -> text:
     rt_env_get(name) ?? ""
@@ -110,7 +106,6 @@ fn write_vendor_sidecar(vendor: text, vhdl_path: text, report_path: text):
         expect(shell_write_text(tcl_path, tcl)).to_equal(true)
 
 fn run_vendor_smoke(vendor: text, tool: text, vhdl_path: text, report_path: text, log_path: text, command_line: text) -> i64:
-    rt_dir_create("build/vhdl/vendor-smoke", true)
     expect(shell_write_text(vhdl_path, vendor_smoke_vhdl())).to_equal(true)
     write_vendor_sidecar(vendor, vhdl_path, report_path)
     val (stdout, stderr, code) = if vendor == "vivado":
@@ -175,13 +170,14 @@ describe "VHDL vendor synthesis smoke":
             val diagnostic = disabled_diagnostic(vendor, tool, report_path, log_path)
             print diagnostic
             expect(diagnostic).to_contain("status=disabled")
-        elif available != true:
-            val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
-            print diagnostic
-            expect(diagnostic).to_contain("status=missing-tool")
-            expect(diagnostic).to_contain(tool)
         else:
-            expect(available).to_equal(true)
+            if available:
+                expect(available).to_equal(true)
+            else:
+                val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=missing-tool")
+                expect(diagnostic).to_contain(tool)
 
     it "captures command report and log when vendor smoke is enabled":
         val vendor = selected_vendor()
@@ -195,18 +191,19 @@ describe "VHDL vendor synthesis smoke":
             val diagnostic = disabled_diagnostic(vendor, tool, report_path, log_path)
             print diagnostic
             expect(diagnostic).to_contain("status=disabled")
-        elif available != true:
-            val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
-            print diagnostic
-            expect(diagnostic).to_contain("status=missing-tool")
         else:
-            val code = run_vendor_smoke(vendor, tool, vhdl_path, report_path, log_path, command_line)
-            val diagnostic = "DONE: status=executed; vendor=" + vendor + "; tool=" + tool + "; exit_code={code}; report_path=" + report_path + "; log_path=" + log_path
-            print diagnostic
-            expect(code).to_equal(0)
-            expect(shell_file_exists(report_path)).to_equal(true)
-            expect(shell_file_exists(log_path)).to_equal(true)
-            expect(shell_read_text(report_path)).to_contain("command: " + command_line)
-            expect(shell_read_text(report_path)).to_contain("exit_code: 0")
-            expect(shell_read_text(log_path)).to_contain("stdout:")
-            expect(shell_read_text(log_path)).to_contain("stderr:")
+            if available:
+                val code = run_vendor_smoke(vendor, tool, vhdl_path, report_path, log_path, command_line)
+                val diagnostic = "DONE: status=executed; vendor=" + vendor + "; tool=" + tool + "; exit_code={code}; report_path=" + report_path + "; log_path=" + log_path
+                print diagnostic
+                expect(code).to_equal(0)
+                expect(shell_file_exists(report_path)).to_equal(true)
+                expect(shell_file_exists(log_path)).to_equal(true)
+                expect(shell_read_text(report_path)).to_contain("command: " + command_line)
+                expect(shell_read_text(report_path)).to_contain("exit_code: 0")
+                expect(shell_read_text(log_path)).to_contain("stdout:")
+                expect(shell_read_text(log_path)).to_contain("stderr:")
+            else:
+                val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=missing-tool")

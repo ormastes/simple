@@ -8,7 +8,7 @@ ROM/RAM templates, generated one-DUT and multi-DUT/multi-phase testbench
 artifacts, source-map sidecars, vendor smoke skip/report/log behavior, and
 documentation are implemented and verified.
 Broad HLS behavior outside that selected subset is explicitly deferred and must
-fail with hard diagnostics instead of emitting partial VHDL.
+fail with hard diagnostics instead of emitting incomplete VHDL.
 
 Status values:
 
