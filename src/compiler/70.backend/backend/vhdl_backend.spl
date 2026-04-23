@@ -2277,7 +2277,7 @@ class VhdlBackend:
                 val type_def = type_def_result.unwrap()
                 match type_def.kind:
                     case Enum(variants):
-                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "aggregate", span)
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "aggregate", span)
                     case _:
                         Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
@@ -2346,7 +2346,7 @@ class VhdlBackend:
                 val type_def = type_def_result.unwrap()
                 match type_def.kind:
                     case Enum(variants):
-                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "process aggregate", span)
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "process aggregate", span)
                     case _:
                         Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
@@ -2415,24 +2415,97 @@ class VhdlBackend:
                 val type_def = type_def_result.unwrap()
                 match type_def.kind:
                     case Enum(variants):
-                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, "helper aggregate", span)
+                        self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "helper aggregate", span)
                     case _:
                         Err(self.backend_error("Aggregate Enum target {type_def.name} is not an enum type"))
             case _:
                 Err(self.backend_error("Unsupported VHDL helper aggregate kind: {kind}"))
 
-    fn enum_aggregate_literal_to_vhdl(type_def: MirTypeDef, variants: [MirVariantDef], variant: i64, lowering_context: text, span: Span?) -> Result<text, CompileError>:
+    fn enum_aggregate_literal_to_vhdl(type_def: MirTypeDef, variants: [MirVariantDef], variant: i64, operands: [MirOperand], lowering_context: text, span: Span?) -> Result<text, CompileError>:
         if variant < 0 or variant >= variants.len():
             return Err(self.backend_error("Enum aggregate variant index {variant} out of range for {type_def.name}"))
         if variants.len() == 0:
             return Err(self.backend_error("Enum aggregate destination {type_def.name} has no variants"))
+        if self.enum_has_payload(variants):
+            return self.payload_enum_aggregate_to_vhdl(type_def, variants, variant, operands, lowering_context, span)
+        if operands.len() != 0:
+            return Err(self.backend_error_at("Payload-free enum `{type_def.name}.{variants[variant].name}` expects 0 payload operands, got {operands.len()} in {lowering_context} lowering", span))
+        Ok(self.sanitize_vhdl_identifier(variants[variant].name))
+
+    fn payload_enum_aggregate_to_vhdl(type_def: MirTypeDef, variants: [MirVariantDef], variant: i64, operands: [MirOperand], lowering_context: text, span: Span?) -> Result<text, CompileError>:
+        val selected = variants[variant]
+        if selected.payload.?:
+            if operands.len() != 1:
+                return Err(self.backend_error_at("Payload enum `{type_def.name}.{selected.name}` expects 1 payload operand, got {operands.len()} in {lowering_context} lowering", span))
+        elif operands.len() != 0:
+            return Err(self.backend_error_at("Payload-free enum `{type_def.name}.{selected.name}` expects 0 payload operands, got {operands.len()} in {lowering_context} lowering", span))
+
+        var entries: [text] = ["tag => {self.sanitize_vhdl_identifier(selected.name)}"]
+        var payload_operand_used = false
         for candidate in variants:
             if candidate.payload.?:
-                return Err(self.backend_error_at(
-                    self.type_mapper.payload_enum_diagnostic(type_def.name, candidate.name, "{lowering_context} lowering"),
-                    span
-                ))
-        Ok(self.sanitize_vhdl_identifier(variants[variant].name))
+                val field_name = self.payload_enum_field_name(candidate)
+                val default_result = self.default_vhdl_value(candidate.payload.unwrap(), span)
+                if default_result.is_err():
+                    return Err(default_result.unwrap_err())
+                var value = default_result.unwrap()
+                if candidate.discriminant == selected.discriminant and selected.payload.?:
+                    val payload_value_result = self.payload_operand_to_vhdl_for_context(operands[0], lowering_context)
+                    if payload_value_result.is_err():
+                        return Err(payload_value_result.unwrap_err())
+                    value = payload_value_result.unwrap()
+                    payload_operand_used = true
+                entries = entries.push("{field_name} => {value}")
+        if selected.payload.? and not payload_operand_used:
+            return Err(self.backend_error_at("Payload enum `{type_def.name}.{selected.name}` did not lower a payload operand", span))
+        Ok("({entries.join(\", \")})")
+
+    fn enum_has_payload(variants: [MirVariantDef]) -> bool:
+        for variant in variants:
+            if variant.payload.?:
+                return true
+        false
+
+    fn payload_enum_field_name(variant: MirVariantDef) -> text:
+        self.sanitize_vhdl_identifier(variant.name) + "_payload"
+
+    fn payload_operand_to_vhdl_for_context(operand: MirOperand, lowering_context: text) -> Result<text, CompileError>:
+        if lowering_context == "process aggregate":
+            return self.process_operand_to_vhdl(operand)
+        if lowering_context == "helper aggregate":
+            return self.helper_operand_to_vhdl(operand)
+        self.operand_to_vhdl(operand)
+
+    fn default_vhdl_value(ty: MirType, span: Span?) -> Result<text, CompileError>:
+        match ty.kind:
+            case I64:
+                Ok("to_signed(0, 64)")
+            case I32:
+                Ok("to_signed(0, 32)")
+            case I16:
+                Ok("to_signed(0, 16)")
+            case I8:
+                Ok("to_signed(0, 8)")
+            case U64:
+                Ok("to_unsigned(0, 64)")
+            case U32:
+                Ok("to_unsigned(0, 32)")
+            case U16:
+                Ok("to_unsigned(0, 16)")
+            case U8:
+                Ok("to_unsigned(0, 8)")
+            case Bool:
+                if self.use_resolved:
+                    Ok("'0'")
+                else:
+                    Ok("'0'")
+            case Bits(width, signed):
+                if signed:
+                    Ok("to_signed(0, {width})")
+                else:
+                    Ok("to_unsigned(0, {width})")
+            case _:
+                Err(self.backend_error_at("Payload enum default value is not defined for payload type `{ty.kind}`", span))
 
     fn field_name_for_operand(base: MirOperand, field: i64) -> Result<text, CompileError>:
         val type_result = self.operand_type(base)
