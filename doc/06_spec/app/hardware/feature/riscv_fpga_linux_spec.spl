@@ -8,7 +8,7 @@ test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl.
 
 import std.spec
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvXlen, RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 
 describe "REQ-RFL-001..002: Xilinx board profile":
     it "accepts generic Xilinx profile for prepare and rejects it for hardware boot":
@@ -44,3 +44,50 @@ describe "REQ-RFL-006..007: deterministic pre-hardware Vivado plan":
         expect(manifest.vivado_tcl_plan()).to_contain("add_files build/fpga/rv64/rtl")
         expect(manifest.readiness_summary()).to_contain("rv32:core-generated:simple_rv32i_core")
         expect(manifest.readiness_summary()).to_contain("rv64:core-generated:simple_rv64i_core")
+
+describe "REQ-RFL-008: generated Simple hardware source":
+    it "emits bounded RV32 and RV64 Simple hardware sources before board boot":
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_system_spec")
+        expect(result.is_ok()).to_equal(true)
+        val bundle = result.ok().unwrap()
+        expect(bundle.generated_files.len()).to_equal(7)
+
+        val rv32_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32i_core.spl")
+        val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64i_core.spl")
+        expect(rv32_source).to_contain("@hardware")
+        expect(rv32_source).to_contain("@clocked")
+        expect(rv32_source).to_contain("bitfield Rv32Instruction(u32):")
+        expect(rv32_source).to_contain("opcode: 7")
+        expect(rv32_source).to_contain("fn simple_rv32i_core")
+        expect(rv32_source).to_contain("inst.opcode -> imem_rdata(6 downto 0)")
+        expect(rv64_source).to_contain("@hardware")
+        expect(rv64_source).to_contain("@clocked")
+        expect(rv64_source).to_contain("bitfield Rv64Instruction(u32):")
+        expect(rv64_source).to_contain("opcode: 7")
+        expect(rv64_source).to_contain("fn simple_rv64i_core")
+        expect(rv64_source).to_contain("inst.opcode -> imem_rdata(6 downto 0)")
+
+describe "REQ-RFL-009: VHDL source-map manifest":
+    it "emits VHDL source maps and manifest entries for generated lane artifacts":
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_system_spec")
+        expect(result.is_ok()).to_equal(true)
+        val bundle = result.ok().unwrap()
+
+        val rv32_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32i_core.vhd")
+        val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64i_core.vhd")
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        expect(rv32_core).to_contain("-- generated-from: simple_rv32i_core.spl")
+        expect(rv32_core).to_contain("-- source-map: Rv32Instruction.opcode => imem_rdata(6 downto 0)")
+        expect(rv32_core).to_contain("-- source-map: Rv32Instruction.rd => imem_rdata(11 downto 7)")
+        expect(rv32_core).to_contain("-- source-map: Rv32Instruction.rs1 => imem_rdata(19 downto 15)")
+        expect(rv32_core).to_contain("-- readiness: core-generated linux-boot-validated=false")
+        expect(rv64_core).to_contain("-- generated-from: simple_rv64i_core.spl")
+        expect(rv64_core).to_contain("-- source-map: Rv64Instruction.opcode => imem_rdata(6 downto 0)")
+        expect(rv64_core).to_contain("-- source-map: Rv64Instruction.rs2 => imem_rdata(24 downto 20)")
+        expect(rv64_core).to_contain("-- readiness: core-generated linux-boot-validated=false")
+        expect(manifest_text).to_contain("source_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32i_core.spl\"")
+        expect(manifest_text).to_contain("package_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32i_core_pkg.vhd\"")
+        expect(manifest_text).to_contain("core_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32i_core.vhd\"")
+        expect(manifest_text).to_contain("source_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64i_core.spl\"")
+        expect(manifest_text).to_contain("package_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64i_core_pkg.vhd\"")
+        expect(manifest_text).to_contain("core_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64i_core.vhd\"")

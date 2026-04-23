@@ -239,6 +239,16 @@ impl RiscvFpgaLane:
             return "Rv32Instruction"
         "Rv64Instruction"
 
+    fn base_integer_instruction_mnemonics() -> [text]:
+        [
+            "lui", "auipc", "jal", "jalr",
+            "beq", "bne", "blt", "bge", "bltu", "bgeu",
+            "lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw",
+            "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
+            "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
+            "fence", "ecall", "ebreak"
+        ]
+
     fn package_name() -> text:
         "simple_{self.xlen.to_text()}i_core_pkg"
 
@@ -288,6 +298,7 @@ impl RiscvFpgaLane:
             "    # inst.rd -> imem_rdata(11 downto 7)\n" +
             "    # inst.rs1 -> imem_rdata(19 downto 15)\n" +
             "    # inst.rs2 -> imem_rdata(24 downto 20)\n" +
+            "    # base integer instructions: {self.base_integer_instruction_mnemonics().join(\",\")}\n" +
             "    imem_rdata as u{self.xlen.bits()}\n"
 
     fn hardware_source_contract_errors() -> [text]:
@@ -301,6 +312,8 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must preserve @hardware metadata")
         if not source.contains("@clocked"):
             errors.push("{self.xlen.to_text()} hardware source must preserve @clocked metadata")
+        if not source.contains("base integer instructions:"):
+            errors.push("{self.xlen.to_text()} hardware source must list RV base integer instructions")
         if source.contains("pass_todo") or source.contains("todo("):
             errors.push("{self.xlen.to_text()} hardware source must not contain stubs")
         if source.contains("async ") or source.contains("spawn ") or source.contains("rt_file_"):
@@ -379,6 +392,9 @@ impl RiscvFpgaLane:
             "        variable addr_i : unsigned(XLEN - 1 downto 0);\n" +
             "        variable branch_i : signed(XLEN - 1 downto 0);\n" +
             "        variable jump_i : signed(XLEN - 1 downto 0);\n" +
+            "        variable imm_u : xword_t;\n" +
+            "        variable branch_taken : boolean;\n" +
+            "        variable shift_i : natural range 0 to 63;\n" +
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
@@ -395,21 +411,85 @@ impl RiscvFpgaLane:
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
             "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
             "                imm_i := resize(signed(imem_rdata(31 downto 20)), XLEN);\n" +
+            "                imm_u := std_logic_vector(resize(signed(imem_rdata(31 downto 12) & x\"000\"), XLEN));\n" +
             "                branch_i := resize(signed(imem_rdata(31) & imem_rdata(7) & imem_rdata(30 downto 25) & imem_rdata(11 downto 8) & '0'), XLEN);\n" +
             "                jump_i := resize(signed(imem_rdata(31) & imem_rdata(19 downto 12) & imem_rdata(20) & imem_rdata(30 downto 21) & '0'), XLEN);\n" +
+            "                branch_taken := false;\n" +
+            "                shift_i := to_integer(unsigned(regs(rs2_i)(5 downto 0)));\n" +
             "                case imem_rdata(6 downto 0) is\n" +
+            "                    when \"0110111\" =>\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= imm_u;\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    when \"0010111\" =>\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= std_logic_vector(signed(pc_reg) + signed(imm_u));\n" +
+            "                        end if;\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0010011\" =>\n" +
-            "                        if imem_rdata(14 downto 12) = \"000\" and rd_i /= 0 then\n" +
-            "                            regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            case imem_rdata(14 downto 12) is\n" +
+            "                                when \"000\" => regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
+            "                                when \"010\" =>\n" +
+            "                                    if signed(regs(rs1_i)) < imm_i then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                    end if;\n" +
+            "                                when \"011\" =>\n" +
+            "                                    if unsigned(regs(rs1_i)) < unsigned(std_logic_vector(imm_i)) then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                    end if;\n" +
+            "                                when \"100\" => regs(rd_i) <= regs(rs1_i) xor std_logic_vector(imm_i);\n" +
+            "                                when \"110\" => regs(rd_i) <= regs(rs1_i) or std_logic_vector(imm_i);\n" +
+            "                                when \"111\" => regs(rd_i) <= regs(rs1_i) and std_logic_vector(imm_i);\n" +
+            "                                when \"001\" => regs(rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                when \"101\" =>\n" +
+            "                                    if imem_rdata(30) = '1' then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                    end if;\n" +
+            "                                when others => trap_reg <= '1';\n" +
+            "                            end case;\n" +
             "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0110011\" =>\n" +
-            "                        if imem_rdata(14 downto 12) = \"000\" and rd_i /= 0 then\n" +
-            "                            if imem_rdata(30) = '1' then\n" +
-            "                                regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
-            "                            else\n" +
-            "                                regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
-            "                            end if;\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            case imem_rdata(14 downto 12) is\n" +
+            "                                when \"000\" =>\n" +
+            "                                    if imem_rdata(30) = '1' then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
+            "                                    end if;\n" +
+            "                                when \"001\" => regs(rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), shift_i));\n" +
+            "                                when \"010\" =>\n" +
+            "                                    if signed(regs(rs1_i)) < signed(regs(rs2_i)) then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                    end if;\n" +
+            "                                when \"011\" =>\n" +
+            "                                    if unsigned(regs(rs1_i)) < unsigned(regs(rs2_i)) then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                    end if;\n" +
+            "                                when \"100\" => regs(rd_i) <= regs(rs1_i) xor regs(rs2_i);\n" +
+            "                                when \"101\" =>\n" +
+            "                                    if imem_rdata(30) = '1' then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), shift_i));\n" +
+            "                                    else\n" +
+            "                                        regs(rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), shift_i));\n" +
+            "                                    end if;\n" +
+            "                                when \"110\" => regs(rd_i) <= regs(rs1_i) or regs(rs2_i);\n" +
+            "                                when \"111\" => regs(rd_i) <= regs(rs1_i) and regs(rs2_i);\n" +
+            "                                when others => trap_reg <= '1';\n" +
+            "                            end case;\n" +
             "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0000011\" =>\n" +
@@ -427,16 +507,34 @@ impl RiscvFpgaLane:
             "                        dmem_we_reg <= '1';\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"1100011\" =>\n" +
-            "                        if imem_rdata(14 downto 12) = \"000\" and regs(rs1_i) = regs(rs2_i) then\n" +
+            "                        case imem_rdata(14 downto 12) is\n" +
+            "                            when \"000\" => branch_taken := regs(rs1_i) = regs(rs2_i);\n" +
+            "                            when \"001\" => branch_taken := regs(rs1_i) /= regs(rs2_i);\n" +
+            "                            when \"100\" => branch_taken := signed(regs(rs1_i)) < signed(regs(rs2_i));\n" +
+            "                            when \"101\" => branch_taken := signed(regs(rs1_i)) >= signed(regs(rs2_i));\n" +
+            "                            when \"110\" => branch_taken := unsigned(regs(rs1_i)) < unsigned(regs(rs2_i));\n" +
+            "                            when \"111\" => branch_taken := unsigned(regs(rs1_i)) >= unsigned(regs(rs2_i));\n" +
+            "                            when others => trap_reg <= '1';\n" +
+            "                        end case;\n" +
+            "                        if branch_taken then\n" +
             "                            pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + branch_i));\n" +
             "                        else\n" +
             "                            pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                        end if;\n" +
+            "                    when \"1100111\" =>\n" +
+            "                        if rd_i /= 0 then\n" +
+            "                            regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                        end if;\n" +
+            "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
+            "                        addr_i(0) := '0';\n" +
+            "                        pc_reg <= std_logic_vector(addr_i);\n" +
             "                    when \"1101111\" =>\n" +
             "                        if rd_i /= 0 then\n" +
             "                            regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + jump_i));\n" +
+            "                    when \"0001111\" =>\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"1110011\" =>\n" +
             "                        halt_reg <= '1';\n" +
             "                    when others =>\n" +
