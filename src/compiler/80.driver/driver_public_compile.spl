@@ -620,6 +620,10 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     out = out + "use ieee.std_logic_1164.all;\n"
     out = out + "use ieee.numeric_std.all;\n\n"
     out = out + "entity {fn_name} is\n"
+    val decl_result = _simple_entity_type_declaration_block(aliases[0], aliases[1])
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
     out = out + _simple_entity_generic_block(generic_text)
     out = out + "    port (\n"
     out = out + ports.join("\n") + "\n"
@@ -808,6 +812,10 @@ fn _simple_single_output_vhdl(fn_name: text, params_text: text, return_type: tex
     out = out + "use ieee.std_logic_1164.all;\n"
     out = out + "use ieee.numeric_std.all;\n\n"
     out = out + "entity {fn_name} is\n"
+    val decl_result = _simple_entity_type_declaration_block(alias_names, alias_types)
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
     out = out + _simple_entity_generic_block(generic_text)
     out = out + "    port (\n"
     out = out + ports.join("\n") + "\n"
@@ -891,6 +899,10 @@ fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: tex
     out = out + "use ieee.std_logic_1164.all;\n"
     out = out + "use ieee.numeric_std.all;\n\n"
     out = out + "entity {fn_name} is\n"
+    val decl_result = _simple_entity_type_declaration_block(alias_names, alias_types)
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
     out = out + _simple_entity_generic_block(generic_text)
     out = out + "    port (\n"
     out = out + ports.join("\n") + "\n"
@@ -1132,11 +1144,101 @@ fn _simple_vhdl_unsupported_parity_gap(source: text) -> text:
     while i < lines.len():
         val line = lines[i].trim()
         if line.starts_with("enum "):
-            return "VHDL Python-HDL parity gap: enum encoding is not implemented in the pure Simple VHDL backend"
+            if _simple_enum_block_has_payload(lines, i):
+                return "VHDL Python-HDL parity gap: payload enum lowering requires tagged-record representation support before VHDL emission"
         if _simple_vhdl_line_looks_like_memory(line):
             return "VHDL Python-HDL parity gap: ROM/RAM inference is not implemented in the pure Simple VHDL backend"
         i = i + 1
     ""
+
+fn _simple_enum_name_from_header(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("enum "):
+        return ""
+    val after_enum = trimmed.substring(5, trimmed.len()).trim()
+    val colon_opt = after_enum.find(":")
+    if colon_opt.?:
+        return after_enum.substring(0, colon_opt.unwrap()).trim()
+    after_enum
+
+fn _simple_enum_variant_name(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return ""
+    val paren_opt = trimmed.find("(")
+    if paren_opt.?:
+        return trimmed.substring(0, paren_opt.unwrap()).trim()
+    val colon_opt = trimmed.find(":")
+    if colon_opt.?:
+        return trimmed.substring(0, colon_opt.unwrap()).trim()
+    trimmed
+
+fn _simple_skip_enum_block(lines: [text], start_index: i64) -> i64:
+    var i = start_index + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            return i + 1
+        if line.starts_with("@") or line.starts_with("fn ") or line.starts_with("type ") or line.starts_with("enum "):
+            return i
+        i = i + 1
+    i
+
+fn _simple_enum_block_has_payload(lines: [text], start_index: i64) -> bool:
+    var i = start_index + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            return false
+        if line.starts_with("@") or line.starts_with("fn ") or line.starts_with("type ") or line.starts_with("enum "):
+            return false
+        if line.contains("("):
+            return true
+        i = i + 1
+    false
+
+fn _simple_enum_alias_type_name(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val sep_opt = rest.find(":")
+    if sep_opt.?:
+        return rest.substring(0, sep_opt.unwrap())
+    rest
+
+fn _simple_enum_alias_variants(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val sep_opt = rest.find(":")
+    if sep_opt.?:
+        return rest.substring(sep_opt.unwrap() + 1, rest.len()).trim()
+    ""
+
+fn _simple_entity_type_declaration_block(alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    var out = ""
+    var type_names: [text] = []
+    var i = 0
+    while i < alias_names.len() and i < alias_types.len():
+        val alias_type = alias_types[i]
+        if alias_type.starts_with("enum:"):
+            val type_name = _simple_enum_alias_type_name(alias_type)
+            if type_name == "":
+                return Err("VHDL subset fallback enum type has an empty VHDL name")
+            if _text_list_contains(type_names, type_name):
+                return Err("VHDL subset fallback duplicate enum type after VHDL sanitization: {alias_names[i]}")
+            val variants_text = _simple_enum_alias_variants(alias_type)
+            if variants_text == "":
+                return Err("VHDL subset fallback enum `{alias_names[i]}` must declare at least one payload-free variant")
+            val variants = variants_text.split(",")
+            var seen_variants: [text] = []
+            for raw_variant in variants:
+                val variant = raw_variant.trim()
+                if variant == "":
+                    return Err("VHDL subset fallback enum `{alias_names[i]}` has an empty variant")
+                if _text_list_contains(seen_variants, variant):
+                    return Err("VHDL subset fallback duplicate enum variant after VHDL sanitization: {variant}")
+                seen_variants = seen_variants.push(variant)
+            type_names = type_names.push(type_name)
+            out = out + "    type {type_name} is ({variants_text});\n"
+        i = i + 1
+    Ok(out)
 
 fn _simple_vhdl_line_looks_like_memory(line: text) -> bool:
     val trimmed = line.trim()
@@ -1225,6 +1327,8 @@ fn _simple_strip_return(expr: text) -> text:
     expr
 
 fn _simple_type_to_vhdl(type_name: text) -> text:
+    if type_name.starts_with("enum:"):
+        return _simple_enum_alias_type_name(type_name)
     match type_name:
         case "i8": "signed(7 downto 0)"
         case "i16": "signed(15 downto 0)"
@@ -1720,6 +1824,8 @@ fn _simple_operand_to_vhdl(value: text, type_name: text, param_names: [text], pa
     val param_type = _simple_param_type(value, param_names, param_types)
     if param_type != "":
         return Ok(_simple_param_vhdl_name(value))
+    if type_name.starts_with("enum:"):
+        return Ok(_simple_vhdl_identifier(value))
     val first = if value.len() > 0: value.substring(0, 1) else: ""
     if _is_decimal_digit(first):
         match type_name:
