@@ -261,6 +261,10 @@ impl TypeChecker {
                 let converted: Vec<Type> = types.iter().map(|t| self.ast_type_to_type(t)).collect();
                 Type::Tuple(converted)
             }
+            AstType::LabeledTuple(fields) => {
+                let converted: Vec<Type> = fields.iter().map(|field| self.ast_type_to_type(&field.ty)).collect();
+                Type::Tuple(converted)
+            }
             AstType::Array { element, .. } => Type::Array(Box::new(self.ast_type_to_type(element))),
             AstType::Function { params, ret } => {
                 let param_types: Vec<Type> = params.iter().map(|p| self.ast_type_to_type(p)).collect();

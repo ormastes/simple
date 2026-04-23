@@ -379,6 +379,16 @@ impl McpGenerator {
                     types.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
                 )
             }
+            Type::LabeledTuple(fields) => {
+                format!(
+                    "({})",
+                    fields
+                        .iter()
+                        .map(|field| format!("{}: {}", field.label, self.format_type(&field.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             _ => "…".to_string(),
         }
     }

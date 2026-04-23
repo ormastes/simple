@@ -51,6 +51,13 @@ pub(super) fn format_type(ty: &Type) -> String {
             let types_str: Vec<String> = types.iter().map(format_type).collect();
             format!("({})", types_str.join(", "))
         }
+        Type::LabeledTuple(fields) => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.label, format_type(&field.ty)))
+                .collect();
+            format!("({})", fields_str.join(", "))
+        }
         Type::Function { params, ret } => {
             let params_str: Vec<String> = params.iter().map(format_type).collect();
             let ret_str = ret.as_ref().map(|r| format_type(r)).unwrap_or_else(|| "()".to_string());

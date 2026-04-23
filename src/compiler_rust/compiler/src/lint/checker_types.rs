@@ -249,6 +249,11 @@ impl LintChecker {
                     self.check_type_in_public_api(t, span, name, context);
                 }
             }
+            Type::LabeledTuple(fields) => {
+                for field in fields {
+                    self.check_type_in_public_api(&field.ty, span, name, context);
+                }
+            }
             Type::Generic { args, .. } => {
                 for arg in args {
                     self.check_type_in_public_api(arg, span, name, context);
