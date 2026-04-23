@@ -457,6 +457,7 @@ fn _simple_type_aliases_for_source(source: text) -> [[text]]:
             val name_result = _simple_enum_name_from_header(line)
             if name_result != "":
                 var variants: [text] = []
+                var payload_fields: [text] = []
                 i = i + 1
                 while i < lines.len():
                     val variant_line = lines[i].trim()
@@ -467,11 +468,16 @@ fn _simple_type_aliases_for_source(source: text) -> [[text]]:
                         break
                     val variant_name = _simple_enum_variant_name(variant_line)
                     if variant_name != "":
-                        variants = variants.push(_simple_vhdl_identifier(variant_name))
+                        val safe_variant = _simple_vhdl_identifier(variant_name)
+                        variants = variants.push(safe_variant)
+                        val payload_type = _simple_enum_variant_payload_type(variant_line)
+                        if payload_type != "":
+                            payload_fields = payload_fields.push(safe_variant + "_payload:" + payload_type)
                     i = i + 1
                 if variants.len() > 0:
                     names = names.push(name_result)
-                    types = types.push("enum:" + _simple_vhdl_identifier(name_result) + "_t:" + variants.join(", "))
+                    val payload_suffix = if payload_fields.len() > 0: "|" + payload_fields.join(",") else: ""
+                    types = types.push("enum:" + _simple_vhdl_identifier(name_result) + "_t:" + variants.join(", ") + payload_suffix)
         i = i + 1
     [names, types]
 
@@ -1143,9 +1149,6 @@ fn _simple_vhdl_unsupported_parity_gap(source: text) -> text:
     var i = 0
     while i < lines.len():
         val line = lines[i].trim()
-        if line.starts_with("enum "):
-            if _simple_enum_block_has_payload(lines, i):
-                return "VHDL Python-HDL parity gap: payload enum lowering requires tagged-record representation support before VHDL emission"
         if _simple_vhdl_line_looks_like_memory(line):
             return "VHDL Python-HDL parity gap: ROM/RAM inference is not implemented in the pure Simple VHDL backend"
         i = i + 1
@@ -1172,6 +1175,18 @@ fn _simple_enum_variant_name(line: text) -> text:
     if colon_opt.?:
         return trimmed.substring(0, colon_opt.unwrap()).trim()
     trimmed
+
+fn _simple_enum_variant_payload_type(line: text) -> text:
+    val trimmed = line.trim()
+    val open_opt = trimmed.find("(")
+    if not open_opt.? or not trimmed.ends_with(")"):
+        return ""
+    val open_index = open_opt.unwrap()
+    val inner = trimmed.substring(open_index + 1, trimmed.len() - 1).trim()
+    val sep_opt = inner.find(":")
+    if not sep_opt.?:
+        return ""
+    inner.substring(sep_opt.unwrap() + 1, inner.len()).trim()
 
 fn _simple_skip_enum_block(lines: [text], start_index: i64) -> i64:
     var i = start_index + 1
@@ -1208,7 +1223,18 @@ fn _simple_enum_alias_variants(alias_type: text) -> text:
     val rest = alias_type.substring(5, alias_type.len())
     val sep_opt = rest.find(":")
     if sep_opt.?:
-        return rest.substring(sep_opt.unwrap() + 1, rest.len()).trim()
+        val variant_and_payload = rest.substring(sep_opt.unwrap() + 1, rest.len()).trim()
+        val payload_sep = variant_and_payload.find("|")
+        if payload_sep.?:
+            return variant_and_payload.substring(0, payload_sep.unwrap()).trim()
+        return variant_and_payload
+    ""
+
+fn _simple_enum_alias_payloads(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val payload_sep = rest.find("|")
+    if payload_sep.?:
+        return rest.substring(payload_sep.unwrap() + 1, rest.len()).trim()
     ""
 
 fn _simple_entity_type_declaration_block(entity_name: text, alias_names: [text], alias_types: [text]) -> Result<text, text>:
@@ -1236,7 +1262,31 @@ fn _simple_entity_type_declaration_block(entity_name: text, alias_names: [text],
                     return Err("VHDL subset fallback duplicate enum variant after VHDL sanitization: {variant}")
                 seen_variants = seen_variants.push(variant)
             type_names = type_names.push(type_name)
-            declarations = declarations + "    type {type_name} is ({variants_text});\n"
+            val payloads_text = _simple_enum_alias_payloads(alias_type)
+            if payloads_text == "":
+                declarations = declarations + "    type {type_name} is ({variants_text});\n"
+            else:
+                val tag_type = type_name + "_tag_t"
+                declarations = declarations + "    type {tag_type} is ({variants_text});\n"
+                declarations = declarations + "    type {type_name} is record\n"
+                declarations = declarations + "        tag : {tag_type};\n"
+                val payload_fields = payloads_text.split(",")
+                var payload_seen: [text] = ["tag"]
+                for payload_field in payload_fields:
+                    val trimmed_payload = payload_field.trim()
+                    val payload_sep = trimmed_payload.find(":")
+                    if not payload_sep.?:
+                        return Err("VHDL subset fallback enum `{alias_names[i]}` has malformed payload field `{trimmed_payload}`")
+                    val payload_name = trimmed_payload.substring(0, payload_sep.unwrap()).trim()
+                    val payload_type = trimmed_payload.substring(payload_sep.unwrap() + 1, trimmed_payload.len()).trim()
+                    if _text_list_contains(payload_seen, payload_name):
+                        return Err("VHDL subset fallback duplicate enum payload field after VHDL sanitization: {payload_name}")
+                    val payload_vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(payload_type, alias_names, alias_types))
+                    if payload_vhdl_type == "":
+                        return Err("VHDL subset fallback unsupported enum payload type `{payload_type}` in `{alias_names[i]}`")
+                    payload_seen = payload_seen.push(payload_name)
+                    declarations = declarations + "        {payload_name} : {payload_vhdl_type};\n"
+                declarations = declarations + "    end record;\n"
         i = i + 1
     if declarations == "":
         return Ok("")

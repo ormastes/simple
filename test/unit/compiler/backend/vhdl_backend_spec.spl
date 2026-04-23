@@ -876,6 +876,62 @@ describe "VHDL Backend - real backend compilation":
         val compiled = result.unwrap()
         check(compiled.vhdl.contains("state_sig <= (tag => None, Some_payload => to_signed(0, 32));"))
 
+    it "lowers payload variants of payload enums with the payload operand":
+        val payload_symbol = SymbolId(id: 65)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "maybe_some_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "None", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Some", discriminant: 1, payload: Some(make_i32()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val enum_type = MirType(kind: MirTypeKind.Enum(payload_symbol))
+        val ret_local = make_return_local(1, enum_type)
+        val state_local = make_temp_local(2, "state_sig", enum_type)
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Aggregate(
+                        LocalId(id: 2),
+                        AggregateKind.Enum(payload_symbol, 1),
+                        [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(7), make_i32()))]
+                    ),
+                    span: nil
+                ),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 2)), span: nil)
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 66),
+            name: "payload_some_pack",
+            signature: MirSignature(params: [], return_type: enum_type, is_variadic: false),
+            locals: [ret_local, state_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        var backend = make_simple_backend()
+        backend.active_type_defs = backend.active_type_defs.set(payload_symbol.id, payload_enum)
+        val result = backend.compile_function(VhdlBuilder.create("payload_some_mod"), func)
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        check(compiled.vhdl.contains("state_sig <= (tag => Some, Some_payload => to_signed(7, 32));"))
+
     it "lowers payload-free variants of payload enums inside processes":
         val payload_symbol = SymbolId(id: 63)
         val payload_enum = MirTypeDef(

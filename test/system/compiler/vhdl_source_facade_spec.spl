@@ -430,17 +430,26 @@ describe "VHDL Source Facade":
         delete_file(src_path)
         delete_file(out_path)
 
-    it "aot_vhdl_file rejects payload enum declarations before VHDL output":
+    it "aot_vhdl_file lowers payload enum declarations as tagged records in the source facade":
         val src_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.spl"
         val out_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.vhd"
         delete_file(src_path)
         delete_file(out_path)
-        write_file(src_path, "enum State:\n    Idle\n    Busy(code: u8)\n\n@hardware\nfn active(state: State) -> bool:\n    true")
+        write_file(src_path, "enum State:\n    Idle\n    Busy(code: u8)\n\n@hardware\nfn hold_payload_state(state: State) -> State:\n    state")
 
         val result = aot_vhdl_file(src_path, out_path)
-        expect(result.is_success()).to_equal(false)
-        expect(result.get_errors().join("\n")).to_contain("payload enum lowering requires tagged-record representation support")
-        expect(rt_file_exists(out_path)).to_equal(false)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("type State_t_tag_t is (Idle, Busy);"), output)
+        check_msg(output.contains("type State_t is record"), output)
+        check_msg(output.contains("tag : State_t_tag_t;"), output)
+        check_msg(output.contains("Busy_payload : unsigned(7 downto 0);"), output)
+        check_msg(output.contains("state : in State_t;"), output)
+        check_msg(output.contains("result_out : out State_t"), output)
+        check_msg(output.contains("result_out <= state;"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "hold_payload_state"), "GHDL rejected payload enum VHDL")
 
         delete_file(src_path)
         delete_file(out_path)
