@@ -282,9 +282,12 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_attributed_item(&mut self) -> Result<Node, ParseError> {
         let mut attributes = Vec::new();
 
-        // Parse all attributes — only @known_attr_name syntax
+        // Parse all attributes: preferred @known_attr_name syntax plus legacy #[...]
+        // for compatibility with existing Simple source and lint fixtures.
         loop {
-            if self.check(&TokenKind::At) && self.is_at_known_attribute() {
+            if self.check(&TokenKind::Hash) {
+                attributes.push(self.parse_attribute()?);
+            } else if self.check(&TokenKind::At) && self.is_at_known_attribute() {
                 attributes.push(self.parse_at_as_attribute()?);
             } else {
                 break;
