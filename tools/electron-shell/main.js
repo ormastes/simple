@@ -717,7 +717,7 @@ function finishNativeSmoke(code) {
         debugLog(`finishNativeSmoke window cleanup failed: ${err.message}`);
     }
     app.exit(code);
-    setTimeout(() => process.exit(code), 250);
+    process.exit(code);
 }
 
 async function runNativeWindowSmoke() {
