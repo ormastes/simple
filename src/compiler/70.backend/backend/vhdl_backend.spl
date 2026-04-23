@@ -260,7 +260,7 @@ class VhdlBackend:
                     Err(self.unsupported_vhdl_helper_instruction_error(inst))
         else:
             match inst.kind:
-                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | UnaryOp(_, _, _) | Load(_, _) | Store(_, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) | VhdlPortMap(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | UnaryOp(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) | VhdlPortMap(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
                     Ok(())
                 case VhdlProcess(_, body_block):
                     val block = blocks.get(body_block.id)
@@ -289,7 +289,7 @@ class VhdlBackend:
     fn unsupported_vhdl_helper_instruction_error(inst: MirInst) -> CompileError:
         match inst.kind:
             case Load(_, _) | Store(_, _) | Alloc(_, _) | GetElementPtr(_, _, _):
-                self.backend_error("Unsupported VHDL helper subprogram memory behavior: {inst.kind}; helpers must be pure combinational")
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer or memory instruction in helper subprogram: {inst.kind}", inst.span)
             case CallIndirect(_, _, _, _):
                 self.backend_error("Unsupported VHDL helper subprogram indirect call behavior: {inst.kind}; helpers must use direct planned calls")
             case VhdlProcess(_, _) | VhdlPortMap(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _):
@@ -302,9 +302,13 @@ class VhdlBackend:
     fn unsupported_vhdl_instruction_error(inst: MirInst) -> CompileError:
         match inst.kind:
             case Alloc(_, _):
-                self.backend_error("Synthesizable VHDL backend does not support Alloc storage allocation")
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Alloc storage allocation", inst.span)
+            case Load(_, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span)
+            case Store(_, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span)
             case GetElementPtr(_, _, _):
-                self.backend_error("Synthesizable VHDL backend does not support pointer GetElementPtr lowering")
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer GetElementPtr lowering", inst.span)
             case CallIndirect(_, _, _, _):
                 self.backend_error("Synthesizable VHDL backend does not support CallIndirect lowering")
             case CheckedBinOp(_, _, _, _):
@@ -621,6 +625,8 @@ class VhdlBackend:
 
         var idx = 0
         while idx < func.signature.params.len():
+            if self.type_has_general_memory(func.signature.params[idx]):
+                return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference ports require an explicit package-level memory ABI before VHDL emission"))
             val param_type_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
             if param_type_result.is_err():
                 return Err(param_type_result.unwrap_err())
@@ -636,6 +642,8 @@ class VhdlBackend:
             return Err(abi_result.unwrap_err())
         val abi = abi_result.unwrap()
         for field in abi.fields:
+            if self.type_has_general_memory(field.type_):
+                return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference result ports require an explicit package-level memory ABI before VHDL emission"))
             val return_type_result = self.mir_type_to_vhdl_at(field.type_, Some(func.span))
             if return_type_result.is_err():
                 return Err(return_type_result.unwrap_err())
@@ -646,6 +654,23 @@ class VhdlBackend:
             ))
 
         Ok(ports)
+
+    fn type_has_general_memory(ty: MirType) -> bool:
+        match ty.kind:
+            case Array(_, _) | Slice(_) | Ptr(_, _) | Ref(_, _):
+                true
+            case Tuple(elements):
+                for element in elements:
+                    if self.type_has_general_memory(element):
+                        return true
+                false
+            case Union(members):
+                for member in members:
+                    if self.type_has_general_memory(member):
+                        return true
+                false
+            case _:
+                false
 
     fn helper_function_by_name(name: text) -> Result<MirFunction, CompileError>:
         val found = self.active_function_by_name.get(name)
@@ -1094,6 +1119,53 @@ class VhdlBackend:
                 else:
                     "sig_{local.id.id}"
 
+    fn local_memory_type_name(local: MirLocal) -> text:
+        vhdl_sanitize_identifier("{self.default_local_name(local)}_memory_t")
+
+    fn memory_template_error(code: text, message: text) -> CompileError:
+        self.backend_error("{code}: {message}")
+
+    fn emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
+        val name = self.default_local_name(local)
+        match local.type_.kind:
+            case Array(element, size):
+                if size <= 0:
+                    return Err(self.backend_error("VHDL-MEM-UNCONSTRAINED: Local memory `{name}` must have a concrete positive array size before VHDL emission"))
+                match element.kind:
+                    case Array(_, _) | Slice(_) | Ptr(_, _) | Ref(_, _):
+                        return Err(self.backend_error("VHDL-MEM-GENERAL: Local memory `{name}` has nested, slice, pointer, or reference element type; constrained VHDL memory lowering is not implemented"))
+                    case _:
+                        ()
+                val element_type_result = self.mir_type_to_vhdl_at(element, span)
+                if element_type_result.is_err():
+                    return Err(element_type_result.unwrap_err())
+                val type_name = self.local_memory_type_name(local)
+                val template_result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+                    name: name,
+                    type_name: type_name,
+                    data_type: element_type_result.unwrap(),
+                    depth: size,
+                    initial_value: nil
+                ))
+                if template_result.is_err():
+                    val diagnostic = template_result.unwrap_err()
+                    return Err(self.memory_template_error(diagnostic.code, diagnostic.message))
+                builder.emit_raw(template_result.unwrap().declarations)
+                self.active_local_memory_type_names = self.active_local_memory_type_names.set(local.id.id, type_name)
+            case _:
+                val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, span)
+                if vhdl_type_result.is_err():
+                    return Err(vhdl_type_result.unwrap_err())
+                builder.emit_signal_decl(name, vhdl_type_result.unwrap(), nil)
+        Ok(())
+
+    fn local_object_type_to_vhdl(local: MirLocal, span: Span?) -> Result<text, CompileError>:
+        val memory_type_name = self.active_local_memory_type_names.get(local.id.id)
+        if memory_type_name.?:
+            Ok(memory_type_name.unwrap())
+        else:
+            self.mir_type_to_vhdl_at(local.type_, span)
+
     fn local_to_vhdl(local: LocalId) -> Result<text, CompileError>:
         val found = self.active_local_names.get(local.id)
         if found.?:
@@ -1239,7 +1311,7 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, Some(func.span))
+                    val vhdl_type_result = self.local_object_type_to_vhdl(local, Some(func.span))
                     if vhdl_type_result.is_err():
                         return Err(vhdl_type_result.unwrap_err())
                     val name = self.default_local_name(local)
