@@ -26,6 +26,9 @@ fn check(condition: bool):
 fn empty_span() -> Span:
     Span(start: 0, end_pos: 0, line: 1, col: 1)
 
+fn diagnostic_span() -> Span:
+    Span(start: 20, end_pos: 25, line: 7, col: 3)
+
 fn make_i32() -> MirType:
     MirType(kind: MirTypeKind.I32)
 
@@ -38,11 +41,20 @@ fn make_u8() -> MirType:
 fn make_u32() -> MirType:
     MirType(kind: MirTypeKind.U32)
 
+fn make_f32() -> MirType:
+    MirType(kind: MirTypeKind.F32)
+
 fn make_u8_array(size: i64) -> MirType:
     MirType(kind: MirTypeKind.Array(make_u8(), size))
 
 fn make_bool() -> MirType:
     MirType(kind: MirTypeKind.Bool)
+
+fn make_unit() -> MirType:
+    MirType(kind: MirTypeKind.Unit)
+
+fn make_ptr_i32() -> MirType:
+    MirType(kind: MirTypeKind.Ptr(make_i32(), false))
 
 fn make_bits(width: i64) -> MirType:
     MirType.bits(width)
@@ -933,6 +945,130 @@ describe "VHDL Backend - real backend compilation":
         val result = backend.compile(module)
         check(result.is_err())
         check(result.unwrap_err().message.contains("Duplicate VHDL enum literal after sanitization"))
+
+    it "rejects floating-point input ports before VHDL emission with a source span":
+        val arg_local = make_arg_local(1, 0, "f_in", make_f32())
+        val ret_local = make_return_local(2, make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 70),
+            name: "float_port",
+            signature: MirSignature(params: [make_f32()], return_type: make_i32(), is_variadic: false),
+            locals: [arg_local, ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: diagnostic_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("float_port_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("f32 input port `arg0`"))
+        check(err.message.contains("before VHDL emission"))
+        check(err.has_location)
+        expect(err.location).to_equal("7:3-8")
+
+    it "rejects Unit local signal lowering before VHDL emission":
+        val ret_local = make_return_local(1, make_i32())
+        val unit_local = make_temp_local(2, "unit_tmp", make_unit())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 71),
+            name: "unit_local",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local, unit_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: diagnostic_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("unit_local_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Unit local signal"))
+        check(err.message.contains("no VHDL signal"))
+        check(err.has_location)
+
+    it "rejects pointer constants before package VHDL emission":
+        val constant = MirConstant(
+            symbol: SymbolId(id: 72),
+            name: "BAD_PTR",
+            type_: make_ptr_i32(),
+            value: MirConstValue.Zero
+        )
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[constant.symbol] = constant
+        val module = MirModule(name: "ptr_const_mod", functions: {}, statics: {}, constants: constants, types: {})
+        val result = make_simple_backend().compile(module)
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("pointer constant `BAD_PTR`"))
+
+    it "rejects pointer memory instructions with instruction spans":
+        val ret_local = make_return_local(1, make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Load(
+                        LocalId(id: 1),
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))
+                    ),
+                    span: Some(diagnostic_span())
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 73),
+            name: "ptr_load",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil
+        )
+        val result = make_simple_backend().compile(single_block_module("ptr_load_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("pointer Load lowering"))
+        check(err.has_location)
+        expect(err.location).to_equal("7:3-8")
 
     it "keeps generic call lowering and unsupported terminators as hard errors":
         val ret_local = make_return_local(1, make_i32())

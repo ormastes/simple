@@ -625,8 +625,8 @@ pub(super) fn eval_builtin(
             )?;
             Ok(Some(Value::Bool(val.truthy())))
         }
-        // pass_todo, pass_do_nothing, pass_dn: no-op builtins (accept optional message)
-        "pass_todo" | "pass_do_nothing" | "pass_dn" => Ok(Some(Value::Nil)),
+        // pass_todo, pass_do_nothing, pass_dn, todo: no-op builtins (accept optional rationale)
+        "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo" => Ok(Some(Value::Nil)),
         _ => Ok(None),
     }
 }

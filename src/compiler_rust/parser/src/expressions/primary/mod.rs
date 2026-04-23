@@ -41,12 +41,12 @@ impl<'a> Parser<'a> {
             | TokenKind::Atom(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
             TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
-            // pass_do_nothing / pass_dn / pass_todo in expression position → unit ()
+            // pass_do_nothing / pass_dn / pass_todo / todo in expression position → unit ()
             TokenKind::Identifier { name, .. }
-                if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo" =>
+                if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo" || name == "todo" =>
             {
                 self.advance();
-                // Optional parenthesised argument: pass_todo("reason")
+                // Optional parenthesised rationale arguments.
                 if self.check(&TokenKind::LParen) {
                     self.advance();
                     while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {

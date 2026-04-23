@@ -7,6 +7,15 @@ use std.spec
 fn env_value(name: text) -> text:
     rt_env_get(name) ?? ""
 
+fn vendor_smoke_enabled() -> bool:
+    env_value("SIMPLE_VHDL_VENDOR_SMOKE") == "1"
+
+fn selected_vendor() -> text:
+    val requested_vendor = env_value("SIMPLE_VHDL_VENDOR")
+    if requested_vendor != "":
+        return requested_vendor
+    "ghdl"
+
 fn vendor_smoke_report_path(vendor: text) -> text:
     val override_path = env_value("SIMPLE_VHDL_VENDOR_REPORT_PATH")
     if override_path != "":
@@ -54,98 +63,48 @@ begin
 end architecture rtl;
 """
 
-fn vendor_smoke_command_line(report: VhdlVendorSmokeReport) -> text:
-    if report.vendor == "vivado":
-        report.tool + " -mode batch -nojournal -nolog -source " + report.vhdl_path + ".tcl"
-    elif report.vendor == "quartus":
-        report.tool + " --flow compile vendor_smoke_top"
-    elif report.vendor == "yosys":
-        report.tool + " -p read_vhdl " + report.vhdl_path + "; synth"
+fn vendor_smoke_command_line(vendor: text, tool: text, vhdl_path: text) -> text:
+    if vendor == "vivado":
+        tool + " -mode batch -nojournal -nolog -source " + vhdl_path + ".tcl"
+    elif vendor == "quartus":
+        tool + " --flow compile vendor_smoke_top"
+    elif vendor == "yosys":
+        tool + " -p read_vhdl " + vhdl_path + "; synth"
     else:
-        report.tool + " --synth --std=08 " + report.vhdl_path + " -e vendor_smoke_top"
+        tool + " --synth --std=08 " + vhdl_path + " -e vendor_smoke_top"
 
-fn build_vendor_smoke_report() -> VhdlVendorSmokeReport:
-    val enabled = env_value("SIMPLE_VHDL_VENDOR_SMOKE") == "1"
-    val requested_vendor = env_value("SIMPLE_VHDL_VENDOR")
-    val vendor = if requested_vendor != "": requested_vendor else: "ghdl"
-    val tool = selected_vendor_tool(requested_vendor)
-    val vhdl_path = vendor_smoke_vhdl_path(vendor)
-    val report_path = vendor_smoke_report_path(vendor)
-    val log_path = vendor_smoke_log_path(vendor)
-    if not enabled:
-        return VhdlVendorSmokeReport(
-            enabled: false,
-            vendor: vendor,
-            tool: tool,
-            vhdl_path: vhdl_path,
-            report_path: report_path,
-            log_path: log_path,
-            command_line: "",
-            exit_code: -1,
-            diagnostic: "SKIP: status=disabled; SIMPLE_VHDL_VENDOR_SMOKE is not 1; vendor=" + vendor + "; tool=" + tool + "; report_path=" + report_path + "; log_path=" + log_path
-        )
-    if not tool_available(tool):
-        return VhdlVendorSmokeReport(
-            enabled: true,
-            vendor: vendor,
-            tool: tool,
-            vhdl_path: vhdl_path,
-            report_path: report_path,
-            log_path: log_path,
-            command_line: "",
-            exit_code: -1,
-            diagnostic: "SKIP: status=missing-tool; selected VHDL vendor tool is missing: " + tool + "; vendor=" + vendor + "; report_path=" + report_path + "; log_path=" + log_path
-        )
-    val ready = VhdlVendorSmokeReport(
-        enabled: true,
-        vendor: vendor,
-        tool: tool,
-        vhdl_path: vhdl_path,
-        report_path: report_path,
-        log_path: log_path,
-        command_line: "",
-        exit_code: -1,
-        diagnostic: "READY: selected VHDL vendor tool is available: " + tool + "; vendor=" + vendor + "; report_path=" + report_path + "; log_path=" + log_path
-    )
-    VhdlVendorSmokeReport(
-        enabled: ready.enabled,
-        vendor: ready.vendor,
-        tool: ready.tool,
-        vhdl_path: ready.vhdl_path,
-        report_path: ready.report_path,
-        log_path: ready.log_path,
-        command_line: vendor_smoke_command_line(ready),
-        exit_code: ready.exit_code,
-        diagnostic: ready.diagnostic
-    )
+fn disabled_diagnostic(vendor: text, tool: text, report_path: text, log_path: text) -> text:
+    "SKIP: status=disabled; SIMPLE_VHDL_VENDOR_SMOKE is not 1; vendor=" + vendor + "; tool=" + tool + "; report_path=" + report_path + "; log_path=" + log_path
 
-fn run_vendor_smoke(report: VhdlVendorSmokeReport) -> VhdlVendorSmokeReport:
+fn missing_tool_diagnostic(vendor: text, tool: text, report_path: text, log_path: text) -> text:
+    "SKIP: status=missing-tool; selected VHDL vendor tool is missing: " + tool + "; vendor=" + vendor + "; report_path=" + report_path + "; log_path=" + log_path
+
+fn ready_diagnostic(vendor: text, tool: text, report_path: text, log_path: text) -> text:
+    "READY: selected VHDL vendor tool is available: " + tool + "; vendor=" + vendor + "; report_path=" + report_path + "; log_path=" + log_path
+
+fn write_vendor_sidecar(vendor: text, vhdl_path: text, report_path: text):
+    if vendor == "vivado":
+        val tcl_path = vhdl_path + ".tcl"
+        val tcl = "read_vhdl " + vhdl_path + "\nsynth_design -top vendor_smoke_top\nreport_utilization -file " + report_path + "\nquit\n"
+        expect(rt_file_write_text(tcl_path, tcl)).to_equal(true)
+
+fn run_vendor_smoke(vendor: text, tool: text, vhdl_path: text, report_path: text, log_path: text, command_line: text) -> i64:
     rt_dir_create("build/vhdl/vendor-smoke", true)
-    expect(rt_file_write_text(report.vhdl_path, vendor_smoke_vhdl())).to_equal(true)
-    val (stdout, stderr, code) = if report.vendor == "vivado":
-        rt_process_run(report.tool, ["-mode", "batch", "-nojournal", "-nolog", "-source", report.vhdl_path + ".tcl"])
-    elif report.vendor == "quartus":
-        rt_process_run(report.tool, ["--flow", "compile", "vendor_smoke_top"])
-    elif report.vendor == "yosys":
-        rt_process_run(report.tool, ["-p", "read_vhdl " + report.vhdl_path + "; synth"])
+    expect(rt_file_write_text(vhdl_path, vendor_smoke_vhdl())).to_equal(true)
+    write_vendor_sidecar(vendor, vhdl_path, report_path)
+    val (stdout, stderr, code) = if vendor == "vivado":
+        rt_process_run(tool, ["-mode", "batch", "-nojournal", "-nolog", "-source", vhdl_path + ".tcl"])
+    elif vendor == "quartus":
+        rt_process_run(tool, ["--flow", "compile", "vendor_smoke_top"])
+    elif vendor == "yosys":
+        rt_process_run(tool, ["-p", "read_vhdl " + vhdl_path + "; synth"])
     else:
-        rt_process_run(report.tool, ["--synth", "--std=08", report.vhdl_path, "-e", "vendor_smoke_top"])
-    val captured = VhdlVendorSmokeReport(
-        enabled: report.enabled,
-        vendor: report.vendor,
-        tool: report.tool,
-        vhdl_path: report.vhdl_path,
-        report_path: report.report_path,
-        log_path: report.log_path,
-        command_line: report.command_line,
-        exit_code: code,
-        diagnostic: "DONE: status=executed; vendor=" + report.vendor + "; tool=" + report.tool + "; exit_code={code}; report_path=" + report.report_path + "; log_path=" + report.log_path
-    )
-    val log_text = "command: " + captured.command_line + "\nexit_code: {code}\nstdout:\n" + stdout + "\nstderr:\n" + stderr
-    val report_text = "status: executed\nvendor: " + captured.vendor + "\ntool: " + captured.tool + "\ncommand: " + captured.command_line + "\nexit_code: {code}\nvhdl_path: " + captured.vhdl_path + "\nlog_path: " + captured.log_path + "\n"
-    expect(rt_file_write_text(captured.log_path, log_text)).to_equal(true)
-    expect(rt_file_write_text(captured.report_path, report_text)).to_equal(true)
-    captured
+        rt_process_run(tool, ["--synth", "--std=08", vhdl_path, "-e", "vendor_smoke_top"])
+    val log_text = "command: " + command_line + "\nexit_code: {code}\nstdout:\n" + stdout + "\nstderr:\n" + stderr
+    val report_text = "status: executed\nvendor: " + vendor + "\ntool: " + tool + "\ncommand: " + command_line + "\nexit_code: {code}\nvhdl_path: " + vhdl_path + "\nlog_path: " + log_path + "\n"
+    expect(rt_file_write_text(log_path, log_text)).to_equal(true)
+    expect(rt_file_write_text(report_path, report_text)).to_equal(true)
+    code
 
 fn main():
     # Optional VHDL vendor synthesis smoke coverage.
@@ -161,27 +120,21 @@ fn main():
     extern fn rt_file_exists(path: text) -> bool
     extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
-    struct VhdlVendorSmokeReport:
-        enabled: bool
-        vendor: text
-        tool: text
-        vhdl_path: text
-        report_path: text
-        log_path: text
-        command_line: text
-        exit_code: i64
-        diagnostic: text
-
     describe "VHDL vendor synthesis smoke":
         it "skips clearly when vendor smoke is disabled":
-            val report = build_vendor_smoke_report()
-            if not report.enabled:
-                print report.diagnostic
-                expect(report.diagnostic).to_contain("SIMPLE_VHDL_VENDOR_SMOKE is not 1")
-                expect(report.report_path).to_contain("build/vhdl/vendor-smoke/")
-                expect(report.log_path).to_contain("build/vhdl/vendor-smoke/")
+            val vendor = selected_vendor()
+            val tool = selected_vendor_tool(vendor)
+            val report_path = vendor_smoke_report_path(vendor)
+            val log_path = vendor_smoke_log_path(vendor)
+            if not vendor_smoke_enabled():
+                val diagnostic = disabled_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("SIMPLE_VHDL_VENDOR_SMOKE is not 1")
+                expect(diagnostic).to_contain("status=disabled")
+                expect(report_path).to_contain("build/vhdl/vendor-smoke/")
+                expect(log_path).to_contain("build/vhdl/vendor-smoke/")
                 return
-            expect(report.enabled).to_equal(true)
+            expect(vendor_smoke_enabled()).to_equal(true)
 
         it "maps supported vendor names to executable tools":
             expect(selected_vendor_tool("vivado")).to_equal("vivado")
@@ -190,45 +143,63 @@ fn main():
             expect(selected_vendor_tool("")).to_equal("ghdl")
             expect(selected_vendor_tool("unknown")).to_equal("ghdl")
 
-        it "reports deterministic vendor smoke output paths":
-            val report = build_vendor_smoke_report()
-            expect(report.report_path).to_contain("-report.sdn")
-            expect(report.log_path).to_contain(".log")
-            expect(report.diagnostic).to_contain("report_path=")
-            expect(report.diagnostic).to_contain("log_path=")
-            if report.enabled and tool_available(report.tool):
-                expect(report.command_line).to_contain(report.tool)
-                expect(report.command_line).to_contain(report.vhdl_path)
+        it "reports deterministic vendor smoke output paths and command":
+            val vendor = selected_vendor()
+            val tool = selected_vendor_tool(vendor)
+            val vhdl_path = vendor_smoke_vhdl_path(vendor)
+            val report_path = vendor_smoke_report_path(vendor)
+            val log_path = vendor_smoke_log_path(vendor)
+            val command_line = vendor_smoke_command_line(vendor, tool, vhdl_path)
+            val diagnostic = ready_diagnostic(vendor, tool, report_path, log_path)
+            expect(report_path).to_contain("-report.sdn")
+            expect(log_path).to_contain(".log")
+            expect(diagnostic).to_contain("report_path=")
+            expect(diagnostic).to_contain("log_path=")
+            expect(command_line).to_contain(tool)
+            expect(command_line).to_contain(vhdl_path)
 
         it "skips clearly when the selected vendor tool is missing":
-            val report = build_vendor_smoke_report()
-            if not report.enabled:
-                print report.diagnostic
-                expect(report.diagnostic).to_contain("SIMPLE_VHDL_VENDOR_SMOKE is not 1")
+            val vendor = selected_vendor()
+            val tool = selected_vendor_tool(vendor)
+            val report_path = vendor_smoke_report_path(vendor)
+            val log_path = vendor_smoke_log_path(vendor)
+            if not vendor_smoke_enabled():
+                val diagnostic = disabled_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=disabled")
                 return
-            if not tool_available(report.tool):
-                print report.diagnostic
-                expect(report.diagnostic).to_contain("selected VHDL vendor tool is missing")
-                expect(report.diagnostic).to_contain(report.tool)
+            if not tool_available(tool):
+                val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=missing-tool")
+                expect(diagnostic).to_contain(tool)
                 return
-            expect(tool_available(report.tool)).to_equal(true)
+            expect(tool_available(tool)).to_equal(true)
 
         it "captures command report and log when vendor smoke is enabled":
-            val report = build_vendor_smoke_report()
-            if not report.enabled:
-                print report.diagnostic
-                expect(report.diagnostic).to_contain("status=disabled")
+            val vendor = selected_vendor()
+            val tool = selected_vendor_tool(vendor)
+            val vhdl_path = vendor_smoke_vhdl_path(vendor)
+            val report_path = vendor_smoke_report_path(vendor)
+            val log_path = vendor_smoke_log_path(vendor)
+            val command_line = vendor_smoke_command_line(vendor, tool, vhdl_path)
+            if not vendor_smoke_enabled():
+                val diagnostic = disabled_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=disabled")
                 return
-            if not tool_available(report.tool):
-                print report.diagnostic
-                expect(report.diagnostic).to_contain("status=missing-tool")
+            if not tool_available(tool):
+                val diagnostic = missing_tool_diagnostic(vendor, tool, report_path, log_path)
+                print diagnostic
+                expect(diagnostic).to_contain("status=missing-tool")
                 return
-            val captured = run_vendor_smoke(report)
-            print captured.diagnostic
-            expect(captured.exit_code).to_equal(0)
-            expect(rt_file_exists(captured.report_path)).to_equal(true)
-            expect(rt_file_exists(captured.log_path)).to_equal(true)
-            expect(rt_file_read_text(captured.report_path)).to_contain("command: " + captured.command_line)
-            expect(rt_file_read_text(captured.report_path)).to_contain("exit_code: 0")
-            expect(rt_file_read_text(captured.log_path)).to_contain("stdout:")
-            expect(rt_file_read_text(captured.log_path)).to_contain("stderr:")
+            val code = run_vendor_smoke(vendor, tool, vhdl_path, report_path, log_path, command_line)
+            val diagnostic = "DONE: status=executed; vendor=" + vendor + "; tool=" + tool + "; exit_code={code}; report_path=" + report_path + "; log_path=" + log_path
+            print diagnostic
+            expect(code).to_equal(0)
+            expect(rt_file_exists(report_path)).to_equal(true)
+            expect(rt_file_exists(log_path)).to_equal(true)
+            expect(rt_file_read_text(report_path)).to_contain("command: " + command_line)
+            expect(rt_file_read_text(report_path)).to_contain("exit_code: 0")
+            expect(rt_file_read_text(log_path)).to_contain("stdout:")
+            expect(rt_file_read_text(log_path)).to_contain("stderr:")
