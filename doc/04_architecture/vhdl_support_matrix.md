@@ -140,9 +140,9 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | `simple compile --backend=vhdl` | CLI entry point for the conservative synthesizable subset | **supported** |
 | `aot_vhdl_file()` | Driver API | **stable** |
 | VHDL source-map sidecar | `<output>.map.json` with generated entity and port anchors | **supported** |
-| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, selected `@generic`/`@clocked` forms, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, narrow slice/concat support, and hard diagnostics for unsupported implicit-width behavior. This is not yet the structured pure Simple compiler source of truth. | **supported** |
+| Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, deterministic anonymous tuple output ports, selected `@generic`/`@clocked` forms, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, narrow slice/concat support, and hard diagnostics for unsupported implicit-width behavior. This is not yet the structured pure Simple compiler source of truth. | **supported** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
-| Anonymous hardware outputs | Rejected before VHDL emission with an actionable diagnostic; labeled outputs are required for stable VHDL public APIs | **unsupported** |
+| Anonymous hardware outputs | Source-facade hardware tuple returns without field labels lower to deterministic `out_N` output ports, validate collisions before VHDL emission, and are covered by GHDL analysis/elaboration | **supported** |
 | Full pure Simple compiler VHDL path | Structured AST/HIR/MIR metadata for broad HLS behavior without source-facade compatibility parsing or Rust-only source-of-truth behavior; currently emits explicit deferral diagnostics where exercised | **deferred** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
@@ -160,8 +160,8 @@ These specs do not by themselves satisfy the broad pure Simple compiler
 source-of-truth requirement:
 
 - `test/system/compiler/vhdl_mir_backend_multi_output_spec.spl` covers labeled
-  tuple return ABI ports, same-type labeled outputs, anonymous-output rejection,
-  sanitized collision diagnostics, and GHDL analyze/elaborate/synth acceptance.
+  tuple return ABI ports, same-type labeled outputs, sanitized collision
+  diagnostics, and GHDL analyze/elaborate/synth acceptance.
 - `test/system/compiler/vhdl_mir_backend_call_port_map_spec.spl` covers direct
   `@hardware` call instance emission, named `port map` wiring, deterministic
   temp signals, field access over virtual aggregates, runtime tuple rejection,
