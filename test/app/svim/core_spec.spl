@@ -11,13 +11,6 @@ use std.sspec.*
 use app.svim.core.*
 
 
-fn _active_text(session: SvimSession) -> text:
-    session.active_buffer()?.piece_table.to_text() ?? ""
-
-fn _cursor(session: SvimSession) -> Cursor:
-    session.current_cursor()
-
-
 describe "svim piece table":
     it "applies insert and delete edits without flattening the model":
         var table = PieceTable.from_text("abc")
@@ -50,8 +43,8 @@ describe "svim modal editing":
         var session = SvimSession.new()
         session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
         session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
-        expect(_active_text(session)).to_equal("hello")
-        expect(_cursor(session).col).to_equal(5)
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("hello")
+        expect(session.current_cursor().col).to_equal(5)
 
     it "supports line yank delete and put through registers":
         var session = SvimSession.new()
@@ -63,16 +56,16 @@ describe "svim modal editing":
         session.execute(CommandRequest(name: "move-down", count: 1, register_name: "", payload: ""))
         session.execute(CommandRequest(name: "delete-line", count: 1, register_name: "", payload: ""))
         session.execute(CommandRequest(name: "put-after", count: 1, register_name: "\"", payload: ""))
-        expect(_active_text(session)).to_equal("alpha\nalpha\n")
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("alpha\nalpha\n")
 
     it "supports undo and redo for text edits":
         var session = SvimSession.new()
         session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
         session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "abc"))
         session.execute(CommandRequest(name: "undo", count: 1, register_name: "", payload: ""))
-        expect(_active_text(session)).to_equal("")
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("")
         session.execute(CommandRequest(name: "redo", count: 1, register_name: "", payload: ""))
-        expect(_active_text(session)).to_equal("abc")
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("abc")
 
 
 describe "svim workspace state":
@@ -113,7 +106,69 @@ describe "svim workspace state":
         session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "normal"))
         val result = session.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: "beta"))
         expect(result.ok).to_equal(true)
-        expect(_cursor(session).col).to_equal(6)
+        expect(session.current_cursor().col).to_equal(6)
+
+    it "tracks visual selection endpoints in the shared session":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "visual"))
+        session.execute(CommandRequest(name: "move-left", count: 2, register_name: "", payload: ""))
+        expect(session.selection?.end.col ?? -1).to_equal(3)
+        expect(svim_snapshot_text(session)).to_contain("selection")
+
+    it "yanks a visual selection into the active register":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "visual"))
+        session.execute(CommandRequest(name: "move-left", count: 2, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "yank-line", count: 1, register_name: "\"", payload: ""))
+        expect(session.registers.entries[0].content).to_equal("lo")
+        expect(session.mode_state.mode).to_equal(SvimMode.Normal)
+
+    it "deletes a visual selection through the shared edit path":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "visual"))
+        session.execute(CommandRequest(name: "move-left", count: 2, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "delete-line", count: 1, register_name: "\"", payload: ""))
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("hel")
+        expect(session.current_cursor().col).to_equal(3)
+        expect(session.mode_state.mode).to_equal(SvimMode.Normal)
+
+    it "replaces a visual selection with register content on put":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "visual"))
+        session.execute(CommandRequest(name: "move-left", count: 2, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "yank-line", count: 1, register_name: "\"", payload: ""))
+        session.execute(CommandRequest(name: "move-left", count: 3, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "visual"))
+        session.execute(CommandRequest(name: "move-right", count: 2, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "put-after", count: 1, register_name: "\"", payload: ""))
+        expect(session.active_buffer()?.piece_table.to_text() ?? "").to_equal("lollo")
+        expect(session.current_cursor().col).to_equal(2)
+        expect(session.mode_state.mode).to_equal(SvimMode.Normal)
+
+    it "supports jump-back after a search move":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "alpha beta"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "normal"))
+        session.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: "beta"))
+        session.execute(CommandRequest(name: "jump-back", count: 1, register_name: "", payload: ""))
+        expect(session.current_cursor().col).to_equal(0)
+
+    it "cycles between buffers through shared commands":
+        var session = SvimSession.new()
+        val second = session.open_text("/tmp/second.txt", "two")
+        session.focus_buffer(second)
+        expect(session.active_buffer()?.path ?? "").to_equal("/tmp/second.txt")
+        session.execute(CommandRequest(name: "next-buffer", count: 1, register_name: "", payload: ""))
+        expect(session.active_buffer()?.path ?? "").to_equal("")
 
 describe "svim normal command parser":
     it "parses count-aware motions":
@@ -125,3 +180,8 @@ describe "svim normal command parser":
         expect(svim_parse_normal_command("dd").name).to_equal("delete-line")
         expect(svim_parse_normal_command(":w").name).to_equal("commandline")
         expect(svim_parse_normal_command("/term").payload).to_equal("term")
+        expect(svim_parse_normal_command("v").payload).to_equal("visual")
+        expect(svim_parse_normal_command("bn").name).to_equal("next-buffer")
+        expect(svim_parse_normal_command("ctrl-o").name).to_equal("jump-back")
+        expect(svim_parse_normal_command("y").name).to_equal("yank-line")
+        expect(svim_parse_normal_command("p").name).to_equal("put-after")

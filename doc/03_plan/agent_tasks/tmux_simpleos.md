@@ -3,22 +3,22 @@
 
 ## Slice 1: Core Native Service
 
-- add `src/os/apps/simplemux/contract.spl`
-- add `src/os/apps/simplemux/service.spl`
-- add `src/os/apps/simplemux/layout.spl`
-- add `src/os/apps/simplemux/buffer.spl`
+- add `src/os/apps/smux/contract.spl`
+- add `src/os/apps/smux/service.spl`
+- add `src/os/apps/smux/layout.spl`
+- add `src/os/apps/smux/buffer.spl`
 - define session/window/pane ids and state structs
 
 ## Slice 2: Native Backend
 
-- add `src/os/apps/simplemux/backend_native.spl`
+- add `src/os/apps/smux/backend_native.spl`
 - adapt pipe-based PTY helper for pane execution
 - bind `ShellApp` to pane backend I/O
 - implement output drain and bounded capture
 
 ## Slice 3: Compatibility API
 
-- add `src/os/apps/simplemux/api.spl`
+- add `src/os/apps/smux/api.spl`
 - map tmux-shaped operations onto the native service
 - preserve session/window/pane/capture response shape
 

@@ -1,0 +1,153 @@
+# @tag:system
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_shell(cmd: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", cmd])
+
+fn cleanup_tmpdir(tmpdir: text):
+    if tmpdir != "":
+        run_shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn setup_wrapper_fixture() -> text:
+    val cmd =
+        "set -eu; " +
+        "REPO_ROOT=\"$(pwd)\"; " +
+        "TMPROOT=$(mktemp -d /tmp/simpleos-wrapper-spec.XXXXXX); " +
+        "mkdir -p \"$TMPROOT/SYS\" \"$TMPROOT/usr/libexec/simpleos-toolchain/llvm\" \"$TMPROOT/usr/libexec/simpleos-toolchain/rust\" \"$TMPROOT/usr/libexec/simpleos-toolchain/ninja\" \"$TMPROOT/work/bin\" \"$TMPROOT/src\" \"$TMPROOT/build\"; " +
+        "printf 'payload=llvm\\nmode=native-wrapper\\nlane=x86_64-simpleos\\nstatus=guest-exec\\n' > \"$TMPROOT/SYS/LLVMMAN.TXT\"; " +
+        "printf 'payload=rust\\nmode=native-wrapper\\nlane=x86_64-simpleos\\nstatus=report-and-gate\\n' > \"$TMPROOT/SYS/RUSTMAN.TXT\"; " +
+        "printf 'payload=cmake\\nmode=native-wrapper\\nlane=x86_64-simpleos\\nstatus=report-and-gate\\n' > \"$TMPROOT/SYS/CMAKEMAN.TXT\"; " +
+        "printf 'payload=ninja\\nmode=native-wrapper\\nlane=x86_64-simpleos\\nstatus=report-and-gate\\n' > \"$TMPROOT/SYS/NINJAMAN.TXT\"; " +
+        "printf 'clang version fake\\n' > \"$TMPROOT/SYS/LLVMVER.TXT\"; " +
+        "printf 'rustc fake\\n' > \"$TMPROOT/SYS/RUSTVER.TXT\"; " +
+        "printf 'cargo fake\\n' > \"$TMPROOT/SYS/CARGOVER.TXT\"; " +
+        "printf 'simple_cmake native wrapper 0.1.0\\n' > \"$TMPROOT/SYS/CMAKEVER.TXT\"; " +
+        "printf '1.11.1\\n' > \"$TMPROOT/SYS/NINJAVER.TXT\"; " +
+        "cat > \"$TMPROOT/usr/libexec/simpleos-toolchain/llvm/clang\" <<'EOF'\n" +
+        "#!/bin/sh\n" +
+        "printf 'LLVM_PAYLOAD %s\\n' \"$*\"\n" +
+        "EOF\n" +
+        "cat > \"$TMPROOT/usr/libexec/simpleos-toolchain/ninja/ninja\" <<'EOF'\n" +
+        "#!/bin/sh\n" +
+        "printf 'NINJA_PAYLOAD %s\\n' \"$*\"\n" +
+        "EOF\n" +
+        "cat > \"$TMPROOT/usr/libexec/simpleos-toolchain/rust/cargo\" <<'EOF'\n" +
+        "#!/bin/sh\n" +
+        "printf 'CARGO_PAYLOAD %s\\n' \"$*\"\n" +
+        "EOF\n" +
+        "chmod +x \"$TMPROOT/usr/libexec/simpleos-toolchain/llvm/clang\" \"$TMPROOT/usr/libexec/simpleos-toolchain/ninja/ninja\" \"$TMPROOT/usr/libexec/simpleos-toolchain/rust/cargo\"; " +
+        "ln -s \"$REPO_ROOT/scripts/simpleos_guest_toolchain_wrapper.shs\" \"$TMPROOT/work/bin/clang\"; " +
+        "ln -s \"$REPO_ROOT/scripts/simpleos_guest_toolchain_wrapper.shs\" \"$TMPROOT/work/bin/rustc\"; " +
+        "ln -s \"$REPO_ROOT/scripts/simpleos_guest_toolchain_wrapper.shs\" \"$TMPROOT/work/bin/cargo\"; " +
+        "ln -s \"$REPO_ROOT/scripts/simpleos_guest_toolchain_wrapper.shs\" \"$TMPROOT/work/bin/cmake\"; " +
+        "ln -s \"$REPO_ROOT/scripts/simpleos_guest_toolchain_wrapper.shs\" \"$TMPROOT/work/bin/ninja\"; " +
+        "cat > \"$TMPROOT/src/CMakeLists.txt\" <<'EOF'\n" +
+        "cmake_minimum_required(VERSION 3.10)\n" +
+        "project(HelloApp LANGUAGES C)\n" +
+        "add_executable(hello hello.c)\n" +
+        "EOF\n" +
+        "cat > \"$TMPROOT/src/hello.c\" <<'EOF'\n" +
+        "int main(void) { return 0; }\n" +
+        "EOF\n" +
+        "printf '%s' \"$TMPROOT\""
+    val (stdout, stderr, code) = run_shell(cmd)
+    if code != 0:
+        fail("failed to create wrapper fixture: {stdout}{stderr}")
+    return stdout.trim()
+
+describe "SimpleOS guest toolchain wrapper":
+    it "clang reports guest-exec status and forwards supported LLVM operations":
+        val tmpdir = setup_wrapper_fixture()
+        val status_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/clang' --print simpleos-wrapper-status"
+        val (status_out, status_err, status_code) = run_shell(status_cmd)
+        if status_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("clang status command failed: {status_out}{status_err}")
+        expect(status_out).to_contain("lane=x86_64-simpleos")
+        expect(status_out).to_contain("mode=native-wrapper")
+        expect(status_out).to_contain("status=guest-exec")
+
+        val triple_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/clang' --print-target-triple"
+        val (triple_out, triple_err, triple_code) = run_shell(triple_cmd)
+        if triple_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("clang triple command failed: {triple_out}{triple_err}")
+        expect(triple_out.trim()).to_equal("x86_64-simpleos")
+
+        val exec_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/clang' -c /tmp/hello.c -o /tmp/hello.o"
+        val (exec_out, exec_err, exec_code) = run_shell(exec_cmd)
+        cleanup_tmpdir(tmpdir)
+        if exec_code != 0:
+            fail("clang exec command failed: {exec_out}{exec_err}")
+        expect(exec_out).to_contain("LLVM_PAYLOAD -c /tmp/hello.c -o /tmp/hello.o")
+
+    it "cmake and ninja expose the supported configure lane":
+        val tmpdir = setup_wrapper_fixture()
+        val caps_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cmake' -E capabilities"
+        val (caps_out, caps_err, caps_code) = run_shell(caps_cmd)
+        if caps_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("cmake capabilities failed: {caps_out}{caps_err}")
+        expect(caps_out).to_contain("serverMode=false")
+        expect(caps_out).to_contain("lane=x86_64-simpleos")
+        expect(caps_out).to_contain("status=report-and-gate")
+
+        val cfg_cmd =
+            "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cmake' " +
+            "-S '{tmpdir}/src' -B '{tmpdir}/build' -G Ninja"
+        val (cfg_out, cfg_err, cfg_code) = run_shell(cfg_cmd)
+        if cfg_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("cmake configure failed: {cfg_out}{cfg_err}")
+        expect(cfg_out).to_contain("Build files have been written to: {tmpdir}/build")
+
+        val ninja_file_cmd =
+            "grep -q '/usr/bin/clang' '{tmpdir}/build/build.ninja' && " +
+            "grep -q '/usr/bin/ld.lld' '{tmpdir}/build/build.ninja'"
+        val (_, _, ninja_file_code) = run_shell(ninja_file_cmd)
+        if ninja_file_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("generated build.ninja does not reference the stable guest tool paths")
+
+        val ninja_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/ninja' -C '{tmpdir}/build'"
+        val (ninja_out, ninja_err, ninja_code) = run_shell(ninja_cmd)
+        cleanup_tmpdir(tmpdir)
+        if ninja_code != 0:
+            fail("ninja wrapper failed: {ninja_out}{ninja_err}")
+        expect(ninja_out).to_contain("NINJA_PAYLOAD -C {tmpdir}/build")
+
+    it "rust wrappers expose discovery and reject unsupported build operations":
+        val tmpdir = setup_wrapper_fixture()
+        val status_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/rustc' --print simpleos-wrapper-status"
+        val (status_out, status_err, status_code) = run_shell(status_cmd)
+        if status_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("rustc status failed: {status_out}{status_err}")
+        expect(status_out).to_contain("lane=x86_64-simpleos")
+        expect(status_out).to_contain("status=report-and-gate")
+
+        val target_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/rustc' --print target-libdir"
+        val (target_out, target_err, target_code) = run_shell(target_cmd)
+        if target_code != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("rustc target-libdir failed: {target_out}{target_err}")
+        expect(target_out.trim()).to_equal("/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
+
+        val rust_fail_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/rustc' main.rs"
+        val (_rust_fail_out, rust_fail_err, rust_fail_code) = run_shell(rust_fail_cmd)
+        expect(rust_fail_code).to_equal(1)
+        expect(rust_fail_err).to_contain("lane=x86_64-simpleos")
+        expect(rust_fail_err).to_contain("mode=native-wrapper")
+        expect(rust_fail_err).to_contain("status=report-and-gate")
+        expect(rust_fail_err).to_contain("no host fallback")
+
+        val cargo_fail_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cargo' build"
+        val (_cargo_fail_out, cargo_fail_err, cargo_fail_code) = run_shell(cargo_fail_cmd)
+        cleanup_tmpdir(tmpdir)
+        expect(cargo_fail_code).to_equal(1)
+        expect(cargo_fail_err).to_contain("lane=x86_64-simpleos")
+        expect(cargo_fail_err).to_contain("status=report-and-gate")
+        expect(cargo_fail_err).to_contain("no host fallback")

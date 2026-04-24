@@ -56,8 +56,88 @@ fn _exp_text_len(s: text) -> text:
     val n = s.len() as i32
     return "{n}"
 
+fn _exp_index_of(s: text, needle: text) -> i32:
+    """Return index of first occurrence of needle in s, or -1."""
+    if needle.len() == 0:
+        return 0
+    var i: i32 = 0
+    while i <= s.len() as i32 - needle.len() as i32:
+        if s.slice(i, i + needle.len() as i32) == needle:
+            return i
+        i = i + 1
+    return -1
+
+fn _exp_last_index_of(s: text, needle: text) -> i32:
+    """Return index of last occurrence of needle in s, or -1."""
+    if needle.len() == 0:
+        return s.len() as i32
+    var i: i32 = s.len() as i32 - needle.len() as i32
+    while i >= 0:
+        if s.slice(i, i + needle.len() as i32) == needle:
+            return i
+        i = i - 1
+    return -1
+
+fn _exp_find_op(content: text, op: text, min_pos: i32) -> i32:
+    """Find op in content starting from min_pos. Returns position or -1."""
+    var i: i32 = min_pos
+    while i <= content.len() as i32 - op.len() as i32:
+        if content.slice(i, i + op.len() as i32) == op:
+            return i
+        i = i + 1
+    return -1
+
+fn _exp_contains_at(content: text, op: text, min_pos: i32) -> bool:
+    """Return true if op appears in content at or after min_pos."""
+    return _exp_find_op(content, op, min_pos) >= 0
+
+fn _exp_strip_prefix(value: text, pattern: text, greedy: bool) -> text:
+    """Strip prefix from value matching pattern. greedy=true for ## (longest match)."""
+    if pattern == "*":
+        if greedy:
+            return ""
+        return value
+    if pattern.ends_with("*"):
+        val literal = pattern.slice(0, pattern.len() as i32 - 1)
+        if value.starts_with(literal):
+            return value.slice(literal.len() as i32, value.len() as i32)
+        return value
+    if pattern.starts_with("*"):
+        val literal = pattern.slice(1, pattern.len() as i32)
+        val pos = if greedy: _exp_last_index_of(value, literal) else: _exp_index_of(value, literal)
+        if pos >= 0:
+            return value.slice(pos + literal.len() as i32, value.len() as i32)
+        return value
+    # plain literal: strip exact prefix
+    if value.starts_with(pattern):
+        return value.slice(pattern.len() as i32, value.len() as i32)
+    return value
+
+fn _exp_strip_suffix(value: text, pattern: text, greedy: bool) -> text:
+    """Strip suffix from value matching pattern. greedy=true for %% (longest match)."""
+    if pattern == "*":
+        if greedy:
+            return ""
+        return value
+    if pattern.starts_with("*"):
+        val literal = pattern.slice(1, pattern.len() as i32)
+        if value.ends_with(literal):
+            return value.slice(0, value.len() as i32 - literal.len() as i32)
+        return value
+    if pattern.ends_with("*"):
+        val literal = pattern.slice(0, pattern.len() as i32 - 1)
+        val pos = if greedy: _exp_index_of(value, literal) else: _exp_last_index_of(value, literal)
+        if pos >= 0:
+            return value.slice(0, pos)
+        return value
+    # plain literal: strip exact suffix
+    if value.ends_with(pattern):
+        return value.slice(0, value.len() as i32 - pattern.len() as i32)
+    return value
+
 # =========================================================================
 # Brace expansion parser: handle ${var}, ${var:-default}, ${var:+alt}, ${#var}
+# Also: ${var#pat}, ${var##pat}, ${var%pat}, ${var%%pat}
 # =========================================================================
 
 fn _exp_brace(content: text, variables: [(text, text)], env: [(text, text)]) -> text:
@@ -106,6 +186,38 @@ fn _exp_brace(content: text, variables: [(text, text)], env: [(text, text)]) -> 
         if v != "":
             return operand
         return ""
+
+    # ${var##pat} — greedy prefix strip (check ## before #)
+    if _exp_contains_at(content, "##", 1):
+        val op_pos = _exp_find_op(content, "##", 1)
+        val vname = content.slice(0, op_pos)
+        val pat = content.slice(op_pos + 2, content.len() as i32)
+        val value = _exp_resolve(vname, variables, env)
+        return _exp_strip_prefix(value, pat, true)
+
+    # ${var#pat} — shortest prefix strip (not at pos 0 — that's ${#var} length)
+    if _exp_contains_at(content, "#", 1):
+        val op_pos = _exp_find_op(content, "#", 1)
+        val vname = content.slice(0, op_pos)
+        val pat = content.slice(op_pos + 1, content.len() as i32)
+        val value = _exp_resolve(vname, variables, env)
+        return _exp_strip_prefix(value, pat, false)
+
+    # ${var%%pat} — greedy suffix strip (check %% before %)
+    val dpct_pos = _exp_index_of(content, "%%")
+    if dpct_pos >= 0:
+        val vname = content.slice(0, dpct_pos)
+        val pat = content.slice(dpct_pos + 2, content.len() as i32)
+        val value = _exp_resolve(vname, variables, env)
+        return _exp_strip_suffix(value, pat, true)
+
+    # ${var%pat} — shortest suffix strip
+    val pct_pos = _exp_index_of(content, "%")
+    if pct_pos >= 0:
+        val vname = content.slice(0, pct_pos)
+        val pat = content.slice(pct_pos + 1, content.len() as i32)
+        val value = _exp_resolve(vname, variables, env)
+        return _exp_strip_suffix(value, pat, false)
 
     # Plain ${var}
     return _exp_resolve(content, variables, env)

@@ -108,6 +108,9 @@ class ShellApp:
     variables: [(text, text)]
     aliases: [(text, text)]
     shell_functions: [(text, text)]
+    capture_mode: bool
+    capture_lines: [text]
+    exit_on_error: bool
 
 impl ShellApp:
 
@@ -134,6 +137,9 @@ impl ShellApp:
             variables: [],
             aliases: [],
             shell_functions: [],
+            capture_mode: false,
+            capture_lines: [],
+            exit_on_error: false,
         )
 
     static fn with_vfs(vfs: VfsManager) -> ShellApp:
@@ -233,6 +239,11 @@ impl ShellApp:
         dispatched directly; external commands go through the tool
         registry or spawn as child processes.
         """
+        # Handle && and || command chaining
+        if cmd.contains(" && ") or cmd.contains(" || "):
+            self._execute_chain(cmd)
+            return
+
         # Check for pipeline first (before redirect parsing)
         if has_pipeline(cmd):
             val stages = parse_pipeline(cmd)
@@ -279,6 +290,10 @@ impl ShellApp:
             self._dispatch_builtin(command, args)
         else:
             self._try_external(command, args)
+
+        # Exit on error if set -e is active
+        if self.exit_on_error and self.last_exit_code != 0:
+            self.running = false
 
         # Restore file redirections
         if saved_fds.len() > 0:
@@ -372,6 +387,7 @@ impl ShellApp:
             "break":    self.last_exit_code = -1
             "continue": self.last_exit_code = -2
             "return":   self.cmd_return(args)
+            "set":      self.cmd_set(args)
             "mkfifo":   self.cmd_mkfifo(args)
             "awk":      self.last_exit_code = tool_awk(self.vfs, self.cwd, args, self.terminal)
             "tac":      self.last_exit_code = tool_tac(self.vfs, self.cwd, args, self.terminal)
@@ -478,6 +494,7 @@ impl ShellApp:
             "break": true
             "continue": true
             "return": true
+            "set": true
             "mkfifo": true
             "awk": true
             "tac": true
@@ -513,6 +530,38 @@ impl ShellApp:
             Err(msg):
                 self._write_error("sosh: {msg}")
                 self.last_exit_code = 1
+
+    me _execute_chain(cmd: text):
+        """Execute a command chain: cmd1 && cmd2 (stop on failure) or cmd1 || cmd2 (stop on success)."""
+        # Split into segments with their operators
+        # We process left to right
+        var remaining = cmd
+        var last_op = "&&"  # Start assuming && (first segment always runs)
+        var first = true
+        while remaining.len() > 0:
+            var segment = remaining
+            var next_op = ""
+            var next_remaining = ""
+            val and_pos = _find_chain_op(remaining, " && ")
+            val or_pos = _find_chain_op(remaining, " || ")
+            if and_pos >= 0 and (or_pos < 0 or and_pos < or_pos):
+                segment = remaining.slice(0, and_pos)
+                next_op = "&&"
+                next_remaining = remaining.slice(and_pos + 4, remaining.len())
+            elif or_pos >= 0:
+                segment = remaining.slice(0, or_pos)
+                next_op = "||"
+                next_remaining = remaining.slice(or_pos + 4, remaining.len())
+            # else: segment = remaining, loop ends after
+
+            val run = if first: true
+                      elif last_op == "&&": self.last_exit_code == 0
+                      else: self.last_exit_code != 0
+            if run:
+                self.execute(segment.trim())
+            first = false
+            last_op = next_op
+            remaining = next_remaining
 
     me _try_external(command: text, args: [text]):
         """Try to run an external command synchronously."""
@@ -1336,8 +1385,95 @@ impl ShellApp:
         self.env = new_env
 
     fn _expand_vars(s: text) -> text:
-        """Expand $VAR, $?, ${var:-default}, $0-$9, $@, $*, $# references in a string."""
-        return shell_expand(s, self.variables, self.env, self.last_exit_code, [])
+        """Expand $VAR, $?, ${var:-default}, $0-$9, $@, $*, $# and $(cmd) in a string."""
+        val pre = self._expand_cmd_substitution(s)
+        return shell_expand(pre, self.variables, self.env, self.last_exit_code, [])
+
+    fn _expand_cmd_substitution(s: text) -> text:
+        """Pre-process $(cmd) and `cmd` command substitution before variable expansion."""
+        var result = ""
+        var i = 0
+        while i < s.len():
+            val ch = s.slice(i, i + 1)
+            if ch == "$" and i + 1 < s.len() and s.slice(i + 1, i + 2) == "(":
+                # Find matching closing )
+                var depth = 1
+                var j = i + 2
+                while j < s.len() and depth > 0:
+                    val jch = s.slice(j, j + 1)
+                    if jch == "(":
+                        depth = depth + 1
+                    elif jch == ")":
+                        depth = depth - 1
+                    j = j + 1
+                val inner = s.slice(i + 2, j - 1)
+                val output = self.execute_capture(inner)
+                result = "{result}{output}"
+                i = j
+            elif ch == "`":
+                # Backtick substitution
+                var j = i + 1
+                while j < s.len() and s.slice(j, j + 1) != "`":
+                    j = j + 1
+                val inner = s.slice(i + 1, j)
+                val output = self.execute_capture(inner)
+                result = "{result}{output}"
+                i = j + 1
+            else:
+                result = "{result}{ch}"
+                i = i + 1
+        return result
+
+    fn execute_capture(cmd: text) -> text:
+        """Execute cmd and return its stdout as text (for command substitution)."""
+        val trimmed = cmd.trim()
+        # Handle pure-compute cases directly — these are the most common in bootstrap scripts
+        if trimmed == "pwd":
+            return self.cwd
+        if trimmed == "hostname":
+            return self._get_env("HOSTNAME")
+        if trimmed == "uname" or trimmed == "uname -s":
+            return "SimpleOS"
+        if trimmed == "uname -m":
+            return "x86_64"
+        if trimmed == "uname -r":
+            return "0.1.0"
+        if trimmed == "whoami":
+            val user = self._get_env("USER")
+            return if user == "": "root" else: user
+        if trimmed == "date":
+            return "Thu Jan  1 00:00:00 UTC 2026"
+        if trimmed.starts_with("echo "):
+            return trimmed.slice(5, trimmed.len()).trim()
+        if trimmed.starts_with("dirname "):
+            val path = _unquote_simple(trimmed.slice(8, trimmed.len()).trim())
+            return _parent_path(path)
+        if trimmed.starts_with("basename "):
+            val path = _unquote_simple(trimmed.slice(9, trimmed.len()).trim())
+            return _basename_of(path)
+        # "cd dir && pwd" — common bootstrap pattern
+        if trimmed.contains(" && pwd"):
+            val cd_part = trimmed.slice(0, trimmed.len() - 7).trim()
+            if cd_part.starts_with("cd "):
+                val dir = _unquote_simple(cd_part.slice(3, cd_part.len()).trim())
+                return self._resolve_path(dir)
+        # Fallback: execute and capture via capture_lines
+        val old_lines = self.capture_lines
+        self.capture_lines = []
+        self.capture_mode = true
+        self.execute(trimmed)
+        self.capture_mode = false
+        var buf = ""
+        for line in self.capture_lines:
+            if buf == "":
+                buf = line
+            else:
+                buf = "{buf}\n{line}"
+        self.capture_lines = old_lines
+        # Trim trailing newline
+        if buf.ends_with("\n"):
+            buf = buf.slice(0, buf.len() - 1)
+        return buf
 
     # -- Path Resolution -----------------------------------------------------
 
@@ -1567,6 +1703,15 @@ impl ShellApp:
         else:
             self.last_exit_code = 0
 
+    fn cmd_set(args: [text]):
+        """Set shell options. Supports -e (exit on error) and +e (disable)."""
+        for arg in args:
+            if arg == "-e" or arg == "-o" or arg == "errexit":
+                self.exit_on_error = true
+            elif arg == "+e":
+                self.exit_on_error = false
+        self.last_exit_code = 0
+
     fn cmd_mkfifo(args: [text]):
         """Create a named pipe (FIFO). Stub — VFS FIFOs not yet supported."""
         if args.len() == 0:
@@ -1667,6 +1812,50 @@ fn _join_lines(lines: [text]) -> text:
     for line in lines:
         result = "{result}{line}\n"
     return result
+
+fn _find_chain_op(s: text, op: text) -> i32:
+    """Find op in s outside of quotes. Returns position or -1."""
+    var in_quote = false
+    var quote_char = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if in_quote:
+            if ch == quote_char:
+                in_quote = false
+        else:
+            if ch == "\"" or ch == "'":
+                in_quote = true
+                quote_char = ch
+            elif i + op.len() <= s.len():
+                if s.slice(i, i + op.len()) == op:
+                    return i
+        i = i + 1
+    return -1
+
+fn _basename_of(path: text) -> text:
+    """Return the last component of a path."""
+    if path == "/" or path == "":
+        return path
+    val normalized = if path.ends_with("/"): path.slice(0, path.len() - 1) else: path
+    var last_slash = -1
+    var i = 0
+    for ch in normalized:
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash < 0:
+        return normalized
+    return normalized.slice(last_slash + 1, normalized.len())
+
+fn _unquote_simple(s: text) -> text:
+    """Strip surrounding single or double quotes from a string."""
+    if s.len() >= 2:
+        val first = s.slice(0, 1)
+        val last = s.slice(s.len() - 1, s.len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return s.slice(1, s.len() - 1)
+    return s
 
 fn _find_char_pos(s: text, ch: text) -> i32:
     """Find position of first occurrence of ch in s. Returns -1 if not found."""

@@ -1,0 +1,56 @@
+use std.spec
+use os.apps.smux.api.{
+    smux_reset_for_test,
+    smux_metrics,
+    smux_create_session,
+    smux_list_windows,
+    smux_list_panes,
+    smux_split_pane,
+    smux_capture,
+    smux_attach,
+    smux_detach,
+    smux_resize
+}
+
+describe "smux api":
+    it "creates a session with an initial pane":
+        smux_reset_for_test()
+        val session = smux_create_session("dev")
+        val windows = smux_list_windows(session.id)
+        val panes = smux_list_panes(session.id, windows[0].id)
+
+        expect(windows.len()).to_equal(1)
+        expect(panes.len()).to_equal(1)
+
+    it "splits a pane and captures buffered output":
+        smux_reset_for_test()
+        val session = smux_create_session("split")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+
+        expect(smux_split_pane(session.id, window.id, pane.id, "vertical").is_ok()).to_equal(true)
+        val panes = smux_list_panes(session.id, window.id)
+        expect(panes.len()).to_equal(2)
+
+        val capture = smux_capture(session.id, window.id, panes[0].id, 20)
+        expect(capture.rows).to_be_greater_than(0)
+
+    it "tracks attach and detach":
+        smux_reset_for_test()
+        val session = smux_create_session("attach")
+        expect(smux_attach(session.id, "client-a", 100, 30).attached).to_equal(true)
+        expect(smux_detach("client-a")).to_equal(true)
+
+    it "records observable metrics and applies resize":
+        smux_reset_for_test()
+        val session = smux_create_session("metrics")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+
+        expect(smux_resize(session.id, window.id, pane.id, 120, 40).is_ok()).to_equal(true)
+        expect(smux_capture(session.id, window.id, pane.id, 20).rows).to_be_greater_than(0)
+
+        val metrics = smux_metrics()
+        expect(metrics.startup_count).to_be_greater_than(0)
+        expect(metrics.resize_count).to_equal(1)
+        expect(metrics.capture_count).to_equal(1)

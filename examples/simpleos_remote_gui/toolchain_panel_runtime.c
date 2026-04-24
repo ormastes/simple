@@ -62,8 +62,8 @@ static void _toolchain_read_manifest_value(const char *path, const char *key, ch
     ssize_t n;
     char buffer[2048];
     size_t key_len;
-    char *line;
-    char *cursor;
+    char *line_start;
+    char *line_end;
     if (cap == 0) {
         return;
     }
@@ -82,13 +82,17 @@ static void _toolchain_read_manifest_value(const char *path, const char *key, ch
     }
     buffer[(size_t)n] = '\0';
     key_len = strlen(key);
-    cursor = buffer;
-    while ((line = strsep(&cursor, "\n")) != NULL) {
-        while (*line == ' ' || *line == '\t' || *line == '\r') {
-            ++line;
+    line_start = buffer;
+    while (line_start != NULL && *line_start != '\0') {
+        line_end = strchr(line_start, '\n');
+        if (line_end != NULL) {
+            *line_end = '\0';
         }
-        if (strncmp(line, key, key_len) == 0 && line[key_len] == '=') {
-            snprintf(out, cap, "%s", line + key_len + 1);
+        while (*line_start == ' ' || *line_start == '\t' || *line_start == '\r') {
+            ++line_start;
+        }
+        if (strncmp(line_start, key, key_len) == 0 && line_start[key_len] == '=') {
+            snprintf(out, cap, "%s", line_start + key_len + 1);
             {
                 size_t i;
                 for (i = 0; out[i] != '\0'; ++i) {
@@ -100,6 +104,10 @@ static void _toolchain_read_manifest_value(const char *path, const char *key, ch
             }
             return;
         }
+        if (line_end == NULL) {
+            break;
+        }
+        line_start = line_end + 1;
     }
 }
 

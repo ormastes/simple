@@ -1,0 +1,408 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Smux Service
+
+use os.apps.smux.contract.{
+    MuxBackendKind,
+    MuxSession,
+    MuxWindow,
+    MuxPane,
+    MuxCapture,
+    MuxClientAttachment,
+    MuxAttachResult,
+    SmuxMetrics
+}
+use os.apps.smux.buffer.{CaptureBuffer}
+use os.apps.smux.layout.{smux_plan_split}
+use os.apps.smux.backend_native.{
+    NativeBackendCreateResult,
+    smux_backend_reset_for_test,
+    smux_backend_create_native,
+    smux_backend_send_text,
+    smux_backend_send_command,
+    smux_backend_resize,
+    smux_backend_poll_output
+}
+use os.userlib.system.{uptime}
+
+class PaneBufferState:
+    pane_id: text
+    buffer: CaptureBuffer
+
+var g_smux_sessions: [MuxSession] = []
+var g_smux_windows: [MuxWindow] = []
+var g_smux_panes: [MuxPane] = []
+var g_smux_attachments: [MuxClientAttachment] = []
+var g_smux_buffers: [PaneBufferState] = []
+var g_smux_metrics = SmuxMetrics(
+    startup_count: 0,
+    last_startup_ns: 0u64,
+    attach_count: 0,
+    detach_count: 0,
+    split_count: 0,
+    resize_count: 0,
+    send_text_count: 0,
+    send_command_count: 0,
+    capture_count: 0
+)
+var g_next_session_id: i64 = 1
+var g_next_window_id: i64 = 1
+var g_next_pane_id: i64 = 1
+
+fn smux_reset_for_test():
+    g_smux_sessions = []
+    g_smux_windows = []
+    g_smux_panes = []
+    g_smux_attachments = []
+    g_smux_buffers = []
+    val now = uptime() ?? 0u64
+    g_smux_metrics = SmuxMetrics(
+        startup_count: g_smux_metrics.startup_count + 1,
+        last_startup_ns: now,
+        attach_count: 0,
+        detach_count: 0,
+        split_count: 0,
+        resize_count: 0,
+        send_text_count: 0,
+        send_command_count: 0,
+        capture_count: 0
+    )
+    g_next_session_id = 1
+    g_next_window_id = 1
+    g_next_pane_id = 1
+    smux_backend_reset_for_test()
+
+fn smux_backend_contract_name() -> text:
+    "smux-native"
+
+fn smux_metrics() -> SmuxMetrics:
+    g_smux_metrics
+
+fn _find_session_index(session_id: text) -> i64:
+    var i = 0
+    while i < g_smux_sessions.len():
+        if g_smux_sessions[i].id == session_id:
+            return i
+        i = i + 1
+    -1
+
+fn _find_window_index(window_id: text) -> i64:
+    var i = 0
+    while i < g_smux_windows.len():
+        if g_smux_windows[i].id == window_id:
+            return i
+        i = i + 1
+    -1
+
+fn _find_pane_index(pane_id: text) -> i64:
+    var i = 0
+    while i < g_smux_panes.len():
+        if g_smux_panes[i].id == pane_id:
+            return i
+        i = i + 1
+    -1
+
+fn _find_attachment_index(client_id: text) -> i64:
+    var i = 0
+    while i < g_smux_attachments.len():
+        if g_smux_attachments[i].client_id == client_id:
+            return i
+        i = i + 1
+    -1
+
+fn _find_buffer_index(pane_id: text) -> i64:
+    var i = 0
+    while i < g_smux_buffers.len():
+        if g_smux_buffers[i].pane_id == pane_id:
+            return i
+        i = i + 1
+    -1
+
+fn _buffer_for_pane(pane_id: text) -> CaptureBuffer?:
+    val idx = _find_buffer_index(pane_id)
+    if idx < 0:
+        return nil
+    Some(g_smux_buffers[idx].buffer)
+
+fn _append_output_to_pane(pane_id: text, output: text):
+    val idx = _find_buffer_index(pane_id)
+    if idx < 0:
+        return
+    var state = g_smux_buffers[idx]
+    state.buffer.append_text(output)
+    g_smux_buffers[idx] = state
+
+fn _create_pane(window_id: text, pane_index: i64, cols: i32, rows: i32) -> Result<MuxPane, text>:
+    val backend_result = smux_backend_create_native(cols, rows)
+    if backend_result.is_err():
+        return Err(backend_result.err().unwrap())
+
+    val backend = backend_result.unwrap()
+    val pane_id = "pane-{g_next_pane_id}"
+    g_next_pane_id = g_next_pane_id + 1
+    val pane = MuxPane(
+        id: pane_id,
+        window_id: window_id,
+        index: pane_index,
+        state: "running",
+        cols: cols,
+        rows: rows,
+        backend_kind: MuxBackendKind.NativeShell,
+        backend_handle: backend.id,
+        last_command: "",
+        last_error: ""
+    )
+    g_smux_panes = g_smux_panes.push(pane)
+
+    var buffer = CaptureBuffer.new(200)
+    buffer.append_text(backend.initial_output)
+    g_smux_buffers = g_smux_buffers.push(PaneBufferState(pane_id: pane_id, buffer: buffer))
+    Ok(pane)
+
+fn smux_create_session(name: text) -> MuxSession:
+    val session_name = if name != "": name else: "session-{g_next_session_id}"
+    val session_id = "sess-{g_next_session_id}"
+    g_next_session_id = g_next_session_id + 1
+
+    val session = MuxSession(
+        id: session_id,
+        name: session_name,
+        active_window_id: "",
+        attached_clients: 0,
+        created_at: "now",
+        generation: 1
+    )
+    g_smux_sessions = g_smux_sessions.push(session)
+    val _ = smux_new_window(session_id, "main")
+    g_smux_sessions[_find_session_index(session_id)]
+
+fn smux_list_sessions() -> [MuxSession]:
+    g_smux_sessions
+
+fn smux_list_windows(session_id: text) -> [MuxWindow]:
+    var windows: [MuxWindow] = []
+    var i = 0
+    while i < g_smux_windows.len():
+        if g_smux_windows[i].session_id == session_id:
+            windows = windows.push(g_smux_windows[i])
+        i = i + 1
+    windows
+
+fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
+    val window_idx = _find_window_index(window_id)
+    if window_idx < 0:
+        return []
+    if g_smux_windows[window_idx].session_id != session_id:
+        return []
+
+    var panes: [MuxPane] = []
+    var i = 0
+    while i < g_smux_panes.len():
+        if g_smux_panes[i].window_id == window_id:
+            panes = panes.push(g_smux_panes[i])
+        i = i + 1
+    panes
+
+fn smux_new_window(session_id: text, name: text) -> MuxWindow:
+    val session_idx = _find_session_index(session_id)
+    if session_idx < 0:
+        return MuxWindow(id: "", session_id: "", name: "", index: -1, active_pane_id: "")
+
+    val window_id = "win-{g_next_window_id}"
+    g_next_window_id = g_next_window_id + 1
+    val pane_result = _create_pane(window_id, 0, 80, 24)
+    if pane_result.is_err():
+        return MuxWindow(id: "", session_id: session_id, name: "", index: -1, active_pane_id: "")
+
+    val pane = pane_result.unwrap()
+    val index = smux_list_windows(session_id).len()
+    val window = MuxWindow(
+        id: window_id,
+        session_id: session_id,
+        name: if name != "": name else: "window-{index}",
+        index: index,
+        active_pane_id: pane.id
+    )
+    g_smux_windows = g_smux_windows.push(window)
+
+    var session = g_smux_sessions[session_idx]
+    session.active_window_id = window_id
+    session.generation = session.generation + 1
+    g_smux_sessions[session_idx] = session
+    window
+
+fn smux_attach(session_id: text, client_id: text, cols: i32, rows: i32) -> MuxAttachResult:
+    val session_idx = _find_session_index(session_id)
+    if session_idx < 0:
+        return MuxAttachResult(attached: false, session_id: session_id, client_id: client_id)
+
+    val existing_idx = _find_attachment_index(client_id)
+    if existing_idx >= 0:
+        g_smux_attachments[existing_idx] = MuxClientAttachment(client_id: client_id, session_id: session_id, cols: cols, rows: rows)
+    else:
+        g_smux_attachments = g_smux_attachments.push(MuxClientAttachment(client_id: client_id, session_id: session_id, cols: cols, rows: rows))
+        var session = g_smux_sessions[session_idx]
+        session.attached_clients = session.attached_clients + 1
+        g_smux_sessions[session_idx] = session
+    g_smux_metrics.attach_count = g_smux_metrics.attach_count + 1
+    MuxAttachResult(attached: true, session_id: session_id, client_id: client_id)
+
+fn smux_detach(client_id: text) -> bool:
+    val attachment_idx = _find_attachment_index(client_id)
+    if attachment_idx < 0:
+        return false
+
+    val session_id = g_smux_attachments[attachment_idx].session_id
+    var kept: [MuxClientAttachment] = []
+    var i = 0
+    while i < g_smux_attachments.len():
+        if g_smux_attachments[i].client_id != client_id:
+            kept = kept.push(g_smux_attachments[i])
+        i = i + 1
+    g_smux_attachments = kept
+
+    val session_idx = _find_session_index(session_id)
+    if session_idx >= 0:
+        var session = g_smux_sessions[session_idx]
+        if session.attached_clients > 0:
+            session.attached_clients = session.attached_clients - 1
+        g_smux_sessions[session_idx] = session
+    g_smux_metrics.detach_count = g_smux_metrics.detach_count + 1
+    true
+
+fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0 or pane_idx < 0:
+        return false
+    if g_smux_windows[window_idx].session_id != session_id:
+        return false
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return false
+
+    var window = g_smux_windows[window_idx]
+    window.active_pane_id = pane_id
+    g_smux_windows[window_idx] = window
+    true
+
+fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0:
+        return Err("window not found: {window_id}")
+    if pane_idx < 0:
+        return Err("pane not found: {pane_id}")
+    if g_smux_windows[window_idx].session_id != session_id:
+        return Err("session does not own window: {window_id}")
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return Err("pane does not belong to window: {pane_id}")
+
+    val plan_result = smux_plan_split(g_smux_panes[pane_idx].cols, g_smux_panes[pane_idx].rows, direction)
+    if plan_result.is_err():
+        return Err(plan_result.err().unwrap())
+
+    val plan = plan_result.unwrap()
+    var existing_pane = g_smux_panes[pane_idx]
+    existing_pane.cols = plan.old_cols
+    existing_pane.rows = plan.old_rows
+    g_smux_panes[pane_idx] = existing_pane
+
+    val new_index = smux_list_panes(session_id, window_id).len()
+    val new_pane_result = _create_pane(window_id, new_index, plan.new_cols, plan.new_rows)
+    if new_pane_result.is_err():
+        return Err(new_pane_result.err().unwrap())
+
+    val new_pane = new_pane_result.unwrap()
+    var window = g_smux_windows[window_idx]
+    window.active_pane_id = new_pane.id
+    g_smux_windows[window_idx] = window
+    g_smux_metrics.split_count = g_smux_metrics.split_count + 1
+    Ok(new_pane)
+
+fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: i32, rows: i32) -> Result<text, text>:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0:
+        return Err("window not found: {window_id}")
+    if pane_idx < 0:
+        return Err("pane not found: {pane_id}")
+    if g_smux_windows[window_idx].session_id != session_id:
+        return Err("session does not own window: {window_id}")
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return Err("pane does not belong to window: {pane_id}")
+
+    var pane = g_smux_panes[pane_idx]
+    pane.cols = cols
+    pane.rows = rows
+    val resize_result = smux_backend_resize(pane.backend_handle, cols, rows)
+    if resize_result.is_err():
+        pane.last_error = resize_result.err().unwrap()
+        g_smux_panes[pane_idx] = pane
+        return Err(pane.last_error)
+    g_smux_metrics.resize_count = g_smux_metrics.resize_count + 1
+    g_smux_panes[pane_idx] = pane
+    Ok("resized")
+
+fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> bool:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0 or pane_idx < 0:
+        return false
+    if g_smux_windows[window_idx].session_id != session_id:
+        return false
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return false
+
+    var pane = g_smux_panes[pane_idx]
+    val result = smux_backend_send_text(pane.backend_handle, text_input)
+    if result.is_err():
+        pane.last_error = result.err().unwrap()
+        pane.state = "failed"
+        g_smux_panes[pane_idx] = pane
+        return false
+    _append_output_to_pane(pane.id, result.unwrap())
+    g_smux_metrics.send_text_count = g_smux_metrics.send_text_count + 1
+    g_smux_panes[pane_idx] = pane
+    true
+
+fn smux_send_command(session_id: text, window_id: text, pane_id: text, command: text) -> bool:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0 or pane_idx < 0:
+        return false
+    if g_smux_windows[window_idx].session_id != session_id:
+        return false
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return false
+
+    var pane = g_smux_panes[pane_idx]
+    val result = smux_backend_send_command(pane.backend_handle, command)
+    if result.is_err():
+        pane.last_error = result.err().unwrap()
+        pane.state = "failed"
+        g_smux_panes[pane_idx] = pane
+        return false
+    pane.last_command = command
+    _append_output_to_pane(pane.id, result.unwrap())
+    g_smux_metrics.send_command_count = g_smux_metrics.send_command_count + 1
+    g_smux_panes[pane_idx] = pane
+    true
+
+fn smux_capture(session_id: text, window_id: text, pane_id: text, history_lines: i64) -> MuxCapture:
+    val window_idx = _find_window_index(window_id)
+    val pane_idx = _find_pane_index(pane_id)
+    if window_idx < 0 or pane_idx < 0:
+        return MuxCapture(content: "", pane_id: pane_id, rows: 0)
+    if g_smux_windows[window_idx].session_id != session_id:
+        return MuxCapture(content: "", pane_id: pane_id, rows: 0)
+    if g_smux_panes[pane_idx].window_id != window_id:
+        return MuxCapture(content: "", pane_id: pane_id, rows: 0)
+
+    val pane = g_smux_panes[pane_idx]
+    val polled = smux_backend_poll_output(pane.backend_handle)
+    if polled.is_ok():
+        _append_output_to_pane(pane.id, polled.unwrap())
+    g_smux_metrics.capture_count = g_smux_metrics.capture_count + 1
+
+    if val buffer = _buffer_for_pane(pane.id):
+        return buffer.capture(pane.id, history_lines)
+    MuxCapture(content: "", pane_id: pane_id, rows: 0)

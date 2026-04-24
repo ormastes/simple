@@ -2,131 +2,165 @@
 # Design-level system spec for the native tmux_simpleos feature.
 
 use std.spec
-use os.apps.simplemux.contract.{
+use os.apps.smux.contract.{
     MuxBackendKind
 }
-use os.apps.simplemux.api.{
-    simplemux_create_session,
-    simplemux_attach,
-    simplemux_detach,
-    simplemux_new_window,
-    simplemux_split_pane,
-    simplemux_focus_pane,
-    simplemux_resize,
-    simplemux_send_text,
-    simplemux_send_command,
-    simplemux_capture,
-    simplemux_list_sessions,
-    simplemux_list_windows,
-    simplemux_list_panes,
-    simplemux_backend_contract_name
+use os.apps.smux.api.{
+    smux_reset_for_test,
+    smux_metrics,
+    smux_create_session,
+    smux_attach,
+    smux_detach,
+    smux_new_window,
+    smux_split_pane,
+    smux_focus_pane,
+    smux_resize,
+    smux_send_text,
+    smux_send_command,
+    smux_capture,
+    smux_list_sessions,
+    smux_list_windows,
+    smux_list_panes,
+    smux_backend_contract_name
 }
 
 describe "tmux_simpleos feature spec":
     describe "REQ-001 session model":
         it "should create a persistent session with an initial window and pane":
-            val session = simplemux_create_session("dev")
+            smux_reset_for_test()
+            val session = smux_create_session("dev")
             expect(session.name).to_equal("dev")
 
-            val windows = simplemux_list_windows(session.id)
+            val windows = smux_list_windows(session.id)
             expect(windows.len()).to_be_greater_than(0)
 
-            val panes = simplemux_list_panes(session.id, windows[0].id)
+            val panes = smux_list_panes(session.id, windows[0].id)
             expect(panes.len()).to_be_greater_than(0)
 
     describe "REQ-002 pane-backed shells":
         it "should start panes on the native backend":
-            val session = simplemux_create_session("shells")
-            val windows = simplemux_list_windows(session.id)
-            val panes = simplemux_list_panes(session.id, windows[0].id)
+            smux_reset_for_test()
+            val session = smux_create_session("shells")
+            val windows = smux_list_windows(session.id)
+            val panes = smux_list_panes(session.id, windows[0].id)
 
             expect(panes[0].backend_kind).to_equal(MuxBackendKind.NativeShell)
             expect(panes[0].state).to_equal("running")
 
     describe "REQ-003 attach and detach":
         it "should detach a client without destroying the session":
-            val session = simplemux_create_session("attach")
-            expect(simplemux_attach(session.id, "client-a", 120, 40).attached).to_equal(true)
-            expect(simplemux_detach("client-a")).to_equal(true)
+            smux_reset_for_test()
+            val session = smux_create_session("attach")
+            expect(smux_attach(session.id, "client-a", 120, 40).attached).to_equal(true)
+            expect(smux_detach("client-a")).to_equal(true)
 
-            val sessions = simplemux_list_sessions()
+            val sessions = smux_list_sessions()
             expect(sessions[0].name).to_equal("attach")
 
     describe "REQ-004 split and layout":
         it "should split the active pane and create a second pane":
-            val session = simplemux_create_session("split")
-            val window = simplemux_list_windows(session.id)[0]
-            val first = simplemux_list_panes(session.id, window.id)[0]
+            smux_reset_for_test()
+            val session = smux_create_session("split")
+            val window = smux_list_windows(session.id)[0]
+            val first = smux_list_panes(session.id, window.id)[0]
 
-            expect(simplemux_split_pane(session.id, window.id, first.id, "horizontal").is_ok()).to_equal(true)
+            expect(smux_split_pane(session.id, window.id, first.id, "horizontal").is_ok()).to_equal(true)
 
-            val panes = simplemux_list_panes(session.id, window.id)
+            val panes = smux_list_panes(session.id, window.id)
             expect(panes.len()).to_equal(2)
 
     describe "REQ-005 input and output routing":
         it "should route sent text and commands to the selected pane":
-            val session = simplemux_create_session("io")
-            val window = simplemux_list_windows(session.id)[0]
-            val pane = simplemux_list_panes(session.id, window.id)[0]
+            smux_reset_for_test()
+            val session = smux_create_session("io")
+            val window = smux_list_windows(session.id)[0]
+            val pane = smux_list_panes(session.id, window.id)[0]
 
-            expect(simplemux_focus_pane(session.id, window.id, pane.id)).to_equal(true)
-            expect(simplemux_send_text(session.id, window.id, pane.id, "echo hi")).to_equal(true)
-            expect(simplemux_send_command(session.id, window.id, pane.id, "pwd")).to_equal(true)
+            expect(smux_focus_pane(session.id, window.id, pane.id)).to_equal(true)
+            expect(smux_send_text(session.id, window.id, pane.id, "echo hi")).to_equal(true)
+            expect(smux_send_command(session.id, window.id, pane.id, "pwd")).to_equal(true)
+
+            val metrics = smux_metrics()
+            expect(metrics.send_text_count).to_equal(1)
+            expect(metrics.send_command_count).to_equal(1)
 
     describe "REQ-006 state query API":
         it "should list sessions windows and panes with stable metadata":
-            val session = simplemux_create_session("query")
-            val sessions = simplemux_list_sessions()
+            smux_reset_for_test()
+            val session = smux_create_session("query")
+            val sessions = smux_list_sessions()
             expect(sessions[0].name).to_equal("query")
 
-            val windows = simplemux_list_windows(session.id)
+            val windows = smux_list_windows(session.id)
             expect(windows[0].session_id).to_equal(session.id)
 
-            val panes = simplemux_list_panes(session.id, windows[0].id)
+            val panes = smux_list_panes(session.id, windows[0].id)
             expect(panes[0].window_id).to_equal(windows[0].id)
 
     describe "REQ-007 capture api":
         it "should capture pane output and preserve pane identity":
-            val session = simplemux_create_session("capture")
-            val window = simplemux_list_windows(session.id)[0]
-            val pane = simplemux_list_panes(session.id, window.id)[0]
+            smux_reset_for_test()
+            val session = smux_create_session("capture")
+            val window = smux_list_windows(session.id)[0]
+            val pane = smux_list_panes(session.id, window.id)[0]
 
-            val capture = simplemux_capture(session.id, window.id, pane.id, 50)
+            val capture = smux_capture(session.id, window.id, pane.id, 50)
             expect(capture.pane_id).to_equal(pane.id)
             expect(capture.rows).to_be_greater_than(0)
 
     describe "REQ-008 compatibility facing api shape":
         it "should expose tmux-shaped session window pane operations over the native backend":
-            val session = simplemux_create_session("compat")
-            val window = simplemux_new_window(session.id, "build")
+            smux_reset_for_test()
+            val session = smux_create_session("compat")
+            val window = smux_new_window(session.id, "build")
             expect(window.name).to_equal("build")
 
-            val panes = simplemux_list_panes(session.id, window.id)
+            val panes = smux_list_panes(session.id, window.id)
             expect(panes.len()).to_be_greater_than(0)
 
     describe "REQ-009 native first backend":
         it "should identify the backend as native rather than host tmux":
-            expect(simplemux_backend_contract_name()).to_equal("simplemux-native")
+            smux_reset_for_test()
+            expect(smux_backend_contract_name()).to_equal("smux-native")
 
     describe "REQ-010 backend swap readiness":
         it "should keep backend identity behind a named contract boundary":
-            expect(simplemux_backend_contract_name()).to_start_with("simplemux-")
+            smux_reset_for_test()
+            expect(smux_backend_contract_name()).to_start_with("smux-")
 
     describe "REQ-011 explicit non fatal failure handling":
         it "should return an error for an invalid pane target":
-            val session = simplemux_create_session("errors")
-            val window = simplemux_list_windows(session.id)[0]
+            smux_reset_for_test()
+            val session = smux_create_session("errors")
+            val window = smux_list_windows(session.id)[0]
 
-            val result = simplemux_resize(session.id, window.id, "missing-pane", 80, 24)
+            val result = smux_resize(session.id, window.id, "missing-pane", 80, 24)
             expect(result.is_err()).to_equal(true)
             expect(result.err().unwrap()).to_contain("pane")
 
         it "should return an error when split target is invalid":
-            val session = simplemux_create_session("split-errors")
-            val window = simplemux_list_windows(session.id)[0]
-            val result = simplemux_split_pane(session.id, window.id, "missing-pane", "vertical")
+            smux_reset_for_test()
+            val session = smux_create_session("split-errors")
+            val window = smux_list_windows(session.id)[0]
+            val result = smux_split_pane(session.id, window.id, "missing-pane", "vertical")
             expect(result.is_err()).to_equal(true)
 
     describe "REQ-012 initial scope boundary":
         it "should not require full upstream tmux compatibility for the first pass":
             expect("copy-mode deferred").to_contain("deferred")
+
+    describe "NFR-007 observability":
+        it "should expose observable startup and operation counters":
+            smux_reset_for_test()
+            val session = smux_create_session("obs")
+            val window = smux_list_windows(session.id)[0]
+            val pane = smux_list_panes(session.id, window.id)[0]
+
+            expect(smux_resize(session.id, window.id, pane.id, 90, 25).is_ok()).to_equal(true)
+            val _capture = smux_capture(session.id, window.id, pane.id, 10)
+            val metrics = smux_metrics()
+
+            expect(metrics.startup_count).to_be_greater_than(0)
+            expect(metrics.last_startup_ns).to_be_greater_than(0u64)
+            expect(metrics.resize_count).to_equal(1)
+            expect(metrics.capture_count).to_equal(1)

@@ -8,8 +8,8 @@ Related requirements:
 
 ## Decision
 
-SimpleOS will implement a native terminal multiplexer service, informally
-`simplemux`, as the first backend for `tmux_simpleos`.
+SimpleOS will implement a native terminal multiplexer service, `smux`, as the
+first backend for `tmux_simpleos`.
 
 The architecture separates:
 
@@ -46,10 +46,10 @@ future compatibility.
 Dashboard / terminal UI / SSH / future CLI adapters
                         |
                         v
-simplemux control contract
+smux control contract
                         |
                         v
-simplemux session service
+smux session service
   - session registry
   - window registry
   - pane registry
@@ -70,17 +70,17 @@ SOSIX / shell / process / VFS / window transport
 
 Recommended ownership split:
 
-- `src/os/apps/simplemux/contract.spl`
+- `src/os/apps/smux/contract.spl`
   - backend-agnostic control types and commands
-- `src/os/apps/simplemux/service.spl`
+- `src/os/apps/smux/service.spl`
   - authoritative session/window/pane state
-- `src/os/apps/simplemux/backend_native.spl`
+- `src/os/apps/smux/backend_native.spl`
   - native ShellApp + PTY-backed pane execution
-- `src/os/apps/simplemux/buffer.spl`
+- `src/os/apps/smux/buffer.spl`
   - bounded pane capture ring / line buffer
-- `src/os/apps/simplemux/layout.spl`
+- `src/os/apps/smux/layout.spl`
   - split tree and geometry computation
-- `src/os/apps/simplemux/api.spl`
+- `src/os/apps/smux/api.spl`
   - adapter-facing functions mirroring current tmux-shaped operations
 - `src/app/web_dashboard/tmux_api.spl` or equivalent adapter
   - maps HTTP to the new control contract

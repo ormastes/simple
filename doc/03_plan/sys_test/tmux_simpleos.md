@@ -3,7 +3,7 @@
 
 ## Scope
 
-This plan covers the first native `simplemux` backend for `tmux_simpleos`.
+This plan covers the first native `smux` backend for `tmux_simpleos`.
 
 Included:
 
@@ -14,6 +14,7 @@ Included:
 - capture behavior
 - compatibility-facing API shape
 - error handling for invalid targets and missing shell/runtime
+- observable metrics for startup and hot-path operation counters
 
 Excluded from this slice:
 
@@ -38,6 +39,7 @@ Excluded from this slice:
 | REQ-010 | backend swap readiness boundary |
 | REQ-011 | explicit non-fatal failure handling |
 | REQ-012 | declared deferrals remain deferred |
+| NFR-007 | startup/operation observability counters are exposed |
 
 ## Execution
 
@@ -70,6 +72,7 @@ bin/simple test test/os/kernel/loader/executable_source_vfs_spec.spl
 | REQ-010 | backend contract can be queried independently of adapter surface |
 | REQ-011 | invalid targets and launch failures return explicit errors |
 | REQ-012 | deferred parity features are not required for pass |
+| NFR-007 | metrics getter reports startup and operation counters |
 
 ## Pass Criteria
 

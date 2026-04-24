@@ -13,7 +13,7 @@ Date: 2026-04-24
 
 ```text
 +--------------------------------------------------------------------------------+
-| simplemux  session: dev  window: build  panes: 3  attached: 1        [Ctrl+g] |
+| smux  session: dev  window: build  panes: 3  attached: 1             [Ctrl+g] |
 +------------------------------+-------------------------------------------------+
 | Pane 0  shell                | Pane 1  tests                                   |
 |------------------------------|-------------------------------------------------|
@@ -50,7 +50,7 @@ Date: 2026-04-24
 |                                      |
 | Session continues running.           |
 |                                      |
-| Reattach: simplemux attach dev       |
+| Reattach: smux attach dev            |
 |                                      |
 | [Enter] return to session list       |
 +--------------------------------------+

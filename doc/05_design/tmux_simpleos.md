@@ -18,27 +18,27 @@ MuxClientAttachment
 ### Service Operations
 
 ```text
-simplemux_create_session(name)
-simplemux_destroy_session(session_id)
-simplemux_attach(session_id, client_id, cols, rows)
-simplemux_detach(client_id)
+smux_create_session(name)
+smux_destroy_session(session_id)
+smux_attach(session_id, client_id, cols, rows)
+smux_detach(client_id)
 
-simplemux_new_window(session_id, name)
-simplemux_focus_window(session_id, window_id)
+smux_new_window(session_id, name)
+smux_focus_window(session_id, window_id)
 
-simplemux_split_pane(session_id, window_id, pane_id, direction)
-simplemux_close_pane(session_id, window_id, pane_id)
-simplemux_focus_pane(session_id, window_id, pane_id)
-simplemux_resize(session_id, window_id, pane_id, cols, rows)
+smux_split_pane(session_id, window_id, pane_id, direction)
+smux_close_pane(session_id, window_id, pane_id)
+smux_focus_pane(session_id, window_id, pane_id)
+smux_resize(session_id, window_id, pane_id, cols, rows)
 
-simplemux_send_input(session_id, window_id, pane_id, bytes)
-simplemux_send_text(session_id, window_id, pane_id, text)
-simplemux_send_command(session_id, window_id, pane_id, command)
-simplemux_capture(session_id, window_id, pane_id, history_lines)
+smux_send_input(session_id, window_id, pane_id, bytes)
+smux_send_text(session_id, window_id, pane_id, text)
+smux_send_command(session_id, window_id, pane_id, command)
+smux_capture(session_id, window_id, pane_id, history_lines)
 
-simplemux_list_sessions()
-simplemux_list_windows(session_id)
-simplemux_list_panes(session_id, window_id)
+smux_list_sessions()
+smux_list_windows(session_id)
+smux_list_panes(session_id, window_id)
 ```
 
 These intentionally mirror the current tmux-shaped host API direction.
@@ -161,6 +161,8 @@ Disk persistence is intentionally deferred.
 - layout recomputation should be scoped to the changed window
 - capture buffer must be bounded per pane
 - output draining should batch available bytes/chunks
+- operation counters and startup timestamp should be exposed for verification
+  and smoke diagnostics
 
 ## Compatibility Mapping
 
