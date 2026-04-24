@@ -1,0 +1,274 @@
+# @cover src/os/apps/shell/shell_starship.spl 75%
+"""
+# Shell Starship Prompt Specification
+
+**Feature IDs:** #shell-starship-prompt
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+**Screenshots:** N/A
+**TUI Captures:** N/A
+**Logs:** N/A
+
+## Overview
+
+Validates the StarshipPrompt implementation (shell_starship.spl) that renders
+an ANSI-colored multi-segment prompt for the SimpleOS interactive shell REPL.
+
+Segments covered:
+- Exit-code indicator (green check / red cross with exit code)
+- user@host segment
+- Current working directory (cwd) with path abbreviation
+- Git branch segment (reads .git/HEAD from VFS)
+- Elapsed time indicator (shown when > threshold ms)
+
+Configuration is read from ~/.config/starship.spl when present.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| StarshipPrompt | Struct that builds the full prompt string via build_prompt(ctx, elapsed_ms) |
+| ShellContext | Provides cwd, last_exit_code, vfs reference, user/host info |
+| ANSI codes | e.g. \\e[32m = green, \\e[31m = red, \\e[0m = reset |
+| Git segment | Reads VFS path <cwd>/.git/HEAD to detect branch name |
+| Elapsed segment | Shown when elapsed_ms > StarshipPrompt.elapsed_threshold_ms |
+"""
+
+use std.sspec.*
+use os.apps.shell.shell_starship.{StarshipPrompt}
+use os.apps.shell.shell_app.{ShellContext}
+
+
+# ============================================================================
+# Test Group 1: Exit-code segment
+# ============================================================================
+
+describe "StarshipPrompt exit-code segment":
+    """
+    ## Exit Code Indicator
+
+    When last_exit_code == 0 the prompt includes a green success indicator.
+    When last_exit_code != 0 the prompt includes a red failure indicator with
+    the nonzero exit code visible in the segment.
+    """
+
+    it "includes green indicator when last exit code is 0":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 0
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        # Green ANSI escape must appear somewhere in the output
+        expect(result.contains("\e[32m") or result.contains("\e[0;32m")).to_equal(true)
+
+    it "includes red indicator when last exit code is nonzero":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 1
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("\e[31m") or result.contains("\e[0;31m")).to_equal(true)
+
+    it "shows nonzero exit code value in prompt on failure":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 127
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("127")).to_equal(true)
+
+    it "does not show exit code number on success":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 0
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        # "0" should not appear as exit-code in the prompt (zero is implicit)
+        expect(result.contains("✓") or not result.contains(" 0 ")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: user@host segment
+# ============================================================================
+
+describe "StarshipPrompt user@host segment":
+    """
+    ## User and Host Segment
+
+    The prompt must show user@host so the operator knows which machine and
+    account is active.
+    """
+
+    it "includes username in prompt":
+        val ctx = ShellContext.default()
+        ctx.user = "root"
+        ctx.host = "simpleos"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("root")).to_equal(true)
+
+    it "includes hostname in prompt":
+        val ctx = ShellContext.default()
+        ctx.user = "root"
+        ctx.host = "simpleos"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("simpleos")).to_equal(true)
+
+    it "separates user and host with @ character":
+        val ctx = ShellContext.default()
+        ctx.user = "admin"
+        ctx.host = "mybox"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("admin@mybox")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: CWD segment
+# ============================================================================
+
+describe "StarshipPrompt cwd segment":
+    """
+    ## Current Working Directory Segment
+
+    The cwd segment shows the current directory. Long paths are abbreviated
+    to keep the prompt concise. The home directory is shown as ~.
+    """
+
+    it "shows cwd in prompt":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/usr/local/bin"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("/usr/local/bin") or result.contains("bin")).to_equal(true)
+
+    it "abbreviates home directory to tilde":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/home/user"
+        ctx.home = "/home/user"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("~")).to_equal(true)
+
+    it "shows root directory as slash":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("/")).to_equal(true)
+
+    it "abbreviates intermediate path components for long paths":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/very/long/nested/path/that/should/be/abbreviated"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        # Result must include the leaf component
+        expect(result.contains("abbreviated")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: Git branch segment
+# ============================================================================
+
+describe "StarshipPrompt git branch segment":
+    """
+    ## Git Branch Segment
+
+    When the cwd (or a parent) contains a .git/HEAD file, the prompt shows
+    the current branch name. When not in a git repo, no branch segment appears.
+    """
+
+    it "shows branch name when .git/HEAD is present":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/repo"
+        # Provide a fake VFS that returns branch HEAD content
+        val prompt = StarshipPrompt.with_git_head_content("ref: refs/heads/main")
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("main")).to_equal(true)
+
+    it "shows detached HEAD indicator when HEAD is a raw commit hash":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/repo"
+        val hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        val prompt = StarshipPrompt.with_git_head_content(hash)
+        val result = prompt.build_prompt(ctx, 0)
+        # At minimum the truncated hash or a detached indicator must appear
+        expect(result.contains("a1b2c3") or result.contains("HEAD")).to_equal(true)
+
+    it "omits git segment when not in a git repo":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/tmp"
+        val prompt = StarshipPrompt.with_no_git()
+        val result = prompt.build_prompt(ctx, 0)
+        # Branch-specific Unicode or "branch" text must be absent
+        expect(result.contains("refs/heads/")).to_equal(false)
+
+
+# ============================================================================
+# Test Group 5: Elapsed time segment
+# ============================================================================
+
+describe "StarshipPrompt elapsed time segment":
+    """
+    ## Elapsed Time Segment
+
+    The elapsed segment is suppressed for fast commands and shown only when
+    elapsed_ms exceeds the configured threshold (default 2000 ms).
+    """
+
+    it "hides elapsed time when below threshold":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 500)
+        # Should not show any timing annotation for fast commands
+        expect(result.contains("ms") or result.contains("500")).to_equal(false)
+
+    it "shows elapsed time when above threshold":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 5000)
+        expect(result.contains("5") and (result.contains("s") or result.contains("ms"))).to_equal(true)
+
+    it "shows elapsed in seconds for times >= 1000 ms":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 3500)
+        expect(result.contains("3") and result.contains("s")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 6: Prompt structure
+# ============================================================================
+
+describe "StarshipPrompt overall structure":
+    """
+    ## Prompt Structure
+
+    The prompt must end with the standard ANSI-reset code followed by a
+    terminating character ($ for normal users, # for root) so the terminal
+    is left in a clean state.
+    """
+
+    it "ends with prompt terminator character":
+        val ctx = ShellContext.default()
+        ctx.user = "user"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        # Prompt must end with $ or # (possibly after reset code)
+        val trimmed = result.trim_end()
+        expect(trimmed.ends_with("$") or trimmed.ends_with("#")).to_equal(true)
+
+    it "includes ANSI reset code to avoid terminal color bleed":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("\e[0m") or result.contains("\e[m")).to_equal(true)
+
+    it "returns non-empty string for default context":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.len()).to_be_greater_than(0)

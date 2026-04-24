@@ -1,0 +1,278 @@
+# @cover src/os/tools/shell/awk/awk_tool.spl 75%
+"""
+# AWK Tool Specification
+
+**Feature IDs:** #shell-awk-tool
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+**Screenshots:** N/A
+**TUI Captures:** N/A
+**Logs:** N/A
+
+## Overview
+
+Validates the basic POSIX awk implementation (awk_tool.spl) that is invoked
+via the shell `awk` command inside SimpleOS.
+
+Scope (this iteration):
+- Field splitting with default IFS (whitespace)
+- $0 (whole record), $1..$NF (fields), NF (field count), NR (record number)
+- BEGIN and END blocks
+- Pattern/action pairs — pattern is a string literal or /regex/ match
+- Built-in print and printf actions
+- Exit code 0 on success, nonzero on bad program syntax
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| tool_awk | Entry fn: tool_awk(vfs, cwd, args, terminal) -> i32 |
+| AckProgram | Parsed representation of BEGIN/END + pattern-action rules |
+| Record | One input line; $0 is full text, $1..$NF are whitespace-split fields |
+| NR | Current record (line) number, 1-based |
+| NF | Number of fields in the current record |
+| BufferingTerminal | Used by $(cmd) substitution to capture awk output |
+"""
+
+use std.sspec.*
+use os.tools.shell.awk.awk_tool.{tool_awk, AckProgram}
+use os.apps.terminal.terminal.{Terminal, BufferingTerminal}
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _run_awk(program: text, input: text) -> text:
+    """Run awk program against input text; return captured stdout."""
+    val term = BufferingTerminal.new()
+    val args = ["-", program]
+    tool_awk(nil, "/", args, term, input)
+    return term.captured()
+
+fn _run_awk_exit(program: text, input: text) -> i32:
+    """Return exit code from running awk program against input."""
+    val term = BufferingTerminal.new()
+    val args = ["-", program]
+    return tool_awk(nil, "/", args, term, input)
+
+
+# ============================================================================
+# Test Group 1: Field splitting
+# ============================================================================
+
+describe "awk field splitting":
+    """
+    ## Field Splitting
+
+    By default awk splits each record on whitespace. $0 is the whole line,
+    $1 is the first field, $NF is the last field, NF is the count.
+    """
+
+    it "prints whole line via $0":
+        val out = _run_awk("{ print $0 }", "hello world")
+        expect(out.trim()).to_equal("hello world")
+
+    it "prints first field via $1":
+        val out = _run_awk("{ print $1 }", "alpha beta gamma")
+        expect(out.trim()).to_equal("alpha")
+
+    it "prints second field via $2":
+        val out = _run_awk("{ print $2 }", "alpha beta gamma")
+        expect(out.trim()).to_equal("beta")
+
+    it "prints last field via $NF":
+        val out = _run_awk("{ print $NF }", "alpha beta gamma")
+        expect(out.trim()).to_equal("gamma")
+
+    it "NF equals number of whitespace-separated tokens":
+        val out = _run_awk("{ print NF }", "a b c d")
+        expect(out.trim()).to_equal("4")
+
+    it "handles multiple spaces between fields":
+        val out = _run_awk("{ print $2 }", "x   y   z")
+        expect(out.trim()).to_equal("y")
+
+    it "handles leading and trailing whitespace":
+        val out = _run_awk("{ print $1 }", "  foo  ")
+        expect(out.trim()).to_equal("foo")
+
+
+# ============================================================================
+# Test Group 2: NR — record number
+# ============================================================================
+
+describe "awk NR record counter":
+    """
+    ## Record Number (NR)
+
+    NR is incremented for each input record (line). It starts at 1.
+    Printing NR alongside $0 annotates each line.
+    """
+
+    it "NR is 1 for the first record":
+        val out = _run_awk("NR==1 { print NR }", "first\nsecond\nthird")
+        expect(out.trim()).to_equal("1")
+
+    it "NR is 2 for the second record":
+        val out = _run_awk("NR==2 { print NR }", "first\nsecond\nthird")
+        expect(out.trim()).to_equal("2")
+
+    it "prints NR and $0 for all records":
+        val out = _run_awk("{ print NR, $0 }", "a\nb")
+        val lines = out.trim().split("\n")
+        expect(lines.len()).to_equal(2)
+        expect(lines[0].starts_with("1")).to_equal(true)
+        expect(lines[1].starts_with("2")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: BEGIN and END blocks
+# ============================================================================
+
+describe "awk BEGIN and END blocks":
+    """
+    ## BEGIN and END
+
+    BEGIN runs before any input is processed; END runs after all input.
+    They are useful for headers, footers, and accumulation.
+    """
+
+    it "BEGIN block executes before input":
+        val out = _run_awk("BEGIN { print \"start\" } { print $0 }", "line")
+        val lines = out.trim().split("\n")
+        expect(lines[0]).to_equal("start")
+        expect(lines[1]).to_equal("line")
+
+    it "END block executes after all input":
+        val out = _run_awk("{ print $0 } END { print \"done\" }", "line")
+        val lines = out.trim().split("\n")
+        expect(lines[lines.len() - 1]).to_equal("done")
+
+    it "BEGIN and END can run without any input records":
+        val out = _run_awk("BEGIN { print \"hi\" } END { print \"bye\" }", "")
+        val lines = out.trim().split("\n")
+        expect(lines[0]).to_equal("hi")
+        expect(lines[1]).to_equal("bye")
+
+    it "END sees correct NR after processing all records":
+        val out = _run_awk("END { print NR }", "a\nb\nc")
+        expect(out.trim()).to_equal("3")
+
+
+# ============================================================================
+# Test Group 4: Pattern/action filtering
+# ============================================================================
+
+describe "awk pattern/action pairs":
+    """
+    ## Pattern Filtering
+
+    A pattern before { action } causes the action to run only on matching records.
+    String equality patterns and /regex/ patterns must both be supported.
+    """
+
+    it "string pattern selects matching records":
+        val out = _run_awk("/ERROR/ { print $0 }", "INFO ok\nERROR bad\nINFO ok2")
+        expect(out.trim()).to_equal("ERROR bad")
+
+    it "pattern can negate with ! operator":
+        val out = _run_awk("!/INFO/ { print $0 }", "INFO ok\nERROR bad")
+        expect(out.trim()).to_equal("ERROR bad")
+
+    it "NR-based pattern selects specific lines":
+        val out = _run_awk("NR==2 { print $0 }", "line1\nline2\nline3")
+        expect(out.trim()).to_equal("line2")
+
+    it "multiple pattern/action pairs apply independently":
+        val out = _run_awk("/A/ { print \"matched-A\" } /B/ { print \"matched-B\" }", "A\nB\nC")
+        val lines = out.trim().split("\n")
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal("matched-A")
+        expect(lines[1]).to_equal("matched-B")
+
+
+# ============================================================================
+# Test Group 5: print and printf
+# ============================================================================
+
+describe "awk print and printf":
+    """
+    ## Output Actions
+
+    print emits fields separated by OFS (default space) with a trailing newline.
+    printf uses a format string like C printf without an automatic newline.
+    """
+
+    it "print with comma joins fields with space":
+        val out = _run_awk("{ print $1, $2 }", "foo bar")
+        expect(out.trim()).to_equal("foo bar")
+
+    it "print with no args prints $0":
+        val out = _run_awk("{ print }", "whole line here")
+        expect(out.trim()).to_equal("whole line here")
+
+    it "printf formats a string without trailing newline":
+        val out = _run_awk("{ printf \"%s:%s\", $1, $2 }", "key value")
+        expect(out).to_equal("key:value")
+
+    it "printf %d formats an integer":
+        val out = _run_awk("{ printf \"%d\", NR }", "x")
+        expect(out).to_equal("1")
+
+
+# ============================================================================
+# Test Group 6: Multi-record accumulation
+# ============================================================================
+
+describe "awk multi-record accumulation":
+    """
+    ## Accumulation Patterns
+
+    Common awk idiom: sum a numeric column, count matching records, etc.
+    """
+
+    it "sums a numeric column across all records":
+        val out = _run_awk("{ sum += $1 } END { print sum }", "10\n20\n30")
+        expect(out.trim()).to_equal("60")
+
+    it "counts records matching a pattern":
+        val out = _run_awk("/yes/ { n++ } END { print n }", "yes\nno\nyes\nno\nyes")
+        expect(out.trim()).to_equal("3")
+
+    it "prints running total with NR":
+        val out = _run_awk("{ sum += $1; print NR, sum }", "5\n3")
+        val lines = out.trim().split("\n")
+        expect(lines[0]).to_equal("1 5")
+        expect(lines[1]).to_equal("2 8")
+
+
+# ============================================================================
+# Test Group 7: Exit codes and error handling
+# ============================================================================
+
+describe "awk exit codes":
+    """
+    ## Exit Codes
+
+    tool_awk returns 0 on success. A syntactically invalid program must return
+    a nonzero exit code without panicking.
+    """
+
+    it "returns 0 for a valid program with input":
+        val code = _run_awk_exit("{ print $1 }", "hello")
+        expect(code).to_equal(0)
+
+    it "returns 0 for a valid program with no input":
+        val code = _run_awk_exit("BEGIN { print \"ok\" }", "")
+        expect(code).to_equal(0)
+
+    it "returns nonzero for an unparseable program":
+        val code = _run_awk_exit("{ INVALID SYNTAX !!! }", "x")
+        expect(code).to_be_greater_than(0)

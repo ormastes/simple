@@ -62,6 +62,8 @@ class ObjectStore:
     prop_obj_ids: [i64]
     prop_keys: [text]
     prop_values: [JsValue]
+    prop_ref_tags: [text]
+    prop_ref_ids: [text]
     prop_enumerables: [bool]
     prop_configurables: [bool]
 
@@ -71,6 +73,8 @@ class ObjectStore:
             prop_obj_ids: rt_array_new_with_cap_i64(16384),
             prop_keys: rt_array_new_with_cap_text(16384),
             prop_values: rt_array_new_with_cap_js_value(16384),
+            prop_ref_tags: rt_array_new_with_cap_text(16384),
+            prop_ref_ids: rt_array_new_with_cap_text(16384),
             prop_enumerables: rt_array_new_with_cap_bool(16384),
             prop_configurables: rt_array_new_with_cap_bool(16384)
         )
@@ -100,6 +104,21 @@ class ObjectStore:
                 JsValue.Symbol(id: self._normalize_obj_id(id))
             case _:
                 value
+
+    fn _decode_ref_value(tag: text, id_text: text, fallback: JsValue) -> JsValue:
+        if tag == "":
+            return self._normalize_value_ids(fallback)
+        if val Some(parsed_id) = _parse_non_negative_i64(id_text):
+            val decoded_id = self._normalize_obj_id(parsed_id)
+            if tag == "object":
+                return JsValue.Object(id: decoded_id)
+            if tag == "array":
+                return JsValue.Array(id: decoded_id)
+            if tag == "function":
+                return JsValue.Function(id: decoded_id)
+            if tag == "symbol":
+                return JsValue.Symbol(id: decoded_id)
+        self._normalize_value_ids(fallback)
 
     me allocate() -> JsObject:
         val id = self.next_id
@@ -133,7 +152,10 @@ class ObjectStore:
                     if is_enum:
                         props.push(JsProperty(
                             key: key,
-                            value: self._normalize_value_ids(self.prop_values.get(i)),
+                            value: self._decode_ref_value(
+                                self.prop_ref_tags.get(i),
+                                self.prop_ref_ids.get(i),
+                                self.prop_values.get(i)),
                             writable: true,
                             enumerable: true,
                             configurable: self.prop_configurables.get(i)
@@ -154,7 +176,27 @@ class ObjectStore:
         # Append-only — latest entry wins on read (no .set() in interpreter mode)
         self.prop_obj_ids.push(obj_id)
         self.prop_keys.push(key)
-        self.prop_values.push(value)
+        match value:
+            case JsValue.Object(id):
+                self.prop_values.push(JsValue.Undefined)
+                self.prop_ref_tags.push("object")
+                self.prop_ref_ids.push("{self._normalize_obj_id(id)}")
+            case JsValue.Array(id):
+                self.prop_values.push(JsValue.Undefined)
+                self.prop_ref_tags.push("array")
+                self.prop_ref_ids.push("{self._normalize_obj_id(id)}")
+            case JsValue.Function(id):
+                self.prop_values.push(JsValue.Undefined)
+                self.prop_ref_tags.push("function")
+                self.prop_ref_ids.push("{self._normalize_obj_id(id)}")
+            case JsValue.Symbol(id):
+                self.prop_values.push(JsValue.Undefined)
+                self.prop_ref_tags.push("symbol")
+                self.prop_ref_ids.push("{self._normalize_obj_id(id)}")
+            case _:
+                self.prop_values.push(value)
+                self.prop_ref_tags.push("")
+                self.prop_ref_ids.push("")
         self.prop_enumerables.push(true)
         self.prop_configurables.push(true)
 
@@ -164,7 +206,10 @@ class ObjectStore:
         while i >= 0:
             if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id):
                 if self.prop_keys.get(i) == key:
-                    return self._normalize_value_ids(self.prop_values.get(i))
+                    return self._decode_ref_value(
+                        self.prop_ref_tags.get(i),
+                        self.prop_ref_ids.get(i),
+                        self.prop_values.get(i))
             i = i - 1
         JsValue.Undefined
 
@@ -238,6 +283,8 @@ class ObjectStore:
         self.prop_obj_ids.push(obj_id)
         self.prop_keys.push(key)
         self.prop_values.push(JsValue.Undefined)
+        self.prop_ref_tags.push("")
+        self.prop_ref_ids.push("")
         self.prop_enumerables.push(false)
         self.prop_configurables.push(false)
 
