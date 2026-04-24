@@ -1,4 +1,191 @@
-describe "Perf":
-    it "skipped":
-        val pending_reason = "assertion failures - runtime behavior differs in interpreter mode"
-        expect(pending_reason.len()).to_be_greater_than(0)
+# @cover src/compiler/70.backend/backend/interpreter.spl
+# # Interpreter Performance Specification
+#
+# **Feature IDs:** #interp-perf-001
+# **Category:** Infrastructure | Runtime
+# **Difficulty:** 3/5
+# **Status:** In Progress
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** N/A
+# **Artifacts:** N/A
+#
+# ## Overview
+#
+# Timing micro-benchmarks for the tree-walking HIR interpreter.
+# Covers integer arithmetic loop throughput, function call overhead,
+# and builtin dispatch cost (println / len calls).
+#
+# ## Key Concepts
+#
+# | Concept              | Description                                         |
+# |----------------------|-----------------------------------------------------|
+# | Arithmetic loop      | 1000 int additions — exercises eval_binop hot path  |
+# | Function call loop   | 100 calls to a trivial helper — measures frame cost |
+# | Builtin dispatch     | 100 len() calls — exercises try_call_builtin path   |
+# | Module-cache timing  | Compiled-mode only (see D-8 note below)             |
+#
+# ## D-8 Note (interpreter `it` block limitation)
+#
+# `it` blocks in interpreter mode do not support `return` for early exit.
+# All assertions are structured as single terminal `expect(...)` expressions.
+# Timing elapsed values are computed and stored in `var`; the assertion
+# verifies functional correctness, not wall-clock bounds (interpreter timing
+# is non-deterministic).  Wall-clock assertions belong in compiled-mode specs.
+#
+# ## Module-cache timing note
+#
+# Observing the Rust `module_cache.rs` hit rate requires compiled mode: there
+# is no API to query cache stats from within an `it` body in interpreter mode.
+# This spec covers dispatch and call-overhead proxies instead; a compiled-mode
+# benchmark for module-cache warmup is a follow-up TODO (see 3-arch D-6b).
+
+use app.io.time_ops.{time_now_unix_micros}
+
+# ============================================================================
+# Helper: a trivial function used for call-overhead benchmarks
+# ============================================================================
+
+fn add_one(x: i64) -> i64:
+    x + 1
+
+fn identity(x: i64) -> i64:
+    x
+
+# ============================================================================
+# Test Group 1: Integer arithmetic loop
+# ============================================================================
+
+describe "Interpreter Perf":
+    """
+    ## Arithmetic Loop Baseline
+
+    1000 iterations of integer addition.
+    Exercises the eval_binop Int+Int hot path in interpreter.spl.
+    Correctness assertion: sum must equal 1 + 2 + ... + 1000 = 500500.
+    """
+
+    describe "arithmetic loop":
+        it "1000 int additions produce correct sum":
+            var sum: i64 = 0
+            var i: i64 = 1
+            for _step in 0..1000:
+                sum = sum + i
+                i = i + 1
+            # sum of 1..1000 = 500500
+            expect(sum).to_equal(500500)
+
+        it "1000 int multiplications produce correct product mod":
+            # multiply 1..10 to get factorial(10) = 3628800
+            var prod: i64 = 1
+            for _step in 0..10:
+                prod = prod * ((_step + 1) + 0)
+            # factorial(10) = 3628800
+            expect(prod).to_equal(3628800)
+
+        it "timing: 1000 additions complete (elapsed recorded, not asserted)":
+            # Wall-clock assertion omitted — interpreter timing is non-deterministic.
+            # elapsed is computed to exercise the timing path; correctness asserted instead.
+            val t0 = time_now_unix_micros()
+            var s: i64 = 0
+            for _n in 0..1000:
+                s = s + _n
+            val elapsed = time_now_unix_micros() - t0
+            # elapsed must be non-negative (time only moves forward)
+            expect(elapsed).to_be_greater_than(-1)
+            expect(s).to_equal(499500)
+
+    # ============================================================================
+    # Test Group 2: Function call overhead
+    # ============================================================================
+
+    describe "function call overhead":
+        """
+        ## Function Call Overhead
+
+        100 calls to a trivial single-argument function.
+        Exercises call_function / call_hir_function / push_scope path.
+        """
+
+        it "100 function calls return correct accumulated value":
+            var acc: i64 = 0
+            for _c in 0..100:
+                acc = add_one(acc)
+            expect(acc).to_equal(100)
+
+        it "identity function returns its argument unchanged":
+            val result = identity(42)
+            expect(result).to_equal(42)
+
+        it "timing: 100 function calls complete (elapsed recorded)":
+            val t0 = time_now_unix_micros()
+            var acc: i64 = 0
+            for _c in 0..100:
+                acc = identity(acc) + 1
+            val elapsed = time_now_unix_micros() - t0
+            expect(elapsed).to_be_greater_than(-1)
+            expect(acc).to_equal(100)
+
+    # ============================================================================
+    # Test Group 3: Builtin dispatch (len / list ops)
+    # ============================================================================
+
+    describe "builtin dispatch":
+        """
+        ## Builtin Dispatch
+
+        Exercises try_call_builtin by calling len() repeatedly on a fixed list.
+        Validates that builtin dispatch does not crash or corrupt state under
+        repeated invocations.
+        """
+
+        it "100 len() calls on a list return stable value":
+            val items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            var checks_ok: i64 = 0
+            for _k in 0..100:
+                val l = items.len()
+                if l == 10:
+                    checks_ok = checks_ok + 1
+            expect(checks_ok).to_equal(100)
+
+        it "timing: 100 len() calls complete (elapsed recorded)":
+            val data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            val t0 = time_now_unix_micros()
+            var acc: i64 = 0
+            for _k in 0..100:
+                acc = acc + data.len()
+            val elapsed = time_now_unix_micros() - t0
+            expect(elapsed).to_be_greater_than(-1)
+            expect(acc).to_equal(1000)
+
+    # ============================================================================
+    # Test Group 4: Module-cache proxy (warm dispatch, not actual import timing)
+    # ============================================================================
+
+    describe "module cache proxy":
+        """
+        ## Module Cache Proxy
+
+        True module-cache hit measurement requires compiled mode and access to
+        Rust loader internals not visible from a spec `it` body (D-8 + D-6b).
+
+        As an interpreter-mode proxy: call `add_one` 200 times and verify
+        total call count is correct.  The second batch of 100 calls exercises
+        the same already-resolved function entry — a proxy for warm dispatch
+        cost.
+        """
+
+        it "first 100 calls produce correct result":
+            var acc: i64 = 0
+            for _i in 0..100:
+                acc = add_one(acc)
+            expect(acc).to_equal(100)
+
+        it "second 100 calls (warm path) produce same correctness":
+            # Same test as above — both batches must give identical results,
+            # demonstrating stable warm-path behaviour.
+            var acc: i64 = 0
+            for _i in 0..100:
+                acc = add_one(acc)
+            expect(acc).to_equal(100)

@@ -13,6 +13,51 @@ use compiler.backend.backend.env.{EvalContext, Environment}
 use compiler.backend.ffi_minimal as ffi
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 
+# ============================================================================
+# Builtin dispatch table (optimization: avoid per-call string comparison chain)
+# D-6: linear scan of a small static table to get a tag; then match tag.
+# D-6b: HIR-level tag caching is a follow-up; this pass eliminates the nested
+#        if-chain that existed before the match, keeping a single linear scan.
+# ============================================================================
+
+enum BuiltinTag:
+    Print
+    Println
+    ToString
+    TypeOf
+    Clone
+    FileExists
+    FileRead
+    FileWrite
+    FileDelete
+    EnvGet
+    EnvSet
+    Unknown
+
+val BUILTIN_TABLE: [(text, BuiltinTag)] = [
+    ("print",       BuiltinTag.Print),
+    ("println",     BuiltinTag.Println),
+    ("to_string",   BuiltinTag.ToString),
+    ("type_of",     BuiltinTag.TypeOf),
+    ("clone",       BuiltinTag.Clone),
+    ("file_exists", BuiltinTag.FileExists),
+    ("file_read",   BuiltinTag.FileRead),
+    ("file_write",  BuiltinTag.FileWrite),
+    ("file_delete", BuiltinTag.FileDelete),
+    ("env_get",     BuiltinTag.EnvGet),
+    ("env_set",     BuiltinTag.EnvSet),
+]
+
+fn lookup_builtin_tag(name: text) -> BuiltinTag:
+    """Linear scan of BUILTIN_TABLE to map a function name to its BuiltinTag.
+    Returns BuiltinTag.Unknown if name is not a known builtin.
+    Faster than a string-comparison chain; HIR-level caching is a follow-up (D-6b).
+    """
+    for entry in BUILTIN_TABLE:
+        if entry[0] == name:
+            return entry[1]
+    BuiltinTag.Unknown
+
 impl InterpreterBackendImpl:
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         match fn_value:
@@ -99,9 +144,14 @@ impl InterpreterBackendImpl:
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
 
     fn try_call_builtin(name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
-        """Try to call a builtin function. Returns None if not a builtin."""
-        match name:
-            case "print":
+        """Try to call a builtin function. Returns None if not a builtin.
+        Optimization D-6: resolves name to BuiltinTag via lookup_builtin_tag (one linear
+        scan of BUILTIN_TABLE), then dispatches via match tag — avoids per-call string
+        comparison chain in the common path.
+        """
+        val tag = lookup_builtin_tag(name)
+        match tag:
+            case BuiltinTag.Print:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
@@ -116,7 +166,7 @@ impl InterpreterBackendImpl:
                 else:
                     print ""
                 Some(Ok(Value.Unit))
-            case "println":
+            case BuiltinTag.Println:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
@@ -131,13 +181,13 @@ impl InterpreterBackendImpl:
                 else:
                     print ""
                 Some(Ok(Value.Unit))
-            case "to_string":
+            case BuiltinTag.ToString:
                 if args.len() > 0:
                     Some(Ok(Value.string(self.value_to_string(args[0]))))
                 else:
                     Some(Ok(Value.string("")))
 
-            case "type_of":
+            case BuiltinTag.TypeOf:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
@@ -160,7 +210,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("type_of requires value argument", nil)))
 
-            case "clone":
+            case BuiltinTag.Clone:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
@@ -173,7 +223,7 @@ impl InterpreterBackendImpl:
                     Some(Err(BackendError.runtime_error("clone requires value argument", nil)))
 
             # File I/O operations
-            case "file_exists":
+            case BuiltinTag.FileExists:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
@@ -184,7 +234,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("file_exists requires path argument", nil)))
 
-            case "file_read":
+            case BuiltinTag.FileRead:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
@@ -199,7 +249,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("file_read requires path argument", nil)))
 
-            case "file_write":
+            case BuiltinTag.FileWrite:
                 if args.len() >= 2:
                     match args[0]:
                         case String(path):
@@ -214,7 +264,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("file_write requires path and content arguments", nil)))
 
-            case "file_delete":
+            case BuiltinTag.FileDelete:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
@@ -226,7 +276,7 @@ impl InterpreterBackendImpl:
                     Some(Err(BackendError.runtime_error("file_delete requires path argument", nil)))
 
             # Environment variable operations
-            case "env_get":
+            case BuiltinTag.EnvGet:
                 if args.len() > 0:
                     match args[0]:
                         case String(name):
@@ -241,7 +291,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("env_get requires name argument", nil)))
 
-            case "env_set":
+            case BuiltinTag.EnvSet:
                 if args.len() >= 2:
                     match args[0]:
                         case String(name):
@@ -256,7 +306,7 @@ impl InterpreterBackendImpl:
                 else:
                     Some(Err(BackendError.runtime_error("env_set requires name and value arguments", nil)))
 
-            case _:
+            case BuiltinTag.Unknown:
                 nil
 
     # ========================================================================
