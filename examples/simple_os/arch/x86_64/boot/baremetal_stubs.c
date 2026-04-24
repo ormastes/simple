@@ -11523,7 +11523,6 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (s < 0) s = 0;
     if (e > (int64_t)a->len) e = (int64_t)a->len;
     if (s >= e) return rt_array_new(ENCODE_INT(1));
-    RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
     for (int64_t i = s; i < e; i++) {
         result = rt_array_push(result, items[i]);

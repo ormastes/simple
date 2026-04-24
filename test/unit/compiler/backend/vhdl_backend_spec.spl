@@ -2300,7 +2300,7 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         val mir_module = mir_lowering.lower_module(hir_module)
 
         val mir_funcs = mir_module.functions.values()
-        check(mir_funcs.len() >= 6)
+        check(mir_funcs.len() >= 8)
         var saw_writeback_opcode_slice = false
         var saw_writeback_funct3_slice = false
         var saw_writeback_funct7_slice = false
@@ -2326,6 +2326,9 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         var saw_exec_datapath_opcode_slice = false
         var saw_exec_datapath_funct3_slice = false
         var saw_exec_datapath_bit30_slice = false
+        var saw_branch_datapath_opcode_slice = false
+        var saw_branch_datapath_funct3_slice = false
+        var saw_control_flow_datapath_opcode_slice = false
         var saw_mem_access_opcode_slice = false
         var saw_mem_access_funct3_slice = false
         var saw_jump_opcode_slice = false
@@ -2340,6 +2343,8 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         var saw_upper_concat = false
         var saw_exec_concat = false
         var saw_exec_datapath_concat = false
+        var saw_branch_datapath_concat = false
+        var saw_control_flow_datapath_concat = false
         var saw_mem_access_concat = false
         var saw_jump_concat = false
         var saw_helper_shift_mask_fallback = false
@@ -2485,6 +2490,38 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
                                     saw_exec_datapath_concat = true
                             case _:
                                 nil
+            if mir_fn.name == "simple_rv32i_core_decode_branch_datapath":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_branch_datapath_opcode_slice = true
+                                if hi == 14 and lo == 12:
+                                    saw_branch_datapath_funct3_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 2:
+                                    saw_branch_datapath_concat = true
+                            case _:
+                                nil
+            if mir_fn.name == "simple_rv32i_core_decode_control_flow_datapath":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_control_flow_datapath_opcode_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 3:
+                                    saw_control_flow_datapath_concat = true
+                            case _:
+                                nil
             if mir_fn.name == "simple_rv32i_core_decode_memory_access_control":
                 for block in mir_fn.blocks:
                     for inst in block.instructions:
@@ -2550,6 +2587,9 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(saw_exec_datapath_opcode_slice)
         check(saw_exec_datapath_funct3_slice)
         check(saw_exec_datapath_bit30_slice)
+        check(saw_branch_datapath_opcode_slice)
+        check(saw_branch_datapath_funct3_slice)
+        check(saw_control_flow_datapath_opcode_slice)
         check(saw_mem_access_opcode_slice)
         check(saw_mem_access_funct3_slice)
         check(saw_jump_opcode_slice)
@@ -2564,6 +2604,8 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(saw_upper_concat)
         check(saw_exec_concat)
         check(saw_exec_datapath_concat)
+        check(saw_branch_datapath_concat)
+        check(saw_control_flow_datapath_concat)
         check(saw_mem_access_concat)
         check(saw_jump_concat)
         check(not saw_helper_shift_mask_fallback)
@@ -2581,6 +2623,11 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(51, 32) then"))
         check(vhdl.contains("elsif unsigned(v_funct3) = to_unsigned(5, 32) and unsigned(v_bit30) = to_unsigned(0, 32) then"))
         check(vhdl.contains("elsif unsigned(v_funct3) = to_unsigned(5, 32) and unsigned(v_bit30) = to_unsigned(1, 32) then"))
+        check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(99, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_funct3) = to_unsigned(4, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_funct3) = to_unsigned(7, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(103, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(111, 32) then"))
         check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(3, 32) or unsigned(v_opcode) = to_unsigned(35, 32) then"))
         check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(111, 32) then"))
         check(vhdl.contains("imem_rdata(6 downto 0)"))
@@ -2607,6 +2654,8 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(vhdl.contains("resize(unsigned(v_upper_inst_high20), 20) & to_unsigned(0, 12)"))
         check(vhdl.contains("to_unsigned(0, 22) & resize(unsigned(v_control_inst_shamt_bit5), 1) & resize(unsigned(v_control_inst_bit30), 1) & resize(unsigned(v_control_inst_funct3), 3)"))
         check(vhdl.contains("to_unsigned(0, 27) & resize(unsigned(v_datapath_alu_op), 4) & resize(unsigned(v_datapath_operation_kind), 1)"))
+        check(vhdl.contains("to_unsigned(0, 29) & resize(unsigned(v_datapath_branch_op), 3)"))
+        check(vhdl.contains("to_unsigned(0, 29) & resize(unsigned(v_datapath_writes_link), 1) & resize(unsigned(v_datapath_next_pc_op), 2)"))
         check(vhdl.contains("to_unsigned(0, 29) & resize(unsigned(v_access_inst_funct3), 3)"))
         check(vhdl.contains("to_unsigned(0, 12) & resize(unsigned(v_jump_inst_bit20), 1) & resize(unsigned(v_jump_inst_high8), 8) & resize(unsigned(v_jump_inst_bit11), 1) & resize(unsigned(v_jump_inst_low10), 10)"))
         check(vhdl.contains("dmem_re       : out std_logic;"))
@@ -2646,6 +2695,9 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(vhdl.contains("-- source-map: RiscvExecuteDatapathEncoding.opcode => imem_rdata(6 downto 0)"))
         check(vhdl.contains("-- source-map: RiscvExecuteDatapathEncoding.funct3 => imem_rdata(14 downto 12)"))
         check(vhdl.contains("-- source-map: RiscvExecuteDatapathEncoding.bit30 => imem_rdata(30 downto 30)"))
+        check(vhdl.contains("-- source-map: RiscvBranchDatapathEncoding.opcode => imem_rdata(6 downto 0)"))
+        check(vhdl.contains("-- source-map: RiscvBranchDatapathEncoding.funct3 => imem_rdata(14 downto 12)"))
+        check(vhdl.contains("-- source-map: RiscvControlFlowDatapathEncoding.opcode => imem_rdata(6 downto 0)"))
         check(vhdl.contains("-- source-map: RiscvMemoryAccessControlEncoding.funct3 => imem_rdata(14 downto 12)"))
         check(vhdl.contains("-- source-map: RiscvJumpEncoding.high8 => imem_rdata(19 downto 12)"))
         check(vhdl.contains("-- source-map: RiscvJumpEncoding.bit11 => imem_rdata(20 downto 20)"))

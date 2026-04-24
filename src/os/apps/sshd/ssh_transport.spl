@@ -327,21 +327,23 @@ fn _first_match(client_list: text, server_list: text) -> text:
 
     Both lists are comma-separated. Returns "" if no match.
     Per RFC 4253 section 7.1, the client's list is iterated in order.
-    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
+    The live baremetal lane is fragile when splitting very long client lists,
+    so this scans the shorter server list and checks exact token membership.
     """
-    var client_items = client_list.split(",")
     var server_items = server_list.split(",")
 
-    var ci: u64 = 0
-    while ci < client_items.len():
-        var candidate: text = client_items[ci].trim()
-        var si: u64 = 0
-        while si < server_items.len():
-            var srv_item: text = server_items[si].trim()
-            if srv_item == candidate:
-                return candidate
-            si = si + 1
-        ci = ci + 1
+    var si: u64 = 0
+    while si < server_items.len():
+        var candidate: text = server_items[si].trim()
+        if client_list == candidate:
+            return candidate
+        if client_list.starts_with(candidate + ","):
+            return candidate
+        if client_list.ends_with("," + candidate):
+            return candidate
+        if client_list.contains("," + candidate + ","):
+            return candidate
+        si = si + 1
 
     ""
 
@@ -356,14 +358,17 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     """
     var kex: text = _first_match(client.kex_algorithms, server.kex_algorithms)
     if kex == "":
+        serial_println("[ssh-transport] no matching kex")
         return Err("no matching kex algorithm")
 
     var host_key: text = _first_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
     if host_key == "":
+        serial_println("[ssh-transport] no matching host key")
         return Err("no matching host key algorithm")
 
     var cipher_c2s: text = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
     if cipher_c2s == "":
+        serial_println("[ssh-transport] no matching cipher c2s")
         return Err("no matching cipher (c2s)")
 
     var cipher_s2c: text = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)

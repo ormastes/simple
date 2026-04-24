@@ -30,7 +30,7 @@ They have been **consolidated** into single files per feature, removing ~8K line
 
 ## Archived Originals
 
-All original phase files are preserved in `doc/design/phases/` for historical reference.
+All original phase files are preserved in `doc/05_design/phases/` for historical reference.
 
 ---
 

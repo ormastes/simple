@@ -4,7 +4,7 @@
 ;;
 ;; Keyword tiers: seed (bootstrap), core (self-hosting), full (runtime)
 ;; Aspirational keywords are marked with ;; aspirational
-;; Source of truth: doc/spec/grammar/tier_keywords.sdn
+;; Source of truth: doc/06_spec/grammar/tier_keywords.sdn
 
 ;; ============================================================================
 ;; Keywords - Core Language

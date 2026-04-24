@@ -9,7 +9,7 @@
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
-use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
@@ -29,6 +29,7 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
+extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 
 # ============================================================================
 # Constants
@@ -198,6 +199,8 @@ impl SshSession:
         # Parse our own KEXINIT (for negotiation)
         val r_server_kex = ssh_parse_kexinit(server_kexinit)
         val server_kex = r_server_kex.unwrap()
+        serial_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
+        serial_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
 
         # Negotiate algorithms
         val r_algos = ssh_negotiate_algorithms(client_kex, server_kex)
@@ -225,13 +228,15 @@ impl SshSession:
         serial_println("[sshd-session] client ecdh pub len={client_public.len()}")
 
         # Generate our ephemeral keypair
-        val keypair = ssh_kex_generate_keypair()
-        val server_private = keypair.0
-        val server_public = keypair.1
+        val server_private = ssh_kex_generate_private_key()
+        val server_public = rt_tls13_x25519_shared_secret(
+            server_private,
+            [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        )
         serial_println("[sshd-session] server ecdh pub len={server_public.len()}")
 
         # Compute shared secret
-        val shared_secret = ssh_kex_compute_shared(server_private, client_public)
+        val shared_secret = rt_tls13_x25519_shared_secret(server_private, client_public)
         serial_println("[sshd-session] shared secret len={shared_secret.len()}")
 
         # Resolve negotiated algorithms — needed now for host-key-blob type

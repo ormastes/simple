@@ -73,6 +73,7 @@ var app_count: u64 = 0
 
 var process_pid: [u64; 64]
 var process_app_index: [i64; 64]
+var process_app_id: [text; 64]
 var process_name: [text; 64]
 var process_path: [text; 64]
 var process_icon: [text; 64]
@@ -417,13 +418,17 @@ fn _resolve_against_cwd(path: text, cwd: text) -> text:
 
 fn _record_detached_process(pid: u64, path: text):
     var existing = _process_index_by_pid(pid)
-    val name = _path_basename(path)
+    val canonical_app_id = _canonical_app_identity(path)
+    val seeded_index = _seeded_app_index_by_path(path)
+    val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: _path_basename(path)
+    val icon = if seeded_index >= 0: _seeded_app_icon_for_path(path) else: ""
     if existing >= 0:
         val slot = existing.to_u64()
-        process_app_index[slot] = -1
+        process_app_index[slot] = seeded_index
+        process_app_id[slot] = canonical_app_id
         process_name[slot] = name
         process_path[slot] = path
-        process_icon[slot] = ""
+        process_icon[slot] = icon
         process_state[slot] = "running"
         process_exit_code[slot] = 0
         process_window_count[slot] = 0
@@ -434,10 +439,11 @@ fn _record_detached_process(pid: u64, path: text):
         serial_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
         return
     process_pid[process_count] = pid
-    process_app_index[process_count] = -1
+    process_app_index[process_count] = seeded_index
+    process_app_id[process_count] = canonical_app_id
     process_name[process_count] = name
     process_path[process_count] = path
-    process_icon[process_count] = ""
+    process_icon[process_count] = icon
     process_state[process_count] = "running"
     process_exit_code[process_count] = 0
     process_window_count[process_count] = 0
@@ -552,6 +558,13 @@ fn _default_app_identity(slot: u64) -> text:
         return ""
     _canonical_app_identity(app_path[slot])
 
+fn _process_app_identity(app_index: i64, path: text) -> text:
+    if path != "":
+        return _canonical_app_identity(path)
+    if app_index >= 0:
+        return _default_app_identity(app_index.to_u64())
+    ""
+
 fn _classify_final_state(previous_state: text, exit_code: i32) -> text:
     if previous_state == "terminating":
         return "terminated"
@@ -589,6 +602,7 @@ fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code: i32
     if existing >= 0:
         val slot = existing.to_u64()
         process_app_index[slot] = app_index
+        process_app_id[slot] = _process_app_identity(app_index, path)
         process_name[slot] = name
         process_path[slot] = path
         process_icon[slot] = icon
@@ -609,6 +623,7 @@ fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code: i32
 
     process_pid[process_count] = pid
     process_app_index[process_count] = app_index
+    process_app_id[process_count] = _process_app_identity(app_index, path)
     process_name[process_count] = name
     process_path[process_count] = path
     process_icon[process_count] = icon
@@ -693,6 +708,7 @@ fn _remove_app_slot(slot: u64):
     while j < MAX_PROCESSES:
         if process_app_index[j] == slot.to_i64():
             process_app_index[j] = -1
+            process_app_id[j] = ""
         elif process_app_index[j] > slot.to_i64():
             process_app_index[j] = process_app_index[j] - 1
         j = j + 1
@@ -728,6 +744,7 @@ fn launcher_init():
     while p < MAX_PROCESSES:
         process_pid[p] = 0
         process_app_index[p] = -1
+        process_app_id[p] = ""
         process_name[p] = ""
         process_path[p] = ""
         process_icon[p] = ""
@@ -1248,6 +1265,8 @@ fn launcher_get_process_app_id(idx: u64) -> text:
     """Return stable app identity for a tracked process."""
     if idx >= process_count:
         return ""
+    if process_app_id[idx] != "":
+        return process_app_id[idx]
     _canonical_app_identity(process_path[idx])
 
 fn launcher_get_process_icon(idx: u64) -> text:
@@ -1282,11 +1301,14 @@ fn launcher_get_process_launch_seq(idx: u64) -> u64:
 
 fn launcher_get_process_app_id_for_pid(pid: u64) -> text:
     """Resolve the stable app identity for a PID, or empty string if unknown."""
-    val idx = _process_index_by_pid(pid)
-    if idx >= 0:
-        val slot = idx.to_u64()
-        if process_path[slot] != "":
-            return _canonical_app_identity(process_path[slot])
+    var slot: u64 = 0
+    while slot < MAX_PROCESSES:
+        if process_pid[slot] == pid:
+            if process_app_id[slot] != "":
+                return process_app_id[slot]
+            if process_path[slot] != "":
+                return _canonical_app_identity(process_path[slot])
+        slot = slot + 1
 
     val app_idx = _app_index_by_pid(pid)
     if app_idx < 0:

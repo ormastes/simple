@@ -13,20 +13,20 @@ Data model:
 - `FpgaPrepareManifest`: board plus lanes, deterministic Vivado TCL plan, readiness summary.
 - Generated helper bitfields:
   - instruction layouts: `Rv32Instruction` / `Rv64Instruction`
-  - immediate/control target layouts: `RiscvBranchImmediate`, `RiscvStoreImmediate`, `RiscvIImmediate`, `RiscvUpperImmediate`, `RiscvExecuteControl`, `RiscvJumpImmediate`
-  - source-layout overlays: `RiscvBranchEncoding`, `RiscvStoreEncoding`, `RiscvIImmediateEncoding`, `RiscvUpperImmediateEncoding`, `RiscvExecuteControlEncoding`, `RiscvJumpEncoding`
+  - immediate/control target layouts: `RiscvBranchImmediate`, `RiscvStoreImmediate`, `RiscvIImmediate`, `RiscvUpperImmediate`, `RiscvExecuteControl`, `RiscvExecuteDatapath`, `RiscvBranchDatapath`, `RiscvJumpImmediate`
+  - source-layout overlays: `RiscvBranchEncoding`, `RiscvStoreEncoding`, `RiscvIImmediateEncoding`, `RiscvUpperImmediateEncoding`, `RiscvExecuteControlEncoding`, `RiscvExecuteDatapathEncoding`, `RiscvBranchDatapathEncoding`, `RiscvJumpEncoding`
 
 Generated helper contract:
 
-- Each lane emits dedicated pure `@hardware` + `@clocked` helpers for `decode_writeback`, `decode_branch_immediate`, `decode_store_immediate`, `decode_i_immediate`, `decode_upper_immediate`, `decode_execute_control`, `decode_memory_access_control`, and `decode_jump_immediate`.
+- Each lane emits dedicated pure `@hardware` + `@clocked` helpers for `decode_writeback`, `decode_branch_immediate`, `decode_store_immediate`, `decode_i_immediate`, `decode_upper_immediate`, `decode_execute_control`, `decode_execute_datapath`, `decode_branch_datapath`, `decode_memory_access_control`, and `decode_jump_immediate`.
 - Helper reconstruction is overlay-driven: read exact fields from source-layout bitfields, write exact fields into packed target bitfields, and return packed `u32` helper values.
 - The helper surface is intentionally bounded: no PC update, register-file mutation, memory effects, trap flow, privilege flow, or MMU behavior.
 
 Generated artifact details:
 
 - The emitted package/core VHDL carries a source-map header in comment form.
-- Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/jump overlay fields.
-- The handwritten VHDL shell keeps entity/package/process structure stable, but now consumes helper-aligned packed variables for writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, memory access control, and jump immediate instead of independently reconstructing those values from ad hoc raw slices.
+- Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/jump overlay fields.
+- The handwritten VHDL shell keeps entity/package/process structure stable, but now consumes helper-aligned packed variables for writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, execute datapath, branch datapath, memory access control, and jump immediate instead of independently reconstructing those values from ad hoc raw slices.
 - Memory accesses stay bounded to the current bus contract: helper-derived `funct3` drives load sign/zero extension and alignment traps, while unsupported store widths still trap instead of implying byte-strobe support the shell does not expose.
 - The bounded memory shell now exposes `dmem_re` and `dmem_width` next to `dmem_we`, using helper-derived width codes `00/01/10/11` for byte/halfword/word/doubleword intent.
 - The bounded store path now also exposes `dmem_wstrb` and lane-packed `dmem_wdata`, covering `SB/SH/SW` on RV32 and `SB/SH/SW/SD` on RV64 through address-derived masks and shifts.

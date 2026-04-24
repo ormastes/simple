@@ -280,5 +280,5 @@ All hooks are already available in the standard runtime.
 ## See Also
 
 - `/examples/perf_demo.spl` - Complete usage examples
-- `/doc/report/optimization_progress_2026-02-04.md` - Performance work
+- `/doc/09_report/optimization_progress_2026-02-04.md` - Performance work
 - `/script/profiling/` - Rust-level profiling tools (for runtime optimization)

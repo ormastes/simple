@@ -105,9 +105,9 @@ This directory contains tree-sitter query files for LSP and editor integration.
 
 ## References
 
-- Implementation documentation: `/home/ormastes/dev/pub/simple/doc/report/lsp_integration_complete_2026-01-22.md`
+- Implementation documentation: `/home/ormastes/dev/pub/simple/doc/09_report/lsp_integration_complete_2026-01-22.md`
 - Tree-sitter query syntax: https://tree-sitter.github.io/tree-sitter/using-parsers#query-syntax
-- Simple language syntax: `/home/ormastes/dev/pub/simple/doc/guide/quick_reference/syntax_quick_reference.md`
+- Simple language syntax: `/home/ormastes/dev/pub/simple/doc/07_guide/quick_reference/syntax_quick_reference.md`
 
 ## Notes
 

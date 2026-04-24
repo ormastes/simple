@@ -258,4 +258,4 @@ bin/simple test test/lib/unified_execution_spec.spl --only-skipped
 - `lib/execution/mod.spl` - Unified execution framework
 - `lib/qemu/test_session.spl` - QEMU session management
 - `remote/protocol/gdb_mi.spl` - GDB MI client
-- `doc/guide/unified_execution_guide.md` - User guide
+- `doc/07_guide/unified_execution_guide.md` - User guide

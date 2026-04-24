@@ -128,5 +128,5 @@ The library uses a **send/receive pattern**:
 ## See Also
 
 - `README_PLATFORM_LIBRARY.md` - User guide
-- `doc/report/platform_abstraction_implementation_2026-02-13.md` - Technical details
-- `doc/report/platform_library_verification_2026-02-13.md` - Test verification
+- `doc/09_report/platform_abstraction_implementation_2026-02-13.md` - Technical details
+- `doc/09_report/platform_library_verification_2026-02-13.md` - Test verification
