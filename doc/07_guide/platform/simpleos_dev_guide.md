@@ -66,6 +66,12 @@ Located in `src/os/apps/shell/shell_tools.spl`:
 | `chmod MODE FILE` | File permissions (stub — VFS has no perms yet) |
 | `stat FILE` | Show file info (size, type) |
 
+Bootstrap-oriented additions in the x86_64 guest lane:
+- `mkdir -p`, `cp -r`, and `rm -r/-f` are supported for the common bootstrap subset
+- `which` now resolves staged `/usr/bin/*` payloads through PATH + VFS lookup
+- `uname -s|-m|-a` reports a SimpleOS identity
+- `ninja --version` is available as a guest shim backed by the staged `/usr/bin/ninja` payload
+
 ### 1.3 Shell Features
 
 - **Pipelines:** `cmd1 | cmd2 | cmd3` — POSIX pipes with fd redirection
@@ -271,6 +277,15 @@ bin/simple run src/os/port/deploy_toolchains.spl -- --stage test
 bin/simple run src/os/port/deploy_toolchains.spl -- --cross
 ```
 
+Host prerequisites for the x86_64 bootstrap lane are explicit:
+- `clang`, `ld.lld`, `llvm-ranlib`, `llvm-strip`
+- `cargo`, a stage1 `rustc` with `x86_64-unknown-simpleos` rustlib
+- `ninja`
+
+The disk/UEFI acceptance lane does not silently degrade when those artifacts are
+missing. `scripts/make_os_disk.shs` now fails fast instead of shipping placeholder
+LLVM/Rust payloads.
+
 ### 4.2 Supported Targets
 
 | Target Triple | Architecture | Notes |
@@ -279,6 +294,11 @@ bin/simple run src/os/port/deploy_toolchains.spl -- --cross
 | `aarch64-simpleos` | ARM64 | |
 | `riscv64gc-simpleos` | RISC-V 64 | GC extensions |
 | `riscv32imac-simpleos` | RISC-V 32 | IMAC extensions |
+
+`x86_64-simpleos` is the supported bootstrap lane for the current guest-toolchain
+slice. The x86_64 FAT32/UEFI image stages real filesystem payloads for LLVM,
+Rust, and Ninja under `/usr`, while `/sys/apps/llvm` and `/sys/apps/rust` stay
+as thin filesystem-backed launchers that validate those staged payloads.
 
 ### 4.3 Sysroot Layout
 
@@ -290,6 +310,21 @@ build/os/sysroot/
   include/c++/          # Minimal C++ headers
   lib/                  # libsimpleos_c.a, crt0.o, compiler-rt builtins
   share/simpleos/       # simpleos.ld linker script
+```
+
+When `scripts/make_os_disk.shs` builds the x86_64 guest image, the staged
+filesystem contract is:
+
+```text
+/usr/bin/clang
+/usr/bin/lld
+/usr/bin/llvm-*
+/usr/bin/rustc
+/usr/bin/cargo
+/usr/bin/ninja
+/usr/include/**
+/usr/lib/**
+/usr/lib/rustlib/x86_64-unknown-simpleos/**
 ```
 
 ### 4.4 LLVM Cross-Build

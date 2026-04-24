@@ -1,16 +1,19 @@
 #define APP_TITLE "Rust"
 #define APP_ID "/sys/apps/rust"
-#define APP_CONTENT \
-    "Rust\n\n" \
-    "[Workspace]\n" \
-    "Review crate build state for remote tool integration.\n\n" \
-    "[Cargo Pass]\n" \
-    "Profile: dev\n" \
-    "Outputs: binary, deps, metadata\n\n" \
-    "[Operator]\n" \
-    "Use this panel to validate Rust-side packaging and tool launch wiring."
 #define APP_WIDTH 536
 #define APP_HEIGHT 332
 #define APP_POS_X 308
 #define APP_POS_Y 102
+
+#define TOOLCHAIN_NAME "Rust"
+#define TOOLCHAIN_VERSION_PATH "/SYS/RUSTVER.TXT"
+#define TOOLCHAIN_MANIFEST_PATH "/SYS/RUSTMAN.TXT"
+#define TOOLCHAIN_PRIMARY_PATH "/usr/bin/rustc"
+#define TOOLCHAIN_SECONDARY_PATH "/usr/bin/cargo"
+
+#include "toolchain_panel_runtime.c"
+
+#define APP_PRE_WINDOW_HOOK() toolchain_pre_window_hook("rust")
+#define APP_RUNTIME_CONTENT(argc, argv) toolchain_runtime_content(argc, argv)
+
 #include "remote_window_runtime.c"

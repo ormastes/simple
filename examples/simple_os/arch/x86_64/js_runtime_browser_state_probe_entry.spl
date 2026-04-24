@@ -1,0 +1,71 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+fn _probe() -> Result<bool, text>:
+    val logger = Logger.new("browser-session-js", LogLevel.Error)
+    var runtime = JsRuntime.new(logger)
+    serial_println("[JRB] after runtime new")
+
+    val body_id = runtime.interpreter.object_store.create_object()
+    serial_println("[JRB] after body object create")
+
+    runtime.interpreter.object_store.set_property(body_id, "alpha", JsValue.String(v: "A"))
+    serial_println("[JRB] after alpha set")
+    serial_println("[JRB] prop lens obj_ids={runtime.interpreter.object_store.prop_obj_ids.len()} keys={runtime.interpreter.object_store.prop_keys.len()} values={runtime.interpreter.object_store.prop_values.len()}")
+    val last_idx = runtime.interpreter.object_store.prop_keys.len() - 1
+    if last_idx >= 0:
+        serial_println("[JRB] last prop obj_id={runtime.interpreter.object_store.prop_obj_ids.get(last_idx)} key={runtime.interpreter.object_store.prop_keys.get(last_idx)}")
+    if val JsValue.String(v) = runtime.interpreter.object_store.get_property(body_id, "alpha"):
+        if v != "A":
+            return Err("alpha readback mismatch after runtime bootstrap")
+    else:
+        return Err("alpha missing after runtime bootstrap")
+
+    val html_doc = """<html><head><title>Boot</title></head><body>boot<script>
+document.title = 'Runtime Ready';
+document.body.innerHTML = 'runtime fetch ok';
+document.cookie = 'runtime=ok; Path=/';
+</script></body></html>"""
+    val body_html = html_doc.slice(44, 186)
+    runtime.interpreter.object_store.set_property(body_id, "innerHTML", JsValue.String(v: "{body_html}"))
+    serial_println("[JRB] after innerHTML set")
+    runtime.interpreter.object_store.set_property(body_id, "textContent", JsValue.String(v: ""))
+    serial_println("[JRB] after textContent set")
+
+    if val JsValue.String(v) = runtime.interpreter.object_store.get_property(body_id, "innerHTML"):
+        if not v.contains("Runtime Ready"):
+            return Err("innerHTML readback mismatch")
+    else:
+        return Err("innerHTML missing or wrong type")
+
+    Ok(true)
+
+fn _start():
+    serial_init()
+    serial_writeln("SimpleOS x86_64 JS runtime browser-state probe")
+
+    arch_x86_64_early_init()
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(128))
+    if not X86Interrupt.runtime_installed():
+        X86Interrupt.install_bootstrap_runtime(64)
+
+    match _probe():
+        Ok(_) =>
+            serial_println("[JRB] Runtime browser-state probe passed")
+        Err(e) =>
+            serial_println("[JRB] Runtime browser-state probe failed: {e}")
+
+    rt_port_outb(0xf4, 0u8)

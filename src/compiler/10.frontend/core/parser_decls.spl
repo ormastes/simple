@@ -46,6 +46,8 @@ use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
+use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
@@ -85,6 +87,90 @@ fn parser_expect_param_name():
     else:
         parser_error("expected parameter name")
         parser_advance()
+
+fn is_domain_block_kind(name: text) -> bool:
+    name == "schema" or
+        name == "style" or
+        name == "ui" or
+        name == "music" or
+        name == "bim" or
+        name == "cad" or
+        name == "city" or
+        name == "rtl"
+
+fn current_ident_followed_by_lbrace() -> bool:
+    var pos = lex_pos_get()
+    val source_len = lex_source_len()
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t" or ch == "\r":
+            pos = pos + 1
+            continue
+        return ch == "{"
+    false
+
+fn parse_raw_domain_block_advance_lexer(start_pos: i64, end_pos: i64):
+    var line = lex_line_get()
+    var col = lex_col_get()
+    var pos = start_pos
+    while pos < end_pos:
+        val ch = lex_source_char_at(pos)
+        if ch == "\n":
+            line = line + 1
+            col = 1
+        else:
+            col = col + 1
+        pos = pos + 1
+    lex_pos_set(end_pos)
+    lex_line_set(line)
+    lex_col_set(col)
+
+fn parse_raw_domain_block_payload(kind: text) -> text:
+    val content_start = lex_pos_get()
+    val source_len = lex_source_len()
+    var pos = content_start
+    var depth = 1
+    var in_string = false
+    var string_quote = ""
+    var escaped = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == string_quote:
+                in_string = false
+        else:
+            if ch == "\"" or ch == "'":
+                in_string = true
+                string_quote = ch
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    val payload = lex_source_slice(content_start, pos).trim()
+                    parse_raw_domain_block_advance_lexer(content_start, pos + 1)
+                    parser_advance()
+                    return payload
+        pos = pos + 1
+    parser_error("unterminated {kind}{...} block")
+    val payload = lex_source_slice(content_start, source_len).trim()
+    parse_raw_domain_block_advance_lexer(content_start, source_len)
+    parser_advance()
+    payload
+
+fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
+    parser_advance()
+    val payload = parse_raw_domain_block_payload(kind)
+    val helper = expr_ident("__domain_block", 0)
+    var args: [i64] = []
+    args.push(expr_string_lit(kind, 0))
+    args.push(expr_string_lit(payload, 0))
+    val marker = expr_call(helper, args, 0)
+    decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, 0)
 
 # ===== Generic Type Parameter Parsing =====
 
@@ -787,6 +873,11 @@ fn parse_module_body():
             # import X.{Y, Z} -- treat like use
             val d = parse_use_decl()
             module_add_decl(d)
+        elif par_kind_get() == TOK_IDENT and is_domain_block_kind(par_text_get()) and current_ident_followed_by_lbrace():
+            val block_kind = par_text_get()
+            val d = parse_module_domain_block_decl(i, block_kind)
+            module_add_decl(d)
+            parser_skip_newlines_and_semicolons()
         elif par_kind_get() == TOK_KW_TRAIT:
             # trait is parsed like struct (skip body)
             val d = parse_struct_decl()

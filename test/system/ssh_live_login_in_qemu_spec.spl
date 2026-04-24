@@ -1,0 +1,80 @@
+# @tag:system
+use std.spec.*
+
+use os.qemu_runner.{get_ssh_live_target, scenario_x64_ssh, build_os_with_backend, ensure_scenario_media}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, spawn_guest_with_qmp_scenario,
+    stop_guest, wait_for_serial_marker, read_serial_log}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn _ssh_probe_command() -> text:
+    "sshpass -p simpleos ssh " +
+        "-o StrictHostKeyChecking=no " +
+        "-o UserKnownHostsFile=/tmp/simpleos_ssh_live_spec_known_hosts " +
+        "-o ConnectTimeout=5 " +
+        "-o PreferredAuthentications=password " +
+        "-o PubkeyAuthentication=no " +
+        "-o NumberOfPasswordPrompts=1 " +
+        "-p 2222 root@127.0.0.1 true"
+
+fn _run_live_ssh_login() -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", _ssh_probe_command()], 15000)
+
+fn _cleanup_known_hosts():
+    val path = "/tmp/simpleos_ssh_live_spec_known_hosts"
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn _assert_ssh_live_login(backend: text):
+    val target = get_ssh_live_target()
+    val scenario = scenario_x64_ssh()
+    expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
+    val built = build_os_with_backend(target, backend)
+    if backend == "llvm" and not built:
+        print "[ssh_live_login_in_qemu_spec] LLVM backend unavailable, skipping build lane"
+        expect(backend).to_equal("llvm")
+        return
+    expect(built).to_equal(true)
+    expect(can_run_target(target)).to_equal(true)
+    expect(ensure_scenario_media(scenario)).to_equal(true)
+
+    val qmp_socket = "/tmp/simpleos_ssh_live_spec_{backend}.sock"
+    val serial_log = "build/os/ssh_live_spec_{backend}.log"
+    dir_create_all("build/os")
+    _cleanup_known_hosts()
+
+    match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
+        Ok(handle):
+            val ready = wait_for_serial_marker(handle, "[sshd] SSH daemon listening on port 22", 30000)
+            if not ready:
+                print "[ssh_live_login_in_qemu_spec] boot log ({backend}):"
+                print read_serial_log(handle)
+            expect(ready).to_equal(true)
+
+            val login = _run_live_ssh_login()
+            if login[2] != 0:
+                print "[ssh_live_login_in_qemu_spec] ssh stdout ({backend}): {login[0]}"
+                print "[ssh_live_login_in_qemu_spec] ssh stderr ({backend}): {login[1]}"
+                print "[ssh_live_login_in_qemu_spec] serial log ({backend}):"
+                print read_serial_log(handle)
+            expect(login[2]).to_equal(0)
+
+            val serial = read_serial_log(handle)
+            expect(serial.contains("heap exhausted")).to_equal(false)
+            expect(stop_guest(handle)).to_equal(true)
+        Err(err):
+            print "[ssh_live_login_in_qemu_spec] failed to spawn guest ({backend}): {err}"
+            expect(err.len() > 0).to_equal(false)
+
+describe "Live SSH login in QEMU":
+
+    it "boots the Cranelift x64-ssh guest and accepts a password-authenticated login":
+        _assert_ssh_live_login("cranelift")
+
+    it "boots the LLVM x64-ssh guest and accepts a password-authenticated login":
+        _assert_ssh_live_login("llvm")

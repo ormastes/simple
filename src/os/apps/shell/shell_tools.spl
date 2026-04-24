@@ -123,6 +123,40 @@ fn _split_lines(content: text) -> [text]:
 fn _split_spaces(content: text) -> [text]:
     return _split_text_on(content, " ")
 
+fn _tool_env_value(env_pairs: [(text, text)], key: text, default_value: text) -> text:
+    for pair in env_pairs:
+        if pair.0 == key:
+            return pair.1
+    default_value
+
+fn _tool_file_first_line(vfs: VfsManager?, path: text) -> text?:
+    if vfs == nil:
+        return nil
+    val result = vfs.read_text(path)
+    if result.is_err():
+        return nil
+    val content = result.unwrap()
+    val newline = content.index_of("\n")
+    if newline == nil:
+        return Some(content.trim())
+    Some(content.slice(0, newline.unwrap()).trim())
+
+fn _tool_path_candidates(command: text, cwd: text, path_env: text) -> [text]:
+    if command == "":
+        return []
+    if command.contains("/"):
+        return [_resolve_tool_path(cwd, command)]
+    var candidates: [text] = []
+    for raw_dir in _split_text_on(path_env, ":"):
+        val dir = raw_dir.trim()
+        if dir == "":
+            continue
+        if dir == "/":
+            candidates = candidates.push("/{command}")
+        else:
+            candidates = candidates.push(_normalize("{dir}/{command}"))
+    candidates
+
 # =========================================================================
 # touch — Create empty files or update timestamps
 # =========================================================================
@@ -400,7 +434,7 @@ fn tool_uniq(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i
 # which — Show which tool/builtin would run for a command
 # =========================================================================
 
-fn tool_which(args: [text], tool_registry: ToolRegistry?, terminal: Terminal) -> i32:
+fn tool_which(vfs: VfsManager?, cwd: text, path_env: text, args: [text], tool_registry: ToolRegistry?, terminal: Terminal) -> i32:
     """Show which built-in or tool would run for a command name."""
     if args.len() == 0:
         _write_error(terminal, "which: missing command name")
@@ -415,24 +449,42 @@ fn tool_which(args: [text], tool_registry: ToolRegistry?, terminal: Terminal) ->
         "chmod", "stat", "cut", "tr", "sed", "basename", "dirname",
         "sleep", "seq", "expr", "test", "[", "xargs", "yes", "printenv",
         "readlink", "mktemp", "diff", "patch", "file", "strings",
-        "hexdump", "base64", "md5sum", "sha256sum", "git", "jj"]
+        "hexdump", "base64", "md5sum", "sha256sum", "git", "jj",
+        "uname", "ninja"]
 
-    val cmd = args[0]
-    # Check builtins
-    for b in builtins:
-        if b == cmd:
-            _write_line(terminal, "{cmd}: shell built-in command")
-            return 0
+    var exit_code = 0
+    for cmd in args:
+        var found = false
+        for b in builtins:
+            if b == cmd:
+                _write_line(terminal, "{cmd}: shell built-in command")
+                found = true
+        if found:
+            continue
 
-    # Check tool registry
-    if tool_registry != nil:
-        val tool = tool_registry.lookup(cmd)
-        if tool != nil:
-            _write_line(terminal, "{cmd}: registered tool")
-            return 0
+        if tool_registry != nil:
+            val tool = tool_registry.lookup(cmd)
+            if tool != nil:
+                _write_line(terminal, "{cmd}: registered tool")
+                found = true
+        if found:
+            continue
 
-    _write_error(terminal, "{cmd}: not found")
-    return 1
+        if vfs != nil:
+            for candidate in _tool_path_candidates(cmd, cwd, path_env):
+                val stat_result = vfs.stat(candidate)
+                if stat_result.is_ok():
+                    val node = stat_result.unwrap()
+                    if node.kind == FsNodeKind.File or node.kind == FsNodeKind.Symlink:
+                        _write_line(terminal, candidate)
+                        found = true
+                        break
+        if found:
+            continue
+
+        _write_error(terminal, "{cmd}: not found")
+        exit_code = 1
+    exit_code
 
 # =========================================================================
 # date — Show current date/time
@@ -443,6 +495,40 @@ fn tool_date(terminal: Terminal) -> i32:
     # SimpleOS doesn't have a real clock yet; show a placeholder
     _write_line(terminal, "1970-01-01 00:00:00 UTC (no RTC available)")
     return 0
+
+fn tool_uname(args: [text], terminal: Terminal) -> i32:
+    """Report a minimal Unix-like kernel identity."""
+    val flag = if args.len() > 0: args[0] else: "-s"
+    match flag:
+        "-s":
+            _write_line(terminal, "SimpleOS")
+        "-m":
+            _write_line(terminal, "x86_64")
+        "-a":
+            _write_line(terminal, "SimpleOS simpleos 0.1.0 x86_64")
+        _:
+            _write_error(terminal, "uname: unsupported flag '{flag}'")
+            return 1
+    0
+
+fn tool_ninja(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
+    """Bootstrap-oriented ninja shim backed by the staged filesystem payload."""
+    val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
+    var found_payload = false
+    for candidate in _tool_path_candidates("ninja", cwd, path_env):
+        if vfs != nil and vfs.stat(candidate).is_ok():
+            found_payload = true
+            break
+    if not found_payload:
+        _write_error(terminal, "ninja: staged payload not found on PATH")
+        return 127
+
+    val version = _tool_file_first_line(vfs, "/SYS/NINJAVER.TXT") ?? "ninja staged payload"
+    if args.len() == 0 or args[0] == "--version":
+        _write_line(terminal, version)
+        return 0
+    _write_error(terminal, "ninja: only --version is supported in the guest bootstrap shim")
+    1
 
 # =========================================================================
 # true / false — Exit with known code

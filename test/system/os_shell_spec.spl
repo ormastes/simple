@@ -2,7 +2,8 @@
 #
 # Tests: ShellApp command execution with VFS backing
 # QEMU scenario: x64-nvme-fat32
-# Exercises: ls, cat, echo, mkdir, pwd, cd, help, env, mem, run, reboot
+# Exercises: ls, cat, echo, mkdir, pwd, cd, help, env, mem, run, reboot,
+# bootstrap-oriented which/uname/ninja and recursive file ops
 #
 # Instead of injecting stdin (impossible in QEMU serial tests), this test
 # creates a ShellApp.with_vfs() and calls execute() directly with command
@@ -161,6 +162,48 @@ fn os_shell_test():
     _assert(true, "Unknown command does not crash shell")
 
     # ---- Test 14: exit sets running to false ----
+    shell = ShellApp.with_vfs(g_vfs)
+
+    # ---- Test 14: mkdir -p creates nested directories ----
+    shell.output_lines = []
+    shell.execute("mkdir -p /shelltree/inner/leaf")
+    val nested_dir = g_vfs.stat("/shelltree/inner/leaf")
+    _assert(nested_dir.is_ok(), "mkdir -p creates nested directories")
+
+    # ---- Test 15: which resolves staged /usr/bin clang through PATH ----
+    shell.output_lines = []
+    shell.execute("which clang")
+    val which_output = shell.output_lines
+    _assert(which_output.len() > 0, "which clang produces output")
+    if which_output.len() > 0:
+        _assert(which_output[0].contains("/usr/bin/clang"), "which clang resolves staged payload")
+
+    # ---- Test 16: uname reports SimpleOS identity ----
+    shell.output_lines = []
+    shell.execute("uname -a")
+    val uname_output = shell.output_lines
+    _assert(uname_output.len() > 0, "uname -a produces output")
+    if uname_output.len() > 0:
+        _assert(uname_output[0].contains("SimpleOS"), "uname -a reports SimpleOS")
+
+    # ---- Test 17: ninja --version is available in guest bootstrap shim ----
+    shell.output_lines = []
+    shell.execute("ninja --version")
+    val ninja_output = shell.output_lines
+    _assert(ninja_output.len() > 0, "ninja --version produces output")
+
+    # ---- Test 18: cp -r copies a directory tree and rm -rf removes it ----
+    shell.output_lines = []
+    shell.execute("mkdir -p /shellcopy/src")
+    shell.execute("echo copied > /shellcopy/src/file.txt")
+    shell.execute("cp -r /shellcopy/src /shellcopy/dst")
+    val copied_file = g_vfs.stat("/shellcopy/dst/file.txt")
+    _assert(copied_file.is_ok(), "cp -r copies directory trees")
+    shell.execute("rm -rf /shellcopy")
+    val removed_tree = g_vfs.stat("/shellcopy")
+    _assert(removed_tree.is_err(), "rm -rf removes copied directory trees")
+
+    # ---- Test 19: exit sets running to false ----
     shell.execute("exit")
     _assert(not shell.running, "exit command stops shell")
 

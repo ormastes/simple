@@ -28,7 +28,7 @@ use os.apps.shell.shell_pipe.{parse_pipeline, has_pipeline, execute_pipeline}
 use os.apps.shell.shell_redirect.{parse_redirects, apply_redirects, restore_redirects, ParsedCommand, SavedFd}
 use os.apps.shell.shell_async.{spawn_command_async, spawn_command_bg}
 use os.apps.shell.shell_async_file.{read_file_posix, read_file_async}
-use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat}
+use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat, tool_uname, tool_ninja}
 use os.tools.shell.cat.cat_tool.{tool_cat}
 use os.tools.shell.ls.ls_tool.{tool_ls}
 use os.tools.shell.echo.echo_tool.{tool_echo}
@@ -300,8 +300,10 @@ impl ShellApp:
             "wc":       self.last_exit_code = tool_wc(self.vfs, self.cwd, args, self.terminal)
             "sort":     self.last_exit_code = tool_sort(self.vfs, self.cwd, args, self.terminal)
             "uniq":     self.last_exit_code = tool_uniq(self.vfs, self.cwd, args, self.terminal)
-            "which":    self.last_exit_code = tool_which(args, self.tool_registry, self.terminal)
+            "which":    self.last_exit_code = tool_which(self.vfs, self.cwd, self._get_env("PATH"), args, self.tool_registry, self.terminal)
             "date":     self.last_exit_code = tool_date(self.terminal)
+            "uname":    self.last_exit_code = tool_uname(args, self.terminal)
+            "ninja":    self.last_exit_code = tool_ninja(self.vfs, self.cwd, self.env, args, self.terminal)
             "true":     self.last_exit_code = tool_true()
             "false":    self.last_exit_code = tool_false()
             "tee":      self.last_exit_code = tool_tee(self.vfs, self.cwd, args, self.terminal)
@@ -378,6 +380,8 @@ impl ShellApp:
             "uniq": true
             "which": true
             "date": true
+            "uname": true
+            "ninja": true
             "true": true
             "false": true
             "tee": true
@@ -537,11 +541,22 @@ impl ShellApp:
             self._write_error("mkdir: missing operand")
             self.last_exit_code = 1
             return
+        var create_parents = false
+        var paths: [text] = []
+        for arg in args:
+            if arg == "-p":
+                create_parents = true
+            else:
+                paths = paths.push(arg)
+        if paths.len() == 0:
+            self._write_error("mkdir: missing operand")
+            self.last_exit_code = 1
+            return
         self.last_exit_code = 0
-        for dirname in args:
+        for dirname in paths:
             val path = self._resolve_path(dirname)
             if self.vfs != nil:
-                val result = self.vfs.mkdir(path)
+                val result = if create_parents: self._mkdir_with_parents(path) else: self.vfs.mkdir(path)
                 if result.is_err():
                     self._write_error("mkdir: {result.unwrap_err()}")
                     self.last_exit_code = 1
@@ -555,11 +570,28 @@ impl ShellApp:
             self._write_error("rm: missing operand")
             self.last_exit_code = 1
             return
+        var recursive = false
+        var force = false
+        var paths: [text] = []
+        for arg in args:
+            if arg == "-r" or arg == "-R":
+                recursive = true
+            elif arg == "-f":
+                force = true
+            elif arg == "-rf" or arg == "-fr":
+                recursive = true
+                force = true
+            else:
+                paths = paths.push(arg)
+        if paths.len() == 0:
+            self._write_error("rm: missing operand")
+            self.last_exit_code = 1
+            return
         self.last_exit_code = 0
-        for filename in args:
+        for filename in paths:
             val path = self._resolve_path(filename)
             if self.vfs != nil:
-                val result = self.vfs.unlink(path)
+                val result = self._remove_path(path, recursive, force)
                 if result.is_err():
                     self._write_error("rm: {result.unwrap_err()}")
                     self.last_exit_code = 1
@@ -573,18 +605,26 @@ impl ShellApp:
             self._write_error("cp: missing operand")
             self.last_exit_code = 1
             return
-        val src = self._resolve_path(args[0])
-        val dst = self._resolve_path(args[1])
+        var recursive = false
+        var operands: [text] = []
+        for arg in args:
+            if arg == "-r" or arg == "-R":
+                recursive = true
+            else:
+                operands = operands.push(arg)
+        if operands.len() < 2:
+            self._write_error("cp: missing operand")
+            self.last_exit_code = 1
+            return
+        val src = self._resolve_path(operands[0])
+        val dst = self._resolve_path(operands[1])
         if self.vfs != nil:
-            val read_result = self.vfs.read_text(src)
-            if read_result.is_err():
-                self._write_error("cp: {read_result.unwrap_err()}")
+            val copy_result = self._copy_path(src, dst, recursive)
+            if copy_result.is_err():
+                self._write_error("cp: {copy_result.unwrap_err()}")
                 self.last_exit_code = 1
-                return
-            val write_result = self.vfs.write_text(dst, read_result.unwrap())
-            if write_result.is_err():
-                self._write_error("cp: {write_result.unwrap_err()}")
-                self.last_exit_code = 1
+            else:
+                self.last_exit_code = 0
         else:
             self._write_error("cp: no filesystem mounted")
             self.last_exit_code = 1
@@ -845,6 +885,7 @@ impl ShellApp:
 
     me cmd_export(args: [text]):
         """Set an environment variable: export KEY=VALUE."""
+        self.last_exit_code = 0
         for arg in args:
             val eq_pos = _find_char(arg, "=")
             if eq_pos >= 0:
@@ -854,6 +895,80 @@ impl ShellApp:
             else:
                 self._write_error("export: invalid format, use KEY=VALUE")
                 self.last_exit_code = 1
+
+    fn _join_child_path(parent: text, child: text) -> text:
+        if parent == "/":
+            return "/{child}"
+        "{parent}/{child}"
+
+    fn _mkdir_with_parents(path: text) -> Result<bool, text>:
+        if self.vfs == nil:
+            return Result.Err("no filesystem mounted")
+        var current = ""
+        for part in path.split("/"):
+            if part == "":
+                continue
+            current = if current == "": "/{part}" else: "{current}/{part}"
+            val stat_result = self.vfs.stat(current)
+            if stat_result.is_ok():
+                val node = stat_result.unwrap()
+                if node.kind != FsNodeKind.Directory:
+                    return Result.Err("path exists and is not a directory: {current}")
+                continue
+            val mkdir_result = self.vfs.mkdir(current)
+            if mkdir_result.is_err():
+                return mkdir_result
+        Result.Ok(true)
+
+    fn _copy_path(src: text, dst: text, recursive: bool) -> Result<bool, text>:
+        if self.vfs == nil:
+            return Result.Err("no filesystem mounted")
+        val stat_result = self.vfs.stat(src)
+        if stat_result.is_err():
+            return Result.Err(stat_result.unwrap_err())
+        val node = stat_result.unwrap()
+        if node.kind == FsNodeKind.Directory:
+            if not recursive:
+                return Result.Err("omitting directory '{src}'")
+            self._mkdir_with_parents(dst)?
+            val entries_result = self.vfs.readdir(src)
+            if entries_result.is_err():
+                return Result.Err(entries_result.unwrap_err())
+            for entry in entries_result.unwrap():
+                if entry.name == "." or entry.name == "..":
+                    continue
+                self._copy_path(self._join_child_path(src, entry.name), self._join_child_path(dst, entry.name), true)?
+            return Result.Ok(true)
+
+        val read_result = self.vfs.read_text(src)
+        if read_result.is_err():
+            return Result.Err(read_result.unwrap_err())
+        val write_result = self.vfs.write_text(dst, read_result.unwrap())
+        if write_result.is_err():
+            return Result.Err(write_result.unwrap_err())
+        Result.Ok(true)
+
+    fn _remove_path(path: text, recursive: bool, force: bool) -> Result<bool, text>:
+        if self.vfs == nil:
+            return Result.Err("no filesystem mounted")
+        val stat_result = self.vfs.stat(path)
+        if stat_result.is_err():
+            if force:
+                return Result.Ok(true)
+            return Result.Err(stat_result.unwrap_err())
+        val node = stat_result.unwrap()
+        if node.kind == FsNodeKind.Directory:
+            if not recursive:
+                return Result.Err("cannot remove '{path}': is a directory")
+            val entries_result = self.vfs.readdir(path)
+            if entries_result.is_err():
+                return Result.Err(entries_result.unwrap_err())
+            for entry in entries_result.unwrap():
+                if entry.name == "." or entry.name == "..":
+                    continue
+                self._remove_path(self._join_child_path(path, entry.name), true, force)?
+            return self.vfs.rmdir(path)
+        self.vfs.unlink(path)
 
     me cmd_history():
         """Display command history."""

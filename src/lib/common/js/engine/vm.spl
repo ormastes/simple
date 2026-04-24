@@ -80,7 +80,7 @@ class ObjectStore:
         stored_id
 
     fn _stored_obj_id_equals(stored_id: i64, expected_id: i64) -> bool:
-        self._normalize_obj_id(stored_id) == expected_id
+        self._normalize_obj_id(stored_id) == self._normalize_obj_id(expected_id)
 
     me allocate() -> JsObject:
         val id = self.next_id
@@ -149,31 +149,25 @@ class ObjectStore:
         JsValue.Undefined
 
     fn array_length(obj_id: i64) -> i64:
-        """Get the length of an array.
-
-        In bare-metal guest builds the Number->i64 conversion path for the
-        stored "length" property is currently unreliable, so derive the length
-        from the highest numeric element key and only fall back to the stored
-        property when that yields a larger value.
-        """
+        """Get the length of a dense array by counting distinct element keys."""
+        var seen_keys: [text] = []
         var derived_len = 0
         var i = self.prop_keys.len() - 1
         while i >= 0:
             if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id):
                 val key = self.prop_keys.get(i)
                 if key != "length":
-                    if val Some(idx) = _parse_non_negative_i64(key):
-                        if idx + 1 > derived_len:
-                            derived_len = idx + 1
+                    var already_seen = false
+                    var si = 0
+                    while si < seen_keys.len():
+                        if seen_keys.get(si) == key:
+                            already_seen = true
+                            si = seen_keys.len()
+                        si = si + 1
+                    if not already_seen:
+                        seen_keys.push(key)
+                        derived_len = derived_len + 1
             i = i - 1
-
-        var stored_len = 0
-        match self.get_property(obj_id, "length"):
-            JsValue.Number(v): stored_len = f64_to_i64(v)
-            _: pass_dn
-
-        if stored_len > derived_len:
-            return stored_len
         derived_len
 
     fn get_by_index(obj_id: i64, idx: i64) -> JsValue:

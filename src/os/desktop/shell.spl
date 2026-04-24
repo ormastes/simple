@@ -186,33 +186,6 @@ fn _create_materialized_surface(
     _register_materialized_window(shell, window_id, pid, app_id)
     window_id
 
-fn _materialize_simple_browser_window(shell: DesktopShell, pid: u64, app_id: text) -> bool:
-    serial_println("[shell] simple-browser-fallback:start pid={pid}")
-    val resolved_app_id = "/sys/apps/simple_browser"
-    val wid = _create_materialized_surface(shell, "Simple Browser", 120, 90, 920, 640, pid, resolved_app_id)
-    if wid.value == 0:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create-window wid=0")
-        return false
-    val compositor_window_ids = shell.compositor.windows_for_process(ProcessId(value: pid))
-    if compositor_window_ids.len() != 1:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=compositor-window-count count={compositor_window_ids.len()} wid={wid.value}")
-        return false
-    val wm_window_ids = shell.wm.window_ids_for_process(pid)
-    if wm_window_ids.len() != 1:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-window-count count={wm_window_ids.len()} wid={wid.value}")
-        return false
-    if shell.wm.window_owner_process_id(wid) != pid:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-pid actual={shell.wm.window_owner_process_id(wid)} wid={wid.value}")
-        return false
-    if shell.wm.window_owner_app_id(wid) != resolved_app_id:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-app actual={shell.wm.window_owner_app_id(wid)} expected={resolved_app_id} wid={wid.value}")
-        return false
-    serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=true wid={wid.value}")
-    serial_println("[simple_browser] window_created app_id={resolved_app_id} wid={wid.value} title=Simple Browser mode=filesystem-process pid={pid}")
-    serial_println("[simple_browser] page_rendered app_id={resolved_app_id} wid={wid.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
-    serial_println("[shell] simple-browser-fallback:end pid={pid}")
-    true
-
 fn _fallback_app_id_for_name(name: text) -> text:
     match name:
         case "Browser Demo": APP_ID_BROWSER_DEMO
@@ -264,8 +237,6 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
             serial_println("[desktop-e2e] cli-verify:ok pid={pid} path={editor_smoke_path} content={editor_smoke_content}")
             serial_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=filesystem-process")
             true
-        case "Simple Browser":
-            _materialize_simple_browser_window(shell, pid, app_id)
         case _:
             val tree = _build_app_tree(name)
             _create_materialized_window(shell, name, 80, 80, 640, 400, tree, pid, app_id).value != 0
@@ -509,38 +480,48 @@ impl DesktopShell:
             return false
         if name == "Simple Browser":
             serial_println("[shell] simple-browser-fallback:start pid={pid}")
-            self.apply_wm_action(WmAction(
-                kind: "create_window",
-                window_id: WindowId(value: 0),
-                title: "Simple Browser",
-                x: 120,
-                y: 90,
-                width: 920,
-                height: 640,
-                content: "",
-                process_id: pid,
-                app_id: app_id,
-                owner_port: 1,
-                src_port: 0
-            ))
-            val browser_wid = self.compositor.focused_window_id()
-            val owner_idx = self.wm.find_owner_index(browser_wid.value)
+            val browser_tree = build_tree_with_title(column("simple_browser_resident_main", [
+                text_widget("simple_browser_title", "Simple Browser"),
+                text_widget("simple_browser_url", "about:network"),
+                text_widget("simple_browser_renderer", "renderer=simple_web mode=filesystem-process")
+            ]), "Simple Browser", "dark")
+            val wid = self.compositor.create_window_with_tree("Simple Browser", 120, 90, 920, 640, browser_tree)
+            serial_println("[shell] simple-browser-fallback:create-window pid={pid} wid={wid.value}")
+            if wid.value == 0:
+                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create-window wid=0")
+                return false
+            self.compositor.set_window_identity(wid, ProcessId(value: pid), AppId(value: app_id))
+            var owner_idx: i32 = -1
+            var i: i32 = 0
+            while i < self.wm.owner_count:
+                if self.wm.owner_window_ids[i] == wid.value:
+                    owner_idx = i
+                    i = self.wm.owner_count
+                else:
+                    i = i + 1
             if owner_idx >= 0:
-                self.wm.owner_window_ids[owner_idx] = browser_wid.value
-                self.wm.owner_ports_fixed[owner_idx] = 1
+                self.wm.owner_window_ids[owner_idx] = wid.value
+                self.wm.owner_ports_fixed[owner_idx] = 0
                 self.wm.owner_process_ids[owner_idx] = pid
                 self.wm.owner_app_ids[owner_idx] = app_id
             elif self.wm.owner_count < self.wm.max_windows:
-                self.wm.owner_window_ids[self.wm.owner_count] = browser_wid.value
-                self.wm.owner_ports_fixed[self.wm.owner_count] = 1
+                self.wm.owner_window_ids[self.wm.owner_count] = wid.value
+                self.wm.owner_ports_fixed[self.wm.owner_count] = 0
                 self.wm.owner_process_ids[self.wm.owner_count] = pid
                 self.wm.owner_app_ids[self.wm.owner_count] = app_id
                 self.wm.owner_count = self.wm.owner_count + 1
-            val wm_window_ids = self.wm.window_ids_for_process(pid)
-            if wm_window_ids.len() != 1:
-                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-window-count count={wm_window_ids.len()} wid=0")
+            launcher_note_window_opened(pid)
+            var wm_window_count: i32 = 0
+            var wm_wid: u64 = 0
+            var j: i32 = 0
+            while j < self.wm.owner_count:
+                if self.wm.owner_process_ids[j] == pid:
+                    wm_window_count = wm_window_count + 1
+                    wm_wid = self.wm.owner_window_ids[j]
+                j = j + 1
+            if wm_window_count != 1:
+                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-window-count count={wm_window_count} wid={wm_wid}")
                 return false
-            val wid = WindowId(value: wm_window_ids[0])
             if self.wm.window_owner_process_id(wid) != pid:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-pid actual={self.wm.window_owner_process_id(wid)} wid={wid.value}")
                 return false

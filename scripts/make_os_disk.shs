@@ -433,6 +433,152 @@ if [ -n "$SEED_DIR" ] && [ -d "$SEED_DIR" ]; then
     cp -R "$SEED_DIR"/. "$TMPDIR"/
 fi
 
+stage_simpleos_toolchain_payloads() {
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            echo "[make_os_disk] Skipping LLVM/Rust/Ninja guest payload staging for $ARCH_MODE"
+            return 0
+            ;;
+    esac
+
+    if ! /bin/sh src/os/port/llvm/sysroot.shs >/dev/null 2>&1; then
+        echo "[make_os_disk] ERROR: sysroot build failed before guest toolchain staging"
+        return 1
+    fi
+
+    LLVM_ROOT="${SIMPLEOS_LLVM_STAGE_ROOT:-build/os/llvm/cross-x86_64}"
+    LLVM_BIN="$LLVM_ROOT/bin"
+    LLVM_CLANG="$LLVM_BIN/clang-20"
+    LLVM_LLD="$LLVM_BIN/lld"
+    LLVM_AR="$LLVM_BIN/llvm-ar"
+    LLVM_NM="$LLVM_BIN/llvm-nm"
+    LLVM_RANLIB="${SIMPLEOS_LLVM_RANLIB:-$(command -v llvm-ranlib 2>/dev/null || true)}"
+    LLVM_OBJDUMP="$LLVM_BIN/llvm-objdump"
+    LLVM_OBJCOPY="$LLVM_BIN/llvm-objcopy"
+    LLVM_STRIP="${SIMPLEOS_LLVM_STRIP:-$(command -v llvm-strip 2>/dev/null || true)}"
+
+    RUST_STAGE1_ROOT="${SIMPLEOS_RUST_STAGE1_ROOT:-$HOME/rust/build/x86_64-unknown-linux-gnu/stage1}"
+    RUST_RUSTC="$RUST_STAGE1_ROOT/bin/rustc"
+    RUST_CARGO="${SIMPLEOS_RUST_CARGO:-$(command -v cargo 2>/dev/null || true)}"
+    RUST_RUSTLIB_DIR="$RUST_STAGE1_ROOT/lib/rustlib/x86_64-unknown-simpleos"
+    NINJA_BIN="${SIMPLEOS_NINJA_BIN:-$(command -v ninja 2>/dev/null || true)}"
+
+    for required in \
+        "$LLVM_CLANG" \
+        "$LLVM_LLD" \
+        "$LLVM_AR" \
+        "$LLVM_NM" \
+        "$LLVM_RANLIB" \
+        "$LLVM_OBJDUMP" \
+        "$LLVM_OBJCOPY" \
+        "$LLVM_STRIP" \
+        "$RUST_RUSTC" \
+        "$RUST_CARGO" \
+        "$NINJA_BIN" \
+        "$RUST_RUSTLIB_DIR" \
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json" \
+        "src/os/toolchain/rust/cargo_config.toml" \
+        "build/os/sysroot/include" \
+        "build/os/sysroot/lib"
+    do
+        if [ ! -e "$required" ]; then
+            echo "[make_os_disk] ERROR: required host artifact missing for guest toolchain staging: $required"
+            return 1
+        fi
+    done
+
+    mkdir -p \
+        "$TMPDIR/usr/bin" \
+        "$TMPDIR/usr/include" \
+        "$TMPDIR/usr/lib" \
+        "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos" \
+        "$TMPDIR/usr/share/simpleos" \
+        "$TMPDIR/etc/cargo" \
+        "$TMPDIR/SYS"
+
+    cp -L "$LLVM_CLANG" "$TMPDIR/usr/bin/clang" || return 1
+    cp -L "$LLVM_CLANG" "$TMPDIR/usr/bin/clang-20" || return 1
+    cp -L "$LLVM_LLD" "$TMPDIR/usr/bin/lld" || return 1
+    cp -L "$LLVM_LLD" "$TMPDIR/usr/bin/ld.lld" || return 1
+    cp -L "$LLVM_AR" "$TMPDIR/usr/bin/llvm-ar" || return 1
+    cp -L "$LLVM_NM" "$TMPDIR/usr/bin/llvm-nm" || return 1
+    cp -L "$LLVM_RANLIB" "$TMPDIR/usr/bin/llvm-ranlib" || return 1
+    cp -L "$LLVM_OBJDUMP" "$TMPDIR/usr/bin/llvm-objdump" || return 1
+    cp -L "$LLVM_OBJCOPY" "$TMPDIR/usr/bin/llvm-objcopy" || return 1
+    cp -L "$LLVM_STRIP" "$TMPDIR/usr/bin/llvm-strip" || return 1
+
+    cp -L "$RUST_RUSTC" "$TMPDIR/usr/bin/rustc" || return 1
+    cp -L "$RUST_CARGO" "$TMPDIR/usr/bin/cargo" || return 1
+    cp -L "$NINJA_BIN" "$TMPDIR/usr/bin/ninja" || return 1
+    cp "scripts/cargo_simpleos.shs" "$TMPDIR/usr/bin/cargo-simpleos" || return 1
+    chmod +x "$TMPDIR/usr/bin/cargo-simpleos" 2>/dev/null || true
+
+    cp -R build/os/sysroot/include/. "$TMPDIR/usr/include/" || return 1
+    cp -R build/os/sysroot/lib/. "$TMPDIR/usr/lib/" || return 1
+    if [ -d build/os/sysroot/share/simpleos ]; then
+        cp -R build/os/sysroot/share/simpleos/. "$TMPDIR/usr/share/simpleos/" || return 1
+    fi
+
+    cp -R "$RUST_RUSTLIB_DIR"/. "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/" || return 1
+    cp "src/os/toolchain/rust/x86_64-unknown-simpleos.json" \
+        "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/target.json" || return 1
+    cp "src/os/toolchain/rust/cargo_config.toml" "$TMPDIR/etc/cargo/config.toml" || return 1
+
+    LLVM_VERSION_LINE="$("$LLVM_CLANG" --version | sed -n '1p')"
+    RUST_VERSION_LINE="$("$RUST_RUSTC" --version | sed -n '1p')"
+    CARGO_VERSION_LINE="$("$RUST_CARGO" --version | sed -n '1p')"
+    NINJA_VERSION_LINE="$("$NINJA_BIN" --version | sed -n '1p')"
+    RUSTLIB_FILE_COUNT="$(find "$RUST_RUSTLIB_DIR"/lib -maxdepth 1 -type f 2>/dev/null | wc -l | awk '{print $1}')"
+
+    printf '%s\n' "$LLVM_VERSION_LINE" > "$TMPDIR/SYS/LLVMVER.TXT"
+    printf '%s\n' "$RUST_VERSION_LINE" > "$TMPDIR/SYS/RUSTVER.TXT"
+    printf '%s\n' "$CARGO_VERSION_LINE" > "$TMPDIR/SYS/CARGOVER.TXT"
+    printf '%s\n' "$NINJA_VERSION_LINE" > "$TMPDIR/SYS/NINJAVER.TXT"
+
+    cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
+payload=llvm
+version=$LLVM_VERSION_LINE
+/usr/bin/clang
+/usr/bin/clang-20
+/usr/bin/lld
+/usr/bin/ld.lld
+/usr/bin/llvm-ar
+/usr/bin/llvm-nm
+/usr/bin/llvm-ranlib
+/usr/bin/llvm-objdump
+/usr/bin/llvm-objcopy
+/usr/bin/llvm-strip
+/usr/include
+/usr/lib
+EOF
+
+    cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
+payload=rust
+rustc=$RUST_VERSION_LINE
+cargo=$CARGO_VERSION_LINE
+rustlib_files=$RUSTLIB_FILE_COUNT
+/usr/bin/rustc
+/usr/bin/cargo
+/usr/bin/cargo-simpleos
+/usr/lib/rustlib/x86_64-unknown-simpleos/lib
+/usr/lib/rustlib/x86_64-unknown-simpleos/target.json
+/etc/cargo/config.toml
+EOF
+
+    cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
+[toolchain]
+lane = "x86_64-simpleos"
+llvm = "/sys/apps/llvm -> /usr/bin/clang"
+rust = "/sys/apps/rust -> /usr/bin/rustc"
+ninja = "/usr/bin/ninja"
+EOF
+
+    echo "[make_os_disk] Staged x86_64 LLVM/Rust/Ninja guest payloads under /usr and /SYS"
+    return 0
+}
+
 HOST_CLANG="clang"
 HOST_LLD="ld.lld"
 if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
@@ -449,6 +595,8 @@ elif [ -x /opt/homebrew/bin/ld.lld ]; then
 elif [ -x /usr/local/bin/ld.lld ]; then
     HOST_LLD="/usr/local/bin/ld.lld"
 fi
+
+stage_simpleos_toolchain_payloads || exit 1
 
 build_disk_hello_elf() {
     if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
