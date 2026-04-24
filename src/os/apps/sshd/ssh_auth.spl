@@ -28,6 +28,8 @@ val SSH_MSG_USERAUTH_FAILURE: u8 = 51
 val SSH_MSG_USERAUTH_SUCCESS: u8 = 52
 val SSH_MSG_USERAUTH_BANNER: u8 = 53
 val SSH_MSG_USERAUTH_PK_OK: u8 = 60
+val SSH_MSG_USERAUTH_INFO_REQUEST: u8 = 60
+val SSH_MSG_USERAUTH_INFO_RESPONSE: u8 = 61
 
 # Maximum authentication attempts before disconnect
 val MAX_AUTH_ATTEMPTS: u32 = 6
@@ -225,6 +227,16 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
                 signature = sig_pair.data
                 off = sig_pair.next_offset
 
+    elif method == "keyboard-interactive":
+        # string language tag
+        # string submethods
+        var r_lang = ssh_get_text(data, off)
+        if r_lang.is_ok():
+            off = r_lang.unwrap().next_offset
+        var r_submethods = ssh_get_text(data, off)
+        if r_submethods.is_ok():
+            off = r_submethods.unwrap().next_offset
+
     # method == "none" has no additional fields
 
     Ok(SshAuthRequest(
@@ -302,6 +314,32 @@ fn ssh_build_userauth_pk_ok(algo: text, key_blob: [u8]) -> [u8]:
     ssh_put_text(buf, algo)
     ssh_put_string(buf, key_blob)
     buf
+
+fn ssh_build_userauth_info_request(name: text, instruction: text, prompt: text, echo: bool) -> [u8]:
+    """Build SSH_MSG_USERAUTH_INFO_REQUEST for keyboard-interactive auth."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_USERAUTH_INFO_REQUEST)
+    ssh_put_text(buf, name)
+    ssh_put_text(buf, instruction)
+    ssh_put_text(buf, "")
+    ssh_put_u32(buf, 1)
+    ssh_put_text(buf, prompt)
+    ssh_put_bool(buf, echo)
+    buf
+
+fn ssh_parse_userauth_info_response(data: [u8]) -> Result<text, text>:
+    """Parse SSH_MSG_USERAUTH_INFO_RESPONSE and return the first response."""
+    if data.len() < 5:
+        return Err("USERAUTH_INFO_RESPONSE too short")
+    if data[0] != SSH_MSG_USERAUTH_INFO_RESPONSE:
+        return Err("not a USERAUTH_INFO_RESPONSE")
+    val count = ssh_get_u32(data, 1).to_u64()
+    if count < 1:
+        return Err("USERAUTH_INFO_RESPONSE missing response")
+    val r_resp = ssh_get_text(data, 5)
+    if r_resp.is_err():
+        return Err("USERAUTH_INFO_RESPONSE bad response")
+    Ok(r_resp.unwrap().value)
 
 # NOTE: Public key authentication is currently DISABLED in ssh_session.spl.
 # To enable it, implement Ed25519 signature verification for userauth here.

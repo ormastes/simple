@@ -10,7 +10,7 @@ use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_pack
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
-use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
@@ -381,7 +381,7 @@ impl SshSession:
             val r = ssh_parse_auth_request(payload)
             if r.is_err():
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                 self.send_packet(fail)
                 continue
 
@@ -389,7 +389,7 @@ impl SshSession:
 
             if req.method == "none":
                 # "none" method: always fail, but tell client which methods are available
-                val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                 self.send_packet(fail)
                 attempts = attempts + 1
 
@@ -403,7 +403,29 @@ impl SshSession:
                     return true
                 else:
                     attempts = attempts + 1
-                    val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                    val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
+                    self.send_packet(fail)
+
+            elif req.method == "keyboard-interactive":
+                val info_req = ssh_build_userauth_info_request(
+                    "SimpleOS SSH",
+                    "Password authentication",
+                    "Password: ",
+                    false
+                )
+                self.send_packet(info_req)
+                val response_payload = self.recv_packet_payload()
+                val r_password = ssh_parse_userauth_info_response(response_payload)
+                if r_password.is_ok() and self.user_db.authenticate_password(req.username, r_password.unwrap()):
+                    self.authenticated_user = req.username
+                    val success = ssh_build_auth_success()
+                    self.send_packet(success)
+                    serial_println("[sshd-session] auth ok (keyboard-interactive)")
+                    self.state = SessionState.Interactive
+                    return true
+                else:
+                    attempts = attempts + 1
+                    val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                     self.send_packet(fail)
 
             elif req.method == "publickey":
@@ -443,17 +465,17 @@ impl SshSession:
                             return true
                         else:
                             attempts = attempts + 1
-                            val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                            val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                             self.send_packet(fail)
                     else:
                         attempts = attempts + 1
-                        val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                        val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                         self.send_packet(fail)
 
             else:
                 # Unknown method
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["publickey", "password"], false)
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                 self.send_packet(fail)
 
         # Too many failed attempts

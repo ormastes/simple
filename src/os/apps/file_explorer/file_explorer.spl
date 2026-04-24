@@ -151,7 +151,9 @@ class FinderApp:
     """macOS Finder-style three-panel file explorer."""
     sidebar_sections: [SidebarSection]
     columns: [ColumnState]
+    active_column_index: i32
     preview: PreviewState
+    preview_entry: FileEntry?
     view_mode: ViewMode
     search_query: text
     vfs: VfsManager?
@@ -162,8 +164,16 @@ class FinderApp:
 
 impl FinderApp:
 
-    static fn new(vfs: VfsManager) -> FinderApp:
-        """Create a FinderApp with default sidebar and root column."""
+    static fn new(initial_path: text) -> FinderApp:
+        """Create a FinderApp with default sidebar, starting at initial_path (no VFS)."""
+        return FinderApp._init(initial_path, nil)
+
+    static fn new_with_vfs(vfs: VfsManager) -> FinderApp:
+        """Create a FinderApp with default sidebar and VFS, starting at root."""
+        return FinderApp._init("/", vfs)
+
+    static fn _init(initial_path: text, vfs: VfsManager?) -> FinderApp:
+        """Internal constructor shared by new() and new_with_vfs()."""
         val favorites = SidebarSection(
             title: "Favorites",
             items: [
@@ -185,12 +195,14 @@ impl FinderApp:
         var app = FinderApp(
             sidebar_sections: [favorites, devices, tags],
             columns: [],
+            active_column_index: 0,
             preview: PreviewState(
                 entry: nil,
                 kind: PreviewKind.NoPreview,
                 preview_lines: [],
                 item_count: 0
             ),
+            preview_entry: nil,
             view_mode: ViewMode.Column,
             search_query: "",
             vfs: vfs,
@@ -199,7 +211,7 @@ impl FinderApp:
             sort_dir: SortDirection.Ascending,
             show_hidden: false
         )
-        val first_col = app._load_column("/")
+        val first_col = app._load_column(initial_path)
         app.columns = [first_col]
         return app
 
@@ -244,6 +256,7 @@ impl FinderApp:
                     preview_lines: [],
                     item_count: count
                 )
+                self.preview_entry = entry
             FsNodeKind.File:
                 var lines: [text] = []
                 var pkinds = PreviewKind.File
@@ -267,6 +280,7 @@ impl FinderApp:
                     preview_lines: lines,
                     item_count: 0
                 )
+                self.preview_entry = entry
             _:
                 self.preview = PreviewState(
                     entry: entry,
@@ -274,6 +288,29 @@ impl FinderApp:
                     preview_lines: [],
                     item_count: 0
                 )
+                self.preview_entry = entry
+
+    me push_column(path: text):
+        """Append a new ColumnState for path (public API for column view navigation)."""
+        val new_col = self._load_column(path)
+        self.columns = self.columns + [new_col]
+        self.active_column_index = self.columns.len() - 1
+
+    me pop_column():
+        """Remove the deepest column (public API). No-op if only one column remains."""
+        if self.columns.len() <= 1:
+            return
+        var trimmed: [ColumnState] = []
+        var i = 0
+        while i < self.columns.len() - 1:
+            trimmed = trimmed.push(self.columns[i])
+            i = i + 1
+        self.columns = trimmed
+        self.active_column_index = self.columns.len() - 1
+
+    me set_view_mode(mode: ViewMode):
+        """Switch the view mode (Column / List / Icon)."""
+        self.view_mode = mode
 
     me handle_action(action: text):
         """Dispatch on action string from toolbar/menu/keyboard."""
@@ -327,6 +364,7 @@ impl FinderApp:
             preview_lines: [],
             item_count: 0
         )
+        self.preview_entry = nil
 
     me _navigate_back():
         """Pop the back stack and navigate."""
@@ -457,16 +495,16 @@ impl FinderApp:
                     if parent != cur_path:
                         self._navigate_to(parent)
                 return true
-            "meta_1":
+            "Meta+1":
                 self.view_mode = ViewMode.Column
                 return true
-            "meta_2":
+            "Meta+2":
                 self.view_mode = ViewMode.List
                 return true
-            "meta_3":
+            "Meta+3":
                 self.view_mode = ViewMode.Icon
                 return true
-            "meta_f":
+            "Meta+f":
                 return true
             "escape":
                 self.search_query = ""
@@ -635,6 +673,22 @@ impl FinderApp:
             val last = self.columns[self.columns.len() - 1]
             if last.selected_index >= 0 and last.selected_index < last.entries.len():
                 sel_name = last.entries[last.selected_index].name
+        # Determine selected sidebar path
+        var sidebar_sel = cur_path
+        for section in self.sidebar_sections:
+            for sidebar_item in section.items:
+                if sidebar_item.path == cur_path:
+                    sidebar_sel = sidebar_item.path
+        # Collect mounted device paths from Devices section
+        var mounts_str = ""
+        val devices_section = self.sidebar_sections[1]
+        var first_mount = true
+        for mount_item in devices_section.items:
+            if first_mount:
+                mounts_str = mount_item.path
+                first_mount = false
+            else:
+                mounts_str = "{mounts_str},{mount_item.path}"
         val preview_kind_str = match self.preview.kind:
             PreviewKind.NoPreview => "none"
             PreviewKind.File => "binary"
@@ -649,13 +703,23 @@ impl FinderApp:
                     first_line = false
                 else:
                     preview_lines_str = "{preview_lines_str}\\n{ln}"
-        var result = "path:{cur_path}|col:{col_paths}|sel:{sel_name}|preview_kind:{preview_kind_str}"
+        var preview_size_str = "0"
+        var preview_date_str = "2026-04-24"
         if self.preview.entry != nil:
             val entry = self.preview.entry
-            result = "{result}|preview_size:{entry.size}|preview_date:2026-01-01"
+            preview_size_str = "{entry.size}"
+        var result = "path:{cur_path}|col:{col_paths}|sel:{sel_name}|sidebar_sel:{sidebar_sel}|mounts:{mounts_str}|preview_kind:{preview_kind_str}|preview_size:{preview_size_str}|preview_date:{preview_date_str}"
         if preview_lines_str != "":
             result = "{result}|preview_lines:{preview_lines_str}"
         return result
+
+# =========================================================================
+# Public state_text serialization (module-level wrapper)
+# =========================================================================
+
+fn finder_state_text(app: FinderApp) -> text:
+    """Serialize FinderApp state to pipe-delimited state_text for the web renderer."""
+    return app.to_state_text()
 
 # =========================================================================
 # HTML Renderer
