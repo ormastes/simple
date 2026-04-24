@@ -87,7 +87,14 @@ pub(super) fn is_pure_predicate_function(func: &FunctionDef) -> bool {
 
     // Function name must start with a predicate prefix
     const PREDICATE_PREFIXES: &[&str] = &[
-        "is_", "has_", "can_", "should_", "will_", "contains_", "must_", "needs_",
+        "is_",
+        "has_",
+        "can_",
+        "should_",
+        "will_",
+        "contains_",
+        "must_",
+        "needs_",
     ];
     let is_predicate_name = PREDICATE_PREFIXES.iter().any(|pfx| func.name.starts_with(pfx));
     if !is_predicate_name {

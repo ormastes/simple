@@ -5,6 +5,7 @@
 
 use crate::hir_core::LogLevel;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
 use super::{rt_string_data, rt_string_len, RuntimeValue};
@@ -21,6 +22,27 @@ static SCOPE_LEVELS: OnceLock<Mutex<HashMap<String, u8>>> = OnceLock::new();
 
 fn scope_levels() -> &'static Mutex<HashMap<String, u8>> {
     SCOPE_LEVELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Native alias for generated global getter calls from std.log globals.
+#[no_mangle]
+pub extern "C" fn get_global_SCOPE_LEVELS() -> *const c_void {
+    scope_levels() as *const Mutex<HashMap<String, u8>> as *const c_void
+}
+
+/// Native alias for generated `SCOPE_LEVELS.has(scope)` calls from std.log.
+#[export_name = "SCOPE_LEVELS_dot_has"]
+pub extern "C" fn scope_levels_dot_has(scope: RuntimeValue) -> bool {
+    let scope_ptr = rt_string_data(scope);
+    let scope_len = rt_string_len(scope);
+    if scope_ptr.is_null() || scope_len <= 0 {
+        return false;
+    }
+    let scope = unsafe {
+        let slice = std::slice::from_raw_parts(scope_ptr, scope_len as usize);
+        String::from_utf8_lossy(slice).to_string()
+    };
+    scope_levels().lock().map(|levels| levels.contains_key(&scope)).unwrap_or(false)
 }
 
 // ============================================================================
@@ -40,6 +62,18 @@ pub extern "C" fn rt_log_set_global_level(level: i64) {
 #[no_mangle]
 pub extern "C" fn rt_log_get_global_level() -> i64 {
     GLOBAL_LEVEL.lock().map(|g| *g as i64).unwrap_or(4)
+}
+
+/// Native alias for generated global getter calls from std.log globals.
+#[no_mangle]
+pub extern "C" fn get_global_GLOBAL_LOG_LEVEL() -> i64 {
+    rt_log_get_global_level()
+}
+
+/// Native alias for generated global setter calls from std.log globals.
+#[no_mangle]
+pub extern "C" fn set_global_GLOBAL_LOG_LEVEL(level: i64) {
+    rt_log_set_global_level(level);
 }
 
 /// Set log level for a specific scope

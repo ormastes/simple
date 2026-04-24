@@ -23,15 +23,26 @@ typedef struct {
 
 typedef struct {
     HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
+    uint64_t     len;
+    uint64_t     cap;
+    RuntimeValue *items;
 } RuntimeArray;
 
 #define HEAP_ARRAY 2
 
 extern void *malloc(size_t size);
 extern void free(void *ptr);
+
+static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
+{
+    return (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
+}
+
+static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
+{
+    if (!a) return NULL;
+    return a->items ? a->items : runtime_array_inline_items(a);
+}
 
 static inline uint8_t _rv_byte(RuntimeValue v)
 {
@@ -264,12 +275,14 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     if (!scalar || !point || scalar->hdr.type != HEAP_ARRAY || point->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (scalar->len != 32 || point->len != 32) return NIL_VALUE;
 
+    RuntimeValue *scalar_items = runtime_array_items(scalar);
+    RuntimeValue *point_items = runtime_array_items(point);
     uint8_t scalar_raw[32];
     uint8_t point_raw[32];
     uint8_t out_raw[32];
     for (uint32_t i = 0; i < 32; i++) {
-        scalar_raw[i] = _rv_byte(scalar->items[i]);
-        point_raw[i] = _rv_byte(point->items[i]);
+        scalar_raw[i] = _rv_byte(scalar_items[i]);
+        point_raw[i] = _rv_byte(point_items[i]);
     }
 
     /* ring's generic X25519 entrypoint expects a masked scalar. The Simple
@@ -291,6 +304,7 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
     out->len = 32;
     out->cap = 32;
+    out->items = runtime_array_inline_items(out);
     for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
     return ENCODE_PTR(out);
 }
@@ -303,10 +317,11 @@ RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
     if (!scalar || scalar->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (scalar->len != 32) return NIL_VALUE;
 
+    RuntimeValue *scalar_items = runtime_array_items(scalar);
     uint8_t scalar_raw[32];
     uint8_t point_raw[32] = {9};
     uint8_t out_raw[32];
-    for (uint32_t i = 0; i < 32; i++) scalar_raw[i] = _rv_byte(scalar->items[i]);
+    for (uint32_t i = 0; i < 32; i++) scalar_raw[i] = _rv_byte(scalar_items[i]);
 
     scalar_raw[0] &= 248u;
     scalar_raw[31] &= 127u;
@@ -320,6 +335,7 @@ RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
     out->len = 32;
     out->cap = 32;
+    out->items = runtime_array_inline_items(out);
     for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
     return ENCODE_PTR(out);
 }

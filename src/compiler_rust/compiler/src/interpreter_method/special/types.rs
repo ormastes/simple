@@ -50,6 +50,11 @@ pub fn handle_unit_methods(
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix
 
+            // Lazily seed the thread-local unit state from `src/unit/simple-lang/`
+            // so user-declared catalog units resolve here without depending on
+            // a `use unit.*` import side effect. See `crate::units::registry`.
+            crate::units::ensure_loaded();
+
             // Get the family name - either from the Unit value or look it up (including SI prefix check)
             let family_name = family.clone().or_else(|| {
                 // First try direct lookup

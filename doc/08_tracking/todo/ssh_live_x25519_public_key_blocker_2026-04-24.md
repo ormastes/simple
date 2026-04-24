@@ -47,4 +47,7 @@ for the current `[boot] Build marker: ...` line.
 
 - Fresh-artifact build gate: fixed
 - Live guest reaches real KEX path: fixed
-- Server X25519 public key derivation in baremetal guest: blocked
+- Baremetal runtime X25519 helper path (`rt_tls13_x25519_*`) now returns stable 32-byte arrays for both fixed and random scalars in the native-built x64 guest probe.
+- The remaining live-lane blocker has moved past KEX public-key generation: OpenSSH now aborts with `incorrect signature` after the guest sends `SSH_MSG_KEX_ECDH_REPLY`.
+- Server X25519 public key derivation in baremetal guest: fixed for the runtime helper path used by the live SSH lane
+- Next blocker: post-KEX exchange-hash / host-key-signature correctness

@@ -1,0 +1,161 @@
+# OS Shell Userland Tools Integration Test
+#
+# Covers the Tier A2 ports (tree, less) and Tier B aliases
+# (rg→grep, fd→find, fdfind→find, bat→cat, batcat→cat, eza→ls, ag→grep)
+# added to bring the SimpleOS shell up to Ubuntu-script parity for the
+# packages listed in the /dev port-userland-to-simpleos spec.
+#
+# Sibling to os_shell_spec.spl; same baremetal harness (not under SSpec).
+# QEMU scenario: x64-nvme-fat32.
+
+use os.kernel.boot.init_services.{init_services}
+use os.services.vfs.vfs_init.{g_vfs, g_vfs_initialized}
+use os.posix.mod.{posix_init}
+use os.apps.shell.shell_app.{ShellApp}
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+
+val ISA_DEBUG_EXIT_PORT: u64 = 0xf4
+
+var _pass_count: u32 = 0
+var _fail_count: u32 = 0
+
+fn _assert(condition: bool, name: text):
+    if condition:
+        serial_println("[TEST PASS] {name}")
+        _pass_count = _pass_count + 1
+    else:
+        serial_println("[TEST FAIL: {name}]")
+        _fail_count = _fail_count + 1
+
+fn _report():
+    serial_println("")
+    serial_println("Userland tool tests: {_pass_count} passed, {_fail_count} failed")
+    if _fail_count == 0:
+        serial_println("[ALL TESTS PASSED]")
+    else:
+        serial_println("[TESTS FAILED: {_fail_count}]")
+    syscall(ISA_DEBUG_EXIT_PORT, 0, 0, 0, 0, 0)
+
+fn os_userland_tools_test():
+    """Entry point for userland-port integration tests."""
+    serial_println("=== OS Shell Userland Tools Integration Test ===")
+    serial_println("")
+
+    posix_init()
+    init_services()
+
+    if not g_vfs_initialized:
+        serial_println("[SKIP] VFS not initialized -- cannot test tools")
+        _assert(false, "VFS initialized for userland tool tests")
+        _report()
+        return
+
+    var shell = ShellApp.with_vfs(g_vfs)
+
+    # ---- Test 1: tree --help prints usage ----
+    shell.output_lines = []
+    shell.execute("tree --help")
+    val tree_help = shell.output_lines
+    _assert(tree_help.len() > 0, "tree --help produces output")
+    if tree_help.len() > 0:
+        _assert(tree_help[0].contains("usage: tree"), "tree --help reports usage")
+
+    # ---- Test 2: tree on /shelltest prints path + summary line ----
+    shell.execute("mkdir -p /treetest/a/b")
+    shell.output_lines = []
+    shell.execute("tree /treetest")
+    val tree_output = shell.output_lines
+    _assert(tree_output.len() >= 2, "tree /treetest produces >=2 lines")
+    var tree_has_summary = false
+    var ti: u64 = 0
+    while ti < tree_output.len():
+        if tree_output[ti].contains("directories") and tree_output[ti].contains("files"):
+            tree_has_summary = true
+        ti = ti + 1
+    _assert(tree_has_summary, "tree prints N directories, M files summary")
+
+    # ---- Test 3: less --help prints usage ----
+    shell.output_lines = []
+    shell.execute("less --help")
+    val less_help = shell.output_lines
+    _assert(less_help.len() > 0, "less --help produces output")
+    if less_help.len() > 0:
+        _assert(less_help[0].contains("usage: less"), "less --help reports usage")
+
+    # ---- Test 4: less /hello.txt dumps content (non-interactive) ----
+    shell.output_lines = []
+    shell.execute("less /hello.txt")
+    val less_output = shell.output_lines
+    _assert(less_output.len() > 0, "less /hello.txt produces output")
+    if less_output.len() > 0:
+        _assert(less_output[0].contains("Hello"), "less shows file content")
+
+    # ---- Test 5: less with missing file fails ----
+    shell.output_lines = []
+    shell.execute("less /nonexistent_file_xyz")
+    _assert(shell.last_exit_code != 0, "less on missing file exits nonzero")
+
+    # ---- Test 6: Tier B alias — rg expands to grep ----
+    shell.output_lines = []
+    shell.execute("echo 'foo bar baz' | rg bar")
+    val rg_output = shell.output_lines
+    _assert(rg_output.len() > 0, "rg (alias → grep) produces output")
+    if rg_output.len() > 0:
+        _assert(rg_output[0].contains("bar"), "rg finds match like grep")
+
+    # ---- Test 7: Tier B alias — bat expands to cat ----
+    shell.output_lines = []
+    shell.execute("bat /hello.txt")
+    val bat_output = shell.output_lines
+    _assert(bat_output.len() > 0, "bat (alias → cat) produces output")
+    if bat_output.len() > 0:
+        _assert(bat_output[0].contains("Hello"), "bat shows file content like cat")
+
+    # ---- Test 8: Tier B alias — eza expands to ls ----
+    shell.output_lines = []
+    shell.execute("eza /")
+    val eza_output = shell.output_lines
+    _assert(eza_output.len() > 0, "eza (alias → ls) produces output")
+
+    # ---- Test 9: Tier B alias — fd expands to find ----
+    shell.execute("mkdir -p /fdtest")
+    shell.execute("echo hi > /fdtest/target.txt")
+    shell.output_lines = []
+    shell.execute("fd /fdtest -name target.txt")
+    val fd_output = shell.output_lines
+    _assert(fd_output.len() > 0, "fd (alias → find) produces output")
+
+    # ---- Test 10: A1 builtin wc reachable ----
+    shell.output_lines = []
+    shell.execute("wc -l /hello.txt")
+    val wc_output = shell.output_lines
+    _assert(wc_output.len() > 0, "wc -l produces output")
+
+    # ---- Test 11: A1 builtin sort reachable via pipeline ----
+    shell.output_lines = []
+    shell.execute("echo -e 'c\\na\\nb' | sort")
+    val sort_output = shell.output_lines
+    _assert(sort_output.len() > 0, "sort produces output")
+
+    # ---- Test 12: A1 builtin uniq reachable via pipeline ----
+    shell.output_lines = []
+    shell.execute("echo -e 'a\\na\\nb' | uniq")
+    val uniq_output = shell.output_lines
+    _assert(uniq_output.len() > 0, "uniq produces output")
+
+    # ---- Test 13: A1 builtin cut reachable ----
+    shell.output_lines = []
+    shell.execute("echo 'a:b:c' | cut -d : -f 2")
+    val cut_output = shell.output_lines
+    _assert(cut_output.len() > 0, "cut -d : produces output")
+    if cut_output.len() > 0:
+        _assert(cut_output[cut_output.len() - 1].contains("b"), "cut extracts 2nd field")
+
+    # ---- Test 14: tree depth-bounded on / (smoke — should not crash) ----
+    shell.output_lines = []
+    shell.execute("tree /")
+    _assert(true, "tree / does not crash shell")
+
+    _report()

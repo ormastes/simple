@@ -540,159 +540,161 @@ pub fn load_and_merge_module(
     // Many __init__.spl files use bare exports (export X, Y, Z) where the symbols
     // come from sibling files (mod.spl, or other .spl files in the same directory).
     // Without preloading these siblings, bare exports resolve to nothing.
-    let preloaded_env: Option<HashMap<String, Value>> =
-        if module_path.file_name().map_or(false, |f| f == "__init__.spl") {
-            let has_bare_exports = filtered_items
-                .iter()
-                .any(|item| matches!(item, Node::ExportUseStmt(e) if e.path.segments.is_empty()));
-            if has_bare_exports {
-                let parent_dir = module_path.parent();
-                if let Some(dir) = parent_dir {
-                    let mut merged_exports: HashMap<String, Value> = HashMap::new();
-                    // Collect sibling .spl files (not __init__.spl itself)
-                    let requested_names = requested_names.clone().map(|names| {
-                        let local_names = locally_defined_names(&filtered_items);
-                        names
-                            .into_iter()
-                            .filter(|name| !local_names.iter().any(|local| local == name))
-                            .collect::<Vec<_>>()
+    let preloaded_env: Option<HashMap<String, Value>> = if module_path
+        .file_name()
+        .map_or(false, |f| f == "__init__.spl")
+    {
+        let has_bare_exports = filtered_items
+            .iter()
+            .any(|item| matches!(item, Node::ExportUseStmt(e) if e.path.segments.is_empty()));
+        if has_bare_exports {
+            let parent_dir = module_path.parent();
+            if let Some(dir) = parent_dir {
+                let mut merged_exports: HashMap<String, Value> = HashMap::new();
+                // Collect sibling .spl files (not __init__.spl itself)
+                let requested_names = requested_names.clone().map(|names| {
+                    let local_names = locally_defined_names(&filtered_items);
+                    names
+                        .into_iter()
+                        .filter(|name| !local_names.iter().any(|local| local == name))
+                        .collect::<Vec<_>>()
+                });
+                if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
+                    None
+                } else if let Ok(entries) = fs::read_dir(dir) {
+                    // Collect siblings with cached source strings to avoid double disk reads.
+                    // sibling_might_define_requested_names returns Some(source) on match.
+                    let mut sibling_files: Vec<(std::path::PathBuf, Option<String>)> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.extension().map_or(false, |ext| ext == "spl")
+                                && p.file_name().map_or(false, |f| f != "__init__.spl")
+                                && p.file_name().map_or(false, |f| f != "mod_stub.spl")
+                                && p.is_file()
+                        })
+                        .filter_map(|p| {
+                            match requested_names.as_ref() {
+                                None => Some((p, None)), // no filter — source read deferred
+                                Some(names) => match sibling_might_define_requested_names(&p, names) {
+                                    Some(source) => Some((p, Some(source))),
+                                    None => {
+                                        loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                                        None
+                                    }
+                                },
+                            }
+                        })
+                        .collect();
+                    // Sort for deterministic load order; mod.spl first if present
+                    sibling_files.sort_by(|(a, _), (b, _)| {
+                        let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
+                        let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
+                        match (a_is_mod, b_is_mod) {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => a.cmp(b),
+                        }
                     });
-                    if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
-                        None
-                    } else if let Ok(entries) = fs::read_dir(dir) {
-                        // Collect siblings with cached source strings to avoid double disk reads.
-                        // sibling_might_define_requested_names returns Some(source) on match.
-                        let mut sibling_files: Vec<(std::path::PathBuf, Option<String>)> = entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.path())
-                            .filter(|p| {
-                                p.extension().map_or(false, |ext| ext == "spl")
-                                    && p.file_name().map_or(false, |f| f != "__init__.spl")
-                                    && p.file_name().map_or(false, |f| f != "mod_stub.spl")
-                                    && p.is_file()
-                            })
-                            .filter_map(|p| {
-                                match requested_names.as_ref() {
-                                    None => Some((p, None)), // no filter — source read deferred
-                                    Some(names) => match sibling_might_define_requested_names(&p, names) {
-                                        Some(source) => Some((p, Some(source))),
-                                        None => {
-                                            loader_trace!("sibling-skip", "{} (no matching names)", p.display());
-                                            None
-                                        }
-                                    },
-                                }
-                            })
-                            .collect();
-                        // Sort for deterministic load order; mod.spl first if present
-                        sibling_files.sort_by(|(a, _), (b, _)| {
-                            let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
-                            let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
-                            match (a_is_mod, b_is_mod) {
-                                (true, false) => std::cmp::Ordering::Less,
-                                (false, true) => std::cmp::Ordering::Greater,
-                                _ => a.cmp(b),
+                    // Cap sibling preload count to prevent unbounded memory growth (BUG-3)
+                    let max_siblings = crate::memory_guard::sibling_preload_limit();
+                    if sibling_files.len() > max_siblings {
+                        loader_trace!(
+                            "sibling-cap",
+                            "skipping preload for {} — {} siblings exceeds cap {}",
+                            module_path.display(),
+                            sibling_files.len(),
+                            max_siblings
+                        );
+                        sibling_files.truncate(max_siblings);
+                    }
+                    for (sibling_path, cached_source) in &sibling_files {
+                        // Early termination: if all requested names are already found, skip remaining siblings
+                        if let Some(names) = requested_names.as_ref() {
+                            if !names.is_empty() && names.iter().all(|n| merged_exports.contains_key(n)) {
+                                loader_trace!(
+                                    "sibling-skip",
+                                    "{} (all requested names already found)",
+                                    sibling_path.display()
+                                );
+                                break;
                             }
-                        });
-                        // Cap sibling preload count to prevent unbounded memory growth (BUG-3)
-                        let max_siblings = crate::memory_guard::sibling_preload_limit();
-                        if sibling_files.len() > max_siblings {
-                            loader_trace!(
-                                "sibling-cap",
-                                "skipping preload for {} — {} siblings exceeds cap {}",
-                                module_path.display(),
-                                sibling_files.len(),
-                                max_siblings
-                            );
-                            sibling_files.truncate(max_siblings);
                         }
-                        for (sibling_path, cached_source) in &sibling_files {
-                            // Early termination: if all requested names are already found, skip remaining siblings
-                            if let Some(names) = requested_names.as_ref() {
-                                if !names.is_empty() && names.iter().all(|n| merged_exports.contains_key(n)) {
-                                    loader_trace!(
-                                        "sibling-skip",
-                                        "{} (all requested names already found)",
-                                        sibling_path.display()
-                                    );
-                                    break;
-                                }
-                            }
-                            record_sibling_preload();
-                            loader_trace!(
-                                "sibling-preload",
-                                "{} (requested: {:?})",
-                                sibling_path.display(),
-                                requested_names
-                            );
-                            debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
-                            // Use cached source from name-matching step to avoid re-reading from disk
-                            let sib_source_result = match cached_source {
-                                Some(s) => Ok(s.clone()),
-                                None => fs::read_to_string(sibling_path),
+                        record_sibling_preload();
+                        loader_trace!(
+                            "sibling-preload",
+                            "{} (requested: {:?})",
+                            sibling_path.display(),
+                            requested_names
+                        );
+                        debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
+                        // Use cached source from name-matching step to avoid re-reading from disk
+                        let sib_source_result = match cached_source {
+                            Some(s) => Ok(s.clone()),
+                            None => fs::read_to_string(sibling_path),
+                        };
+                        if let Ok(sib_source) = sib_source_result {
+                            let sib_source = if sib_source.contains('\r') {
+                                sib_source.replace('\r', "")
+                            } else {
+                                sib_source
                             };
-                            if let Ok(sib_source) = sib_source_result {
-                                let sib_source = if sib_source.contains('\r') {
-                                    sib_source.replace('\r', "")
-                                } else {
-                                    sib_source
-                                };
-                                let mut sib_parser = simple_parser::Parser::new(&sib_source);
-                                match sib_parser.parse() {
-                                    Ok(sib_module) => {
-                                        // Evaluate sibling exports in isolation. Preloading is only
-                                        // meant to seed __init__.spl bare exports; it should not let
-                                        // helper/fallback files mutate the caller's global symbol
-                                        // tables or shadow unrelated imports.
-                                        let mut preload_functions = HashMap::new();
-                                        let mut preload_classes = HashMap::new();
-                                        let mut preload_enums = HashMap::new();
-                                        if let Ok((_env, sib_exports, _funcs, _classes, _enums)) = evaluate_module_exports(
-                                            &sib_module.items,
-                                            Some(sibling_path),
-                                            &mut preload_functions,
-                                            &mut preload_classes,
-                                            &mut preload_enums,
-                                        ) {
-                                            for (k, v) in sib_exports {
-                                                // Preserve the first provider for a symbol.
-                                                // This matters for packages like std.nogc_sync_mut.io
-                                                // where real implementations and fallback stubs coexist:
-                                                // env_ops/dir_ops should win, and later stub files should
-                                                // not silently replace them during __init__ preloading.
-                                                merged_exports.entry(k).or_insert(v);
-                                            }
+                            let mut sib_parser = simple_parser::Parser::new(&sib_source);
+                            match sib_parser.parse() {
+                                Ok(sib_module) => {
+                                    // Evaluate sibling exports in isolation. Preloading is only
+                                    // meant to seed __init__.spl bare exports; it should not let
+                                    // helper/fallback files mutate the caller's global symbol
+                                    // tables or shadow unrelated imports.
+                                    let mut preload_functions = HashMap::new();
+                                    let mut preload_classes = HashMap::new();
+                                    let mut preload_enums = HashMap::new();
+                                    if let Ok((_env, sib_exports, _funcs, _classes, _enums)) = evaluate_module_exports(
+                                        &sib_module.items,
+                                        Some(sibling_path),
+                                        &mut preload_functions,
+                                        &mut preload_classes,
+                                        &mut preload_enums,
+                                    ) {
+                                        for (k, v) in sib_exports {
+                                            // Preserve the first provider for a symbol.
+                                            // This matters for packages like std.nogc_sync_mut.io
+                                            // where real implementations and fallback stubs coexist:
+                                            // env_ops/dir_ops should win, and later stub files should
+                                            // not silently replace them during __init__ preloading.
+                                            merged_exports.entry(k).or_insert(v);
                                         }
                                     }
-                                    Err(e) => {
-                                        debug!(
-                                            path = ?sibling_path,
-                                            error = %e,
-                                            "Skipping preloaded sibling module after parse failure"
-                                        );
-                                    }
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        path = ?sibling_path,
+                                        error = %e,
+                                        "Skipping preloaded sibling module after parse failure"
+                                    );
                                 }
                             }
                         }
-                        if merged_exports.is_empty() {
-                            None
-                        } else {
-                            Some(merged_exports)
-                        }
-                    } else if merged_exports.is_empty() {
+                    }
+                    if merged_exports.is_empty() {
                         None
                     } else {
                         Some(merged_exports)
                     }
-                } else {
+                } else if merged_exports.is_empty() {
                     None
+                } else {
+                    Some(merged_exports)
                 }
             } else {
                 None
             }
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let (module_env, module_exports, module_functions, module_classes, module_enums) =
         match evaluate_module_exports_with_preloaded(

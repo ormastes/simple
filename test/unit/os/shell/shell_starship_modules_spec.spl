@@ -1,0 +1,130 @@
+# @cover src/os/apps/shell/shell_starship.spl 15%
+"""
+# Shell Starship Module Specification
+
+**Feature IDs:** #shell-starship-modules
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Complements shell_starship_spec.spl by exercising the AC-4 modules that the
+original spec does not cover directly: ASCII-fallback glyphs, jobs module,
+character module suffix, and extended cmd_duration formatting.
+"""
+
+use std.sspec.*
+use os.apps.shell.shell_starship.{StarshipPrompt, ShellContext}
+
+
+# ============================================================================
+# AC-4 module: jobs
+# ============================================================================
+
+describe "StarshipPrompt jobs module":
+    """Background job count appears only when at least one job is tracked."""
+
+    it "hides jobs segment when no background jobs":
+        val ctx = ShellContext.default()
+        ctx.jobs_count = 0
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        # No jobs marker should appear — we use  (NF_JOBS) or "jobs:" fallback
+        expect(result.contains("jobs:")).to_equal(false)
+
+    it "shows jobs segment when 1+ background jobs":
+        val ctx = ShellContext.default()
+        ctx.jobs_count = 3
+        val prompt = StarshipPrompt.new()
+        prompt.use_nerd_font = false
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("jobs: 3") or result.contains("jobs:3")).to_equal(true)
+
+
+# ============================================================================
+# AC-4 module: character (suffix)
+# ============================================================================
+
+describe "StarshipPrompt character module":
+    """Character module emits $ for non-root, # for root, always present."""
+
+    it "emits $ suffix for non-root user":
+        val ctx = ShellContext.default()
+        ctx.user = "user"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.trim_end().ends_with("$")).to_equal(true)
+
+    it "emits # suffix for root user":
+        val ctx = ShellContext.default()
+        ctx.user = "root"
+        val prompt = StarshipPrompt.new()
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.trim_end().ends_with("#")).to_equal(true)
+
+
+# ============================================================================
+# ASCII fallback (use_nerd_font = false)
+# ============================================================================
+
+describe "StarshipPrompt ASCII fallback":
+    """When use_nerd_font is disabled, ASCII replacements must appear."""
+
+    it "uses ASCII ok glyph when nerd fonts disabled and exit is 0":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 0
+        val prompt = StarshipPrompt.new()
+        prompt.use_nerd_font = false
+        val result = prompt.build_prompt(ctx, 0)
+        # ASCII_OK = "v"; the success glyph should render as "v"
+        expect(result.contains("v")).to_equal(true)
+
+    it "uses ASCII fail glyph when nerd fonts disabled and exit is non-zero":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 2
+        val prompt = StarshipPrompt.new()
+        prompt.use_nerd_font = false
+        val result = prompt.build_prompt(ctx, 0)
+        # ASCII_FAIL = "x"; exit code 2 rendered as "x(2)"
+        expect(result.contains("x(2)")).to_equal(true)
+
+
+# ============================================================================
+# Module toggles
+# ============================================================================
+
+describe "StarshipPrompt module toggles":
+    """AC-4 requires modules to be individually toggleable."""
+
+    it "disabling show_status removes exit indicator":
+        val ctx = ShellContext.default()
+        ctx.last_exit_code = 127
+        val prompt = StarshipPrompt.new()
+        prompt.show_status = false
+        val result = prompt.build_prompt(ctx, 0)
+        # With status disabled, "127" must not leak from the exit module
+        expect(result.contains("127")).to_equal(false)
+
+    it "disabling show_directory removes cwd segment":
+        val ctx = ShellContext.default()
+        ctx.cwd = "/tmp/workspace/project"
+        val prompt = StarshipPrompt.new()
+        prompt.show_directory = false
+        val result = prompt.build_prompt(ctx, 0)
+        expect(result.contains("project")).to_equal(false)
+
+
+# ============================================================================
+# cmd_duration formatting
+# ============================================================================
+
+describe "StarshipPrompt cmd_duration formatting":
+    """Extended cmd_duration: ms for sub-second, s for >= 1s."""
+
+    it "formats just-above-threshold duration in seconds":
+        val ctx = ShellContext.default()
+        val prompt = StarshipPrompt.new()
+        # 2001 > 2000 threshold → show, and 2001/1000 = 2s
+        val result = prompt.build_prompt(ctx, 2001)
+        expect(result.contains("2s")).to_equal(true)

@@ -10,8 +10,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use simple_compiler::CompilerPipeline;
-use simple_compiler::linker::NativeBinaryOptions;
+use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
+use simple_compiler::{CompilerPipeline, ProjectContext};
 
 /// Cache directory for compiled test artifacts
 const CACHE_DIR: &str = "tmp/test_cache";
@@ -122,14 +122,7 @@ impl BuildCache {
             return Ok(output);
         }
 
-        let mut pipeline = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler pipeline: {}", e))?;
-        pipeline.set_test_mode(true);
-
-        let options = NativeBinaryOptions::new();
-
-        pipeline
-            .compile_file_to_native_binary(source, &output, Some(options))
-            .map_err(|e| format!("Failed to compile {} to native binary: {}", source.display(), e))?;
+        self.compile_test_to_native_via_entry_closure(source, &output)?;
 
         // Make executable on Unix
         #[cfg(unix)]
@@ -143,6 +136,41 @@ impl BuildCache {
         }
 
         Ok(output)
+    }
+
+    fn compile_test_to_native_via_entry_closure(&self, source: &Path, output: &Path) -> Result<(), String> {
+        let project =
+            ProjectContext::detect(source).map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
+
+        let mut config = NativeBuildConfig {
+            entry_closure: true,
+            incremental: false,
+            clean: false,
+            ..Default::default()
+        };
+
+        if let Ok(backend) = std::env::var("SIMPLE_BACKEND") {
+            let normalized = match backend.as_str() {
+                "llvm-lib" | "llvmlib" => "llvm",
+                other => other,
+            };
+            if !normalized.is_empty() {
+                config.backend = normalized.to_string();
+            }
+        }
+
+        let mut builder = NativeProjectBuilder::new(project.root.clone(), output.to_path_buf())
+            .config(config)
+            .entry_file(source.to_path_buf());
+
+        for dir in native_test_source_dirs(&project.root) {
+            builder = builder.source_dir(dir);
+        }
+
+        builder
+            .build()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to compile {} to native binary: {}", source.display(), e))
     }
 
     /// Clean the cache directory.
@@ -164,9 +192,35 @@ impl BuildCache {
     }
 }
 
+fn native_test_source_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let candidates = [
+        project_root.join("src/compiler"),
+        project_root.join("src/app"),
+        project_root.join("src/lib"),
+        project_root.join("test"),
+    ];
+
+    let mut dirs = Vec::new();
+    for candidate in candidates {
+        if candidate.is_dir() && !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+
+    if dirs.is_empty() {
+        let fallback = project_root.join("src");
+        if fallback.is_dir() {
+            dirs.push(fallback);
+        }
+    }
+
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_source_hash_deterministic() {
@@ -183,5 +237,36 @@ mod tests {
     fn test_needs_rebuild_force() {
         let cache = BuildCache::new(true);
         assert!(cache.needs_rebuild(Path::new("nonexistent.spl"), "smf"));
+    }
+
+    #[test]
+    fn test_native_test_source_dirs_prefers_standard_roots() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("src/compiler")).expect("compiler dir");
+        fs::create_dir_all(tmp.path().join("src/app")).expect("app dir");
+        fs::create_dir_all(tmp.path().join("src/lib")).expect("lib dir");
+        fs::create_dir_all(tmp.path().join("test")).expect("test dir");
+
+        let dirs = native_test_source_dirs(tmp.path());
+
+        assert_eq!(
+            dirs,
+            vec![
+                tmp.path().join("src/compiler"),
+                tmp.path().join("src/app"),
+                tmp.path().join("src/lib"),
+                tmp.path().join("test"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_native_test_source_dirs_falls_back_to_src() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+
+        let dirs = native_test_source_dirs(tmp.path());
+
+        assert_eq!(dirs, vec![tmp.path().join("src")]);
     }
 }

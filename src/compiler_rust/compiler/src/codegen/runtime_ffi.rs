@@ -1151,6 +1151,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
     RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),        // path -> bool
     RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),         // path -> i64
+    RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),  // path -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]), // old, new -> bool
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),   // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool

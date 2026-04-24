@@ -69,6 +69,7 @@ pub mod text_diff;
 pub mod trait_coherence;
 pub mod type_check;
 pub mod type_inference_config;
+pub mod units;
 pub mod value;
 pub mod value_bridge;
 pub mod verification_checker;

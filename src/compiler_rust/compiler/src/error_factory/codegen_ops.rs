@@ -124,7 +124,13 @@ pub fn unit_no_family(unit_suffix: &str, target_suffix: &str) -> CompileError {
 }
 
 /// Error when a unit family is not found.
+///
+/// Defensively triggers a lazy load of the on-disk unit catalog
+/// (`src/unit/simple-lang/`) before producing the error so any future caller
+/// benefits from the registry without needing its own seed call. The seeding
+/// is idempotent per thread.
 pub fn unit_family_not_found(family: &str) -> CompileError {
+    crate::units::ensure_loaded();
     CompileError::Semantic(format!("Unit family '{}' not found", family))
 }
 

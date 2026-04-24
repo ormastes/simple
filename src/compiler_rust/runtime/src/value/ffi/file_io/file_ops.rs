@@ -10,11 +10,32 @@
 //! - Remove: Delete files
 //! - Rename/Move: Move or rename files
 
-use crate::value::collections::{rt_array_new, rt_array_push, rt_string_new};
+use crate::value::collections::{rt_array_new, rt_array_push, rt_string_data, rt_string_len, rt_string_new};
 use crate::value::RuntimeValue;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use sha2::{Digest, Sha256};
+
+fn tagged_text_to_string(value: i64) -> Option<String> {
+    let text = RuntimeValue::from_raw(value as u64);
+    let len = rt_string_len(text);
+    if len < 0 {
+        return None;
+    }
+    let data = rt_string_data(text);
+    if data.is_null() {
+        return None;
+    }
+    unsafe {
+        let slice = std::slice::from_raw_parts(data, len as usize);
+        Some(String::from_utf8_lossy(slice).to_string())
+    }
+}
+
+fn string_to_tagged_text(value: &str) -> i64 {
+    rt_string_new(value.as_ptr(), value.len() as u64).to_raw() as i64
+}
 
 /// Normalize/canonicalize a file path
 /// Returns the absolute path with all symbolic links resolved
@@ -186,6 +207,138 @@ pub unsafe extern "C" fn rt_file_size(path_ptr: *const u8, path_len: u64) -> i64
         Ok(metadata) => metadata.len() as i64,
         Err(_) => -1,
     }
+}
+
+/// Compute the SHA256 hash of a file and return it as a hex string.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_hash_sha256(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let content = match std::fs::read(path_str) {
+        Ok(content) => content,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    let digest = hasher.finalize();
+    let hex = format!("{:x}", digest);
+    rt_string_new(hex.as_ptr(), hex.len() as u64)
+}
+
+/// Best-effort file lock shim for native runtime-only bundles.
+///
+/// The non-compiler native specs only need this symbol to link; they do not
+/// rely on real locking semantics here. Keep the ABI permissive so existing
+/// native call sites that pass tagged RuntimeValue strings continue to link.
+#[no_mangle]
+pub extern "C" fn rt_file_lock(_path: i64) -> i64 {
+    1
+}
+
+/// Best-effort file unlock shim paired with `rt_file_lock`.
+#[no_mangle]
+pub extern "C" fn rt_file_unlock(_handle: i64) -> bool {
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_mmap_read_text(path: i64) -> i64 {
+    match tagged_text_to_string(path) {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(content) => string_to_tagged_text(&content),
+            Err(_) => RuntimeValue::NIL.to_raw() as i64,
+        },
+        None => RuntimeValue::NIL.to_raw() as i64,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_mmap_read_bytes(path: i64) -> RuntimeValue {
+    let bytes = match tagged_text_to_string(path).and_then(|path| std::fs::read(path).ok()) {
+        Some(bytes) => bytes,
+        None => return RuntimeValue::NIL,
+    };
+    let arr = rt_array_new(0);
+    for byte in bytes {
+        rt_array_push(arr, RuntimeValue::from_int(byte as i64));
+    }
+    arr
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_read_text_at(path: i64, offset: i64, size: i64) -> i64 {
+    let Some(path) = tagged_text_to_string(path) else {
+        return RuntimeValue::NIL.to_raw() as i64;
+    };
+    let Ok(content) = std::fs::read(path) else {
+        return RuntimeValue::NIL.to_raw() as i64;
+    };
+    let start = offset.max(0) as usize;
+    if start >= content.len() {
+        return string_to_tagged_text("");
+    }
+    let end = start.saturating_add(size.max(0) as usize).min(content.len());
+    let slice = &content[start..end];
+    string_to_tagged_text(&String::from_utf8_lossy(slice))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_write_text_at(path: i64, offset: i64, data: i64) -> i64 {
+    let Some(path) = tagged_text_to_string(path) else {
+        return -1;
+    };
+    let Some(data) = tagged_text_to_string(data) else {
+        return -1;
+    };
+    let mut bytes = std::fs::read(&path).unwrap_or_default();
+    let start = offset.max(0) as usize;
+    if bytes.len() < start {
+        bytes.resize(start, 0);
+    }
+    let data_bytes = data.into_bytes();
+    let end = start.saturating_add(data_bytes.len());
+    if bytes.len() < end {
+        bytes.resize(end, 0);
+    }
+    bytes[start..end].copy_from_slice(&data_bytes);
+    match std::fs::write(path, bytes) {
+        Ok(_) => data_bytes.len() as i64,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_munmap(_addr: i64, _size: i64) -> bool {
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_madvise(_addr: i64, _size: i64, _advice: i64) -> bool {
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_msync(_addr: i64, _size: i64) -> bool {
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_getpid() -> i64 {
+    std::process::id() as i64
 }
 
 /// Rename/move a file or directory

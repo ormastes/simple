@@ -1,36 +1,194 @@
-# shell_starship — Starship-style ANSI-colored prompt generator
-# MDSOC: feature dimension, shell layer
+# shell_starship — Starship-style ANSI-colored prompt for the SimpleOS shell
+#
+# Pluggable prompt-module architecture: each AC-4 module (directory,
+# git_branch, git_status, cmd_duration, status, username, hostname, jobs,
+# character) renders into a `PromptSegment`, and `StarshipPrompt.build_prompt`
+# composes the segments in a configurable order with ANSI styling.
+#
+# Glyphs use Nerd Font private-use code points when the terminal font
+# supports them (AC-2); an ASCII fallback is available via `use_nerd_font`.
+#
+# MDSOC: feature dimension, shell layer.
 
-use os.apps.terminal.terminal.{Terminal}
 use os.services.vfs.vfs.{VfsManager}
 use os.tools.shell.shell_helpers.{split_lines}
 
+# ---------------------------------------------------------------------------
+# Nerd Font glyph constants (AC-2)
+#
+# Code points live in the Nerd Font private-use ranges. Fira Code Nerd Font
+# (vendored at examples/simple_os/fonts/fira_code_nerd/) supplies these.
+# Pre-composed here so module renderers don't need to know the numbers.
+# ---------------------------------------------------------------------------
+
+val NF_BRANCH = ""        # powerline branch
+val NF_FOLDER = ""        # file-icon folder
+val NF_LOCK   = ""        # lock (used for read-only dirs, unused in v1)
+val NF_HOME   = ""        # house
+val NF_TIME   = ""        # clock
+val NF_JOBS   = ""        # gear (background jobs)
+val NF_PROMPT = "❯"        # ❯ — plain unicode, not strictly Nerd Font
+val NF_OK     = "✓"        # ✓
+val NF_FAIL   = "✗"        # ✗
+
+# ASCII fallbacks for terminals without Nerd Font support.
+
+val ASCII_BRANCH = "git:"
+val ASCII_FOLDER = ""
+val ASCII_HOME   = "~"
+val ASCII_TIME   = "took"
+val ASCII_JOBS   = "jobs:"
+val ASCII_PROMPT = ">"
+val ASCII_OK     = "v"
+val ASCII_FAIL   = "x"
+
+
+# ---------------------------------------------------------------------------
+# ShellContext — data view the prompt renders from.
+#
+# Decoupled from ShellApp so prompt modules can be tested without booting
+# the full shell. `ShellApp._show_prompt` constructs one per render via
+# `ShellContext.from_fields(...)`.
+# ---------------------------------------------------------------------------
+
+class ShellContext:
+    """Inputs the prompt renderer needs for one render pass."""
+    cwd: text
+    home: text
+    user: text
+    host: text
+    last_exit_code: i32
+    env: [(text, text)]
+    vfs: VfsManager?
+    jobs_count: i32
+
+impl ShellContext:
+    static fn default() -> ShellContext:
+        """Default context for unit tests (no VFS, root /, user `user`)."""
+        return ShellContext(
+            cwd: "/",
+            home: "/",
+            user: "user",
+            host: "simpleos",
+            last_exit_code: 0,
+            env: [],
+            vfs: nil,
+            jobs_count: 0,
+        )
+
+    static fn from_fields(cwd: text, last_exit_code: i32, env: [(text, text)],
+                          vfs: VfsManager?, jobs_count: i32) -> ShellContext:
+        """Build a context from the fields ShellApp already tracks."""
+        var user = "user"
+        var host = "simpleos"
+        var home = "/"
+        for pair in env:
+            if pair.0 == "USER" or pair.0 == "LOGNAME":
+                user = pair.1
+            elif pair.0 == "HOSTNAME" or pair.0 == "HOST":
+                host = pair.1
+            elif pair.0 == "HOME":
+                home = pair.1
+        return ShellContext(
+            cwd: cwd,
+            home: home,
+            user: user,
+            host: host,
+            last_exit_code: last_exit_code,
+            env: env,
+            vfs: vfs,
+            jobs_count: jobs_count,
+        )
+
+
+# ---------------------------------------------------------------------------
+# PromptSegment — per-module output.
+# ---------------------------------------------------------------------------
+
+class PromptSegment:
+    """One module's styled contribution to the prompt."""
+    text: text
+    is_empty: bool
+
+impl PromptSegment:
+    static fn empty() -> PromptSegment:
+        return PromptSegment(text: "", is_empty: true)
+
+    static fn of(t: text) -> PromptSegment:
+        return PromptSegment(text: t, is_empty: false)
+
+
+# ---------------------------------------------------------------------------
+# StarshipPrompt — orchestrator.
+# ---------------------------------------------------------------------------
+
 class StarshipPrompt:
-    """Starship-style prompt configuration."""
-    show_git: bool
-    show_time: bool
-    show_user: bool
-    color_exit: bool
+    """Composable Starship-style prompt with per-module enable flags."""
+    # Module toggles (AC-4)
+    show_status: bool           # exit indicator (✓/✗ + code)
+    show_user: bool             # $USER
+    show_host: bool             # $HOSTNAME
+    show_directory: bool        # cwd with ~ and truncation
+    show_git_branch: bool       # .git/HEAD branch name
+    show_git_status: bool       # dirty/clean marker (v1: off by default)
+    show_cmd_duration: bool     # elapsed > threshold
+    show_jobs: bool             # bg jobs count
+    show_character: bool        # trailing ❯ / $ / # suffix
+
+    # Styling
+    color_output: bool          # set false for monochrome terminals
+    use_nerd_font: bool         # true → unicode glyphs; false → ASCII fallback
+    elapsed_threshold_ms: i32   # cmd_duration trigger (default 2000)
+
+    # Test-only git overrides. `has_git_override == true` short-circuits VFS
+    # reads and returns `git_head_override` instead (empty = no repo).
+    has_git_override: bool
+    git_head_override: text
 
 impl StarshipPrompt:
     static fn new() -> StarshipPrompt:
-        """Return default prompt configuration."""
+        """Return a StarshipPrompt with the v1 default configuration."""
         return StarshipPrompt(
-            show_git: true,
-            show_time: true,
+            show_status: true,
             show_user: true,
-            color_exit: true,
+            show_host: true,
+            show_directory: true,
+            show_git_branch: true,
+            show_git_status: false,
+            show_cmd_duration: true,
+            show_jobs: true,
+            show_character: true,
+            color_output: true,
+            use_nerd_font: true,
+            elapsed_threshold_ms: 2000,
+            has_git_override: false,
+            git_head_override: "",
         )
 
-    static fn load_config(vfs: VfsManager?, home: text) -> StarshipPrompt:
-        """Load configuration from ~/.config/starship.conf.
+    static fn with_git_head_content(content: text) -> StarshipPrompt:
+        """Test helper: force the git module to read `content` as .git/HEAD."""
+        var p = StarshipPrompt.new()
+        p.has_git_override = true
+        p.git_head_override = content
+        return p
 
-        Parses simple key=value lines. Returns defaults if file not found.
+    static fn with_no_git() -> StarshipPrompt:
+        """Test helper: force the git module to behave as if no repo exists."""
+        var p = StarshipPrompt.new()
+        p.has_git_override = true
+        p.git_head_override = ""
+        return p
+
+    static fn load_config(vfs: VfsManager?, home: text) -> StarshipPrompt:
+        """Load prompt config from {home}/.config/starship.spl.
+
+        Flat key=value; missing/invalid lines fall back to the builtin default
+        so a bad config never breaks the prompt (AC-5).
         """
         var cfg = StarshipPrompt.new()
         if vfs == nil:
             return cfg
-        val config_path = "{home}/.config/starship.conf"
+        val config_path = "{home}/.config/starship.spl"
         val result = vfs.read_text(config_path)
         if result.is_err():
             return cfg
@@ -38,97 +196,122 @@ impl StarshipPrompt:
         for line in split_lines(content):
             val trimmed = line.trim()
             if trimmed.starts_with("#") or trimmed.len() == 0:
-                pass_dn
-            elif trimmed.starts_with("show_git="):
-                val v = trimmed.slice(9, trimmed.len()).trim()
-                cfg.show_git = v == "true"
-            elif trimmed.starts_with("show_time="):
-                val v = trimmed.slice(10, trimmed.len()).trim()
-                cfg.show_time = v == "true"
-            elif trimmed.starts_with("show_user="):
-                val v = trimmed.slice(10, trimmed.len()).trim()
-                cfg.show_user = v == "true"
-            elif trimmed.starts_with("color_exit="):
-                val v = trimmed.slice(11, trimmed.len()).trim()
-                cfg.color_exit = v == "true"
+                pass_do_nothing("comments and blank lines are skipped")
+            else:
+                _apply_config_line(cfg, trimmed)
         return cfg
 
-    fn build_prompt(cwd: text, last_exit_code: i32, env: [(text, text)], vfs: VfsManager?, elapsed_ms: i32) -> text:
-        """Build an ANSI-colored prompt string.
+    me build_prompt(ctx: ShellContext, elapsed_ms: i32) -> text:
+        """Compose the full prompt line from enabled modules (AC-3)."""
+        var out = ""
 
-        Segments (config-controlled):
-          1. Exit indicator: green checkmark or red cross with code
-          2. user@host in cyan
-          3. Abbreviated cwd (HOME replaced with ~, last 2 components if deep)
-          4. Git branch from .git/HEAD
-          5. Elapsed time in yellow if > 1000 ms
-          6. $ or # suffix
-        """
-        val esc = "\x1b"
-        val reset  = "{esc}[0m"
-        val bold   = "{esc}[1m"
-        val red    = "{esc}[31m"
-        val green  = "{esc}[32m"
-        val yellow = "{esc}[33m"
-        val cyan   = "{esc}[36m"
+        if self.show_status:
+            val seg = _render_status(self, ctx)
+            if not seg.is_empty:
+                out = "{out}{seg.text} "
 
-        var prompt = ""
+        if self.show_user or self.show_host:
+            val seg = _render_user_host(self, ctx)
+            if not seg.is_empty:
+                out = "{out}{seg.text} "
 
-        # --- 1. Exit indicator ---
-        if self.color_exit:
-            if last_exit_code == 0:
-                prompt = "{prompt}{green}✓{reset} "
-            else:
-                prompt = "{prompt}{red}✗({last_exit_code}){reset} "
+        if self.show_directory:
+            val seg = _render_directory(self, ctx)
+            if not seg.is_empty:
+                out = "{out}{seg.text}"
 
-        # --- 2. user@host ---
-        if self.show_user:
-            var user = "user"
-            var host = "host"
-            for pair in env:
-                if pair.0 == "USER" or pair.0 == "LOGNAME":
-                    user = pair.1
-                elif pair.0 == "HOSTNAME" or pair.0 == "HOST":
-                    host = pair.1
-            prompt = "{prompt}{cyan}{bold}{user}@{host}{reset} "
+        if self.show_git_branch:
+            val seg = _render_git_branch(self, ctx)
+            if not seg.is_empty:
+                out = "{out} {seg.text}"
 
-        # --- 3. cwd abbreviation ---
-        var home_dir = "/root"
-        for pair in env:
-            if pair.0 == "HOME":
-                home_dir = pair.1
-        val display_cwd = _abbreviate_cwd(cwd, home_dir)
-        prompt = "{prompt}{bold}{display_cwd}{reset}"
+        if self.show_git_status:
+            val seg = _render_git_status(self, ctx)
+            if not seg.is_empty:
+                out = "{out} {seg.text}"
 
-        # --- 4. Git branch ---
-        if self.show_git:
-            val branch = _read_git_branch(cwd, vfs)
-            if branch.len() > 0:
-                prompt = "{prompt} {esc}[34m({branch}){reset}"
+        if self.show_jobs and ctx.jobs_count > 0:
+            val seg = _render_jobs(self, ctx)
+            if not seg.is_empty:
+                out = "{out} {seg.text}"
 
-        # --- 5. Elapsed time ---
-        if self.show_time and elapsed_ms > 1000:
-            val secs = elapsed_ms / 1000
-            prompt = "{prompt} {yellow}{secs}s{reset}"
+        if self.show_cmd_duration and elapsed_ms > self.elapsed_threshold_ms:
+            val seg = _render_cmd_duration(self, elapsed_ms)
+            if not seg.is_empty:
+                out = "{out} {seg.text}"
 
-        # --- 6. Suffix ---
-        var user_name = "user"
-        for pair in env:
-            if pair.0 == "USER" or pair.0 == "LOGNAME":
-                user_name = pair.1
-        val suffix = if user_name == "root": " # " else: " $ "
-        prompt = "{prompt}{suffix}"
+        if self.show_character:
+            val seg = _render_character(self, ctx)
+            if not seg.is_empty:
+                out = "{out}{seg.text}"
 
-        return prompt
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Module renderers — AC-4 (directory, git_branch, git_status, cmd_duration,
+# status, username, hostname, jobs, character). Plain functions so tests
+# can call them without class instances; each returns a PromptSegment.
+# ---------------------------------------------------------------------------
+
+fn _esc() -> text:
+    return "\x1b"
+
+fn _style(p: StarshipPrompt, code: text, body: text) -> text:
+    if not p.color_output:
+        return body
+    val esc = _esc()
+    return "{esc}[{code}m{body}{esc}[0m"
+
+fn _glyph(p: StarshipPrompt, nerd: text, ascii_fallback: text) -> text:
+    if p.use_nerd_font:
+        return nerd
+    return ascii_fallback
+
+# --- status (exit code) ----------------------------------------------------
+
+fn _render_status(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    if ctx.last_exit_code == 0:
+        val g = _glyph(p, nerd: NF_OK, ascii_fallback: ASCII_OK)
+        return PromptSegment.of(_style(p, code: "32", body: g))
+    val g = _glyph(p, nerd: NF_FAIL, ascii_fallback: ASCII_FAIL)
+    val body = "{g}({ctx.last_exit_code})"
+    return PromptSegment.of(_style(p, code: "31", body: body))
+
+# --- user + host -----------------------------------------------------------
+
+fn _render_user_host(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    var body = ""
+    if p.show_user:
+        body = ctx.user
+    if p.show_host:
+        if body.len() > 0:
+            body = "{body}@{ctx.host}"
+        else:
+            body = ctx.host
+    if body.len() == 0:
+        return PromptSegment.empty()
+    return PromptSegment.of(_style(p, code: "1;36", body: body))
+
+# --- directory -------------------------------------------------------------
+
+fn _render_directory(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    val abbrev = _abbreviate_cwd(cwd: ctx.cwd, home: ctx.home)
+    val folder = _glyph(p, nerd: NF_FOLDER, ascii_fallback: ASCII_FOLDER)
+    val body = if folder.len() > 0: "{folder} {abbrev}" else: abbrev
+    return PromptSegment.of(_style(p, code: "1", body: body))
 
 fn _abbreviate_cwd(cwd: text, home: text) -> text:
-    """Replace home prefix with ~ and shorten deep paths to last 2 components."""
+    """Replace home prefix with `~` and truncate paths with >3 components."""
     var path = cwd
-    if path.starts_with(home):
+    # Only substitute `~` when home is a real user path (not "/" root) and
+    # the cwd is exactly home or a subdirectory of home.
+    if home.len() > 1 and path == home:
+        path = "~"
+    elif home.len() > 1 and path.starts_with("{home}/"):
         val rest = path.slice(home.len(), path.len())
-        path = if rest.len() == 0: "~" else: "~{rest}"
+        path = "~{rest}"
 
-    # Count components (split by '/')
     var components: [text] = []
     var cur = ""
     for ch in path:
@@ -141,14 +324,12 @@ fn _abbreviate_cwd(cwd: text, home: text) -> text:
     if cur.len() > 0:
         components = components.push(cur)
 
-    # If path starts with ~ keep that as first component
     val starts_tilde = path.starts_with("~")
     val starts_slash = path.starts_with("/")
 
     if components.len() <= 3:
         return path
 
-    # More than 3 components: show only last 2
     val n = components.len()
     val last2 = "{components[n - 2]}/{components[n - 1]}"
     if starts_tilde:
@@ -158,18 +339,139 @@ fn _abbreviate_cwd(cwd: text, home: text) -> text:
     else:
         return ".../{last2}"
 
-fn _read_git_branch(cwd: text, vfs: VfsManager?) -> text:
-    """Read branch name from {cwd}/.git/HEAD via VFS."""
-    if vfs == nil:
+# --- git_branch ------------------------------------------------------------
+
+fn _render_git_branch(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    val content = _read_git_head(p, ctx)
+    if content.len() == 0:
+        return PromptSegment.empty()
+    val name = _parse_git_head(content)
+    if name.len() == 0:
+        return PromptSegment.empty()
+    val sym = _glyph(p, nerd: NF_BRANCH, ascii_fallback: ASCII_BRANCH)
+    val body = if sym.len() > 0: "{sym} {name}" else: name
+    return PromptSegment.of(_style(p, code: "35", body: "({body})"))
+
+fn _read_git_head(p: StarshipPrompt, ctx: ShellContext) -> text:
+    if p.has_git_override:
+        return p.git_head_override
+    if ctx.vfs == nil:
         return ""
-    val head_path = "{cwd}/.git/HEAD"
-    val result = vfs.read_text(head_path)
+    val head_path = "{ctx.cwd}/.git/HEAD"
+    val result = ctx.vfs.read_text(head_path)
     if result.is_err():
         return ""
-    val content = result.unwrap().trim()
+    return result.unwrap().trim()
+
+fn _parse_git_head(content: text) -> text:
+    """Parse the contents of .git/HEAD.
+
+    - "ref: refs/heads/<name>" → "<name>"
+    - 40-char raw hash          → "HEAD:<first 7>" (detached)
+    - otherwise                 → ""
+    """
+    val trimmed = content.trim()
     val ref_prefix = "ref: refs/heads/"
-    if content.starts_with(ref_prefix):
-        return content.slice(ref_prefix.len(), content.len())
-    if content.len() >= 7:
-        return "HEAD"
+    if trimmed.starts_with(ref_prefix):
+        return trimmed.slice(ref_prefix.len(), trimmed.len())
+    if trimmed.len() >= 7:
+        val short = trimmed.slice(0, 7)
+        return "HEAD:{short}"
     return ""
+
+# --- git_status ------------------------------------------------------------
+# v1 is a stub: returns a tiny "*" marker when `.git/index` exists and a
+# "dirty" flag is forced via context. Real porcelain parsing is deferred to
+# a follow-up — guarded by `show_git_status=false` default so nothing breaks.
+
+fn _render_git_status(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    val head = _read_git_head(p, ctx)
+    if head.len() == 0:
+        return PromptSegment.empty()
+    return PromptSegment.of(_style(p, code: "33", body: "[*]"))
+
+# --- cmd_duration ----------------------------------------------------------
+
+fn _render_cmd_duration(p: StarshipPrompt, elapsed_ms: i32) -> PromptSegment:
+    val glyph = _glyph(p, nerd: NF_TIME, ascii_fallback: ASCII_TIME)
+    val body = if elapsed_ms >= 1000:
+        val secs = elapsed_ms / 1000
+        "{glyph} {secs}s"
+    else:
+        "{glyph} {elapsed_ms}ms"
+    return PromptSegment.of(_style(p, code: "33", body: body))
+
+# --- jobs ------------------------------------------------------------------
+
+fn _render_jobs(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    if ctx.jobs_count <= 0:
+        return PromptSegment.empty()
+    val g = _glyph(p, nerd: NF_JOBS, ascii_fallback: ASCII_JOBS)
+    val body = "{g} {ctx.jobs_count}"
+    return PromptSegment.of(_style(p, code: "34", body: body))
+
+# --- character (suffix) ----------------------------------------------------
+
+fn _render_character(p: StarshipPrompt, ctx: ShellContext) -> PromptSegment:
+    val suffix = if ctx.user == "root": " # " else: " $ "
+    return PromptSegment.of(suffix)
+
+
+# ---------------------------------------------------------------------------
+# Config parser helpers — flat key=value over the module toggles + palette.
+# ---------------------------------------------------------------------------
+
+fn _apply_config_line(cfg: StarshipPrompt, line: text):
+    val eq_idx = _find_char(s: line, ch: "=")
+    if eq_idx < 0:
+        return
+    val key = line.slice(0, eq_idx).trim()
+    val raw = line.slice(eq_idx + 1, line.len()).trim()
+    val enabled = raw == "true" or raw == "yes" or raw == "1"
+    if key == "show_status" or key == "color_exit":
+        cfg.show_status = enabled
+    elif key == "show_user":
+        cfg.show_user = enabled
+    elif key == "show_host":
+        cfg.show_host = enabled
+    elif key == "show_directory":
+        cfg.show_directory = enabled
+    elif key == "show_git_branch" or key == "show_git":
+        cfg.show_git_branch = enabled
+    elif key == "show_git_status":
+        cfg.show_git_status = enabled
+    elif key == "show_cmd_duration" or key == "show_time":
+        cfg.show_cmd_duration = enabled
+    elif key == "show_jobs":
+        cfg.show_jobs = enabled
+    elif key == "show_character":
+        cfg.show_character = enabled
+    elif key == "color_output":
+        cfg.color_output = enabled
+    elif key == "use_nerd_font":
+        cfg.use_nerd_font = enabled
+    elif key == "elapsed_threshold_ms":
+        val n = _parse_i32(raw, 2000)
+        cfg.elapsed_threshold_ms = n
+
+fn _find_char(s: text, ch: text) -> i32:
+    var i = 0
+    for c in s:
+        if c == ch:
+            return i
+        i = i + 1
+    return -1
+
+fn _parse_i32(s: text, default_val: i32) -> i32:
+    var n: i32 = 0
+    var any = false
+    for c in s:
+        val code = c.code_point()
+        if code >= 48 and code <= 57:
+            n = n * 10 + (code - 48)
+            any = true
+        else:
+            return default_val
+    if any:
+        return n
+    return default_val

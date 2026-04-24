@@ -37,8 +37,11 @@ pub mod path;
 pub use metadata::{rt_file_exists, rt_file_stat};
 pub use file_ops::{
     rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv, rt_file_write_text, rt_file_copy, rt_file_remove,
-    rt_file_size, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes, rt_file_write_bytes,
-    rt_file_move, rt_bytes_from_raw, rt_bytes_to_text, rt_text_to_bytes,
+    rt_file_size, rt_file_hash_sha256, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
+    rt_file_write_bytes, rt_file_move, rt_file_lock, rt_file_unlock, rt_file_mmap_read_text, rt_file_mmap_read_bytes,
+    rt_file_read_text_at, rt_file_write_text_at, rt_mmap, rt_munmap, rt_madvise, rt_msync, rt_getpid,
+    rt_bytes_from_raw,
+    rt_bytes_to_text, rt_text_to_bytes,
 };
 pub use directory::{
     rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk,

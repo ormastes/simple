@@ -130,6 +130,25 @@ pub extern "C" fn rt_cli_exit(code: i64) -> ! {
     std::process::exit(code as i32);
 }
 
+#[no_mangle]
+pub extern "C" fn rt_cli_dispatch_rust(_cmd: RuntimeValue, _args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_compile_to_native(_source_path: RuntimeValue, _output_path: RuntimeValue) -> i64 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_compile_to_llvm_ir(
+    _source_file: RuntimeValue,
+    _target_triple: RuntimeValue,
+    _bare_metal: u8,
+) -> i64 {
+    0
+}
+
 // Stub implementations for complex CLI functions
 // These require the full driver to implement properly
 

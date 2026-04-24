@@ -51,9 +51,7 @@ fn per_test_timeout_secs(path: &Path) -> u64 {
         }
     }
     if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-        if file_name == "simpleos_guest_toolchain_live_spec.spl"
-            || file_name == "ssh_live_login_in_qemu_spec.spl"
-        {
+        if file_name == "simpleos_guest_toolchain_live_spec.spl" || file_name == "ssh_live_login_in_qemu_spec.spl" {
             return 300;
         }
     }
@@ -759,7 +757,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
                 }
                 let indent_len = line.len().saturating_sub(line.trim_start().len());
                 let indent = &line[..indent_len];
-                return format!("{indent}{matcher}(expect({actual}), {expected})");
+                return format!("{indent}expect({actual}).{matcher}({expected})");
             }
         }
 
@@ -949,23 +947,8 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     }
 
     let wrapper_compat = r#"
-fn expect<T>(actual: T) -> T:
-    actual
-
-fn to_equal<T>(actual: T, expected: T):
-    assert actual == expected
-
-fn to_be<T>(actual: T, expected: T):
-    to_equal(actual, expected)
-
-fn to_contain(actual: text, expected: text):
-    assert actual.contains(expected)
-
-fn to_start_with(actual: text, expected: text):
-    assert actual.starts_with(expected)
-
-fn to_end_with(actual: text, expected: text):
-    assert actual.ends_with(expected)
+fn expect<T>(actual: T) -> Expectation<T>:
+    Expectation.new(actual)
 "#;
 
     let wrapped = format!(
@@ -1678,8 +1661,7 @@ describe "extern hoist":
             .find("extern fn rt_file_read_text(path: text) -> text")
             .expect("extern");
         assert!(extern_idx < main_idx, "extern should stay above fn main()");
-        assert!(wrapped_source.contains("fn expect<T>(actual: T) -> T:"));
-        assert!(wrapped_source.contains("fn to_equal<T>(actual: T, expected: T):"));
+        assert!(wrapped_source.contains("fn expect<T>(actual: T) -> Expectation<T>:"));
     }
 
     #[test]
@@ -1701,7 +1683,7 @@ describe "infix":
         let wrapped = preprocess_sspec_for_smf(&spec_path).expect("preprocess");
         let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
 
-        assert!(wrapped_source.contains("to_equal(expect(value), 1)"));
-        assert!(wrapped_source.contains("to_contain(expect(output), \"ok\")"));
+        assert!(wrapped_source.contains("expect(value).to_equal(1)"));
+        assert!(wrapped_source.contains("expect(output).to_contain(\"ok\")"));
     }
 }

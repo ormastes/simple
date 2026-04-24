@@ -57,6 +57,11 @@ pub fn suffix_to_type_names(suffix: &str) -> Vec<String> {
 
 /// Look up the family name for a unit suffix from the thread-local registry
 pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
+    // Lazily seed the thread-local unit state from the on-disk unit tree
+    // (`src/unit/simple-lang/`). Idempotent per thread; user-supplied entries
+    // win on conflict. See `crate::units::registry`.
+    crate::units::ensure_loaded();
+
     // First try direct lookup
     if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
         return Some(family);
@@ -77,6 +82,10 @@ pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
 /// Look up unit family with SI prefix info
 /// Returns (family_name, si_multiplier, base_suffix) if SI prefix was used
 pub(super) fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Option<f64>, Option<String>) {
+    // Lazily seed the thread-local unit state from the on-disk unit tree
+    // (`src/unit/simple-lang/`). See `crate::units::registry`.
+    crate::units::ensure_loaded();
+
     // First try direct lookup
     if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
         return (Some(family), None, None);

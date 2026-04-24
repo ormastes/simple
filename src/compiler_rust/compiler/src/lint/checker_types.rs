@@ -225,13 +225,7 @@ impl LintChecker {
 
     /// Like `check_type_in_public_api` but skips the `BareBool` diagnostic.
     /// Used for predicate-function return types that are exempt from the bare-bool lint.
-    pub(super) fn check_type_in_public_api_skip_bare_bool(
-        &mut self,
-        ty: &Type,
-        span: Span,
-        name: &str,
-        context: &str,
-    ) {
+    pub(super) fn check_type_in_public_api_skip_bare_bool(&mut self, ty: &Type, span: Span, name: &str, context: &str) {
         use super::super::rules::is_primitive_type;
         // BareBool is intentionally skipped here.
         if is_primitive_type(ty) {

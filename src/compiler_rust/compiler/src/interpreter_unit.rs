@@ -378,6 +378,12 @@ pub(crate) fn type_to_family_name(ty: &Type) -> String {
 /// Check if a binary operation is allowed between two unit values
 /// Returns Ok(result_family) if allowed, Err with error message if not
 pub(crate) fn check_unit_binary_op(left_family: &str, right_family: &str, op: BinOp) -> Result<Option<String>, String> {
+    // Lazily seed the thread-local unit catalog (BASE_UNIT_DIMENSIONS,
+    // COMPOUND_UNIT_DIMENSIONS, etc.) from `src/unit/simple-lang/`. This
+    // enables dimension-signature → composite-name lookup (e.g. `km / h`
+    // folding to `kmph`) without requiring a `use unit.*` side effect.
+    crate::units::ensure_loaded();
+
     // Convert BinOp to BinaryArithmeticOp
     let arith_op = match op {
         BinOp::Add => BinaryArithmeticOp::Add,

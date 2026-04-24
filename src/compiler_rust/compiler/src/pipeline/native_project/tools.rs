@@ -49,28 +49,6 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
-        "src/compiler_rust/target/release/libsimple_native_all.a",
-        "src/compiler_rust/target/debug/libsimple_native_all.a",
-    ];
-
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
-            "src/compiler_rust/target/release/simple_native_all.lib",
-            "src/compiler_rust/target/debug/simple_native_all.lib",
-        ]);
-    }
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let path = dir.join("libsimple_native_all.a");
@@ -84,6 +62,28 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
                     return Some(path);
                 }
             }
+        }
+    }
+
+    let mut candidates: Vec<&str> = vec![
+        "src/compiler_rust/target/debug/libsimple_native_all.a",
+        "src/compiler_rust/target/release/libsimple_native_all.a",
+        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
+    ];
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/debug/simple_native_all.lib",
+            "src/compiler_rust/target/release/simple_native_all.lib",
+            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
+        ]);
+    }
+
+    for candidate in &candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
         }
     }
 
@@ -121,37 +121,6 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/release/libsimple_runtime.a",
-        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-    ];
-
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
-            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
-            "src/compiler_rust/target/release/simple_runtime.lib",
-            "src/compiler_rust/target/release/deps/simple_runtime.lib",
-            "src/compiler_rust/target/debug/simple_runtime.lib",
-            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
-        ]);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    candidates.push("/usr/local/lib/libsimple_runtime.a");
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let path = dir.join("libsimple_runtime.a");
@@ -165,6 +134,37 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
                     return Some(path);
                 }
             }
+        }
+    }
+
+    let mut candidates: Vec<&str> = vec![
+        "src/compiler_rust/target/debug/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/release/libsimple_runtime.a",
+        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
+        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
+    ];
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend_from_slice(&[
+            "src/compiler_rust/target/debug/simple_runtime.lib",
+            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
+            "src/compiler_rust/target/release/simple_runtime.lib",
+            "src/compiler_rust/target/release/deps/simple_runtime.lib",
+            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
+            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
+        ]);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    candidates.push("/usr/local/lib/libsimple_runtime.a");
+
+    for candidate in &candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
         }
     }
 

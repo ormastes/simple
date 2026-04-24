@@ -144,10 +144,23 @@ pub extern "C" fn rt_stdout_write(data: i64) -> i64 {
     stdout_write(data)
 }
 
+/// Runtime-prefixed stderr alias used by native-built entry closures.
+#[no_mangle]
+pub extern "C" fn rt_stderr_write(data: i64) -> i64 {
+    stderr_write(data)
+}
+
 /// Runtime-prefixed stdout flush alias used by native-built entry closures.
 #[no_mangle]
 pub extern "C" fn rt_stdout_flush() -> i64 {
     let _ = std::io::stdout().flush();
+    0
+}
+
+/// Runtime-prefixed stderr flush alias used by native-built entry closures.
+#[no_mangle]
+pub extern "C" fn rt_stderr_flush() -> i64 {
+    let _ = std::io::stderr().flush();
     0
 }
 

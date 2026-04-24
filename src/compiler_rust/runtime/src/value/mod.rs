@@ -290,7 +290,8 @@ pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_std
 // Re-export print FFI functions
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
-    rt_println_value, rt_value_format_string, rt_value_to_string,
+    rt_println_value, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write, rt_value_format_string,
+    rt_value_to_string,
 };
 
 // Re-export log FFI functions
@@ -315,7 +316,14 @@ pub use ffi::{
 pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
 
 // Re-export CLI FFI functions
-pub use cli_ffi::{rt_cli_get_args, rt_cli_print_help, rt_cli_print_version, rt_cli_version};
+pub use cli_ffi::{
+    rt_cli_dispatch_rust, rt_cli_exit, rt_cli_file_exists, rt_cli_get_args, rt_cli_handle_compile,
+    rt_cli_handle_diagram, rt_cli_handle_linkers, rt_cli_handle_run, rt_cli_handle_web, rt_cli_print_help,
+    rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_ffi_gen, rt_cli_run_file,
+    rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
+    rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_verify, rt_cli_version, rt_cli_watch_file,
+    rt_compile_to_llvm_ir, rt_compile_to_native,
+};
 
 // Re-export file I/O FFI functions
 pub use ffi::{
@@ -330,6 +338,18 @@ pub use ffi::{
     rt_file_copy,
     rt_file_remove,
     rt_file_size,
+    rt_file_hash_sha256,
+    rt_file_lock,
+    rt_file_unlock,
+    rt_file_mmap_read_text,
+    rt_file_mmap_read_bytes,
+    rt_file_read_text_at,
+    rt_file_write_text_at,
+    rt_mmap,
+    rt_munmap,
+    rt_madvise,
+    rt_msync,
+    rt_getpid,
     rt_file_rename,
     rt_file_read_lines,
     rt_file_append_text,

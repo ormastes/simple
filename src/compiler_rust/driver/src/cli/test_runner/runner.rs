@@ -713,8 +713,8 @@ fn execute_test_files(
             continue;
         }
 
-        let is_system_spec = path.components().any(|c| c.as_os_str() == "system")
-            && path.components().any(|c| c.as_os_str() == "test");
+        let is_system_spec =
+            path.components().any(|c| c.as_os_str() == "system") && path.components().any(|c| c.as_os_str() == "test");
 
         // Check result cache — skip unchanged files.
         // System specs must always execute because they drive real side effects
