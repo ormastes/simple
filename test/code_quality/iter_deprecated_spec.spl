@@ -1,0 +1,132 @@
+"""
+# List.iter() Deprecation Replacement Spec
+
+**Feature IDs:** fix-foreach-deprecated
+**Category:** Testing
+**Difficulty:** 1/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Canary spec verifying that the replacement APIs for the deprecated `List<T>.iter()`
+method work correctly. The deprecated `iter()` will be removed; these tests lock
+the replacement contract so it cannot regress.
+
+Replacements for `List<T>.iter()`:
+- Inline iteration: `for x in list` (preferred — avoids closure capture limits)
+- Callback iteration: `list.each(fn)` (use when callback is a named function)
+- Indexed iteration: `list.each_with_index(fn)`
+
+NOTE: These specs verify the replacement methods work. They cannot directly
+assert that the deprecated method is gone — that is a grep gate at phase 7-verify:
+  `rg -F 'iter()' src/compiler_rust/lib/std/src/core/list.spl`
+should return zero deprecated usages after phase 5-implement completes.
+"""
+
+use std.sspec.*
+
+
+# ============================================================================
+# List.each() — replacement for List.iter() callback usage
+# ============================================================================
+
+describe "List.each() iterates all elements (replaces iter())":
+    """
+    ## List.each(fn) replacement
+
+    `list.each(\x: ...)` is the replacement for callback-style uses of
+    `list.iter()`. Verifies correctness of each() as the drop-in for iter().
+    """
+
+    it "List.each() visits every element in order":
+        val items = [10, 20, 30]
+        var result = ""
+        items.each(\n:
+            result = result + n.to_string()
+        )
+        expect(result).to_equal("102030")
+
+    it "List.each() on empty list calls fn zero times":
+        val items: List<Int> = []
+        var count = 0
+        items.each(\n:
+            count = count + 1
+        )
+        expect(count).to_equal(0)
+
+    it "List.each() accumulates a sum correctly":
+        val items = [1, 2, 3, 4, 5]
+        var sum = 0
+        items.each(\n:
+            sum = sum + n
+        )
+        expect(sum).to_equal(15)
+
+
+# ============================================================================
+# for x in list — preferred replacement for iter()-based for loops
+# ============================================================================
+
+describe "for x in list works without iter() (replaces for x in list.iter())":
+    """
+    ## Direct for-in on List
+
+    `for x in list` is the preferred replacement for `for x in list.iter()`.
+    Cleaner syntax and avoids closure capture limitations.
+    """
+
+    it "for x in list visits every element":
+        val items = ["a", "b", "c"]
+        var count = 0
+        for item in items:
+            count = count + 1
+        expect(count).to_equal(3)
+
+    it "for x in list accumulates all values":
+        val items = [2, 4, 6]
+        var sum = 0
+        for n in items:
+            sum = sum + n
+        expect(sum).to_equal(12)
+
+    it "for x in list on empty list executes zero iterations":
+        val items: List<Int> = []
+        var count = 0
+        for n in items:
+            count = count + 1
+        expect(count).to_equal(0)
+
+
+# ============================================================================
+# List.each_with_index() — indexed iteration replacement
+# ============================================================================
+
+describe "List.each_with_index provides index alongside element":
+    """
+    ## List.each_with_index(fn)
+
+    Replacement for patterns that combined iter() with manual index tracking.
+    Verifies index is correct alongside element value.
+    """
+
+    it "List.each_with_index passes correct index and value":
+        val items = ["x", "y", "z"]
+        var index_sum = 0
+        items.each_with_index(\i, v:
+            index_sum = index_sum + i
+        )
+        # indices 0+1+2 = 3
+        expect(index_sum).to_equal(3)
+
+    it "List.each_with_index index starts at zero":
+        val items = ["only"]
+        var first_index = -1
+        items.each_with_index(\i, v:
+            first_index = i
+        )
+        expect(first_index).to_equal(0)

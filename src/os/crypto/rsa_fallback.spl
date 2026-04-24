@@ -1,0 +1,509 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Pure-Simple RSA PKCS#1 v1.5 signing fallback.
+#
+# Used when the hosted `rt_rsa_*_sign` externs are unavailable in the
+# freestanding/baremetal SSH live lane. Verification stays on the existing FFI.
+
+use os.crypto.sha256.{sha256}
+use os.crypto.sha512.{sha512}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val _RSA_BIGINT_BASE: i64 = 1073741824
+val _RSA_BIGINT_BITS_PER_LIMB: i64 = 30
+
+enum _DerTlv:
+    Ok(tag: u8, value_off: u64, value_len: u64, next_off: u64)
+    Err(msg: text)
+
+enum _RsaPrivateKey:
+    Ok(modulus: [u8], p: [u8], q: [u8], d_p: [u8], d_q: [u8], q_inv: [u8])
+    Err(msg: text)
+
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _bi_zero() -> list:
+    [0]
+
+fn _bi_one() -> list:
+    [1]
+
+fn _bi_from_i64(n: i64) -> list:
+    if n == 0:
+        return [0]
+
+    var result = []
+    var value = n
+    while value > 0:
+        result.push(value % _RSA_BIGINT_BASE)
+        value = value / _RSA_BIGINT_BASE
+    result
+
+fn _bi_is_zero(a: list) -> bool:
+    if a.len() == 0:
+        return true
+    if a.len() == 1:
+        return a[0] == 0
+    false
+
+fn _bi_normalize(a: list) -> list:
+    var len = a.len()
+    while len > 1:
+        if a[len - 1] != 0:
+            break
+        len = len - 1
+
+    if len == a.len():
+        return a
+
+    var result = []
+    var i = 0
+    while i < len:
+        result.push(a[i])
+        i = i + 1
+    result
+
+fn _bi_compare(a: list, b: list) -> i64:
+    val len_a = a.len()
+    val len_b = b.len()
+    if len_a < len_b:
+        return -1
+    if len_a > len_b:
+        return 1
+
+    var i = len_a - 1
+    while i >= 0:
+        val limb_a = a[i]
+        val limb_b = b[i]
+        if limb_a < limb_b:
+            return -1
+        if limb_a > limb_b:
+            return 1
+        i = i - 1
+    0
+
+fn _bi_add(a: list, b: list) -> list:
+    val len_a = a.len()
+    val len_b = b.len()
+    var max_len = len_a
+    if len_b > max_len:
+        max_len = len_b
+
+    var result = []
+    var carry = 0
+    var i = 0
+    while i < max_len:
+        var sum = carry
+        if i < len_a:
+            sum = sum + a[i]
+        if i < len_b:
+            sum = sum + b[i]
+        result.push(sum % _RSA_BIGINT_BASE)
+        carry = sum / _RSA_BIGINT_BASE
+        i = i + 1
+
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_sub(a: list, b: list) -> list:
+    if _bi_compare(a, b) <= 0:
+        return _bi_zero()
+
+    val len_a = a.len()
+    val len_b = b.len()
+    var result = []
+    var borrow = 0
+    var i = 0
+    while i < len_a:
+        var limb_a = a[i] - borrow
+        var limb_b = 0
+        if i < len_b:
+            limb_b = b[i]
+        if limb_a < limb_b:
+            limb_a = limb_a + _RSA_BIGINT_BASE
+            borrow = 1
+        else:
+            borrow = 0
+        result.push(limb_a - limb_b)
+        i = i + 1
+    _bi_normalize(result)
+
+fn _bi_mul(a: list, b: list) -> list:
+    if _bi_is_zero(a):
+        return _bi_zero()
+    if _bi_is_zero(b):
+        return _bi_zero()
+
+    val len_a = a.len()
+    val len_b = b.len()
+    var result = []
+    var i = 0
+    while i < len_a + len_b:
+        result.push(0)
+        i = i + 1
+
+    i = 0
+    while i < len_a:
+        val limb_a = a[i]
+        var carry = 0
+        var j = 0
+        while j < len_b:
+            val idx = i + j
+            val prod = limb_a * b[j] + result[idx] + carry
+            result[idx] = prod % _RSA_BIGINT_BASE
+            carry = prod / _RSA_BIGINT_BASE
+            j = j + 1
+        if carry > 0:
+            result[i + len_b] = result[i + len_b] + carry
+        i = i + 1
+    _bi_normalize(result)
+
+fn _bi_mul_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return _bi_zero()
+    if n == 1:
+        return a
+
+    var result = []
+    var carry = 0
+    var i = 0
+    while i < a.len():
+        val prod = a[i] * n + carry
+        result.push(prod % _RSA_BIGINT_BASE)
+        carry = prod / _RSA_BIGINT_BASE
+        i = i + 1
+
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_divmod_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return [_bi_zero(), _bi_zero()]
+    if n == 1:
+        return [a, _bi_zero()]
+
+    var quotient = []
+    var remainder = 0
+    var i = a.len() - 1
+    while i >= 0:
+        val dividend = remainder * _RSA_BIGINT_BASE + a[i]
+        quotient.push(dividend / n)
+        remainder = dividend % n
+        i = i - 1
+
+    var rev_quotient = []
+    i = quotient.len() - 1
+    while i >= 0:
+        rev_quotient.push(quotient[i])
+        i = i - 1
+
+    [_bi_normalize(rev_quotient), _bi_from_i64(remainder)]
+
+fn _bi_bit_length(a: list) -> i64:
+    val norm = _bi_normalize(a)
+    if _bi_is_zero(norm):
+        return 0
+
+    val top = norm[norm.len() - 1]
+    var bits = 0
+    var temp = top
+    while temp > 0:
+        bits = bits + 1
+        temp = temp / 2
+    (norm.len() - 1) * _RSA_BIGINT_BITS_PER_LIMB + bits
+
+fn _bi_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / _RSA_BIGINT_BITS_PER_LIMB
+    val bit_idx = n % _RSA_BIGINT_BITS_PER_LIMB
+    if limb_idx >= a.len():
+        return 0
+    val mask = 1 << bit_idx
+    (a[limb_idx] / mask) % 2
+
+fn _bi_shift_left_one(a: list) -> list:
+    if _bi_is_zero(a):
+        return a
+
+    var result = []
+    var carry = 0
+    var i = 0
+    while i < a.len():
+        val shifted = a[i] * 2 + carry
+        result.push(shifted % _RSA_BIGINT_BASE)
+        carry = shifted / _RSA_BIGINT_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_mod(a: list, b: list) -> list:
+    if _bi_is_zero(b):
+        return _bi_zero()
+    if _bi_compare(a, b) < 0:
+        return _bi_normalize(a)
+
+    val bit_len = _bi_bit_length(a)
+    var remainder = _bi_zero()
+    var i = bit_len - 1
+    while i >= 0:
+        remainder = _bi_shift_left_one(remainder)
+        if _bi_get_bit(a, i) == 1:
+            remainder = _bi_add(remainder, _bi_one())
+        if _bi_compare(remainder, b) >= 0:
+            remainder = _bi_sub(remainder, b)
+        i = i - 1
+    _bi_normalize(remainder)
+
+fn _bi_mod_exp(base: list, exp: list, modulus: list) -> list:
+    if _bi_is_zero(modulus):
+        return _bi_zero()
+
+    var result = _bi_one()
+    var base_mod = _bi_mod(base, modulus)
+    var exp_copy = exp
+    while !_bi_is_zero(exp_copy):
+        val divmod_2 = _bi_divmod_i64(exp_copy, 2)
+        val remainder = divmod_2[1]
+        if !_bi_is_zero(remainder):
+            result = _bi_mod(_bi_mul(result, base_mod), modulus)
+        exp_copy = divmod_2[0]
+        base_mod = _bi_mod(_bi_mul(base_mod, base_mod), modulus)
+    result
+
+fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i: u64 = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _slice_bytes(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(_u8_at(data, start + i))
+        i = i + 1
+    out
+
+fn _strip_integer_padding(data: [u8]) -> [u8]:
+    var start: u64 = 0
+    while start + 1 < data.len() and data[start] == 0x00:
+        start = start + 1
+    _slice_bytes(data, start, data.len() - start)
+
+fn _bytes_to_bigint_be(bytes: [u8]) -> list:
+    if bytes.len() == 0:
+        return _bi_zero()
+
+    var result = _bi_zero()
+    var i: u64 = 0
+    while i < bytes.len():
+        result = _bi_mul_i64(result, 256)
+        result = _bi_add(result, _bi_from_i64(_u8_at(bytes, i).to_i64()))
+        i = i + 1
+    _bi_normalize(result)
+
+fn _bigint_to_bytes_be(n: list, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(0)
+        i = i + 1
+
+    var temp = n
+    var pos = length
+    while pos > 0:
+        val divmod_256 = _bi_divmod_i64(temp, 256)
+        val remainder = divmod_256[1]
+        out[pos - 1] = remainder[0].to_u8()
+        temp = divmod_256[0]
+        pos = pos - 1
+    out
+
+fn _der_read_tlv(data: [u8], off: u64) -> _DerTlv:
+    if off + 2 > data.len():
+        return _DerTlv.Err(msg: "truncated DER TLV")
+
+    val tag = _u8_at(data, off)
+    val first = _u8_at(data, off + 1)
+    var header_len: u64 = 0
+    var value_len: u64 = 0
+    if first < 0x80:
+        header_len = 1
+        value_len = first.to_u64()
+    elif first == 0x81:
+        if off + 3 > data.len():
+            return _DerTlv.Err(msg: "truncated DER len(0x81)")
+        header_len = 2
+        value_len = _u8_at(data, off + 2).to_u64()
+    elif first == 0x82:
+        if off + 4 > data.len():
+            return _DerTlv.Err(msg: "truncated DER len(0x82)")
+        header_len = 3
+        value_len = (((_u8_at(data, off + 2).to_u32() << 8) | _u8_at(data, off + 3).to_u32()).to_u64())
+    else:
+        return _DerTlv.Err(msg: "unsupported DER length form")
+
+    val value_off = off + 1 + header_len
+    val next_off = value_off + value_len
+    if next_off > data.len():
+        return _DerTlv.Err(msg: "DER value extends past buffer")
+
+    _DerTlv.Ok(tag: tag, value_off: value_off, value_len: value_len, next_off: next_off)
+
+fn _expect_tag(data: [u8], off: u64, want: u8, label: text) -> _DerTlv:
+    val tlv = _der_read_tlv(data, off)
+    if val _DerTlv.Ok(tag, value_off, value_len, next_off) = tlv:
+        if tag == want:
+            return _DerTlv.Ok(tag: tag, value_off: value_off, value_len: value_len, next_off: next_off)
+        return _DerTlv.Err(msg: "{label}: unexpected tag")
+    _DerTlv.Err(msg: "{label}: parse failed")
+
+fn _parse_pkcs8_rsa_private_key(pkcs8: [u8]) -> _RsaPrivateKey:
+    val outer = _expect_tag(pkcs8, 0, 0x30, "pkcs8 outer")
+    if val _DerTlv.Ok(_, outer_value_off, _, outer_next_off) = outer:
+        var pos = outer_value_off
+        val version = _expect_tag(pkcs8, pos, 0x02, "pkcs8 version")
+        if val _DerTlv.Ok(_, _, _, next_pos) = version:
+            pos = next_pos
+        else:
+            return _RsaPrivateKey.Err(msg: "pkcs8 version parse failed")
+
+        val algorithm = _expect_tag(pkcs8, pos, 0x30, "pkcs8 algorithm")
+        if val _DerTlv.Ok(_, _, _, next_pos) = algorithm:
+            pos = next_pos
+        else:
+            return _RsaPrivateKey.Err(msg: "pkcs8 algorithm parse failed")
+
+        val private_octets = _expect_tag(pkcs8, pos, 0x04, "pkcs8 privateKey")
+        if val _DerTlv.Ok(_, private_value_off, private_value_len, next_pos) = private_octets:
+            if next_pos > outer_next_off:
+                return _RsaPrivateKey.Err(msg: "pkcs8 privateKey past outer sequence")
+            val rsa_der = _slice_bytes(pkcs8, private_value_off, private_value_len)
+            val rsa_outer = _expect_tag(rsa_der, 0, 0x30, "rsa private sequence")
+            if val _DerTlv.Ok(_, rsa_value_off, _, _) = rsa_outer:
+                var inner = rsa_value_off
+                val inner_version = _expect_tag(rsa_der, inner, 0x02, "rsa version")
+                if val _DerTlv.Ok(_, _, _, next_inner) = inner_version:
+                    inner = next_inner
+                else:
+                    return _RsaPrivateKey.Err(msg: "rsa version parse failed")
+
+                val modulus_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa modulus")
+                if val _DerTlv.Ok(_, modulus_off, modulus_len, next_inner) = modulus_tlv:
+                    val modulus = _strip_integer_padding(_slice_bytes(rsa_der, modulus_off, modulus_len))
+                    inner = next_inner
+
+                    val public_exp_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa public exponent")
+                    if val _DerTlv.Ok(_, _, _, next_inner) = public_exp_tlv:
+                        inner = next_inner
+                    else:
+                        return _RsaPrivateKey.Err(msg: "rsa public exponent parse failed")
+
+                    val private_exp_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa private exponent")
+                    if val _DerTlv.Ok(_, _, _, next_inner) = private_exp_tlv:
+                        inner = next_inner
+                    else:
+                        return _RsaPrivateKey.Err(msg: "rsa private exponent parse failed")
+
+                    val prime1_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa prime1")
+                    if val _DerTlv.Ok(_, prime1_off, prime1_len, next_inner) = prime1_tlv:
+                        val p = _strip_integer_padding(_slice_bytes(rsa_der, prime1_off, prime1_len))
+                        inner = next_inner
+
+                        val prime2_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa prime2")
+                        if val _DerTlv.Ok(_, prime2_off, prime2_len, next_inner) = prime2_tlv:
+                            val q = _strip_integer_padding(_slice_bytes(rsa_der, prime2_off, prime2_len))
+                            inner = next_inner
+
+                            val exponent1_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa exponent1")
+                            if val _DerTlv.Ok(_, exponent1_off, exponent1_len, next_inner) = exponent1_tlv:
+                                val d_p = _strip_integer_padding(_slice_bytes(rsa_der, exponent1_off, exponent1_len))
+                                inner = next_inner
+
+                                val exponent2_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa exponent2")
+                                if val _DerTlv.Ok(_, exponent2_off, exponent2_len, next_inner) = exponent2_tlv:
+                                    val d_q = _strip_integer_padding(_slice_bytes(rsa_der, exponent2_off, exponent2_len))
+                                    inner = next_inner
+
+                                    val coeff_tlv = _expect_tag(rsa_der, inner, 0x02, "rsa coefficient")
+                                    if val _DerTlv.Ok(_, coeff_off, coeff_len, _) = coeff_tlv:
+                                        val q_inv = _strip_integer_padding(_slice_bytes(rsa_der, coeff_off, coeff_len))
+                                        return _RsaPrivateKey.Ok(
+                                            modulus: modulus,
+                                            p: p,
+                                            q: q,
+                                            d_p: d_p,
+                                            d_q: d_q,
+                                            q_inv: q_inv
+                                        )
+                    _RsaPrivateKey.Err(msg: "rsa CRT parse failed")
+                else:
+                    _RsaPrivateKey.Err(msg: "rsa modulus parse failed")
+            else:
+                _RsaPrivateKey.Err(msg: "rsa private sequence parse failed")
+        else:
+            _RsaPrivateKey.Err(msg: "pkcs8 privateKey parse failed")
+    else:
+        _RsaPrivateKey.Err(msg: "pkcs8 outer parse failed")
+
+fn _emsa_pkcs1_v15(digest_info_prefix: [u8], digest: [u8], key_bytes: u64) -> [u8]:
+    val t_len = digest_info_prefix.len() + digest.len()
+    if key_bytes < t_len + 11:
+        return []
+
+    var out: [u8] = [0x00, 0x01]
+    var pad_len: u64 = key_bytes - t_len - 3
+    while pad_len > 0:
+        out.push(0xFF)
+        pad_len = pad_len - 1
+    out.push(0x00)
+    out = _append_bytes(out, digest_info_prefix)
+    _append_bytes(out, digest)
+
+fn _crt_sign(encoded_msg: [u8], modulus: [u8], p_bytes: [u8], q_bytes: [u8], d_p_bytes: [u8], d_q_bytes: [u8], q_inv_bytes: [u8]) -> [u8]:
+    val m = _bytes_to_bigint_be(encoded_msg)
+    val p = _bytes_to_bigint_be(p_bytes)
+    val q = _bytes_to_bigint_be(q_bytes)
+    val d_p = _bytes_to_bigint_be(d_p_bytes)
+    val d_q = _bytes_to_bigint_be(d_q_bytes)
+    val q_inv = _bytes_to_bigint_be(q_inv_bytes)
+
+    val m1 = _bi_mod_exp(_bi_mod(m, p), d_p, p)
+    val m2 = _bi_mod_exp(_bi_mod(m, q), d_q, q)
+    val diff = if _bi_compare(m1, m2) >= 0 { _bi_sub(m1, m2) } else { _bi_sub(p, _bi_sub(m2, m1)) }
+    val h = _bi_mod(_bi_mul(q_inv, diff), p)
+    val sig = _bi_add(m2, _bi_mul(h, q))
+    _bigint_to_bytes_be(sig, modulus.len())
+
+fn rsa_sha256_sign_fallback(pkcs8: [u8], message: [u8]) -> [u8]:
+    val digest = sha256(message)
+    val prefix: [u8] = [
+        0x30u8, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+        0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+    ]
+    val parsed = _parse_pkcs8_rsa_private_key(pkcs8)
+    if val _RsaPrivateKey.Ok(modulus, p, q, d_p, d_q, q_inv) = parsed:
+        val em = _emsa_pkcs1_v15(prefix, digest, modulus.len())
+        if em.len() == 0:
+            return []
+        return _crt_sign(em, modulus, p, q, d_p, d_q, q_inv)
+    []
+
+fn rsa_sha512_sign_fallback(pkcs8: [u8], message: [u8]) -> [u8]:
+    val digest = sha512(message)
+    val prefix: [u8] = [
+        0x30u8, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+        0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40
+    ]
+    val parsed = _parse_pkcs8_rsa_private_key(pkcs8)
+    if val _RsaPrivateKey.Ok(modulus, p, q, d_p, d_q, q_inv) = parsed:
+        val em = _emsa_pkcs1_v15(prefix, digest, modulus.len())
+        if em.len() == 0:
+            return []
+        return _crt_sign(em, modulus, p, q, d_p, d_q, q_inv)
+    []

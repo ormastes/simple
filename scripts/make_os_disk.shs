@@ -186,9 +186,27 @@ cp "$TMPDIR/SYS/VERSION.TXT" "$TMPDIR/VERSION.TXT"
 if command -v openssl >/dev/null 2>&1; then
     if openssl genpkey -algorithm RSA \
         -pkeyopt rsa_keygen_bits:2048 \
-        -outform DER \
-        -out "$TMPDIR/SYS/HOST_RSA.DER" >/dev/null 2>&1; then
-        :
+        -out "$TMPDIR/SYS/HOST_RSA.PEM" >/dev/null 2>&1 \
+        && openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER \
+            -in "$TMPDIR/SYS/HOST_RSA.PEM" \
+            -out "$TMPDIR/SYS/HOST_RSA.DER" >/dev/null 2>&1; then
+        if command -v ssh-keygen >/dev/null 2>&1; then
+            if ssh-keygen -f "$TMPDIR/SYS/HOST_RSA.PEM" -y > "$TMPDIR/SYS/HOST_RSA.PUBTXT" 2>/dev/null; then
+                pub_b64="$(awk 'NR==1 { print $2 }' "$TMPDIR/SYS/HOST_RSA.PUBTXT")"
+                if [ -n "$pub_b64" ]; then
+                    if command -v base64 >/dev/null 2>&1; then
+                        printf '%s' "$pub_b64" | base64 -d > "$TMPDIR/SYS/HOST_RSA.BIN" 2>/dev/null || true
+                    elif command -v python3 >/dev/null 2>&1; then
+                        python3 - <<'PY' "$pub_b64" "$TMPDIR/SYS/HOST_RSA.BIN" >/dev/null 2>&1 || true
+import base64
+import pathlib
+import sys
+pathlib.Path(sys.argv[2]).write_bytes(base64.b64decode(sys.argv[1]))
+PY
+                    fi
+                fi
+            fi
+        fi
     else
         echo "[make_os_disk] WARNING: openssl RSA key generation failed -- SSH live lane stays Ed25519-only"
     fi

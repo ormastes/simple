@@ -494,18 +494,32 @@ impl DesktopShell:
             ]), "Simple Browser", "dark")
             serial_println("[shell] materialized-window:create:start pid={pid} title=Simple Browser app_id={resolved_app_id}")
             var compositor = self.compositor
-            val created_window_id = compositor.create_window("Simple Browser", 220, 120, 520, 320)
-            if compositor.surfaces.len() == 0:
-                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=no-compositor-surface")
-                return false
-            val window_id = compositor.surfaces[compositor.surfaces.len() - 1].id
-            compositor.update_window_tree(window_id, browser_tree)
-            serial_println("[shell] materialized-window:create:end pid={pid} title=Simple Browser wid={window_id.value} created_wid={created_window_id.value}")
+            val icon = compositor.get_icon_for_title("Simple Browser")
+            if icon != "" and browser_tree.root_node().get_prop("icon-id") == "":
+                browser_tree.root_node().set_prop("icon-id", icon)
+            val window_id = WindowId(value: compositor.next_id)
+            compositor.next_id = compositor.next_id + 1
+            val browser_session = new_session(browser_tree)
+            val browser_surface = WindowSurface(
+                id: window_id,
+                title: "Simple Browser",
+                bounds: Rect.xywh(220, 120, 520, 320),
+                visible: true,
+                session: browser_session,
+                dirty: true,
+                owner_port: 0,
+                process_id: ProcessId(value: pid),
+                app_id: AppId(value: resolved_app_id),
+                icon_id: icon
+            )
+            compositor.surfaces = compositor.surfaces.push(browser_surface)
+            compositor.app_states = compositor.app_states.push(app_state_new())
+            compositor.focused_idx = compositor.surfaces.len() - 1
+            serial_println("[shell] materialized-window:create:end pid={pid} title=Simple Browser wid={window_id.value}")
             if window_id.value == 0:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=zero-wid")
                 return false
             serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={resolved_app_id}")
-            compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: resolved_app_id))
             self.compositor = compositor
             serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
             var wm = self.wm
@@ -514,11 +528,7 @@ impl DesktopShell:
             serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
             launcher_note_window_opened(pid)
             serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
-            val compositor_windows = compositor.windows_for_process(ProcessId(value: pid))
             val owned_windows = self.wm.window_ids_for_process(pid)
-            if compositor_windows.len() != 1:
-                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=compositor-window-count count={compositor_windows.len()} wid={window_id.value}")
-                return false
             if owned_windows.len() != 1:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-window-count count={owned_windows.len()} wid={window_id.value}")
                 return false
