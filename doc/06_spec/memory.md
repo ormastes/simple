@@ -102,6 +102,26 @@ unless the fallback path is handled.
 reference counting with cycle detection for class types that escape to the
 heap. `NoGC` regions enable deterministic cleanup for embedded code.
 
+## Common Patterns
+
+Safe optional chaining (no null checks):
+
+    val user: Option<User> = find_user(id)
+    val name = user.map(|u| u.name).unwrap_or("anonymous")
+
+Early return on absent value:
+
+    fn get_age(id: i64) -> Option<i64>:
+        val user = find_user(id)?   # None propagates automatically
+        Some(user.age)
+
+Resource cleanup with `defer`:
+
+    fn process_file(path: text) -> Result<text, text>:
+        val f = open(path)?
+        defer f.close()
+        Ok(f.read_all())
+
 ## Evidence
 
 | Category | Count |

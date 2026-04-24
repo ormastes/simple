@@ -93,6 +93,29 @@ enabling lazy, backpressure-aware streaming without callbacks.
 **Cancellation** — a suspended coroutine can be cancelled via its handle.
 Pending `~=` points check for cancellation on resume.
 
+## Common Patterns
+
+Sequential async pipeline:
+
+    val raw   ~= fetch(url)
+    val parsed ~= parse(raw)
+    val result ~= validate(parsed)
+
+Parallel fan-out then join:
+
+    val a_fut = start fetch_a()
+    val b_fut = start fetch_b()
+    val a ~= a_fut
+    val b ~= b_fut
+    combine(a, b)
+
+Timeout wrapper:
+
+    val result ~= with_timeout(5000, fetch(url))
+    match result:
+        case Ok(v):  process(v)
+        case Err(_): use_default()
+
 ## Related Specifications
 
 - **Async Default** - Async-by-default function model

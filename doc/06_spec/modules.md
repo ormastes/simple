@@ -17,8 +17,8 @@ This file contains executable test cases extracted from modules.md. The original
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -98,6 +98,31 @@ paths use `use super.X` (parent) or `use self.X` (current module).
 **Namespace hygiene** — each module has its own scope. Names defined in one
 module never shadow names in another unless explicitly imported.
 
+## Common Patterns
+
+Facade module (stable public API over reorganised internals):
+
+    pub use self.client.{Client, Response}
+    pub use self.server.{Server, Handler}
+
+Feature-gated module (conditional compilation):
+
+    #[cfg(feature = "tls")]
+    use self.tls.{TlsStream}
+
+Module aliasing for long paths:
+
+    use std.collections.hashmap as hm
+    val m = hm.HashMap.new()
+
+Inline test module (collocated tests, not in test/):
+
+    #[cfg(test)]
+    module tests:
+        use super.*
+        it "round_trip":
+            ...
+
 ## Evidence
 
 | Category | Count |
@@ -112,6 +137,7 @@ module never shadow names in another unless explicitly imported.
 
 ## Scenarios
 
+- round_trip
 - tracks module metadata
 - resolves dependency order before root
 - checks exported symbols

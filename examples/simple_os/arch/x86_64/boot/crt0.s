@@ -211,12 +211,38 @@ boot32_serial_puts:
 
 boot32_entry_msg:
     .asciz "[BOOT32] entry\r\n"
+boot64_entry_msg:
+    .asciz "[BOOT64] entry\r\n"
+boot64_idt_msg:
+    .asciz "[BOOT64] idt\r\n"
+boot64_start_msg:
+    .asciz "[BOOT64] call _start\r\n"
+
+boot64_serial_puts:
+    lodsb
+    testb %al, %al
+    jz 2f
+1:
+    movw $0x3fd, %dx
+.boot64_wait:
+    inb %dx, %al
+    testb $0x20, %al
+    jz .boot64_wait
+    movw $0x3f8, %dx
+    movb -1(%rsi), %al
+    outb %al, %dx
+    jmp boot64_serial_puts
+2:
+    ret
 
 /* ==================================================================
  * 64-bit code
  * ================================================================== */
 .code64
 long_mode_entry:
+    movq $boot64_entry_msg, %rsi
+    call boot64_serial_puts
+
     /* Reload data segments with 64-bit data selector */
     movw $0x10, %ax
     movw %ax, %ds
@@ -265,11 +291,15 @@ long_mode_entry:
     movw $4095, _idt_ptr(%rip)    /* limit: 256*16-1 */
     movq %rax, _idt_ptr+2(%rip)   /* base */
     lidt _idt_ptr(%rip)
+    movq $boot64_idt_msg, %rsi
+    call boot64_serial_puts
 
     /* Pass multiboot info pointer as first arg (rdi) -- zero-extend ESI */
     movl %esi, %edi
 
     /* Call Simple compiler entry point */
+    movq $boot64_start_msg, %rsi
+    call boot64_serial_puts
     call _start
 
     /* Halt if it returns */

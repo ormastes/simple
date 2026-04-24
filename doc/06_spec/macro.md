@@ -96,6 +96,26 @@ inside a macro (allocation, I/O) are forbidden and rejected at parse time.
 **Recursive macros** — a macro may call itself up to a configurable depth
 limit (default: 64) to implement iteration patterns without native loops.
 
+## Common Patterns
+
+Assertion macro (compile-time message formatting):
+
+    macro assert!(cond, msg):
+        if not cond:
+            panic("Assertion failed: {msg}")
+
+Derive-style boilerplate generation:
+
+    #[derive(Debug, Clone, Eq)]
+    struct Point:
+        x: i64
+        y: i64
+
+
+Token-based string interpolation (done at compile time):
+
+    macro format!(template, args...):
+
 ## Evidence
 
 | Category | Count |

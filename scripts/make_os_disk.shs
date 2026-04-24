@@ -293,8 +293,9 @@ stage_uefi_boot_media() {
         return 1
     fi
 
-    mkdir -p "$TMPDIR/EFI/BOOT" "$TMPDIR/boot/grub" "build/os/esp/EFI/BOOT"
+    mkdir -p "$TMPDIR/EFI/BOOT" "$TMPDIR/boot/grub" "build/os/esp/EFI/BOOT" "build/os/esp/boot/grub"
     cp "$SIMPLEOS_UEFI_KERNEL" "$TMPDIR/boot/kernel.elf"
+    cp "$SIMPLEOS_UEFI_KERNEL" "build/os/esp/boot/kernel.elf"
     cat > "$TMPDIR/boot/grub/grub.cfg" << 'EOFGRUB'
 serial --unit=0 --speed=115200
 terminal_input serial console
@@ -308,6 +309,7 @@ menuentry "SimpleOS desktop" {
     boot
 }
 EOFGRUB
+    cp "$TMPDIR/boot/grub/grub.cfg" "build/os/esp/boot/grub/grub.cfg"
 
     if command -v grub-mkstandalone >/dev/null 2>&1; then
         if grub-mkstandalone -O x86_64-efi \
@@ -461,13 +463,22 @@ restage_uefi_boot_files() {
     if [ -z "${SIMPLEOS_UEFI_KERNEL:-}" ]; then
         return 0
     fi
+    mkdir -p "$TMPDIR/boot/grub"
+    if [ -f "build/os/esp/boot/kernel.elf" ]; then
+        cp "build/os/esp/boot/kernel.elf" "$TMPDIR/boot/kernel.elf" || return 1
+    elif [ -f "$SIMPLEOS_UEFI_KERNEL" ]; then
+        cp "$SIMPLEOS_UEFI_KERNEL" "$TMPDIR/boot/kernel.elf" || return 1
+    fi
+    if [ -f "build/os/esp/boot/grub/grub.cfg" ]; then
+        cp "build/os/esp/boot/grub/grub.cfg" "$TMPDIR/boot/grub/grub.cfg" || return 1
+    fi
     if [ -f "build/os/esp/EFI/BOOT/BOOTX64.EFI" ]; then
         mkdir -p "$TMPDIR/EFI/BOOT"
         cp "build/os/esp/EFI/BOOT/BOOTX64.EFI" "$TMPDIR/EFI/BOOT/BOOTX64.EFI" || return 1
     fi
-    if [ -f "$TMPDIR/boot/grub/grub.cfg" ]; then
-        mkdir -p "$TMPDIR/boot/grub"
-        cp "$TMPDIR/boot/grub/grub.cfg" "$TMPDIR/boot/grub/grub.cfg" >/dev/null 2>&1 || true
+    if [ ! -f "$TMPDIR/EFI/BOOT/BOOTX64.EFI" ] || [ ! -f "$TMPDIR/boot/kernel.elf" ] || [ ! -f "$TMPDIR/boot/grub/grub.cfg" ]; then
+        echo "[make_os_disk] ERROR: UEFI boot files incomplete before FAT population"
+        return 1
     fi
     return 0
 }

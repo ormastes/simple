@@ -7593,12 +7593,14 @@ void _start(void)
     __asm__ volatile("cli");
 
     _serial_init();
+    serial_puts("[BOOT] _start entered\r\n");
 
     /* For Simple baremetal app lanes, the validated minimum boot path is:
      * long-mode handoff -> basic IRQ masking -> direct spl_start().
      * Skip the heavyweight C boot diagnostics/probing until the boot lane is stable.
      */
     if (spl_start) {
+        serial_puts("[BOOT] spl_start dispatch\r\n");
         __asm__ volatile(
             "movw $0x3F8, %%dx\n"
             "movb $'4', %%al\n"
@@ -7608,6 +7610,7 @@ void _start(void)
             : "rax", "rdx"
         );
         spl_start();
+        serial_puts("[BOOT] spl_start returned\r\n");
         __asm__ volatile(
             "movw $0x3F8, %%dx\n"
             "movb $'5', %%al\n"
@@ -9347,6 +9350,39 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     free(scalar);
     free(point);
     return _tls_runtime_array_from_bytes(out, 32U);
+}
+
+int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue point_rv, RuntimeValue out_rv)
+{
+    uint32_t scalar_len = 0, point_len = 0;
+    uint8_t *scalar = _tls_copy_runtime_bytes(scalar_rv, &scalar_len);
+    uint8_t *point = _tls_copy_runtime_bytes(point_rv, &point_len);
+    if (!scalar || !point || scalar_len != 32U || point_len != 32U) {
+        if (scalar) free(scalar);
+        if (point) free(point);
+        return 0;
+    }
+    if (!IS_HEAP(out_rv)) {
+        free(scalar);
+        free(point);
+        return 0;
+    }
+    RuntimeArray *out_arr = (RuntimeArray *)DECODE_PTR(out_rv);
+    if (!out_arr || out_arr->hdr.type != HEAP_ARRAY || out_arr->len != 32U) {
+        free(scalar);
+        free(point);
+        return 0;
+    }
+
+    uint8_t out[32];
+    _tls_x25519_scalarmult(out, scalar, point);
+    RuntimeValue *out_items = runtime_array_items(out_arr);
+    for (uint32_t i = 0; i < 32U; i++) {
+        out_items[i] = ENCODE_INT(out[i]);
+    }
+    free(scalar);
+    free(point);
+    return 1;
 }
 
 static inline uint32_t _tls_sha256_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
@@ -11523,7 +11559,6 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (s < 0) s = 0;
     if (e > (int64_t)a->len) e = (int64_t)a->len;
     if (s >= e) return rt_array_new(ENCODE_INT(1));
-    RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
     for (int64_t i = s; i < e; i++) {
         result = rt_array_push(result, items[i]);
