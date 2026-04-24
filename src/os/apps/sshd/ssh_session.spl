@@ -283,6 +283,7 @@ impl SshSession:
             []
         }
         log_info("[app.sshd] " + "[sshd-session] server ecdh priv len={server_private.len()} pub len={server_public.len()}")
+        serial_println("[sshd-session] server ecdh priv={_bytes_to_hex(server_private)}")
         if server_public.len() != 32:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 public failed")
             return false
@@ -300,6 +301,7 @@ impl SshSession:
             return false
         log_info("[app.sshd] " + "[sshd-session] shared secret len={shared_secret.len()}")
         log_info("[app.sshd] " + "[sshd-session] shared secret={_bytes_to_hex(shared_secret)}")
+        serial_println("[sshd-session] shared secret={_bytes_to_hex(shared_secret)}")
 
         # Resolve negotiated algorithms — needed now for host-key-blob type
         val negotiated_hk_algo = algos_early.host_key
@@ -308,6 +310,7 @@ impl SshSession:
         val host_key_blob = _build_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys)
         log_info("[app.sshd] " + "[sshd-session] host key algo={negotiated_hk_algo} blob len={host_key_blob.len()}")
         log_info("[app.sshd] " + "[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
+        serial_println("[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
 
         # Compute exchange hash
         val exchange_hash = ssh_kex_compute_exchange_hash(
@@ -321,6 +324,7 @@ impl SshSession:
             shared_secret
         )
         log_info("[app.sshd] " + "[sshd-session] exchange hash len={exchange_hash.len()}")
+        serial_println("[sshd-session] exchange hash={_bytes_to_hex(exchange_hash)}")
 
         # Session ID is the first exchange hash
         if self.session_id.len() == 0:
@@ -334,6 +338,7 @@ impl SshSession:
             return false
         val sig_blob = r_sig.unwrap()
         log_info("[app.sshd] " + "[sshd-session] sig blob len={sig_blob.len()}")
+        serial_println("[sshd-session] sig blob={_bytes_to_hex(sig_blob)}")
         if negotiated_hk_algo == "ssh-ed25519":
             val sig_pubkey = _extract_ed25519_pubkey(host_key_blob)
             val sig_raw = _unwrap_ssh_signature(sig_blob)
@@ -342,10 +347,13 @@ impl SshSession:
             log_info("[app.sshd] " + "[sshd-session] sig self-verify pub={_bytes_to_hex(sig_pubkey)}")
             log_info("[app.sshd] " + "[sshd-session] sig self-verify hash={_bytes_to_hex(exchange_hash)}")
             log_info("[app.sshd] " + "[sshd-session] sig self-verify raw={_bytes_to_hex(sig_raw)}")
+            serial_println("[sshd-session] sig self-verify raw={_bytes_to_hex(sig_raw)}")
 
         # Send KEX_ECDH_REPLY
         val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob)
         log_info("[app.sshd] " + "[sshd-session] kex reply len={reply.len()}")
+        serial_println("[sshd-session] server ecdh pub={_bytes_to_hex(server_public)}")
+        serial_println("[sshd-session] kex reply={_bytes_to_hex(reply)}")
         self.send_packet(reply)
 
         # Send NEWKEYS
@@ -354,7 +362,12 @@ impl SshSession:
 
         # Receive client NEWKEYS
         val client_newkeys = self.recv_packet_payload()
-        if client_newkeys.len() == 0 or _u8_at(client_newkeys, 0) != SSH_MSG_NEWKEYS:
+        var client_newkeys_len: u64 = client_newkeys.len()
+        var client_newkeys_type: u8 = 0
+        if client_newkeys_len > 0:
+            client_newkeys_type = _u8_at(client_newkeys, 0)
+        serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
+        if client_newkeys_len == 0 or client_newkeys_type != SSH_MSG_NEWKEYS:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
             return false
 

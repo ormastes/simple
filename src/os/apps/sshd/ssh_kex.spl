@@ -125,6 +125,25 @@ fn _bytes_to_hex(data: [u8]) -> text:
         i = i + 1
     out
 
+fn _push_mpint_bytes(buf: [u8], val_bytes: [u8]) -> [u8]:
+    var start: u64 = 0
+    while start < val_bytes.len() and _u8_at(val_bytes, start) == 0:
+        start = start + 1
+
+    if start >= val_bytes.len():
+        return _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
+
+    var body: [u8] = []
+    if (_u8_at(val_bytes, start) & 0x80) != 0:
+        body = rt_push_byte(body, 0)
+
+    var i: u64 = start
+    while i < val_bytes.len():
+        body = rt_push_byte(body, _u8_at(val_bytes, i).to_i64())
+        i = i + 1
+
+    _push_string_bytes(buf, body)
+
 fn _looks_like_baremetal_sha256_truncation(digest: [u8]) -> bool:
     if digest.len() != 32:
         return false
@@ -509,9 +528,9 @@ fn ssh_kex_compute_exchange_hash(
     hash_input = _push_string_32(hash_input, server_public)
 
     # K: shared secret (as mpint — big-endian with sign handling)
-    ssh_put_mpint(hash_input, shared_secret_mpint)
-    log_info("[app.sshd] " + "[ssh-kex] exchange hash input len={hash_input.len()}")
-    log_info("[app.sshd] " + "[ssh-kex] exchange hash input={_bytes_to_hex(hash_input)}")
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
+    serial_println("[ssh-kex] exchange hash input len={hash_input.len()}")
+    serial_println("[ssh-kex] exchange hash input={_bytes_to_hex(hash_input)}")
 
     _sha256_stable(hash_input)
 
@@ -533,7 +552,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     # Build the initial hash input: mpint(K) || H || letter || session_id
     var input: [u8] = []
     val shared_secret_mpint = shared_secret
-    ssh_put_mpint(input, shared_secret_mpint)
+    input = _push_mpint_bytes(input, shared_secret_mpint)
 
     var i: u64 = 0
     while i < exchange_hash.len():
@@ -560,7 +579,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     while key_material.len() < needed:
         # next = SHA-256(K || H || K1 || K2 || ...)
         var ext_input: [u8] = []
-        ssh_put_mpint(ext_input, shared_secret_mpint)
+        ext_input = _push_mpint_bytes(ext_input, shared_secret_mpint)
 
         i = 0
         while i < exchange_hash.len():
