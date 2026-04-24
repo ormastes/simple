@@ -1,0 +1,140 @@
+"""
+# Bare Bool Lint Spec — Text Scanner Behavior
+
+**Feature IDs:** fix-bare-bool-suppressions
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests the text-scanner lint (`check_bare_bool`) behavior after the
+predicate-exemption wave:
+
+- Group 1: Parameter detection — `pub fn` with `: bool` param fires; return-only bool does NOT.
+- Group 2: Private function exemption — non-pub fn is skipped.
+- Group 3: `@allow(bare_bool)` suppression — count drops to 0 when suppression present.
+- Group 4: Predicate prefix with bool param — text-scanner still fires on bool *params*
+  in `is_*` fns (D-1 only exempts the Rust AST return-type path, not text-scanner params).
+
+Note: The text-scanner never fires on return types regardless of D-1.  These specs
+test the text-scanner path only; the Rust AST predicate exemption is integration-verified
+via the normal build lint after checker_core.rs lands.
+"""
+
+use std.sspec.*
+use compiler.tools.fix.main.{collect_fixes_from_source}
+use compiler.tools.lint.main.{LintConfig, LintLevel, build_default_levels}
+
+
+# Helper: count bare_bool fix hits in a source snippet (respects @allow).
+fn count_bare_bool_fixes(source: text) -> i64:
+    val fixes = collect_fixes_from_source("sample.spl", source)
+    var config = LintConfig.new()
+    config.apply_file_attributes(source)
+    var count = 0
+    for fix in fixes:
+        val parts = fix.id.split(":")
+        if parts.len() >= 2 and parts[1] == "bare_bool" and config.get_level("bare_bool") != LintLevel.Allow:
+            count = count + 1
+    count
+
+
+# ============================================================================
+# Test Group 1: Parameter detection
+# ============================================================================
+
+describe "bare_bool lint — parameter detection":
+    """
+    ## Group 1: The text-scanner fires on bool-typed parameters
+
+    The scanner looks for `: bool` or `: Bool` in `pub fn` / `fn` / `static fn`
+    parameter lists.  Return types are never flagged by the text scanner.
+    """
+
+    it "AC-1a: should flag pub fn with a bool parameter":
+        val source =
+            "pub fn set_enabled(flag: bool):\n" +
+            "    pass_dn\n"
+        expect(count_bare_bool_fixes(source)).to_be_greater_than(0)
+
+    it "AC-1b: should NOT flag pub fn whose only bool is the return type":
+        val source =
+            "pub fn is_ready() -> bool:\n" +
+            "    return true\n"
+        expect(count_bare_bool_fixes(source)).to_equal(0)
+
+    it "AC-1c: should flag pub fn with a mixed signature (bool param + bool return)":
+        val source =
+            "pub fn toggle(current: bool) -> bool:\n" +
+            "    return not current\n"
+        expect(count_bare_bool_fixes(source)).to_be_greater_than(0)
+
+
+# ============================================================================
+# Test Group 2: Private function exemption
+# ============================================================================
+
+describe "bare_bool lint — private function exemption":
+    """
+    ## Group 2: Non-public functions are not checked
+
+    The text scanner skips functions inside class bodies and non-pub `fn`.
+    """
+
+    it "AC-2a: should NOT flag private fn with a bool parameter":
+        val source =
+            "fn internal_toggle(flag: bool):\n" +
+            "    pass_dn\n"
+        expect(count_bare_bool_fixes(source)).to_equal(0)
+
+
+# ============================================================================
+# Test Group 3: @allow suppression
+# ============================================================================
+
+describe "bare_bool lint — suppression via @allow":
+    """
+    ## Group 3: @allow(bare_bool) suppresses the diagnostic
+
+    A file-level `@allow(bare_bool)` annotation (before the first definition)
+    causes the text-scanner count to drop to zero for that file.
+    """
+
+    it "AC-3a: should produce zero fixes when @allow(bare_bool) is present":
+        val source =
+            "@allow(bare_bool)\n" +
+            "pub fn set_enabled(flag: bool):\n" +
+            "    pass_dn\n"
+        expect(count_bare_bool_fixes(source)).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: Predicate prefix + bool param still fires
+# ============================================================================
+
+describe "bare_bool lint — predicate prefix does NOT exempt bool params":
+    """
+    ## Group 4: D-1 exempts return types (Rust AST path), not parameters
+
+    An `is_*` / `has_*` function with a bool-typed *parameter* must still be
+    flagged by the text scanner.  The predicate exemption only applies to
+    return types in the Rust AST lint path.
+    """
+
+    it "AC-4a: should flag is_* fn that takes a bool parameter":
+        val source =
+            "pub fn is_flagged(flag: bool) -> bool:\n" +
+            "    return flag\n"
+        expect(count_bare_bool_fixes(source)).to_be_greater_than(0)
+
+    it "AC-4b: should NOT flag is_* fn with no bool parameters (return type only)":
+        val source =
+            "pub fn is_active() -> bool:\n" +
+            "    return true\n"
+        expect(count_bare_bool_fixes(source)).to_equal(0)

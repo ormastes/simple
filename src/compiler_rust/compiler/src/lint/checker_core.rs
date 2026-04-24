@@ -67,6 +67,45 @@ pub(super) fn format_type(ty: &Type) -> String {
     }
 }
 
+/// Check if a function is a "pure predicate function" — the name starts with a
+/// recognised predicate prefix (e.g. `is_`, `has_`, `can_`), the return type is
+/// bare `bool`, and **no parameter** has bare `bool` type.
+///
+/// Such functions are exempt from the `bare_bool` lint on their *return type*.
+/// The exemption does NOT apply to bool-typed parameters; `fn is_enabled(flag: bool) -> bool`
+/// is still flagged.  The exemption also does NOT suppress `primitive_api` — it is
+/// intentionally narrow to the `BareBool` diagnostic only.
+pub(super) fn is_pure_predicate_function(func: &FunctionDef) -> bool {
+    // Return type must be bare bool
+    let is_bool_return = match func.return_type {
+        Some(ref ret_ty) => is_bare_bool(ret_ty),
+        None => return false,
+    };
+    if !is_bool_return {
+        return false;
+    }
+
+    // Function name must start with a predicate prefix
+    const PREDICATE_PREFIXES: &[&str] = &[
+        "is_", "has_", "can_", "should_", "will_", "contains_", "must_", "needs_",
+    ];
+    let is_predicate_name = PREDICATE_PREFIXES.iter().any(|pfx| func.name.starts_with(pfx));
+    if !is_predicate_name {
+        return false;
+    }
+
+    // No parameter may have bare bool type — that would still be ambiguous
+    for param in &func.params {
+        if let Some(ref ty) = param.ty {
+            if is_bare_bool(ty) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 /// Check if a function is a "pure math function" — all parameters and the return
 /// type are the *same* bare numeric primitive (e.g. `fn abs(x: f64) -> f64`).
 /// Such functions are exempt from the `primitive_api` lint.

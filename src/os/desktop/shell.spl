@@ -161,27 +161,26 @@ fn _create_materialized_window(
 
 fn _materialize_simple_browser_window(shell: DesktopShell, pid: u64, app_id: text) -> bool:
     serial_println("[shell] simple-browser-fallback:start pid={pid}")
-    var resolved_app_id = app_id
-    if resolved_app_id == "":
-        resolved_app_id = APP_ID_SIMPLE_BROWSER
-    shell.compositor.create_remote_window("Simple Browser", 220, 120, 520, 320, 0)
-    if shell.compositor.surfaces.len() == 0:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=no-compositor-surface")
-        return false
-    val window_id = shell.compositor.surfaces[shell.compositor.surfaces.len() - 1].id
-    serial_println("[shell] simple-browser-fallback:surface-count pid={pid} count={shell.compositor.surfaces.len()} wid={window_id.value}")
+    val resolved_app_id = if app_id == "": "/sys/apps/simple_browser" else: app_id
+    val browser_tree = build_tree_with_title(column("simple_browser_resident_main", [
+        text_widget("simple_browser_title", "Simple Browser"),
+        text_widget("simple_browser_location", "about:network"),
+        text_widget("simple_browser_body", "filesystem process launch")
+    ]), "Simple Browser", "dark")
+    val window_id = _create_materialized_window(
+        shell,
+        "Simple Browser",
+        220,
+        120,
+        520,
+        320,
+        browser_tree,
+        pid,
+        resolved_app_id
+    )
     if window_id.value == 0:
-        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=zero-wid")
+        serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create_window_failed")
         return false
-    serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={resolved_app_id}")
-    shell.compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: resolved_app_id))
-    serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
-    var wm = shell.wm
-    wm.register_window_owner_with_identity(window_id, 0, pid, resolved_app_id)
-    shell.wm = wm
-    serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
-    launcher_note_window_opened(pid)
-    serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
     val compositor_windows = shell.compositor.windows_for_process(ProcessId(value: pid))
     val owned_windows = shell.wm.window_ids_for_process(pid)
     if compositor_windows.len() != 1:
@@ -487,26 +486,34 @@ impl DesktopShell:
             return false
         if name == "Simple Browser":
             serial_println("[shell] simple-browser-fallback:start pid={pid}")
-            self.apply_wm_action(WmAction(
-                kind: "create_window",
-                window_id: 0,
-                title: "Simple Browser",
-                x: 220,
-                y: 120,
-                width: 520,
-                height: 320,
-                content: "",
-                process_id: pid,
-                app_id: APP_ID_SIMPLE_BROWSER,
-                owner_port: 0,
-                src_port: 0
-            ))
-            if self.compositor.surfaces.len() == 0:
+            val resolved_app_id = "/sys/apps/simple_browser"
+            val browser_tree = build_tree_with_title(column("simple_browser_resident_main", [
+                text_widget("simple_browser_title", "Simple Browser"),
+                text_widget("simple_browser_location", "about:network"),
+                text_widget("simple_browser_body", "filesystem process launch")
+            ]), "Simple Browser", "dark")
+            serial_println("[shell] materialized-window:create:start pid={pid} title=Simple Browser app_id={resolved_app_id}")
+            var compositor = self.compositor
+            val created_window_id = compositor.create_window_with_tree("Simple Browser", 220, 120, 520, 320, browser_tree)
+            if compositor.surfaces.len() == 0:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=no-compositor-surface")
                 return false
-            val window_id = self.compositor.surfaces[self.compositor.surfaces.len() - 1].id
-            serial_println("[shell] simple-browser-fallback:surface-count pid={pid} count={self.compositor.surfaces.len()} wid={window_id.value}")
-            val compositor_windows = self.compositor.windows_for_process(ProcessId(value: pid))
+            val window_id = compositor.surfaces[compositor.surfaces.len() - 1].id
+            serial_println("[shell] materialized-window:create:end pid={pid} title=Simple Browser wid={window_id.value} created_wid={created_window_id.value}")
+            if window_id.value == 0:
+                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=zero-wid")
+                return false
+            serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={resolved_app_id}")
+            compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: resolved_app_id))
+            self.compositor = compositor
+            serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
+            var wm = self.wm
+            wm.register_window_owner_with_identity(window_id, 0, pid, resolved_app_id)
+            self.wm = wm
+            serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
+            launcher_note_window_opened(pid)
+            serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
+            val compositor_windows = compositor.windows_for_process(ProcessId(value: pid))
             val owned_windows = self.wm.window_ids_for_process(pid)
             if compositor_windows.len() != 1:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=compositor-window-count count={compositor_windows.len()} wid={window_id.value}")
@@ -517,12 +524,12 @@ impl DesktopShell:
             if self.wm.window_owner_process_id(window_id) != pid:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-pid actual={self.wm.window_owner_process_id(window_id)} wid={window_id.value}")
                 return false
-            if self.wm.window_owner_app_id(window_id) != APP_ID_SIMPLE_BROWSER:
-                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-app actual={self.wm.window_owner_app_id(window_id)} expected={APP_ID_SIMPLE_BROWSER} wid={window_id.value}")
+            if self.wm.window_owner_app_id(window_id) != resolved_app_id:
+                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=wm-owner-app actual={self.wm.window_owner_app_id(window_id)} expected={resolved_app_id} wid={window_id.value}")
                 return false
             serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=true")
-            serial_println("[simple_browser] window_created app_id={APP_ID_SIMPLE_BROWSER} wid={window_id.value} title=Simple Browser mode=filesystem-process pid={pid}")
-            serial_println("[simple_browser] page_rendered app_id={APP_ID_SIMPLE_BROWSER} wid={window_id.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
+            serial_println("[simple_browser] window_created app_id={resolved_app_id} wid={window_id.value} title=Simple Browser mode=filesystem-process pid={pid}")
+            serial_println("[simple_browser] page_rendered app_id={resolved_app_id} wid={window_id.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
             serial_println("[shell] simple-browser-fallback:end pid={pid}")
             return true
         serial_println("[shell] materialize-process:lookup-app-id:start pid={pid}")

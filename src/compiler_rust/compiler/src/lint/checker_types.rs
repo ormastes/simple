@@ -4,7 +4,7 @@ use super::super::rules::{is_bare_bool, is_primitive_type};
 use super::super::types::LintName;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node, StructDef, TraitDef, Type};
 use simple_parser::token::Span;
-use super::checker_core::{format_type, is_pure_math_function};
+use super::checker_core::{format_type, is_pure_math_function, is_pure_predicate_function};
 
 use super::LintChecker;
 
@@ -100,9 +100,16 @@ impl LintChecker {
             }
         }
 
-        // Check return type
+        // Check return type — predicate functions (is_*, has_*, can_*, etc.) with a
+        // bool return and no bool parameters are exempt from the BareBool lint on
+        // the return type only.  PrimitiveApi is still checked unconditionally.
         if let Some(ref ret_ty) = func.return_type {
-            self.check_type_in_public_api(ret_ty, func.span, &func.name, "return type");
+            if is_pure_predicate_function(func) {
+                // Skip BareBool for this return type; still run other checks.
+                self.check_type_in_public_api_skip_bare_bool(ret_ty, func.span, &func.name, "return type");
+            } else {
+                self.check_type_in_public_api(ret_ty, func.span, &func.name, "return type");
+            }
         }
 
         // Restore original config
@@ -204,9 +211,89 @@ impl LintChecker {
                     self.check_type_in_public_api(ty, param.span, &param.name, "parameter");
                 }
             }
+            // Apply predicate exemption: is_*, has_*, can_*, etc. returning bool
+            // are exempt from BareBool on the return type (same rule as check_function).
             if let Some(ref ret_ty) = method.return_type {
-                self.check_type_in_public_api(ret_ty, method.span, &method.name, "return type");
+                if is_pure_predicate_function(method) {
+                    self.check_type_in_public_api_skip_bare_bool(ret_ty, method.span, &method.name, "return type");
+                } else {
+                    self.check_type_in_public_api(ret_ty, method.span, &method.name, "return type");
+                }
             }
+        }
+    }
+
+    /// Like `check_type_in_public_api` but skips the `BareBool` diagnostic.
+    /// Used for predicate-function return types that are exempt from the bare-bool lint.
+    pub(super) fn check_type_in_public_api_skip_bare_bool(
+        &mut self,
+        ty: &Type,
+        span: Span,
+        name: &str,
+        context: &str,
+    ) {
+        use super::super::rules::is_primitive_type;
+        // BareBool is intentionally skipped here.
+        if is_primitive_type(ty) {
+            let type_name = match ty {
+                Type::Simple(n) => n.as_str(),
+                _ => "primitive",
+            };
+            self.emit(
+                LintName::PrimitiveApi,
+                span,
+                format!("bare primitive `{}` in public API {} `{}`", type_name, context, name),
+                Some(format!(
+                    "consider using a unit type or newtype wrapper instead of `{}`",
+                    type_name
+                )),
+            );
+        }
+
+        // Recursively check nested types (still suppress BareBool in nested positions
+        // since this is a return type context for a predicate).
+        match ty {
+            Type::Array { element, .. } => {
+                self.check_type_in_public_api_skip_bare_bool(element, span, name, context);
+            }
+            Type::Tuple(types) => {
+                for t in types {
+                    self.check_type_in_public_api_skip_bare_bool(t, span, name, context);
+                }
+            }
+            Type::LabeledTuple(fields) => {
+                for field in fields {
+                    self.check_type_in_public_api_skip_bare_bool(&field.ty, span, name, context);
+                }
+            }
+            Type::Generic { args, .. } => {
+                for arg in args {
+                    self.check_type_in_public_api_skip_bare_bool(arg, span, name, context);
+                }
+            }
+            Type::Function { params, ret } => {
+                for p in params {
+                    self.check_type_in_public_api_skip_bare_bool(p, span, name, context);
+                }
+                if let Some(r) = ret {
+                    self.check_type_in_public_api_skip_bare_bool(r, span, name, context);
+                }
+            }
+            Type::Optional(inner) => {
+                self.check_type_in_public_api_skip_bare_bool(inner, span, name, context);
+            }
+            Type::Union(types) => {
+                for t in types {
+                    self.check_type_in_public_api_skip_bare_bool(t, span, name, context);
+                }
+            }
+            Type::Pointer { inner, .. } => {
+                self.check_type_in_public_api_skip_bare_bool(inner, span, name, context);
+            }
+            Type::Simd { element, .. } => {
+                self.check_type_in_public_api_skip_bare_bool(element, span, name, context);
+            }
+            _ => {}
         }
     }
 

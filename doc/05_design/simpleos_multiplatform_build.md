@@ -79,6 +79,7 @@ The per-architecture console modules remain as the public HAL adapters. They kee
 - `boot_impl_kind`
 - `runtime_impl_kind`
 - `standalone_asm_policy`
+- `grandfathered_native_sources`
 
 The build/config helper layer forwards these through:
 
@@ -91,4 +92,4 @@ The build/config helper layer forwards these through:
 
 Focused unit coverage asserts the primary reduction policy for `x86_64`, `riscv64`, and `riscv32`, and also checks that the native-build facade returns the same policy.
 
-`src/os/port/native_surface_policy_verify.spl` is the regression gate for this phase. It walks the covered primary-target trees and `src/os/libc`, permits only the approved exception manifest, prints the current libc bucket inventory, and exits non-zero if a new native `.c`, `.s`, or `.S` file appears in those covered subsystems.
+`src/os/port/native_surface_policy_verify.spl` is the regression gate for this phase. It walks the covered primary-target trees and `src/os/libc`, derives the x86_64 approved boot set from the catalog plus the libc exception manifest, prints the current libc bucket inventory, and exits non-zero if a new native `.c`, `.s`, or `.S` file appears in those covered subsystems.

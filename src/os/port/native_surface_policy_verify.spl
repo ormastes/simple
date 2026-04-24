@@ -7,6 +7,11 @@
 ## exception manifest below.
 
 use std.process
+use os.port.simpleos_multiplatform_build.{
+    simpleos_platform_boot_asm_sources,
+    simpleos_platform_boot_c_sources,
+    simpleos_platform_grandfathered_native_sources
+}
 
 val COVERED_ROOTS: [text] = [
     "examples/simple_os/arch/x86_64",
@@ -18,21 +23,7 @@ val COVERED_ROOTS: [text] = [
     "src/os/libc"
 ]
 
-val APPROVED_NATIVE_SOURCES: [text] = [
-    "examples/simple_os/arch/x86_64/boot/ap_trampoline.s",
-    "examples/simple_os/arch/x86_64/boot/auto_stubs.c",
-    "examples/simple_os/arch/x86_64/boot/baremetal_stubs.c",
-    "examples/simple_os/arch/x86_64/boot/collections.c",
-    "examples/simple_os/arch/x86_64/boot/crt0.s",
-    "examples/simple_os/arch/x86_64/boot/curve25519_ring_helper.c",
-    "examples/simple_os/arch/x86_64/boot/ed25519_verify_helper.c",
-    "examples/simple_os/arch/x86_64/boot/enter_user_first.s",
-    "examples/simple_os/arch/x86_64/boot/glass_render.c",
-    "examples/simple_os/arch/x86_64/boot/hashmap.c",
-    "examples/simple_os/arch/x86_64/boot/primitives.c",
-    "examples/simple_os/arch/x86_64/boot/rt_extras.c",
-    "examples/simple_os/arch/x86_64/boot/syscall_entry.s",
-    "examples/simple_os/arch/x86_64/boot/type_stubs.c",
+val LIBC_NATIVE_SOURCES: [text] = [
     "src/os/libc/simpleos_alloc.c",
     "src/os/libc/simpleos_crt0.S",
     "src/os/libc/simpleos_cxxabi.c",
@@ -119,6 +110,20 @@ fn contains_path(paths: [text], needle: text) -> bool:
             return true
     false
 
+fn append_all(dst: [text], src: [text]) -> [text]:
+    var out = dst
+    for path in src:
+        out.push(path)
+    out
+
+fn approved_native_sources() -> [text]:
+    var approved: [text] = []
+    approved = append_all(approved, simpleos_platform_boot_c_sources("x86_64"))
+    approved = append_all(approved, simpleos_platform_boot_asm_sources("x86_64"))
+    approved = append_all(approved, simpleos_platform_grandfathered_native_sources("x86_64"))
+    approved = append_all(approved, LIBC_NATIVE_SOURCES)
+    approved
+
 fn native_sources_in_root(root: text) -> [text]:
     var out: [text] = []
     val result = process.run("find", [root, "-type", "f"])
@@ -140,8 +145,9 @@ fn collect_native_sources() -> [text]:
 
 fn unexpected_native_sources(found: [text]) -> [text]:
     var unexpected: [text] = []
+    val approved = approved_native_sources()
     for path in found:
-        if not contains_path(APPROVED_NATIVE_SOURCES, path):
+        if not contains_path(approved, path):
             unexpected.push(path)
     unexpected
 
@@ -187,6 +193,10 @@ fn print_libc_inventory(found: [text]):
             print "    {path}"
 
 fn print_policy_summary(found: [text]):
+    val x64_boot = simpleos_platform_boot_c_sources("x86_64")
+    val x64_boot_asm = simpleos_platform_boot_asm_sources("x86_64")
+    val x64_backlog = simpleos_platform_grandfathered_native_sources("x86_64")
+
     print "covered native sources: {found.len()}"
     print "covered roots:"
     for root in COVERED_ROOTS:
@@ -194,14 +204,17 @@ fn print_policy_summary(found: [text]):
 
     print ""
     print "approved entry-stub exceptions:"
-    print "  examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"
-    print "  examples/simple_os/arch/x86_64/boot/crt0.s"
+    for path in x64_boot:
+        print "  {path}"
+    for path in x64_boot_asm:
+        print "  {path}"
     print "  src/os/libc/simpleos_crt0.S"
     print "  src/os/libc/simpleos_setjmp.S"
     print "  src/os/libc/simpleos_syscall.S"
     print ""
     print "grandfathered migration backlog:"
-    print "  examples/simple_os/arch/x86_64/boot/*.{c,s}"
+    for path in x64_backlog:
+        print "  {path}"
 
 fn main():
     val found = collect_native_sources()

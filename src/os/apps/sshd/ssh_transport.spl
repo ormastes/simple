@@ -322,29 +322,37 @@ fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
 # Algorithm Negotiation
 # ============================================================================
 
-fn _first_match(client_list: text, server_list: text) -> text:
-    """Find the first algorithm in client_list that also appears in server_list.
+fn _list_contains(list: text, candidate: text) -> bool:
+    if candidate == "":
+        return false
+    if list == candidate:
+        return true
+    if list.starts_with(candidate + ","):
+        return true
+    if list.ends_with("," + candidate):
+        return true
+    list.contains("," + candidate + ",")
 
-    Both lists are comma-separated. Returns "" if no match.
-    Per RFC 4253 section 7.1, the client's list is iterated in order.
-    The live baremetal lane is fragile when splitting very long client lists,
-    so this scans the shorter server list and checks exact token membership.
-    """
+fn _first_match(client_list: text, server_list: text) -> text:
+    """Find the first algorithm in client_list that also appears in server_list."""
     var server_items = server_list.split(",")
     var si: u64 = 0
     while si < server_items.len():
         var candidate: text = server_items[si].trim()
-        if candidate != "":
-            if client_list == candidate:
-                return candidate
-            if client_list.starts_with(candidate + ","):
-                return candidate
-            if client_list.ends_with("," + candidate):
-                return candidate
-            if client_list.contains("," + candidate + ","):
-                return candidate
+        if _list_contains(client_list, candidate):
+            return candidate
         si = si + 1
+    ""
 
+fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
+    if _list_contains(client_list, "ecdsa-sha2-nistp256") and _list_contains(server_list, "ecdsa-sha2-nistp256"):
+        return "ecdsa-sha2-nistp256"
+    if _list_contains(client_list, "ssh-ed25519") and _list_contains(server_list, "ssh-ed25519"):
+        return "ssh-ed25519"
+    if _list_contains(client_list, "rsa-sha2-512") and _list_contains(server_list, "rsa-sha2-512"):
+        return "rsa-sha2-512"
+    if _list_contains(client_list, "rsa-sha2-256") and _list_contains(server_list, "rsa-sha2-256"):
+        return "rsa-sha2-256"
     ""
 
 fn _is_aes_gcm(cipher: text) -> bool:
@@ -356,22 +364,34 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     Returns the first matching algorithm for each category, following
     client preference order per RFC 4253 section 7.1.
     """
-    var kex: text = _first_match(client.kex_algorithms, server.kex_algorithms)
+    var kex: text = ""
+    if _list_contains(client.kex_algorithms, server.kex_algorithms):
+        kex = server.kex_algorithms
+    else:
+        kex = _first_match(client.kex_algorithms, server.kex_algorithms)
     if kex == "":
         serial_println("[ssh-transport] no matching kex")
         return Err("no matching kex algorithm")
 
-    var host_key: text = _first_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
+    var host_key: text = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
     if host_key == "":
         serial_println("[ssh-transport] no matching host key")
         return Err("no matching host key algorithm")
 
-    var cipher_c2s: text = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
+    var cipher_c2s: text = ""
+    if _list_contains(client.encryption_client_to_server, server.encryption_client_to_server):
+        cipher_c2s = server.encryption_client_to_server
+    else:
+        cipher_c2s = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
     if cipher_c2s == "":
         serial_println("[ssh-transport] no matching cipher c2s")
         return Err("no matching cipher (c2s)")
 
-    var cipher_s2c: text = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
+    var cipher_s2c: text = ""
+    if _list_contains(client.encryption_server_to_client, server.encryption_server_to_client):
+        cipher_s2c = server.encryption_server_to_client
+    else:
+        cipher_s2c = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
     if cipher_s2c == "":
         serial_println("[ssh-transport] no matching cipher s2c")
         return Err("no matching cipher (s2c)")
@@ -380,7 +400,10 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     if _is_aes_gcm(cipher_c2s):
         mac_c2s = "none"
     else:
-        mac_c2s = _first_match(client.mac_client_to_server, server.mac_client_to_server)
+        if _list_contains(client.mac_client_to_server, server.mac_client_to_server):
+            mac_c2s = server.mac_client_to_server
+        else:
+            mac_c2s = _first_match(client.mac_client_to_server, server.mac_client_to_server)
         if mac_c2s == "":
             serial_println("[ssh-transport] no matching mac c2s")
             return Err("no matching mac (c2s)")
@@ -389,17 +412,28 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     if _is_aes_gcm(cipher_s2c):
         mac_s2c = "none"
     else:
-        mac_s2c = _first_match(client.mac_server_to_client, server.mac_server_to_client)
+        if _list_contains(client.mac_server_to_client, server.mac_server_to_client):
+            mac_s2c = server.mac_server_to_client
+        else:
+            mac_s2c = _first_match(client.mac_server_to_client, server.mac_server_to_client)
         if mac_s2c == "":
             serial_println("[ssh-transport] no matching mac s2c")
             return Err("no matching mac (s2c)")
 
-    var comp_c2s: text = _first_match(client.compression_client_to_server, server.compression_client_to_server)
+    var comp_c2s: text = ""
+    if _list_contains(client.compression_client_to_server, server.compression_client_to_server):
+        comp_c2s = server.compression_client_to_server
+    else:
+        comp_c2s = _first_match(client.compression_client_to_server, server.compression_client_to_server)
     if comp_c2s == "":
         serial_println("[ssh-transport] no matching compression c2s")
         return Err("no matching compression (c2s)")
 
-    var comp_s2c: text = _first_match(client.compression_server_to_client, server.compression_server_to_client)
+    var comp_s2c: text = ""
+    if _list_contains(client.compression_server_to_client, server.compression_server_to_client):
+        comp_s2c = server.compression_server_to_client
+    else:
+        comp_s2c = _first_match(client.compression_server_to_client, server.compression_server_to_client)
     if comp_s2c == "":
         serial_println("[ssh-transport] no matching compression s2c")
         return Err("no matching compression (s2c)")
