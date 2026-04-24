@@ -14,6 +14,7 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_kex.{HostKeySet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
 use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
 extern fn rt_net_socket(proto: i64) -> i64
 extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
@@ -134,29 +135,29 @@ impl SshDaemon:
         # Ed25519 is now validated in the dedicated SSH self-test lane.
         # Run the same gate in the live daemon so startup failures stay
         # aligned with the validated crypto baseline.
-        serial_println("[sshd] Running Ed25519 self-test in live lane")
+        log_info("[app.sshd] " + "[sshd] Running Ed25519 self-test in live lane")
         val r_self_test = ed25519_self_test()
         if r_self_test.is_err():
             return Err("Ed25519 self-test failed in live lane")
-        serial_println("[sshd] Ed25519 self-test: PASS")
+        log_info("[app.sshd] " + "[sshd] Ed25519 self-test: PASS")
 
         # Generate host keypair (Ed25519)
         # Uses C-side Ed25519 implementation via extern fn wrappers,
         # which avoids the baremetal Cranelift codegen bugs with pure Simple
         # extended-coordinate point arithmetic.
         var seed = random_bytes(32)
-        serial_println("[sshd] Seed: {seed.len()} bytes")
+        log_info("[app.sshd] " + "[sshd] Seed: {seed.len()} bytes")
         val keypair = ed25519_keypair_from_seed(seed)
         self.host_private_key = keypair.0   # 32-byte seed
         self.host_public_key = keypair.1    # 32-byte Ed25519 public key
-        serial_println("[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
+        log_info("[app.sshd] " + "[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
 
         # The x64-ssh live lane uses the C-backed TCP runtime directly.
         # Bypass the netstack IPC shim here so SSH can come up before the
         # higher-level service loop exists in this boot profile.
         val fd = decode_net_runtime_i32(rt_net_socket(1))
         if fd < 0:
-            serial_println("[sshd] rt_net_socket failed: {fd}")
+            log_info("[app.sshd] " + "[sshd] rt_net_socket failed: {fd}")
             return Err("failed to create socket: {fd}")
         self.listen_fd = fd
 
@@ -174,7 +175,7 @@ impl SshDaemon:
             self.listen_fd = -1
             return Err("failed to listen: {listen_result}")
 
-        serial_println("[sshd] SSH daemon listening on port {self.port}")
+        log_info("[app.sshd] " + "[sshd] SSH daemon listening on port {self.port}")
         self.running = true
         self.accept_loop()
         Ok(true)
@@ -202,13 +203,13 @@ impl SshDaemon:
             rt_net_close(client_fd as i64)
             return
 
-        serial_println("[sshd] handle_connection fd={client_fd}")
+        log_info("[app.sshd] " + "[sshd] handle_connection fd={client_fd}")
 
         # Guard: host keys must have been generated in start()
         var priv_len: u64 = self.host_private_key.len()
         var pub_len: u64 = self.host_public_key.len()
         if priv_len < 1 or pub_len < 1:
-            serial_println("[sshd] FATAL: host keys not initialized (priv={priv_len} pub={pub_len})")
+            log_info("[app.sshd] " + "[sshd] FATAL: host keys not initialized (priv={priv_len} pub={pub_len})")
             rt_net_close(client_fd as i64)
             return
 

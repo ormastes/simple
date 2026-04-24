@@ -19,10 +19,11 @@
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
 use os.crypto.curve25519.{x25519, x25519_base}
-use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.rsa.{RsaSignBackend, rsa_sha256_sign_with_backend, rsa_sha512_sign_with_backend}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_bool, ssh_put_mpint, ssh_get_string, SshStringResult}
+use std.format.{format_hex}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -32,7 +33,8 @@ extern fn rt_dh_curve25519_shared_secret(handle: i64, their_pub: [u8]) -> [u8]
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
-extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
+extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
+extern fn rt_ed25519_sign_seed(seed: [u8], message: [u8]) -> [u8]
 
 # ============================================================================
 # Constants
@@ -100,6 +102,28 @@ fn _bytes_equal(a: [u8], b: [u8]) -> bool:
             return false
         i = i + 1
     true
+
+fn _reverse_bytes(data: [u8]) -> [u8]:
+    var out: [u8] = []
+    if data.len() == 0:
+        return out
+    var i: i64 = data.len().to_i64() - 1
+    while i >= 0:
+        out.push(_u8_at(data, i.to_u64()))
+        i = i - 1
+    out
+
+fn _bytes_to_hex(data: [u8]) -> text:
+    var out = ""
+    var i: u64 = 0
+    while i < data.len():
+        val piece = format_hex(_u8_at(data, i).to_i64())
+        if piece.len() == 1:
+            out = out + "0" + piece
+        else:
+            out = out + piece
+        i = i + 1
+    out
 
 fn _looks_like_baremetal_sha256_truncation(digest: [u8]) -> bool:
     if digest.len() != 32:
@@ -458,10 +482,9 @@ fn ssh_kex_compute_exchange_hash(
     except the shared secret K which is encoded as an SSH mpint.
     """
     var hash_input: [u8] = []
-    # RFC 8731 requires the raw 32-byte X25519 output to be reinterpreted as
-    # a big-endian integer for SSH mpint encoding. That means the byte string
-    # is used as-is here, not byte-reversed.
-    val shared_secret_mpint = shared_secret
+    # RFC 8731 uses the X25519 shared secret as an integer for SSH mpint
+    # encoding. X25519 emits little-endian bytes, while mpint is big-endian.
+    val shared_secret_mpint = _reverse_bytes(shared_secret)
 
     # V_C: client version string (without CR LF)
     ssh_put_text(hash_input, client_version)
@@ -486,6 +509,8 @@ fn ssh_kex_compute_exchange_hash(
 
     # K: shared secret (as mpint — big-endian with sign handling)
     ssh_put_mpint(hash_input, shared_secret_mpint)
+    log_info("[app.sshd] " + "[ssh-kex] exchange hash input len={hash_input.len()}")
+    log_info("[app.sshd] " + "[ssh-kex] exchange hash input={_bytes_to_hex(hash_input)}")
 
     _sha256_stable(hash_input)
 
@@ -506,7 +531,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     """
     # Build the initial hash input: mpint(K) || H || letter || session_id
     var input: [u8] = []
-    val shared_secret_mpint = shared_secret
+    val shared_secret_mpint = _reverse_bytes(shared_secret)
     ssh_put_mpint(input, shared_secret_mpint)
 
     var i: u64 = 0
@@ -645,11 +670,10 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
         if host_keys.ed25519_seed == nil:
             return Err("ssh-ed25519: no ed25519 seed configured")
         val seed = host_keys.ed25519_seed
-        val pubkey = _zeroed_32_bytes()
-        val rc = rt_ed25519_keypair(seed, pubkey)
-        if rc != 0:
+        val pubkey = rt_ed25519_keypair_pk(seed)
+        if pubkey.len() != 32:
             return Err("ssh-ed25519: keypair derive failed")
-        val sig_raw = ed25519_sign(seed, pubkey, exchange_hash)
+        val sig_raw = rt_ed25519_sign_seed(seed, exchange_hash)
         if sig_raw.len() == 0:
             return Err("ssh-ed25519: signing failed")
         var blob = _push_ssh_ed25519([])
@@ -659,7 +683,7 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
     elif algo == "rsa-sha2-256":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-256: no RSA key configured")
-        val sig_raw = rsa_sha256_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.PureSimple)
+        val sig_raw = rsa_sha256_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
         if sig_raw.len() == 0:
             return Err("rsa-sha2-256: signing failed")
         var blob: [u8] = []
@@ -670,7 +694,7 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
     elif algo == "rsa-sha2-512":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-512: no RSA key configured")
-        val sig_raw = rsa_sha512_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.PureSimple)
+        val sig_raw = rsa_sha512_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
         if sig_raw.len() == 0:
             return Err("rsa-sha2-512: signing failed")
         var blob: [u8] = []

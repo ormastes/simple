@@ -5992,6 +5992,30 @@ int64_t rt_ed25519_sign(int64_t msg_rv, int64_t sk_rv, int64_t sig_rv)
     return 0;
 }
 
+RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue msg_rv)
+{
+    uint32_t seed_len = 0, msg_len = 0;
+    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
+    uint8_t *msg = _ed_rv_to_bytes(msg_rv, &msg_len);
+    if (!seed || seed_len != 32) {
+        if (seed) free(seed);
+        if (msg) free(msg);
+        return NIL_VALUE;
+    }
+    uint8_t pk[32], sk[64], sig[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
+    free(seed);
+    if (msg) free(msg);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
+    a->len = 64; a->cap = 64;
+    a->items = runtime_array_inline_items(a);
+    for (int i = 0; i < 64; i++) a->items[i] = ENCODE_INT(sig[i]);
+    return ENCODE_PTR(a);
+}
+
 int64_t rt_ed25519_verify(int64_t msg_rv, int64_t pk_rv, int64_t sig_rv)
 {
     uint32_t msg_len = 0, pk_len = 0, sig_len = 0;

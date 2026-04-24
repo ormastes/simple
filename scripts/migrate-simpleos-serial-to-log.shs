@@ -3,14 +3,14 @@
 #
 # Phase-3/AC-5 deliverable. Finds every serial_{println,writeln,write,puts,putc}
 # call under src/os/ outside the driver + log-lib + early-boot exempt set,
-# and proposes a rewrite. By default runs in --dry-run mode (prints only).
+# and proposes (or applies) a rewrite.
 #
 # Usage:
 #   sh scripts/migrate-simpleos-serial-to-log.shs [--dry-run] [--apply] [--check]
 #                                                  [--verbose] [--files GLOB]
 #
 #   --dry-run     Print proposed rewrites, do not modify files (DEFAULT)
-#   --apply       Actually rewrite files. Idempotent: rerun is a no-op
+#   --apply       Mutate files in place. Idempotent (rerun is a no-op)
 #   --check       Exit 1 if any rewrite would happen (CI gate for AC-6)
 #   --verbose     Include skipped lines + reasons
 #   --files GLOB  Limit to a path glob (e.g. 'src/os/services/vfs/*.spl')
@@ -21,6 +21,7 @@
 #   serial_println(X)               -> log_info("[<scope>] " + X)
 #   serial_writeln / serial_write   -> same pattern
 #   serial_puts / serial_putc       -> verbose-flagged; manual review
+#   extern fn serial_println(msg: text)  -> deleted (klog_api import inserted)
 #
 # Exempt files:
 #   src/os/kernel/boot/kernel_entry.spl   (minimal-boot, runs before log_init)
@@ -36,6 +37,12 @@ MODE="dry-run"
 VERBOSE=0
 FILE_GLOB=""
 ANY_REWRITE=0
+TOTAL_FILES=0
+TOTAL_REWRITES=0
+TOTAL_DELETIONS=0
+TOTAL_IMPORTS=0
+
+USE_LINE='use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}'
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -44,7 +51,7 @@ while [ $# -gt 0 ]; do
         --check)   MODE="check" ;;
         --verbose) VERBOSE=1 ;;
         --files)   shift; FILE_GLOB="$1" ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
     shift
@@ -121,72 +128,104 @@ is_marker_literal() {
     return 1
 }
 
-report() {
-    # report FILE LINE ORIGINAL REWRITE
-    ANY_REWRITE=1
-    printf '%s:%s  %s\n    -> %s\n' "$1" "$2" "$3" "$4"
+has_klog_import() {
+    grep -qE '^use os\.kernel\.log\.klog_api\b' "$1" 2>/dev/null
 }
 
-apply_rewrite() {
-    # apply_rewrite FILE LINE ORIGINAL_PATTERN REWRITE_REPLACEMENT
-    # Uses sed to rewrite the matched line. Escaping left tight on purpose.
-    _file="$1"; _line="$2"; _from="$3"; _to="$4"
-    # sed expression rewrites only the exact matching line number
-    # to guard against incidental duplicates elsewhere in the file.
-    sed -i "${_line}s|${_from}|${_to}|" "$_file"
+# Build a sed program for the file. Print to stdout. Caller decides whether
+# to feed it to sed -i (apply) or display (dry-run).
+build_sed_program() {
+    _file="$1"; _scope="$2"
+    # Each operation = one sed -e clause. We build them up here.
+    # Order matters: deletions first (line numbers don't shift since we
+    # use pattern-based matches, not line numbers).
+
+    # 1. Delete `extern fn serial_println(msg: text)` lines (and other serial_* externs).
+    # Under sed -E, parens are metacharacters — escape them for literal matching.
+    printf '%s\n' '/^extern fn serial_println\(msg: text\)$/d'
+    printf '%s\n' '/^extern fn serial_writeln\(msg: text\)$/d'
+    printf '%s\n' '/^extern fn serial_write\(msg: text\)$/d'
+    printf '%s\n' '/^extern fn serial_puts\(msg: text\)$/d'
+    printf '%s\n' '/^extern fn serial_putc\(.*\)$/d'
+
+    # 2. Marker rewrites (per is_marker_literal namespaces).
+    printf '%s\n' 's/serial_println\("(\[BOOT\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_println\("(\[vfs\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_println\("(\[pack\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_println\("(\[native-verify\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_println\("(\[desktop-e2e\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_println\("(\[launcher\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[BOOT\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[vfs\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[pack\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[native-verify\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[desktop-e2e\][^"]*)"\)/log_raw_println("\1")/g'
+    printf '%s\n' 's/serial_writeln\("(\[launcher\][^"]*)"\)/log_raw_println("\1")/g'
+
+    # 3. Regular call rewrites — embed scope into the message.
+    #    (Naive [^)]* — breaks on nested parens; manual review for those.)
+    printf 's/serial_println\\(([^)]*)\\)/log_info("[%s] " + \\1)/g\n' "$_scope"
+    printf 's/serial_writeln\\(([^)]*)\\)/log_info("[%s] " + \\1)/g\n' "$_scope"
+    printf 's/serial_write\\(([^)]*)\\)/log_info("[%s] " + \\1)/g\n' "$_scope"
+    printf 's/serial_puts\\(([^)]*)\\)/log_info("[%s] " + \\1)/g\n' "$_scope"
+}
+
+# Apply (or simulate apply) the build_sed_program output to a file.
+# Also handles the import-insertion if the file gained any rewrite and
+# does not yet have the klog_api import.
+apply_to_file() {
+    _file="$1"; _scope="$2"
+    _tmp="${_file}.migrate.tmp"
+    # Run the sed program.
+    build_sed_program "$_file" "$_scope" | sed -E -f - "$_file" > "$_tmp"
+
+    # Check if the file actually changed.
+    if cmp -s "$_file" "$_tmp"; then
+        rm -f "$_tmp"
+        return 1   # no-op
+    fi
+
+    # Insert use line if missing.
+    if ! grep -qE '^use os\.kernel\.log\.klog_api\b' "$_tmp"; then
+        # Find last "use " line and insert after it. If none, insert at line 1.
+        _last_use=$(grep -nE '^use ' "$_tmp" | tail -1 | cut -d: -f1)
+        if [ -n "$_last_use" ]; then
+            sed -i "${_last_use}a ${USE_LINE}" "$_tmp"
+        else
+            sed -i "1i ${USE_LINE}" "$_tmp"
+        fi
+        TOTAL_IMPORTS=$((TOTAL_IMPORTS + 1))
+    fi
+
+    if [ "$MODE" = "apply" ]; then
+        mv "$_tmp" "$_file"
+    else
+        # Dry-run: emit a diff summary, drop the tmp.
+        _changed=$(diff -u "$_file" "$_tmp" | grep -c '^[+-][^+-]' || true)
+        echo "$_file  ($_changed line changes)"
+        if [ "$VERBOSE" = "1" ]; then
+            diff -u "$_file" "$_tmp" | head -40
+        fi
+        rm -f "$_tmp"
+    fi
+    return 0
 }
 
 process_file() {
     _file="$1"
     is_exempt "$_file" && { [ "$VERBOSE" = "1" ] && echo "SKIP exempt: $_file"; return 0; }
+    # Skip files with no candidate calls.
+    grep -qE 'serial_(println|writeln|write|puts|putc)\(' "$_file" 2>/dev/null || return 0
+    # Skip files where every candidate is already migrated (idempotency).
+    _remaining=$(grep -cE '(^|[^_a-zA-Z])serial_(println|writeln|write|puts|putc)\(' "$_file" 2>/dev/null || true)
+    if [ "${_remaining:-0}" = "0" ]; then return 0; fi
+
     _scope=$(scope_for_path "$_file")
+    TOTAL_FILES=$((TOTAL_FILES + 1))
 
-    # Track whether we need to insert the klog_api import.
-    _need_import=0
-
-    # Iterate each candidate line.
-    grep -nE 'serial_(println|writeln|write|puts|putc)\(' "$_file" 2>/dev/null | \
-    while IFS=: read -r _ln _body; do
-        _line="$_body"
-        # Skip lines that already use log_* (idempotency).
-        case "$_line" in
-            *log_info\(*|*log_warn\(*|*log_error\(*|*log_raw_println\(*|*log_raw\(*)
-                [ "$VERBOSE" = "1" ] && echo "  idempotent: $_file:$_ln" ;
-                continue ;;
-        esac
-        # Skip FN DEFINITIONS — those are the duplicate local defs, handled
-        # separately. Recognised by 'fn serial_' at start of trimmed line.
-        _trimmed=$(echo "$_line" | sed -E 's/^[[:space:]]+//')
-        case "$_trimmed" in
-            "fn serial_"*|"extern fn serial_"*)
-                [ "$VERBOSE" = "1" ] && echo "  fn-def skip (deletion pass): $_file:$_ln";
-                continue ;;
-        esac
-
-        _need_import=1
-
-        # Marker detection — literal arg starts with a known namespace.
-        if is_marker_literal "$_line"; then
-            _rewrite=$(echo "$_line" | sed -E 's/serial_(println|writeln)/log_raw_println/; s/serial_write/log_raw/')
-            report "$_file" "$_ln" "$_trimmed" "$(echo "$_rewrite" | sed -E 's/^[[:space:]]+//')"
-            continue
-        fi
-
-        # Regular line: serial_println(X) -> log_info("[scope] " + X)
-        # We embed the scope via "+" string concat rather than expanding the
-        # log lib API surface.
-        _rewrite=$(echo "$_line" | sed -E \
-            "s/serial_(println|writeln)\\((.*)\\)/log_info(\"[${_scope}] \" + \\2)/; \
-             s/serial_write\\((.*)\\)/log_info(\"[${_scope}] \" + \\1)/; \
-             s/serial_puts\\((.*)\\)/log_info(\"[${_scope}] \" + \\1)/")
-        report "$_file" "$_ln" "$_trimmed" "$(echo "$_rewrite" | sed -E 's/^[[:space:]]+//')"
-    done
-
-    # NOTE: actual --apply path is intentionally not implemented yet.
-    # Dry-run output is the deliverable this session; user reviews before
-    # sweep enters --apply mode (see state.md Phase 5 commit plan item 7).
-    if [ "$_need_import" = "1" ] && [ "$VERBOSE" = "1" ]; then
-        echo "  (would insert) use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw_println}"
+    if apply_to_file "$_file" "$_scope"; then
+        ANY_REWRITE=1
+        TOTAL_REWRITES=$((TOTAL_REWRITES + _remaining))
     fi
 }
 
@@ -201,6 +240,7 @@ find_files() {
 
 echo "# migrate-simpleos-serial-to-log.shs — mode=$MODE"
 echo "# scan root: src/os"
+echo "# import inserted: ${USE_LINE}"
 echo ""
 
 for f in $(find_files); do
@@ -208,13 +248,19 @@ for f in $(find_files); do
 done
 
 echo ""
+echo "# Summary:"
+echo "#   files touched:   $TOTAL_FILES"
+echo "#   imports added:   $TOTAL_IMPORTS"
+echo "#   call-site rewrites (approx): $TOTAL_REWRITES"
+
 if [ "$ANY_REWRITE" = "1" ]; then
     if [ "$MODE" = "check" ]; then
-        echo "FAIL: rewrites pending. Run with --dry-run to preview or --apply to mutate."
+        echo "FAIL: rewrites pending."
         exit 1
     fi
-    echo "# Summary: rewrites proposed. --apply is a no-op in this release;"
-    echo "# the sweep commit is gated on human review of this output."
+    if [ "$MODE" = "dry-run" ]; then
+        echo "# Preview only. Re-run with --apply to mutate files."
+    fi
 else
-    echo "# Summary: no rewrites pending (already migrated or empty scan)."
+    echo "# No rewrites pending (already migrated or empty scan)."
 fi

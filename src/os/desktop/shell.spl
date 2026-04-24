@@ -30,7 +30,6 @@ use os.services.launcher.launcher.{
     launcher_process_is_process_backed, MOD_META
 }
 
-extern fn serial_println(msg: text)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 use os.services.vfs.vfs_init.{g_vfs_read_file_text}
 
@@ -64,6 +63,7 @@ use os.apps.color_picker.color_picker.{ColorPickerApp}
 use os.apps.font_viewer.font_viewer.{FontViewerApp}
 use os.apps.installer_gui.installer_gui.{InstallerGuiApp}
 use os.apps.installer_gui.upgrade_gui.{UpgradeGuiApp}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 # ============================================================================
 # Desktop Shell Constants
 # ============================================================================
@@ -126,15 +126,15 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
     ))
 
 fn _register_materialized_window(shell: DesktopShell, window_id: WindowId, pid: u64, app_id: text):
-    serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={app_id}")
+    log_info("[desktop] " + "[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={app_id}")
     shell.compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: app_id))
-    serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
     var wm = shell.wm
     wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
     shell.wm = wm
-    serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
     launcher_note_window_opened(pid)
-    serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
 
 fn _create_materialized_window(
     shell: DesktopShell,
@@ -147,14 +147,14 @@ fn _create_materialized_window(
     pid: u64,
     app_id: text
 ) -> WindowId:
-    serial_println("[shell] materialized-window:create:start pid={pid} title={title} app_id={app_id}")
+    log_info("[desktop] " + "[shell] materialized-window:create:start pid={pid} title={title} app_id={app_id}")
     val returned_window_id = shell.compositor.create_window_with_tree(title, x, y, width, height, tree)
     var window_id = returned_window_id
     if shell.compositor.surfaces.len() > 0:
         val created_surface = shell.compositor.surfaces[shell.compositor.surfaces.len() - 1]
         if created_surface.title == title:
             window_id = created_surface.id
-    serial_println("[shell] materialized-window:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-window:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
     if window_id.value == 0:
         return WindowId(value: 0)
     _register_materialized_window(shell, window_id, pid, app_id)
@@ -170,17 +170,17 @@ fn _create_materialized_surface(
     pid: u64,
     app_id: text
 ) -> WindowId:
-    serial_println("[shell] materialized-surface:create:start pid={pid} title={title} app_id={app_id}")
+    log_info("[desktop] " + "[shell] materialized-surface:create:start pid={pid} title={title} app_id={app_id}")
     val returned_window_id = shell.compositor.add_surface(title, x, y, width, height)
     var window_id = returned_window_id
     val surface_count = shell.compositor.window_count()
-    serial_println("[shell] materialized-surface:create:count pid={pid} title={title} count={surface_count} returned_wid={returned_window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-surface:create:count pid={pid} title={title} count={surface_count} returned_wid={returned_window_id.value}")
     if surface_count > 0:
         val surface = shell.compositor.get_surface(returned_window_id)
         if surface != nil:
             val created_surface = surface
             window_id = created_surface.id
-    serial_println("[shell] materialized-surface:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
+    log_info("[desktop] " + "[shell] materialized-surface:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
     if window_id.value == 0:
         return WindowId(value: 0)
     _register_materialized_window(shell, window_id, pid, app_id)
@@ -222,7 +222,7 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
             ]), "Hello World", "dark")
             _create_materialized_window(shell, "Hello World", 180, 160, 380, 220, hello_tree, pid, app_id).value != 0
         case "Editor":
-            serial_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
+            log_raw_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
             val editor_smoke_path = "/EDITOR.TXT"
             val editor_smoke_content = "SimpleOS editor smoke saved from GUI"
             val editor_tree = build_tree_with_title(column("editor_resident_main", [
@@ -231,11 +231,11 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
                 text_widget("editor_resident_body", editor_smoke_content)
             ]), "Editor", "dark")
             if _create_materialized_window(shell, "Editor", 140, 100, 760, 420, editor_tree, pid, app_id).value == 0:
-                serial_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
+                log_raw_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
                 return false
-            serial_println("[desktop-e2e] editor-save:ok pid={pid} path={editor_smoke_path}")
-            serial_println("[desktop-e2e] cli-verify:ok pid={pid} path={editor_smoke_path} content={editor_smoke_content}")
-            serial_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=filesystem-process")
+            log_raw_println("[desktop-e2e] editor-save:ok pid={pid} path={editor_smoke_path}")
+            log_raw_println("[desktop-e2e] cli-verify:ok pid={pid} path={editor_smoke_path} content={editor_smoke_content}")
+            log_raw_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=filesystem-process")
             true
         case _:
             val tree = _build_app_tree(name)
@@ -295,10 +295,10 @@ impl DesktopShell:
         baremetal due to auto-stubbed WidgetNode constructors. Create a
         minimal UISession with nil tree instead.
         """
-        serial_println("[shell] new: creating minimal session (no builder DSL)...")
+        log_info("[desktop] " + "[shell] new: creating minimal session (no builder DSL)...")
         # Use nil session — the builder DSL crashes in baremetal
         val wm = WmService.new()
-        serial_println("[shell] new: WmService created")
+        log_info("[desktop] " + "[shell] new: WmService created")
 
         # Agent δ (2026-04-13): Agent V's `launcher_init()`-in-`new()`
         # workaround is reverted now that the root cause — bare-method
@@ -338,16 +338,16 @@ impl DesktopShell:
         """
         if not self.wm.initialized:
             if self.wm.init():
-                serial_println("[shell] init: wm service initialized")
+                log_info("[desktop] " + "[shell] init: wm service initialized")
             else:
-                serial_println("[shell] init: wm service init failed")
+                log_info("[desktop] " + "[shell] init: wm service init failed")
         if not self.launcher_initialized:
             launcher_init()
             _sync_launcher_registry_with_manifests()
             self.launcher_initialized = true
-            serial_println("[shell] init: launcher initialized")
-        serial_println("[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
-        serial_println("[shell] init: desktop shell initialized")
+            log_info("[desktop] " + "[shell] init: launcher initialized")
+        log_info("[desktop] " + "[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
+        log_info("[desktop] " + "[shell] init: desktop shell initialized")
 
     me update_taskbar():
         """Refresh the taskbar with current window list and clock."""
@@ -427,9 +427,9 @@ impl DesktopShell:
         val pid = launcher_launch(name)
         if _app_uses_remote_window(name):
             if pid >= 0:
-                serial_println("[shell] launch_app: waiting for remote window from {name} (PID {pid.to_u64()})")
+                log_info("[desktop] " + "[shell] launch_app: waiting for remote window from {name} (PID {pid.to_u64()})")
             else:
-                serial_println("[shell] launch_app: launcher spawn failed for {name}")
+                log_info("[desktop] " + "[shell] launch_app: launcher spawn failed for {name}")
         else:
             # Calculate cascading position
             val win_count = self.compositor.window_count()
@@ -454,7 +454,7 @@ impl DesktopShell:
                 self.wm.register_window_owner_with_identity(wid, 0, process_id, app_id)
                 launcher_note_window_opened(process_id)
             else:
-                serial_println("[shell] launch_app: launcher spawn failed for {name}, keeping local window only")
+                log_info("[desktop] " + "[shell] launch_app: launcher spawn failed for {name}, keeping local window only")
 
         # Close launcher if open
         if self.launcher_visible:
@@ -464,31 +464,31 @@ impl DesktopShell:
 
     me materialize_process_launch(name: text, pid: u64) -> bool:
         """Materialize a filesystem-created process into compositor windows."""
-        serial_println("[shell] materialize-process:start name={name} pid={pid}")
+        log_info("[desktop] " + "[shell] materialize-process:start name={name} pid={pid}")
         if pid == 0:
             return false
-        serial_println("[shell] materialize-process:lookup-app-id:start pid={pid}")
+        log_info("[desktop] " + "[shell] materialize-process:lookup-app-id:start pid={pid}")
         var app_id = launcher_get_process_app_id_for_pid(pid)
-        serial_println("[shell] materialize-process:lookup-app-id:end pid={pid} app_id={app_id}")
+        log_info("[desktop] " + "[shell] materialize-process:lookup-app-id:end pid={pid} app_id={app_id}")
         if app_id == "":
             if name == "Simple Browser":
                 app_id = "/sys/apps/simple_browser"
             else:
                 app_id = _fallback_app_id_for_name(name)
-            serial_println("[shell] materialize-process:fallback-app-id pid={pid} app_id={app_id}")
+            log_info("[desktop] " + "[shell] materialize-process:fallback-app-id pid={pid} app_id={app_id}")
         if app_id == "":
             return false
         if name == "Simple Browser":
-            serial_println("[shell] simple-browser-fallback:start pid={pid}")
+            log_info("[desktop] " + "[shell] simple-browser-fallback:start pid={pid}")
             val browser_tree = build_tree_with_title(column("simple_browser_resident_main", [
                 text_widget("simple_browser_title", "Simple Browser"),
                 text_widget("simple_browser_url", "about:network"),
                 text_widget("simple_browser_renderer", "renderer=simple_web mode=filesystem-process")
             ]), "Simple Browser", "dark")
             val wid = self.compositor.create_window_with_tree("Simple Browser", 120, 90, 920, 640, browser_tree)
-            serial_println("[shell] simple-browser-fallback:create-window pid={pid} wid={wid.value}")
+            log_info("[desktop] " + "[shell] simple-browser-fallback:create-window pid={pid} wid={wid.value}")
             if wid.value == 0:
-                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create-window wid=0")
+                log_info("[desktop] " + "[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create-window wid=0")
                 return false
             self.compositor.set_window_identity(wid, ProcessId(value: pid), AppId(value: app_id))
             self.wm.shadow_window_id = wid.value
@@ -497,10 +497,10 @@ impl DesktopShell:
             self.wm.shadow_app_id = app_id
             self.wm.shadow_active = true
             launcher_note_window_opened(pid)
-            serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=true wid={wid.value}")
-            serial_println("[simple_browser] window_created app_id={app_id} wid={wid.value} title=Simple Browser mode=filesystem-process pid={pid}")
-            serial_println("[simple_browser] page_rendered app_id={app_id} wid={wid.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
-            serial_println("[shell] simple-browser-fallback:end pid={pid}")
+            log_info("[desktop] " + "[shell] simple-browser-fallback:create-result pid={pid} created=true wid={wid.value}")
+            log_info("[desktop] " + "[simple_browser] window_created app_id={app_id} wid={wid.value} title=Simple Browser mode=filesystem-process pid={pid}")
+            log_info("[desktop] " + "[simple_browser] page_rendered app_id={app_id} wid={wid.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
+            log_info("[desktop] " + "[shell] simple-browser-fallback:end pid={pid}")
             return true
         _materialize_launch_fallback(self, name, pid, app_id)
 
@@ -561,16 +561,16 @@ impl DesktopShell:
                     if launcher_app_id != "":
                         app_id = launcher_app_id
                 if action.title == "Simple Browser":
-                    serial_println("[shell] create_window:start pid={action.process_id} src_port={action.src_port} app_id={app_id}")
+                    log_info("[desktop] " + "[shell] create_window:start pid={action.process_id} src_port={action.src_port} app_id={app_id}")
                 val wid = self.compositor.create_remote_window(
                     action.title, action.x, action.y,
                     action.width, action.height, action.owner_port)
                 if action.title == "Simple Browser":
-                    serial_println("[shell] create_window:created pid={action.process_id} wid={wid.value}")
+                    log_info("[desktop] " + "[shell] create_window:created pid={action.process_id} wid={wid.value}")
                 # Preserve launcher/WM identity at the shell boundary.
                 self.compositor.set_window_identity(wid, action.process_id, app_id)
                 if action.title == "Simple Browser":
-                    serial_println("[shell] create_window:identity pid={action.process_id} wid={wid.value}")
+                    log_info("[desktop] " + "[shell] create_window:identity pid={action.process_id} wid={wid.value}")
                 self.wm.register_window_owner_with_identity(
                     wid,
                     action.owner_port,
@@ -578,14 +578,14 @@ impl DesktopShell:
                     app_id
                 )
                 if action.title == "Simple Browser":
-                    serial_println("[shell] create_window:wm-owner pid={action.process_id} wid={wid.value}")
+                    log_info("[desktop] " + "[shell] create_window:wm-owner pid={action.process_id} wid={wid.value}")
                 if action.process_id > 0:
                     launcher_note_window_opened(action.process_id)
                 if action.src_port > 0:
                     if action.title == "Simple Browser":
-                        serial_println("[shell] create_window:reply pid={action.process_id} wid={wid.value} dst_port={action.src_port}")
+                        log_info("[desktop] " + "[shell] create_window:reply pid={action.process_id} wid={wid.value} dst_port={action.src_port}")
                     self.wm.send_create_reply(action.src_port, wid)
-                serial_println("[shell] Created window {wid} for port {action.src_port}: '{action.title}'")
+                log_info("[desktop] " + "[shell] Created window {wid} for port {action.src_port}: '{action.title}'")
             "create_web_window":
                 # Wave 3 apply-side: treat a web-window exactly like a
                 # regular window for placement / ownership; the rect is
@@ -611,7 +611,7 @@ impl DesktopShell:
                     launcher_note_window_opened(action.process_id)
                 if action.src_port > 0:
                     self.wm.send_create_reply(action.src_port, web_wid)
-                serial_println("[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
+                log_info("[desktop] " + "[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
             "destroy_window":
                 val process_id = self.wm.window_owner_process_id(action.window_id)
                 self.compositor.destroy_window(action.window_id)
@@ -619,7 +619,7 @@ impl DesktopShell:
                 if process_id > 0:
                     launcher_note_window_closed(process_id)
                 self.wm.send_status_reply(action.src_port, 0)
-                serial_println("[shell] Destroyed window {action.window_id}")
+                log_info("[desktop] " + "[shell] Destroyed window {action.window_id}")
             "focus":
                 self.compositor.focus_window(action.window_id)
                 self.wm.send_status_reply(action.src_port, 0)
@@ -645,7 +645,7 @@ impl DesktopShell:
                 val tree = _build_remote_tree(action.window_id, action.content)
                 self.compositor.update_window_tree(action.window_id, tree)
                 self.wm.send_status_reply(action.src_port, 0)
-                serial_println("[shell] Applied tree update for window {action.window_id}")
+                log_info("[desktop] " + "[shell] Applied tree update for window {action.window_id}")
             _:
                 pass_dn
 
@@ -655,7 +655,7 @@ impl DesktopShell:
         WORKAROUND: Simplified for baremetal — no taskbar updates,
         no WM IPC, no launcher shortcuts. Just input + render.
         """
-        serial_println("[shell] entering event loop...")
+        log_info("[desktop] " + "[shell] entering event loop...")
         self.compositor.running = true
         while self.compositor.running:
             self.drain_wm_actions()
@@ -677,9 +677,9 @@ impl DesktopShell:
             self.launcher_initialized = true
         val pid = launcher_launch(name)
         if pid >= 0:
-            serial_println("[shell] launched (baremetal): {name} pid={pid}")
+            log_info("[desktop] " + "[shell] launched (baremetal): {name} pid={pid}")
         else:
-            serial_println("[shell] launcher launch failed for {name}, keeping overlay-only window")
+            log_info("[desktop] " + "[shell] launcher launch failed for {name}, keeping overlay-only window")
         if not _contains_text(self.baremetal_apps, name):
             self.baremetal_apps = self.baremetal_apps.push(name)
 
@@ -691,7 +691,7 @@ impl DesktopShell:
         no widget tree, no builder DSL. The compositor still polls
         input so Esc/Alt-F4 continue to work.
         """
-        serial_println("[shell] entering baremetal event loop...")
+        log_info("[desktop] " + "[shell] entering baremetal event loop...")
         self.compositor.running = true
         val screen_w = self.compositor.screen_width
         val screen_h = self.compositor.screen_height
@@ -767,7 +767,7 @@ impl DesktopShell:
         val row = selected
         val window_ids = self.wm.window_ids_for_process(row.pid)
         if window_ids.len() == 0:
-            serial_println("[shell] focus_selected_process: pid {row.pid} has no owned windows")
+            log_info("[desktop] " + "[shell] focus_selected_process: pid {row.pid} has no owned windows")
             return
         self.compositor.focus_window(window_ids[0])
 
@@ -777,7 +777,7 @@ impl DesktopShell:
             return
         val row = selected
         if launcher_terminate(row.pid):
-            serial_println("[shell] terminate_selected_process: pid {row.pid}")
+            log_info("[desktop] " + "[shell] terminate_selected_process: pid {row.pid}")
 
     me relaunch_selected_process(baremetal: bool):
         val selected = _selected_process_row(self.selected_process_idx)
@@ -831,7 +831,7 @@ impl DesktopShell:
                 self.compositor.destroy_window(window_id)
                 self.wm.remove_owner(window_id)
             if reaped_count > 0 or row.windows > 0:
-                serial_println("[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")
+                log_info("[desktop] " + "[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")
 
 # ============================================================================
 # Baremetal Overlay (direct Engine2D, no WidgetNode DSL)
@@ -988,11 +988,11 @@ fn _build_taskbar_tree(window_titles: [text], clock: text) -> UITree:
     Layout: [App Button | Window List ... | Clock | System Tray]
     """
     # App launcher button
-    serial_println("[taskbar] creating launcher button...")
+    log_info("[desktop] " + "[taskbar] creating launcher button...")
     var launcher_btn = button("taskbar_launcher", "Apps", "launcher")
-    serial_println("[taskbar] launcher button created, setting width...")
+    log_info("[desktop] " + "[taskbar] launcher button created, setting width...")
     launcher_btn = with_width(launcher_btn, 60)
-    serial_println("[taskbar] launcher button width set")
+    log_info("[desktop] " + "[taskbar] launcher button width set")
 
     # Window list buttons
     var window_buttons: [WidgetNode] = []

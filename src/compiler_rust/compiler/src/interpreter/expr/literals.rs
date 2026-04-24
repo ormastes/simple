@@ -279,6 +279,28 @@ pub(super) fn eval_literal_expr(
             if let Some(val) = global_val {
                 return Ok(Some(val));
             }
+            // Last-chance unit lookup: a bare lowercase identifier like
+            // `kmph` may refer to a registered unit symbol used as a type
+            // annotation. If the catalog entry exists and a matching
+            // PascalCase class is in scope, return that constructor so the
+            // type machinery resolves naturally. See `crate::units::registry`.
+            crate::units::ensure_loaded();
+            if crate::units::lookup(name).is_some() {
+                let pascal: String = {
+                    let mut chars = name.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                    }
+                };
+                if classes.contains_key(&pascal) {
+                    return Ok(Some(Value::Constructor { class_name: pascal }));
+                }
+                // No PascalCase class loaded; surface a Symbol so downstream
+                // type-coercion can still recognise it as a unit reference.
+                return Ok(Some(Value::Symbol(name.clone())));
+            }
+
             // Collect all known names for typo suggestion
             let known_names: Vec<&str> = env
                 .keys()

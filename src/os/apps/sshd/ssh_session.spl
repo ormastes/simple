@@ -16,11 +16,11 @@ use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
 use os.apps.shell.shell_app.{ShellApp}
 use std.format.{format_hex}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
-extern fn serial_println(msg: text)
-extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
+extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
-extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
@@ -73,9 +73,8 @@ fn _bytes_to_hex(data: [u8]) -> text:
 fn _ed25519_public_key_from_seed(seed: [u8]?) -> [u8]:
     if seed == nil:
         return []
-    val pk = _zeroed_32_bytes()
-    val rc = rt_ed25519_keypair(seed, pk)
-    if rc != 0:
+    val pk = rt_ed25519_keypair_pk(seed)
+    if pk.len() != 32:
         return []
     pk
 
@@ -153,7 +152,7 @@ impl SshSession:
 
     me run():
         """Main session loop. Drives the SSH protocol state machine."""
-        serial_println("[sshd-session] start")
+        log_info("[app.sshd] " + "[sshd-session] start")
         if not self.do_version_exchange():
             return
 
@@ -174,7 +173,7 @@ impl SshSession:
 
     me do_version_exchange() -> bool:
         """Exchange SSH version strings (RFC 4253 section 4.2)."""
-        serial_println("[sshd-session] version exchange")
+        log_info("[app.sshd] " + "[sshd-session] version exchange")
         # Send our version string
         val our_version = ssh_build_version_string()
         self.raw_send(our_version)
@@ -188,14 +187,14 @@ impl SshSession:
             return false
 
         if not client_version.starts_with("SSH-2.0-"):
-            serial_println("[sshd-session] invalid version text={client_version}")
+            log_info("[app.sshd] " + "[sshd-session] invalid version text={client_version}")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
             return false
 
         self.client_version = client_version
-        serial_println("[sshd-session] version parsed text={self.client_version}")
-        serial_println("[sshd-session] version parsed len={self.client_version.len()}")
-        serial_println("[sshd-session] version exchange ok")
+        log_info("[app.sshd] " + "[sshd-session] version parsed text={self.client_version}")
+        log_info("[app.sshd] " + "[sshd-session] version parsed len={self.client_version.len()}")
+        log_info("[app.sshd] " + "[sshd-session] version exchange ok")
         self.state = SessionState.KexInit
         true
 
@@ -205,7 +204,7 @@ impl SshSession:
 
     me do_kex() -> bool:
         """Perform key exchange (curve25519-sha256)."""
-        serial_println("[sshd-session] kex start")
+        log_info("[app.sshd] " + "[sshd-session] kex start")
         # Send our KEXINIT — advertise algorithms available in our host key set
         val server_kexinit = ssh_build_kexinit_for_host_keys(self.host_keys)
         self.server_kexinit_payload = server_kexinit
@@ -213,9 +212,9 @@ impl SshSession:
 
         # Receive client KEXINIT
         val client_payload = self.recv_packet_payload()
-        serial_println("[sshd-session] client kexinit received")
+        log_info("[app.sshd] " + "[sshd-session] client kexinit received")
         if client_payload.len() == 0:
-            serial_println("[sshd-session] client kexinit missing")
+            log_info("[app.sshd] " + "[sshd-session] client kexinit missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
             return false
         self.client_kexinit_payload = client_payload
@@ -223,42 +222,45 @@ impl SshSession:
         # Parse client KEXINIT
         val r_client_kex = ssh_parse_kexinit(client_payload)
         if r_client_kex.is_err():
-            serial_println("[sshd-session] client kexinit parse err")
+            log_info("[app.sshd] " + "[sshd-session] client kexinit parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
             return false
         val client_kex = r_client_kex.unwrap()
-        serial_println("[sshd-session] client kexinit parsed")
+        log_info("[app.sshd] " + "[sshd-session] client kexinit parsed")
+        log_info("[app.sshd] " + "[sshd-session] client kexinit hex={_bytes_to_hex(client_payload)}")
 
         # Parse our own KEXINIT (for negotiation)
         val r_server_kex = ssh_parse_kexinit(server_kexinit)
         val server_kex = r_server_kex.unwrap()
-        serial_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
-        serial_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
+        log_info("[app.sshd] " + "[sshd-session] client kex list={client_kex.kex_algorithms}")
+        log_info("[app.sshd] " + "[sshd-session] server kex list={server_kex.kex_algorithms}")
+        log_info("[app.sshd] " + "[sshd-session] server kexinit hex={_bytes_to_hex(server_kexinit)}")
 
         # Negotiate algorithms
         val r_algos = ssh_negotiate_algorithms(client_kex, server_kex)
         if r_algos.is_err():
-            serial_println("[sshd-session] algo negotiation failed")
+            log_info("[app.sshd] " + "[sshd-session] algo negotiation failed")
             self.disconnect(3, "algorithm negotiation failed")
             return false
         val algos_early = r_algos.unwrap()
-        serial_println("[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
+        log_info("[app.sshd] " + "[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
 
         # Receive KEX_ECDH_INIT (client's ephemeral public key)
         val kex_init_payload = self.recv_packet_payload()
-        serial_println("[sshd-session] client ecdh init received")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh init received")
         if kex_init_payload.len() == 0:
-            serial_println("[sshd-session] client ecdh init missing")
+            log_info("[app.sshd] " + "[sshd-session] client ecdh init missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
             return false
 
         val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
         if r_client_pub.is_err():
-            serial_println("[sshd-session] client ecdh init parse err")
+            log_info("[app.sshd] " + "[sshd-session] client ecdh init parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
             return false
         val client_public = r_client_pub.unwrap()
-        serial_println("[sshd-session] client ecdh pub len={client_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh pub len={client_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh pub={_bytes_to_hex(client_public)}")
 
         # Generate our ephemeral keypair
         val server_private = ssh_kex_generate_private_key()
@@ -267,11 +269,12 @@ impl SshSession:
         } else {
             []
         }
-        serial_println("[sshd-session] server ecdh priv len={server_private.len()} pub len={server_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] server ecdh priv len={server_private.len()} pub len={server_public.len()}")
         if server_public.len() != 32:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 public failed")
             return false
-        serial_println("[sshd-session] server ecdh pub len={server_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] server ecdh pub len={server_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] server ecdh pub={_bytes_to_hex(server_public)}")
 
         # Compute shared secret
         val shared_secret = if server_private.len() == 32 and client_public.len() == 32 {
@@ -282,14 +285,16 @@ impl SshSession:
         if shared_secret.len() != 32:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 shared failed")
             return false
-        serial_println("[sshd-session] shared secret len={shared_secret.len()}")
+        log_info("[app.sshd] " + "[sshd-session] shared secret len={shared_secret.len()}")
+        log_info("[app.sshd] " + "[sshd-session] shared secret={_bytes_to_hex(shared_secret)}")
 
         # Resolve negotiated algorithms — needed now for host-key-blob type
         val negotiated_hk_algo = algos_early.host_key
 
         # Build host key blob for the negotiated algorithm
         val host_key_blob = _build_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys)
-        serial_println("[sshd-session] host key algo={negotiated_hk_algo} blob len={host_key_blob.len()}")
+        log_info("[app.sshd] " + "[sshd-session] host key algo={negotiated_hk_algo} blob len={host_key_blob.len()}")
+        log_info("[app.sshd] " + "[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
 
         # Compute exchange hash
         val exchange_hash = ssh_kex_compute_exchange_hash(
@@ -302,7 +307,7 @@ impl SshSession:
             server_public,
             shared_secret
         )
-        serial_println("[sshd-session] exchange hash len={exchange_hash.len()}")
+        log_info("[app.sshd] " + "[sshd-session] exchange hash len={exchange_hash.len()}")
 
         # Session ID is the first exchange hash
         if self.session_id.len() == 0:
@@ -311,23 +316,23 @@ impl SshSession:
         # Sign the exchange hash with the appropriate host key
         val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
         if r_sig.is_err():
-            serial_println("[sshd-session] host key signing err")
+            log_info("[app.sshd] " + "[sshd-session] host key signing err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
             return false
         val sig_blob = r_sig.unwrap()
-        serial_println("[sshd-session] sig blob len={sig_blob.len()}")
+        log_info("[app.sshd] " + "[sshd-session] sig blob len={sig_blob.len()}")
         if negotiated_hk_algo == "ssh-ed25519":
             val sig_pubkey = _extract_ed25519_pubkey(host_key_blob)
             val sig_raw = _unwrap_ssh_signature(sig_blob)
-            val sig_verify = rt_ed25519_verify(sig_pubkey, exchange_hash, sig_raw)
-            serial_println("[sshd-session] sig self-verify rc={sig_verify} pub len={sig_pubkey.len()} raw len={sig_raw.len()}")
-            serial_println("[sshd-session] sig self-verify pub={_bytes_to_hex(sig_pubkey)}")
-            serial_println("[sshd-session] sig self-verify hash={_bytes_to_hex(exchange_hash)}")
-            serial_println("[sshd-session] sig self-verify raw={_bytes_to_hex(sig_raw)}")
+            val sig_verify = rt_ed25519_verify(exchange_hash, sig_pubkey, sig_raw)
+            log_info("[app.sshd] " + "[sshd-session] sig self-verify rc={sig_verify} pub len={sig_pubkey.len()} raw len={sig_raw.len()}")
+            log_info("[app.sshd] " + "[sshd-session] sig self-verify pub={_bytes_to_hex(sig_pubkey)}")
+            log_info("[app.sshd] " + "[sshd-session] sig self-verify hash={_bytes_to_hex(exchange_hash)}")
+            log_info("[app.sshd] " + "[sshd-session] sig self-verify raw={_bytes_to_hex(sig_raw)}")
 
         # Send KEX_ECDH_REPLY
         val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob)
-        serial_println("[sshd-session] kex reply len={reply.len()}")
+        log_info("[app.sshd] " + "[sshd-session] kex reply len={reply.len()}")
         self.send_packet(reply)
 
         # Send NEWKEYS
@@ -347,8 +352,8 @@ impl SshSession:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return false
         self.cipher.activate(keys, self.recv_seq, self.send_seq)
-        serial_println("[sshd-session] cipher activated: c2s_seq={self.recv_seq} s2c_seq={self.send_seq}")
-        serial_println("[sshd-session] kex ok")
+        log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq={self.recv_seq} s2c_seq={self.send_seq}")
+        log_info("[app.sshd] " + "[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
         true
@@ -359,7 +364,7 @@ impl SshSession:
 
     me do_service_request() -> bool:
         """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
-        serial_println("[sshd-session] service request")
+        log_info("[app.sshd] " + "[sshd-session] service request")
         val payload = self.recv_packet_payload()
         if payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
@@ -372,7 +377,7 @@ impl SshSession:
                 if service == "ssh-userauth":
                     val accept = ssh_build_service_accept("ssh-userauth")
                     self.send_packet(accept)
-                    serial_println("[sshd-session] service request ok")
+                    log_info("[app.sshd] " + "[sshd-session] service request ok")
                     return true
 
             self.disconnect(7, "service not available")
@@ -386,7 +391,7 @@ impl SshSession:
 
     me do_auth() -> bool:
         """Handle authentication requests. Loops until success or max attempts."""
-        serial_println("[sshd-session] auth")
+        log_info("[app.sshd] " + "[sshd-session] auth")
         var attempts: u32 = 0
 
         # Send banner
@@ -424,7 +429,7 @@ impl SshSession:
                     self.authenticated_user = req.username
                     val success = ssh_build_auth_success()
                     self.send_packet(success)
-                    serial_println("[sshd-session] auth ok")
+                    log_info("[app.sshd] " + "[sshd-session] auth ok")
                     self.state = SessionState.Interactive
                     return true
                 else:
@@ -446,7 +451,7 @@ impl SshSession:
                     self.authenticated_user = req.username
                     val success = ssh_build_auth_success()
                     self.send_packet(success)
-                    serial_println("[sshd-session] auth ok (keyboard-interactive)")
+                    log_info("[app.sshd] " + "[sshd-session] auth ok (keyboard-interactive)")
                     self.state = SessionState.Interactive
                     return true
                 else:
@@ -475,7 +480,7 @@ impl SshSession:
                     elif req.key_algo == "ssh-ed25519":
                         # Ed25519 blob: string "ssh-ed25519" + string raw_pubkey (32 bytes)
                         val raw_pubkey = _extract_ed25519_pubkey(req.key_blob)
-                        val vr = rt_ed25519_verify(raw_pubkey, signed_data, raw_sig)
+                        val vr = rt_ed25519_verify(signed_data, raw_pubkey, raw_sig)
                         verified = vr == 1
                     else:
                         verified = false
@@ -486,7 +491,7 @@ impl SshSession:
                             self.authenticated_user = req.username
                             val success = ssh_build_auth_success()
                             self.send_packet(success)
-                            serial_println("[sshd-session] auth ok (publickey)")
+                            log_info("[app.sshd] " + "[sshd-session] auth ok (publickey)")
                             self.state = SessionState.Interactive
                             return true
                         else:
@@ -518,7 +523,7 @@ impl SshSession:
         Main loop: receive packets, dispatch by message type.
         Simultaneously forwards data between PTY and SSH channel.
         """
-        serial_println("[sshd-session] interactive")
+        log_info("[app.sshd] " + "[sshd-session] interactive")
         while self.state == SessionState.Interactive:
             # Check for data from the interactive shell before blocking on input.
             self._forward_shell_output()
@@ -893,9 +898,9 @@ impl SshSession:
             # runtime socket ring to avoid SPL-side buffering corruption.
             val payload = rt_net_recv_ssh_plain_packet_payload(self.socket_fd as i64)
             if payload.len() == 0:
-                serial_println("[sshd-session] plaintext incomplete")
+                log_info("[app.sshd] " + "[sshd-session] plaintext incomplete")
                 return []
-            serial_println("[sshd-session] plaintext packet ok")
+            log_info("[app.sshd] " + "[sshd-session] plaintext packet ok")
             self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
             return payload
 
@@ -944,7 +949,7 @@ impl SshSession:
 
     me disconnect(reason: u32, description: text):
         """Send SSH_MSG_DISCONNECT and close the session."""
-        serial_println("[sshd-session] disconnect reason={reason} description={description}")
+        log_info("[app.sshd] " + "[sshd-session] disconnect reason={reason} description={description}")
         val msg = ssh_build_disconnect(reason, description)
         self.send_packet(msg)
         self.state = SessionState.Closed

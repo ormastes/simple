@@ -150,8 +150,12 @@ thread_local! {
 
 /// Get the process-wide registry, building it on first use.
 pub fn ensure_loaded() -> &'static UnitRegistry {
+    let dbg = std::env::var("SIMPLE_UNIT_REGISTRY_DEBUG").is_ok();
     let reg = GLOBAL.get_or_init(|| {
         let root = find_unit_tree_root();
+        if dbg {
+            eprintln!("[unit-registry] init: root = {:?}", root);
+        }
         match root {
             Some(p) => build_from_unit_tree(&p).unwrap_or_else(|err| {
                 eprintln!("[unit-registry] scan failed at {}: {}", p.display(), err);
@@ -160,6 +164,9 @@ pub fn ensure_loaded() -> &'static UnitRegistry {
             None => UnitRegistry::new(),
         }
     });
+    if dbg {
+        eprintln!("[unit-registry] ensure_loaded called; entries={}", reg.entries.len());
+    }
     populate_thread_local_state(reg);
     reg
 }
@@ -187,52 +194,96 @@ pub fn populate_thread_local_state(reg: &UnitRegistry) {
     };
     use crate::interpreter_unit::Dimension;
 
-    // family-name -> { suffix -> scale_to_base }
+    // The existing dimension-analysis machinery in `interpreter_unit.rs` keys
+    // dimensions by family name (e.g. `Dimension::base("length")` → `{length:
+    // 1}`), and the lowercase form is what user `unit length:` declarations
+    // register. We mirror that convention here: kind strings from `static fn
+    // kind()` are normalised to lowercase before being used as family names
+    // and dimension keys. This also resolves the AC-4 PascalCase/lowercase
+    // mismatch noted in the design doc.
+
+    // family-name (lowercase) -> { suffix -> scale_to_base }
     let mut by_family: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    // suffix -> family-name
+    // suffix -> family-name (lowercase)
     let mut by_suffix: HashMap<String, String> = HashMap::new();
-    // family-name -> Dimension
+    // family-name (lowercase) -> Dimension keyed by family-name
     let mut family_dims: HashMap<String, Dimension> = HashMap::new();
-    // composite-suffix -> Dimension
+    // composite-suffix -> Dimension keyed by family-name
     let mut compound_dims: HashMap<String, Dimension> = HashMap::new();
-    // base-suffix -> family-name (for SI prefix decomposition: "m" -> "Length")
+    // base-suffix -> family-name (for SI prefix decomposition: "m" -> "length")
     let mut si_bases: HashMap<String, String> = HashMap::new();
+
+    // First sweep: build base-unit-symbol -> family-name (lowercase) so the
+    // composite pass can translate dims like `{m: 1, s: -1}` into
+    // `{length: 1, time: -1}`.
+    let mut base_symbol_to_family: HashMap<String, String> = HashMap::new();
+    for entry in reg.entries.values() {
+        if entry.dimensions.len() == 1 && (entry.scale_to_base - 1.0).abs() < f64::EPSILON {
+            // This is the canonical base unit for its family.
+            let family = entry.kind.to_ascii_lowercase();
+            base_symbol_to_family
+                .entry(entry.symbol.clone())
+                .or_insert(family);
+        }
+    }
 
     for entry in reg.entries.values() {
         if entry.kind.is_empty() {
             continue;
         }
-        by_suffix.entry(entry.symbol.clone()).or_insert_with(|| entry.kind.clone());
+        let family = entry.kind.to_ascii_lowercase();
+        by_suffix.entry(entry.symbol.clone()).or_insert_with(|| family.clone());
         by_family
-            .entry(entry.kind.clone())
+            .entry(family.clone())
             .or_default()
             .insert(entry.symbol.clone(), entry.scale_to_base);
 
-        let dim = Dimension {
-            exponents: entry.dimensions.clone(),
-        };
-        // A unit is "composite" if its dimension signature has more than one
-        // component, OR if its scale_to_base != 1.0 against a single base
-        // whose name differs from its own symbol (rare). Default heuristic
-        // suffices: more than one dimension component => compound.
-        if entry.dimensions.len() > 1 {
-            compound_dims.insert(entry.symbol.clone(), dim.clone());
-        } else if entry.dimensions.len() == 1 {
-            // Atomic unit. Record the family's canonical base dimension if not
-            // yet recorded. The first 1.0-scale entry per family is taken as
-            // canonical.
+        // Translate base-symbol-keyed dims to family-name-keyed dims.
+        let mut translated: HashMap<String, i32> = HashMap::new();
+        for (base_sym, exp) in &entry.dimensions {
+            let key = base_symbol_to_family
+                .get(base_sym)
+                .cloned()
+                .unwrap_or_else(|| base_sym.clone());
+            *translated.entry(key).or_insert(0) += *exp;
+        }
+        translated.retain(|_, v| *v != 0);
+        let dim = Dimension { exponents: translated };
+
+        if dim.exponents.len() > 1 {
+            // Composite — record its dimension signature so dimension-lookup
+            // can find it by signature (e.g. {length:1, time:-1} → "kmph").
+            compound_dims.insert(entry.symbol.clone(), dim);
+        } else if dim.exponents.len() == 1 {
+            // Atomic unit — record the canonical base dimension for the
+            // family if not yet present.
             family_dims
-                .entry(entry.kind.clone())
-                .or_insert_with(|| dim.clone());
-            // Track base-unit suffix → family for SI-prefix decomposition.
+                .entry(family.clone())
+                .or_insert_with(|| Dimension::base(&family));
             if (entry.scale_to_base - 1.0).abs() < f64::EPSILON {
-                si_bases.entry(entry.symbol.clone()).or_insert_with(|| entry.kind.clone());
+                si_bases.entry(entry.symbol.clone()).or_insert(family);
             }
         }
     }
 
     // Merge into the thread-locals. Existing entries (planted by user `use
     // unit.*` module evaluation) win — we only fill gaps.
+    let dbg = std::env::var("SIMPLE_UNIT_REGISTRY_DEBUG").is_ok();
+    if dbg {
+        eprintln!(
+            "[unit-registry] seed: {} suffixes, {} families, {} compound, {} si_bases",
+            by_suffix.len(),
+            by_family.len(),
+            compound_dims.len(),
+            si_bases.len(),
+        );
+        if let Some(v) = by_family.get("velocity") {
+            eprintln!("[unit-registry] velocity family conversions: {:?}", v);
+        }
+        if let Some(v) = compound_dims.get("kmph") {
+            eprintln!("[unit-registry] kmph compound dim: {:?}", v.exponents);
+        }
+    }
     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
         let mut map = cell.borrow_mut();
         for (k, v) in by_suffix {

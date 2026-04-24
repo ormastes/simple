@@ -35,8 +35,8 @@ use os.drivers.virtio.virtio_gpu_types.{
 }
 use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 use os.userlib.device.{DeviceDmaDescriptor, DMA_CACHE_COHERENT}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
-extern fn serial_println(msg: text)
 extern fn rt_alloc(size: u64) -> u64
 extern fn rt_memory_barrier()
 extern fn rt_mmio_read_u32(addr: u64) -> u32
@@ -298,10 +298,10 @@ impl VirtioGpuDriver:
         """
         # -- Step 1: Detect BAR type and set up access --
         self.notif_id = grant.irq_notification_id
-        serial_println("[virtio-gpu] grant bar0=0x{grant.bar0_phys} bar0_cap={grant.bar0_cap}")
+        log_info("[virtio] " + "[virtio-gpu] grant bar0=0x{grant.bar0_phys} bar0_cap={grant.bar0_cap}")
 
         if grant.bar0_cap != 1 and (grant.bar0_phys & 1) == 0 and self.try_map_modern_pci_caps(grant):
-            serial_println("[virtio-gpu] using modern virtio-pci capabilities")
+            log_info("[virtio] " + "[virtio-gpu] using modern virtio-pci capabilities")
 
             self.modern_write8(MODERN_COMMON_DEVICE_STATUS, 0)
             self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)
@@ -309,7 +309,7 @@ impl VirtioGpuDriver:
 
             self.modern_write32(MODERN_COMMON_DEVICE_FEATURE_SELECT, 0)
             val host_features = self.modern_read32(MODERN_COMMON_DEVICE_FEATURE)
-            serial_println("[virtio-gpu] modern host_features=0x{host_features}")
+            log_info("[virtio] " + "[virtio-gpu] modern host_features=0x{host_features}")
             self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 0)
             self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 0)        # no GPU features in word 0
             self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 1)
@@ -326,7 +326,7 @@ impl VirtioGpuDriver:
             if val Err(msg) = ctrl_result:
                 self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_FAILED)
                 return Err("Controlq setup failed: {msg}")
-            serial_println("[virtio-gpu] Controlq ready (modern size={self.ctrl_queue_size})")
+            log_info("[virtio] " + "[virtio-gpu] Controlq ready (modern size={self.ctrl_queue_size})")
 
             val ok_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
             self.modern_write8(MODERN_COMMON_DEVICE_STATUS, ok_status)
@@ -343,19 +343,19 @@ impl VirtioGpuDriver:
                 return Err("Response buffer DMA alloc failed")
             self.resp_buf_virt = resp_dma.unwrap_virt()
             self.resp_buf_phys = resp_dma.unwrap_device()
-            serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
+            log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
 
             val display_result = self.cmd_get_display_info()
             if display_result.is_err():
                 return Err("GET_DISPLAY_INFO failed")
-            serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+            log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
 
             self.resource_id = 1
             self.next_resource_id = 2
             val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
             if create_result.is_err():
                 return Err("RESOURCE_CREATE_2D failed")
-            serial_println("[virtio-gpu] Resource {self.resource_id} created")
+            log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
 
             self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
             val fb_dma = self.alloc_dma(self.fb_size)
@@ -363,22 +363,22 @@ impl VirtioGpuDriver:
                 return Err("Framebuffer DMA alloc failed")
             self.fb_virt = fb_dma.unwrap_virt()
             self.fb_phys = fb_dma.unwrap_device()
-            serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
+            log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
 
             self.clear(0x00000000)
 
             val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
             if attach_result.is_err():
                 return Err("RESOURCE_ATTACH_BACKING failed")
-            serial_println("[virtio-gpu] Backing attached")
+            log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
             val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
             if scanout_result.is_err():
                 return Err("SET_SCANOUT failed")
-            serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+            log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
 
             self.initialized = true
-            serial_println("[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA (modern)")
+            log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA (modern)")
             return Ok(true)
 
         if (grant.bar0_phys & 1) != 0:
@@ -386,7 +386,7 @@ impl VirtioGpuDriver:
             self.is_io_bar = true
             self.bar0_port = (grant.bar0_phys & 0xFFFC).to_u16()
             self.bar0_virt = 0
-            serial_println("[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
+            log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
         else:
             # Memory-mapped BAR: map via syscall 83
             self.is_io_bar = false
@@ -395,7 +395,7 @@ impl VirtioGpuDriver:
                 return Err("MapBar failed: error {bar_result}")
             self.bar0_virt = bar_result as u64
             self.bar0_port = 0
-            serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
+            log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
 
         # -- Step 2: Reset and negotiate features --
         self.write_status(0)
@@ -406,7 +406,7 @@ impl VirtioGpuDriver:
         # legacy PCI transport/register model, so it does not negotiate any
         # optional feature bits yet.
         val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
-        serial_println("[virtio-gpu] host_features=0x{host_features}")
+        log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
         self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
 
         # -- Step 3: Set up controlq (queue 0) --
@@ -414,7 +414,7 @@ impl VirtioGpuDriver:
         if val Err(msg) = ctrl_result:
             self.write_status(STATUS_FAILED)
             return Err("Controlq setup failed: {msg}")
-        serial_println("[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
+        log_info("[virtio] " + "[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
 
         # -- Step 4: Set DRIVER_OK (must be set before sending commands) --
         val ok_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK
@@ -432,13 +432,13 @@ impl VirtioGpuDriver:
             return Err("Response buffer DMA alloc failed")
         self.resp_buf_virt = resp_dma.unwrap_virt()
         self.resp_buf_phys = resp_dma.unwrap_device()
-        serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
+        log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
 
         # -- Step 6: GET_DISPLAY_INFO --
         val display_result = self.cmd_get_display_info()
         if display_result.is_err():
             return Err("GET_DISPLAY_INFO failed")
-        serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+        log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
 
         # -- Step 7: RESOURCE_CREATE_2D --
         self.resource_id = 1
@@ -446,7 +446,7 @@ impl VirtioGpuDriver:
         val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
         if create_result.is_err():
             return Err("RESOURCE_CREATE_2D failed")
-        serial_println("[virtio-gpu] Resource {self.resource_id} created")
+        log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
 
         # -- Step 8: Allocate framebuffer and ATTACH_BACKING --
         self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
@@ -455,7 +455,7 @@ impl VirtioGpuDriver:
             return Err("Framebuffer DMA alloc failed")
         self.fb_virt = fb_dma.unwrap_virt()
         self.fb_phys = fb_dma.unwrap_device()
-        serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
+        log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
 
         # Zero the framebuffer
         self.clear(0x00000000)
@@ -463,16 +463,16 @@ impl VirtioGpuDriver:
         val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
         if attach_result.is_err():
             return Err("RESOURCE_ATTACH_BACKING failed")
-        serial_println("[virtio-gpu] Backing attached")
+        log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
         # -- Step 9: SET_SCANOUT --
         val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
         if scanout_result.is_err():
             return Err("SET_SCANOUT failed")
-        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
 
         self.initialized = true
-        serial_println("[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
+        log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
         Ok(true)
 
     me init_legacy_from_bar0(bar0_phys: u64, bar0_size: u64, notif_id: u64) -> Result<bool, text>:
@@ -482,13 +482,13 @@ impl VirtioGpuDriver:
         DeviceGrant ABI issue where fields after pci_subclass arrive as zero.
         """
         self.notif_id = notif_id
-        serial_println("[virtio-gpu] scalar legacy bar0=0x{bar0_phys}")
+        log_info("[virtio] " + "[virtio-gpu] scalar legacy bar0=0x{bar0_phys}")
 
         if (bar0_phys & 1) != 0:
             self.is_io_bar = true
             self.bar0_port = (bar0_phys & 0xFFFC).to_u16()
             self.bar0_virt = 0
-            serial_println("[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
+            log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
         else:
             self.is_io_bar = false
             val bar_result = syscall(83, bar0_phys, bar0_size, 0, 0, 0)
@@ -496,21 +496,21 @@ impl VirtioGpuDriver:
                 return Err("MapBar failed: error {bar_result}")
             self.bar0_virt = bar_result as u64
             self.bar0_port = 0
-            serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
+            log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
 
         self.write_status(0)
         self.write_status(STATUS_ACKNOWLEDGE)
         self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
 
         val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
-        serial_println("[virtio-gpu] host_features=0x{host_features}")
+        log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
         self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
 
         val ctrl_result = self.setup_controlq()
         if val Err(msg) = ctrl_result:
             self.write_status(STATUS_FAILED)
             return Err("Controlq setup failed: {msg}")
-        serial_println("[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
+        log_info("[virtio] " + "[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
 
         self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK)
 
@@ -525,19 +525,19 @@ impl VirtioGpuDriver:
             return Err("Response buffer DMA alloc failed")
         self.resp_buf_virt = resp_dma.unwrap_virt()
         self.resp_buf_phys = resp_dma.unwrap_device()
-        serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
+        log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
 
         val display_result = self.cmd_get_display_info()
         if display_result.is_err():
             return Err("GET_DISPLAY_INFO failed")
-        serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+        log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
 
         self.resource_id = 1
         self.next_resource_id = 2
         val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
         if create_result.is_err():
             return Err("RESOURCE_CREATE_2D failed")
-        serial_println("[virtio-gpu] Resource {self.resource_id} created")
+        log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
 
         self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
         val fb_dma = self.alloc_dma(self.fb_size)
@@ -545,22 +545,22 @@ impl VirtioGpuDriver:
             return Err("Framebuffer DMA alloc failed")
         self.fb_virt = fb_dma.unwrap_virt()
         self.fb_phys = fb_dma.unwrap_device()
-        serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
+        log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
 
         self.clear(0x00000000)
 
         val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
         if attach_result.is_err():
             return Err("RESOURCE_ATTACH_BACKING failed")
-        serial_println("[virtio-gpu] Backing attached")
+        log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
         val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
         if scanout_result.is_err():
             return Err("SET_SCANOUT failed")
-        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
 
         self.initialized = true
-        serial_println("[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
+        log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
         Ok(true)
 
     me try_map_modern_pci_caps(grant: DeviceGrant) -> bool:
@@ -569,7 +569,7 @@ impl VirtioGpuDriver:
         val cmd_enabled = cmd_raw | 0x00000006
         if cmd_enabled != cmd_raw:
             pci_write_config(grant.pci_bus, grant.pci_dev, grant.pci_func, 0x04, cmd_enabled)
-            serial_println("[virtio-gpu] enabled PCI memory+bus-master cmd=0x{cmd_enabled}")
+            log_info("[virtio] " + "[virtio-gpu] enabled PCI memory+bus-master cmd=0x{cmd_enabled}")
 
         val cap_ptr0 = self.pci_cfg_read8(grant, 0x34)
         var cap_ptr = cap_ptr0
@@ -582,20 +582,20 @@ impl VirtioGpuDriver:
                 val offset = self.pci_cfg_read32(grant, cap_ptr + 8)
                 val length = self.pci_cfg_read32(grant, cap_ptr + 12)
                 val bar_phys = self.pci_bar_phys(grant, bar)
-                serial_println("[virtio-gpu] cap cfg_type={cfg_type} bar={bar} bar_phys=0x{bar_phys} off=0x{offset} len=0x{length}")
+                log_info("[virtio] " + "[virtio-gpu] cap cfg_type={cfg_type} bar={bar} bar_phys=0x{bar_phys} off=0x{offset} len=0x{length}")
                 if bar_phys != 0 and length > 0:
                     # These capability windows sit inside the same page-aligned
                     # BAR aperture. Use bitwise OR instead of `+` here: this
                     # lane has shown corrupted large-address addition results
                     # when composing BAR4 phys bases with small page offsets.
                     val mapped = bar_phys | offset.to_u64()
-                    serial_println("[virtio-gpu] cap mapped=0x{mapped}")
+                    log_info("[virtio] " + "[virtio-gpu] cap mapped=0x{mapped}")
                     if mapped != 0:
                         if cfg_type == VIRTIO_PCI_CAP_COMMON_CFG:
                             self.modern_common_virt = mapped
                             val probe_feat = mmio_read32(mapped + 4)
                             val probe_qsize = mmio_read16(mapped + MODERN_COMMON_QUEUE_SIZE)
-                            serial_println("[virtio-gpu] common probe feat=0x{probe_feat} qsize=0x{probe_qsize}")
+                            log_info("[virtio] " + "[virtio-gpu] common probe feat=0x{probe_feat} qsize=0x{probe_qsize}")
                         elif cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG:
                             self.modern_notify_virt = mapped
                             self.modern_notify_multiplier = self.pci_cfg_read32(grant, cap_ptr + 16)
@@ -607,7 +607,7 @@ impl VirtioGpuDriver:
 
         self.is_modern_pci = self.modern_common_virt != 0 and self.modern_notify_virt != 0
         if self.is_modern_pci:
-            serial_println("[virtio-gpu] modern caps common=0x{self.modern_common_virt} notify=0x{self.modern_notify_virt} isr=0x{self.modern_isr_virt} mult={self.modern_notify_multiplier}")
+            log_info("[virtio] " + "[virtio-gpu] modern caps common=0x{self.modern_common_virt} notify=0x{self.modern_notify_virt} isr=0x{self.modern_isr_virt} mult={self.modern_notify_multiplier}")
         self.is_modern_pci
 
     me setup_controlq_modern() -> Result<bool, text>:
@@ -615,7 +615,7 @@ impl VirtioGpuDriver:
         val num_queues = self.modern_read16(0x12)
         val queue_select_echo = self.modern_read16(MODERN_COMMON_QUEUE_SELECT)
         val max_size = self.modern_read16(MODERN_COMMON_QUEUE_SIZE)
-        serial_println("[virtio-gpu] modern controlq probe: num_queues={num_queues} queue_select={queue_select_echo} queue_size_reg={max_size} notify_mult={self.modern_notify_multiplier}")
+        log_info("[virtio] " + "[virtio-gpu] modern controlq probe: num_queues={num_queues} queue_select={queue_select_echo} queue_size_reg={max_size} notify_mult={self.modern_notify_multiplier}")
         if max_size == 0:
             return Err("Controlq not available")
 
@@ -658,14 +658,14 @@ impl VirtioGpuDriver:
         self.ctrl_desc_idx = 0
         self.ctrl_last_used = 0
 
-        serial_println("[virtio-gpu] controlq layout desc=0x{self.ctrl_desc_phys} avail=0x{self.ctrl_avail_phys} used=0x{self.ctrl_used_phys}")
+        log_info("[virtio] " + "[virtio-gpu] controlq layout desc=0x{self.ctrl_desc_phys} avail=0x{self.ctrl_avail_phys} used=0x{self.ctrl_used_phys}")
         self.modern_write32(MODERN_COMMON_QUEUE_DESC_LO, (self.ctrl_desc_phys & 0xFFFFFFFF).to_u32())
         self.modern_write32(MODERN_COMMON_QUEUE_DESC_HI, (self.ctrl_desc_phys >> 32).to_u32())
         self.modern_write32(MODERN_COMMON_QUEUE_AVAIL_LO, (self.ctrl_avail_phys & 0xFFFFFFFF).to_u32())
         self.modern_write32(MODERN_COMMON_QUEUE_AVAIL_HI, (self.ctrl_avail_phys >> 32).to_u32())
         self.modern_write32(MODERN_COMMON_QUEUE_USED_LO, (self.ctrl_used_phys & 0xFFFFFFFF).to_u32())
         self.modern_write32(MODERN_COMMON_QUEUE_USED_HI, (self.ctrl_used_phys >> 32).to_u32())
-        serial_println("[virtio-gpu] controlq regs desc_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_DESC_LO)} avail_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_AVAIL_LO)} used_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_USED_LO)}")
+        log_info("[virtio] " + "[virtio-gpu] controlq regs desc_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_DESC_LO)} avail_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_AVAIL_LO)} used_lo=0x{self.modern_read32(MODERN_COMMON_QUEUE_USED_LO)}")
         self.modern_write16(MODERN_COMMON_QUEUE_ENABLE, 1)
         Ok(true)
 
@@ -714,7 +714,7 @@ impl VirtioGpuDriver:
             self.modern_write16(MODERN_COMMON_QUEUE_SELECT, queue_idx)
             val notify_off = self.modern_read16(MODERN_COMMON_QUEUE_NOTIFY_OFF).to_u64()
             val addr = rt_virtio_notify_addr(self.modern_notify_virt, notify_off, self.modern_notify_multiplier.to_u64())
-            serial_println("[virtio-gpu] notify addr=0x{addr} off={notify_off} mult={self.modern_notify_multiplier} q={queue_idx}")
+            log_info("[virtio] " + "[virtio-gpu] notify addr=0x{addr} off={notify_off} mult={self.modern_notify_multiplier} q={queue_idx}")
             rt_virtio_notify_write16(self.modern_notify_virt, notify_off, self.modern_notify_multiplier.to_u64(), queue_idx.to_u64())
         else:
             self.write_reg16(VIRTIO_PCI_QUEUE_NOTIFY, queue_idx)
@@ -730,7 +730,7 @@ impl VirtioGpuDriver:
 
         # Read max queue size
         val max_size = self.read_reg16(VIRTIO_PCI_QUEUE_SIZE)
-        serial_println("[virtio-gpu] controlq probe: io_bar={self.is_io_bar} queue_size_reg={max_size}")
+        log_info("[virtio] " + "[virtio-gpu] controlq probe: io_bar={self.is_io_bar} queue_size_reg={max_size}")
         if max_size == 0:
             return Err("Controlq not available")
 
@@ -893,10 +893,10 @@ impl VirtioGpuDriver:
         val ring_slot_readback = ram_read16(ring_slot)
         ram_write16_raw(self.ctrl_avail_virt + 2, (avail_idx + 1).to_u64())
         val avail_idx_after = ram_read16(self.ctrl_avail_virt + 2)
-        serial_println("[virtio-gpu] desc d0 addr=0x{self.cmd_buf_phys} len={cmd_size} tail=0x{ram_read32(d0_off + 12)}")
-        serial_println("[virtio-gpu] desc d1 addr=0x{self.resp_buf_phys} len={resp_size} tail=0x{ram_read32(d1_off + 12)}")
-        serial_println("[virtio-gpu] avail slot=0x{ring_slot} wrote={d0} readback={ring_slot_readback} idx_before={avail_idx} idx_after={avail_idx_after}")
-        serial_println("[virtio-gpu] used idx before notify={ram_read16(self.ctrl_used_virt + 2)}")
+        log_info("[virtio] " + "[virtio-gpu] desc d0 addr=0x{self.cmd_buf_phys} len={cmd_size} tail=0x{ram_read32(d0_off + 12)}")
+        log_info("[virtio] " + "[virtio-gpu] desc d1 addr=0x{self.resp_buf_phys} len={resp_size} tail=0x{ram_read32(d1_off + 12)}")
+        log_info("[virtio] " + "[virtio-gpu] avail slot=0x{ring_slot} wrote={d0} readback={ring_slot_readback} idx_before={avail_idx} idx_after={avail_idx_after}")
+        log_info("[virtio] " + "[virtio-gpu] used idx before notify={ram_read16(self.ctrl_used_virt + 2)}")
 
         # Notify device (controlq = queue 0)
         val d0_desc_lo = ram_read32(d0_off)
@@ -912,23 +912,23 @@ impl VirtioGpuDriver:
         val avail_ring0 = ram_read16(self.ctrl_avail_virt + 4)
         val used_flags = ram_read16(self.ctrl_used_virt)
         val used_hdr_idx = ram_read16(self.ctrl_used_virt + 2)
-        serial_println("[virtio-gpu] pre-notify desc[d0] lo=0x{d0_desc_lo} hi=0x{d0_desc_hi} len={d0_desc_len} flags=0x{d0_desc_flags}")
-        serial_println("[virtio-gpu] pre-notify desc[d1] lo=0x{d1_desc_lo} hi=0x{d1_desc_hi} len={d1_desc_len} flags=0x{d1_desc_flags}")
-        serial_println("[virtio-gpu] pre-notify avail flags=0x{avail_flags} idx={avail_hdr_idx} ring0={avail_ring0}")
-        serial_println("[virtio-gpu] pre-notify used flags=0x{used_flags} idx={used_hdr_idx}")
-        serial_println("[virtio-gpu] send_command notify d0={d0} d1={d1} avail_idx={avail_idx} cmd_phys=0x{self.cmd_buf_phys} resp_phys=0x{self.resp_buf_phys}")
+        log_info("[virtio] " + "[virtio-gpu] pre-notify desc[d0] lo=0x{d0_desc_lo} hi=0x{d0_desc_hi} len={d0_desc_len} flags=0x{d0_desc_flags}")
+        log_info("[virtio] " + "[virtio-gpu] pre-notify desc[d1] lo=0x{d1_desc_lo} hi=0x{d1_desc_hi} len={d1_desc_len} flags=0x{d1_desc_flags}")
+        log_info("[virtio] " + "[virtio-gpu] pre-notify avail flags=0x{avail_flags} idx={avail_hdr_idx} ring0={avail_ring0}")
+        log_info("[virtio] " + "[virtio-gpu] pre-notify used flags=0x{used_flags} idx={used_hdr_idx}")
+        log_info("[virtio] " + "[virtio-gpu] send_command notify d0={d0} d1={d1} avail_idx={avail_idx} cmd_phys=0x{self.cmd_buf_phys} resp_phys=0x{self.resp_buf_phys}")
         # Barrier: ensure avail ring write is visible before doorbell write
         rt_memory_barrier()
         self.notify_queue(VIRTIO_GPU_CONTROLQ)
-        serial_println("[virtio-gpu] send_command notified")
+        log_info("[virtio] " + "[virtio-gpu] send_command notified")
 
         # Poll used ring for completion
         val used_idx = rt_wait_u16_change(self.ctrl_used_virt + 2, self.ctrl_last_used.to_u64(), 2000000)
         if used_idx != self.ctrl_last_used.to_u64():
             self.ctrl_last_used = used_idx.to_u16()
-            serial_println("[virtio-gpu] send_command complete used_idx={used_idx}")
+            log_info("[virtio] " + "[virtio-gpu] send_command complete used_idx={used_idx}")
         else:
-            serial_println("[virtio-gpu] send_command timeout")
+            log_info("[virtio] " + "[virtio-gpu] send_command timeout")
 
         # Acknowledge ISR
         val isr = self.read_isr()
@@ -952,15 +952,15 @@ impl VirtioGpuDriver:
         """
         self._write_ctrl_hdr(0x0100)
         if ram_read32(self.cmd_buf_virt) == 0x0100 and ram_read32(self.cmd_buf_virt + 4) == 0:
-            serial_println("[virtio-gpu] GET_DISPLAY_INFO hdr-ok")
+            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO hdr-ok")
         else:
-            serial_println("[virtio-gpu] GET_DISPLAY_INFO hdr-bad")
-        serial_println("[virtio-gpu] GET_DISPLAY_INFO submit")
+            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO hdr-bad")
+        log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO submit")
         val resp_type = self._send_command(24, 408)
-        serial_println("[virtio-gpu] GET_DISPLAY_INFO resp_type=0x{resp_type}")
+        log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO resp_type=0x{resp_type}")
 
         if resp_type != 0x1101:
-            serial_println("[virtio-gpu] GET_DISPLAY_INFO error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO error: resp=0x{resp_type}")
             return Err("GET_DISPLAY_INFO failed (resp=0x{resp_type})")
 
         # SYS-GUI-008 QEMU baseline currently relies on the default virtio-gpu
@@ -980,7 +980,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(40, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
             return Err("RESOURCE_CREATE_2D failed")
         Ok(true)
 
@@ -994,7 +994,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
             return Err("RESOURCE_ATTACH_BACKING failed")
         Ok(true)
 
@@ -1009,7 +1009,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
             return Err("SET_SCANOUT failed")
         Ok(true)
 
@@ -1027,7 +1027,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(40, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
             return Err("RESOURCE_CREATE_2D failed")
         Ok(true)
 
@@ -1050,7 +1050,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
             return Err("RESOURCE_ATTACH_BACKING failed")
         Ok(true)
 
@@ -1070,7 +1070,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(48, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
             return Err("SET_SCANOUT failed")
         Ok(true)
 
@@ -1086,7 +1086,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(32, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] DETACH_BACKING error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] DETACH_BACKING error: resp=0x{resp_type}")
             return Err("RESOURCE_DETACH_BACKING failed")
         Ok(true)
 
@@ -1102,7 +1102,7 @@ impl VirtioGpuDriver:
 
         val resp_type = self._send_command(32, 24)
         if resp_type != 0x1100:
-            serial_println("[virtio-gpu] RESOURCE_UNREF error: resp=0x{resp_type}")
+            log_info("[virtio] " + "[virtio-gpu] RESOURCE_UNREF error: resp=0x{resp_type}")
             return Err("RESOURCE_UNREF failed")
         Ok(true)
 

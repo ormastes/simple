@@ -2,29 +2,31 @@
 
 ## Summary
 
-After the live build lane was hardened to require a fresh
-`build/os/simpleos_ssh_live_32.elf`, the QEMU login spec advanced to the real
-runtime KEX failure inside the guest.
-
-The remaining blocker is server ephemeral key generation for the live SSH lane:
-`ssh_kex_public_from_private` does not currently yield a valid 32-byte `Q_S`
-for the baremetal guest.
+The original live-lane blocker in this note is fixed. The remaining defect is
+now narrower and later in the SSH handshake: OpenSSH still aborts after
+`SSH_MSG_KEX_ECDH_REPLY`, but the guest now produces valid 32-byte X25519
+values, a full 32-byte exchange hash, and a standard-valid Ed25519 signature
+over the guest-computed exchange hash.
 
 ## Symptom
 
-Fresh live kernel boot succeeds and reaches SSH KEX, then the guest disconnects:
+Fresh live kernel boot now reaches host-key signing, sends
+`SSH_MSG_KEX_ECDH_REPLY`, and OpenSSH aborts with:
 
 ```text
-[sshd-session] client ecdh pub len=32
-[sshd-session] disconnect reason=5236088 description=server X25519 public failed
+ssh_dispatch_run_fatal: Connection to 127.0.0.1 port 2299: incorrect signature
 ```
 
-Two attempted implementations were observed during this pass:
+Current live serial evidence on the Cranelift x64 guest:
 
-- pure `x25519_base(private)` in the guest:
-  allocates until `[PANIC] heap exhausted`
-- handle-based hosted DH FFI:
-  not usable in the baremetal guest path, returning no valid 32-byte public key
+- `server ecdh priv len=32 pub len=32`
+- `shared secret len=32`
+- `exchange hash len=32`
+- `sig self-verify rc=1 pub len=32 raw len=64`
+
+The emitted Ed25519 signature also verifies off-guest with OpenSSL against the
+guest-logged public key and exchange hash, so the remaining mismatch is in the
+SSH exchange-hash inputs seen by OpenSSH rather than in Ed25519 signing itself.
 
 ## Reproduction
 
@@ -37,17 +39,18 @@ for the current `[boot] Build marker: ...` line.
 
 ## Impact
 
-- Blocks the live `curve25519-sha256` reply path before `Q_S`, `H`, and the
-  Ed25519 signature can be fully validated against OpenSSH
-- Prevents password-authenticated OpenSSH login in the `x64-ssh` QEMU lane
-- Leaves the hosted transcript/signature regressions green, but the live guest
-  still fails before authentication
+- Blocks password-authenticated OpenSSH login in the `x64-ssh` QEMU lane
+- Prevents `simpleos_guest_toolchain_live_spec` from moving past SSH login
+- Leaves the runtime/X25519/SHA/Ed25519 primitive fixes in place, but the live
+  guest still disagrees with OpenSSH on the KEX exchange hash inputs
 
 ## Current Status
 
 - Fresh-artifact build gate: fixed
 - Live guest reaches real KEX path: fixed
 - Baremetal runtime X25519 helper path (`rt_tls13_x25519_*`) now returns stable 32-byte arrays for both fixed and random scalars in the native-built x64 guest probe.
-- The remaining live-lane blocker has moved past KEX public-key generation: OpenSSH now aborts with `incorrect signature` after the guest sends `SSH_MSG_KEX_ECDH_REPLY`.
+- Baremetal SHA-256 truncation in the live lane: fixed via runtime fallback path
+- Baremetal Ed25519 host-key signing path now uses direct runtime return-value helpers and produces signatures that verify both in-guest and off-guest.
+- The remaining live-lane blocker has moved past KEX public-key generation and past host-key signing itself: OpenSSH still aborts with `incorrect signature` after the guest sends `SSH_MSG_KEX_ECDH_REPLY`.
 - Server X25519 public key derivation in baremetal guest: fixed for the runtime helper path used by the live SSH lane
-- Next blocker: post-KEX exchange-hash / host-key-signature correctness
+- Next blocker: post-KEX exchange-hash input mismatch between the guest and OpenSSH

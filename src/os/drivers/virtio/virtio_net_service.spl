@@ -20,8 +20,8 @@ use os.userlib.syscall_raw.{syscall}
 use os.async.os_waker.{OsWaker}
 use os.async.os_poll.{OsPoll}
 use os.async.os_future.{OsFuture}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
-extern fn serial_println(msg: text)
 
 # ============================================================================
 # IPC Method IDs
@@ -54,24 +54,24 @@ fn virtio_net_service_start(grant: DeviceGrant):
     Initializes the VirtIO-net driver from the given DeviceGrant,
     creates an IPC port, and enters the service dispatch loop.
     """
-    serial_println("[virtio-net-svc] Starting network service...")
+    log_info("[virtio] " + "[virtio-net-svc] Starting network service...")
 
     val init_result = driver.init_from_grant(grant)
     if init_result.is_err():
-        serial_println("[virtio-net-svc] Driver init failed")
+        log_info("[virtio] " + "[virtio-net-svc] Driver init failed")
         return
 
-    serial_println("[virtio-net-svc] Driver initialized, MAC={driver.mac_string()}")
+    log_info("[virtio] " + "[virtio-net-svc] Driver initialized, MAC={driver.mac_string()}")
 
     # Create IPC port for "net0" service
     val port_result = syscall(22, 0, 0, 0, 0, 0)
     if port_result < 0:
-        serial_println("[virtio-net-svc] FATAL: Failed to create IPC port (error {port_result})")
+        log_info("[virtio] " + "[virtio-net-svc] FATAL: Failed to create IPC port (error {port_result})")
         return
 
     val port_handle = port_result as u64
     service_ready = true
-    serial_println("[virtio-net-svc] Service ready on IPC port (handle={port_handle})")
+    log_info("[virtio] " + "[virtio-net-svc] Service ready on IPC port (handle={port_handle})")
 
     # Enter service loop
     net_service_loop(port_handle)
@@ -90,16 +90,16 @@ fn net_service_loop(port_handle: u64):
 
     Responses are written back via IPC reply (syscall 20).
     """
-    serial_println("[virtio-net-svc] Entering service loop...")
+    log_info("[virtio] " + "[virtio-net-svc] Entering service loop...")
 
     while true:
         # Block on IPC receive (syscall 21 = IpcRecv)
         val msg_result = syscall(21, port_handle, 0, 0, 0, 0)
         if msg_result < 0:
-            serial_println("[virtio-net-svc] IPC recv error: {msg_result}")
+            log_info("[virtio] " + "[virtio-net-svc] IPC recv error: {msg_result}")
             continue
 
-        serial_println("[virtio-net-svc] Received request (raw={msg_result})")
+        log_info("[virtio] " + "[virtio-net-svc] Received request (raw={msg_result})")
 
         # IpcMessage layout (@repr("C")):
         #   offset  0: src_port: u64
@@ -144,7 +144,7 @@ fn net_service_loop(port_handle: u64):
                 val ret = handle_send_async(frame_virt, frame_phys, frame_len)
                 syscall(20, sender_task, 0, ret as u64, 0, 0)
             _:
-                serial_println("[virtio-net-svc] Unknown method ID: {method_id}")
+                log_info("[virtio] " + "[virtio-net-svc] Unknown method ID: {method_id}")
                 syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
 # ============================================================================
@@ -165,7 +165,7 @@ fn handle_send_frame(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
         return -1
     val result = driver.send_frame(frame_virt, frame_phys, frame_len)
     if result.is_err():
-        serial_println("[virtio-net-svc] Send failed")
+        log_info("[virtio] " + "[virtio-net-svc] Send failed")
         return -1
     0
 
@@ -254,7 +254,7 @@ fn handle_send_async(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
 
     val future_result = driver.send_frame_async(frame_virt, frame_phys, frame_len)
     if future_result.is_err():
-        serial_println("[virtio-net-svc] Async send setup failed: {future_result.unwrap_err()}")
+        log_info("[virtio] " + "[virtio-net-svc] Async send setup failed: {future_result.unwrap_err()}")
         return -1
     pending_sends.push(future_result.unwrap())
     val handle = next_send_handle

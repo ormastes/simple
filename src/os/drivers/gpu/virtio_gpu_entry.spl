@@ -14,8 +14,8 @@ use os.drivers.virtio.virtio_gpu_types.{VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM}
 use os.drivers.gpu.gpu_accel.{set_gpu_accel_supported_from_driver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_write32}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
-extern fn serial_println(msg: text)
 
 # ============================================================================
 # Helper — build a DeviceGrant from a discovered PciDevice
@@ -29,7 +29,7 @@ fn grant_from_pci(dev: PciDevice) -> DeviceGrant:
     # If BAR0 is unassigned (0), try BAR1 (modern VirtIO on q35)
     if bar0_phys == 0:
         bar0_phys = (dev.bar1 & 0xFFFFFFF0).to_u64()
-    serial_println("[grant] bar0={dev.bar0} bar1={dev.bar1} using=0x{bar0_phys}")
+    log_info("[gpu] " + "[grant] bar0={dev.bar0} bar1={dev.bar1} using=0x{bar0_phys}")
 
     # BAR size: write all-ones, read back, mask, complement + 1
     # For simplicity, assume 4KB for legacy PCI I/O BAR
@@ -109,12 +109,12 @@ fn draw_test_pattern(gpu: VirtioGpuDriver):
 
 fn gpu_test_main():
     """Standalone GPU test: scan PCI, init driver, draw pattern, flush."""
-    serial_println("[gpu-test] VirtIO-GPU test entry starting")
+    log_info("[gpu] " + "[gpu-test] VirtIO-GPU test entry starting")
 
     # Step 1: Scan PCI bus
     var pci = PciBus.new()
     pci.scan()
-    serial_println("[gpu-test] PCI scan complete: {pci.device_count()} devices found")
+    log_info("[gpu] " + "[gpu-test] PCI scan complete: {pci.device_count()} devices found")
 
     # Step 2: Find VirtIO-GPU device
     #   VirtIO vendor = 0x1AF4
@@ -131,32 +131,32 @@ fn gpu_test_main():
             gpu_dev = disp00[0]
 
     if val Some(found_dev) = gpu_dev:
-        serial_println("[gpu-test] Found GPU: {found_dev.description()}")
+        log_info("[gpu] " + "[gpu-test] Found GPU: {found_dev.description()}")
 
         # Step 3: Build DeviceGrant and init driver
         val grant = grant_from_pci(found_dev)
         var gpu = VirtioGpuDriver.new()
         if val Ok(_ok) = gpu.init_from_grant(grant):
-            serial_println("[gpu-test] GPU driver initialized: {gpu.get_width()}x{gpu.get_height()}")
+            log_info("[gpu] " + "[gpu-test] GPU driver initialized: {gpu.get_width()}x{gpu.get_height()}")
 
             # Wire the gpu_accel feature flag + glass_render.c mirror.
             # Safe in the standalone test too — glass_render's C globals
             # live in the same boot image and any subsequent rt_gui_*
             # calls will see the flag set.
             set_gpu_accel_supported_from_driver(gpu)
-            serial_println("[gpu-test] gpu_accel feature flag ON")
+            log_info("[gpu] " + "[gpu-test] gpu_accel feature flag ON")
 
             # Step 4: Draw test pattern
-            serial_println("[gpu-test] Drawing test pattern...")
+            log_info("[gpu] " + "[gpu-test] Drawing test pattern...")
             draw_test_pattern(gpu)
 
             # Step 5: Transfer to host and flush
             gpu.flush()
 
-            serial_println("GPU TEST PATTERN VISIBLE")
+            log_info("[gpu] " + "GPU TEST PATTERN VISIBLE")
         else:
-            serial_println("[gpu-test] GPU init failed")
+            log_info("[gpu] " + "[gpu-test] GPU init failed")
     else:
-        serial_println("NO VIRTIO-GPU FOUND")
+        log_info("[gpu] " + "NO VIRTIO-GPU FOUND")
 
-    serial_println("[gpu-test] Test entry complete")
+    log_info("[gpu] " + "[gpu-test] Test entry complete")

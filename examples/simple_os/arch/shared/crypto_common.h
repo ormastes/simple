@@ -1473,6 +1473,35 @@ RV_INT rt_ed25519_sign(RV_INT msg_rv, RV_INT sk_rv, RV_INT sig_rv)
     return 0;
 }
 
+RV_INT rt_ed25519_keypair_pk(RV_INT seed_rv)
+{
+    uint32_t seed_len = 0;
+    uint8_t *seed = _crypto_rv_to_bytes((RuntimeValue)seed_rv, &seed_len);
+    if (!seed || seed_len != 32) { if (seed) free(seed); return NIL_VALUE; }
+    uint8_t pk[32], sk[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    free(seed);
+    return _crypto_make_byte_array(pk, 32);
+}
+
+RV_INT rt_ed25519_sign_seed(RV_INT seed_rv, RV_INT msg_rv)
+{
+    uint32_t seed_len = 0, msg_len = 0;
+    uint8_t *seed = _crypto_rv_to_bytes((RuntimeValue)seed_rv, &seed_len);
+    uint8_t *msg = _crypto_rv_to_bytes((RuntimeValue)msg_rv, &msg_len);
+    if (!seed || seed_len != 32) {
+        if (seed) free(seed);
+        if (msg) free(msg);
+        return NIL_VALUE;
+    }
+    uint8_t pk[32], sk[64], sig[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
+    free(seed);
+    if (msg) free(msg);
+    return _crypto_make_byte_array(sig, 64);
+}
+
 RV_INT rt_ed25519_verify(RV_INT msg_rv, RV_INT pk_rv, RV_INT sig_rv)
 {
     uint32_t msg_len = 0, pk_len = 0, sig_len = 0;

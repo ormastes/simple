@@ -86,25 +86,56 @@ pub(crate) fn is_unit_type(type_name: &str) -> bool {
 
 /// Validate that a value matches a unit type annotation
 /// Returns Ok(()) if valid, Err with message if invalid
+///
+/// Acceptance rules (in order):
+///  1. exact match on suffix (e.g. expected `kmph`, value suffix `kmph`)
+///  2. exact match on family (e.g. expected `velocity`, value family `velocity`)
+///  3. suffix-to-family alias (expected is a family the suffix belongs to)
+///  4. dimension equivalence: expected and actual share the same dim signature
+///     (e.g. expected `kmph`, value is `mps` → both are `{length:1, time:-1}`).
+///     This relaxation supports composite-result expressions like `100_km / 2_h`
+///     being passed where a sibling composite is declared.
 pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(), String> {
+    // Lazily seed the unit registry so suffix/family/dim lookups see all
+    // catalog-declared units, not just the ones touched via `use unit.*` imports.
+    crate::units::ensure_loaded();
+
     match value {
         Value::Unit { family, suffix, .. } => {
-            // Check if the unit's family matches the expected type
+            // Rule 1: exact suffix match (literal-suffix form, e.g. `kmph`).
+            if suffix.as_str() == expected_type {
+                return Ok(());
+            }
+
+            // Rule 2: exact family match (e.g. expected `velocity`).
             let actual_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
             if actual_family == expected_type {
-                Ok(())
-            } else {
-                // Check if the suffix itself indicates membership in the expected family
-                let suffix_family = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
-                if suffix_family.as_deref() == Some(expected_type) {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "expected unit type '{}', got '{}' (family: {})",
-                        expected_type, suffix, actual_family
-                    ))
+                return Ok(());
+            }
+
+            // Rule 3: suffix-to-family alias.
+            let suffix_family =
+                UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
+            if suffix_family.as_deref() == Some(expected_type) {
+                return Ok(());
+            }
+
+            // Rule 4: dimension equivalence — accept any unit with the same
+            // dimensional signature as the expected unit. This lets
+            // `100_km / 2_h` (a `mps`/composite) satisfy a `kmph` parameter.
+            let expected_dim = get_unit_dimension(expected_type);
+            let actual_dim = get_unit_dimension(suffix)
+                .or_else(|| get_unit_dimension(actual_family));
+            if let (Some(exp), Some(act)) = (expected_dim, actual_dim) {
+                if exp.exponents == act.exponents && !exp.exponents.is_empty() {
+                    return Ok(());
                 }
             }
+
+            Err(format!(
+                "expected unit type '{}', got '{}' (family: {})",
+                expected_type, suffix, actual_family
+            ))
         }
         _ => Err(format!(
             "expected unit type '{}', got non-unit value of type '{}'",

@@ -24,8 +24,8 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
 use os.drivers.nvme.nvme_types.{NVME_REG_CAP, NVME_REG_VS, NVME_REG_CC, NVME_REG_CSTS, NVME_REG_AQA, NVME_REG_ASQ, NVME_REG_ACQ, CC_EN, CC_CSS_NVM, CC_MPS_4K, CC_IOSQES_64, CC_IOCQES_16, CSTS_RDY, CSTS_CFS, ADMIN_QUEUE_DEPTH, IO_QUEUE_DEPTH, SQE_SIZE, CQE_SIZE, NVME_ADMIN_IDENTIFY, NVME_ADMIN_CREATE_IOCQ, NVME_ADMIN_CREATE_IOSQ, NVME_ADMIN_SET_FEATURES, NVME_IO_READ, NVME_IO_WRITE, NVME_IO_FLUSH, IDENTIFY_CNS_NAMESPACE, IDENTIFY_CNS_CONTROLLER, IDNS_NSZE_OFFSET, IDNS_FLBAS_OFFSET, IDNS_LBAF0_OFFSET}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
-extern fn serial_println(msg: text)
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
 # Timeout for controller ready transitions (spin iterations)
@@ -90,7 +90,7 @@ impl NvmeDriver:
         if bar0_result < 0:
             return Result.Err("NVMe: failed to map BAR0")
         self.bar0_virt = bar0_result.to_u64()
-        serial_println("NVMe: BAR0 mapped")
+        log_info("[nvme] " + "NVMe: BAR0 mapped")
 
         # Step 2: Read CAP register -- extract doorbell stride and max queue entries
         val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
@@ -99,7 +99,7 @@ impl NvmeDriver:
         self.db_stride = dstrd
         # CAP bits 0-15: MQES (Maximum Queue Entries Supported, 0-based)
         val mqes = (cap & 0xFFFF).to_u16()
-        serial_println("NVMe: CAP read, DSTRD={dstrd}, MQES={mqes}")
+        log_info("[nvme] " + "NVMe: CAP read, DSTRD={dstrd}, MQES={mqes}")
 
         # Step 3: Disable controller
         val disable_result = self.disable_controller()
@@ -152,19 +152,19 @@ impl NvmeDriver:
         val enable_result = self.enable_controller()
         if enable_result.is_err():
             return enable_result
-        serial_println("NVMe: controller enabled")
+        log_info("[nvme] " + "NVMe: controller enabled")
 
         # Step 9: Identify Controller (admin command, CNS=1)
         val identify_ctrl_result = self.identify_controller()
         if identify_ctrl_result.is_err():
             return identify_ctrl_result
-        serial_println("NVMe: controller identified")
+        log_info("[nvme] " + "NVMe: controller identified")
 
         # Step 10: Identify Namespace 1 (admin command, CNS=0, NSID=1)
         val identify_ns_result = self.identify_namespace()
         if identify_ns_result.is_err():
             return identify_ns_result
-        serial_println("NVMe: namespace identified, sectors={self.sector_count}, sector_size={self.sector_size}")
+        log_info("[nvme] " + "NVMe: namespace identified, sectors={self.sector_count}, sector_size={self.sector_size}")
 
         # Step 11: Set Number of Queues feature (feature ID 0x07)
         val set_queues_result = self.set_num_queues(1, 1)
@@ -175,16 +175,16 @@ impl NvmeDriver:
         val create_iocq_result = self.create_io_completion_queue()
         if create_iocq_result.is_err():
             return create_iocq_result
-        serial_println("NVMe: I/O CQ created")
+        log_info("[nvme] " + "NVMe: I/O CQ created")
 
         # Step 13: Create I/O Submission Queue (QID 1)
         val create_iosq_result = self.create_io_submission_queue()
         if create_iosq_result.is_err():
             return create_iosq_result
-        serial_println("NVMe: I/O SQ created")
+        log_info("[nvme] " + "NVMe: I/O SQ created")
 
         self.initialized = true
-        serial_println("NVMe: initialization complete")
+        log_info("[nvme] " + "NVMe: initialization complete")
         Result.Ok(true)
 
     me init_baremetal(bar0_virt_addr: i64, dma_buf_addr: i64) -> Result<bool, text>:
@@ -195,14 +195,14 @@ impl NvmeDriver:
         """
         self.bar0_virt = bar0_virt_addr
         self.notif_id = 0  # No IRQ on baremetal, polling only
-        serial_println("[nvme] BAR0 at 0x{bar0_virt_addr}")
+        log_info("[nvme] " + "[nvme] BAR0 at 0x{bar0_virt_addr}")
 
         # Read CAP register
         val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
         val dstrd = ((cap / 4294967296) & 0x0F).to_u32()
         self.db_stride = dstrd
         val mqes = (cap & 0xFFFF).to_u16()
-        serial_println("[nvme] CAP: DSTRD={dstrd}, MQES={mqes}")
+        log_info("[nvme] " + "[nvme] CAP: DSTRD={dstrd}, MQES={mqes}")
 
         # Disable controller
         val disable_result = self.disable_controller()
@@ -241,24 +241,24 @@ impl NvmeDriver:
         mmio_write32(self.bar0_virt + NVME_REG_ASQ + 4, (sq_dma / 4294967296) & 0xFFFFFFFF)
         mmio_write32(self.bar0_virt + NVME_REG_ACQ, cq_dma & 0xFFFFFFFF)
         mmio_write32(self.bar0_virt + NVME_REG_ACQ + 4, (cq_dma / 4294967296) & 0xFFFFFFFF)
-        serial_println("[nvme] Admin queues configured")
+        log_info("[nvme] " + "[nvme] Admin queues configured")
 
         # Enable controller
         val enable_result = self.enable_controller()
         if enable_result.is_err():
             return enable_result
 
-        serial_println("[nvme] Controller enabled, running Identify...")
+        log_info("[nvme] " + "[nvme] Controller enabled, running Identify...")
 
         # Identify Controller
         val ident_result = self.identify_controller()
         if ident_result.is_err():
-            serial_println("[nvme] Identify failed — continuing anyway")
+            log_info("[nvme] " + "[nvme] Identify failed — continuing anyway")
 
         # Identify Namespace 1
         val ns_result = self.identify_namespace()
         if ns_result.is_err():
-            serial_println("[nvme] Namespace identify failed — using defaults")
+            log_info("[nvme] " + "[nvme] Namespace identify failed — using defaults")
 
         # Create I/O queues
         val io_sq_size = 64 * 64  # IO_QUEUE_DEPTH * SQE_SIZE
@@ -279,12 +279,12 @@ impl NvmeDriver:
             val cq_result = self.create_io_completion_queue()
             val sq_result = self.create_io_submission_queue()
             if cq_result.is_ok() and sq_result.is_ok():
-                serial_println("[nvme] I/O queues created")
+                log_info("[nvme] " + "[nvme] I/O queues created")
             else:
-                serial_println("[nvme] I/O queue creation failed — read/write unavailable")
+                log_info("[nvme] " + "[nvme] I/O queue creation failed — read/write unavailable")
 
         self.initialized = true
-        serial_println("[nvme] Baremetal initialization complete")
+        log_info("[nvme] " + "[nvme] Baremetal initialization complete")
         Result.Ok(true)
 
     # ========================================================================
@@ -302,7 +302,7 @@ impl NvmeDriver:
         while i < READY_TIMEOUT:
             val csts = mmio_read32(self.bar0_virt + NVME_REG_CSTS)
             if (csts & CSTS_RDY) == 0:
-                serial_println("NVMe: controller disabled")
+                log_info("[nvme] " + "NVMe: controller disabled")
                 return Result.Ok(true)
             if (csts & CSTS_CFS) != 0:
                 return Result.Err("NVMe: controller fatal status during disable")
