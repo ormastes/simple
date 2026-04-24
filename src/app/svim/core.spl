@@ -261,6 +261,8 @@ class SvimWindow:
     buffer_id: BufferId
     viewport: SvimViewport
     cursor_anchor: AnchorId
+    cursor_row: i64
+    cursor_col: i64
 
 class SvimTabpage:
     id: TabId
@@ -341,6 +343,8 @@ impl SvimSession:
         var window = self.windows[window_idx]
         window.buffer_id = buffer_id
         window.cursor_anchor = anchor
+        window.cursor_row = pos.row
+        window.cursor_col = pos.col
         self.windows[window_idx] = window
 
     me focus_buffer_in_new_tab(buffer_id: BufferId) -> TabId:
@@ -354,7 +358,9 @@ impl SvimSession:
             id: window_id,
             buffer_id: buffer_id,
             viewport: SvimViewport(top_row: 0, left_col: 0, width: 80, height: 12),
-            cursor_anchor: anchor
+            cursor_anchor: anchor,
+            cursor_row: 0,
+            cursor_col: 0
         ))
         val tab_id = TabId(value: self.next_tab_id)
         self.next_tab_id = self.next_tab_id + 1
@@ -390,22 +396,27 @@ impl SvimSession:
 
     fn current_cursor() -> Cursor:
         val window_idx = self.active_window_index()
-        val buffer_idx = self.active_buffer_index()
-        if window_idx < 0 or buffer_idx < 0:
+        if window_idx < 0:
             return Cursor(row: 0, col: 0)
-        self.buffers[buffer_idx].anchors.get(self.windows[window_idx].cursor_anchor)
+        Cursor(row: self.windows[window_idx].cursor_row, col: self.windows[window_idx].cursor_col)
 
     me set_current_cursor(row: i64, col: i64):
         val window_idx = self.active_window_index()
         val buffer_idx = self.active_buffer_index()
         if window_idx < 0 or buffer_idx < 0:
             return
-        val text = self.buffers[buffer_idx].piece_table.to_text()
-        val max_row = _svim_max_row(self.buffers[buffer_idx].line_starts)
+        var buffer = self.buffers[buffer_idx]
+        val text = buffer.piece_table.to_text()
+        val max_row = _svim_max_row(buffer.line_starts)
         val clamped_row = _svim_clamp_i64(row, 0, max_row)
-        val max_col = _svim_line_length(text, self.buffers[buffer_idx].line_starts, clamped_row)
+        val max_col = _svim_line_length(text, buffer.line_starts, clamped_row)
         val clamped_col = _svim_clamp_i64(col, 0, max_col)
-        self.buffers[buffer_idx].anchors.set(self.windows[window_idx].cursor_anchor, clamped_row, clamped_col)
+        buffer.anchors.set(self.windows[window_idx].cursor_anchor, clamped_row, clamped_col)
+        self.buffers[buffer_idx] = buffer
+        var window = self.windows[window_idx]
+        window.cursor_row = clamped_row
+        window.cursor_col = clamped_col
+        self.windows[window_idx] = window
         self._ensure_cursor_visible()
 
     me save_current_buffer() -> CommandResult:
@@ -445,7 +456,9 @@ impl SvimSession:
             id: new_window_id,
             buffer_id: self.windows[window_idx].buffer_id,
             viewport: self.windows[window_idx].viewport,
-            cursor_anchor: new_anchor
+            cursor_anchor: new_anchor,
+            cursor_row: source_cursor.row,
+            cursor_col: source_cursor.col
         ))
         var tab = self.tabs[self.current_tab_index]
         tab.window_ids.push(new_window_id)
@@ -1048,12 +1061,55 @@ fn _svim_drop_last_snapshot(items: [BufferSnapshot]) -> [BufferSnapshot]:
     out
 
 fn _svim_parse_rpc_command(raw: text) -> CommandRequest:
+    val trimmed = raw.trim()
+    if trimmed.starts_with(":") or trimmed.starts_with("/"):
+        return svim_parse_normal_command(trimmed)
     val sep = raw.index_of(":") ?? -1
     if sep < 0:
-        return CommandRequest(name: raw.trim(), count: 1, register_name: "", payload: "")
+        return svim_parse_normal_command(trimmed)
     CommandRequest(
         name: raw.slice(0, sep).trim(),
         count: 1,
         register_name: "",
         payload: raw.slice(sep + 1, raw.len())
     )
+
+fn svim_parse_normal_command(raw: text) -> CommandRequest:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return CommandRequest(name: "", count: 1, register_name: "", payload: "")
+    if trimmed.starts_with(":"):
+        return CommandRequest(name: "commandline", count: 1, register_name: "", payload: trimmed.slice(1, trimmed.len()))
+    if trimmed.starts_with("/"):
+        return CommandRequest(name: "search-forward", count: 1, register_name: "", payload: trimmed.slice(1, trimmed.len()))
+    if trimmed == "i":
+        return CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert")
+    if trimmed == "esc":
+        return CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "normal")
+    if trimmed == "redo":
+        return CommandRequest(name: "redo", count: 1, register_name: "", payload: "")
+    var idx = 0
+    while idx < trimmed.len():
+        val ch = trimmed.char_at(idx)
+        if ch < "0" or ch > "9":
+            break
+        idx = idx + 1
+    val count = if idx > 0 then trimmed.slice(0, idx).to_int() else: 1
+    val cmd = trimmed.slice(idx, trimmed.len())
+    if cmd == "h":
+        return CommandRequest(name: "move-left", count: count, register_name: "", payload: "")
+    if cmd == "j":
+        return CommandRequest(name: "move-down", count: count, register_name: "", payload: "")
+    if cmd == "k":
+        return CommandRequest(name: "move-up", count: count, register_name: "", payload: "")
+    if cmd == "l":
+        return CommandRequest(name: "move-right", count: count, register_name: "", payload: "")
+    if cmd == "dd":
+        return CommandRequest(name: "delete-line", count: count, register_name: "", payload: "")
+    if cmd == "yy":
+        return CommandRequest(name: "yank-line", count: count, register_name: "", payload: "")
+    if cmd == "p":
+        return CommandRequest(name: "put-after", count: count, register_name: "", payload: "")
+    if cmd == "u":
+        return CommandRequest(name: "undo", count: count, register_name: "", payload: "")
+    CommandRequest(name: cmd, count: count, register_name: "", payload: "")

@@ -219,42 +219,42 @@ fn _toolchain_command_supported(command: text) -> bool:
 fn _toolchain_help_lines(command: text) -> [text]:
     if command == "cmake":
         return [
-            "cmake: SimpleOS native wrapper backed by the in-tree simple_cmake port",
-            "supported: --version, --help",
-            "configure/build generation is packaged but not execution-complete in this guest lane yet",
+            "cmake: SimpleOS native wrapper for the packaged configure lane",
+            "supported: --version, --help, -E capabilities",
+            "supported subset: cmake -S <src> -B <build> -G Ninja",
         ]
     if command == "clang" or command == "clang-20" or command == "lld" or
        command == "ld.lld" or command == "llvm-ar" or command == "llvm-nm" or
        command == "llvm-ranlib" or command == "llvm-objdump" or
        command == "llvm-objcopy" or command == "llvm-strip":
         return [
-            "{command}: SimpleOS native wrapper for staged LLVM payloads",
+            "{command}: SimpleOS guest-exec wrapper for staged LLVM payloads",
             "supported: --version, --help, --print-target-triple",
-            "real guest LLVM execution is not port-complete yet",
+            "lane executes the staged LLVM payloads for x86_64-simpleos",
         ]
     if command == "rustc":
         return [
-            "rustc: SimpleOS native wrapper for staged Rust payloads",
-            "supported: --version, --help, --print target-list",
-            "real guest rustc execution is not port-complete yet",
+            "rustc: SimpleOS report-and-gate wrapper for staged Rust payloads",
+            "supported: --version, --help, --print target-list, --print sysroot",
+            "compile/build operations fail explicitly with lane/status metadata",
         ]
     if command == "cargo":
         return [
-            "cargo: SimpleOS native wrapper for staged Rust payloads",
-            "supported: --version, --help",
-            "use cargo-simpleos once real guest cargo execution lands",
+            "cargo: SimpleOS report-and-gate wrapper for staged Rust payloads",
+            "supported: --version, --help, --print target-list",
+            "cargo build/check/test/run are intentionally gated on this lane",
         ]
     if command == "cargo-simpleos":
         return [
-            "cargo-simpleos: native wrapper entry for SimpleOS bootstrap",
-            "supported: --version, --help",
-            "delegates to the staged bootstrap flow; real guest cargo is pending",
+            "cargo-simpleos: SimpleOS report-and-gate bootstrap wrapper",
+            "supported: --version, --help, --print target-list",
+            "real guest cargo cutover is pending rustlib/std bring-up",
         ]
     if command == "ninja":
         return [
-            "ninja: SimpleOS native wrapper backed by the in-tree simple_ninja port",
+            "ninja: SimpleOS native wrapper for packaged Ninja execution",
             "supported: --version, --help",
-            "build execution is packaged but not execution-complete in this guest lane yet",
+            "guest execution uses the staged ninja payload",
         ]
     []
 
@@ -308,9 +308,43 @@ fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
             _write_line(terminal, "mode={mode}")
             _write_line(terminal, "status={status}")
             return 0
+        return nil
     if command == "rustc":
         if primary == "--print" and args.len() > 1 and args[1] == "target-list":
             _write_line(terminal, "x86_64-unknown-simpleos")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "sysroot":
+            _write_line(terminal, "/usr")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "target-libdir":
+            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-rustlib":
+            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-target-json":
+            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/target.json")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
+            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
+            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
+            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
+            _write_line(terminal, "lane={lane}")
+            _write_line(terminal, "mode={mode}")
+            _write_line(terminal, "status={status}")
+            return 0
+    if command == "cargo" or command == "cargo-simpleos":
+        if primary == "--print" and args.len() > 1 and args[1] == "target-list":
+            _write_line(terminal, "x86_64-unknown-simpleos")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "sysroot":
+            _write_line(terminal, "/usr")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-rustlib":
+            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-target-json":
+            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/target.json")
             return 0
         if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
             val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
@@ -336,14 +370,20 @@ fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
         _write_line(terminal, "payload: {canonical_path}")
         return 0
 
+    val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
+    val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
+    val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
     _write_error(terminal,
-        "{command}: native wrapper available at {canonical_path} but execution is not complete on this guest lane")
+        "{command}: unsupported operation on lane={lane} mode={mode} status={status}")
+    _write_error(terminal,
+        "{command}: no host fallback is available from this guest wrapper")
     _write_error(terminal,
         "{command}: supported guest wrapper options are --version and --help")
     if command == "cmake":
         _write_error(terminal,
             "{command}: supported discovery option available: -E capabilities")
-    if command == "clang" or command == "clang-20" or command == "rustc":
+    if command == "clang" or command == "clang-20" or command == "rustc" or
+       command == "cargo" or command == "cargo-simpleos":
         _write_error(terminal,
             "{command}: additional discovery option available: --print target metadata")
         _write_error(terminal,

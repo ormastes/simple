@@ -1,6 +1,7 @@
 use std.cli.cli_util.{get_cli_args}
 use app.svim.core.*
 use app.svim.tui_shell.{svim_render_tui}
+use app.ui.tui.input.{read_user_input}
 
 
 fn _svim_help():
@@ -11,13 +12,55 @@ fn _svim_help():
     print "Options:"
     print "  --cmd=<name[:payload]>   Run one shared-core command before rendering"
     print "  --mode=<mode>            Set editor mode before rendering"
+    print "  --interactive            Run a line-based interactive shell"
     print "  --help                   Show this help"
+
+fn _svim_prompt(mode: SvimMode) -> text:
+    match mode:
+        SvimMode.Insert => "insert> "
+        SvimMode.Command => ":"
+        SvimMode.Visual => "visual> "
+        _ => "svim> "
+
+fn _svim_should_quit(result: CommandResult) -> bool:
+    for event in result.events:
+        if event.kind == "quit-requested":
+            return true
+    false
+
+fn _svim_dispatch_line(session: SvimSession, line: text) -> CommandResult:
+    if session.mode_state.mode == SvimMode.Insert:
+        if line == ".esc":
+            return session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "normal"))
+        if line == ".bs":
+            return session.execute(CommandRequest(name: "backspace", count: 1, register_name: "", payload: ""))
+        if line == ".nl":
+            return session.execute(CommandRequest(name: "newline", count: 1, register_name: "", payload: ""))
+        return session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: line))
+    val request = svim_parse_normal_command(line)
+    session.execute(request)
+
+fn _svim_run_interactive(session: SvimSession) -> i64:
+    print svim_render_tui(session)
+    while true:
+        print _svim_prompt(session.mode_state.mode)
+        val line = read_user_input()
+        if line == "":
+            print svim_render_tui(session)
+            continue
+        val result = _svim_dispatch_line(session, line)
+        if not result.ok and result.message != "":
+            print result.message
+        if _svim_should_quit(result):
+            return 0
+        print svim_render_tui(session)
 
 fn main() -> i64:
     val args = get_cli_args()
     var path = ""
     var rpc_cmd = ""
     var mode = ""
+    var interactive = false
     for arg in args:
         if arg == "--help" or arg == "-h":
             _svim_help()
@@ -26,6 +69,8 @@ fn main() -> i64:
             rpc_cmd = arg.slice(6, arg.len())
         elif arg.starts_with("--mode="):
             mode = arg.slice(7, arg.len())
+        elif arg == "--interactive":
+            interactive = true
         elif not arg.starts_with("-") and path == "":
             path = arg
 
@@ -42,6 +87,7 @@ fn main() -> i64:
         if not rpc.ok:
             print rpc.error_text
             return 1
+    if interactive:
+        return _svim_run_interactive(session)
     print svim_render_tui(session)
     0
-

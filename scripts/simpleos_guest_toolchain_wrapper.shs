@@ -1,0 +1,387 @@
+#!/bin/sh
+set -eu
+
+SELF="${0##*/}"
+TOOL_ROOT="/usr/libexec/simpleos-toolchain"
+
+manifest_path() {
+    case "$SELF" in
+        cmake) echo "/SYS/CMAKEMAN.TXT" ;;
+        clang|clang-20|lld|ld.lld|llvm-ar|llvm-nm|llvm-ranlib|llvm-objdump|llvm-objcopy|llvm-strip)
+            echo "/SYS/LLVMMAN.TXT"
+            ;;
+        rustc|cargo|cargo-simpleos) echo "/SYS/RUSTMAN.TXT" ;;
+        ninja) echo "/SYS/NINJAMAN.TXT" ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+version_path() {
+    case "$SELF" in
+        cmake) echo "/SYS/CMAKEVER.TXT" ;;
+        clang|clang-20|lld|ld.lld|llvm-ar|llvm-nm|llvm-ranlib|llvm-objdump|llvm-objcopy|llvm-strip)
+            echo "/SYS/LLVMVER.TXT"
+            ;;
+        rustc) echo "/SYS/RUSTVER.TXT" ;;
+        cargo|cargo-simpleos) echo "/SYS/CARGOVER.TXT" ;;
+        ninja) echo "/SYS/NINJAVER.TXT" ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+payload_path() {
+    case "$SELF" in
+        cmake) echo "" ;;
+        clang|clang-20) echo "$TOOL_ROOT/llvm/clang" ;;
+        lld|ld.lld) echo "$TOOL_ROOT/llvm/lld" ;;
+        llvm-ar) echo "$TOOL_ROOT/llvm/llvm-ar" ;;
+        llvm-nm) echo "$TOOL_ROOT/llvm/llvm-nm" ;;
+        llvm-ranlib) echo "$TOOL_ROOT/llvm/llvm-ranlib" ;;
+        llvm-objdump) echo "$TOOL_ROOT/llvm/llvm-objdump" ;;
+        llvm-objcopy) echo "$TOOL_ROOT/llvm/llvm-objcopy" ;;
+        llvm-strip) echo "$TOOL_ROOT/llvm/llvm-strip" ;;
+        rustc) echo "$TOOL_ROOT/rust/rustc" ;;
+        cargo) echo "$TOOL_ROOT/rust/cargo" ;;
+        cargo-simpleos) echo "$TOOL_ROOT/rust/cargo" ;;
+        ninja) echo "$TOOL_ROOT/ninja/ninja" ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+manifest_value() {
+    key="$1"
+    manifest="$(manifest_path)"
+    if [ -z "$manifest" ] || [ ! -f "$manifest" ]; then
+        return 1
+    fi
+    sed -n "s/^${key}=//p" "$manifest" | sed -n '1p'
+}
+
+version_line() {
+    version_file="$(version_path)"
+    if [ -n "$version_file" ] && [ -f "$version_file" ]; then
+        sed -n '1p' "$version_file"
+        return 0
+    fi
+    return 1
+}
+
+lane() {
+    manifest_value "lane" 2>/dev/null || echo "unknown"
+}
+
+mode() {
+    manifest_value "mode" 2>/dev/null || echo "unknown"
+}
+
+status() {
+    manifest_value "status" 2>/dev/null || echo "unknown"
+}
+
+print_wrapper_status() {
+    printf 'lane=%s\n' "$(lane)"
+    printf 'mode=%s\n' "$(mode)"
+    printf 'status=%s\n' "$(status)"
+}
+
+print_rust_discovery() {
+    what="$1"
+    case "$what" in
+        target-list) echo "x86_64-unknown-simpleos" ;;
+        sysroot) echo "/usr" ;;
+        simpleos-rustlib|target-libdir) echo "/usr/lib/rustlib/x86_64-unknown-simpleos/lib" ;;
+        simpleos-target-json) echo "/usr/lib/rustlib/x86_64-unknown-simpleos/target.json" ;;
+        simpleos-wrapper-status) print_wrapper_status ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+emit_help() {
+    case "$SELF" in
+        cmake)
+            cat <<EOF
+cmake: SimpleOS native-wrapper surface for the packaged configure lane
+supported:
+  --version
+  --help
+  -E capabilities
+  -S <src> -B <build> -G Ninja
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+        clang|clang-20)
+            cat <<EOF
+$SELF: SimpleOS guest-exec LLVM wrapper
+supported:
+  --version
+  --help
+  --print-target-triple
+  --print simpleos-wrapper-status
+  compile and link operations for lane $(lane)
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+        lld|ld.lld|llvm-ar|llvm-nm|llvm-ranlib|llvm-objdump|llvm-objcopy|llvm-strip)
+            cat <<EOF
+$SELF: SimpleOS guest-exec LLVM wrapper
+supported:
+  --version
+  --help
+  guest-executed LLVM tool invocation for lane $(lane)
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+        rustc)
+            cat <<EOF
+rustc: SimpleOS report-and-gate wrapper
+supported:
+  --version
+  --help
+  --print target-list
+  --print sysroot
+  --print target-libdir
+  --print simpleos-rustlib
+  --print simpleos-target-json
+  --print simpleos-wrapper-status
+unsupported:
+  compile and build operations on this lane
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+        cargo|cargo-simpleos)
+            cat <<EOF
+$SELF: SimpleOS report-and-gate wrapper
+supported:
+  --version
+  --help
+  --print target-list
+  --print sysroot
+  --print simpleos-rustlib
+  --print simpleos-target-json
+  --print simpleos-wrapper-status
+unsupported:
+  cargo build/check/test/run on this lane
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+        ninja)
+            cat <<EOF
+ninja: SimpleOS native-wrapper surface for packaged Ninja execution
+supported:
+  --version
+  --help
+  ninja -C <builddir>
+wrapper-status: lane=$(lane) mode=$(mode) status=$(status)
+EOF
+            ;;
+    esac
+}
+
+fail_unsupported() {
+    operation="$1"
+    echo "$SELF: unsupported operation on lane=$(lane) mode=$(mode) status=$(status): $operation" >&2
+    echo "$SELF: no host fallback is available from this guest wrapper" >&2
+    exit 1
+}
+
+cmake_emit_ninja() {
+    src_dir="$1"
+    build_dir="$2"
+    manifest_file="$src_dir/CMakeLists.txt"
+    if [ ! -f "$manifest_file" ]; then
+        fail_unsupported "missing $manifest_file"
+    fi
+    target_line="$(grep -E '^[[:space:]]*add_executable[[:space:]]*\(' "$manifest_file" | sed -n '1p' || true)"
+    if [ -z "$target_line" ]; then
+        fail_unsupported "only single add_executable(<name> <source.c>) projects are supported"
+    fi
+    target_name="$(printf '%s\n' "$target_line" | sed -E 's/.*add_executable[[:space:]]*\(([A-Za-z0-9_.-]+)[[:space:]]+([^ )]+).*/\1/')"
+    source_name="$(printf '%s\n' "$target_line" | sed -E 's/.*add_executable[[:space:]]*\(([A-Za-z0-9_.-]+)[[:space:]]+([^ )]+).*/\2/')"
+    if [ "$target_name" = "$target_line" ] || [ "$source_name" = "$target_line" ]; then
+        fail_unsupported "could not parse add_executable from $manifest_file"
+    fi
+    case "$source_name" in
+        /*) source_path="$source_name" ;;
+        *) source_path="$src_dir/$source_name" ;;
+    esac
+    if [ ! -f "$source_path" ]; then
+        fail_unsupported "missing source file $source_path"
+    fi
+    mkdir -p "$build_dir"
+    cat > "$build_dir/build.ninja" <<EOF
+cc = /usr/bin/clang
+ld = /usr/bin/ld.lld
+sysroot = /usr
+cflags = --target=x86_64-simpleos --sysroot=\$sysroot -I/usr/include
+ldflags = -T/usr/share/simpleos/simpleos.ld /usr/lib/crt0.o -L/usr/lib -lsimpleos_c
+
+rule cc
+  command = \$cc \$cflags -c $source_path -o \$out
+  description = CC \$out
+
+rule link
+  command = \$ld \$in \$ldflags -o \$out
+  description = LINK \$out
+
+build $target_name.o: cc
+build $target_name: link $target_name.o
+
+default $target_name
+EOF
+    cat > "$build_dir/CMakeCache.txt" <<EOF
+CMAKE_GENERATOR:INTERNAL=Ninja
+CMAKE_HOME_DIRECTORY:INTERNAL=$src_dir
+EOF
+    echo "-- Configuring done"
+    echo "-- Generating done"
+    echo "-- Build files have been written to: $build_dir"
+}
+
+run_cmake() {
+    if [ $# -eq 0 ]; then
+        set -- --help
+    fi
+    case "$1" in
+        --version)
+            version_line || echo "simple_cmake native wrapper"
+            exit 0
+            ;;
+        --help|-h)
+            emit_help
+            exit 0
+            ;;
+    esac
+    if [ "$1" = "-E" ] && [ "${2-}" = "capabilities" ]; then
+        cat <<EOF
+serverMode=false
+generators=Ninja
+tool=/usr/bin/cmake
+lane=$(lane)
+mode=$(mode)
+status=$(status)
+EOF
+        exit 0
+    fi
+    src_dir=""
+    build_dir=""
+    generator=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -S)
+                src_dir="${2-}"
+                shift 2
+                ;;
+            -B)
+                build_dir="${2-}"
+                shift 2
+                ;;
+            -G)
+                generator="${2-}"
+                shift 2
+                ;;
+            -D*)
+                shift
+                ;;
+            *)
+                fail_unsupported "$1"
+                ;;
+        esac
+    done
+    if [ -z "$src_dir" ] || [ -z "$build_dir" ] || [ "$generator" != "Ninja" ]; then
+        fail_unsupported "cmake requires -S <src> -B <build> -G Ninja"
+    fi
+    cmake_emit_ninja "$src_dir" "$build_dir"
+}
+
+run_guest_exec() {
+    payload="$(payload_path)"
+    if [ -z "$payload" ] || [ ! -x "$payload" ]; then
+        fail_unsupported "payload missing at $payload"
+    fi
+    exec "$payload" "$@"
+}
+
+run_llvm() {
+    if [ $# -eq 0 ]; then
+        set -- --help
+    fi
+    if [ "$1" = "--print" ] && [ "${2-}" = "simpleos-wrapper-status" ]; then
+        print_wrapper_status
+        exit 0
+    fi
+    if [ "$SELF" = "clang" ] || [ "$SELF" = "clang-20" ]; then
+        if [ "$1" = "--print-target-triple" ]; then
+            echo "x86_64-simpleos"
+            exit 0
+        fi
+    fi
+    run_guest_exec "$@"
+}
+
+run_rust() {
+    if [ $# -eq 0 ]; then
+        set -- --help
+    fi
+    case "$1" in
+        --version)
+            version_line || echo "$SELF staged wrapper"
+            exit 0
+            ;;
+        --help|-h)
+            emit_help
+            exit 0
+            ;;
+    esac
+    if [ "$1" = "--print" ] && [ $# -ge 2 ]; then
+        if print_rust_discovery "$2"; then
+            exit 0
+        fi
+    fi
+    fail_unsupported "$*"
+}
+
+run_ninja() {
+    if [ $# -eq 0 ]; then
+        set -- --help
+    fi
+    case "$1" in
+        --help|-h)
+            emit_help
+            exit 0
+            ;;
+        --version)
+            payload="$(payload_path)"
+            if [ -x "$payload" ]; then
+                exec "$payload" --version
+            fi
+            version_line || echo "1"
+            exit 0
+            ;;
+    esac
+    run_guest_exec "$@"
+}
+
+case "$SELF" in
+    cmake) run_cmake "$@" ;;
+    clang|clang-20|lld|ld.lld|llvm-ar|llvm-nm|llvm-ranlib|llvm-objdump|llvm-objcopy|llvm-strip)
+        run_llvm "$@"
+        ;;
+    rustc|cargo|cargo-simpleos)
+        run_rust "$@"
+        ;;
+    ninja)
+        run_ninja "$@"
+        ;;
+    *)
+        echo "simpleos-wrapper: unknown tool entrypoint $SELF" >&2
+        exit 127
+        ;;
+esac

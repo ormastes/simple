@@ -1,0 +1,137 @@
+# shuf — Shuffle lines or generate shuffled integer ranges
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_shuf(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Shuffle lines or generate a shuffled integer range.
+
+    Usage: shuf [-n COUNT] [-i LO-HI] [FILE]
+    Flags: -n N   Output at most N lines
+           -i LO-HI  Generate integers in range LO..HI (inclusive)
+    """
+    var count = -1        # -1 means all
+    var range_mode = false
+    var range_lo = 0
+    var range_hi = 0
+    var file_arg = ""
+
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "-n" and i + 1 < args.len():
+            count = _parse_i32(args[i + 1])
+            i = i + 2
+        elif a == "-i" and i + 1 < args.len():
+            val range_str = args[i + 1]
+            val parts = _split_dash(range_str)
+            if parts.len() == 2:
+                range_lo = _parse_i32(parts[0])
+                range_hi = _parse_i32(parts[1])
+                range_mode = true
+            i = i + 2
+        else:
+            file_arg = a
+            i = i + 1
+
+    var lines: [text] = []
+
+    if range_mode:
+        var n = range_lo
+        while n <= range_hi:
+            lines = lines.push("{n}")
+            n = n + 1
+    elif file_arg != "":
+        if vfs == nil:
+            write_error(terminal, "shuf: no filesystem mounted")
+            return 1
+        val path = resolve_path(cwd, file_arg)
+        val result = vfs.read_text(path)
+        if result.is_err():
+            write_error(terminal, "shuf: {path}: {result.unwrap_err()}")
+            return 1
+        lines = split_lines(result.unwrap())
+        # Drop trailing empty line from split
+        if lines.len() > 0 and lines[lines.len() - 1] == "":
+            var trimmed: [text] = []
+            var k = 0
+            while k < lines.len() - 1:
+                trimmed = trimmed.push(lines[k])
+                k = k + 1
+            lines = trimmed
+    else:
+        write_error(terminal, "shuf: missing operand")
+        return 1
+
+    # Fisher-Yates shuffle using LCG
+    lines = _fisher_yates(lines)
+
+    val out_count = if count >= 0 and count < lines.len(): count else: lines.len()
+    var j = 0
+    while j < out_count:
+        write_line(terminal, lines[j])
+        j = j + 1
+
+    return 0
+
+fn _fisher_yates(items: [text]) -> [text]:
+    """Shuffle list in-place equivalent using LCG Fisher-Yates."""
+    val n = items.len()
+    if n <= 1:
+        return items
+    # LCG seed from length
+    var seed: i64 = n as i64 * 6364136223846793005
+    # Build mutable copy
+    var arr: [text] = []
+    var k = 0
+    while k < n:
+        arr = arr.push(items[k])
+        k = k + 1
+    # Fisher-Yates from end to start
+    var i = n - 1
+    while i > 0:
+        # LCG step: next = (a * seed + c) % m  (m=2^32 simulated via truncation)
+        seed = (1664525 * seed + 1013904223) % 4294967296
+        val j = (seed % (i as i64 + 1)) as i32
+        # Swap arr[i] and arr[j]
+        val tmp = arr[i]
+        var new_arr: [text] = []
+        var m = 0
+        while m < arr.len():
+            if m == i:
+                new_arr = new_arr.push(arr[j])
+            elif m == j:
+                new_arr = new_arr.push(tmp)
+            else:
+                new_arr = new_arr.push(arr[m])
+            m = m + 1
+        arr = new_arr
+        i = i - 1
+    return arr
+
+fn _split_dash(s: text) -> [text]:
+    """Split 'LO-HI' on the first dash."""
+    var parts: [text] = []
+    var current = ""
+    var split_done = false
+    for ch in s:
+        if ch == "-" and not split_done:
+            parts = parts.push(current)
+            current = ""
+            split_done = true
+        else:
+            current = "{current}{ch}"
+    parts = parts.push(current)
+    return parts
+
+fn _parse_i32(s: text) -> i32:
+    """Parse text to i32, returns 0 on failure."""
+    var result = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32())
+        else:
+            return 0
+    return result
