@@ -1,0 +1,210 @@
+# Shell Variable Expansion — POSIX-compatible $VAR, ${var:-default}, $? expansion
+# MDSOC: feature dimension, shell layer
+use os.apps.terminal.terminal.{Terminal}
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _exp_lookup(pairs: [(text, text)], key: text) -> text:
+    """Look up key in a list of (key, value) pairs. Returns empty text if not found."""
+    for pair in pairs:
+        if pair.0 == key:
+            return pair.1
+    return ""
+
+fn _exp_resolve(key: text, variables: [(text, text)], env: [(text, text)]) -> text:
+    """Resolve a variable name: check variables first, then env."""
+    val v = _exp_lookup(variables, key)
+    if v != "":
+        return v
+    return _exp_lookup(env, key)
+
+fn _exp_positional(index: i32, positional_args: [text]) -> text:
+    """Return positional arg at index, or empty if out of range."""
+    if index < 0:
+        return ""
+    if index >= positional_args.len() as i32:
+        return ""
+    return positional_args[index]
+
+fn _exp_join_from(positional_args: [text], start: i32) -> text:
+    """Join positional_args[start..] with spaces."""
+    var result = ""
+    var i = start
+    while i < positional_args.len() as i32:
+        if i > start:
+            result = "{result} "
+        result = "{result}{positional_args[i]}"
+        i = i + 1
+    return result
+
+fn _exp_is_alnum_or_underscore(ch: text) -> bool:
+    """Return true if ch is a valid variable name character."""
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    if ch == "_":
+        return true
+    return false
+
+fn _exp_text_len(s: text) -> text:
+    """Return the character length of s as text."""
+    val n = s.len() as i32
+    return "{n}"
+
+# =========================================================================
+# Brace expansion parser: handle ${var}, ${var:-default}, ${var:+alt}, ${#var}
+# =========================================================================
+
+fn _exp_brace(content: text, variables: [(text, text)], env: [(text, text)]) -> text:
+    """Evaluate the content inside ${...} and return the expanded value."""
+    # ${#var} — length of var
+    if content.starts_with("#"):
+        val var_name = content.slice(1, content.len())
+        val v = _exp_resolve(var_name, variables, env)
+        return _exp_text_len(v)
+
+    # Find :- or :+ operator
+    var op_pos: i32 = -1
+    var op_kind = ""  # ":-" or ":+"
+    var i: i32 = 0
+    var prev_colon = false
+    for ch in content:
+        if prev_colon:
+            if ch == "-":
+                op_pos = i - 1
+                op_kind = ":-"
+                i = i + 1
+                break
+            elif ch == "+":
+                op_pos = i - 1
+                op_kind = ":+"
+                i = i + 1
+                break
+            else:
+                prev_colon = false
+        if ch == ":":
+            prev_colon = true
+        else:
+            prev_colon = false
+        i = i + 1
+
+    if op_pos >= 0 and op_kind != "":
+        val var_name = content.slice(0, op_pos)
+        # operand starts after the two-char operator
+        val operand = content.slice(op_pos + 2, content.len())
+        val v = _exp_resolve(var_name, variables, env)
+        if op_kind == ":-":
+            if v == "":
+                return operand
+            return v
+        # :+ — return alt if non-empty, else empty
+        if v != "":
+            return operand
+        return ""
+
+    # Plain ${var}
+    return _exp_resolve(content, variables, env)
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn shell_expand(s: text, variables: [(text, text)], env: [(text, text)], last_exit_code: i32, positional_args: [text]) -> text:
+    """Expand shell variables in s.
+
+    Handles: $VAR, $?, $0-$9, $#, $@, $*, ${var}, ${var:-default}, ${var:+alt}, ${#var}.
+    Command substitution $(cmd) is left as-is (not implemented).
+    """
+    var result = ""
+    var state = "normal"   # normal | dollar | varname | brace | brace_content
+    var var_name = ""
+    var brace_content = ""
+
+    for ch in s:
+        if state == "normal":
+            if ch == "$":
+                state = "dollar"
+                var_name = ""
+            else:
+                result = "{result}{ch}"
+
+        elif state == "dollar":
+            # Immediately after $
+            if ch == "{":
+                state = "brace_content"
+                brace_content = ""
+            elif ch == "(":
+                # Command substitution — not implemented; emit literal $(
+                result = "{result}$("
+                state = "normal"
+            elif ch == "?":
+                result = "{result}{last_exit_code}"
+                state = "normal"
+            elif ch == "#":
+                val count = if positional_args.len() > 0: positional_args.len() as i32 - 1 else: 0
+                result = "{result}{count}"
+                state = "normal"
+            elif ch == "@" or ch == "*":
+                val joined = _exp_join_from(positional_args, 1)
+                result = "{result}{joined}"
+                state = "normal"
+            elif ch == "0":
+                val s0 = _exp_positional(0, positional_args)
+                val val0 = if s0 == "": "sosh" else: s0
+                result = "{result}{val0}"
+                state = "normal"
+            elif ch >= "1" and ch <= "9":
+                val idx = ch.to_i32() - "0".to_i32()
+                result = "{result}{_exp_positional(idx, positional_args)}"
+                state = "normal"
+            elif _exp_is_alnum_or_underscore(ch):
+                var_name = "{ch}"
+                state = "varname"
+            else:
+                # Bare $ followed by non-special char — emit literal $
+                result = "{result}${ch}"
+                state = "normal"
+
+        elif state == "varname":
+            if _exp_is_alnum_or_underscore(ch):
+                var_name = "{var_name}{ch}"
+            else:
+                # End of var name
+                result = "{result}{_exp_resolve(var_name, variables, env)}"
+                var_name = ""
+                if ch == "$":
+                    state = "dollar"
+                else:
+                    result = "{result}{ch}"
+                    state = "normal"
+
+        elif state == "brace_content":
+            if ch == "}":
+                result = "{result}{_exp_brace(brace_content, variables, env)}"
+                brace_content = ""
+                state = "normal"
+            else:
+                brace_content = "{brace_content}{ch}"
+
+    # Flush pending state
+    if state == "varname":
+        result = "{result}{_exp_resolve(var_name, variables, env)}"
+    elif state == "dollar":
+        result = "{result}$"
+    elif state == "brace_content":
+        # Unterminated brace — emit literally
+        result = "{result}${{{brace_content}"
+
+    return result
+
+fn shell_apply_alias(command: text, aliases: [(text, text)]) -> text:
+    """Return alias expansion of the command word, or command unchanged if no alias."""
+    for pair in aliases:
+        if pair.0 == command:
+            return pair.1
+    return command

@@ -298,8 +298,9 @@ LLVM/Rust payloads.
 
 `x86_64-simpleos` is the supported bootstrap lane for the current guest-toolchain
 slice. The x86_64 FAT32/UEFI image stages real filesystem payloads for LLVM,
-Rust, and Ninja under `/usr`, while `/sys/apps/llvm` and `/sys/apps/rust` stay
-as thin filesystem-backed launchers that validate those staged payloads.
+Rust, and Ninja under `/usr`, while `/sys/apps/llvm` and `/sys/apps/rust` now
+launch the same native-wrapper surfaces and report manifest-backed execution
+instead of only validating file presence.
 
 ### 4.3 Sysroot Layout
 

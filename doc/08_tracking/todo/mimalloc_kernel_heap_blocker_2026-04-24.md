@@ -10,30 +10,49 @@ Replace `src/os/kernel/memory/heap.spl`'s free-list allocator with mimalloc
 as the primary `heap_alloc`/`heap_free` implementation, so SimpleOS uses
 mimalloc-bucketed allocation at the kernel heap tier.
 
-## Blocker
+## Blocker (accurate as of 2026-04-24)
 
-`src/lib/nogc_sync_mut/mimalloc.spl` (AC-4/AC-5) is a **structural/simulation
-port** (constraint D-3):
+`src/lib/nogc_sync_mut/mimalloc.spl` (AC-4/AC-5) is a **pure structural
+simulation** (constraint D-3). Every allocation is a fresh Simple `[u8]` array:
 
-- In interpreter mode: uses Simple `[u8]` arrays as backing store.
-- In compiled mode: large allocations delegate to `sys_malloc` — which is
-  the kernel free-list heap itself. This is a circular dependency.
-- `mi_malloc` returns `[u8]?`, not `VirtAddr` — there is no safe cast.
+```
+val mock_ptr: [u8] = [0u8; page.block_size]   # mimalloc.spl line 121
+```
 
-## What must be built first
+There is **no `sys_malloc` call** anywhere in the file. The "circular
+dependency via sys_malloc" described in earlier notes was incorrect — the
+actual blocker is that `mi_malloc` returns interpreter-managed `[u8]?` slices,
+not virtual addresses, so `heap_alloc → mi_malloc → cast to VirtAddr` is
+semantically invalid.
 
-One of the following:
+Existing tests (`test/unit/lib/alloc/mimalloc_spec.spl`,
+`test/unit/os/memory/mimalloc_os_spec.spl`) assert non-nil `[u8]?` returns in
+interpreter mode and must not regress.
 
-**Option A — VMM/PMM page-backed mimalloc store**
-Add a `mi_page_alloc_fn: fn(usize) -> u64?` hook to `MiHeap`. The kernel
-wires it to `pmm_alloc_page()` + `vmm_map_page()`, so mimalloc gets physical
-pages directly without calling back into `heap_alloc`. Then `heap_alloc`
-delegates to `mi_malloc`, which uses the kernel page supply — no cycle.
+## What must be built
 
-**Option B — Shim extern in runtime.c**
-Expose `rt_kernel_page_alloc(size: usize) -> usize` as an extern that the
-kernel provides. `mimalloc.spl` calls this instead of `sys_malloc` for the
-large-class path. Simpler but requires a runtime C change + bootstrap rebuild.
+**Option A — Dual-mode mi_malloc_raw (preferred)**
+
+Add `mi_malloc_raw(size: usize) -> usize` alongside `mi_malloc`:
+
+- Small/medium (size ≤ 65536): allocates from a page whose `base: usize`
+  points to kernel virtual memory; returns `base + block_offset`.
+  Requires adding `base: usize` field to `MiPage` and rewriting
+  `_page_alloc_from_free` / `_page_free_to_local` to use offset arithmetic.
+- Large (size > 65536): calls `g_os_page_alloc(size)` — a pluggable
+  `fn(usize) -> usize` global (0 = failure).
+- In stub/interpreter mode (`g_os_page_alloc` returns 0, no real pages):
+  `mi_malloc_raw` returns 0 → `heap_alloc` returns nil.  Interpreter-mode
+  `mi_malloc` (`[u8]?` path) is unchanged — existing tests pass.
+
+Then `heap_alloc` / `heap_free` in `heap.spl` call `mi_malloc_raw` /
+`mi_free_raw`. The kernel boot sequence calls
+`mimalloc_set_os_page_alloc(_kernel_page_alloc)` to inject the PMM provider.
+
+**Option B — Deferred: keep free-list until native mode is ready**
+
+Leave `heap.spl` free-list intact. Land Option A only when native kernel
+compile is stable enough to test. Update heap.spl comment to point here.
 
 ## Files to modify when unblocked
 

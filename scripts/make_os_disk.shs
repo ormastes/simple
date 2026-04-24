@@ -549,6 +549,8 @@ EOF
     cat > "$TMPDIR/SYS/CMAKEMAN.TXT" <<EOF
 payload=cmake
 mode=native-wrapper
+lane=x86_64-simpleos
+status=report-and-gate
 generator=Ninja
 version=$CMAKE_VERSION_LINE
 /usr/bin/cmake
@@ -558,6 +560,8 @@ EOF
     cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
 payload=llvm
 mode=native-wrapper
+lane=x86_64-simpleos
+status=report-and-gate
 version=$LLVM_VERSION_LINE
 /usr/bin/clang
 /usr/bin/clang-20
@@ -576,6 +580,8 @@ EOF
     cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
 payload=rust
 mode=native-wrapper
+lane=x86_64-simpleos
+status=report-and-gate
 rustc=$RUST_VERSION_LINE
 cargo=$CARGO_VERSION_LINE
 rustlib_files=$RUSTLIB_FILE_COUNT
@@ -590,6 +596,8 @@ EOF
     cat > "$TMPDIR/SYS/NINJAMAN.TXT" <<EOF
 payload=ninja
 mode=native-wrapper
+lane=x86_64-simpleos
+status=report-and-gate
 version=$NINJA_VERSION_LINE
 /usr/bin/ninja
 examples/ninja/simple_ninja.spl
@@ -626,6 +634,43 @@ elif [ -x /usr/local/bin/ld.lld ]; then
 fi
 
 stage_simpleos_toolchain_payloads || exit 1
+
+stage_mold_payload() {
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            echo "[make_os_disk] Skipping mold guest payload staging for $ARCH_MODE"
+            return 0
+            ;;
+    esac
+
+    MOLD_HOST_BIN="${SIMPLEOS_MOLD_BIN:-${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}/bin/mold/mold}"
+    if [ ! -f "$MOLD_HOST_BIN" ]; then
+        echo "[make_os_disk] mold not found at $MOLD_HOST_BIN -- skipping (run scripts/install-mold.shs to install)"
+        return 0
+    fi
+
+    mkdir -p "$TMPDIR/usr/bin" "$TMPDIR/SYS/APPS"
+    cp -L "$MOLD_HOST_BIN" "$TMPDIR/usr/bin/mold" || return 1
+    cp -L "$MOLD_HOST_BIN" "$TMPDIR/SYS/APPS/mold" || return 1
+
+    MOLD_VERSION_LINE="$("$MOLD_HOST_BIN" --version 2>/dev/null | sed -n '1p' || echo "unknown")"
+    cat > "$TMPDIR/SYS/MOLDMAN.TXT" <<EOF
+payload=mold
+mode=native-binary
+lane=x86_64-simpleos
+status=report-and-gate
+version=$MOLD_VERSION_LINE
+/usr/bin/mold
+/SYS/APPS/mold
+EOF
+
+    echo "[make_os_disk] Staged mold guest payload under /usr/bin/mold and /SYS/APPS/mold ($MOLD_VERSION_LINE)"
+    return 0
+}
+
+stage_mold_payload || exit 1
 
 build_disk_hello_elf() {
     if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then

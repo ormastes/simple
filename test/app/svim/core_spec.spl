@@ -1,0 +1,107 @@
+# @cover src/app/svim/core.spl 80%
+"""
+# svim shared editor core specification
+
+Validates the foundational shared editor core used by host TUI first and
+future shells later. Covers piece-table storage, anchor updates, modal
+commands, registers, splits/tabpages, quickfix flow, and RPC control.
+"""
+
+use std.sspec.*
+use app.svim.core.*
+
+
+fn _active_text(session: SvimSession) -> text:
+    session.active_buffer()?.piece_table.to_text() ?? ""
+
+fn _cursor(session: SvimSession) -> Cursor:
+    session.current_cursor()
+
+
+describe "svim piece table":
+    it "applies insert and delete edits without flattening the model":
+        var table = PieceTable.from_text("abc")
+        table.insert(1, "XY")
+        expect(table.to_text()).to_equal("aXYbc")
+        table.delete(2, 4)
+        expect(table.to_text()).to_equal("aXc")
+
+
+describe "svim anchors":
+    it "moves extmark-like anchors across multiline inserts":
+        var tracker = AnchorTracker.new()
+        val id = tracker.create(0, 1, true)
+        tracker.apply_insert(0, 1, "ZZ\nQ")
+        val pos = tracker.get(id)
+        expect(pos.row).to_equal(1)
+        expect(pos.col).to_equal(1)
+
+    it "clamps anchors into deleted ranges":
+        var tracker = AnchorTracker.new()
+        val id = tracker.create(2, 5, true)
+        tracker.apply_delete(1, 3, 3, 2)
+        val pos = tracker.get(id)
+        expect(pos.row).to_equal(1)
+        expect(pos.col).to_equal(3)
+
+
+describe "svim modal editing":
+    it "inserts text in insert mode and tracks cursor":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "hello"))
+        expect(_active_text(session)).to_equal("hello")
+        expect(_cursor(session).col).to_equal(5)
+
+    it "supports line yank delete and put through registers":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "alpha\nbeta"))
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "normal"))
+        session.execute(CommandRequest(name: "move-up", count: 1, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "yank-line", count: 1, register_name: "\"", payload: ""))
+        session.execute(CommandRequest(name: "move-down", count: 1, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "delete-line", count: 1, register_name: "", payload: ""))
+        session.execute(CommandRequest(name: "put-after", count: 1, register_name: "\"", payload: ""))
+        expect(_active_text(session)).to_equal("alpha\nalpha\n")
+
+    it "supports undo and redo for text edits":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: "abc"))
+        session.execute(CommandRequest(name: "undo", count: 1, register_name: "", payload: ""))
+        expect(_active_text(session)).to_equal("")
+        session.execute(CommandRequest(name: "redo", count: 1, register_name: "", payload: ""))
+        expect(_active_text(session)).to_equal("abc")
+
+
+describe "svim workspace state":
+    it "supports split windows over the same buffer":
+        var session = SvimSession.new()
+        val result = session.execute(CommandRequest(name: "split-window", count: 1, register_name: "", payload: ""))
+        expect(result.ok).to_equal(true)
+        expect(session.tabs[session.current_tab_index].window_ids.len()).to_equal(2)
+
+    it "supports opening a new tabpage from the current buffer":
+        var session = SvimSession.new()
+        val result = session.execute(CommandRequest(name: "new-tab", count: 1, register_name: "", payload: ""))
+        expect(result.ok).to_equal(true)
+        expect(session.tabs.len()).to_equal(2)
+
+    it "builds quickfix items from diagnostics and jumps to them":
+        var session = SvimSession.new()
+        val buffer_id = session.active_buffer()?.id ?? BufferId(value: 0)
+        session.replace_diagnostics(buffer_id, [DiagnosticItem(row: 0, col: 0, severity: "error", message: "boom")])
+        expect(session.quickfix.items.len()).to_equal(1)
+        val jump = session.jump_to_quickfix(0)
+        expect(jump.ok).to_equal(true)
+        expect(jump.message).to_equal("boom")
+
+    it "handles rpc snapshot and command requests through the shared session api":
+        var session = SvimSession.new()
+        session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: "insert"))
+        val cmd = session.handle_rpc(RpcRequest(id: "1", method: "svim.command", params_json: "insert-text:rpc"))
+        expect(cmd.ok).to_equal(true)
+        val snap = session.handle_rpc(RpcRequest(id: "2", method: "svim.snapshot", params_json: ""))
+        expect(snap.ok).to_equal(true)
+        expect(snap.result_json).to_contain("rpc")

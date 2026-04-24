@@ -950,6 +950,11 @@ const char* rt_env_get(const char* key) {
  * Memory
  * ================================================================ */
 
+#ifdef USE_MIMALLOC
+#include "mimalloc.h"
+void* spl_malloc(int64_t size) { return mi_malloc((size_t)size); }
+void  spl_free(void* ptr)      { mi_free(ptr); }
+#else
 void* spl_malloc(int64_t size) {
     return SPL_MALLOC((size_t)size, "user");
 }
@@ -957,6 +962,7 @@ void* spl_malloc(int64_t size) {
 void spl_free(void* ptr) {
     SPL_FREE(ptr);
 }
+#endif
 
 char* spl_strdup(const char* s) {
     return SPL_STRDUP(s ? s : "", "user");

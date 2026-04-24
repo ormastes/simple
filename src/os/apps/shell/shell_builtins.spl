@@ -1,0 +1,229 @@
+# Shell Builtins — Pure helper functions for shell built-in commands
+# MDSOC: feature dimension, shell layer
+use os.apps.terminal.terminal.{Terminal}
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _bl_lookup(pairs: [(text, text)], key: text) -> text:
+    """Look up key in a (text, text) list. Returns empty on miss."""
+    for pair in pairs:
+        if pair.0 == key:
+            return pair.1
+    return ""
+
+fn _bl_resolve(key: text, variables: [(text, text)], env: [(text, text)]) -> text:
+    """Resolve variable: variables first, then env."""
+    val v = _bl_lookup(variables, key)
+    if v != "":
+        return v
+    return _bl_lookup(env, key)
+
+fn _bl_parse_int(s: text) -> i32:
+    """Parse i32 from text. Returns 0 on failure."""
+    var result: i32 = 0
+    var found = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            result = result * 10 + digit
+            found = true
+        else:
+            return 0
+    if not found:
+        return 0
+    return result
+
+fn _bl_write(terminal: Terminal, s: text):
+    """Write raw text to terminal (no newline)."""
+    terminal.write_string(s)
+
+fn _bl_write_line(terminal: Terminal, s: text):
+    """Write text plus newline to terminal."""
+    terminal.write_string("{s}\n")
+
+# =========================================================================
+# builtin_printf — printf format string implementation
+# =========================================================================
+
+fn builtin_printf(terminal: Terminal, args: [text]) -> i32:
+    """Implement printf: args[0] is format string.
+
+    Escape sequences: \\n, \\t, \\\\.
+    Format specs: %s (next arg as text), %d (next arg as i32).
+    """
+    if args.len() == 0:
+        return 0
+
+    val fmt = args[0]
+    var arg_idx: i32 = 1
+    var output = ""
+    var escaped = false
+    var percent = false
+
+    for ch in fmt:
+        if escaped:
+            if ch == "n":
+                output = "{output}\n"
+            elif ch == "t":
+                output = "{output}\t"
+            elif ch == "\\":
+                output = "{output}\\"
+            else:
+                output = "{output}\\{ch}"
+            escaped = false
+        elif percent:
+            if ch == "s":
+                val sval = if arg_idx < args.len() as i32: args[arg_idx] else: ""
+                output = "{output}{sval}"
+                arg_idx = arg_idx + 1
+            elif ch == "d":
+                val dval = if arg_idx < args.len() as i32: _bl_parse_int(args[arg_idx]) else: 0
+                output = "{output}{dval}"
+                arg_idx = arg_idx + 1
+            elif ch == "%":
+                output = "{output}%"
+            else:
+                output = "{output}%{ch}"
+            percent = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "%":
+            percent = true
+        else:
+            output = "{output}{ch}"
+
+    _bl_write(terminal, output)
+    return 0
+
+# =========================================================================
+# builtin_alias_list — print all defined aliases
+# =========================================================================
+
+fn builtin_alias_list(aliases: [(text, text)], terminal: Terminal) -> i32:
+    """Print each alias in the form: alias name='value'."""
+    for pair in aliases:
+        _bl_write_line(terminal, "alias {pair.0}='{pair.1}'")
+    return 0
+
+# =========================================================================
+# builtin_test_condition — evaluate simple test expressions
+# =========================================================================
+
+fn builtin_test_condition(condition: text, variables: [(text, text)], env: [(text, text)]) -> bool:
+    """Evaluate a simple test condition string.
+
+    Supported forms:
+      -z str      true if str is empty
+      -n str      true if str is non-empty
+      a = b       true if a equals b
+      a != b      true if a not equals b
+    """
+    val trimmed = condition.trim()
+    if trimmed == "":
+        return false
+
+    # Split on spaces to get tokens
+    var tokens: [text] = []
+    var current = ""
+    for ch in trimmed:
+        if ch == " ":
+            if current != "":
+                tokens = tokens.push(current)
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current != "":
+        tokens = tokens.push(current)
+
+    if tokens.len() == 0:
+        return false
+
+    val t0 = tokens[0]
+
+    # Unary: -z STR or -n STR
+    if t0 == "-z":
+        if tokens.len() < 2:
+            return true
+        val expanded = _bl_resolve(tokens[1], variables, env)
+        return expanded == ""
+
+    if t0 == "-n":
+        if tokens.len() < 2:
+            return false
+        val expanded = _bl_resolve(tokens[1], variables, env)
+        return expanded != ""
+
+    # Binary: A OP B
+    if tokens.len() >= 3:
+        val lhs = _bl_resolve(t0, variables, env)
+        val op = tokens[1]
+        val rhs = _bl_resolve(tokens[2], variables, env)
+        if op == "=":
+            return lhs == rhs
+        if op == "!=":
+            return lhs != rhs
+        if op == "==":
+            return lhs == rhs
+
+    # Single token: non-empty means true
+    return t0 != ""
+
+# =========================================================================
+# builtin_eval_prompt — expand PS1-style prompt template
+# =========================================================================
+
+fn builtin_eval_prompt(template: text, cwd: text, last_exit_code: i32) -> text:
+    """Expand a prompt template.
+
+    Escape sequences:
+      \\w   — current working directory
+      \\$   — $ (or # for root, but SimpleOS has no uid; always $)
+      \\e   — ESC character (\\u{001b})
+      \\[   — begin non-printing sequence (omitted from output)
+      \\]   — end non-printing sequence (omitted from output)
+      \\n   — newline
+      \\\\  — literal backslash
+
+    ANSI color shortcuts inside \\[...\\] are stripped (they're already
+    raw escape sequences passed through \\e); callers should embed full
+    ANSI escapes via \\e[32m style.
+    """
+    val esc = "\u{001b}"
+    var result = ""
+    var escaped = false
+    var in_nonprint = false
+
+    for ch in template:
+        if escaped:
+            if ch == "w":
+                if not in_nonprint:
+                    result = "{result}{cwd}"
+            elif ch == "$":
+                if not in_nonprint:
+                    result = "{result}$"
+            elif ch == "e":
+                if not in_nonprint:
+                    result = "{result}{esc}"
+            elif ch == "[":
+                in_nonprint = true
+            elif ch == "]":
+                in_nonprint = false
+            elif ch == "n":
+                if not in_nonprint:
+                    result = "{result}\n"
+            elif ch == "\\":
+                if not in_nonprint:
+                    result = "{result}\\"
+            else:
+                if not in_nonprint:
+                    result = "{result}\\{ch}"
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        else:
+            if not in_nonprint:
+                result = "{result}{ch}"
+
+    return result

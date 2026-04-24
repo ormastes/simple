@@ -43,11 +43,26 @@ struct MiHeap:
     pages_by_class: [[MiPage]]
 
 # ============================================================================
+# OS page provider hook (kernel sets this; default stub returns 0 = failure)
+# ============================================================================
+
+fn _default_os_page_alloc(_size: usize) -> usize:
+    """Stub OS page provider. Returns 0 (failure). Kernel replaces via mimalloc_set_os_page_alloc."""
+    0
+
+var _g_os_page_alloc: fn(usize) -> usize = _default_os_page_alloc
+
+fn mimalloc_set_os_page_alloc(f: fn(usize) -> usize):
+    """Inject a real OS page provider (e.g. PMM-backed). Must be called before mi_malloc_raw for large allocs."""
+    _g_os_page_alloc = f
+
+# ============================================================================
 # Global heap state (single-threaded; mimalloc_init required before use)
 # ============================================================================
 
 var _g_heap: MiHeap = MiHeap(size_classes: [], pages_by_class: [])
 var _g_total_allocated: usize = 0
+var _g_raw_allocated: usize = 0
 
 # ============================================================================
 # Size-class lookup (no >> — D-2 Cranelift workaround)
@@ -56,7 +71,7 @@ var _g_total_allocated: usize = 0
 # Fixed 32-entry size-class table covering 8..65536.
 # Small classes: 8, 16, 32, 64, 128, 256, 512, 1024  (indices 0..7)
 # Medium classes: 2048, 4096, 8192, 16384, 32768, 65536  (indices 8..13)
-# Anything larger: return 14 (large class, delegate to sys_malloc)
+# Anything larger: return 14 (large class, delegated to g_os_page_alloc in mi_malloc_raw)
 val _SIZE_CLASS_TABLE: [usize] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
 
 fn mi_size_class_index(size: usize) -> i64:
@@ -273,6 +288,65 @@ fn _g_total_allocated_get() -> usize:
     _g_total_allocated
 
 # ============================================================================
+# Raw kernel API — returns usize (virtual address); 0 = failure
+#
+# mi_malloc_raw: kernel-facing allocator that returns a VirtAddr as usize.
+#   - Small/medium (size class 0..13, ≤ 65536): allocates a bookkeeping slot
+#     from the size-class free list and returns g_os_page_alloc(actual_size).
+#     The page provider must back the memory with real physical pages.
+#   - Large (class 14, > 65536): calls g_os_page_alloc(size) directly.
+#   - If g_os_page_alloc returns 0 (stub mode), returns 0 (nil).
+#
+# mi_free_raw: counterpart. Decrements raw allocation counter; page reclaim
+#   is deferred to the OS page provider (not yet implemented).
+# ============================================================================
+
+fn mi_malloc_raw(size: usize) -> usize:
+    """Kernel-facing allocator. Returns virtual address as usize; 0 = failure.
+
+    Uses g_os_page_alloc for backing pages. Does not return [u8]? — safe to
+    cast result to VirtAddr in kernel code. Works in interpreter stub mode
+    (g_os_page_alloc returns 0 → mi_malloc_raw returns 0).
+    """
+    if size == 0:
+        return 0
+
+    val class_idx = mi_size_class_index(size)
+    val actual_size = if class_idx < _SIZE_CLASS_TABLE.len() as i64:
+        _class_size(class_idx)
+    else:
+        size
+
+    # Ensure size-class slot exists in the global heap table
+    _ensure_class_slot(class_idx)
+
+    # Update raw allocation counter (bookkeeping only; no [u8] slices)
+    _g_raw_allocated = _g_raw_allocated + actual_size
+
+    # Delegate page backing to the OS page provider
+    _g_os_page_alloc(actual_size)
+
+fn mi_free_raw(addr: usize, size: usize):
+    """Kernel-facing free. Decrements raw allocation counter.
+
+    Page reclaim is handled by the OS page provider when it implements
+    a free path. Currently a no-op beyond the counter update.
+    """
+    if addr == 0:
+        return
+    val class_idx = mi_size_class_index(size)
+    val actual_size = if class_idx < _SIZE_CLASS_TABLE.len() as i64:
+        _class_size(class_idx)
+    else:
+        size
+    if _g_raw_allocated >= actual_size:
+        _g_raw_allocated = _g_raw_allocated - actual_size
+
+fn mi_raw_allocated() -> usize:
+    """Total bytes tracked by mi_malloc_raw (for diagnostics)."""
+    _g_raw_allocated
+
+# ============================================================================
 # MimallocAllocator — implements Allocator trait
 # ============================================================================
 
@@ -318,8 +392,12 @@ export MiSegment
 export MiHeap
 export MimallocAllocator
 export mimalloc_init
+export mimalloc_set_os_page_alloc
 export mi_malloc
 export mi_free
 export mi_realloc
+export mi_malloc_raw
+export mi_free_raw
+export mi_raw_allocated
 export mi_size_class_index
 export default_allocator

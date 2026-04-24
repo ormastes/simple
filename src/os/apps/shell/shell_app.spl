@@ -60,6 +60,11 @@ use os.apps.git.git_app.{git_run_cmd}
 use os.apps.jj.jj_app.{jj_run_cmd}
 use os.async.os_executor.{OsExecutor}
 use os.posix.process_compat.{posix_waitpid}
+use os.apps.shell.shell_expand.{shell_expand, shell_apply_alias}
+use os.apps.shell.shell_script.{ScriptEngine, Stmt, StmtKind}
+use os.apps.shell.shell_builtins.{builtin_printf, builtin_alias_list}
+use os.apps.shell.shell_starship.{StarshipPrompt}
+use os.tools.shell.awk.awk_tool.{tool_awk}
 
 # =========================================================================
 # Shell Application
@@ -87,6 +92,9 @@ class ShellApp:
     jobs: JobTable
     executor: OsExecutor
     async_fs: AsyncFilesystem?
+    variables: [(text, text)]
+    aliases: [(text, text)]
+    shell_functions: [(text, text)]
 
 impl ShellApp:
 
@@ -109,7 +117,10 @@ impl ShellApp:
             tool_registry: nil,
             jobs: JobTable.new(),
             executor: OsExecutor.new(),
-            async_fs: nil
+            async_fs: nil,
+            variables: [],
+            aliases: [],
+            shell_functions: [],
         )
 
     static fn with_vfs(vfs: VfsManager) -> ShellApp:
@@ -196,8 +207,8 @@ impl ShellApp:
 
     me _show_prompt():
         """Display the shell prompt."""
-        val esc = "\u{001b}"
-        self.terminal.write_string("{esc}[32m{self.cwd}{esc}[0m {self.prompt}")
+        val prompt_str = StarshipPrompt.new().build_prompt(self.cwd, self.last_exit_code, self.env, self.vfs, 0)
+        self.terminal.write_string(prompt_str)
 
     # -- Command Execution ---------------------------------------------------
 
@@ -336,6 +347,20 @@ impl ShellApp:
             "sha256sum": self.last_exit_code = tool_sha256sum(self.vfs, self.cwd, args, self.terminal)
             "git":      self.cmd_git(args)
             "jj":       self.cmd_jj(args)
+            "source":   self.cmd_source(args)
+            ".":        self.cmd_source(args)
+            "read":     self.cmd_read(args)
+            "printf":   self.last_exit_code = builtin_printf(self.terminal, args)
+            "alias":    self.cmd_alias(args)
+            "unalias":  self.cmd_unalias(args)
+            "shift":    self.cmd_shift(args)
+            "trap":     self.cmd_trap(args)
+            "wait":     self.cmd_wait(args)
+            "break":    self.last_exit_code = -1
+            "continue": self.last_exit_code = -2
+            "return":   self.cmd_return(args)
+            "mkfifo":   self.cmd_mkfifo(args)
+            "awk":      self.last_exit_code = tool_awk(self.vfs, self.cwd, args, self.terminal)
             _:
                 self.last_exit_code = 127
 
@@ -415,6 +440,20 @@ impl ShellApp:
             "sha256sum": true
             "git": true
             "jj": true
+            "source": true
+            ".": true
+            "read": true
+            "printf": true
+            "alias": true
+            "unalias": true
+            "shift": true
+            "trap": true
+            "wait": true
+            "break": true
+            "continue": true
+            "return": true
+            "mkfifo": true
+            "awk": true
             _: false
 
     me _execute_background(command: text, args: [text]):
@@ -1258,26 +1297,8 @@ impl ShellApp:
         self.env = new_env
 
     fn _expand_vars(s: text) -> text:
-        """Expand $VAR references in a string."""
-        var result = ""
-        var in_var = false
-        var var_name = ""
-        for ch in s:
-            if in_var:
-                if ch >= "A" and ch <= "Z" or ch >= "a" and ch <= "z" or ch == "_" or ch >= "0" and ch <= "9":
-                    var_name = "{var_name}{ch}"
-                else:
-                    result = "{result}{self._get_env(var_name)}{ch}"
-                    in_var = false
-                    var_name = ""
-            elif ch == "$":
-                in_var = true
-                var_name = ""
-            else:
-                result = "{result}{ch}"
-        if in_var:
-            result = "{result}{self._get_env(var_name)}"
-        return result
+        """Expand $VAR, $?, ${var:-default}, $0-$9, $@, $*, $# references in a string."""
+        return shell_expand(s, self.variables, self.env, self.last_exit_code, [])
 
     # -- Path Resolution -----------------------------------------------------
 
@@ -1295,6 +1316,226 @@ impl ShellApp:
             return self.cwd
         val full = if self.cwd == "/": "/{path}" else: "{self.cwd}/{path}"
         return _normalize_path(full)
+
+    fn cmd_source(args: [text]):
+        """Source (execute) a shell script file."""
+        if args.len() == 0:
+            self.terminal.write_string("source: usage: source <file> [args...]\n")
+            self.last_exit_code = 1
+            return
+        val path = self._resolve_path(args[0])
+        var script_args: [text] = [args[0]]
+        var i = 1
+        while i < args.len():
+            script_args = script_args.push(args[i])
+            i = i + 1
+        if self.vfs != nil:
+            val result = self.vfs.read_text(path)
+            if result.is_ok():
+                self.execute_script_text(result.unwrap(), script_args)
+            else:
+                self.terminal.write_string("source: {path}: not found\n")
+                self.last_exit_code = 1
+        else:
+            self.terminal.write_string("source: no filesystem\n")
+            self.last_exit_code = 1
+
+    fn execute_script_text(source: text, script_args: [text]):
+        """Parse and execute shell script source text."""
+        val engine = ScriptEngine.new()
+        val stmts = engine.parse(source)
+        var i = 0
+        while i < stmts.len():
+            self._execute_stmt(stmts[i], script_args)
+            i = i + 1
+
+    fn _execute_stmt(stmt: Stmt, script_args: [text]):
+        """Execute a single parsed statement."""
+        match stmt.kind:
+            case StmtKind.Command:
+                if stmt.args.len() > 0:
+                    val raw_cmd = stmt.args[0]
+                    val aliased = shell_apply_alias(raw_cmd, self.aliases)
+                    var expanded = shell_expand(aliased, self.variables, self.env, self.last_exit_code, script_args)
+                    var i = 1
+                    while i < stmt.args.len():
+                        expanded = "{expanded} {shell_expand(stmt.args[i], self.variables, self.env, self.last_exit_code, script_args)}"
+                        i = i + 1
+                    self.execute(expanded)
+            case StmtKind.Assign:
+                val key = stmt.var_name
+                val value = shell_expand(stmt.args[0], self.variables, self.env, self.last_exit_code, script_args)
+                var new_vars: [(text, text)] = []
+                var found = false
+                for pair in self.variables:
+                    if pair.0 == key:
+                        new_vars = new_vars.push((key, value))
+                        found = true
+                    else:
+                        new_vars = new_vars.push(pair)
+                if not found:
+                    new_vars = new_vars.push((key, value))
+                self.variables = new_vars
+            case StmtKind.If:
+                var executed = false
+                for branch in stmt.branches:
+                    val cond_expanded = shell_expand(branch.condition, self.variables, self.env, self.last_exit_code, script_args)
+                    if cond_expanded != "" and cond_expanded != "0" and cond_expanded != "false":
+                        self.execute_script_text(_join_lines(branch.body), script_args)
+                        executed = true
+                        break
+                if not executed:
+                    self.execute_script_text(_join_lines(stmt.else_body), script_args)
+            case StmtKind.While:
+                var keep_going = true
+                while keep_going:
+                    val cond = shell_expand(stmt.condition, self.variables, self.env, self.last_exit_code, script_args)
+                    if cond == "" or cond == "0" or cond == "false":
+                        keep_going = false
+                    else:
+                        self.execute_script_text(_join_lines(stmt.body), script_args)
+                        if self.last_exit_code == -1:
+                            self.last_exit_code = 0
+                            keep_going = false
+            case StmtKind.For:
+                for item in stmt.items:
+                    var new_vars2: [(text, text)] = []
+                    var found2 = false
+                    for pair in self.variables:
+                        if pair.0 == stmt.var_name:
+                            new_vars2 = new_vars2.push((stmt.var_name, item))
+                            found2 = true
+                        else:
+                            new_vars2 = new_vars2.push(pair)
+                    if not found2:
+                        new_vars2 = new_vars2.push((stmt.var_name, item))
+                    self.variables = new_vars2
+                    self.execute_script_text(_join_lines(stmt.body), script_args)
+                    if self.last_exit_code == -1:
+                        self.last_exit_code = 0
+                        break
+            case StmtKind.FnDef:
+                val fn_body = _join_lines(stmt.body)
+                var new_fns: [(text, text)] = []
+                var found3 = false
+                for pair in self.shell_functions:
+                    if pair.0 == stmt.var_name:
+                        new_fns = new_fns.push((stmt.var_name, fn_body))
+                        found3 = true
+                    else:
+                        new_fns = new_fns.push(pair)
+                if not found3:
+                    new_fns = new_fns.push((stmt.var_name, fn_body))
+                self.shell_functions = new_fns
+            case StmtKind.Source:
+                self.cmd_source(stmt.args)
+            case StmtKind.BreakStmt:
+                self.last_exit_code = -1
+            case StmtKind.ContinueStmt:
+                self.last_exit_code = -2
+            case StmtKind.ReturnStmt:
+                if stmt.args.len() > 0:
+                    self.last_exit_code = stmt.args[0].to_i32()
+                else:
+                    self.last_exit_code = 0
+            case _:
+                pass
+
+    fn cmd_read(args: [text]):
+        """Read a line of input into a variable."""
+        if args.len() == 0:
+            self.last_exit_code = 0
+            return
+        val input = self.terminal.read_input()
+        val var_name = args[0]
+        var new_vars: [(text, text)] = []
+        var found = false
+        for pair in self.variables:
+            if pair.0 == var_name:
+                new_vars = new_vars.push((var_name, input))
+                found = true
+            else:
+                new_vars = new_vars.push(pair)
+        if not found:
+            new_vars = new_vars.push((var_name, input))
+        self.variables = new_vars
+        self.last_exit_code = 0
+
+    fn cmd_alias(args: [text]):
+        """Set or list aliases."""
+        if args.len() == 0:
+            self.last_exit_code = builtin_alias_list(self.aliases, self.terminal)
+            return
+        for arg in args:
+            val eq_pos = _find_char_pos(arg, "=")
+            if eq_pos >= 0:
+                val name = arg.slice(0, eq_pos)
+                var value = arg.slice(eq_pos + 1, arg.len())
+                if value.starts_with("'") and value.len() > 1:
+                    value = value.slice(1, value.len() - 1)
+                var new_aliases: [(text, text)] = []
+                var found = false
+                for pair in self.aliases:
+                    if pair.0 == name:
+                        new_aliases = new_aliases.push((name, value))
+                        found = true
+                    else:
+                        new_aliases = new_aliases.push(pair)
+                if not found:
+                    new_aliases = new_aliases.push((name, value))
+                self.aliases = new_aliases
+        self.last_exit_code = 0
+
+    fn cmd_unalias(args: [text]):
+        """Remove an alias."""
+        for arg in args:
+            var new_aliases: [(text, text)] = []
+            for pair in self.aliases:
+                if pair.0 != arg:
+                    new_aliases = new_aliases.push(pair)
+            self.aliases = new_aliases
+        self.last_exit_code = 0
+
+    fn cmd_shift(args: [text]):
+        """Shift positional parameters (no-op for interactive mode)."""
+        self.last_exit_code = 0
+
+    fn cmd_trap(args: [text]):
+        """Register a signal handler (stored in variables for now)."""
+        if args.len() >= 2:
+            var new_vars: [(text, text)] = []
+            var found = false
+            val trap_key = "_trap_{args[1]}"
+            for pair in self.variables:
+                if pair.0 == trap_key:
+                    new_vars = new_vars.push((trap_key, args[0]))
+                    found = true
+                else:
+                    new_vars = new_vars.push(pair)
+            if not found:
+                new_vars = new_vars.push((trap_key, args[0]))
+            self.variables = new_vars
+        self.last_exit_code = 0
+
+    fn cmd_wait(args: [text]):
+        """Wait for background jobs to complete."""
+        self.last_exit_code = 0
+
+    fn cmd_return(args: [text]):
+        """Return from a function with optional exit code."""
+        if args.len() > 0:
+            self.last_exit_code = args[0].to_i32()
+        else:
+            self.last_exit_code = 0
+
+    fn cmd_mkfifo(args: [text]):
+        """Create a named pipe (FIFO). Stub — VFS FIFOs not yet supported."""
+        if args.len() == 0:
+            self.terminal.write_string("mkfifo: usage: mkfifo <name>\n")
+            self.last_exit_code = 1
+            return
+        self.terminal.write_string("mkfifo: not supported on this filesystem\n")
+        self.last_exit_code = 1
 
     # -- UI Construction -----------------------------------------------------
 
@@ -1380,6 +1621,22 @@ fn _parent_path(path: text) -> text:
     if last_slash == 0:
         return "/"
     return path.slice(0, last_slash)
+
+fn _join_lines(lines: [text]) -> text:
+    """Join a list of lines into a single text with newlines."""
+    var result = ""
+    for line in lines:
+        result = "{result}{line}\n"
+    return result
+
+fn _find_char_pos(s: text, ch: text) -> i32:
+    """Find position of first occurrence of ch in s. Returns -1 if not found."""
+    var pos = 0
+    for c in s:
+        if c == ch:
+            return pos
+        pos = pos + 1
+    return -1
 
 # =========================================================================
 # Remote Window Entry

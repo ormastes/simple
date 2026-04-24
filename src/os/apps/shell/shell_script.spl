@@ -1,0 +1,670 @@
+# Shell Scripting Engine — parses and represents .shs control flow statements
+# MDSOC: feature dimension, shell layer
+
+# =========================================================================
+# Control Flow
+# =========================================================================
+
+enum ControlFlow:
+    """Control flow result from executing a statement."""
+    Normal(exit_code: i32)
+    Break(depth: i32)
+    Continue(depth: i32)
+    Return(exit_code: i32)
+
+# =========================================================================
+# Statement Kind
+# =========================================================================
+
+enum StmtKind:
+    """Kind of shell statement."""
+    Command
+    If
+    While
+    For
+    Case
+    FnDef
+    Assign
+    Source
+    BreakStmt
+    ContinueStmt
+    ReturnStmt
+
+# =========================================================================
+# AST Nodes
+# =========================================================================
+
+class IfBranch:
+    """One arm (if or elif) of a conditional statement."""
+    condition: text
+    body: [text]
+
+class Stmt:
+    """A parsed shell statement."""
+    kind: StmtKind
+    args: [text]          # Command / Assign / Source
+    condition: text       # If / While / For / Case
+    branches: [IfBranch]  # If — if/elif arms
+    else_body: [text]     # If — else arm
+    body: [text]          # While / For / FnDef / Case body
+    var_name: text        # For (loop var) / Assign (lhs) / FnDef (name)
+    items: [text]         # For — item list
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _split_by_space(s: text) -> [text]:
+    """Split a string on whitespace, skipping empty tokens."""
+    var parts: [text] = []
+    var cur = ""
+    for ch in s:
+        if ch == " " or ch == "\t":
+            if cur.len() > 0:
+                parts = parts.push(cur)
+                cur = ""
+        else:
+            cur = "{cur}{ch}"
+    if cur.len() > 0:
+        parts = parts.push(cur)
+    return parts
+
+fn _split_lines(s: text) -> [text]:
+    """Split text into lines on \\n."""
+    var lines: [text] = []
+    var cur = ""
+    for ch in s:
+        if ch == "\n":
+            lines = lines.push(cur)
+            cur = ""
+        else:
+            cur = "{cur}{ch}"
+    if cur.len() > 0:
+        lines = lines.push(cur)
+    return lines
+
+fn _trim(s: text) -> text:
+    """Remove leading/trailing whitespace."""
+    return s.trim()
+
+fn _contains_eq_no_space(s: text) -> bool:
+    """Return true if s contains '=' with no surrounding space (var=val pattern)."""
+    var i = 0
+    var found_eq = false
+    for ch in s:
+        if ch == "=":
+            found_eq = true
+        i = i + 1
+    if not found_eq:
+        return false
+    # Make sure there is no space before the first '='
+    var before_eq = ""
+    for ch in s:
+        if ch == "=":
+            # stop
+            return not before_eq.contains(" ") and not before_eq.contains("\t") and before_eq.len() > 0
+        else:
+            before_eq = "{before_eq}{ch}"
+    return false
+
+fn _split_assign(s: text) -> (text, text):
+    """Split 'var=value' into (var, value)."""
+    var lhs = ""
+    var rhs = ""
+    var seen_eq = false
+    for ch in s:
+        if ch == "=" and not seen_eq:
+            seen_eq = true
+        elif seen_eq:
+            rhs = "{rhs}{ch}"
+        else:
+            lhs = "{lhs}{ch}"
+    return (lhs, rhs)
+
+fn _extract_condition_if(line: text) -> text:
+    """Extract condition from 'if <cond>' or 'if <cond> then'."""
+    var after_if = line.slice(3, line.len())  # drop 'if '
+    val trimmed = after_if.trim()
+    if trimmed.ends_with(" then"):
+        val end = trimmed.len() - 5
+        return trimmed.slice(0, end).trim()
+    if trimmed == "then":
+        return ""
+    return trimmed
+
+fn _extract_condition_elif(line: text) -> text:
+    """Extract condition from 'elif <cond>' or 'elif <cond> then'."""
+    var after = line.slice(5, line.len())  # drop 'elif '
+    val trimmed = after.trim()
+    if trimmed.ends_with(" then"):
+        val end = trimmed.len() - 5
+        return trimmed.slice(0, end).trim()
+    return trimmed
+
+fn _extract_condition_while(line: text) -> text:
+    """Extract condition from 'while <cond>' or 'while <cond> do'."""
+    var after = line.slice(6, line.len())  # drop 'while '
+    val trimmed = after.trim()
+    if trimmed.ends_with(" do"):
+        val end = trimmed.len() - 3
+        return trimmed.slice(0, end).trim()
+    return trimmed
+
+fn _make_empty_stmt(kind: StmtKind) -> Stmt:
+    """Construct a Stmt with all fields zeroed out."""
+    return Stmt(
+        kind: kind,
+        args: [],
+        condition: "",
+        branches: [],
+        else_body: [],
+        body: [],
+        var_name: "",
+        items: []
+    )
+
+# =========================================================================
+# Parse — collect body lines until closing keyword, respecting nesting
+# =========================================================================
+
+fn _collect_block(lines: [text], start: i32, open_kw: text, close_kw: text) -> ([text], i32):
+    """
+    Collect body lines starting at index `start` until `close_kw` at depth 0.
+    Returns (body_lines, index_after_close).
+    open_kw/close_kw are used for nesting (e.g. "if"/"fi", "while"/"done").
+    """
+    var body: [text] = []
+    var depth = 1
+    var i = start
+    while i < lines.len():
+        val raw = lines[i]
+        val line = raw.trim()
+        i = i + 1
+        if line == close_kw or line.starts_with("{close_kw} "):
+            depth = depth - 1
+            if depth == 0:
+                return (body, i)
+            else:
+                body = body.push(raw)
+        elif line == open_kw or line.starts_with("{open_kw} "):
+            depth = depth + 1
+            body = body.push(raw)
+        else:
+            body = body.push(raw)
+    return (body, i)
+
+# =========================================================================
+# ScriptEngine
+# =========================================================================
+
+class ScriptEngine:
+    """Parses and represents shell script text into Stmt AST nodes."""
+
+impl ScriptEngine:
+
+    static fn new() -> ScriptEngine:
+        """Create a new stateless script engine."""
+        return ScriptEngine()
+
+    fn parse(self, source: text) -> [Stmt]:
+        """Parse shell script source into a flat list of Stmt nodes."""
+        val raw_lines = _split_lines(source)
+        var lines: [text] = []
+        for raw in raw_lines:
+            lines = lines.push(raw)
+
+        var stmts: [Stmt] = []
+        var i = 0
+        while i < lines.len():
+            val raw = lines[i]
+            val line = raw.trim()
+            i = i + 1
+
+            # Skip blank lines and comments
+            if line.len() == 0:
+                continue
+            if line.starts_with("#"):
+                continue
+
+            # -----------------------------------------------------------------
+            # if / elif / else / fi
+            # -----------------------------------------------------------------
+            if line.starts_with("if ") or line == "if":
+                var stmt = _make_empty_stmt(StmtKind.If)
+                val cond = _extract_condition_if(line)
+                var first_branch = IfBranch(condition: cond, body: [])
+
+                # Collect lines until fi, tracking nesting
+                var body_lines: [text] = []
+                var depth = 1
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline == "fi" or bline.starts_with("fi "):
+                        depth = depth - 1
+                        if depth == 0:
+                            # done
+                            i = i  # no-op to end loop
+                            break
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline.starts_with("if ") or bline == "if":
+                        depth = depth + 1
+                        body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                # Now parse body_lines into branches
+                var branches: [IfBranch] = []
+                var current_branch = first_branch
+                var current_body: [text] = []
+                var in_else = false
+                var else_body_acc: [text] = []
+
+                for braw in body_lines:
+                    val bline = braw.trim()
+                    if bline == "then":
+                        # absorb 'then' keyword — don't add to body
+                        continue
+                    elif bline.starts_with("elif "):
+                        # Save current branch
+                        current_branch = IfBranch(condition: current_branch.condition, body: current_body)
+                        branches = branches.push(current_branch)
+                        current_body = []
+                        val new_cond = _extract_condition_elif(bline)
+                        current_branch = IfBranch(condition: new_cond, body: [])
+                        in_else = false
+                    elif bline == "else":
+                        # Save current branch and switch to else
+                        current_branch = IfBranch(condition: current_branch.condition, body: current_body)
+                        branches = branches.push(current_branch)
+                        current_body = []
+                        in_else = true
+                    else:
+                        if in_else:
+                            else_body_acc = else_body_acc.push(braw)
+                        else:
+                            current_body = current_body.push(braw)
+
+                if not in_else:
+                    current_branch = IfBranch(condition: current_branch.condition, body: current_body)
+                    branches = branches.push(current_branch)
+
+                stmt = Stmt(
+                    kind: StmtKind.If,
+                    args: [],
+                    condition: "",
+                    branches: branches,
+                    else_body: else_body_acc,
+                    body: [],
+                    var_name: "",
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # while <cond> [do] ... done
+            # -----------------------------------------------------------------
+            if line.starts_with("while ") or line == "while":
+                var stmt = _make_empty_stmt(StmtKind.While)
+                val cond = _extract_condition_while(line)
+                var body_lines: [text] = []
+                var depth = 1
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline == "done" or bline.starts_with("done "):
+                        depth = depth - 1
+                        if depth == 0:
+                            break
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline == "do":
+                        # absorb top-level do keyword (depth already 1)
+                        continue
+                    elif (bline.starts_with("while ") or bline.starts_with("for ")):
+                        depth = depth + 1
+                        body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                stmt = Stmt(
+                    kind: StmtKind.While,
+                    args: [],
+                    condition: cond,
+                    branches: [],
+                    else_body: [],
+                    body: body_lines,
+                    var_name: "",
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # for <var> in <items> [do] ... done
+            # -----------------------------------------------------------------
+            if line.starts_with("for ") or line == "for":
+                var stmt = _make_empty_stmt(StmtKind.For)
+                # Parse: for VAR in ITEM1 ITEM2 ...
+                val after_for = line.slice(4, line.len()).trim()
+                var for_var = ""
+                var for_items: [text] = []
+                val for_tokens = _split_by_space(after_for)
+                if for_tokens.len() >= 1:
+                    for_var = for_tokens[0]
+                # tokens[1] should be "in"
+                if for_tokens.len() >= 3:
+                    var ti = 2
+                    while ti < for_tokens.len():
+                        val tok = for_tokens[ti]
+                        if tok != "do":
+                            for_items = for_items.push(tok)
+                        ti = ti + 1
+
+                var body_lines: [text] = []
+                var depth = 1
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline == "done" or bline.starts_with("done "):
+                        depth = depth - 1
+                        if depth == 0:
+                            break
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline == "do":
+                        continue
+                    elif (bline.starts_with("while ") or bline.starts_with("for ")):
+                        depth = depth + 1
+                        body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                stmt = Stmt(
+                    kind: StmtKind.For,
+                    args: [],
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: body_lines,
+                    var_name: for_var,
+                    items: for_items
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # case <expr> in ... esac
+            # -----------------------------------------------------------------
+            if line.starts_with("case ") or line == "case":
+                var stmt = _make_empty_stmt(StmtKind.Case)
+                val after_case = line.slice(5, line.len()).trim()
+                # Strip trailing " in" if present
+                var case_expr = after_case
+                if after_case.ends_with(" in"):
+                    val end = after_case.len() - 3
+                    case_expr = after_case.slice(0, end).trim()
+
+                var body_lines: [text] = []
+                var depth = 1
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline == "esac" or bline.starts_with("esac "):
+                        depth = depth - 1
+                        if depth == 0:
+                            break
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline.starts_with("case "):
+                        depth = depth + 1
+                        body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                stmt = Stmt(
+                    kind: StmtKind.Case,
+                    args: [],
+                    condition: case_expr,
+                    branches: [],
+                    else_body: [],
+                    body: body_lines,
+                    var_name: "",
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # function <name> { ... }  OR  <name>() { ... }
+            # -----------------------------------------------------------------
+            if line.starts_with("function "):
+                var stmt = _make_empty_stmt(StmtKind.FnDef)
+                val after_fn = line.slice(9, line.len()).trim()
+                var fn_name = after_fn
+                # Strip trailing { or ()
+                if fn_name.ends_with(" {"):
+                    val end = fn_name.len() - 2
+                    fn_name = fn_name.slice(0, end).trim()
+                elif fn_name.ends_with("{"):
+                    val end = fn_name.len() - 1
+                    fn_name = fn_name.slice(0, end).trim()
+
+                var body_lines: [text] = []
+                var depth = 0
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline.contains("{"):
+                        depth = depth + 1
+                        if depth == 1:
+                            continue  # opening brace line, don't add
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline == "}":
+                        if depth <= 1:
+                            break
+                        else:
+                            depth = depth - 1
+                            body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                stmt = Stmt(
+                    kind: StmtKind.FnDef,
+                    args: [],
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: body_lines,
+                    var_name: fn_name,
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # <name>() { ... }
+            if line.contains("()"):
+                val paren_pos = line.len()  # approximate: treat whole line as fn def
+                # Find name before ()
+                var fn_name2 = ""
+                for ch in line:
+                    if ch == "(" or ch == ")":
+                        break
+                    fn_name2 = "{fn_name2}{ch}"
+                fn_name2 = fn_name2.trim()
+
+                var body_lines: [text] = []
+                var depth = 0
+                while i < lines.len():
+                    val braw = lines[i]
+                    val bline = braw.trim()
+                    i = i + 1
+                    if bline.contains("{"):
+                        depth = depth + 1
+                        if depth == 1:
+                            continue
+                        else:
+                            body_lines = body_lines.push(braw)
+                    elif bline == "}":
+                        if depth <= 1:
+                            break
+                        else:
+                            depth = depth - 1
+                            body_lines = body_lines.push(braw)
+                    else:
+                        body_lines = body_lines.push(braw)
+
+                val fn_stmt = Stmt(
+                    kind: StmtKind.FnDef,
+                    args: [],
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: body_lines,
+                    var_name: fn_name2,
+                    items: []
+                )
+                stmts = stmts.push(fn_stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # return [n]
+            # -----------------------------------------------------------------
+            if line == "return" or line.starts_with("return "):
+                var stmt = _make_empty_stmt(StmtKind.ReturnStmt)
+                var ret_args: [text] = []
+                if line.starts_with("return "):
+                    val after_ret = line.slice(7, line.len()).trim()
+                    ret_args = _split_by_space(after_ret)
+                stmt = Stmt(
+                    kind: StmtKind.ReturnStmt,
+                    args: ret_args,
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: [],
+                    var_name: "",
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # break
+            # -----------------------------------------------------------------
+            if line == "break" or line.starts_with("break "):
+                var stmt = _make_empty_stmt(StmtKind.BreakStmt)
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # continue
+            # -----------------------------------------------------------------
+            if line == "continue" or line.starts_with("continue "):
+                var stmt = _make_empty_stmt(StmtKind.ContinueStmt)
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # source <file>  or  . <file>
+            # -----------------------------------------------------------------
+            if line.starts_with("source ") or line.starts_with(". "):
+                var stmt = _make_empty_stmt(StmtKind.Source)
+                var src_args = _split_by_space(line)
+                # Drop the 'source' or '.' token — keep the rest
+                var file_args: [text] = []
+                var first_tok = true
+                for tok in src_args:
+                    if first_tok:
+                        first_tok = false
+                    else:
+                        file_args = file_args.push(tok)
+                stmt = Stmt(
+                    kind: StmtKind.Source,
+                    args: file_args,
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: [],
+                    var_name: "",
+                    items: []
+                )
+                stmts = stmts.push(stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # VAR=VALUE assignment (no spaces around =)
+            # -----------------------------------------------------------------
+            if _contains_eq_no_space(line):
+                val pair = _split_assign(line)
+                val lhs = pair.0
+                val rhs = pair.1
+                val assign_stmt = Stmt(
+                    kind: StmtKind.Assign,
+                    args: [rhs],
+                    condition: "",
+                    branches: [],
+                    else_body: [],
+                    body: [],
+                    var_name: lhs,
+                    items: []
+                )
+                stmts = stmts.push(assign_stmt)
+                continue
+
+            # -----------------------------------------------------------------
+            # Default: Command
+            # -----------------------------------------------------------------
+            val cmd_args = _split_by_space(line)
+            val cmd_stmt = Stmt(
+                kind: StmtKind.Command,
+                args: cmd_args,
+                condition: "",
+                branches: [],
+                else_body: [],
+                body: [],
+                var_name: "",
+                items: []
+            )
+            stmts = stmts.push(cmd_stmt)
+
+        return stmts
+
+    fn parse_file(self, source: text, args: [text]) -> [Stmt]:
+        """Parse shell script source; args passed at execute time."""
+        return self.parse(source)
+
+    fn describe_stmt(self, stmt: Stmt) -> text:
+        """Return a human-readable description of a Stmt for debugging."""
+        if stmt.kind == StmtKind.Command:
+            return "Command({stmt.args})"
+        if stmt.kind == StmtKind.If:
+            val branch_count = stmt.branches.len()
+            return "If(branches={branch_count}, has_else={stmt.else_body.len() > 0})"
+        if stmt.kind == StmtKind.While:
+            return "While(cond='{stmt.condition}', body_lines={stmt.body.len()})"
+        if stmt.kind == StmtKind.For:
+            return "For(var='{stmt.var_name}', items={stmt.items.len()}, body_lines={stmt.body.len()})"
+        if stmt.kind == StmtKind.Case:
+            return "Case(expr='{stmt.condition}', body_lines={stmt.body.len()})"
+        if stmt.kind == StmtKind.FnDef:
+            return "FnDef(name='{stmt.var_name}', body_lines={stmt.body.len()})"
+        if stmt.kind == StmtKind.Assign:
+            return "Assign({stmt.var_name}={stmt.args})"
+        if stmt.kind == StmtKind.Source:
+            return "Source({stmt.args})"
+        if stmt.kind == StmtKind.ReturnStmt:
+            return "Return({stmt.args})"
+        if stmt.kind == StmtKind.BreakStmt:
+            return "Break"
+        if stmt.kind == StmtKind.ContinueStmt:
+            return "Continue"
+        return "Unknown"

@@ -1,0 +1,1059 @@
+@allow(star_import) # facade-style shared editor core
+# svim shared editor core
+#
+# Editor-native public vocabulary backed by a shared session model.
+# This v1 foundation keeps editing logic in the core so host TUI and
+# future shells can reuse the same state and command surface.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+
+# ============================================================================
+# Public IDs and editor vocabulary
+# ============================================================================
+
+class BufferId:
+    value: i64
+
+class WindowId:
+    value: i64
+
+class TabId:
+    value: i64
+
+class AnchorId:
+    value: i64
+
+enum SvimMode:
+    Normal
+    Insert
+    Visual
+    Command
+
+fn svim_mode_name(mode: SvimMode) -> text:
+    match mode:
+        SvimMode.Normal => "NORMAL"
+        SvimMode.Insert => "INSERT"
+        SvimMode.Visual => "VISUAL"
+        SvimMode.Command => "COMMAND"
+
+class Cursor:
+    row: i64
+    col: i64
+
+class Selection:
+    start: Cursor
+    end: Cursor
+
+class ModeState:
+    mode: SvimMode
+    pending_count: i64
+    commandline: text
+
+class RegisterEntry:
+    name: text
+    content: text
+    linewise: bool
+
+class RegisterBank:
+    entries: [RegisterEntry]
+    active_register: text
+
+class JumpLocation:
+    buffer_id: BufferId
+    row: i64
+    col: i64
+
+class JumpList:
+    locations: [JumpLocation]
+    index: i64
+
+class QuickfixItem:
+    buffer_id: BufferId
+    row: i64
+    col: i64
+    severity: text
+    message: text
+
+class QuickfixList:
+    items: [QuickfixItem]
+    selected_index: i64
+
+class DiagnosticItem:
+    row: i64
+    col: i64
+    severity: text
+    message: text
+
+class EditorEvent:
+    kind: text
+    message: text
+
+class RpcRequest:
+    id: text
+    method: text
+    params_json: text
+
+class RpcResponse:
+    id: text
+    ok: bool
+    result_json: text
+    error_text: text
+
+class CommandRequest:
+    name: text
+    count: i64
+    register_name: text
+    payload: text
+
+class CommandResult:
+    ok: bool
+    message: text
+    events: [EditorEvent]
+
+class SvimViewport:
+    top_row: i64
+    left_col: i64
+    width: i64
+    height: i64
+
+
+# ============================================================================
+# Piece table
+# ============================================================================
+
+class SvimPiece:
+    source: text
+    start: i64
+    length: i64
+
+class PieceTable:
+    original: text
+    add_buffer: text
+    pieces: [SvimPiece]
+
+impl PieceTable:
+
+    static fn from_text(content: text) -> PieceTable:
+        var pieces: [SvimPiece] = []
+        if content.len() > 0:
+            pieces.push(SvimPiece(source: "original", start: 0, length: content.len()))
+        PieceTable(original: content, add_buffer: "", pieces: pieces)
+
+    fn len() -> i64:
+        var total = 0
+        for piece in self.pieces:
+            total = total + piece.length
+        total
+
+    fn to_text() -> text:
+        var out = ""
+        for piece in self.pieces:
+            out = out + _svim_piece_slice(self, piece)
+        out
+
+    me insert(offset: i64, content: text):
+        if content.len() == 0:
+            return
+        val clamped = _svim_clamp_i64(offset, 0, self.len())
+        val add_start = self.add_buffer.len()
+        self.add_buffer = self.add_buffer + content
+        val inserted = SvimPiece(source: "add", start: add_start, length: content.len())
+        self.pieces = _svim_insert_piece(self.pieces, clamped, inserted)
+
+    me delete(start: i64, end: i64):
+        val total = self.len()
+        val clamped_start = _svim_clamp_i64(start, 0, total)
+        val clamped_end = _svim_clamp_i64(end, clamped_start, total)
+        if clamped_end <= clamped_start:
+            return
+        self.pieces = _svim_delete_range(self.pieces, clamped_start, clamped_end)
+
+
+# ============================================================================
+# Anchors
+# ============================================================================
+
+class AnchorEntry:
+    id: AnchorId
+    row: i64
+    col: i64
+    gravity_after: bool
+
+class AnchorTracker:
+    next_id: i64
+    anchors: [AnchorEntry]
+
+impl AnchorTracker:
+
+    static fn new() -> AnchorTracker:
+        AnchorTracker(next_id: 1, anchors: [])
+
+    me create(row: i64, col: i64, gravity_after: bool) -> AnchorId:
+        val id = AnchorId(value: self.next_id)
+        self.next_id = self.next_id + 1
+        self.anchors.push(AnchorEntry(id: id, row: row, col: col, gravity_after: gravity_after))
+        id
+
+    fn get(id: AnchorId) -> Cursor:
+        for anchor in self.anchors:
+            if anchor.id.value == id.value:
+                return Cursor(row: anchor.row, col: anchor.col)
+        Cursor(row: 0, col: 0)
+
+    me set(id: AnchorId, row: i64, col: i64):
+        var i = 0
+        while i < self.anchors.len():
+            if self.anchors[i].id.value == id.value:
+                var anchor = self.anchors[i]
+                anchor.row = row
+                anchor.col = col
+                self.anchors[i] = anchor
+                return
+            i = i + 1
+
+    me apply_insert(row: i64, col: i64, content: text):
+        val stats = _svim_text_insert_stats(content)
+        var i = 0
+        while i < self.anchors.len():
+            val anchor = self.anchors[i]
+            val after = _svim_position_after_insert(anchor.row, anchor.col, anchor.gravity_after, row, col, stats.0, stats.1)
+            var updated = self.anchors[i]
+            updated.row = after.row
+            updated.col = after.col
+            self.anchors[i] = updated
+            i = i + 1
+
+    me apply_delete(start_row: i64, start_col: i64, end_row: i64, end_col: i64):
+        var i = 0
+        while i < self.anchors.len():
+            val anchor = self.anchors[i]
+            val after = _svim_position_after_delete(anchor.row, anchor.col, start_row, start_col, end_row, end_col)
+            var updated = self.anchors[i]
+            updated.row = after.row
+            updated.col = after.col
+            self.anchors[i] = updated
+            i = i + 1
+
+
+# ============================================================================
+# Buffer, window, tab, session
+# ============================================================================
+
+class BufferSnapshot:
+    text: text
+    cursor: Cursor
+
+class SvimBuffer:
+    id: BufferId
+    path: text?
+    piece_table: PieceTable
+    line_starts: [i64]
+    anchors: AnchorTracker
+    diagnostics: [DiagnosticItem]
+    undo_stack: [BufferSnapshot]
+    redo_stack: [BufferSnapshot]
+    version: i64
+
+class SvimWindow:
+    id: WindowId
+    buffer_id: BufferId
+    viewport: SvimViewport
+    cursor_anchor: AnchorId
+
+class SvimTabpage:
+    id: TabId
+    window_ids: [WindowId]
+    active_window_index: i64
+
+class SvimSession:
+    buffers: [SvimBuffer]
+    windows: [SvimWindow]
+    tabs: [SvimTabpage]
+    current_tab_index: i64
+    next_buffer_id: i64
+    next_window_id: i64
+    next_tab_id: i64
+    mode_state: ModeState
+    registers: RegisterBank
+    jumps: JumpList
+    quickfix: QuickfixList
+    last_search: text
+
+impl SvimSession:
+
+    static fn new() -> SvimSession:
+        var session = SvimSession(
+            buffers: [],
+            windows: [],
+            tabs: [],
+            current_tab_index: 0,
+            next_buffer_id: 1,
+            next_window_id: 1,
+            next_tab_id: 1,
+            mode_state: ModeState(mode: SvimMode.Normal, pending_count: 0, commandline: ""),
+            registers: RegisterBank(entries: [RegisterEntry(name: "\"", content: "", linewise: false)], active_register: "\""),
+            jumps: JumpList(locations: [], index: 0),
+            quickfix: QuickfixList(items: [], selected_index: 0),
+            last_search: ""
+        )
+        val buffer_id = session.open_text(nil, "")
+        val _ = session.focus_buffer_in_new_tab(buffer_id)
+        session
+
+    me open_text(path: text?, content: text) -> BufferId:
+        val buffer_id = BufferId(value: self.next_buffer_id)
+        self.next_buffer_id = self.next_buffer_id + 1
+        self.buffers.push(SvimBuffer(
+            id: buffer_id,
+            path: path,
+            piece_table: PieceTable.from_text(content),
+            line_starts: _svim_compute_line_starts(content),
+            anchors: AnchorTracker.new(),
+            diagnostics: [],
+            undo_stack: [],
+            redo_stack: [],
+            version: 1
+        ))
+        buffer_id
+
+    me open_path(path: text) -> CommandResult:
+        val content = rt_file_read_text(path) ?? ""
+        val buffer_id = self.open_text(path, content)
+        self.focus_buffer(buffer_id)
+        CommandResult(ok: true, message: "opened {path}", events: [EditorEvent(kind: "buffer-opened", message: path)])
+
+    me focus_buffer(buffer_id: BufferId):
+        if self.tabs.len() == 0:
+            val _ = self.focus_buffer_in_new_tab(buffer_id)
+            return
+        val window_idx = self.active_window_index()
+        if window_idx < 0:
+            val _ = self.focus_buffer_in_new_tab(buffer_id)
+            return
+        val window = self.windows[window_idx]
+        val buffer_idx = _svim_find_buffer_index(self.buffers, buffer_id)
+        if buffer_idx < 0:
+            return
+        val pos = Cursor(row: 0, col: 0)
+        val anchor = self.buffers[buffer_idx].anchors.create(pos.row, pos.col, true)
+        var window = self.windows[window_idx]
+        window.buffer_id = buffer_id
+        window.cursor_anchor = anchor
+        self.windows[window_idx] = window
+
+    me focus_buffer_in_new_tab(buffer_id: BufferId) -> TabId:
+        val buffer_idx = _svim_find_buffer_index(self.buffers, buffer_id)
+        if buffer_idx < 0:
+            return TabId(value: 0)
+        val window_id = WindowId(value: self.next_window_id)
+        self.next_window_id = self.next_window_id + 1
+        val anchor = self.buffers[buffer_idx].anchors.create(0, 0, true)
+        self.windows.push(SvimWindow(
+            id: window_id,
+            buffer_id: buffer_id,
+            viewport: SvimViewport(top_row: 0, left_col: 0, width: 80, height: 12),
+            cursor_anchor: anchor
+        ))
+        val tab_id = TabId(value: self.next_tab_id)
+        self.next_tab_id = self.next_tab_id + 1
+        self.tabs.push(SvimTabpage(id: tab_id, window_ids: [window_id], active_window_index: 0))
+        self.current_tab_index = self.tabs.len() - 1
+        tab_id
+
+    fn active_window_index() -> i64:
+        if self.tabs.len() == 0 or self.current_tab_index < 0 or self.current_tab_index >= self.tabs.len():
+            return -1
+        val tab = self.tabs[self.current_tab_index]
+        if tab.window_ids.len() == 0 or tab.active_window_index < 0 or tab.active_window_index >= tab.window_ids.len():
+            return -1
+        _svim_find_window_index(self.windows, tab.window_ids[tab.active_window_index])
+
+    fn active_window() -> SvimWindow?:
+        val idx = self.active_window_index()
+        if idx < 0:
+            return nil
+        self.windows[idx]
+
+    fn active_buffer_index() -> i64:
+        val window_idx = self.active_window_index()
+        if window_idx < 0:
+            return -1
+        _svim_find_buffer_index(self.buffers, self.windows[window_idx].buffer_id)
+
+    fn active_buffer() -> SvimBuffer?:
+        val idx = self.active_buffer_index()
+        if idx < 0:
+            return nil
+        self.buffers[idx]
+
+    fn current_cursor() -> Cursor:
+        val window_idx = self.active_window_index()
+        val buffer_idx = self.active_buffer_index()
+        if window_idx < 0 or buffer_idx < 0:
+            return Cursor(row: 0, col: 0)
+        self.buffers[buffer_idx].anchors.get(self.windows[window_idx].cursor_anchor)
+
+    me set_current_cursor(row: i64, col: i64):
+        val window_idx = self.active_window_index()
+        val buffer_idx = self.active_buffer_index()
+        if window_idx < 0 or buffer_idx < 0:
+            return
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val max_row = _svim_max_row(self.buffers[buffer_idx].line_starts)
+        val clamped_row = _svim_clamp_i64(row, 0, max_row)
+        val max_col = _svim_line_length(text, self.buffers[buffer_idx].line_starts, clamped_row)
+        val clamped_col = _svim_clamp_i64(col, 0, max_col)
+        self.buffers[buffer_idx].anchors.set(self.windows[window_idx].cursor_anchor, clamped_row, clamped_col)
+        self._ensure_cursor_visible()
+
+    me save_current_buffer() -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        val path = self.buffers[buffer_idx].path
+        if path == nil:
+            return CommandResult(ok: false, message: "buffer has no path", events: [])
+        val ok = rt_file_write_text(path, self.buffers[buffer_idx].piece_table.to_text())
+        if ok:
+            CommandResult(ok: true, message: "saved {path}", events: [EditorEvent(kind: "buffer-saved", message: path)])
+        else:
+            CommandResult(ok: false, message: "failed to save {path}", events: [])
+
+    me save_current_buffer_as(path: text) -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        var buffer = self.buffers[buffer_idx]
+        buffer.path = path
+        self.buffers[buffer_idx] = buffer
+        self.save_current_buffer()
+
+    me split_current_window() -> CommandResult:
+        if self.tabs.len() == 0:
+            return CommandResult(ok: false, message: "no tabpage", events: [])
+        val window_idx = self.active_window_index()
+        val buffer_idx = self.active_buffer_index()
+        if window_idx < 0 or buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active window", events: [])
+        val source_cursor = self.current_cursor()
+        val new_window_id = WindowId(value: self.next_window_id)
+        self.next_window_id = self.next_window_id + 1
+        val new_anchor = self.buffers[buffer_idx].anchors.create(source_cursor.row, source_cursor.col, true)
+        self.windows.push(SvimWindow(
+            id: new_window_id,
+            buffer_id: self.windows[window_idx].buffer_id,
+            viewport: self.windows[window_idx].viewport,
+            cursor_anchor: new_anchor
+        ))
+        var tab = self.tabs[self.current_tab_index]
+        tab.window_ids.push(new_window_id)
+        tab.active_window_index = tab.window_ids.len() - 1
+        self.tabs[self.current_tab_index] = tab
+        CommandResult(ok: true, message: "split window", events: [EditorEvent(kind: "window-split", message: "")])
+
+    me new_tab_from_current_buffer() -> CommandResult:
+        val window = self.active_window()
+        if window == nil:
+            return CommandResult(ok: false, message: "no active window", events: [])
+        val tab_id = self.focus_buffer_in_new_tab(window.buffer_id)
+        CommandResult(ok: true, message: "new tab {tab_id.value}", events: [EditorEvent(kind: "tab-opened", message: str(tab_id.value))])
+
+    me replace_diagnostics(buffer_id: BufferId, diagnostics: [DiagnosticItem]):
+        val idx = _svim_find_buffer_index(self.buffers, buffer_id)
+        if idx < 0:
+            return
+        var buffer = self.buffers[idx]
+        buffer.diagnostics = diagnostics
+        self.buffers[idx] = buffer
+        self._rebuild_quickfix()
+
+    me _rebuild_quickfix():
+        var items: [QuickfixItem] = []
+        for buffer in self.buffers:
+            for diag in buffer.diagnostics:
+                items.push(QuickfixItem(
+                    buffer_id: buffer.id,
+                    row: diag.row,
+                    col: diag.col,
+                    severity: diag.severity,
+                    message: diag.message
+                ))
+        self.quickfix.items = items
+        if self.quickfix.selected_index >= self.quickfix.items.len():
+            self.quickfix.selected_index = 0
+
+    me jump_to_quickfix(index: i64) -> CommandResult:
+        if self.quickfix.items.len() == 0:
+            return CommandResult(ok: false, message: "quickfix empty", events: [])
+        val clamped = _svim_clamp_i64(index, 0, self.quickfix.items.len() - 1)
+        self.quickfix.selected_index = clamped
+        val item = self.quickfix.items[clamped]
+        self.focus_buffer(item.buffer_id)
+        self.set_current_cursor(item.row, item.col)
+        CommandResult(ok: true, message: item.message, events: [EditorEvent(kind: "quickfix-jump", message: item.message)])
+
+    me execute(request: CommandRequest) -> CommandResult:
+        val count = if request.count <= 0 then 1 else: request.count
+        match request.name:
+            "set-mode":
+                self.mode_state.mode = _svim_mode_from_text(request.payload)
+                CommandResult(ok: true, message: svim_mode_name(self.mode_state.mode), events: [])
+            "insert-text":
+                if self.mode_state.mode != SvimMode.Insert:
+                    return CommandResult(ok: false, message: "insert-text requires Insert mode", events: [])
+                self._insert_text(request.payload)
+                CommandResult(ok: true, message: "inserted", events: [EditorEvent(kind: "buffer-changed", message: "insert")])
+            "backspace":
+                self._delete_before_cursor()
+                CommandResult(ok: true, message: "backspace", events: [])
+            "newline":
+                self._insert_text("\n")
+                CommandResult(ok: true, message: "newline", events: [])
+            "move-left":
+                self._move_horizontal(0 - count)
+                CommandResult(ok: true, message: "left", events: [])
+            "move-right":
+                self._move_horizontal(count)
+                CommandResult(ok: true, message: "right", events: [])
+            "move-up":
+                self._move_vertical(0 - count)
+                CommandResult(ok: true, message: "up", events: [])
+            "move-down":
+                self._move_vertical(count)
+                CommandResult(ok: true, message: "down", events: [])
+            "delete-line":
+                self._delete_current_line()
+                CommandResult(ok: true, message: "deleted line", events: [])
+            "yank-line":
+                self._yank_current_line(request.register_name)
+                CommandResult(ok: true, message: "yanked line", events: [])
+            "put-after":
+                self._put_after(request.register_name)
+                CommandResult(ok: true, message: "put", events: [])
+            "undo":
+                self._undo()
+                CommandResult(ok: true, message: "undo", events: [])
+            "redo":
+                self._redo()
+                CommandResult(ok: true, message: "redo", events: [])
+            "split-window":
+                self.split_current_window()
+            "new-tab":
+                self.new_tab_from_current_buffer()
+            "search-forward":
+                self._search_forward(request.payload)
+            "save":
+                self.save_current_buffer()
+            "save-as":
+                self.save_current_buffer_as(request.payload)
+            "commandline":
+                self.execute_commandline(request.payload)
+            _:
+                CommandResult(ok: false, message: "unknown command: {request.name}", events: [])
+
+    me execute_commandline(commandline: text) -> CommandResult:
+        self.mode_state.commandline = commandline
+        if commandline == "w":
+            return self.save_current_buffer()
+        if commandline == "q":
+            return CommandResult(ok: true, message: "quit requested", events: [EditorEvent(kind: "quit-requested", message: "")])
+        if commandline == "split":
+            return self.split_current_window()
+        if commandline == "tabnew":
+            return self.new_tab_from_current_buffer()
+        if commandline.starts_with("w "):
+            return self.save_current_buffer_as(commandline.slice(2, commandline.len()).trim())
+        if commandline.starts_with("e "):
+            return self.open_path(commandline.slice(2, commandline.len()).trim())
+        CommandResult(ok: false, message: "unknown commandline: {commandline}", events: [])
+
+    me handle_rpc(request: RpcRequest) -> RpcResponse:
+        if request.method == "svim.snapshot":
+            return RpcResponse(id: request.id, ok: true, result_json: svim_snapshot_text(self), error_text: "")
+        if request.method == "svim.command":
+            val parsed = _svim_parse_rpc_command(request.params_json)
+            val result = self.execute(parsed)
+            return RpcResponse(id: request.id, ok: result.ok, result_json: result.message, error_text: if result.ok then "" else: result.message)
+        RpcResponse(id: request.id, ok: false, result_json: "", error_text: "unknown rpc method: {request.method}")
+
+    me _insert_text(content: text):
+        val window_idx = self.active_window_index()
+        val buffer_idx = self.active_buffer_index()
+        if window_idx < 0 or buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        self._push_undo_snapshot(cursor)
+        val offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.insert(offset, content)
+        buffer.anchors.apply_insert(cursor.row, cursor.col, content)
+        buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        val stats = _svim_text_insert_stats(content)
+        val after = _svim_position_after_insert(cursor.row, cursor.col, true, cursor.row, cursor.col, stats.0, stats.1)
+        self.set_current_cursor(after.row, after.col)
+
+    me _delete_before_cursor():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        if cursor.row == 0 and cursor.col == 0:
+            return
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val current_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        if current_offset <= 0:
+            return
+        val start_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, current_offset - 1)
+        self._push_undo_snapshot(cursor)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.delete(current_offset - 1, current_offset)
+        buffer.anchors.apply_delete(start_cursor.row, start_cursor.col, cursor.row, cursor.col)
+        buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        self.set_current_cursor(start_cursor.row, start_cursor.col)
+
+    me _delete_current_line():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val line_start = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, 0)
+        val line_len = _svim_line_length(text, self.buffers[buffer_idx].line_starts, cursor.row)
+        val has_next = cursor.row < _svim_max_row(self.buffers[buffer_idx].line_starts)
+        val delete_end = if has_next then line_start + line_len + 1 else: line_start + line_len
+        self._push_undo_snapshot(cursor)
+        self._store_register(if self.registers.active_register == "" then "\"" else: self.registers.active_register, text.slice(line_start, delete_end), true)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.delete(line_start, delete_end)
+        val end_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, delete_end)
+        buffer.anchors.apply_delete(cursor.row, 0, end_cursor.row, end_cursor.col)
+        val new_text = buffer.piece_table.to_text()
+        buffer.line_starts = _svim_compute_line_starts(new_text)
+        if new_text.len() == 0:
+            buffer.piece_table = PieceTable.from_text("")
+            buffer.line_starts = [0]
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        val target_row = _svim_clamp_i64(cursor.row, 0, _svim_max_row(buffer.line_starts))
+        self.set_current_cursor(target_row, 0)
+
+    me _yank_current_line(register_name: text):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val line_start = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, 0)
+        val line_len = _svim_line_length(text, self.buffers[buffer_idx].line_starts, cursor.row)
+        val has_next = cursor.row < _svim_max_row(self.buffers[buffer_idx].line_starts)
+        val line_end = if has_next then line_start + line_len + 1 else: line_start + line_len
+        val name = if register_name == "" then "\"" else: register_name
+        self._store_register(name, text.slice(line_start, line_end), true)
+
+    me _put_after(register_name: text):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        val entry = self._register_entry(if register_name == "" then "\"" else: register_name)
+        if entry.name == "":
+            return
+        if entry.linewise:
+            val text = self.buffers[buffer_idx].piece_table.to_text()
+            val line_start = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, 0)
+            val line_len = _svim_line_length(text, self.buffers[buffer_idx].line_starts, cursor.row)
+            val has_next = cursor.row < _svim_max_row(self.buffers[buffer_idx].line_starts)
+            val offset = if has_next then line_start + line_len + 1 else: line_start + line_len
+            self._push_undo_snapshot(cursor)
+            var buffer = self.buffers[buffer_idx]
+            buffer.piece_table.insert(offset, entry.content)
+            val line_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, offset)
+            buffer.anchors.apply_insert(line_cursor.row, line_cursor.col, entry.content)
+            buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
+            self.buffers[buffer_idx] = buffer
+            self.set_current_cursor(cursor.row + 1, 0)
+        else:
+            self._insert_text(entry.content)
+
+    me _move_horizontal(delta: i64):
+        val cursor = self.current_cursor()
+        self.set_current_cursor(cursor.row, cursor.col + delta)
+
+    me _move_vertical(delta: i64):
+        val cursor = self.current_cursor()
+        self.set_current_cursor(cursor.row + delta, cursor.col)
+
+    me _search_forward(term: text) -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        self.last_search = term
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val cursor = self.current_cursor()
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        var found = text.find(term, start_offset + 1) ?? -1
+        if found < 0:
+            found = text.find(term, 0) ?? -1
+        if found < 0:
+            return CommandResult(ok: false, message: "pattern not found", events: [])
+        val target = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, found)
+        self.jumps.locations.push(JumpLocation(buffer_id: self.buffers[buffer_idx].id, row: cursor.row, col: cursor.col))
+        self.jumps.index = self.jumps.locations.len() - 1
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "found {term}", events: [EditorEvent(kind: "search-hit", message: term)])
+
+    me _push_undo_snapshot(cursor: Cursor):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        var buffer = self.buffers[buffer_idx]
+        buffer.undo_stack.push(BufferSnapshot(text: buffer.piece_table.to_text(), cursor: cursor))
+        buffer.redo_stack = []
+        if buffer.undo_stack.len() > 32:
+            buffer.undo_stack = _svim_trim_snapshots(buffer.undo_stack)
+        self.buffers[buffer_idx] = buffer
+
+    me _undo():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or self.buffers[buffer_idx].undo_stack.len() == 0:
+            return
+        val current = BufferSnapshot(text: self.buffers[buffer_idx].piece_table.to_text(), cursor: self.current_cursor())
+        var buffer = self.buffers[buffer_idx]
+        buffer.redo_stack.push(current)
+        val last = buffer.undo_stack[buffer.undo_stack.len() - 1]
+        buffer.undo_stack = _svim_drop_last_snapshot(buffer.undo_stack)
+        self.buffers[buffer_idx] = buffer
+        self._restore_snapshot(last)
+
+    me _redo():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or self.buffers[buffer_idx].redo_stack.len() == 0:
+            return
+        val current = BufferSnapshot(text: self.buffers[buffer_idx].piece_table.to_text(), cursor: self.current_cursor())
+        var buffer = self.buffers[buffer_idx]
+        buffer.undo_stack.push(current)
+        val last = buffer.redo_stack[buffer.redo_stack.len() - 1]
+        buffer.redo_stack = _svim_drop_last_snapshot(buffer.redo_stack)
+        self.buffers[buffer_idx] = buffer
+        self._restore_snapshot(last)
+
+    me _restore_snapshot(snapshot: BufferSnapshot):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table = PieceTable.from_text(snapshot.text)
+        buffer.line_starts = _svim_compute_line_starts(snapshot.text)
+        buffer.anchors = AnchorTracker.new()
+        val window_idx = self.active_window_index()
+        val anchor = buffer.anchors.create(snapshot.cursor.row, snapshot.cursor.col, true)
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        var window = self.windows[window_idx]
+        window.cursor_anchor = anchor
+        self.windows[window_idx] = window
+        self.set_current_cursor(snapshot.cursor.row, snapshot.cursor.col)
+
+    me _store_register(name: text, content: text, linewise: bool):
+        var i = 0
+        while i < self.registers.entries.len():
+            if self.registers.entries[i].name == name:
+                var entry = self.registers.entries[i]
+                entry.content = content
+                entry.linewise = linewise
+                self.registers.entries[i] = entry
+                self.registers.active_register = name
+                return
+            i = i + 1
+        self.registers.entries.push(RegisterEntry(name: name, content: content, linewise: linewise))
+        self.registers.active_register = name
+
+    fn _register_entry(name: text) -> RegisterEntry:
+        for entry in self.registers.entries:
+            if entry.name == name:
+                return entry
+        RegisterEntry(name: "", content: "", linewise: false)
+
+    me _ensure_cursor_visible():
+        val window_idx = self.active_window_index()
+        val cursor = self.current_cursor()
+        if window_idx < 0:
+            return
+        var window = self.windows[window_idx]
+        if cursor.row < window.viewport.top_row:
+            window.viewport.top_row = cursor.row
+        elif cursor.row >= window.viewport.top_row + window.viewport.height:
+            window.viewport.top_row = cursor.row - window.viewport.height + 1
+        self.windows[window_idx] = window
+
+
+# ============================================================================
+# Rendering helpers used by shells and tests
+# ============================================================================
+
+fn svim_snapshot_text(session: SvimSession) -> text:
+    var out = "svim {svim_mode_name(session.mode_state.mode)}"
+    if session.tabs.len() == 0:
+        return out + "\n(no tabpages)"
+    out = out + "\n"
+    var tab_i = 0
+    while tab_i < session.tabs.len():
+        val tab = session.tabs[tab_i]
+        out = out + "[tab {tab.id.value}]"
+        if tab_i == session.current_tab_index:
+            out = out + " *"
+        out = out + "\n"
+        var win_i = 0
+        while win_i < tab.window_ids.len():
+            val window_idx = _svim_find_window_index(session.windows, tab.window_ids[win_i])
+            if window_idx >= 0:
+                val buffer_idx = _svim_find_buffer_index(session.buffers, session.windows[window_idx].buffer_id)
+                if buffer_idx >= 0:
+                    val buffer = session.buffers[buffer_idx]
+                    val cursor = buffer.anchors.get(session.windows[window_idx].cursor_anchor)
+                    val label = if buffer.path == nil then "[No Name]" else: buffer.path
+                    out = out + "  win {session.windows[window_idx].id.value}"
+                    if win_i == tab.active_window_index and tab_i == session.current_tab_index:
+                        out = out + " >"
+                    out = out + " {label} ({cursor.row + 1},{cursor.col + 1})\n"
+                    out = out + _svim_render_window(buffer.piece_table.to_text(), buffer.line_starts, cursor, session.windows[window_idx].viewport)
+            win_i = win_i + 1
+        tab_i = tab_i + 1
+    if session.quickfix.items.len() > 0:
+        val current_qf = session.quickfix.items[session.quickfix.selected_index]
+        out = out + "quickfix {session.quickfix.selected_index + 1}/{session.quickfix.items.len()}: {current_qf.message}\n"
+    out
+
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _svim_mode_from_text(name: text) -> SvimMode:
+    if name.lower() == "insert":
+        return SvimMode.Insert
+    if name.lower() == "visual":
+        return SvimMode.Visual
+    if name.lower() == "command":
+        return SvimMode.Command
+    SvimMode.Normal
+
+fn _svim_piece_slice(table: PieceTable, piece: SvimPiece) -> text:
+    if piece.length <= 0:
+        return ""
+    if piece.source == "add":
+        return table.add_buffer.slice(piece.start, piece.start + piece.length)
+    table.original.slice(piece.start, piece.start + piece.length)
+
+fn _svim_insert_piece(pieces: [SvimPiece], offset: i64, inserted: SvimPiece) -> [SvimPiece]:
+    var result: [SvimPiece] = []
+    var cursor = 0
+    var inserted_now = false
+    for piece in pieces:
+        val next_cursor = cursor + piece.length
+        if not inserted_now and offset <= next_cursor:
+            val local = offset - cursor
+            if local <= 0:
+                result.push(inserted)
+                result.push(piece)
+            elif local >= piece.length:
+                result.push(piece)
+                result.push(inserted)
+            else:
+                result.push(SvimPiece(source: piece.source, start: piece.start, length: local))
+                result.push(inserted)
+                result.push(SvimPiece(source: piece.source, start: piece.start + local, length: piece.length - local))
+            inserted_now = true
+        else:
+            result.push(piece)
+        cursor = next_cursor
+    if not inserted_now:
+        result.push(inserted)
+    result
+
+fn _svim_delete_range(pieces: [SvimPiece], start: i64, end: i64) -> [SvimPiece]:
+    var result: [SvimPiece] = []
+    var cursor = 0
+    for piece in pieces:
+        val piece_start = cursor
+        val piece_end = cursor + piece.length
+        if end <= piece_start or start >= piece_end:
+            result.push(piece)
+        else:
+            val left_keep = _svim_clamp_i64(start - piece_start, 0, piece.length)
+            val right_drop = _svim_clamp_i64(end - piece_start, 0, piece.length)
+            if left_keep > 0:
+                result.push(SvimPiece(source: piece.source, start: piece.start, length: left_keep))
+            if right_drop < piece.length:
+                result.push(SvimPiece(source: piece.source, start: piece.start + right_drop, length: piece.length - right_drop))
+        cursor = piece_end
+    result
+
+fn _svim_compute_line_starts(content: text) -> [i64]:
+    var starts: [i64] = [0]
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            starts.push(i + 1)
+        i = i + 1
+    starts
+
+fn _svim_row_col_to_offset(line_starts: [i64], row: i64, col: i64) -> i64:
+    if line_starts.len() == 0:
+        return 0
+    val clamped_row = _svim_clamp_i64(row, 0, line_starts.len() - 1)
+    line_starts[clamped_row] + col
+
+fn _svim_offset_to_cursor(line_starts: [i64], offset: i64) -> Cursor:
+    if line_starts.len() == 0:
+        return Cursor(row: 0, col: 0)
+    var row = 0
+    var i = 0
+    while i < line_starts.len():
+        if line_starts[i] > offset:
+            break
+        row = i
+        i = i + 1
+    Cursor(row: row, col: offset - line_starts[row])
+
+fn _svim_line_length(content: text, line_starts: [i64], row: i64) -> i64:
+    if line_starts.len() == 0:
+        return 0
+    val clamped_row = _svim_clamp_i64(row, 0, line_starts.len() - 1)
+    val start = line_starts[clamped_row]
+    val end = if clamped_row + 1 < line_starts.len() then line_starts[clamped_row + 1] - 1 else: content.len()
+    end - start
+
+fn _svim_max_row(line_starts: [i64]) -> i64:
+    if line_starts.len() == 0:
+        return 0
+    line_starts.len() - 1
+
+fn _svim_text_insert_stats(content: text) -> (i64, i64):
+    var newlines = 0
+    var last_line_len = 0
+    var i = 0
+    while i < content.len():
+        val ch = content.char_at(i)
+        if ch == "\n":
+            newlines = newlines + 1
+            last_line_len = 0
+        else:
+            last_line_len = last_line_len + 1
+        i = i + 1
+    (newlines, last_line_len)
+
+fn _svim_position_after_insert(anchor_row: i64, anchor_col: i64, gravity_after: bool, row: i64, col: i64, inserted_newlines: i64, last_line_len: i64) -> Cursor:
+    if anchor_row < row:
+        return Cursor(row: anchor_row, col: anchor_col)
+    if anchor_row == row and anchor_col < col:
+        return Cursor(row: anchor_row, col: anchor_col)
+    if anchor_row == row and anchor_col == col and not gravity_after:
+        return Cursor(row: anchor_row, col: anchor_col)
+    if inserted_newlines == 0:
+        if anchor_row == row:
+            return Cursor(row: anchor_row, col: anchor_col + last_line_len)
+        return Cursor(row: anchor_row, col: anchor_col)
+    if anchor_row == row:
+        return Cursor(row: anchor_row + inserted_newlines, col: last_line_len + (anchor_col - col))
+    Cursor(row: anchor_row + inserted_newlines, col: anchor_col)
+
+fn _svim_position_after_delete(anchor_row: i64, anchor_col: i64, start_row: i64, start_col: i64, end_row: i64, end_col: i64) -> Cursor:
+    if anchor_row < start_row:
+        return Cursor(row: anchor_row, col: anchor_col)
+    if anchor_row == start_row and anchor_col < start_col:
+        return Cursor(row: anchor_row, col: anchor_col)
+    if _svim_position_in_range(anchor_row, anchor_col, start_row, start_col, end_row, end_col):
+        return Cursor(row: start_row, col: start_col)
+    val row_delta = end_row - start_row
+    if row_delta == 0:
+        if anchor_row == start_row:
+            return Cursor(row: anchor_row, col: anchor_col - (end_col - start_col))
+        return Cursor(row: anchor_row, col: anchor_col)
+    if anchor_row == end_row:
+        return Cursor(row: anchor_row - row_delta, col: start_col + (anchor_col - end_col))
+    Cursor(row: anchor_row - row_delta, col: anchor_col)
+
+fn _svim_position_in_range(row: i64, col: i64, start_row: i64, start_col: i64, end_row: i64, end_col: i64) -> bool:
+    if row < start_row or row > end_row:
+        return false
+    if start_row == end_row:
+        return row == start_row and col >= start_col and col < end_col
+    if row == start_row:
+        return col >= start_col
+    if row == end_row:
+        return col < end_col
+    true
+
+fn _svim_clamp_i64(value: i64, low: i64, high: i64) -> i64:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    value
+
+fn _svim_find_buffer_index(buffers: [SvimBuffer], id: BufferId) -> i64:
+    var i = 0
+    while i < buffers.len():
+        if buffers[i].id.value == id.value:
+            return i
+        i = i + 1
+    -1
+
+fn _svim_find_window_index(windows: [SvimWindow], id: WindowId) -> i64:
+    var i = 0
+    while i < windows.len():
+        if windows[i].id.value == id.value:
+            return i
+        i = i + 1
+    -1
+
+fn _svim_render_window(content: text, line_starts: [i64], cursor: Cursor, viewport: SvimViewport) -> text:
+    var out = ""
+    var row = viewport.top_row
+    val end_row = viewport.top_row + viewport.height
+    while row < end_row:
+        if row > _svim_max_row(line_starts):
+            break
+        val start = line_starts[row]
+        val line_len = _svim_line_length(content, line_starts, row)
+        var line = content.slice(start, start + line_len)
+        if row == cursor.row:
+            val caret_col = _svim_clamp_i64(cursor.col, 0, line.len())
+            line = line.slice(0, caret_col) + "|" + line.slice(caret_col, line.len())
+        out = out + "    {row + 1:>3} {line}\n"
+        row = row + 1
+    out
+
+fn _svim_trim_snapshots(items: [BufferSnapshot]) -> [BufferSnapshot]:
+    var out: [BufferSnapshot] = []
+    var i = 1
+    while i < items.len():
+        out.push(items[i])
+        i = i + 1
+    out
+
+fn _svim_drop_last_snapshot(items: [BufferSnapshot]) -> [BufferSnapshot]:
+    var out: [BufferSnapshot] = []
+    var i = 0
+    while i + 1 < items.len():
+        out.push(items[i])
+        i = i + 1
+    out
+
+fn _svim_parse_rpc_command(raw: text) -> CommandRequest:
+    val sep = raw.index_of(":") ?? -1
+    if sep < 0:
+        return CommandRequest(name: raw.trim(), count: 1, register_name: "", payload: "")
+    CommandRequest(
+        name: raw.slice(0, sep).trim(),
+        count: 1,
+        register_name: "",
+        payload: raw.slice(sep + 1, raw.len())
+    )

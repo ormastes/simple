@@ -141,6 +141,18 @@ fn _tool_file_first_line(vfs: VfsManager?, path: text) -> text?:
         return Some(content.trim())
     Some(content.slice(0, newline.unwrap()).trim())
 
+fn _tool_manifest_value(vfs: VfsManager?, path: text, key: text) -> text?:
+    if vfs == nil:
+        return nil
+    val result = vfs.read_text(path)
+    if result.is_err():
+        return nil
+    for raw_line in _split_lines(result.unwrap()):
+        val line = raw_line.trim()
+        if line.starts_with("{key}="):
+            return Some(line.slice(key.len() + 1, line.len()).trim())
+    nil
+
 fn _tool_path_candidates(command: text, cwd: text, path_env: text) -> [text]:
     if command == "":
         return []
@@ -273,26 +285,54 @@ fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
 
     if command == "cmake":
         if primary == "-E" and args.len() > 1 and args[1] == "capabilities":
+            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
+            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
+            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
             _write_line(terminal, "serverMode=false")
             _write_line(terminal, "generators=Ninja")
             _write_line(terminal, "tool=/usr/bin/cmake")
+            _write_line(terminal, "lane={lane}")
+            _write_line(terminal, "mode={mode}")
+            _write_line(terminal, "status={status}")
             return 0
 
     if command == "clang" or command == "clang-20":
         if primary == "--print-target-triple":
             _write_line(terminal, "x86_64-simpleos")
             return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
+            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
+            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
+            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
+            _write_line(terminal, "lane={lane}")
+            _write_line(terminal, "mode={mode}")
+            _write_line(terminal, "status={status}")
+            return 0
     if command == "rustc":
         if primary == "--print" and args.len() > 1 and args[1] == "target-list":
             _write_line(terminal, "x86_64-unknown-simpleos")
+            return 0
+        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
+            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
+            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
+            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
+            _write_line(terminal, "lane={lane}")
+            _write_line(terminal, "mode={mode}")
+            _write_line(terminal, "status={status}")
             return 0
 
     if primary == "--help" or primary == "-h":
         for line in _toolchain_help_lines(command):
             _write_line(terminal, line)
         val manifest = _tool_file_first_line(vfs, manifest_path)
+        val lane = _tool_manifest_value(vfs, manifest_path, "lane")
+        val status = _tool_manifest_value(vfs, manifest_path, "status")
         if manifest != nil and manifest.unwrap() != "":
             _write_line(terminal, "manifest: {manifest.unwrap()}")
+        if lane != nil:
+            _write_line(terminal, "lane: {lane.unwrap()}")
+        if status != nil:
+            _write_line(terminal, "status: {status.unwrap()}")
         _write_line(terminal, "payload: {canonical_path}")
         return 0
 
@@ -306,6 +346,8 @@ fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
     if command == "clang" or command == "clang-20" or command == "rustc":
         _write_error(terminal,
             "{command}: additional discovery option available: --print target metadata")
+        _write_error(terminal,
+            "{command}: wrapper status available via --print simpleos-wrapper-status")
     1
 
 # =========================================================================

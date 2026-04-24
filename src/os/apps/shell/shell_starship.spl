@@ -1,0 +1,175 @@
+# shell_starship — Starship-style ANSI-colored prompt generator
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{split_lines}
+
+class StarshipPrompt:
+    """Starship-style prompt configuration."""
+    show_git: bool
+    show_time: bool
+    show_user: bool
+    color_exit: bool
+
+impl StarshipPrompt:
+    static fn new() -> StarshipPrompt:
+        """Return default prompt configuration."""
+        return StarshipPrompt(
+            show_git: true,
+            show_time: true,
+            show_user: true,
+            color_exit: true,
+        )
+
+    static fn load_config(vfs: VfsManager?, home: text) -> StarshipPrompt:
+        """Load configuration from ~/.config/starship.conf.
+
+        Parses simple key=value lines. Returns defaults if file not found.
+        """
+        var cfg = StarshipPrompt.new()
+        if vfs == nil:
+            return cfg
+        val config_path = "{home}/.config/starship.conf"
+        val result = vfs.read_text(config_path)
+        if result.is_err():
+            return cfg
+        val content = result.unwrap()
+        for line in split_lines(content):
+            val trimmed = line.trim()
+            if trimmed.starts_with("#") or trimmed.len() == 0:
+                pass_dn
+            elif trimmed.starts_with("show_git="):
+                val v = trimmed.slice(9, trimmed.len()).trim()
+                cfg.show_git = v == "true"
+            elif trimmed.starts_with("show_time="):
+                val v = trimmed.slice(10, trimmed.len()).trim()
+                cfg.show_time = v == "true"
+            elif trimmed.starts_with("show_user="):
+                val v = trimmed.slice(10, trimmed.len()).trim()
+                cfg.show_user = v == "true"
+            elif trimmed.starts_with("color_exit="):
+                val v = trimmed.slice(11, trimmed.len()).trim()
+                cfg.color_exit = v == "true"
+        return cfg
+
+    fn build_prompt(cwd: text, last_exit_code: i32, env: [(text, text)], vfs: VfsManager?, elapsed_ms: i32) -> text:
+        """Build an ANSI-colored prompt string.
+
+        Segments (config-controlled):
+          1. Exit indicator: green checkmark or red cross with code
+          2. user@host in cyan
+          3. Abbreviated cwd (HOME replaced with ~, last 2 components if deep)
+          4. Git branch from .git/HEAD
+          5. Elapsed time in yellow if > 1000 ms
+          6. $ or # suffix
+        """
+        val esc = "\x1b"
+        val reset  = "{esc}[0m"
+        val bold   = "{esc}[1m"
+        val red    = "{esc}[31m"
+        val green  = "{esc}[32m"
+        val yellow = "{esc}[33m"
+        val cyan   = "{esc}[36m"
+
+        var prompt = ""
+
+        # --- 1. Exit indicator ---
+        if self.color_exit:
+            if last_exit_code == 0:
+                prompt = "{prompt}{green}✓{reset} "
+            else:
+                prompt = "{prompt}{red}✗({last_exit_code}){reset} "
+
+        # --- 2. user@host ---
+        if self.show_user:
+            var user = "user"
+            var host = "host"
+            for pair in env:
+                if pair.0 == "USER" or pair.0 == "LOGNAME":
+                    user = pair.1
+                elif pair.0 == "HOSTNAME" or pair.0 == "HOST":
+                    host = pair.1
+            prompt = "{prompt}{cyan}{bold}{user}@{host}{reset} "
+
+        # --- 3. cwd abbreviation ---
+        var home_dir = "/root"
+        for pair in env:
+            if pair.0 == "HOME":
+                home_dir = pair.1
+        val display_cwd = _abbreviate_cwd(cwd, home_dir)
+        prompt = "{prompt}{bold}{display_cwd}{reset}"
+
+        # --- 4. Git branch ---
+        if self.show_git:
+            val branch = _read_git_branch(cwd, vfs)
+            if branch.len() > 0:
+                prompt = "{prompt} {esc}[34m({branch}){reset}"
+
+        # --- 5. Elapsed time ---
+        if self.show_time and elapsed_ms > 1000:
+            val secs = elapsed_ms / 1000
+            prompt = "{prompt} {yellow}{secs}s{reset}"
+
+        # --- 6. Suffix ---
+        var user_name = "user"
+        for pair in env:
+            if pair.0 == "USER" or pair.0 == "LOGNAME":
+                user_name = pair.1
+        val suffix = if user_name == "root": " # " else: " $ "
+        prompt = "{prompt}{suffix}"
+
+        return prompt
+
+fn _abbreviate_cwd(cwd: text, home: text) -> text:
+    """Replace home prefix with ~ and shorten deep paths to last 2 components."""
+    var path = cwd
+    if path.starts_with(home):
+        val rest = path.slice(home.len(), path.len())
+        path = if rest.len() == 0: "~" else: "~{rest}"
+
+    # Count components (split by '/')
+    var components: [text] = []
+    var cur = ""
+    for ch in path:
+        if ch == "/":
+            if cur.len() > 0:
+                components = components.push(cur)
+            cur = ""
+        else:
+            cur = "{cur}{ch}"
+    if cur.len() > 0:
+        components = components.push(cur)
+
+    # If path starts with ~ keep that as first component
+    val starts_tilde = path.starts_with("~")
+    val starts_slash = path.starts_with("/")
+
+    if components.len() <= 3:
+        return path
+
+    # More than 3 components: show only last 2
+    val n = components.len()
+    val last2 = "{components[n - 2]}/{components[n - 1]}"
+    if starts_tilde:
+        return "~/.../{last2}"
+    elif starts_slash:
+        return "/.../{last2}"
+    else:
+        return ".../{last2}"
+
+fn _read_git_branch(cwd: text, vfs: VfsManager?) -> text:
+    """Read branch name from {cwd}/.git/HEAD via VFS."""
+    if vfs == nil:
+        return ""
+    val head_path = "{cwd}/.git/HEAD"
+    val result = vfs.read_text(head_path)
+    if result.is_err():
+        return ""
+    val content = result.unwrap().trim()
+    val ref_prefix = "ref: refs/heads/"
+    if content.starts_with(ref_prefix):
+        return content.slice(ref_prefix.len(), content.len())
+    if content.len() >= 7:
+        return "HEAD"
+    return ""
