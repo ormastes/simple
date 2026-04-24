@@ -17,6 +17,7 @@ fn map_ffi_name(func_name: &str) -> &str {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
         "rt_file_read_text" => "rt_file_read_text_rv",
+        "rt_file_delete" => "rt_file_remove",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
         _ => base,
@@ -40,6 +41,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_exists"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
+        | "rt_file_size"
+        | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"
         | "rt_file_read_bytes" => Some(&[0]),

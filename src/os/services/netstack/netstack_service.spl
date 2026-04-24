@@ -40,7 +40,8 @@ use os.services.netstack.socket.{
 }
 use os.userlib.syscall_raw.{syscall}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
+extern fn unsafe_addr_of(ref: any) -> u64
 
 # IPC method constants for network syscalls
 val NET_SOCKET: u32 = 1
@@ -148,8 +149,8 @@ impl NetstackService:
         # Read MAC from driver
         val mac_bytes = self.driver.mac_address()
         self.local_mac = EthAddress.from_driver_mac(mac_bytes)
-        serial_println("[netstack] MAC={self.local_mac.to_text()}")
-        serial_println("[netstack] IP={self.local_ip.to_text()}")
+        log_raw_println("[netstack] MAC={self.local_mac.to_text()}")
+        log_raw_println("[netstack] IP={self.local_ip.to_text()}")
 
         # Set up default route
         val gw = Ipv4Address.from_bytes(DEFAULT_GW_A, DEFAULT_GW_B, DEFAULT_GW_C, DEFAULT_GW_D)
@@ -158,16 +159,16 @@ impl NetstackService:
             Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, 0),
             self.subnet_mask, gw, self.local_ip
         )
-        serial_println("[netstack] Default gateway={gw.to_text()}")
+        log_raw_println("[netstack] Default gateway={gw.to_text()}")
 
         # Create IPC port
         val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
         if port < 0:
-            serial_println("[netstack] Failed to create IPC port: {port}")
+            log_raw_println("[netstack] Failed to create IPC port: {port}")
             return
         self.port_id = port.to_u64()
         self.running = true
-        serial_println("[netstack] Service started on IPC port {self.port_id}")
+        log_raw_println("[netstack] Service started on IPC port {self.port_id}")
 
         self.run_loop()
 
@@ -196,8 +197,8 @@ impl NetstackService:
         """
         val mac_bytes = self.driver.mac_address()
         self.local_mac = EthAddress.from_driver_mac(mac_bytes)
-        serial_println("[netstack] MAC={self.local_mac.to_text()}")
-        serial_println("[netstack] IP={self.local_ip.to_text()}")
+        log_raw_println("[netstack] MAC={self.local_mac.to_text()}")
+        log_raw_println("[netstack] IP={self.local_ip.to_text()}")
 
         val gw = Ipv4Address.from_bytes(DEFAULT_GW_A, DEFAULT_GW_B, DEFAULT_GW_C, DEFAULT_GW_D)
         self.routing.set_default(gw)
@@ -205,15 +206,15 @@ impl NetstackService:
             Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, 0),
             self.subnet_mask, gw, self.local_ip
         )
-        serial_println("[netstack] Default gateway={gw.to_text()}")
+        log_raw_println("[netstack] Default gateway={gw.to_text()}")
 
         val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
         if port < 0:
-            serial_println("[netstack] Failed to create IPC port: {port}")
+            log_raw_println("[netstack] Failed to create IPC port: {port}")
             return
         self.port_id = port.to_u64()
         self.running = true
-        serial_println("[netstack] Service ready on IPC port {self.port_id}")
+        log_raw_println("[netstack] Service ready on IPC port {self.port_id}")
 
     me poll_once():
         """Run one iteration of the event loop (non-blocking).
@@ -267,7 +268,6 @@ impl NetstackService:
             bi = bi + 1
 
         # Non-blocking poll
-        extern fn unsafe_addr_of(ref: any) -> u64
         val buf_addr = unsafe_addr_of(buf)
         val result = self.driver.recv_frame_poll(buf_addr, RECV_BUF_SIZE)
 
@@ -288,7 +288,7 @@ impl NetstackService:
         val frame_result = eth_parse(data)
         match frame_result:
             Err(msg):
-                serial_println("[netstack] frame parse error: {msg}")
+                log_raw_println("[netstack] frame parse error: {msg}")
             Ok(frame):
                 match frame.ethertype:
                     ETHERTYPE_ARP:
@@ -311,7 +311,7 @@ impl NetstackService:
         val arp_result = arp_parse(frame.payload)
         match arp_result:
             Err(msg):
-                serial_println("[netstack] ARP parse error: {msg}")
+                log_raw_println("[netstack] ARP parse error: {msg}")
             Ok(arp):
                 # Always learn the sender's mapping
                 self.arp_table.insert(arp.sender_ip, arp.sender_mac)
@@ -319,7 +319,7 @@ impl NetstackService:
                 if arp.operation == ARP_REQUEST:
                     # Is this request for our IP?
                     if arp.target_ip == self.local_ip.value:
-                        serial_println("[netstack] ARP request for our IP from {arp.sender_mac.to_text()}")
+                        log_raw_println("[netstack] ARP request for our IP from {arp.sender_mac.to_text()}")
                         val reply_payload = arp_build_reply(
                             self.local_mac, self.local_ip.value,
                             arp.sender_mac, arp.sender_ip
@@ -331,7 +331,7 @@ impl NetstackService:
                         self._send_raw_frame(eth_frame)
 
                 else if arp.operation == ARP_REPLY:
-                    serial_println("[netstack] ARP reply: {Ipv4Address.from_u32(arp.sender_ip).to_text()} -> {arp.sender_mac.to_text()}")
+                    log_raw_println("[netstack] ARP reply: {Ipv4Address.from_u32(arp.sender_ip).to_text()} -> {arp.sender_mac.to_text()}")
 
     # ========================================================================
     # IPv4 Handling
@@ -346,7 +346,7 @@ impl NetstackService:
         val ip_result = ipv4_parse(frame.payload)
         match ip_result:
             Err(msg):
-                serial_println("[netstack] IPv4 parse error: {msg}")
+                log_raw_println("[netstack] IPv4 parse error: {msg}")
             Ok(packet):
                 # Check if this packet is for us (or broadcast)
                 if (packet.header.dst.equals(self.local_ip) or
@@ -369,10 +369,10 @@ impl NetstackService:
         val icmp_result = icmp_parse(packet.payload)
         match icmp_result:
             Err(msg):
-                serial_println("[netstack] ICMP parse error: {msg}")
+                log_raw_println("[netstack] ICMP parse error: {msg}")
             Ok(icmp):
                 if icmp.type_ == ICMP_ECHO_REQUEST:
-                    serial_println("[netstack] ICMP echo request from {packet.header.src.to_text()}")
+                    log_raw_println("[netstack] ICMP echo request from {packet.header.src.to_text()}")
                     val reply = icmp_build_echo_reply(icmp)
                     self.send_ipv4(packet.header.src, IP_PROTO_ICMP, reply)
 
@@ -390,7 +390,7 @@ impl NetstackService:
         val tcp_result = tcp_parse(packet.payload)
         match tcp_result:
             Err(msg):
-                serial_println("[netstack] TCP parse error: {msg}")
+                log_raw_println("[netstack] TCP parse error: {msg}")
             Ok(segment):
                 val src_ip = packet.header.src
                 val src_port = segment.header.src_port
@@ -440,7 +440,7 @@ impl NetstackService:
             val conn_idx = self.tcp_connections.len() - 1
 
             self._send_tcp_segments(conn_idx, reply_segments)
-            serial_println("[netstack] New TCP connection from {src_ip.to_text()}:{segment.header.src_port} -> :{dst_port}")
+            log_raw_println("[netstack] New TCP connection from {src_ip.to_text()}:{segment.header.src_port} -> :{dst_port}")
         # else: no listener, ignore (real stack sends RST)
 
     me _tcp_connection_established(conn_idx: u64):
@@ -481,7 +481,7 @@ impl NetstackService:
         val udp_result = udp_parse(packet.payload)
         match udp_result:
             Err(msg):
-                serial_println("[netstack] UDP parse error: {msg}")
+                log_raw_println("[netstack] UDP parse error: {msg}")
             Ok(datagram):
                 val delivered = self.udp_table.deliver(
                     datagram.header.dst_port,
@@ -490,7 +490,7 @@ impl NetstackService:
                     datagram.header.src_port
                 )
                 if not delivered:
-                    serial_println("[netstack] UDP: no binding for port {datagram.header.dst_port}")
+                    log_raw_println("[netstack] UDP: no binding for port {datagram.header.dst_port}")
 
     # ========================================================================
     # TCP Connection Management
@@ -560,7 +560,7 @@ impl NetstackService:
         else:
             # Need ARP resolution: send ARP request
             # Queue the packet for later (simplified: just send ARP and drop this packet)
-            serial_println("[netstack] ARP miss for {next_hop.to_text()}, sending request")
+            log_raw_println("[netstack] ARP miss for {next_hop.to_text()}, sending request")
             val arp_req = arp_build_request(self.local_mac, self.local_ip.value, next_hop.value)
             val arp_frame = eth_build(EthAddress.broadcast(), self.local_mac, ETHERTYPE_ARP, arp_req)
             self._send_raw_frame(arp_frame)
@@ -568,11 +568,10 @@ impl NetstackService:
 
     me _send_raw_frame(frame: [u8]):
         """Send a raw Ethernet frame via the VirtIO driver."""
-        extern fn unsafe_addr_of(ref: any) -> u64
         val data_addr = unsafe_addr_of(frame)
         val result = self.driver.send_frame(data_addr, 0, frame.len())
         match result:
-            Err(msg): serial_println("[netstack] send_frame error: {msg}")
+            Err(msg): log_raw_println("[netstack] send_frame error: {msg}")
             Ok(_): pass_dn
 
     # ========================================================================
@@ -834,7 +833,7 @@ impl NetstackService:
     me set_ip(ip: Ipv4Address):
         """Set the stack's IP address (e.g., after DHCP)."""
         self.local_ip = ip
-        serial_println("[netstack] IP changed to {ip.to_text()}")
+        log_raw_println("[netstack] IP changed to {ip.to_text()}")
 
     me set_subnet_mask(mask: Ipv4Address):
         self.subnet_mask = mask
@@ -845,7 +844,7 @@ impl NetstackService:
     me stop():
         """Stop the service loop."""
         self.running = false
-        serial_println("[netstack] Service stopped")
+        log_raw_println("[netstack] Service stopped")
 
     # ========================================================================
     # Ephemeral Port Allocation
@@ -916,7 +915,6 @@ fn _push_i32(buf: [u8], val: i32):
 
 fn _ipc_send_raw(dst_port: u64, src_port: u64, data: [u8]):
     """Send raw bytes via IPC syscall."""
-    extern fn unsafe_addr_of(ref: any) -> u64
     # Simple [u8] arrays are heap objects with a 16-byte header before items.
     # IPC expects a pointer to the first byte payload, not the array header.
     val data_ptr = unsafe_addr_of(data) + 16

@@ -11,7 +11,7 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
@@ -188,34 +188,34 @@ fn _path_bytes_to_text(bytes: [u8]) -> text:
 # ----------------------------------------------------------------------------
 
 fn _initramfs_read_file_bytes_or_empty(path: text) -> [u8]:
-    serial_println("[exec-source] initramfs enter path={path}")
+    log_raw_println("[exec-source] initramfs enter path={path}")
     # First consult the synthetic test map — this is the injection point used
     # by specs and is a no-op in production.
     val synthetic = _lookup_synthetic(path)
     if synthetic.is_ok():
-        serial_println("[exec-source] initramfs synthetic-hit path={path}")
+        log_raw_println("[exec-source] initramfs synthetic-hit path={path}")
         return synthetic.unwrap()
 
     # Real initramfs path: decompress + parse on first access, then cache.
     val blob = g_initramfs_blob
     if blob == nil:
-        serial_println("[exec-source] initramfs no-blob path={path}")
+        log_raw_println("[exec-source] initramfs no-blob path={path}")
         return []
 
     if not g_cpio_decoded:
-        serial_println("[exec-source] initramfs decompress path={path}")
+        log_raw_println("[exec-source] initramfs decompress path={path}")
         val decomp = zstd_decompress(blob.unwrap())
         if decomp.is_err():
-            serial_println("[exec-source] initramfs decompress-fail path={path}")
+            log_raw_println("[exec-source] initramfs decompress-fail path={path}")
             return []
         g_cpio_entries = cpio_parse(decomp.unwrap())
         g_cpio_decoded = true
 
     val found = cpio_lookup(g_cpio_entries, path)
     if found == nil:
-        serial_println("[exec-source] initramfs miss path={path}")
+        log_raw_println("[exec-source] initramfs miss path={path}")
         return []
-    serial_println("[exec-source] initramfs hit path={path}")
+    log_raw_println("[exec-source] initramfs hit path={path}")
     found.unwrap()
 
 fn _initramfs_read_file(path: text) -> Result<[u8], text>:
@@ -399,7 +399,7 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
 
     val bytes = _exec_vfs_read_file_bytes(path)
     if bytes.len() > 0:
-        serial_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
+        log_raw_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
         return Ok(bytes)
 
     # Desktop app paths are long logical names, but the FAT32 disk fixture is
@@ -410,18 +410,18 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
         val alias_path = alias.unwrap()
         val alias_bytes = _exec_vfs_read_file_bytes(alias_path)
         if alias_bytes.len() > 0:
-            serial_println("[exec-source] vfs_alias_hit path={path} alias={alias_path} bytes={alias_bytes.len()}")
+            log_raw_println("[exec-source] vfs_alias_hit path={path} alias={alias_path} bytes={alias_bytes.len()}")
             return Ok(alias_bytes)
-        serial_println("[exec-source] vfs_alias_miss path={path} alias={alias_path}")
+        log_raw_println("[exec-source] vfs_alias_miss path={path} alias={alias_path}")
     val root_alias = _desktop_app_root_elf_alias(path)
     if root_alias != nil:
         val root_alias_path = root_alias.unwrap()
         val root_alias_bytes = _exec_vfs_read_file_bytes(root_alias_path)
         if root_alias_bytes.len() > 0:
-            serial_println("[exec-source] vfs_root_alias_hit path={path} alias={root_alias_path} bytes={root_alias_bytes.len()}")
+            log_raw_println("[exec-source] vfs_root_alias_hit path={path} alias={root_alias_path} bytes={root_alias_bytes.len()}")
             return Ok(root_alias_bytes)
-        serial_println("[exec-source] vfs_root_alias_miss path={path} alias={root_alias_path}")
-    serial_println("[exec-source] vfs_miss path={path}")
+        log_raw_println("[exec-source] vfs_root_alias_miss path={path} alias={root_alias_path}")
+    log_raw_println("[exec-source] vfs_miss path={path}")
     Err(ERR_ENOENT)
 
 fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text>:
@@ -433,24 +433,24 @@ fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text
        proof-of-concept stubs used for early boot smoke tests.
     3. Otherwise return ENOENT.
     """
-    serial_println("[exec-source] resolve enter path={path}")
+    log_raw_println("[exec-source] resolve enter path={path}")
     if path.len() == 0:
         return Err(ERR_EINVAL)
 
     if path.starts_with("/"):
-        serial_println("[exec-source] resolve absolute path={path}")
+        log_raw_println("[exec-source] resolve absolute path={path}")
         val initramfs_bytes = _initramfs_read_file_bytes_or_empty(path)
-        serial_println("[exec-source] resolve initramfs returned path={path}")
+        log_raw_println("[exec-source] resolve initramfs returned path={path}")
         if initramfs_bytes.len() > 0:
             return Ok(initramfs_bytes)
-        serial_println("[exec-source] resolve vfs begin path={path}")
+        log_raw_println("[exec-source] resolve vfs begin path={path}")
         val vfs_result = _vfs_read_file(path)
-        serial_println("[exec-source] resolve vfs returned path={path}")
+        log_raw_println("[exec-source] resolve vfs returned path={path}")
         if vfs_result.is_ok():
             return vfs_result
 
     # Reader said ENOENT — try the boot-test fallback.
-    serial_println("[exec-source] resolve legacy-fallback path={path}")
+    log_raw_println("[exec-source] resolve legacy-fallback path={path}")
     _legacy_stub_bytes(path, arch)
 
 fn resolve_executable_bytes_from_path_bytes(path_bytes: [u8], arch: Architecture) -> Result<[u8], text>:

@@ -31,7 +31,7 @@ use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, W
 use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
 use os.userlib.process.{getpid}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 extern fn rt_get_args() -> [text]
 extern fn rt_host_wm_client_connect(app_id: text, process_id: i64) -> i64
 extern fn rt_host_wm_client_request(client_id: i64, method: i64, window_id: i64, title: text, x: i64, y: i64, w: i64, h: i64, content: text, process_id: i64, app_id: text, timeout_ms: i64) -> (i64, i64)
@@ -118,13 +118,13 @@ impl WindowClient:
             self.host_client_id = host_client
             self.app_port = host_client.to_u64()
             self.connected = true
-            serial_println("[window-client] Connected to hosted WM bridge (client {host_client})")
+            log_raw_println("[window-client] Connected to hosted WM bridge (client {host_client})")
             return true
 
         # Create our own reply port
         val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
         if port < 0:
-            serial_println("[window-client] Failed to create reply port (error {port})")
+            log_raw_println("[window-client] Failed to create reply port (error {port})")
             return false
         self.app_port = port.to_u64()
 
@@ -136,12 +136,12 @@ impl WindowClient:
         val name_len = WM_PORT_NAME.len().to_u64()
         val comp_port = syscall(SYS_IPC_CONNECT, name_ptr, name_len, 0, 0, 0)
         if comp_port < 0:
-            serial_println("[window-client] Failed to connect to compositor (error {comp_port})")
+            log_raw_println("[window-client] Failed to connect to compositor (error {comp_port})")
             return false
 
         self.compositor_port = comp_port.to_u64()
         self.connected = true
-        serial_println("[window-client] Connected to compositor (port {self.compositor_port}), reply port {self.app_port}")
+        log_raw_println("[window-client] Connected to compositor (port {self.compositor_port}), reply port {self.app_port}")
         true
 
     me disconnect():
@@ -155,7 +155,7 @@ impl WindowClient:
         self.compositor_port = 0
         self.app_port = 0
         self.host_client_id = 0
-        serial_println("[window-client] Disconnected")
+        log_raw_println("[window-client] Disconnected")
 
     # -- Window Creation & Destruction ---------------------------------------
 
@@ -174,7 +174,7 @@ impl WindowClient:
         Returns the window_id (>0 on success, 0 on failure).
         """
         if not self.connected:
-            serial_println("[window-client] Not connected")
+            log_raw_println("[window-client] Not connected")
             return 0
 
         if self.host_client_id > 0:
@@ -196,9 +196,9 @@ impl WindowClient:
             )
             if status == WM_STATUS_OK.value.to_i64() and wid_i64 > 0:
                 self.window_id = wid_i64.to_u64()
-                serial_println("[window-client] Created hosted window {wid_i64}: '{title}'")
+                log_raw_println("[window-client] Created hosted window {wid_i64}: '{title}'")
                 return self.window_id
-            serial_println("[window-client] Hosted create window failed with status {status}")
+            log_raw_println("[window-client] Hosted create window failed with status {status}")
             return 0
 
         # Build request payload:
@@ -227,7 +227,7 @@ impl WindowClient:
         # Wait for response: status(i32) | window_id(u64)
         val reply = self._recv_reply()
         if reply.len() < 12:
-            serial_println("[window-client] Invalid create response (len={reply.len()})")
+            log_raw_println("[window-client] Invalid create response (len={reply.len()})")
             return 0
 
         val status = _decode_i32(reply, 0)
@@ -235,10 +235,10 @@ impl WindowClient:
 
         if status == WM_STATUS_OK.value and wid > 0:
             self.window_id = wid
-            serial_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
+            log_raw_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
             return wid
         else:
-            serial_println("[window-client] Create window failed with status {status}")
+            log_raw_println("[window-client] Create window failed with status {status}")
             return 0
 
     me destroy_window():
@@ -272,7 +272,7 @@ impl WindowClient:
             return
         self._send_window_id_request(COMP_DESTROY_WINDOW, window_id)
         val reply = self._recv_reply()
-        serial_println("[window-client] Destroyed window {window_id}")
+        log_raw_println("[window-client] Destroyed window {window_id}")
         if self.window_id == window_id:
             self.window_id = 0
 
@@ -774,7 +774,7 @@ impl WindowClient:
                     Point.xy(0, 0)
                 )
             _:
-                serial_println("[window-client] Unknown event method {method}")
+                log_raw_println("[window-client] Unknown event method {method}")
                 return nil
 
 # ============================================================================

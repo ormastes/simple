@@ -10,6 +10,7 @@ use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
 use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
 use os.kernel.boot.mmio.{mmio_read64, mmio_read32, mmio_write8, mmio_read8}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.log.klog_api.{log_init_serial, log_raw, log_raw_println, LOG_INFO}
 
 # ============================================================================
 # Limine Request/Response Structures
@@ -157,84 +158,6 @@ var kernel_addr_request: LimineRequest = LimineRequest(
     response: 0
 )
 
-# ============================================================================
-# Serial Output (Early Debug)
-# ============================================================================
-
-# COM1 I/O ports
-val COM1_PORT: u64 = 0x3F8
-val COM1_DATA: u64 = 0x3F8
-val COM1_IER: u64 = 0x3F9
-val COM1_FCR: u64 = 0x3FA
-val COM1_LCR: u64 = 0x3FB
-val COM1_MCR: u64 = 0x3FC
-val COM1_LSR: u64 = 0x3FD
-
-use os.kernel.boot.cpu.{port_outb, port_inb}
-
-fn _serial_outb(port: u64, value: u8):
-    """Write byte to x86 I/O port."""
-    port_outb(port.to_u16(), value)
-
-fn _serial_inb(port: u64) -> u8:
-    """Read byte from x86 I/O port."""
-    port_inb(port.to_u16())
-
-var g_serial_ready: bool = false
-
-fn serial_init():
-    """Initialize COM1 serial port at 115200 baud, 8N1."""
-    if g_serial_ready:
-        return
-
-    # Disable all interrupts
-    _serial_outb(COM1_IER, 0x00)
-
-    # Enable DLAB (set baud rate divisor)
-    _serial_outb(COM1_LCR, 0x80)
-
-    # Set divisor to 1 (115200 baud)
-    _serial_outb(COM1_DATA, 0x01)    # Low byte
-    _serial_outb(COM1_IER, 0x00)     # High byte
-
-    # 8 bits, no parity, one stop bit (8N1), clear DLAB
-    _serial_outb(COM1_LCR, 0x03)
-
-    # Enable FIFO, clear, 14-byte threshold
-    _serial_outb(COM1_FCR, 0xC7)
-
-    # RTS/DSR set, IRQs enabled
-    _serial_outb(COM1_MCR, 0x0B)
-
-    # Loopback test
-    _serial_outb(COM1_MCR, 0x1E)
-    _serial_outb(COM1_DATA, 0xAE)
-
-    # Back to normal operation
-    _serial_outb(COM1_MCR, 0x0F)
-
-    g_serial_ready = true
-
-fn serial_write_byte(byte: u8):
-    """Write one byte to COM1 (blocking wait for transmit ready)."""
-    # Wait until transmit holding register is empty
-    while (_serial_inb(COM1_LSR) & 0x20) == 0:
-        pass_do_nothing
-    _serial_outb(COM1_DATA, byte)
-
-fn serial_print(msg: text):
-    """Print string to serial console."""
-    if not g_serial_ready:
-        serial_init()
-    for i in 0..msg.len():
-        val ch = msg.char_at(i)
-        serial_write_byte(ch as u8)
-
-fn serial_println(msg: text):
-    """Print string + newline to serial console."""
-    serial_print(msg)
-    serial_write_byte(0x0D)  # CR
-    serial_write_byte(0x0A)  # LF
 
 # ============================================================================
 # HHDM Offset (Higher-Half Direct Map)
@@ -246,13 +169,13 @@ fn _parse_hhdm():
     """Parse HHDM response to get virtual-to-physical mapping offset."""
     val resp_ptr = hhdm_request.response
     if resp_ptr == 0:
-        serial_println("[BOOT] WARNING: No HHDM response from Limine")
+        log_raw_println("[BOOT] WARNING: No HHDM response from Limine")
         return
 
     val resp_revision = mmio_read64(resp_ptr)
     val offset = mmio_read64(resp_ptr + 8)
     g_hhdm_offset = offset
-    serial_println("[BOOT] HHDM offset: 0x{offset}")
+    log_raw_println("[BOOT] HHDM offset: 0x{offset}")
 
 fn phys_to_virt(phys: u64) -> u64:
     """Convert physical address to virtual via HHDM."""
@@ -289,7 +212,7 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
 
     val resp_ptr = memmap_request.response
     if resp_ptr == 0:
-        serial_println("[BOOT] WARNING: No memory map response from Limine")
+        log_raw_println("[BOOT] WARNING: No memory map response from Limine")
         return regions
 
     # Read LimineMemMapResponse fields
@@ -297,7 +220,7 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
     val entry_count = mmio_read64(resp_ptr + 8)
     val entries_ptr = mmio_read64(resp_ptr + 16)
 
-    serial_println("[BOOT] Memory map: {entry_count} entries")
+    log_raw_println("[BOOT] Memory map: {entry_count} entries")
 
     var i: u64 = 0
     while i < entry_count:
@@ -319,7 +242,7 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
         )
         regions.push(region)
 
-        serial_println("[BOOT]   region {i}: base=0x{base} size=0x{length} type={type_}")
+        log_raw_println("[BOOT]   region {i}: base=0x{base} size=0x{length} type={type_}")
 
         i = i + 1
 
@@ -333,7 +256,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
     """Parse Limine framebuffer response."""
     val resp_ptr = framebuffer_request.response
     if resp_ptr == 0:
-        serial_println("[BOOT] WARNING: No framebuffer response from Limine")
+        log_raw_println("[BOOT] WARNING: No framebuffer response from Limine")
         return FramebufferInfo(
             addr: PhysAddr(addr: 0),
             width: 0,
@@ -347,7 +270,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
     val fbs_ptr = mmio_read64(resp_ptr + 16)
 
     if fb_count == 0:
-        serial_println("[BOOT] WARNING: No framebuffers available")
+        log_raw_println("[BOOT] WARNING: No framebuffers available")
         return FramebufferInfo(
             addr: PhysAddr(addr: 0),
             width: 0,
@@ -366,7 +289,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
     val pitch = mmio_read64(fb_ptr + 24)
     val bpp = mmio_read64(fb_ptr + 32)      # Actually u16, but read full word
 
-    serial_println("[BOOT] Framebuffer: {width}x{height} bpp={bpp} pitch={pitch}")
+    log_raw_println("[BOOT] Framebuffer: {width}x{height} bpp={bpp} pitch={pitch}")
 
     FramebufferInfo(
         addr: PhysAddr(addr: address),
@@ -384,13 +307,13 @@ fn _parse_rsdp() -> PhysAddr?:
     """Parse Limine RSDP response."""
     val resp_ptr = rsdp_request.response
     if resp_ptr == 0:
-        serial_println("[BOOT] No RSDP from Limine (ACPI unavailable)")
+        log_raw_println("[BOOT] No RSDP from Limine (ACPI unavailable)")
         return nil
 
     val _revision = mmio_read64(resp_ptr)
     val address = mmio_read64(resp_ptr + 8)
 
-    serial_println("[BOOT] RSDP at physical address 0x{address}")
+    log_raw_println("[BOOT] RSDP at physical address 0x{address}")
 
     PhysAddr(addr: address)
 
@@ -402,14 +325,14 @@ fn _parse_kernel_address() -> (PhysAddr, VirtAddr):
     """Parse Limine kernel address response."""
     val resp_ptr = kernel_addr_request.response
     if resp_ptr == 0:
-        serial_println("[BOOT] WARNING: No kernel address response")
+        log_raw_println("[BOOT] WARNING: No kernel address response")
         return (PhysAddr(addr: 0), VirtAddr(addr: 0))
 
     val _revision = mmio_read64(resp_ptr)
     val phys_base = mmio_read64(resp_ptr + 8)
     val virt_base = mmio_read64(resp_ptr + 16)
 
-    serial_println("[BOOT] Kernel: phys=0x{phys_base} virt=0x{virt_base}")
+    log_raw_println("[BOOT] Kernel: phys=0x{phys_base} virt=0x{virt_base}")
 
     (PhysAddr(addr: phys_base), VirtAddr(addr: virt_base))
 
@@ -460,11 +383,11 @@ fn kernel_main():
     Initializes serial, parses boot info, hands off to memory layer.
     """
     # Step 1: Initialize early serial for debug output
-    serial_init()
-    serial_println("")
-    serial_println("========================================")
-    serial_println("  SimpleOS — Limine Boot Protocol")
-    serial_println("========================================")
+    log_init_serial(LOG_INFO)
+    log_raw_println("")
+    log_raw_println("========================================")
+    log_raw_println("  SimpleOS — Limine Boot Protocol")
+    log_raw_println("========================================")
 
     # Step 2: Parse HHDM (needed for physical-to-virtual conversions)
     _parse_hhdm()
@@ -472,15 +395,15 @@ fn kernel_main():
     # Step 3: Build boot output from all Limine responses
     val boot_info = _build_boot_output()
 
-    serial_println("[BOOT] Boot info assembled successfully")
-    serial_println("[BOOT] Total memory regions: {boot_info.memory_map.len()}")
+    log_raw_println("[BOOT] Boot info assembled successfully")
+    log_raw_println("[BOOT] Total memory regions: {boot_info.memory_map.len()}")
 
     # Step 4: Hand off to memory layer (Layer 1)
-    serial_println("[BOOT] Handing off to memory layer...")
+    log_raw_println("[BOOT] Handing off to memory layer...")
     memory_init(boot_info)
 
     # Step 5: If control returns, halt
-    serial_println("[BOOT] FATAL: memory_init returned, halting")
+    log_raw_println("[BOOT] FATAL: memory_init returned, halting")
     _halt()
 
 @noreturn

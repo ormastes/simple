@@ -48,7 +48,7 @@ var dev_subclass: [i64; 64] = [0; 64]
 var dev_state: [i64; 64] = [0; 64]
 var dev_grant_owner: [u64; 64] = [0; 64]  # Task ID that holds the grant
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
 # Direct C PCI cache access (bypasses syscall tagging issues)
@@ -61,10 +61,10 @@ extern fn rt_pci_get_field(index: i64, field: i64) -> i64
 
 fn pcimgr_init():
     """Initialize PCI manager: read devices from C PCI cache."""
-    serial_println("[pcimgr] Starting PCI device enumeration...")
+    log_raw_println("[pcimgr] Starting PCI device enumeration...")
 
     val count_result = rt_pci_device_count()
-    serial_println("[pcimgr] PCI scan done")
+    log_raw_println("[pcimgr] PCI scan done")
 
     dev_count = count_result
     var i: i64 = 0
@@ -80,7 +80,7 @@ fn pcimgr_init():
         dev_grant_owner[i] = 0
         i = i + 1
 
-    serial_println("[pcimgr] Populated {i} devices")
+    log_raw_println("[pcimgr] Populated {i} devices")
 
 # ============================================================================
 # Device Lookup
@@ -189,7 +189,7 @@ fn pcimgr_grant_device(dev_idx: u64, requester_task: u64) -> Result<DeviceGrant,
         dev_state[dev_idx] = DEV_STATE_GRANTED
         dev_grant_owner[dev_idx] = requester_task
 
-    serial_println("[pcimgr] Granted device [{dev_idx}] to task {requester_task}")
+    log_raw_println("[pcimgr] Granted device [{dev_idx}] to task {requester_task}")
     Ok(DeviceGrant(
         pci_vendor: vendor as u16,
         pci_device: device as u16,
@@ -224,7 +224,7 @@ fn pcimgr_release_device(dev_idx: u64, requester_task: u64) -> Result<bool, text
 
     dev_state[dev_idx] = DEV_STATE_AVAILABLE
     dev_grant_owner[dev_idx] = 0
-    serial_println("[pcimgr] Released device [{dev_idx}] from task {requester_task}")
+    log_raw_println("[pcimgr] Released device [{dev_idx}] from task {requester_task}")
     Ok(true)
 
 # ============================================================================
@@ -260,10 +260,10 @@ fn pcimgr_start():
     # Create IPC port for "pcimgr" service
     val port_result = syscall(22, 0, 0, 0, 0, 0)  # IpcCreatePort
     if port_result < 0:
-        serial_println("[pcimgr] FATAL: Failed to create IPC port (error {port_result})")
+        log_raw_println("[pcimgr] FATAL: Failed to create IPC port (error {port_result})")
         return
 
-    serial_println("[pcimgr] Service ready on IPC port (handle={port_result})")
+    log_raw_println("[pcimgr] Service ready on IPC port (handle={port_result})")
     val port_handle = port_result.to_u64()
 
     # Enter service loop
@@ -277,16 +277,16 @@ fn pcimgr_service_loop(port_handle: u64):
       word 1: sender task ID
       word 2..N: method-specific arguments
     """
-    serial_println("[pcimgr] Entering service loop...")
+    log_raw_println("[pcimgr] Entering service loop...")
 
     while true:
         # Block on IPC receive (syscall 21 = IpcRecv)
         val msg_result = syscall(21, port_handle, 0, 0, 0, 0)
         if msg_result < 0:
-            serial_println("[pcimgr] IPC recv error: {msg_result}")
+            log_raw_println("[pcimgr] IPC recv error: {msg_result}")
             continue
 
-        serial_println("[pcimgr] Received IPC request (raw={msg_result})")
+        log_raw_println("[pcimgr] Received IPC request (raw={msg_result})")
 
         # IpcMessage layout (@repr("C")):
         #   offset  0: src_port: u64  (sender task / port)
@@ -303,7 +303,7 @@ fn pcimgr_service_loop(port_handle: u64):
         match method_id:
             PCIMGR_ENUMERATE:
                 val count = pcimgr_device_count()
-                serial_println("[pcimgr] ENUMERATE: {count} devices")
+                log_raw_println("[pcimgr] ENUMERATE: {count} devices")
                 syscall(20, sender_task, 0, count, 0, 0)
             PCIMGR_REQUEST_DEVICE:
                 val dev_idx = mmio_read64(msg_ptr + 32)
@@ -312,7 +312,7 @@ fn pcimgr_service_loop(port_handle: u64):
                     Ok(g):
                         syscall(20, sender_task, 0, dev_idx, 0, 0)
                     Err(msg):
-                        serial_println("[pcimgr] REQUEST_DEVICE failed: {msg}")
+                        log_raw_println("[pcimgr] REQUEST_DEVICE failed: {msg}")
                         syscall(20, sender_task, 0xFFFF, 0, 0, 0)
             PCIMGR_RELEASE_DEVICE:
                 val dev_idx = mmio_read64(msg_ptr + 32)
@@ -321,19 +321,19 @@ fn pcimgr_service_loop(port_handle: u64):
                     Ok(ok):
                         syscall(20, sender_task, 0, 0, 0, 0)
                     Err(msg):
-                        serial_println("[pcimgr] RELEASE_DEVICE failed: {msg}")
+                        log_raw_println("[pcimgr] RELEASE_DEVICE failed: {msg}")
                         syscall(20, sender_task, 0xFFFF, 0, 0, 0)
             PCIMGR_GET_DEVICE_INFO:
                 val dev_idx = mmio_read64(msg_ptr + 32)
                 val cls = pcimgr_get_device_class(dev_idx)
                 syscall(20, sender_task, 0, cls as u64, 0, 0)
             _:
-                serial_println("[pcimgr] Unknown method ID: {method_id}")
+                log_raw_println("[pcimgr] Unknown method ID: {method_id}")
                 syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
 fn pcimgr_dump_devices():
     """Debug helper: print all tracked devices to serial (reads from C cache)."""
-    serial_println("[pcimgr] === Device Table ({dev_count} devices) ===")
+    log_raw_println("[pcimgr] === Device Table ({dev_count} devices) ===")
     var i: i64 = 0
     while i < dev_count:
         val bus = rt_pci_get_field(i, 0)
@@ -343,6 +343,6 @@ fn pcimgr_dump_devices():
         val devid = rt_pci_get_field(i, 6)
         val cls = rt_pci_get_field(i, 3)
         val sub = rt_pci_get_field(i, 4)
-        serial_println("[pcimgr]   [{i}] {bus}:{dev}.{func} vendor=0x{vendor} dev=0x{devid} class={cls}.{sub}")
+        log_raw_println("[pcimgr]   [{i}] {bus}:{dev}.{func} vendor=0x{vendor} dev=0x{devid} class={cls}.{sub}")
         i = i + 1
-    serial_println("[pcimgr] === End Device Table ===")
+    log_raw_println("[pcimgr] === End Device Table ===")

@@ -449,6 +449,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_write_text",
     "rt_file_copy",
     "rt_file_remove",
+    "rt_file_size",
     "rt_file_rename",
     "rt_file_read_lines",
     "rt_file_append_text",

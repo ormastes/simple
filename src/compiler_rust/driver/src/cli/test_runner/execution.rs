@@ -923,9 +923,30 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         import_parts.insert(0, "use std.spec".to_string());
     }
 
+    let wrapper_compat = r#"
+fn expect<T>(actual: T) -> T:
+    actual
+
+fn to_equal<T>(actual: T, expected: T):
+    assert actual == expected
+
+fn to_be<T>(actual: T, expected: T):
+    to_equal(actual, expected)
+
+fn to_contain(actual: text, expected: text):
+    assert actual.contains(expected)
+
+fn to_start_with(actual: text, expected: text):
+    assert actual.starts_with(expected)
+
+fn to_end_with(actual: text, expected: text):
+    assert actual.ends_with(expected)
+"#;
+
     let wrapped = format!(
-        "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n\n{}\nfn main():\n{}",
+        "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
         import_parts.join("\n"),
+        wrapper_compat,
         top_level_parts.join("\n"),
         body_parts.join("\n")
     );
@@ -1632,5 +1653,7 @@ describe "extern hoist":
             .find("extern fn rt_file_read_text(path: text) -> text")
             .expect("extern");
         assert!(extern_idx < main_idx, "extern should stay above fn main()");
+        assert!(wrapped_source.contains("fn expect<T>(actual: T) -> T:"));
+        assert!(wrapped_source.contains("fn to_equal<T>(actual: T, expected: T):"));
     }
 }

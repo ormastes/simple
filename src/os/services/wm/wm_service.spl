@@ -37,7 +37,7 @@ use std.ecs.change_detection.{ChangeTracker}
 use std.ecs.system.{Scheduler}
 use std.ecs.world.{WorldBase}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
@@ -195,25 +195,25 @@ impl WmWorld:
 
     me spawn_window(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
         """Spawn a new entity and insert all window components."""
-        serial_println("[wm-service] spawn-window:start wid={window_id} pid={process_id} app_id={app_id}")
+        log_raw_println("[wm-service] spawn-window:start wid={window_id} pid={process_id} app_id={app_id}")
         val e = self.base.spawn()
         # The WM uses these stores as current-state metadata, not as a
         # change-detection stream, so a stable tick is sufficient here.
         val tick: i64 = 0
         self.win_ids.insert(e, WinId(value: window_id), tick)
-        serial_println("[wm-service] spawn-window:win-id wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:win-id wid={window_id}")
         self.owner_ports.insert(e, OwnerPort(value: owner_port), tick)
-        serial_println("[wm-service] spawn-window:owner-port wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:owner-port wid={window_id}")
         self.owner_processes.insert(e, OwnerProcess(value: process_id), tick)
-        serial_println("[wm-service] spawn-window:owner-process wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:owner-process wid={window_id}")
         self.app_ids.insert(e, WinAppId(value: app_id), tick)
-        serial_println("[wm-service] spawn-window:app-id wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:app-id wid={window_id}")
         self.titles.insert(e, Title(value: ""), tick)
-        serial_println("[wm-service] spawn-window:title wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:title wid={window_id}")
         self.geometries.insert(e, Geometry(x: 0, y: 0, w: 0, h: 0), tick)
-        serial_println("[wm-service] spawn-window:geometry wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:geometry wid={window_id}")
         self.states.insert(e, WindowState(value: WIN_STATE_NORMAL), tick)
-        serial_println("[wm-service] spawn-window:end wid={window_id}")
+        log_raw_println("[wm-service] spawn-window:end wid={window_id}")
 
     me despawn_window(window_id: u64) -> bool:
         """Despawn the entity for window_id. Returns false if not found."""
@@ -463,11 +463,11 @@ impl WmService:
         val name_len = WM_PORT_NAME.len().to_u64()
         val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, name_len, 0, 0, 0)
         if port < 0:
-            serial_println("[wm-service] Failed to create IPC port (error {port})")
+            log_raw_println("[wm-service] Failed to create IPC port (error {port})")
             return false
         self.port_id = port.to_u64()
         self.initialized = true
-        serial_println("[wm-service] Listening on IPC port {self.port_id} as '{WM_PORT_NAME}'")
+        log_raw_println("[wm-service] Listening on IPC port {self.port_id} as '{WM_PORT_NAME}'")
         true
 
     me run_loop():
@@ -478,15 +478,15 @@ impl WmService:
         integration pattern, use poll_once() which returns WmAction?.
         """
         if not self.initialized:
-            serial_println("[wm-service] Cannot run: not initialized")
+            log_raw_println("[wm-service] Cannot run: not initialized")
             return
         self.running = true
-        serial_println("[wm-service] Service loop started (blocking mode)")
+        log_raw_println("[wm-service] Service loop started (blocking mode)")
         while self.running:
             # Receive IPC message -- blocks until message arrives
             val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
             if msg_raw < 0:
-                serial_println("[wm-service] IPC recv error: {msg_raw}")
+                log_raw_println("[wm-service] IPC recv error: {msg_raw}")
                 continue
             self.request_count = self.request_count + 1
             # In blocking mode, parse and discard (no compositor to apply to)
@@ -517,7 +517,7 @@ impl WmService:
     me stop():
         """Signal the service loop to exit."""
         self.running = false
-        serial_println("[wm-service] Stopped after {self.request_count} requests")
+        log_raw_println("[wm-service] Stopped after {self.request_count} requests")
 
     # -- Message Parsing ------------------------------------------------------
 
@@ -558,7 +558,7 @@ impl WmService:
             COMP_TEST_API_REQ:
                 return self.parse_test_api_req(src_port, payload_addr, payload_len)
             _:
-                serial_println("[wm-service] Unknown method {method} from port {src_port}")
+                log_raw_println("[wm-service] Unknown method {method} from port {src_port}")
                 self.send_error_reply(src_port, STATUS_INVALID, "unknown compositor method")
                 return wm_action_none()
 
@@ -570,7 +570,7 @@ impl WmService:
         embedding so callers degrade cleanly instead of hanging.
         Protocol contract is fixed — see COMP_TEST_API_REQ in
         src/os/userlib/ipc_protocol.spl."""
-        serial_println("[wm-service] COMP_TEST_API_REQ received (payload_len={payload_len}); in-kernel bridge not yet wired")
+        log_raw_println("[wm-service] COMP_TEST_API_REQ received (payload_len={payload_len}); in-kernel bridge not yet wired")
         self.send_error_reply(src_port, STATUS_INVALID, "COMP_TEST_API_REQ: use host-side /api/test/* socket until Wave 7 kernel bridge lands")
         return wm_action_none()
 
@@ -583,7 +583,7 @@ impl WmService:
                  | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
         """
         if self.world.win_ids.len() >= self.max_windows:
-            serial_println("[wm-service] Max windows reached, rejecting create")
+            log_raw_println("[wm-service] Max windows reached, rejecting create")
             self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
             return wm_action_none()
 
@@ -615,7 +615,7 @@ impl WmService:
             else:
                 app_id = title
 
-        serial_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h}) pid={process_id} app_id='{app_id}'")
+        log_raw_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h}) pid={process_id} app_id='{app_id}'")
         WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
 
     me parse_create_web_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
@@ -628,7 +628,7 @@ impl WmService:
         to the URL, app_id falls back to the launcher's record for src_port.
         """
         if self.world.win_ids.len() >= self.max_windows:
-            serial_println("[wm-service] Max windows reached, rejecting create_web")
+            log_raw_println("[wm-service] Max windows reached, rejecting create_web")
             self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
             return wm_action_none()
 
@@ -645,7 +645,7 @@ impl WmService:
         if app_id == "":
             app_id = url
 
-        serial_println("[wm-service] Parsed create_web_window from port {src_port}: '{url}' ({w}x{h}) pid={process_id}")
+        log_raw_println("[wm-service] Parsed create_web_window from port {src_port}: '{url}' ({w}x{h}) pid={process_id}")
         WmAction(kind: "create_web_window", window_id: 0, title: url, x: x, y: y, width: w, height: h, content: url, process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
 
     me parse_destroy_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
@@ -658,7 +658,7 @@ impl WmService:
         # Verify ownership
         val owner = self.find_owner(window_id)
         if owner == 0 or owner != src_port:
-            serial_println("[wm-service] Destroy denied: port {src_port} does not own window {window_id}")
+            log_raw_println("[wm-service] Destroy denied: port {src_port} does not own window {window_id}")
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
@@ -835,7 +835,7 @@ impl WmService:
         _push_u32(buf, COMP_CLOSE_REQUEST)
         _push_u64(buf, window_id)
         _ipc_send(owner, self.port_id, buf)
-        serial_println("[wm-service] Sent close request for window {window_id} to port {owner}")
+        log_raw_println("[wm-service] Sent close request for window {window_id} to port {owner}")
 
     me send_focus_changed(window_id: u64, focused: bool):
         """Notify the app that a window gained or lost focus.
@@ -929,7 +929,7 @@ impl WmService:
         for window_id in to_destroy:
             self.remove_owner(window_id)
         for window_id in to_destroy:
-            serial_println("[wm-service] Cleaned up ownership of window {window_id} for disconnected port {port}")
+            log_raw_println("[wm-service] Cleaned up ownership of window {window_id} for disconnected port {port}")
         to_destroy
 
     fn window_owner_process_id(window_id: u64) -> u64:
@@ -1083,7 +1083,7 @@ impl WmService:
         placeholder window ownership record so the WM is aware of the
         app before the app's own IPC connect arrives.
         """
-        serial_println("[wm-service] App launched: {app_name} (PID {pid})")
+        log_raw_println("[wm-service] App launched: {app_name} (PID {pid})")
         # The actual window surface will be created when the app sends
         # COMP_CREATE_WINDOW via IPC.  Record the PID so we can match
         # the connect request to this launch notification later.
@@ -1100,7 +1100,7 @@ fn wm_notify_app_launched(app_name: text, pid: u64):
     PID with a window when the app connects via IPC and sends
     COMP_CREATE_WINDOW.
     """
-    serial_println("[wm] App launched: {app_name} (PID {pid})")
+    log_raw_println("[wm] App launched: {app_name} (PID {pid})")
 
 # ============================================================================
 # Memory Access Helpers

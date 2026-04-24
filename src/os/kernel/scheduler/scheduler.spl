@@ -33,7 +33,7 @@ use os.kernel.ipc.notification.{notification_clear_waiter}
 # Called after every task creation so the capability subsystem has an
 # explicit record for the new task instead of relying on default-ALLOW.
 extern fn cap_init_task_record(task: TaskId, full: bool)
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 
 @cfg(arm64)
 extern fn rt_arm64_record_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)
@@ -237,31 +237,31 @@ fn _map_user_process_image(
 ) -> i32:
     """Map PT_LOAD segments and the initial stack for a user process image."""
     if not _address_space_can_map(space):
-        serial_println("[scheduler] map_user_process_image: synthetic address space root={space.phys_root} id={space.id}")
+        log_raw_println("[scheduler] map_user_process_image: synthetic address space root={space.phys_root} id={space.id}")
         return 0
     if _scheduler_uses_direct_load_arena():
         var staged = stage_elf64_load_image(space, file_bytes)
         if staged <= 0:
             staged = stage_raw_image(space, file_bytes)
         if staged <= 0:
-            serial_println("[scheduler] map_user_process_image: arm64 direct-load stage failed root={space.phys_root}")
+            log_raw_println("[scheduler] map_user_process_image: arm64 direct-load stage failed root={space.phys_root}")
             return -12
-        serial_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} staged={staged} id={space.id}")
+        log_raw_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} staged={staged} id={space.id}")
         return 0
     if stack_top == 0 or stack_size == 0:
-        serial_println("[scheduler] map_user_process_image: invalid stack shape")
+        log_raw_println("[scheduler] map_user_process_image: invalid stack shape")
         return -22
     if (initial_stack_bytes.len() as u64) > stack_size:
-        serial_println("[scheduler] map_user_process_image: initial stack too large")
+        log_raw_println("[scheduler] map_user_process_image: initial stack too large")
         return -22
 
     val seg_result = map_all(space, segments, file_bytes)
     if seg_result.is_err():
-        serial_println("[scheduler] map_user_process_image: segment map failed root={space.phys_root}")
+        log_raw_println("[scheduler] map_user_process_image: segment map failed root={space.phys_root}")
         return -12
     val stack_result = map_stack(space, stack_top, stack_size, initial_stack_bytes)
     if stack_result.is_err():
-        serial_println("[scheduler] map_user_process_image: stack map failed")
+        log_raw_println("[scheduler] map_user_process_image: stack map failed")
         return -12
     0
 
@@ -666,7 +666,7 @@ impl Scheduler:
         """
         var next_id = g_scheduler_next_task_id
         if next_id == 0 or next_id >= 0x40000000:
-            serial_println("[scheduler] create_task: normalized next_task_id")
+            log_raw_println("[scheduler] create_task: normalized next_task_id")
             next_id = 1
         val id = TaskId(id: next_id)
         g_scheduler_next_task_id = next_id + 1
@@ -730,89 +730,89 @@ impl Scheduler:
         Returns the primitive task id for syscall/ABI paths that must not
         depend on aggregate TaskId return lowering.
         """
-        serial_println("[scheduler] create_user_task: image access begin")
+        log_raw_println("[scheduler] create_user_task: image access begin")
         val entry = user_process_image_entry(image)
-        serial_println("[scheduler] create_user_task: image entry ok")
+        log_raw_println("[scheduler] create_user_task: image entry ok")
         val stack_top = user_process_image_stack_top(image)
-        serial_println("[scheduler] create_user_task: image stack_top ok")
+        log_raw_println("[scheduler] create_user_task: image stack_top ok")
         val stack_size = user_process_image_stack_size(image)
-        serial_println("[scheduler] create_user_task: image stack_size ok")
+        log_raw_println("[scheduler] create_user_task: image stack_size ok")
         val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0
-        serial_println("[scheduler] create_user_task: image initial_sp ok")
+        log_raw_println("[scheduler] create_user_task: image initial_sp ok")
         val initial_stack_bytes = user_process_image_initial_stack_bytes(image)
-        serial_println("[scheduler] create_user_task: image initial_stack ok")
+        log_raw_println("[scheduler] create_user_task: image initial_stack ok")
         val segments = user_process_image_segments(image)
-        serial_println("[scheduler] create_user_task: image segments ok")
+        log_raw_println("[scheduler] create_user_task: image segments ok")
         val file_bytes = user_process_image_file_bytes(image)
-        serial_println("[scheduler] create_user_task: image file_bytes ok")
-        serial_println("[scheduler] create_user_task: validate begin")
+        log_raw_println("[scheduler] create_user_task: image file_bytes ok")
+        log_raw_println("[scheduler] create_user_task: validate begin")
         if stack_top == 0:
-            serial_println("[scheduler] create_user_task: stack_top zero")
+            log_raw_println("[scheduler] create_user_task: stack_top zero")
             return 0
         if stack_size == 0:
-            serial_println("[scheduler] create_user_task: stack_size zero")
+            log_raw_println("[scheduler] create_user_task: stack_size zero")
             return 0
         if user_sp == 0:
-            serial_println("[scheduler] create_user_task: user_sp zero")
+            log_raw_println("[scheduler] create_user_task: user_sp zero")
             return 0
         if (initial_stack_bytes.len() as u64) > stack_size:
-            serial_println("[scheduler] create_user_task: initial stack too large")
+            log_raw_println("[scheduler] create_user_task: initial stack too large")
             return 0
-        serial_println("[scheduler] create_user_task: validate ok")
+        log_raw_println("[scheduler] create_user_task: validate ok")
 
-        serial_println("[scheduler] create_user_task: find slot begin")
+        log_raw_println("[scheduler] create_user_task: find slot begin")
         var slot = self._find_empty_slot()
-        serial_println("[scheduler] create_user_task: find slot returned")
+        log_raw_println("[scheduler] create_user_task: find slot returned")
         if slot < 0:
             if self.current.id == 0:
-                serial_println("[scheduler] create_user_task: bootstrap slot fallback")
+                log_raw_println("[scheduler] create_user_task: bootstrap slot fallback")
                 slot = 0
             else:
-                serial_println("[scheduler] create_user_task: no free slot")
+                log_raw_println("[scheduler] create_user_task: no free slot")
                 return 0
 
-        serial_println("[scheduler] create_user_task: address space begin")
+        log_raw_println("[scheduler] create_user_task: address space begin")
         val user_as: AddressSpace = create_user_address_space()
-        serial_println("[scheduler] create_user_task: address space ok")
+        log_raw_println("[scheduler] create_user_task: address space ok")
 
-        serial_println("[scheduler] create_user_task: map begin")
+        log_raw_println("[scheduler] create_user_task: map begin")
         val map_result = if _address_space_can_map(user_as):
             _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         else:
-            serial_println("[scheduler] create_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
+            log_raw_println("[scheduler] create_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
             0
-        serial_println("[scheduler] create_user_task: map returned")
+        log_raw_println("[scheduler] create_user_task: map returned")
         if map_result < 0:
             destroy_user_address_space(user_as)
-            serial_println("[scheduler] create_user_task: map failed")
+            log_raw_println("[scheduler] create_user_task: map failed")
             return 0
         val mapped_entry = if _scheduler_uses_direct_load_arena():
             _scheduler_mapped_entry(user_as, file_bytes, entry)
         else:
             entry
-        serial_println("[scheduler] create_user_task: mapped entry ok")
+        log_raw_println("[scheduler] create_user_task: mapped entry ok")
         if mapped_entry != entry:
-            serial_println("[scheduler] create_user_task: direct entry mapped")
+            log_raw_println("[scheduler] create_user_task: direct entry mapped")
             if not verify_direct_load_entry(user_as, file_bytes, entry):
                 destroy_user_address_space(user_as)
-                serial_println("[scheduler] create_user_task: direct entry verify failed")
+                log_raw_println("[scheduler] create_user_task: direct entry verify failed")
                 return 0
         val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-        serial_println("[scheduler] create_user_task: user context ok")
+        log_raw_println("[scheduler] create_user_task: user context ok")
 
         # Dodge the `Scheduler.next_task_id` field-read stub by using a
         # module-level counter. The `self.next_task_id` read in the baremetal
         # build resolves to a weak stub that returns 0 and logs a WARN.
-        serial_println("[scheduler] create_user_task: pid alloc begin")
+        log_raw_println("[scheduler] create_user_task: pid alloc begin")
         var user_next_id = g_scheduler_next_task_id
         if user_next_id == 0 or user_next_id >= 0x40000000:
-            serial_println("[scheduler] create_user_task: normalized next_task_id")
+            log_raw_println("[scheduler] create_user_task: normalized next_task_id")
             user_next_id = 1
         g_scheduler_next_task_id = user_next_id + 1
         val id = TaskId(id: user_next_id)
-        serial_println("[scheduler] create_user_task: pid alloc ok")
+        log_raw_println("[scheduler] create_user_task: pid alloc ok")
 
-        serial_println("[scheduler] create_user_task: tcb build begin")
+        log_raw_println("[scheduler] create_user_task: tcb build begin")
         val tcb = TaskControlBlock(
             id: id,
             name: "user-{id.id}",
@@ -833,25 +833,25 @@ impl Scheduler:
             exit_code: 0,
             ticks_remaining: TIME_SLICE_TICKS
         )
-        serial_println("[scheduler] create_user_task: tcb built")
+        log_raw_println("[scheduler] create_user_task: tcb built")
 
-        serial_println("[scheduler] create_user_task: task store begin")
+        log_raw_println("[scheduler] create_user_task: task store begin")
         self.tasks[slot] = tcb
-        serial_println("[scheduler] create_user_task: task stored")
+        log_raw_println("[scheduler] create_user_task: task stored")
 
         # Register capability record so cap_check finds an explicit entry
         # instead of falling through to the (now-removed) default-ALLOW path.
-        serial_println("[scheduler] create_user_task: caps begin")
+        log_raw_println("[scheduler] create_user_task: caps begin")
         cap_init_task_record(id, true)
-        serial_println("[scheduler] create_user_task: caps registered")
+        log_raw_println("[scheduler] create_user_task: caps registered")
 
         # Skip `_find_slot` (which re-scans the whole tasks table and stalls
         # in the baremetal build when called with a TaskId matching a slot
         # we just wrote — see _enqueue_ready_at_slot below). We already have
         # the slot in-hand, so pass it in directly.
-        serial_println("[scheduler] create_user_task: enqueue begin")
+        log_raw_println("[scheduler] create_user_task: enqueue begin")
         self._enqueue_ready_at_slot(id, slot)
-        serial_println("[scheduler] create_user_task: enqueue done")
+        log_raw_println("[scheduler] create_user_task: enqueue done")
 
         return user_next_id
 
@@ -868,7 +868,7 @@ impl Scheduler:
         reliable in freestanding ARM builds.
         """
         if self.tasks[0] != nil:
-            serial_println("[scheduler] bootstrap_user_task: slot busy")
+            log_raw_println("[scheduler] bootstrap_user_task: slot busy")
             return 0
 
         val entry = user_process_image_entry(image)
@@ -879,28 +879,28 @@ impl Scheduler:
         val segments = user_process_image_segments(image)
         val file_bytes = user_process_image_file_bytes(image)
         if stack_top == 0 or stack_size == 0 or user_sp == 0:
-            serial_println("[scheduler] bootstrap_user_task: invalid image")
+            log_raw_println("[scheduler] bootstrap_user_task: invalid image")
             return 0
         if (initial_stack_bytes.len() as u64) > stack_size:
-            serial_println("[scheduler] bootstrap_user_task: initial stack too large")
+            log_raw_println("[scheduler] bootstrap_user_task: initial stack too large")
             return 0
 
         val user_as: AddressSpace = create_user_address_space()
         val map_result = if _address_space_can_map(user_as):
             _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         else:
-            serial_println("[scheduler] bootstrap_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
+            log_raw_println("[scheduler] bootstrap_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
             0
         if map_result < 0:
             destroy_user_address_space(user_as)
-            serial_println("[scheduler] bootstrap_user_task: map failed")
+            log_raw_println("[scheduler] bootstrap_user_task: map failed")
             return 0
         val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
         if mapped_entry != entry:
-            serial_println("[scheduler] bootstrap_user_task: direct entry mapped")
+            log_raw_println("[scheduler] bootstrap_user_task: direct entry mapped")
             if not verify_direct_load_entry(user_as, file_bytes, entry):
                 destroy_user_address_space(user_as)
-                serial_println("[scheduler] bootstrap_user_task: direct entry verify failed")
+                log_raw_println("[scheduler] bootstrap_user_task: direct entry verify failed")
                 return 0
         val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
 
@@ -1782,7 +1782,7 @@ impl Scheduler:
         val map_result = if _address_space_can_map(new_as):
             _map_user_process_image(new_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
         else:
-            serial_println("[scheduler] exec_image: synthetic address space root={new_as.phys_root} id={new_as.id}")
+            log_raw_println("[scheduler] exec_image: synthetic address space root={new_as.phys_root} id={new_as.id}")
             0
         if map_result < 0:
             destroy_user_address_space(new_as)
@@ -1791,7 +1791,7 @@ impl Scheduler:
             return map_result
         val mapped_entry = _scheduler_mapped_entry(new_as, file_bytes, entry)
         if mapped_entry != entry:
-            serial_println("[scheduler] exec_image: direct entry mapped")
+            log_raw_println("[scheduler] exec_image: direct entry mapped")
             if not verify_direct_load_entry(new_as, file_bytes, entry):
                 destroy_user_address_space(new_as)
                 if was_ready:

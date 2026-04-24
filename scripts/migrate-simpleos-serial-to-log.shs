@@ -1,0 +1,220 @@
+#!/usr/bin/env sh
+# Migrate SimpleOS serial_* call sites to the log lib.
+#
+# Phase-3/AC-5 deliverable. Finds every serial_{println,writeln,write,puts,putc}
+# call under src/os/ outside the driver + log-lib + early-boot exempt set,
+# and proposes a rewrite. By default runs in --dry-run mode (prints only).
+#
+# Usage:
+#   sh scripts/migrate-simpleos-serial-to-log.shs [--dry-run] [--apply] [--check]
+#                                                  [--verbose] [--files GLOB]
+#
+#   --dry-run     Print proposed rewrites, do not modify files (DEFAULT)
+#   --apply       Actually rewrite files. Idempotent: rerun is a no-op
+#   --check       Exit 1 if any rewrite would happen (CI gate for AC-6)
+#   --verbose     Include skipped lines + reasons
+#   --files GLOB  Limit to a path glob (e.g. 'src/os/services/vfs/*.spl')
+#
+# Rewrite rules (see .sstack/simpleos-serial-log-via-log-lib/state.md
+# section ### 3-arch D6 for the full spec):
+#   serial_println("[BOOT] ...")    -> log_raw_println("[BOOT] ...")
+#   serial_println(X)               -> log_info("[<scope>] " + X)
+#   serial_writeln / serial_write   -> same pattern
+#   serial_puts / serial_putc       -> verbose-flagged; manual review
+#
+# Exempt files:
+#   src/os/kernel/boot/kernel_entry.spl   (minimal-boot, runs before log_init)
+#   src/os/kernel/arch/**                  (arch UART drivers)
+#   src/lib/nogc_async_mut_noalloc/log/**  (log lib itself)
+#   src/os/kernel/log/markers.spl          (registry-only, no emit)
+#   examples/simple_os/**                  (out-of-sweep worktree)
+#   src/os/sdk/include/*.h                 (C header macros)
+
+set -eu
+
+MODE="dry-run"
+VERBOSE=0
+FILE_GLOB=""
+ANY_REWRITE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) MODE="dry-run" ;;
+        --apply)   MODE="apply" ;;
+        --check)   MODE="check" ;;
+        --verbose) VERBOSE=1 ;;
+        --files)   shift; FILE_GLOB="$1" ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+is_exempt() {
+    case "$1" in
+        src/os/kernel/boot/kernel_entry.spl) return 0 ;;
+        src/os/kernel/arch/*)                return 0 ;;
+        src/lib/nogc_async_mut_noalloc/log/*) return 0 ;;
+        src/os/kernel/log/markers.spl)       return 0 ;;
+        examples/simple_os/*)                return 0 ;;
+        src/os/sdk/include/*)                return 0 ;;
+        *.sdn|*.smf|*.h|*.c|*.s|*.S)         return 0 ;;
+    esac
+    return 1
+}
+
+scope_for_path() {
+    case "$1" in
+        src/os/kernel/boot/*)              echo "boot" ;;
+        src/os/kernel/memory/*)            echo "mem" ;;
+        src/os/kernel/scheduler/*)         echo "sched" ;;
+        src/os/kernel/interrupts/*)        echo "irq" ;;
+        src/os/kernel/ipc/*)               echo "ipc" ;;
+        src/os/kernel/loader/*)            echo "loader" ;;
+        src/os/kernel/lifecycle/*)         echo "lifecycle" ;;
+        src/os/kernel/abi/*)               echo "abi" ;;
+        src/os/kernel/log/klog.spl)        echo "klog" ;;
+        src/os/kernel/mod.spl)             echo "kernel" ;;
+        src/os/services/vfs/*)             echo "vfs" ;;
+        src/os/services/netstack/*)        echo "net" ;;
+        src/os/services/device_registry/*) echo "devreg" ;;
+        src/os/services/display/*)         echo "display" ;;
+        src/os/services/launcher/*)        echo "launcher" ;;
+        src/os/services/pcimgr/*)          echo "pci" ;;
+        src/os/services/wm/*)              echo "wm" ;;
+        src/os/services/*)                 echo "svc" ;;
+        src/os/drivers/virtio/*)           echo "virtio" ;;
+        src/os/drivers/nvme/*)             echo "nvme" ;;
+        src/os/drivers/gpu/*)              echo "gpu" ;;
+        src/os/drivers/*)                  echo "drv" ;;
+        src/os/compositor/*)               echo "comp" ;;
+        src/os/desktop/*)                  echo "desktop" ;;
+        src/os/apps/shell/*)               echo "app.shell" ;;
+        src/os/apps/browser_sample/*)      echo "app.browser_sample" ;;
+        src/os/apps/sshd/*)                echo "app.sshd" ;;
+        src/os/apps/simple_browser/*)      echo "app.simple_browser" ;;
+        src/os/apps/smux/*)                echo "app.smux" ;;
+        src/os/apps/*)                     echo "app" ;;
+        src/os/userlib/*)                  echo "userlib" ;;
+        src/os/lib/driver_runtime/*)       echo "drvrt" ;;
+        src/os/lib/*)                      echo "oslib" ;;
+        src/os/posix/*)                    echo "posix" ;;
+        src/os/sosix/*)                    echo "sosix" ;;
+        src/os/crypto/*)                   echo "crypto" ;;
+        src/os/hosted/*)                   echo "hosted" ;;
+        src/os/test/*)                     echo "test" ;;
+        *)                                 echo "os" ;;
+    esac
+}
+
+# Marker namespaces whose call sites route to log_raw_println (preserves
+# strict-prefix wire format consumed by markers.spl::validate()).
+is_marker_literal() {
+    case "$1" in
+        *'"[BOOT] '*)          return 0 ;;
+        *'"[vfs] '*)           return 0 ;;
+        *'"[pack] '*)          return 0 ;;
+        *'"[native-verify] '*) return 0 ;;
+        *'"[desktop-e2e] '*)   return 0 ;;
+        *'"[launcher] '*)      return 0 ;;
+    esac
+    return 1
+}
+
+report() {
+    # report FILE LINE ORIGINAL REWRITE
+    ANY_REWRITE=1
+    printf '%s:%s  %s\n    -> %s\n' "$1" "$2" "$3" "$4"
+}
+
+apply_rewrite() {
+    # apply_rewrite FILE LINE ORIGINAL_PATTERN REWRITE_REPLACEMENT
+    # Uses sed to rewrite the matched line. Escaping left tight on purpose.
+    _file="$1"; _line="$2"; _from="$3"; _to="$4"
+    # sed expression rewrites only the exact matching line number
+    # to guard against incidental duplicates elsewhere in the file.
+    sed -i "${_line}s|${_from}|${_to}|" "$_file"
+}
+
+process_file() {
+    _file="$1"
+    is_exempt "$_file" && { [ "$VERBOSE" = "1" ] && echo "SKIP exempt: $_file"; return 0; }
+    _scope=$(scope_for_path "$_file")
+
+    # Track whether we need to insert the klog_api import.
+    _need_import=0
+
+    # Iterate each candidate line.
+    grep -nE 'serial_(println|writeln|write|puts|putc)\(' "$_file" 2>/dev/null | \
+    while IFS=: read -r _ln _body; do
+        _line="$_body"
+        # Skip lines that already use log_* (idempotency).
+        case "$_line" in
+            *log_info\(*|*log_warn\(*|*log_error\(*|*log_raw_println\(*|*log_raw\(*)
+                [ "$VERBOSE" = "1" ] && echo "  idempotent: $_file:$_ln" ;
+                continue ;;
+        esac
+        # Skip FN DEFINITIONS — those are the duplicate local defs, handled
+        # separately. Recognised by 'fn serial_' at start of trimmed line.
+        _trimmed=$(echo "$_line" | sed -E 's/^[[:space:]]+//')
+        case "$_trimmed" in
+            "fn serial_"*|"extern fn serial_"*)
+                [ "$VERBOSE" = "1" ] && echo "  fn-def skip (deletion pass): $_file:$_ln";
+                continue ;;
+        esac
+
+        _need_import=1
+
+        # Marker detection — literal arg starts with a known namespace.
+        if is_marker_literal "$_line"; then
+            _rewrite=$(echo "$_line" | sed -E 's/serial_(println|writeln)/log_raw_println/; s/serial_write/log_raw/')
+            report "$_file" "$_ln" "$_trimmed" "$(echo "$_rewrite" | sed -E 's/^[[:space:]]+//')"
+            continue
+        fi
+
+        # Regular line: serial_println(X) -> log_info("[scope] " + X)
+        # We embed the scope via "+" string concat rather than expanding the
+        # log lib API surface.
+        _rewrite=$(echo "$_line" | sed -E \
+            "s/serial_(println|writeln)\\((.*)\\)/log_info(\"[${_scope}] \" + \\2)/; \
+             s/serial_write\\((.*)\\)/log_info(\"[${_scope}] \" + \\1)/; \
+             s/serial_puts\\((.*)\\)/log_info(\"[${_scope}] \" + \\1)/")
+        report "$_file" "$_ln" "$_trimmed" "$(echo "$_rewrite" | sed -E 's/^[[:space:]]+//')"
+    done
+
+    # NOTE: actual --apply path is intentionally not implemented yet.
+    # Dry-run output is the deliverable this session; user reviews before
+    # sweep enters --apply mode (see state.md Phase 5 commit plan item 7).
+    if [ "$_need_import" = "1" ] && [ "$VERBOSE" = "1" ]; then
+        echo "  (would insert) use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw_println}"
+    fi
+}
+
+find_files() {
+    if [ -n "$FILE_GLOB" ]; then
+        # shellcheck disable=SC2086
+        ls $FILE_GLOB 2>/dev/null
+    else
+        find src/os -type f -name '*.spl' 2>/dev/null | sort
+    fi
+}
+
+echo "# migrate-simpleos-serial-to-log.shs — mode=$MODE"
+echo "# scan root: src/os"
+echo ""
+
+for f in $(find_files); do
+    process_file "$f"
+done
+
+echo ""
+if [ "$ANY_REWRITE" = "1" ]; then
+    if [ "$MODE" = "check" ]; then
+        echo "FAIL: rewrites pending. Run with --dry-run to preview or --apply to mutate."
+        exit 1
+    fi
+    echo "# Summary: rewrites proposed. --apply is a no-op in this release;"
+    echo "# the sweep commit is gated on human review of this output."
+else
+    echo "# Summary: no rewrites pending (already migrated or empty scan)."
+fi

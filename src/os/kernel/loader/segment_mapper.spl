@@ -40,7 +40,7 @@ val PAGE_SIZE: u64 = 4096
 # Diagnostics
 # ============================================================================
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 
 # ============================================================================
 # Helpers
@@ -64,7 +64,7 @@ fn _flags_from_pf(flags: u32) -> VmFlags:
     val x = (flags & PF_X) != 0
 
     if not r and not w and not x:
-        serial_println("[segmap] WARN: PT_LOAD segment has no PF_* flags; defaulting to R only")
+        log_raw_println("[segmap] WARN: PT_LOAD segment has no PF_* flags; defaulting to R only")
         # VM_PRESENT | VM_USER | VM_NO_EXECUTE — read-only user page.
         return VmFlags(bits: 1 | 4 | 32)
 
@@ -150,7 +150,7 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
     val file_size = user_load_segment_file_size(seg)
     val mem_size = user_load_segment_mem_size(seg)
     if file_size > mem_size:
-        serial_println("[segmap] file_size exceeds mem_size")
+        log_raw_println("[segmap] file_size exceeds mem_size")
         return Err("segment file_size exceeds mem_size")
     if mem_size == 0:
         return Ok(0)
@@ -164,14 +164,14 @@ fn map_segment(as_handle: AddressSpace, seg: UserLoadSegment, file_bytes: [u8]) 
     while va < va_end:
         val opt_frame = alloc_user_page_frame()
         if opt_frame == nil:
-            serial_println("[segmap] frame alloc failed for PT_LOAD")
+            log_raw_println("[segmap] frame alloc failed for PT_LOAD")
             return Err("alloc_user_page_frame failed while mapping PT_LOAD")
         val frame = opt_frame
         val phys = PhysAddr(addr: frame.pfn * PAGE_SIZE)
         val virt = VirtAddr(addr: va)
         val ok = map_user_page_in(as_handle, virt, phys, vm_flags)
         if not ok:
-            serial_println("[segmap] map_user_page_in failed for PT_LOAD")
+            log_raw_println("[segmap] map_user_page_in failed for PT_LOAD")
             return Err("map_user_page_in failed for PT_LOAD page")
         _copy_segment_page(phys_addr_value(phys), va, virt_addr, file_size, mem_size, user_load_segment_data(seg))
         va = va + PAGE_SIZE
@@ -226,19 +226,19 @@ fn stage_raw_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     """
     extern fn rt_arm_stage_raw_image(dst_phys: u64, bytes: [u8]) -> i32
     if as_handle.phys_root == 0:
-        serial_println("[segmap] raw stage failed: no address-space root")
+        log_raw_println("[segmap] raw stage failed: no address-space root")
         return -1
     val total = file_bytes.len() as u64
     if total == 0:
-        serial_println("[segmap] raw stage failed: empty image")
+        log_raw_println("[segmap] raw stage failed: empty image")
         return -2
 
     val image_base = as_handle.phys_root + 0x100000
     val staged = rt_arm_stage_raw_image(image_base, file_bytes)
     if staged <= 0:
-        serial_println("[segmap] raw stage failed: runtime copy")
+        log_raw_println("[segmap] raw stage failed: runtime copy")
         return -12
-    serial_println("[segmap] raw stage ok bytes={total} root={as_handle.phys_root}")
+    log_raw_println("[segmap] raw stage ok bytes={total} root={as_handle.phys_root}")
     staged
 
 @cfg(arm64)
@@ -248,7 +248,7 @@ fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
     extern fn rt_arm64_user_as_map_elf64(root: u64, dst_phys: u64, bytes: [u8]) -> i32
     extern fn rt_arm64_user_as_ttbr0_probe(root: u64) -> i32
     if as_handle.phys_root == 0:
-        serial_println("[segmap] elf stage failed: no address-space root")
+        log_raw_println("[segmap] elf stage failed: no address-space root")
         return -1
     val image_base = as_handle.phys_root + 0x100000
     val staged = rt_arm_stage_elf64_load_image(image_base, file_bytes)
@@ -256,19 +256,19 @@ fn stage_elf64_load_image(as_handle: AddressSpace, file_bytes: [u8]) -> i32:
         return staged
     val mapped = rt_arm64_user_as_map_elf64(as_handle.phys_root, image_base, file_bytes)
     if mapped <= 0:
-        serial_println("[segmap] arm64 user page table failed root={as_handle.phys_root}")
+        log_raw_println("[segmap] arm64 user page table failed root={as_handle.phys_root}")
         return -13
-    serial_println("[segmap] arm64 user page table ok root={as_handle.phys_root}")
+    log_raw_println("[segmap] arm64 user page table ok root={as_handle.phys_root}")
     val ttbr0_probe = rt_arm64_user_as_ttbr0_probe(as_handle.phys_root)
     if ttbr0_probe == 1:
-        serial_println("[segmap] arm64 ttbr0 probe ok")
+        log_raw_println("[segmap] arm64 ttbr0 probe ok")
     else:
         if ttbr0_probe == 2:
-            serial_println("[segmap] arm64 ttbr0 probe deferred mmu-on")
+            log_raw_println("[segmap] arm64 ttbr0 probe deferred mmu-on")
         else:
-            serial_println("[segmap] arm64 ttbr0 probe failed")
+            log_raw_println("[segmap] arm64 ttbr0 probe failed")
             return -14
-    serial_println("[segmap] elf stage ok root={as_handle.phys_root}")
+    log_raw_println("[segmap] elf stage ok root={as_handle.phys_root}")
     staged
 
 @cfg(arm64)
@@ -290,14 +290,14 @@ fn verify_direct_load_entry(as_handle: AddressSpace, file_bytes: [u8], entry: u6
     val direct_entry = rt_arm_elf64_direct_entry(image_base, file_bytes, entry)
     val table_entry = rt_arm64_user_as_translate(as_handle.phys_root, entry)
     if direct_entry == 0 or table_entry != direct_entry:
-        serial_println("[segmap] direct entry page table mismatch")
+        log_raw_println("[segmap] direct entry page table mismatch")
         return false
-    serial_println("[segmap] direct entry page table ok")
+    log_raw_println("[segmap] direct entry page table ok")
     val ok = rt_arm_elf64_direct_entry_bytes_ok(image_base, file_bytes, entry)
     if ok == 1:
-        serial_println("[segmap] direct entry bytes ok")
+        log_raw_println("[segmap] direct entry bytes ok")
         return true
-    serial_println("[segmap] direct entry bytes mismatch")
+    log_raw_println("[segmap] direct entry bytes mismatch")
     false
 
 @cfg(arm32)

@@ -12,7 +12,7 @@
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 
 # ============================================================================
 # IPC Method IDs
@@ -70,7 +70,7 @@ fn registry_init():
         reg_active[i] = false
         i = i + 1
     reg_count = 0
-    serial_println("[registry] Device registry initialized")
+    log_raw_println("[registry] Device registry initialized")
 
 # ============================================================================
 # Register / Update
@@ -97,13 +97,13 @@ fn registry_register(class: u8, name: text, port: i64, task: u64) -> bool:
             reg_driver_name[i] = name
             reg_ipc_port[i] = port
             reg_task_id[i] = task
-            serial_println("[registry] Updated {name} for class {_class_name(class)}")
+            log_raw_println("[registry] Updated {name} for class {_class_name(class)}")
             return true
         i = i + 1
 
     # New registration
     if reg_count >= MAX_REGISTRATIONS:
-        serial_println("[registry] Registry full ({MAX_REGISTRATIONS} slots)")
+        log_raw_println("[registry] Registry full ({MAX_REGISTRATIONS} slots)")
         return false
 
     val idx = reg_count
@@ -113,7 +113,7 @@ fn registry_register(class: u8, name: text, port: i64, task: u64) -> bool:
     reg_task_id[idx] = task
     reg_active[idx] = true
     reg_count = reg_count + 1
-    serial_println("[registry] Registered {name} for class {_class_name(class)} (port={port}, task={task})")
+    log_raw_println("[registry] Registered {name} for class {_class_name(class)} (port={port}, task={task})")
     true
 
 # ============================================================================
@@ -164,7 +164,7 @@ fn registry_unregister(class: u8, task: u64) -> bool:
     while i < reg_count:
         if reg_class[i] == class and reg_task_id[i] == task and reg_active[i]:
             reg_active[i] = false
-            serial_println("[registry] Unregistered {reg_driver_name[i]} for class {_class_name(class)}")
+            log_raw_println("[registry] Unregistered {reg_driver_name[i]} for class {_class_name(class)}")
             return true
         i = i + 1
     false
@@ -175,16 +175,16 @@ fn registry_unregister(class: u8, task: u64) -> bool:
 
 fn registry_list():
     """Print all active registrations to serial."""
-    serial_println("[registry] Active registrations:")
+    log_raw_println("[registry] Active registrations:")
     var i: u64 = 0
     var active_count: u64 = 0
     while i < reg_count:
         if reg_active[i]:
             val cn = _class_name(reg_class[i])
-            serial_println("  [{cn}] {reg_driver_name[i]} port={reg_ipc_port[i]} task={reg_task_id[i]}")
+            log_raw_println("  [{cn}] {reg_driver_name[i]} port={reg_ipc_port[i]} task={reg_task_id[i]}")
             active_count = active_count + 1
         i = i + 1
-    serial_println("[registry] Total: {active_count} active")
+    log_raw_println("[registry] Total: {active_count} active")
 
 fn registry_active_count() -> u64:
     """Return the number of active registrations."""
@@ -211,11 +211,11 @@ fn registry_start():
 
     val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
     if port_result < 0:
-        serial_println("[registry] FATAL: Failed to create IPC port (error {port_result})")
+        log_raw_println("[registry] FATAL: Failed to create IPC port (error {port_result})")
         return
 
     val port_handle = port_result as u64
-    serial_println("[registry] Service ready on IPC port (handle={port_handle})")
+    log_raw_println("[registry] Service ready on IPC port (handle={port_handle})")
 
     registry_service_loop(port_handle)
 
@@ -230,15 +230,15 @@ fn registry_service_loop(port_handle: u64):
     Dispatch will be wired when IPC message framing is finalized
     in the kernel IPC layer.
     """
-    serial_println("[registry] Entering service loop...")
+    log_raw_println("[registry] Entering service loop...")
 
     while true:
         val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
         if msg_result < 0:
-            serial_println("[registry] IPC recv error: {msg_result}")
+            log_raw_println("[registry] IPC recv error: {msg_result}")
             continue
 
-        serial_println("[registry] Received IPC request (raw={msg_result})")
+        log_raw_println("[registry] Received IPC request (raw={msg_result})")
 
         # IpcMessage layout (@repr("C")):
         #   offset  0: src_port: u64  (sender task / port)
@@ -276,7 +276,7 @@ fn registry_service_loop(port_handle: u64):
                 registry_list()
                 syscall(20, sender_task, 0, 0, 0, 0)
             _:
-                serial_println("[registry] Unknown method ID: {method_id}")
+                log_raw_println("[registry] Unknown method ID: {method_id}")
                 syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
 # ============================================================================

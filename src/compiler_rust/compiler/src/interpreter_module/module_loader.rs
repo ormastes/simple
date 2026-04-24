@@ -665,7 +665,11 @@ pub fn load_and_merge_module(
                                         }
                                     }
                                     Err(e) => {
-                                        error!(path = ?sibling_path, error = %e, "Failed to parse preloaded sibling module");
+                                        debug!(
+                                            path = ?sibling_path,
+                                            error = %e,
+                                            "Skipping preloaded sibling module after parse failure"
+                                        );
                                     }
                                 }
                             }

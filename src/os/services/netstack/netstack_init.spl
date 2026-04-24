@@ -18,7 +18,7 @@ use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by
 use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 extern fn rt_pci_device_count() -> i64
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
 extern fn rt_net_init() -> i64
@@ -75,12 +75,12 @@ fn net_boot_init() -> bool:
 
     Returns true if network stack is ready.
     """
-    serial_println("[net-init] Starting network stack initialization...")
+    log_raw_println("[net-init] Starting network stack initialization...")
 
     # Step 1: Find VirtIO-net device
     # Search by VirtIO vendor first (precise), then by class (broad).
     # Class-based search finds any NIC (e.g., Intel 82574L), but we need VirtIO.
-    serial_println("[net-init] Looking for VirtIO-net device (vendor=0x1AF4)...")
+    log_raw_println("[net-init] Looking for VirtIO-net device (vendor=0x1AF4)...")
     var dev_idx = pcimgr_find_by_vendor(VIRTIO_VENDOR, VIRTIO_DEV_NET)
 
     if dev_idx < 0:
@@ -92,10 +92,10 @@ fn net_boot_init() -> bool:
             val vendor = pcimgr_get_device_vendor(dev_idx.to_u64())
             val virtio_vendor = VIRTIO_VENDOR.to_i64()
             if vendor != virtio_vendor:
-                serial_println("[net-init] Found NIC at index {dev_idx} but not VirtIO (vendor=0x{vendor})")
+                log_raw_println("[net-init] Found NIC at index {dev_idx} but not VirtIO (vendor=0x{vendor})")
                 dev_idx = -1
             else:
-                serial_println("[net-init] Falling back to Ethernet-class NIC at index {dev_idx} (vendor=0x{vendor})")
+                log_raw_println("[net-init] Falling back to Ethernet-class NIC at index {dev_idx} (vendor=0x{vendor})")
 
     if dev_idx < 0:
         # Last-resort raw PCI cache scan. This bypasses all wrapper code and
@@ -111,26 +111,26 @@ fn net_boot_init() -> bool:
             scan_idx = scan_idx + 1
 
     if dev_idx < 0:
-        serial_println("[net-init] No VirtIO-net device found -- network unavailable")
+        log_raw_println("[net-init] No VirtIO-net device found -- network unavailable")
         return false
-    serial_println("[net-init] Found VirtIO-net device at index {dev_idx}")
+    log_raw_println("[net-init] Found VirtIO-net device at index {dev_idx}")
 
     # On baremetal, the C VirtIO-net driver (syscall 90) handles the NIC.
     # Do not assume C boot already did this for every entrypoint.
-    serial_println("[net-init] Initializing C VirtIO-net driver via rt_net_init")
+    log_raw_println("[net-init] Initializing C VirtIO-net driver via rt_net_init")
     val init_rc = rt_net_init()
     if init_rc < 0:
-        serial_println("[net-init] C network init failed rc={init_rc}")
+        log_raw_println("[net-init] C network init failed rc={init_rc}")
         return false
 
     val stats = rt_net_stats()
     if stats < 0:
-        serial_println("[net-init] C network stats probe failed rc={stats}")
+        log_raw_println("[net-init] C network stats probe failed rc={stats}")
         return false
-    serial_println("[net-init] C network driver active")
+    log_raw_println("[net-init] C network driver active")
 
     g_net_initialized = true
-    serial_println("[net-init] Network stack ready (C-backed)")
+    log_raw_println("[net-init] Network stack ready (C-backed)")
     true
 
 # ============================================================================
@@ -146,10 +146,10 @@ fn net_service_start():
     For cooperative scheduling, use net_service_init_port() + net_service_poll().
     """
     if not g_net_initialized:
-        serial_println("[net-init] Cannot start service -- not initialized")
+        log_raw_println("[net-init] Cannot start service -- not initialized")
         return
     if g_netstack == nil:
-        serial_println("[net-init] Cannot start service -- no netstack instance")
+        log_raw_println("[net-init] Cannot start service -- no netstack instance")
         return
     g_netstack.start()
 
@@ -159,7 +159,7 @@ fn net_service_init_port():
     Use with net_service_poll() for cooperative scheduling.
     """
     if not g_net_initialized or g_netstack == nil:
-        serial_println("[net-init] Cannot init port -- not initialized")
+        log_raw_println("[net-init] Cannot init port -- not initialized")
         return
     g_netstack.init_port()
 

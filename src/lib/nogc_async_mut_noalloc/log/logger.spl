@@ -54,6 +54,86 @@ fn log_init(level: i32, targets: i32):
     g_log_targets = targets
     rt_simpleos_log_init(level.to_i64(), targets.to_i64())
 
+fn log_init_serial(level: i32):
+    """Convenience: send all output at or above `level` to the on-device serial
+    port (COM1 / PL011 / NS16550, per log_set_device). Equivalent to
+    log_init(level, TARGET_DEVICE).
+
+    Call log_set_device(kind, base) before or after this if the runtime needs
+    a non-default UART address."""
+    log_init(level, 1)
+
+fn log_parse_level(name: text) -> i32:
+    """Parse a level token (case-sensitive, lowercase). Unknown → LOG_INFO."""
+    if name == "trace": return LOG_TRACE
+    if name == "debug": return LOG_DEBUG
+    if name == "info":  return LOG_INFO
+    if name == "warn":  return LOG_WARN
+    if name == "error": return LOG_ERROR
+    if name == "fatal": return LOG_FATAL
+    if name == "off":   return LOG_OFF
+    LOG_INFO
+
+fn log_parse_targets(csv: text) -> i32:
+    """Parse a comma-separated target list (e.g. 'serial,semihost') into a
+    bitmask. Unknown tokens are ignored. Empty string → 0."""
+    var mask: i32 = 0
+    var token: text = ""
+    val n = csv.len()
+    var i = 0
+    while i <= n:
+        val c: text = if i < n: csv.char_at(i) else: ","
+        if c == "," or c == " ":
+            if token == "serial" or token == "device":
+                mask = mask | 1
+            if token == "semihost":
+                mask = mask | 2
+            if token == "file":
+                mask = mask | 4
+            token = ""
+        else:
+            token = token + c
+        i = i + 1
+    mask
+
+fn log_init_from_config(cfg: text):
+    """Initialize the logger from a config string of the form
+    'level=<lvl> targets=<csv>'. Tokens are whitespace-separated; values
+    use '='. Missing fields default to INFO / TARGET_DEVICE.
+
+    Examples:
+      log_init_from_config("level=debug targets=serial")
+      log_init_from_config("level=info targets=serial,semihost")
+      log_init_from_config("")                  # INFO + serial
+    """
+    var level: i32 = LOG_INFO
+    var targets: i32 = 1
+    var key: text = ""
+    var val_buf: text = ""
+    var in_value: bool = false
+    val n = cfg.len()
+    var i = 0
+    while i <= n:
+        val c: text = if i < n: cfg.char_at(i) else: " "
+        if c == " " or c == "\t" or c == "\n":
+            if key != "":
+                if key == "level":
+                    level = log_parse_level(val_buf)
+                if key == "targets" or key == "target":
+                    targets = log_parse_targets(val_buf)
+            key = ""
+            val_buf = ""
+            in_value = false
+        elif c == "=" and not in_value:
+            in_value = true
+        else:
+            if in_value:
+                val_buf = val_buf + c
+            else:
+                key = key + c
+        i = i + 1
+    log_init(level, targets)
+
 fn log_set_level(level: i32):
     """Change minimum log level at runtime."""
     g_log_level = level

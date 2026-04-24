@@ -24,7 +24,7 @@ use os.userlib.syscall_raw.{syscall}
 use os.posix.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
 
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 use os.services.vfs.vfs_init.{g_vfs_read_file_text, g_vfs_file_size}
 extern fn rt_file_exists(path: text) -> bool
 
@@ -446,7 +446,7 @@ fn _record_detached_process(pid: u64, path: text):
         process_active[slot] = true
         return
     if process_count >= MAX_PROCESSES:
-        serial_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
+        log_raw_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
         return
     process_pid[process_count] = pid
     process_app_index[process_count] = seeded_index
@@ -493,7 +493,7 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
     """Launch a binary by canonical filesystem path and track it in the registry."""
     if path == "":
         return -1
-    serial_println("[launcher] launch_path begin path={path}")
+    log_raw_println("[launcher] launch_path begin path={path}")
     val seeded_index = _seeded_app_index_by_path(path)
     var app_index = seeded_index
     if app_index < 0:
@@ -503,24 +503,24 @@ fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
         if seeded_index >= 0:
             _ensure_seeded_app_slot(slot, path)
         val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: app_name[slot]
-        serial_println("[launcher] posix_spawn begin name={name} path={path}")
+        log_raw_println("[launcher] posix_spawn begin name={name} path={path}")
         val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
-        serial_println("[launcher] posix_spawn returned name={name} result={pid_result}")
+        log_raw_println("[launcher] posix_spawn returned name={name} result={pid_result}")
         if pid_result < 0:
             app_launch_state[slot] = "failed"
             app_exit_code[slot] = pid_result.to_i32()
-            serial_println("[launcher] Failed to launch {name}: {pid_result}")
+            log_raw_println("[launcher] Failed to launch {name}: {pid_result}")
             return pid_result
         return _finalize_launch(slot, name, pid_result.to_u64(), path)
 
     val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
-    serial_println("[launcher] detached posix_spawn returned path={path} result={pid_result}")
+    log_raw_println("[launcher] detached posix_spawn returned path={path} result={pid_result}")
     if pid_result < 0:
-        serial_println("[launcher] Failed to launch path={path}: {pid_result}")
+        log_raw_println("[launcher] Failed to launch path={path}: {pid_result}")
         return pid_result
     launcher_last_launch_pid = pid_result.to_u64()
     _record_detached_process(pid_result.to_u64(), path)
-    serial_println("[launcher] Started detached path={path} pid={pid_result}")
+    log_raw_println("[launcher] Started detached path={path} pid={pid_result}")
     pid_result
 
 fn launcher_open_path(path: text, cwd: text) -> i64:
@@ -631,7 +631,7 @@ fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code: i32
         return true
 
     if process_count >= MAX_PROCESSES:
-        serial_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
+        log_raw_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
         return false
 
     process_pid[process_count] = pid
@@ -732,7 +732,7 @@ fn _remove_app_slot(slot: u64):
 
 fn launcher_init():
     """Initialize launcher and register default apps."""
-    serial_println("[launcher] Initializing app launcher...")
+    log_raw_println("[launcher] Initializing app launcher...")
 
     # Clear all slots
     var i: u64 = 0
@@ -785,7 +785,7 @@ fn launcher_init():
     launcher_register("LLVM", _preferred_app_exec_path("/sys/apps/llvm"), "L", 0x4C, MOD_META)                 # Meta+L
     launcher_register("Rust", _preferred_app_exec_path("/sys/apps/rust"), "R", 0x52, MOD_META)                 # Meta+R
 
-    serial_println("[launcher] Registered {app_count} default apps")
+    log_raw_println("[launcher] Registered {app_count} default apps")
 
 # ============================================================================
 # Register / Unregister
@@ -812,11 +812,11 @@ fn launcher_register(name: text, path: text, icon: text, key: u32, modifiers: u3
         app_shortcut_key[slot] = key
         app_shortcut_mod[slot] = modifiers
         app_active[slot] = true
-        serial_println("[launcher] Updated: {name} ({path})")
+        log_raw_println("[launcher] Updated: {name} ({path})")
         return true
 
     if app_count >= MAX_APPS:
-        serial_println("[launcher] Registry full ({MAX_APPS} slots)")
+        log_raw_println("[launcher] Registry full ({MAX_APPS} slots)")
         return false
 
     val slot = app_count
@@ -834,7 +834,7 @@ fn launcher_register(name: text, path: text, icon: text, key: u32, modifiers: u3
     app_is_headless[slot] = false
     app_active[slot] = true
     app_count = app_count + 1
-    serial_println("[launcher] Registered: {name} ({path})")
+    log_raw_println("[launcher] Registered: {name} ({path})")
     true
 
 fn launcher_unregister(name: text) -> bool:
@@ -845,9 +845,9 @@ fn launcher_unregister(name: text) -> bool:
 
     val slot = idx.to_u64()
     if app_pid[slot] > 0:
-        serial_println("[launcher] Unregistering running app: {name} (PID {app_pid[slot]})")
+        log_raw_println("[launcher] Unregistering running app: {name} (PID {app_pid[slot]})")
     _remove_app_slot(slot)
-    serial_println("[launcher] Unregistered: {name}")
+    log_raw_println("[launcher] Unregistered: {name}")
     true
 
 # ============================================================================
@@ -863,7 +863,7 @@ fn launcher_launch(name: text) -> i64:
     """
     val idx = _app_index_by_name(name)
     if idx < 0:
-        serial_println("[launcher] App not found: {name}")
+        log_raw_println("[launcher] App not found: {name}")
         return -1
 
     launcher_launch_by_index(idx.to_u64())
@@ -874,7 +874,7 @@ fn launcher_launch_by_index(idx: u64) -> i64:
         return -1
     val name = _app_name(idx)
     val path = _app_path(idx)
-    serial_println("[launcher] Launching: {name}")
+    log_raw_println("[launcher] Launching: {name}")
     launcher_launch_path_with_args(path, [])
 
 fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
@@ -884,10 +884,10 @@ fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
     val canonical_app_id = _canonical_app_identity(app_id)
-    serial_println("[launcher] Started {name} (PID {pid})")
-    serial_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
+    log_raw_println("[launcher] Started {name} (PID {pid})")
+    log_raw_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
     if launcher_process_is_process_backed(pid):
-        serial_println("[launcher] process-backed app_id={canonical_app_id} pid={pid}")
+        log_raw_println("[launcher] process-backed app_id={canonical_app_id} pid={pid}")
     pid.to_i64()
 
 fn _launch_seeded_app(slot: u64, name: text, path: text, icon: text, key: u32, modifiers: u32) -> i64:
@@ -982,13 +982,13 @@ fn launcher_shortcut_dispatch(key: u32, modifiers: u32) -> bool:
     var i: u64 = 0
     while i < app_count:
         if _app_key(i) == key and _app_mod(i) == modifiers:
-            serial_println("[launcher] shortcut match slot={i} name={_app_name(i)} path={_app_path(i)}")
+            log_raw_println("[launcher] shortcut match slot={i} name={_app_name(i)} path={_app_path(i)}")
             launcher_launch(_app_name(i))
             return true
         i = i + 1
     val launched = _dispatch_seeded_shortcut(key, modifiers)
     if launched:
-        serial_println("[launcher] shortcut fallback key={key} mod={modifiers}")
+        log_raw_println("[launcher] shortcut fallback key={key} mod={modifiers}")
     launched
 
 # ============================================================================
@@ -997,14 +997,14 @@ fn launcher_shortcut_dispatch(key: u32, modifiers: u32) -> bool:
 
 fn launcher_list():
     """Print all registered apps to serial."""
-    serial_println("[launcher] === App Registry ({app_count} entries) ===")
+    log_raw_println("[launcher] === App Registry ({app_count} entries) ===")
     var i: u64 = 0
     while i < app_count:
         val running = if app_pid[i] > 0: " (running, PID={app_pid[i]}, windows={app_window_count[i]})" else: ""
         val shortcut_desc = _shortcut_desc(_app_key(i), _app_mod(i))
-        serial_println("  [{i}] {_app_name(i)} — {_app_path(i)} [{shortcut_desc}] state={app_launch_state[i]} launches={app_launch_count[i]}{running}")
+        log_raw_println("  [{i}] {_app_name(i)} — {_app_path(i)} [{shortcut_desc}] state={app_launch_state[i]} launches={app_launch_count[i]}{running}")
         i = i + 1
-    serial_println("[launcher] === End App Registry ===")
+    log_raw_println("[launcher] === End App Registry ===")
 
 fn launcher_get_app_count() -> i64:
     """Return total number of registered (active) apps."""
@@ -1114,22 +1114,22 @@ fn launcher_mark_exited_with_code(pid: u64, exit_code: i32):
         val slot = app_idx.to_u64()
         val app_id = _default_app_identity(slot)
         if final_state == "terminated":
-            serial_println("[launcher] Process terminated: {app_name[slot]} (PID {pid}, code {exit_code})")
+            log_raw_println("[launcher] Process terminated: {app_name[slot]} (PID {pid}, code {exit_code})")
         elif final_state == "crashed":
-            serial_println("[launcher] Process crashed: {app_name[slot]} (PID {pid}, code {exit_code})")
+            log_raw_println("[launcher] Process crashed: {app_name[slot]} (PID {pid}, code {exit_code})")
         else:
-            serial_println("[launcher] Process exited: {app_name[slot]} (PID {pid}, code {exit_code})")
-        serial_println("[launcher] exited app_id={app_id} pid={pid} state={final_state} code={exit_code}")
+            log_raw_println("[launcher] Process exited: {app_name[slot]} (PID {pid}, code {exit_code})")
+        log_raw_println("[launcher] exited app_id={app_id} pid={pid} state={final_state} code={exit_code}")
         _clear_app_slot_by_pid(pid, final_state, exit_code)
         return
 
     if final_state == "terminated":
-        serial_println("[launcher] Process terminated: PID {pid} (code {exit_code})")
+        log_raw_println("[launcher] Process terminated: PID {pid} (code {exit_code})")
     elif final_state == "crashed":
-        serial_println("[launcher] Process crashed: PID {pid} (code {exit_code})")
+        log_raw_println("[launcher] Process crashed: PID {pid} (code {exit_code})")
     else:
-        serial_println("[launcher] Process exited: PID {pid} (code {exit_code})")
-    serial_println("[launcher] exited app_id= pid={pid} state={final_state} code={exit_code}")
+        log_raw_println("[launcher] Process exited: PID {pid} (code {exit_code})")
+    log_raw_println("[launcher] exited app_id= pid={pid} state={final_state} code={exit_code}")
 
 fn launcher_terminate(pid: u64) -> bool:
     """Request forced termination of a tracked process.
@@ -1149,11 +1149,11 @@ fn launcher_terminate(pid: u64) -> bool:
     """
     var process_idx = _process_index_by_pid(pid)
     if process_idx < 0:
-        serial_println("[launcher] Terminate ignored: PID {pid} not tracked")
+        log_raw_println("[launcher] Terminate ignored: PID {pid} not tracked")
         return false
     val pslot = process_idx.to_u64()
     if not _is_running_state(process_state[pslot]):
-        serial_println("[launcher] Terminate ignored: PID {pid} already in state {process_state[pslot]}")
+        log_raw_println("[launcher] Terminate ignored: PID {pid} already in state {process_state[pslot]}")
         return false
 
     # Record the terminate intent first so that the reaper's subsequent
@@ -1165,9 +1165,9 @@ fn launcher_terminate(pid: u64) -> bool:
 
     val result = posix_kill(pid, SIGTERM)
     if result != 0:
-        serial_println("[launcher] posix_kill SIGTERM failed for PID {pid}: {result} (state kept as terminating)")
+        log_raw_println("[launcher] posix_kill SIGTERM failed for PID {pid}: {result} (state kept as terminating)")
     else:
-        serial_println("[launcher] Terminate sent to PID {pid}")
+        log_raw_println("[launcher] Terminate sent to PID {pid}")
     true
 
 fn launcher_note_task_probe(pid: u64, alive: bool, exit_code: i32):
@@ -1314,24 +1314,24 @@ fn launcher_get_process_launch_seq(idx: u64) -> u64:
 
 fn launcher_get_process_app_id_for_pid(pid: u64) -> text:
     """Resolve the stable app identity for a PID, or empty string if unknown."""
-    serial_println("[launcher] process-app-id:lookup:start pid={pid}")
+    log_raw_println("[launcher] process-app-id:lookup:start pid={pid}")
     var slot: u64 = 0
     while slot < MAX_PROCESSES:
         if process_pid[slot] == pid:
-            serial_println("[launcher] process-app-id:lookup:slot pid={pid} slot={slot}")
+            log_raw_println("[launcher] process-app-id:lookup:slot pid={pid} slot={slot}")
             if process_app_id[slot] != "":
-                serial_println("[launcher] process-app-id:lookup:return pid={pid} source=process-app-id")
+                log_raw_println("[launcher] process-app-id:lookup:return pid={pid} source=process-app-id")
                 return process_app_id[slot]
             if process_path[slot] != "":
-                serial_println("[launcher] process-app-id:lookup:return pid={pid} source=process-path")
+                log_raw_println("[launcher] process-app-id:lookup:return pid={pid} source=process-path")
                 return _canonical_app_identity(process_path[slot])
         slot = slot + 1
 
     val app_idx = _app_index_by_pid(pid)
     if app_idx < 0:
-        serial_println("[launcher] process-app-id:lookup:return pid={pid} source=missing")
+        log_raw_println("[launcher] process-app-id:lookup:return pid={pid} source=missing")
         return ""
-    serial_println("[launcher] process-app-id:lookup:return pid={pid} source=app-slot app_idx={app_idx}")
+    log_raw_println("[launcher] process-app-id:lookup:return pid={pid} source=app-slot app_idx={app_idx}")
     _canonical_app_identity(app_path[app_idx.to_u64()])
 
 fn launcher_note_window_opened(pid: u64):
@@ -1382,11 +1382,11 @@ fn launcher_start():
 
     val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
     if port_result < 0:
-        serial_println("[launcher] FATAL: Failed to create IPC port (error {port_result})")
+        log_raw_println("[launcher] FATAL: Failed to create IPC port (error {port_result})")
         return
 
     val port_handle = port_result as u64
-    serial_println("[launcher] Service ready on IPC port (handle={port_handle})")
+    log_raw_println("[launcher] Service ready on IPC port (handle={port_handle})")
     launcher_list()
 
     # Enter service loop
@@ -1403,15 +1403,15 @@ fn launcher_service_loop(port_handle: u64):
     Dispatch will be wired when IPC message framing is finalized
     in the kernel IPC layer.
     """
-    serial_println("[launcher] Entering service loop...")
+    log_raw_println("[launcher] Entering service loop...")
 
     while true:
         val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
         if msg_result < 0:
-            serial_println("[launcher] IPC recv error: {msg_result}")
+            log_raw_println("[launcher] IPC recv error: {msg_result}")
             continue
 
-        serial_println("[launcher] Received IPC request (raw={msg_result})")
+        log_raw_println("[launcher] Received IPC request (raw={msg_result})")
 
         # IPC dispatch is intentionally deferred here; the registry and
         # process bookkeeping paths are the part owned by this change.

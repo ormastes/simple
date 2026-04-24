@@ -169,6 +169,25 @@ pub unsafe extern "C" fn rt_file_remove(path_ptr: *const u8, path_len: u64) -> b
     std::fs::remove_file(path_str).is_ok()
 }
 
+/// Return file size in bytes, or -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_size(path_ptr: *const u8, path_len: u64) -> i64 {
+    if path_ptr.is_null() {
+        return -1;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match std::fs::metadata(path_str) {
+        Ok(metadata) => metadata.len() as i64,
+        Err(_) => -1,
+    }
+}
+
 /// Rename/move a file or directory
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_ptr: *const u8, to_len: u64) -> bool {

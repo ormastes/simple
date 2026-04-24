@@ -46,7 +46,7 @@ use os.posix.pipe_compat.{posix_pipe}
 use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
-extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
@@ -1079,11 +1079,11 @@ fn _copy_user_bytes(ptr_addr: u64, len: u64) -> Result<[u8], text>:
     Ok(bytes)
 
 fn _copy_user_text(ptr_addr: u64, len: u64) -> Result<text, text>:
-    serial_println("[syscall13] copy_user_text enter")
+    log_raw_println("[syscall13] copy_user_text enter")
     val bytes_result = _copy_user_bytes(ptr_addr, len)
     if bytes_result.is_err():
         return Err(bytes_result.err().unwrap())
-    serial_println("[syscall13] copy_user_text ok")
+    log_raw_println("[syscall13] copy_user_text ok")
     Ok(_path_bytes_to_text(bytes_result.unwrap()))
 
 fn _is_user_read_range(ptr: u64, len: u64) -> bool:
@@ -1173,7 +1173,7 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     boot-packaged ELF bytes, validates them, builds a transitional user
     process image, and schedules a user task from that image.
     """
-    serial_println("[syscall13] handle_spawn_binary enter")
+    log_raw_println("[syscall13] handle_spawn_binary enter")
     if args.arg0 == 0 or args.arg1 == 0:
         return SyscallResult(value: -22)
     val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
@@ -1182,10 +1182,10 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
-    serial_println("[syscall13] path decoded")
+    log_raw_println("[syscall13] path decoded")
     val arch = CURRENT_EXEC_ARCH
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
-    serial_println("[syscall13] resolve_executable_bytes returned")
+    log_raw_println("[syscall13] resolve_executable_bytes returned")
     if bytes_result.is_err():
         var log = klog
         klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
@@ -1235,38 +1235,38 @@ fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8]
     val _sp_argv: [text] = []
     val _sp_envp: [text] = []
     val _path_bytes = path_bytes
-    serial_println("[syscall13] build_user_process_image begin")
+    log_raw_println("[syscall13] build_user_process_image begin")
     val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
     if image_result.is_ok():
-        serial_println("[syscall13] build_user_process_image ok")
+        log_raw_println("[syscall13] build_user_process_image ok")
         if _use_x86_64_direct_spawn_handoff(arch):
             val pid = _alloc_x86_64_direct_spawn_pid()
             val pid_value = pid as i64
-            serial_println("[syscall13] user image handoff ok pid={pid_value}")
+            log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
             return pid_value
         val priority = _u64_to_priority(priority_raw)
         val caps = CapabilitySet.full()
         var sched = scheduler
-        serial_println("[syscall13] create_user_task begin")
+        log_raw_println("[syscall13] create_user_task begin")
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        serial_println("[syscall13] create_user_task returned")
+        log_raw_println("[syscall13] create_user_task returned")
         val pid = raw_pid
-        serial_println("[syscall13] pid resolved")
+        log_raw_println("[syscall13] pid resolved")
         if pid == 0:
-            serial_println("[syscall13] create_user_task failed")
+            log_raw_println("[syscall13] create_user_task failed")
             return -12
 
         val pid_value = pid as i64
-        serial_println("[syscall13] log begin")
-        serial_println("[syscall13] log done")
-        serial_println("[syscall13] user image handoff ok pid={pid_value}")
+        log_raw_println("[syscall13] log begin")
+        log_raw_println("[syscall13] log done")
+        log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
         return pid_value
     else:
-        serial_println("[syscall13] build_user_process_image failed")
+        log_raw_println("[syscall13] build_user_process_image failed")
 
     var log = klog
     klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
-    serial_println("[syscall13] rejected invalid filesystem executable")
+    log_raw_println("[syscall13] rejected invalid filesystem executable")
     -8
 
 fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
@@ -1282,7 +1282,7 @@ fn _is_builtin_binary_path(path: text) -> bool:
 
 fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
     """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
-    serial_println("[syscall13] dispatch_direct enter")
+    log_raw_println("[syscall13] dispatch_direct enter")
     if path_len == 0:
         val sentinel_path = _direct_spawn_app_id_path(path_ptr)
         if sentinel_path != nil:
@@ -1291,32 +1291,32 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
             if bytes_result.is_ok():
                 return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
             if _is_builtin_binary_path(path):
-                serial_println("[syscall13] builtin resident fallback path={path}")
+                log_raw_println("[syscall13] builtin resident fallback path={path}")
                 return -2
         return -14
 
     if path_len > MAX_BINARY_PATH_LEN:
-        serial_println("[syscall13] dispatch_direct path too long")
+        log_raw_println("[syscall13] dispatch_direct path too long")
         return -14
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)
     if path_bytes_result.is_err():
-        serial_println("[syscall13] dispatch_direct path copy failed")
+        log_raw_println("[syscall13] dispatch_direct path copy failed")
         return -14
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
-    serial_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
+    log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
     val arch = CURRENT_EXEC_ARCH
-    serial_println("[syscall13] dispatch_direct arch-ready")
+    log_raw_println("[syscall13] dispatch_direct arch-ready")
 
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
-    serial_println("[syscall13] dispatch_direct resolve returned")
+    log_raw_println("[syscall13] dispatch_direct resolve returned")
     if bytes_result.is_ok():
-        serial_println("[syscall13] vfs bytes ok; exec handoff active")
+        log_raw_println("[syscall13] vfs bytes ok; exec handoff active")
         return _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
 
     if _is_builtin_binary_path(path):
-        serial_println("[syscall13] builtin resident fallback path={path}")
+        log_raw_println("[syscall13] builtin resident fallback path={path}")
         return -2
 
     if bytes_result.is_err():
