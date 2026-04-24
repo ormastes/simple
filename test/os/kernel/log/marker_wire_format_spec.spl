@@ -20,63 +20,56 @@ use os.kernel.log.markers.{
     namespace_prefix,
     marker_string
 }
-use os.kernel.log.klog_api.{
-    log_info,
-    log_raw_println,
-    log_init,
-    LOG_INFO,
-    TARGET_DEVICE,
-    log_level_name
-}
+use os.kernel.log.klog_api.{log_level_name, LOG_INFO}
 
 describe "markers.find_spec strict prefix matching":
-    it "matches bare '[boot] entry'":
+    """Demonstrates why log_info CANNOT be used to emit markers — the
+    `[INFO] ` prefix breaks the offset-0 starts_with check that
+    qemu_runner / markers.validate depend on."""
+
+    it "matches a bare '[boot] entry' marker":
         val raw = "[boot] entry"
         val spec = find_spec(raw)
         expect(spec.is_nil()).to_equal(false)
 
-    it "does NOT match '[INFO] [boot] entry' (log_info would emit this)":
-        # This is the regression the task fixes: if we route markers through
-        # log_info, the wire bytes become "[INFO] [boot] entry\n", and
-        # find_spec's starts_with check fails.
+    it "does NOT match '[INFO] [boot] entry' (the regression shape)":
         val raw_with_level = "[INFO] [boot] entry"
         val spec = find_spec(raw_with_level)
         expect(spec.is_nil()).to_equal(true)
 
-    it "rejects unknown prefixes":
+    it "rejects unknown namespace prefixes":
         val raw = "[nonsense] event"
         val spec = find_spec(raw)
         expect(spec.is_nil()).to_equal(true)
 
 describe "validate() rejects level-prefixed markers":
     it "validates a bare marker":
-        val raw = "[boot] entry"
-        val result = validate(raw)
+        val result = validate("[boot] entry")
         expect(result.is_ok()).to_equal(true)
 
-    it "rejects the same marker with a [INFO] prefix":
-        val raw_with_level = "[INFO] [boot] entry"
-        val result = validate(raw_with_level)
+    it "rejects the same marker with an [INFO] prefix":
+        val result = validate("[INFO] [boot] entry")
         expect(result.is_ok()).to_equal(false)
 
 describe "log_level_name composition (log_info wire format)":
-    # log_info emits "[LEVELNAME] msg" — this test documents that shape so
-    # future changes to the level-prefix format will fail a spec, not slip
-    # past the qemu_runner silently.
-    it "INFO prefix is '[INFO]'":
+    """log_at composes its prefix as `[{log_level_name(level)}] `. This
+    test pins the exact token shape; if it changes, qemu_runner's
+    contains() tolerance assumptions need re-validating."""
+
+    it "INFO prefix is exactly '[INFO]'":
         val level_token = "[" + log_level_name(LOG_INFO) + "]"
         expect(level_token).to_equal("[INFO]")
 
 describe "namespace_prefix / marker_string round-trip":
-    it "marker_string for boot namespace starts with '[boot]'":
+    """marker_string is the canonical builder for marker bytes. The
+    migration ensures every caller of marker_string routes the result
+    through log_raw_println."""
+
+    it "marker_string for boot namespace produces '[boot] event'":
         val s = marker_string(NAMESPACE_BOOT, "entry")
         expect(s.starts_with("[boot] ")).to_equal(true)
 
-    it "log_raw_println delivers the namespace prefix unchanged (symbol exists)":
-        # We can't observe the captured byte stream in hosted mode, but we
-        # CAN assert that log_raw_println is the symbol the migration uses
-        # for markers (compile-time check that the import works).
-        log_init(LOG_INFO, TARGET_DEVICE)
+    it "the produced marker is accepted by find_spec":
         val s = marker_string(NAMESPACE_BOOT, "entry")
-        log_raw_println(s)
-        expect(true).to_equal(true)
+        val spec = find_spec(s)
+        expect(spec.is_nil()).to_equal(false)

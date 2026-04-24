@@ -55,27 +55,38 @@ impl UnitRegistry {
 
     /// Find an entry whose dimension signature matches `dims` exactly.
     /// Used after unit arithmetic to discover composite names like `kmph`.
+    ///
+    /// Iteration order over `entries` (a `HashMap`) is non-deterministic, so
+    /// we walk a sorted snapshot of the keys and break ties with a stable
+    /// preference: composite-shape (more dimension components) > shorter
+    /// symbol > lexicographic symbol order.
     pub fn lookup_by_dimensions(&self, dims: &HashMap<String, i32>) -> Option<&UnitEntry> {
-        // Prefer composites (more than one base) so we surface `kmph` not `m`
-        // when a base unit happens to share a signature with a composite.
+        let mut keys: Vec<&String> = self.entries.keys().collect();
+        keys.sort();
         let mut best: Option<&UnitEntry> = None;
-        for entry in self.entries.values() {
-            if dimensions_eq(&entry.dimensions, dims) {
-                match best {
-                    None => best = Some(entry),
-                    Some(prev) => {
-                        // Tie-break: prefer the entry with more dimension
-                        // components (more "composite-like"), then shorter
-                        // symbol for stability.
-                        if entry.dimensions.len() > prev.dimensions.len()
-                            || (entry.dimensions.len() == prev.dimensions.len()
-                                && entry.symbol.len() < prev.symbol.len())
-                        {
-                            best = Some(entry);
-                        }
+        for key in keys {
+            let entry = &self.entries[key];
+            if !dimensions_eq(&entry.dimensions, dims) {
+                continue;
+            }
+            best = Some(match best {
+                None => entry,
+                Some(prev) => {
+                    if entry.dimensions.len() > prev.dimensions.len() {
+                        entry
+                    } else if entry.dimensions.len() < prev.dimensions.len() {
+                        prev
+                    } else if entry.symbol.len() < prev.symbol.len() {
+                        entry
+                    } else if entry.symbol.len() > prev.symbol.len() {
+                        prev
+                    } else if entry.symbol < prev.symbol {
+                        entry
+                    } else {
+                        prev
                     }
                 }
-            }
+            });
         }
         best
     }
@@ -647,5 +658,48 @@ mod tests {
         assert!(dimensions_eq(&a, &b));
         b.insert("kg".into(), 1);
         assert!(!dimensions_eq(&a, &b));
+    }
+
+    /// `lookup_by_dimensions` must be deterministic across calls when several
+    /// composites share the same dimension signature. Previously HashMap
+    /// iteration order made the result run-dependent (sometimes `mph`,
+    /// sometimes `fps`, etc.).
+    #[test]
+    fn lookup_by_dimensions_is_deterministic() {
+        let mut velocity = HashMap::new();
+        velocity.insert("m".to_string(), 1);
+        velocity.insert("s".to_string(), -1);
+
+        let mut reg = UnitRegistry::new();
+        for sym in &["fps", "mph", "kmph", "mps", "knot", "ft_per_s", "c_light", "mach"] {
+            reg.entries.insert(
+                (*sym).to_string(),
+                UnitEntry {
+                    symbol: (*sym).to_string(),
+                    kind: "velocity".to_string(),
+                    scale_to_base: 1.0,
+                    base_unit: "mps".to_string(),
+                    dimensions: velocity.clone(),
+                },
+            );
+        }
+
+        let first = reg
+            .lookup_by_dimensions(&velocity)
+            .expect("velocity dim should match at least one entry")
+            .symbol
+            .clone();
+
+        // Run 100 lookups and assert the result is stable.
+        for _ in 0..100 {
+            let again = reg.lookup_by_dimensions(&velocity).unwrap().symbol.clone();
+            assert_eq!(again, first, "lookup_by_dimensions must be deterministic");
+        }
+
+        // With current tie-break (composite-shape, then shortest symbol, then
+        // lex order) the chosen velocity composite is `mph` (3 chars, lex-min
+        // among 3-char composites). Just assert it's NOT `ft_per_s` (the
+        // longer name we explicitly want to deprioritise).
+        assert_ne!(first, "ft_per_s");
     }
 }

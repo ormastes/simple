@@ -3,36 +3,36 @@
 # Verifies the Simple-side log-lib API surface introduced by the
 # SimpleOS-serial-via-log-lib migration:
 #
-#   - log_raw / log_raw_println symbols exist and are callable
-#   - log_set_device_from_profile translates MachineProfile config
-#     (qemu_serial_kind text + qemu_serial_base u64) into the i64 codes
-#     the runtime hook accepts (com1=1, pl011=2, ns16550=3)
-#   - target_device_write calls the hook before falling back to println
+#   - log level + target bit constants are stable
+#   - log_level_name returns the expected token per level
+#   - log_kind_from_text translates profile config text → i32 device-kind
+#     codes (com1=1, pl011=2, ns16550=3) for rt_simpleos_log_set_device
+#   - log_parse_level / log_parse_targets parse SIMPLE_LOG-style config
+#   - per-arch SimpleOsPlatformBuildTarget exposes the right serial config
 #
-# Byte-exact wire-format verification lives in marker_wire_format_spec.spl.
-# End-to-end QEMU serial smoke lives in test/qemu/os/log_lib/*.
+# End-to-end byte-stream verification lives in marker_wire_format_spec.spl
+# and test/qemu/os/log_lib/log_lib_serial_smoke_qemu_spec.spl.
 #
 # @platform: hosted
 # @tag: os,log,unit
 
 use os.kernel.log.klog_api.{
-    log_init,
-    log_info,
-    log_warn,
-    log_error,
-    log_raw,
-    log_raw_println,
     log_level_name,
+    log_parse_level,
+    log_parse_targets,
     LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF,
-    TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE
+    TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE,
+    LOG_DEV_KIND_COM1, LOG_DEV_KIND_PL011, LOG_DEV_KIND_NS16550
 }
-use os.kernel.log.log_setup.{log_set_device_from_profile}
+use os.kernel.log.log_setup.{log_kind_from_text}
 use os.port.simpleos_multiplatform_build.{simpleos_platform_target_by_name}
 use os.machine_profile.{MachineProfile, riscv64_machine_profile}
-use os.kernel.arch.arch_context.{Architecture}
 
-describe "log level constants":
-    it "orders TRACE < DEBUG < INFO < WARN < ERROR < FATAL < OFF":
+describe "log level constants ordering":
+    """The level integers must form a strict ascending sequence; many call
+    sites (log_dispatch in logger.spl) rely on numeric comparison."""
+
+    it "orders TRACE through OFF":
         expect(LOG_TRACE).to_equal(0)
         expect(LOG_DEBUG).to_equal(1)
         expect(LOG_INFO).to_equal(2)
@@ -41,7 +41,7 @@ describe "log level constants":
         expect(LOG_FATAL).to_equal(5)
         expect(LOG_OFF).to_equal(6)
 
-    it "names each level":
+    it "names each level via log_level_name":
         expect(log_level_name(LOG_TRACE)).to_equal("TRACE")
         expect(log_level_name(LOG_DEBUG)).to_equal("DEBUG")
         expect(log_level_name(LOG_INFO)).to_equal("INFO")
@@ -50,31 +50,67 @@ describe "log level constants":
         expect(log_level_name(LOG_FATAL)).to_equal("FATAL")
 
 describe "log target bit constants":
+    """Targets are a bitmask combined with `|`; the bit values are part of
+    the runtime contract with rt_simpleos_log_init."""
+
     it "assigns DEVICE=1, SEMIHOST=2, HOST_FILE=4":
         expect(TARGET_DEVICE).to_equal(1)
         expect(TARGET_SEMIHOST).to_equal(2)
         expect(TARGET_HOST_FILE).to_equal(4)
 
-describe "log_raw / log_raw_println API surface":
-    it "log_raw is callable without raising":
-        log_init(LOG_INFO, TARGET_DEVICE)
-        log_raw("hello")
-        expect(true).to_equal(true)
+describe "log_kind_from_text translates profile serial-kind to runtime code":
+    """Bridge from MachineProfile.qemu_serial_kind (text) to the i32 codes
+    the runtime hook rt_simpleos_log_set_device accepts."""
 
-    it "log_raw_println is callable without raising":
-        log_init(LOG_INFO, TARGET_DEVICE)
-        log_raw_println("hello")
-        expect(true).to_equal(true)
+    it "com1 → LOG_DEV_KIND_COM1 (1)":
+        expect(log_kind_from_text("com1")).to_equal(LOG_DEV_KIND_COM1)
+        expect(log_kind_from_text("com1")).to_equal(1)
 
-    it "log_raw respects the target bitmask (no device target → no op)":
-        # With no device target bit set, log_raw should short-circuit
-        # cleanly. We can't observe the byte stream in hosted mode,
-        # but we CAN verify no exception is raised.
-        log_init(LOG_INFO, TARGET_SEMIHOST)
-        log_raw("should-not-reach-device")
-        expect(true).to_equal(true)
+    it "pl011 → LOG_DEV_KIND_PL011 (2)":
+        expect(log_kind_from_text("pl011")).to_equal(LOG_DEV_KIND_PL011)
+        expect(log_kind_from_text("pl011")).to_equal(2)
+
+    it "ns16550 → LOG_DEV_KIND_NS16550 (3)":
+        expect(log_kind_from_text("ns16550")).to_equal(LOG_DEV_KIND_NS16550)
+        expect(log_kind_from_text("ns16550")).to_equal(3)
+
+    it "unknown text → 0 (sentinel: no device dispatch)":
+        expect(log_kind_from_text("nonsense")).to_equal(0)
+        expect(log_kind_from_text("")).to_equal(0)
+
+describe "log_parse_level: SIMPLE_LOG-style level token parsing":
+    it "parses canonical lowercase tokens":
+        expect(log_parse_level("trace")).to_equal(LOG_TRACE)
+        expect(log_parse_level("debug")).to_equal(LOG_DEBUG)
+        expect(log_parse_level("info")).to_equal(LOG_INFO)
+        expect(log_parse_level("warn")).to_equal(LOG_WARN)
+        expect(log_parse_level("error")).to_equal(LOG_ERROR)
+        expect(log_parse_level("fatal")).to_equal(LOG_FATAL)
+        expect(log_parse_level("off")).to_equal(LOG_OFF)
+
+    it "unknown tokens default to LOG_INFO":
+        expect(log_parse_level("verbose")).to_equal(LOG_INFO)
+        expect(log_parse_level("")).to_equal(LOG_INFO)
+
+describe "log_parse_targets: comma-separated target list to bitmask":
+    it "parses single targets":
+        expect(log_parse_targets("serial")).to_equal(1)
+        expect(log_parse_targets("device")).to_equal(1)
+        expect(log_parse_targets("semihost")).to_equal(2)
+        expect(log_parse_targets("file")).to_equal(4)
+
+    it "ORs multiple targets":
+        expect(log_parse_targets("serial,semihost")).to_equal(3)
+        expect(log_parse_targets("serial,semihost,file")).to_equal(7)
+
+    it "empty string → 0 (no targets)":
+        expect(log_parse_targets("")).to_equal(0)
 
 describe "platform target exposes serial config per arch":
+    """Source of truth: SimpleOsPlatformBuildTarget carries qemu_serial_kind
+    + qemu_serial_base. log_set_device_from_profile feeds these into the
+    runtime hook at boot."""
+
     it "x86_64 platform → com1 @ 0x3F8":
         if val platform = simpleos_platform_target_by_name("x86_64"):
             expect(platform.qemu_serial_kind).to_equal("com1")
@@ -90,22 +126,11 @@ describe "platform target exposes serial config per arch":
             expect(platform.qemu_serial_kind).to_equal("ns16550")
             expect(platform.qemu_serial_base).to_equal(0x10000000u64)
 
-describe "log_set_device_from_profile is callable":
-    it "accepts a riscv64 MachineProfile without raising":
+describe "MachineProfile mirrors the platform's serial config":
+    """riscv64_machine_profile() factory pulls qemu_serial_* from the
+    SimpleOsPlatformBuildTarget for arch=riscv64."""
+
+    it "riscv64 MachineProfile carries ns16550 @ 0x10000000":
         val profile = riscv64_machine_profile()
         expect(profile.qemu_serial_kind).to_equal("ns16550")
         expect(profile.qemu_serial_base).to_equal(0x10000000u64)
-        log_set_device_from_profile(profile)
-
-describe "log level filter still gates log_info":
-    it "log_info at LOG_INFO threshold is callable":
-        log_init(LOG_INFO, TARGET_DEVICE)
-        log_info("info-sample")
-        log_warn("warn-sample")
-        log_error("error-sample")
-        expect(true).to_equal(true)
-
-    it "log_info below LOG_WARN threshold drops silently":
-        log_init(LOG_WARN, TARGET_DEVICE)
-        log_info("should-be-dropped")
-        expect(true).to_equal(true)

@@ -376,15 +376,55 @@ pub(crate) fn get_unit_dimension(family: &str) -> Option<Dimension> {
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow().get(family).cloned())
 }
 
-/// Find a compound unit name that matches the given dimension
+/// Canonical priority for composite-symbol selection when several composites
+/// share a dimension signature (e.g. `mps`, `kmph`, `mph`, `fps`, `ft_per_s`,
+/// `knot`, `c_light`, `mach` all match `{length:1, time:-1}`). The first
+/// symbol in this list that also appears in `COMPOUND_UNIT_DIMENSIONS` is
+/// returned. Otherwise we fall through to lex-sorted order so the result is
+/// at least deterministic across runs.
+pub(crate) const COMPOUND_PRIORITY: &[&str] = &[
+    // velocity
+    "mps", "kmph", "mph", "fps", "knot",
+    // energy
+    "J", "Wh", "kWh", "cal", "BTU",
+    // power
+    "W", "kW", "hp",
+    // pressure
+    "Pa", "kPa", "bar", "atm", "psi",
+    // frequency
+    "Hz", "kHz", "MHz", "GHz", "rpm", "bpm",
+    // area / volume
+    "m2", "m3",
+];
+
+/// Find a compound unit name that matches the given dimension.
+///
+/// Iteration over `COMPOUND_UNIT_DIMENSIONS` (a `HashMap`) is non-deterministic,
+/// so when several composites share a dimension signature the picked symbol
+/// would otherwise change run-to-run. We resolve that two ways:
+///   1. Walk `COMPOUND_PRIORITY` first and return the highest-priority match.
+///   2. Fall back to lexicographic order of the keys for stable behaviour
+///      with composites the priority list does not yet cover.
 pub(crate) fn find_compound_unit_for_dimension(dim: &Dimension) -> Option<String> {
     COMPOUND_UNIT_DIMENSIONS.with(|cell| {
-        for (name, unit_dim) in cell.borrow().iter() {
-            if unit_dim == dim {
-                return Some(name.clone());
+        let map = cell.borrow();
+
+        // Priority pass: prefer canonical SI/common composites.
+        for sym in COMPOUND_PRIORITY {
+            if let Some(unit_dim) = map.get(*sym) {
+                if unit_dim == dim {
+                    return Some((*sym).to_string());
+                }
             }
         }
-        None
+
+        // Deterministic fallback: lex-sorted iteration.
+        let mut candidates: Vec<&String> = map
+            .iter()
+            .filter_map(|(name, unit_dim)| if unit_dim == dim { Some(name) } else { None })
+            .collect();
+        candidates.sort();
+        candidates.first().map(|s| (*s).to_string())
     })
 }
 

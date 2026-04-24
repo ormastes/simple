@@ -46,9 +46,26 @@ pub fn handle_unit_methods(
         "suffix" => return Ok(Some(Value::Str(suffix.to_string()))),
         "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::Str))),
         "to_string" => return Ok(Some(Value::Str(format!("{}_{}", value.to_display_string(), suffix)))),
+        // `to_text` renders just the numeric value (no suffix) so concat
+        // expressions like `v.to_text() + " kmph"` work as the user expects.
+        // Without this arm the `other if other.starts_with("to_")` catchall
+        // below would treat `text` as a target unit and fail.
+        "to_text" => return Ok(Some(Value::Str(value.to_display_string()))),
         // For dynamic to_X() conversion methods, check if method starts with "to_"
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix
+
+            // Bypass the unit-registry path for builtin numeric/text conversions
+            // so `v.to_int()`, `v.to_float()`, etc. don't get caught by the
+            // unit-conversion arm. These fall through to `Ok(None)` so the
+            // caller can dispatch to the existing builtin numeric path.
+            if matches!(
+                target_suffix,
+                "int" | "i32" | "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64"
+                    | "float" | "f32" | "f64" | "bool" | "string" | "byte"
+            ) {
+                return Ok(None);
+            }
 
             // Lazily seed the thread-local unit state from `src/unit/simple-lang/`
             // so user-declared catalog units resolve here without depending on

@@ -7,7 +7,7 @@
 # The session reads/writes via socket FDs using the POSIX socket API.
 
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
-use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
@@ -22,6 +22,7 @@ extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_to_byte_array(s: text) -> [u8]
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 extern fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]
@@ -108,6 +109,9 @@ class SshSession:
     send_seq: u32
     recv_seq: u32
     client_version: text
+    server_version: text
+    client_version_bytes: [u8]
+    server_version_bytes: [u8]
     server_kexinit_payload: [u8]
     client_kexinit_payload: [u8]
     host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
@@ -145,6 +149,9 @@ impl SshSession:
             send_seq: 0,
             recv_seq: 0,
             client_version: "",
+            server_version: "",
+            client_version_bytes: [],
+            server_version_bytes: [],
             server_kexinit_payload: [],
             client_kexinit_payload: [],
             host_keys: host_keys
@@ -176,6 +183,8 @@ impl SshSession:
         log_info("[app.sshd] " + "[sshd-session] version exchange")
         # Send our version string
         val our_version = ssh_build_version_string()
+        self.server_version_bytes = rt_bytes_slice(our_version, 0, our_version.len().to_i64() - 2)
+        self.server_version = rt_string_from_byte_array(self.server_version_bytes)
         self.raw_send(our_version)
 
         # Read the client banner via the C TCP ring directly. The byte-array
@@ -192,8 +201,10 @@ impl SshSession:
             return false
 
         self.client_version = client_version
+        self.client_version_bytes = rt_string_to_byte_array(client_version)
         log_info("[app.sshd] " + "[sshd-session] version parsed text={self.client_version}")
         log_info("[app.sshd] " + "[sshd-session] version parsed len={self.client_version.len()}")
+        log_info("[app.sshd] " + "[sshd-session] server version text={self.server_version}")
         log_info("[app.sshd] " + "[sshd-session] version exchange ok")
         self.state = SessionState.KexInit
         true
@@ -226,6 +237,7 @@ impl SshSession:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
             return false
         val client_kex = r_client_kex.unwrap()
+        log_info("[app.sshd] " + "[sshd-session] client kexinit hex={_bytes_to_hex(client_payload)}")
         log_info("[app.sshd] " + "[sshd-session] client kexinit parsed")
         log_info("[app.sshd] " + "[sshd-session] client kexinit hex={_bytes_to_hex(client_payload)}")
 
@@ -234,6 +246,7 @@ impl SshSession:
         val server_kex = r_server_kex.unwrap()
         log_info("[app.sshd] " + "[sshd-session] client kex list={client_kex.kex_algorithms}")
         log_info("[app.sshd] " + "[sshd-session] server kex list={server_kex.kex_algorithms}")
+        log_info("[app.sshd] " + "[sshd-session] server kexinit hex={_bytes_to_hex(server_kexinit)}")
         log_info("[app.sshd] " + "[sshd-session] server kexinit hex={_bytes_to_hex(server_kexinit)}")
 
         # Negotiate algorithms
@@ -298,8 +311,8 @@ impl SshSession:
 
         # Compute exchange hash
         val exchange_hash = ssh_kex_compute_exchange_hash(
-            self.client_version,
-            SSH_VERSION_STRING,
+            self.client_version_bytes,
+            self.server_version_bytes,
             self.client_kexinit_payload,
             self.server_kexinit_payload,
             host_key_blob,

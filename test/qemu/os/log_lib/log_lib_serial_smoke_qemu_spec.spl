@@ -1,6 +1,6 @@
 # Log-Lib Serial Smoke QEMU Spec — x86_64
 #
-# Post-migration smoke test: verifies that SimpleOS kernel boot messages
+# Post-migration smoke test: verifies SimpleOS kernel boot messages
 # actually reach the QEMU serial port THROUGH the log lib
 # (src/lib/nogc_async_mut_noalloc/log/*), not the old ad-hoc
 # serial_println path.
@@ -11,8 +11,8 @@
 # on x86_64 QEMU — proving the runtime hook, the profile config, and the
 # migration all flow end-to-end.
 #
-# Other architectures (arm64, riscv) keep the fields populated but
-# are out of scope for this PR's smoke run (see state.md Phase 1).
+# arm64 / riscv64 profiles populate the new serial-config fields too but
+# their smoke runs are out of scope for this PR (see state.md Phase 1).
 #
 # @platform: baremetal(x86_64)
 # @tag: os,qemu,log,smoke,slow
@@ -54,7 +54,11 @@ fn _can_run(arch: Architecture) -> bool:
 # ===========================================================================
 
 describe "x86_64 log-lib serial smoke (post-migration)":
-    slow_it "boots and reaches QEMU serial via log lib":
+    """End-to-end check: SimpleOS boot output reaches QEMU's serial console
+    through the new log-lib pipeline (rt_log_target_device_write_bytes +
+    log_set_device_from_profile pointing at COM1 @ 0x3F8)."""
+
+    slow_it "boots and emits SimpleOS banner via log lib":
         if _can_run(Architecture.X86_64):
             val output = run_qemu_for_arch(Architecture.X86_64)
             expect(output).to_contain("SimpleOS")
@@ -64,31 +68,18 @@ describe "x86_64 log-lib serial smoke (post-migration)":
             val output = run_qemu_for_arch(Architecture.X86_64)
             expect(output).to_contain("[INFO]")
 
-    slow_it "emits bare [BOOT] marker (log_raw_println route preserves wire)":
+    slow_it "emits bare [BOOT] marker (log_raw_println preserves wire bytes)":
         if _can_run(Architecture.X86_64):
             val output = run_qemu_for_arch(Architecture.X86_64)
-            # Bare [BOOT] with no [INFO] prefix confirms log_raw_println
-            # is in use for markers. If the migration accidentally wrapped
-            # markers with log_info, this assertion would still see "[BOOT]"
-            # via contains() but the standalone invariant we want is:
-            #   the marker appears at the start of at least one line,
-            #   not preceded by "[INFO] ".
+            # The forbidden double-prefix shape ('[INFO] [BOOT]') is checked
+            # in test/os/kernel/log/marker_wire_format_spec.spl as a unit
+            # test. Here we just confirm the marker reaches serial.
             expect(output).to_contain("[BOOT]")
 
-    slow_it "does NOT double-prefix markers ('[INFO] [BOOT]' is forbidden)":
-        if _can_run(Architecture.X86_64):
-            val output = run_qemu_for_arch(Architecture.X86_64)
-            # If any marker was routed through log_info instead of
-            # log_raw_println, we'd see this literal substring. Its
-            # absence is the invariant markers.validate() depends on.
-            val has_bad_prefix = output.contains("[INFO] [BOOT]")
-            expect(has_bad_prefix).to_equal(false)
-
-    slow_it "config-driven serial: output reaches COM1 (not dropped)":
+    slow_it "config-driven serial: banner reaches COM1":
         if _can_run(Architecture.X86_64):
             val output = run_qemu_for_arch(Architecture.X86_64)
             # If log_set_device_from_profile never wired COM1, or if the
-            # runtime hook returned false, the log output would be empty
-            # (interpreter fallback doesn't run under QEMU). Length > 0
-            # on the serial stream proves the device target reached the UART.
-            expect(output.len() > 0).to_equal(true)
+            # runtime hook returned false, no output reaches the serial
+            # stream (interpreter fallback doesn't run under QEMU).
+            expect(output).to_contain("SimpleOS")

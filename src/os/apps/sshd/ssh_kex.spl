@@ -438,9 +438,9 @@ fn ssh_kex_public_from_private(private: [u8]) -> [u8]:
         return _push_bytes([], rt_dh_curve25519_public_key(_decode_handle_backed_private_key(private)))
     val stable_private = _push_bytes([], private)
     val runtime_public = rt_tls13_x25519_public_key(stable_private)
+    val public = x25519_base(stable_private)
     if runtime_public.len() == 32:
         return _push_bytes([], runtime_public)
-    val public = x25519_base(stable_private)
     if public.len() == 32:
         return _push_bytes([], public)
     []
@@ -455,9 +455,9 @@ fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
     val stable_private = _push_bytes([], our_private)
     val stable_public = _push_bytes([], their_public)
     val shared = rt_tls13_x25519_shared_secret(stable_private, stable_public)
+    val pure_shared = x25519(stable_private, stable_public)
     if shared.len() == 32:
         return _push_bytes([], shared)
-    val pure_shared = x25519(stable_private, stable_public)
     if pure_shared.len() == 32:
         return _push_bytes([], pure_shared)
     []
@@ -467,8 +467,8 @@ fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
 # ============================================================================
 
 fn ssh_kex_compute_exchange_hash(
-    client_version: text,
-    server_version: text,
+    client_version: [u8],
+    server_version: [u8],
     client_kexinit: [u8],
     server_kexinit: [u8],
     host_key_blob: [u8],
@@ -482,15 +482,16 @@ fn ssh_kex_compute_exchange_hash(
     except the shared secret K which is encoded as an SSH mpint.
     """
     var hash_input: [u8] = []
-    # RFC 8731 uses the X25519 shared secret as an integer for SSH mpint
-    # encoding. X25519 emits little-endian bytes, while mpint is big-endian.
-    val shared_secret_mpint = _reverse_bytes(shared_secret)
+    # RFC 8731 says the X25519 output bytes are reinterpreted as a fixed-length
+    # unsigned big-endian integer for SSH K, then encoded as an mpint. That is
+    # a reinterpretation of the same byte string, not a byte reversal.
+    val shared_secret_mpint = shared_secret
 
     # V_C: client version string (without CR LF)
-    ssh_put_text(hash_input, client_version)
+    hash_input = _push_string_bytes(hash_input, client_version)
 
     # V_S: server version string (without CR LF)
-    ssh_put_text(hash_input, server_version)
+    hash_input = _push_string_bytes(hash_input, server_version)
 
     # I_C: client KEXINIT payload (the full packet payload including msg type)
     hash_input = _push_string_bytes(hash_input, client_kexinit)
@@ -531,7 +532,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     """
     # Build the initial hash input: mpint(K) || H || letter || session_id
     var input: [u8] = []
-    val shared_secret_mpint = _reverse_bytes(shared_secret)
+    val shared_secret_mpint = shared_secret
     ssh_put_mpint(input, shared_secret_mpint)
 
     var i: u64 = 0
@@ -793,9 +794,9 @@ fn ssh_build_kex_ecdh_reply(host_key_blob: [u8], server_public: [u8], signature:
     """
     var buf: [u8] = []
     buf.push(SSH_MSG_KEX_ECDH_REPLY)
-    ssh_put_string(buf, host_key_blob)
+    buf = _push_string_bytes(buf, host_key_blob)
     buf = _push_string_32(buf, server_public)
-    ssh_put_string(buf, signature)
+    buf = _push_string_bytes(buf, signature)
     buf
 
 fn ssh_parse_kex_ecdh_init(data: [u8]) -> Result<[u8], text>:
