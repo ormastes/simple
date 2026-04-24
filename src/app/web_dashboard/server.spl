@@ -22,7 +22,7 @@ use app.llm_dashboard.web_login.{
 use std.text.{to_int_or}
 use dashboard.views.status.{render_status_html, render_vcs_state_html}
 use app.llm_dashboard.data.store.{AgentDashboardStore}
-use app.llm_dashboard.gui.html_views.{generate_agents_html}
+use app.llm_dashboard.gui.html_views.{generate_agents_html, generate_agents_html_with_ios}
 use app.llm_dashboard.gui.ws_handler.{handle_agents_ws}
 use app.llm_dashboard.gui.tasks_api.{handle_tasks_api}
 use lib.common.llm.output_gate.{OutputGate, filter_response_body}
@@ -49,19 +49,30 @@ class DashboardServer:
     port: i32
     auto_refresh_seconds: i32
     agent_watch_dir: text
+    is_ios: bool
 
     static fn new(port: i32) -> DashboardServer:
         return DashboardServer {
             port: port,
             auto_refresh_seconds: 30,
-            agent_watch_dir: ""
+            agent_watch_dir: "",
+            is_ios: false
         }
 
     static fn new_with_agent_dir(port: i32, agent_watch_dir: text) -> DashboardServer:
         return DashboardServer {
             port: port,
             auto_refresh_seconds: 30,
-            agent_watch_dir: agent_watch_dir
+            agent_watch_dir: agent_watch_dir,
+            is_ios: false
+        }
+
+    static fn new_ios(port: i32, watch_dir: text) -> DashboardServer:
+        return DashboardServer {
+            port: port,
+            auto_refresh_seconds: 30,
+            agent_watch_dir: watch_dir,
+            is_ios: true
         }
 
     fn start():
@@ -166,6 +177,11 @@ class DashboardServer:
 
     fn route_request(method: text, path: text, body: text, headers: text) -> text:
         val clean_path = _clean_path(path)
+
+        # In iOS mode the WKWebView is the sole client; skip auth for agents page.
+        if self.is_ios and (clean_path == "/agents" or clean_path.starts_with("/agents")):
+            return self.serve_agents()
+
         val session = auth_session_from_headers(headers)
 
         if clean_path == "/login":
@@ -275,7 +291,9 @@ class DashboardServer:
     fn serve_agents() -> text:
         var store = self.agent_store()
         store.poll()
-        val html = generate_agents_html(store)
+        val html = generate_agents_html_with_ios(store, self.is_ios)
+        if self.is_ios:
+            return http_response_with_headers(200, "text/html", html, ["Cache-Control: no-store"])
         return http_response(200, "text/html", html)
 
     fn serve_static(path: text) -> text:

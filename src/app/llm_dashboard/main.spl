@@ -9,7 +9,6 @@ use std.text.{to_int_or}
 use std.cli.cli_util (get_cli_args)
 use app.dashboard.framework_policy.{strip_framework_flags}
 use lib.common.llm.output_gate.{OutputGate, filter_response_body}
-use lib.common.llm.content_authority.{ContentAuthority, release_gate}
 use lib.common.privilege.authority_token.{AuthorityToken}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -55,6 +54,7 @@ fn run_llm_dashboard(args: [text]) -> i64:
     var watch_dir = ""
     var enable_terminal = false
     var enable_tmux = false
+    var is_ios = false
 
     # Parse arguments
     var i = 0
@@ -64,6 +64,9 @@ fn run_llm_dashboard(args: [text]) -> i64:
             "--gui" => mode = "gui"
             "--web" => mode = "gui"
             "--tui" => mode = "tui"
+            "--ios" =>
+                is_ios = true
+                mode = "gui"
             "--terminal" => enable_terminal = true
             "--tmux" => enable_tmux = true
             "--port" =>
@@ -95,10 +98,25 @@ fn run_llm_dashboard(args: [text]) -> i64:
                 AgentDashboardStore.with_dir(watch_dir)
             else:
                 AgentDashboardStore.new()
-            run_gui_dashboard(store, port, watch_dir)
+            if is_ios:
+                run_ios_dashboard(store, port, watch_dir)
+            else:
+                run_gui_dashboard(store, port, watch_dir)
             return 0
         _:
             return run_tui_dashboard_subprocess(clean_args)
+
+fn run_ios_dashboard(store: AgentDashboardStore, port: i32, watch_dir: text):
+    """Start the web-based GUI dashboard in iOS mode.
+
+    Constructs DashboardServer with is_ios=true so that:
+    - /agents is served without auth (WKWebView is the sole client)
+    - iOS CSS overrides are injected into the HTML
+    - Cache-Control: no-store is set for dev convenience
+    """
+    val _ = store
+    val server = DashboardServer.new_ios(port, watch_dir)
+    server.start()
 
 fn run_gui_dashboard(store: AgentDashboardStore, port: i32, watch_dir: text):
     """Start the web-based GUI dashboard.

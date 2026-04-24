@@ -1,0 +1,104 @@
+#!/bin/sh
+# ios-dashboard.shs — Run the LLM Dashboard in the iOS simulator via Tauri.
+#
+# Starts `bin/simple agents --gui --ios --port $PORT` in the background,
+# waits for the HTTP port to be ready, then launches `cargo tauri ios dev`
+# (or `cargo tauri ios build` for --device) with SIMPLE_DASHBOARD_URL set.
+#
+# Usage:
+#   sh tools/tauri-shell/scripts/ios-dashboard.shs [--port N] [--sim|--device] [--help]
+#
+# Options:
+#   --port N    Port for the dashboard HTTP server (default: 3001)
+#   --sim       Target iOS Simulator (default)
+#   --device    Target a physical iOS device (runs `cargo tauri ios build`)
+#   --help      Show this message and exit
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+PORT=3001
+TARGET="sim"
+SERVER_PID=""
+
+# =========================================================================
+# Argument parsing
+# =========================================================================
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help)
+            printf 'Usage: sh tools/tauri-shell/scripts/ios-dashboard.shs [--port N] [--sim|--device]\n'
+            printf '\n'
+            printf 'Options:\n'
+            printf '  --port N    HTTP port for dashboard server (default: 3001)\n'
+            printf '  --sim       Target iOS Simulator (default)\n'
+            printf '  --device    Target physical device (runs cargo tauri ios build)\n'
+            printf '  --help      Show this message\n'
+            exit 0
+            ;;
+        --port)
+            shift
+            PORT="$1"
+            ;;
+        --sim)
+            TARGET="sim"
+            ;;
+        --device)
+            TARGET="device"
+            ;;
+        *)
+            printf '[ios-dashboard] Unknown argument: %s\n' "$1"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# =========================================================================
+# Cleanup trap — kill server on exit
+# =========================================================================
+_cleanup() {
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+    fi
+}
+trap '_cleanup' INT TERM EXIT
+
+# =========================================================================
+# Start the dashboard server in iOS mode
+# =========================================================================
+printf '[ios-dashboard] Starting LLM dashboard on port %s in iOS mode...\n' "$PORT"
+"$REPO_ROOT/bin/simple" agents --gui --ios --port "$PORT" &
+SERVER_PID=$!
+
+# =========================================================================
+# Wait for port to be ready (bounded: 30 attempts x 1 s = 30 s max)
+# =========================================================================
+TRIES=0
+printf '[ios-dashboard] Waiting for server on port %s...\n' "$PORT"
+until nc -z 127.0.0.1 "$PORT" 2>/dev/null; do
+    TRIES=$((TRIES + 1))
+    if [ "$TRIES" -ge 30 ]; then
+        printf '[ios-dashboard] ERROR: server did not start within 30 seconds on port %s\n' "$PORT"
+        exit 1
+    fi
+    sleep 1
+done
+printf '[ios-dashboard] Server ready on port %s.\n' "$PORT"
+
+# =========================================================================
+# Launch Tauri iOS
+# =========================================================================
+export SIMPLE_DASHBOARD_URL="http://localhost:${PORT}"
+printf '[ios-dashboard] SIMPLE_DASHBOARD_URL=%s\n' "$SIMPLE_DASHBOARD_URL"
+
+cd "$REPO_ROOT/tools/tauri-shell"
+
+if [ "$TARGET" = "device" ]; then
+    printf '[ios-dashboard] Building for physical device...\n'
+    cargo tauri ios build
+else
+    printf '[ios-dashboard] Launching iOS Simulator...\n'
+    cargo tauri ios dev
+fi
