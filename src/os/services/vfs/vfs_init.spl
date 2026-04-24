@@ -680,29 +680,28 @@ fn _cached_lazy_exec_bytes(path: text) -> [u8]:
     []
 
 fn _cache_lazy_exec_bytes(path: text, bytes: [u8]) -> [u8]:
-    val cloned = _clone_bytes(bytes)
     if path == "/sys/apps/info" or path == "/sys/apps/info.smf" or path == "/SYS/APPS/info" or path == "/SYS/APPS/info.smf" or path == "/info" or path == "/info.smf":
-        g_vfs_info_exec_bytes = cloned
+        g_vfs_info_exec_bytes = bytes
         return g_vfs_info_exec_bytes
     if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf" or path == "/SYS/APPS/simple_browser" or path == "/SYS/APPS/simple_browser.smf" or path == "/SYS/APPS/SBROWSMF.SMF" or path == "/SBROWSMF.SMF":
-        g_vfs_simple_browser_exec_bytes = cloned
+        g_vfs_simple_browser_exec_bytes = bytes
         return g_vfs_simple_browser_exec_bytes
     if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf" or path == "/SYS/APPS/simple_compiler" or path == "/SYS/APPS/simple_compiler.smf" or path == "/SYS/APPS/SCOMPSMF.SMF" or path == "/SCOMPSMF.SMF":
-        g_vfs_simple_compiler_exec_bytes = cloned
+        g_vfs_simple_compiler_exec_bytes = bytes
         return g_vfs_simple_compiler_exec_bytes
     if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf" or path == "/SYS/APPS/simple_interpreter" or path == "/SYS/APPS/simple_interpreter.smf" or path == "/SYS/APPS/SINTSMF.SMF" or path == "/SINTSMF.SMF":
-        g_vfs_simple_interpreter_exec_bytes = cloned
+        g_vfs_simple_interpreter_exec_bytes = bytes
         return g_vfs_simple_interpreter_exec_bytes
     if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf" or path == "/SYS/APPS/simple_loader" or path == "/SYS/APPS/simple_loader.smf" or path == "/SYS/APPS/SLOADSMF.SMF" or path == "/SLOADSMF.SMF":
-        g_vfs_simple_loader_exec_bytes = cloned
+        g_vfs_simple_loader_exec_bytes = bytes
         return g_vfs_simple_loader_exec_bytes
     if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf" or path == "/SYS/APPS/llvm" or path == "/SYS/APPS/llvm.smf" or path == "/SYS/APPS/LLVMSMF.SMF" or path == "/LLVMSMF.SMF":
-        g_vfs_llvm_exec_bytes = cloned
+        g_vfs_llvm_exec_bytes = bytes
         return g_vfs_llvm_exec_bytes
     if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf" or path == "/SYS/APPS/rust" or path == "/SYS/APPS/rust.smf" or path == "/SYS/APPS/RUSTSMF.SMF" or path == "/RUSTSMF.SMF":
-        g_vfs_rust_exec_bytes = cloned
+        g_vfs_rust_exec_bytes = bytes
         return g_vfs_rust_exec_bytes
-    cloned
+    bytes
 
 fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)
@@ -740,11 +739,13 @@ fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
     if file_size > FAT32_PATH_READ_BUFFER_MAX:
         serial_println("[vfs-root] c_fat32_path_read_oversize path={path} bytes={file_size}")
         return []
-    val read_result = simpleos_fat32_read_path(path)
-    if read_result != 0:
-        serial_println("[vfs-root] c_fat32_path_read_failed path={path} rc={read_result}")
+    # Materialize large executable payloads via the C-built runtime array.
+    # Keep this to a single FAT32 file read; the direct read helper already
+    # stages the final byte array into the shared bridge buffer.
+    val out = simpleos_fat32_read_path_array(path)
+    if out.len() <= 0 or out.len().to_u64() != file_size:
+        serial_println("[vfs-root] c_fat32_path_read_failed path={path} bytes={out.len()} expected={file_size}")
         return []
-    val out = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), file_size)
     serial_println("[vfs-root] c_fat32_path_read_ok path={path} bytes={out.len()}")
     out
 
@@ -757,15 +758,21 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
     if lazy_cached.len() > 0:
         return lazy_cached
     val root_name = g_vfs_root_path(name)
-    val root_cached = _cached_lazy_exec_bytes(root_name)
-    if root_cached.len() > 0:
-        return root_cached
+    if root_name != name:
+        val root_cached = _cached_lazy_exec_bytes(root_name)
+        if root_cached.len() > 0:
+            return root_cached
     val direct_path_bytes = g_vfs_read_fat32_path_bytes(name)
     if direct_path_bytes.len() > 0:
-        return _cache_lazy_exec_bytes(name, direct_path_bytes)
-    val root_path_bytes = g_vfs_read_fat32_path_bytes(root_name)
-    if root_path_bytes.len() > 0:
-        return _cache_lazy_exec_bytes(root_name, root_path_bytes)
+        val direct_cached = _cache_exec_bytes_if_valid(name, name, direct_path_bytes)
+        if direct_cached.len() > 0:
+            return direct_cached
+    if root_name != name:
+        val root_path_bytes = g_vfs_read_fat32_path_bytes(root_name)
+        if root_path_bytes.len() > 0:
+            val root_cached_bytes = _cache_exec_bytes_if_valid(root_name, root_name, root_path_bytes)
+            if root_cached_bytes.len() > 0:
+                return root_cached_bytes
     val root_disk_alias = _vfs_exec_root_disk_alias(name)
     if root_disk_alias != name:
         val root_disk_cached = _cached_lazy_exec_bytes(root_disk_alias)
@@ -773,15 +780,19 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             return root_disk_cached
         val root_disk_bytes = g_vfs_read_fat32_path_bytes(root_disk_alias)
         if root_disk_bytes.len() > 0:
-            return _cache_lazy_exec_bytes(root_disk_alias, root_disk_bytes)
+            val root_disk_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias, root_disk_alias, root_disk_bytes)
+            if root_disk_cached_bytes.len() > 0:
+                return root_disk_cached_bytes
     val root_disk_alias_root = _vfs_exec_root_disk_alias(root_name)
-    if root_disk_alias_root != root_name:
+    if root_name != name and root_disk_alias_root != root_name:
         val root_disk_root_cached = _cached_lazy_exec_bytes(root_disk_alias_root)
         if root_disk_root_cached.len() > 0:
             return root_disk_root_cached
         val root_disk_root_bytes = g_vfs_read_fat32_path_bytes(root_disk_alias_root)
         if root_disk_root_bytes.len() > 0:
-            return _cache_lazy_exec_bytes(root_disk_alias_root, root_disk_root_bytes)
+            val root_disk_root_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias_root, root_disk_alias_root, root_disk_root_bytes)
+            if root_disk_root_cached_bytes.len() > 0:
+                return root_disk_root_cached_bytes
     val alias_name = _vfs_exec_disk_alias(name)
     if alias_name != name:
         val alias_cached = _cached_lazy_exec_bytes(alias_name)
@@ -789,15 +800,19 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             return alias_cached
         val alias_bytes = g_vfs_read_fat32_path_bytes(alias_name)
         if alias_bytes.len() > 0:
-            return _cache_lazy_exec_bytes(alias_name, alias_bytes)
+            val alias_cached_bytes = _cache_exec_bytes_if_valid(alias_name, alias_name, alias_bytes)
+            if alias_cached_bytes.len() > 0:
+                return alias_cached_bytes
     val root_alias = _vfs_exec_disk_alias(root_name)
-    if root_alias != root_name:
+    if root_name != name and root_alias != root_name:
         val root_alias_cached = _cached_lazy_exec_bytes(root_alias)
         if root_alias_cached.len() > 0:
             return root_alias_cached
         val root_alias_bytes = g_vfs_read_fat32_path_bytes(root_alias)
         if root_alias_bytes.len() > 0:
-            return _cache_lazy_exec_bytes(root_alias, root_alias_bytes)
+            val root_alias_cached_bytes = _cache_exec_bytes_if_valid(root_alias, root_alias, root_alias_bytes)
+            if root_alias_cached_bytes.len() > 0:
+                return root_alias_cached_bytes
 
     if alias_name != name or root_disk_alias != name or root_disk_alias_root != root_name:
         return []
@@ -810,6 +825,11 @@ fn _clone_bytes(buf: [u8]) -> [u8]:
         out.push(buf[i])
         i = i + 1
     out
+
+fn _cache_exec_bytes_if_valid(cache_key: text, path: text, bytes: [u8]) -> [u8]:
+    if bytes.len() <= 4:
+        return []
+    _cache_lazy_exec_bytes(cache_key, bytes)
 
 fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
     var out: [u8] = []

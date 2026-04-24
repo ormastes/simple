@@ -10,23 +10,29 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
+use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvLinuxProfile, RiscvPlatformProfile, Rv32LinuxBootArtifacts, Rv64LinuxBootArtifacts}
+use hardware.rv32gc.top.rv32_machine.{qemu_virt_rv32_platform_profile, rv32_qemu_virt_linux_profile}
+use hardware.rv64gc.top.rv64_machine.{qemu_virt_rv64_platform_profile, rv64_qemu_virt_linux_profile}
+
 enum RiscvXlen:
     Rv32
     Rv64
 
 enum RiscvReadinessStatus:
-    Preparation
-    CoreGenerated
-    SocGenerated
-    LinuxBootValidated
+    Contract
+    RtlGenerated
+    QemuBootValidated
+    RtlLinuxValidated
+    FpgaValidated
 
 impl RiscvReadinessStatus:
     fn to_text() -> text:
         match self:
-            Preparation: "preparation"
-            CoreGenerated: "core-generated"
-            SocGenerated: "soc-generated"
-            LinuxBootValidated: "linux-boot-validated"
+            Contract: "contract"
+            RtlGenerated: "rtl-generated"
+            QemuBootValidated: "qemu-boot-validated"
+            RtlLinuxValidated: "rtl-linux-validated"
+            FpgaValidated: "fpga-validated"
 
 impl RiscvXlen:
     fn bits() -> i64:
@@ -41,8 +47,8 @@ impl RiscvXlen:
 
     fn linux_policy() -> text:
         match self:
-            Rv32: "experimental"
-            Rv64: "upstream"
+            Rv32: "repo-native-rv32-linux"
+            Rv64: "repo-native-rv64-linux"
 
     fn mmu_mode() -> text:
         match self:
@@ -134,46 +140,71 @@ impl LinuxArtifactSet:
     fn firmware_configured() -> bool:
         self.opensbi_image != "" or self.uboot_image != ""
 
+    fn to_rv64_boot_artifacts() -> Rv64LinuxBootArtifacts:
+        Rv64LinuxBootArtifacts(
+            opensbi: self.opensbi_image,
+            kernel_image: self.kernel_image,
+            initrd_rootfs: self.rootfs_image,
+            dtb: self.dtb_path,
+            uboot: self.uboot_image
+        )
+
+    fn to_rv32_boot_artifacts() -> Rv32LinuxBootArtifacts:
+        Rv32LinuxBootArtifacts(
+            opensbi: self.opensbi_image,
+            kernel_image: self.kernel_image,
+            initrd_rootfs: self.rootfs_image,
+            dtb: self.dtb_path,
+            uboot: self.uboot_image
+        )
+
 struct RiscvFpgaLane:
     xlen: RiscvXlen
     top_module: text
     rtl_dir: text
     rtl_sim_backend: text
     bootrom_path: text
+    readiness: RiscvReadinessStatus
+    linux_profile: RiscvLinuxProfile
+    platform_profile: RiscvPlatformProfile
+    scope_note: text
     linux: LinuxArtifactSet
 
 impl RiscvFpgaLane:
     static fn rv64_default() -> RiscvFpgaLane:
+        val platform = qemu_virt_rv64_platform_profile()
         RiscvFpgaLane(
             xlen: RiscvXlen.Rv64,
-            top_module: "simple_rv64i_core",
+            top_module: "simple_rv64gc_core",
             rtl_dir: "build/fpga/rv64/rtl",
             rtl_sim_backend: "ghdl-vhdl-2008",
             bootrom_path: "build/fpga/rv64/bootrom.bin",
+            readiness: RiscvReadinessStatus.Contract,
+            linux_profile: rv64_qemu_virt_linux_profile(),
+            platform_profile: platform,
+            scope_note: "repo-native RV64GC Linux contract lane",
             linux: LinuxArtifactSet.empty()
         )
 
     static fn rv32_default() -> RiscvFpgaLane:
+        val platform = qemu_virt_rv32_platform_profile()
         RiscvFpgaLane(
             xlen: RiscvXlen.Rv32,
-            top_module: "simple_rv32i_core",
+            top_module: "simple_rv32gc_core",
             rtl_dir: "build/fpga/rv32/rtl",
             rtl_sim_backend: "ghdl-vhdl-2008",
             bootrom_path: "build/fpga/rv32/bootrom.bin",
+            readiness: RiscvReadinessStatus.Contract,
+            linux_profile: rv32_qemu_virt_linux_profile(),
+            platform_profile: platform,
+            scope_note: "repo-native RV32GC Linux contract lane",
             linux: LinuxArtifactSet.empty()
         )
 
     fn expected_boot_markers() -> [text]:
-        if self.xlen == RiscvXlen.Rv32:
-            var markers: [text] = []
-            markers.push("Linux version")
-            markers.push("OF: fdt")
-            markers.push("Freeing unused kernel memory")
-            markers.push("init started")
-            markers.push("rv32-linux-experimental")
-            return markers
         var markers: [text] = []
-        markers.push("OpenSBI")
+        if self.linux_profile.opensbi_required:
+            markers.push("OpenSBI")
         markers.push("Linux version")
         markers.push("OF: fdt")
         markers.push("Freeing unused kernel memory")
@@ -181,28 +212,7 @@ impl RiscvFpgaLane:
         markers
 
     fn required_soc_blocks() -> [text]:
-        if self.xlen == RiscvXlen.Rv32:
-            var blocks: [text] = []
-            blocks.push("rv32ima-core")
-            blocks.push("sv32-mmu")
-            blocks.push("clint")
-            blocks.push("plic")
-            blocks.push("uart16550")
-            blocks.push("bootrom")
-            blocks.push("memory-bus")
-            blocks.push("dtb")
-            return blocks
-        var blocks: [text] = []
-        blocks.push("rv64ima-core")
-        blocks.push("sv39-mmu")
-        blocks.push("clint")
-        blocks.push("plic")
-        blocks.push("uart16550")
-        blocks.push("bootrom")
-        blocks.push("memory-bus")
-        blocks.push("dtb")
-        blocks.push("opensbi-handoff")
-        blocks
+        self.platform_profile.required_soc_blocks()
 
     fn validate_for_prepare() -> [text]:
         var errors: [text] = []
@@ -214,22 +224,35 @@ impl RiscvFpgaLane:
             errors.push("rtl_sim_backend is required")
         if self.bootrom_path == "":
             errors.push("bootrom_path is required")
+        if self.linux_profile.xlen != self.xlen.bits():
+            errors.push("linux profile xlen must match lane xlen")
+        if self.platform_profile.linux.xlen != self.xlen.bits():
+            errors.push("platform profile xlen must match lane xlen")
         errors
 
     fn validate_for_linux_boot() -> [text]:
         var errors = self.validate_for_prepare()
-        if self.readiness_status() != RiscvReadinessStatus.LinuxBootValidated:
-            errors.push("{self.xlen.to_text()} readiness must be linux-boot-validated before claiming Linux boot")
-        if not self.linux.configured():
-            errors.push("{self.xlen.to_text()} linux kernel, rootfs, dtb, and toolchain must be configured")
-        if self.xlen == RiscvXlen.Rv64 and not self.linux.firmware_configured():
-            errors.push("rv64 linux requires OpenSBI or U-Boot firmware")
-        if self.xlen == RiscvXlen.Rv32 and self.xlen.linux_policy() != "experimental":
-            errors.push("rv32 linux must remain marked experimental")
+        if not self.readiness_is_boot_validated():
+            errors.push("{self.xlen.to_text()} readiness must be qemu-boot-validated, rtl-linux-validated, or fpga-validated before claiming Linux boot")
+        var boot_errors: [text] = []
+        if self.xlen == RiscvXlen.Rv32:
+            boot_errors = self.linux.to_rv32_boot_artifacts().validate_for(self.linux_profile)
+        else:
+            boot_errors = self.linux.to_rv64_boot_artifacts().validate_for(self.linux_profile)
+        for err in boot_errors:
+            errors.push(err)
+        if self.toolchain_prefix() == "":
+            errors.push("{self.xlen.to_text()} toolchain prefix must be configured")
         errors
 
+    fn readiness_is_boot_validated() -> bool:
+        self.readiness == RiscvReadinessStatus.QemuBootValidated or self.readiness == RiscvReadinessStatus.RtlLinuxValidated or self.readiness == RiscvReadinessStatus.FpgaValidated
+
     fn readiness_status() -> RiscvReadinessStatus:
-        RiscvReadinessStatus.CoreGenerated
+        self.readiness
+
+    fn toolchain_prefix() -> text:
+        self.linux.toolchain_prefix
 
     fn hardware_source_file_name() -> text:
         "{self.top_module}.spl"
@@ -269,6 +292,8 @@ impl RiscvFpgaLane:
             "Pure Simple source-of-truth sketch for the generated VHDL lane. The\n" +
             "current bundle writes this next to RTL so backend work can replace the\n" +
             "temporary emitter without inventing a RISC-V-specific bitfield language.\n" +
+            "platform: {self.platform_profile.name}\n" +
+            "scope: {self.scope_note}\n" +
             "\"\"\"\n\n" +
             "bitfield {bitfield_name}(u32):\n" +
             "    opcode: 7\n" +
@@ -303,6 +328,36 @@ impl RiscvFpgaLane:
             "    rs1: 5\n" +
             "    rs2: 5\n" +
             "    high: 7\n\n" +
+            "bitfield RiscvIImmediate(u32):\n" +
+            "    value: 12\n" +
+            "    _: 20\n\n" +
+            "bitfield RiscvIImmediateEncoding(u32):\n" +
+            "    opcode: 7\n" +
+            "    rd: 5\n" +
+            "    funct3: 3\n" +
+            "    rs1: 5\n" +
+            "    value: 12\n\n" +
+            "bitfield RiscvUpperImmediate(u32):\n" +
+            "    _: 12\n" +
+            "    high20: 20\n\n" +
+            "bitfield RiscvUpperImmediateEncoding(u32):\n" +
+            "    opcode: 7\n" +
+            "    rd: 5\n" +
+            "    high20: 20\n\n" +
+            "bitfield RiscvExecuteControl(u32):\n" +
+            "    funct3: 3\n" +
+            "    bit30: 1\n" +
+            "    shamt6: 6\n" +
+            "    _: 22\n\n" +
+            "bitfield RiscvExecuteControlEncoding(u32):\n" +
+            "    opcode: 7\n" +
+            "    rd: 5\n" +
+            "    funct3: 3\n" +
+            "    rs1: 5\n" +
+            "    shamt_low5: 5\n" +
+            "    shamt_bit5: 1\n" +
+            "    bit30: 1\n" +
+            "    _: 5\n\n" +
             "bitfield RiscvJumpImmediate(u32):\n" +
             "    low10: 10\n" +
             "    bit11: 1\n" +
@@ -362,6 +417,44 @@ impl RiscvFpgaLane:
             "        0 as u32\n\n" +
             "@hardware\n" +
             "@clocked(clk, reset_n)\n" +
+            "fn {self.top_module}_decode_i_immediate(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:\n" +
+            "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    val opcode = inst.opcode as u32\n" +
+            "    if opcode == 19 as u32 or opcode == 3 as u32:\n" +
+            "        val imm_inst = RiscvIImmediateEncoding.new(imem_rdata)\n" +
+            "        var imm = RiscvIImmediate.new(0 as u32)\n" +
+            "        imm.value = imm_inst.value as u32\n" +
+            "        imm\n" +
+            "    else:\n" +
+            "        0 as u32\n\n" +
+            "@hardware\n" +
+            "@clocked(clk, reset_n)\n" +
+            "fn {self.top_module}_decode_upper_immediate(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:\n" +
+            "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    val opcode = inst.opcode as u32\n" +
+            "    if opcode == 55 as u32 or opcode == 23 as u32:\n" +
+            "        val upper_inst = RiscvUpperImmediateEncoding.new(imem_rdata)\n" +
+            "        var upper_imm = RiscvUpperImmediate.new(0 as u32)\n" +
+            "        upper_imm.high20 = upper_inst.high20 as u32\n" +
+            "        upper_imm\n" +
+            "    else:\n" +
+            "        0 as u32\n\n" +
+            "@hardware\n" +
+            "@clocked(clk, reset_n)\n" +
+            "fn {self.top_module}_decode_execute_control(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:\n" +
+            "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    val opcode = inst.opcode as u32\n" +
+            "    if opcode == 19 as u32 or opcode == 51 as u32 or opcode == 99 as u32:\n" +
+            "        val control_inst = RiscvExecuteControlEncoding.new(imem_rdata)\n" +
+            "        var control = RiscvExecuteControl.new(0 as u32)\n" +
+            "        control.funct3 = control_inst.funct3 as u32\n" +
+            "        control.bit30 = control_inst.bit30 as u32\n" +
+            "        control.shamt6 = ((control_inst.shamt_bit5 as u32) << 5) | (control_inst.shamt_low5 as u32)\n" +
+            "        control\n" +
+            "    else:\n" +
+            "        0 as u32\n\n" +
+            "@hardware\n" +
+            "@clocked(clk, reset_n)\n" +
             "fn {self.top_module}_decode_jump_immediate(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:\n" +
             "    val inst = {bitfield_name}.new(imem_rdata)\n" +
             "    val opcode = inst.opcode as u32\n" +
@@ -396,6 +489,12 @@ impl RiscvFpgaLane:
             "    # RiscvBranchEncoding.bit12 -> imem_rdata(31 downto 31)\n" +
             "    # RiscvStoreEncoding.low -> imem_rdata(11 downto 7)\n" +
             "    # RiscvStoreEncoding.high -> imem_rdata(31 downto 25)\n" +
+            "    # RiscvIImmediateEncoding.value -> imem_rdata(31 downto 20)\n" +
+            "    # RiscvUpperImmediateEncoding.high20 -> imem_rdata(31 downto 12)\n" +
+            "    # RiscvExecuteControlEncoding.funct3 -> imem_rdata(14 downto 12)\n" +
+            "    # RiscvExecuteControlEncoding.shamt_low5 -> imem_rdata(24 downto 20)\n" +
+            "    # RiscvExecuteControlEncoding.shamt_bit5 -> imem_rdata(25 downto 25)\n" +
+            "    # RiscvExecuteControlEncoding.bit30 -> imem_rdata(30 downto 30)\n" +
             "    # RiscvJumpEncoding.high8 -> imem_rdata(19 downto 12)\n" +
             "    # RiscvJumpEncoding.bit11 -> imem_rdata(20 downto 20)\n" +
             "    # RiscvJumpEncoding.low10 -> imem_rdata(30 downto 21)\n" +
@@ -425,6 +524,12 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must define branch immediate helper")
         if not source.contains("fn {self.top_module}_decode_store_immediate"):
             errors.push("{self.xlen.to_text()} hardware source must define store immediate helper")
+        if not source.contains("fn {self.top_module}_decode_i_immediate"):
+            errors.push("{self.xlen.to_text()} hardware source must define I-type immediate helper")
+        if not source.contains("fn {self.top_module}_decode_upper_immediate"):
+            errors.push("{self.xlen.to_text()} hardware source must define upper immediate helper")
+        if not source.contains("fn {self.top_module}_decode_execute_control"):
+            errors.push("{self.xlen.to_text()} hardware source must define execute control helper")
         if not source.contains("fn {self.top_module}_decode_jump_immediate"):
             errors.push("{self.xlen.to_text()} hardware source must define jump immediate helper")
         if not source.contains("writeback.rd = inst.rs1 as u32"):
@@ -439,6 +544,18 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must define store immediate bitfield")
         if not source.contains("bitfield RiscvStoreEncoding(u32):"):
             errors.push("{self.xlen.to_text()} hardware source must define store immediate source-layout bitfield")
+        if not source.contains("bitfield RiscvIImmediate(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define I-type immediate bitfield")
+        if not source.contains("bitfield RiscvIImmediateEncoding(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define I-type immediate source-layout bitfield")
+        if not source.contains("bitfield RiscvUpperImmediate(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define upper immediate bitfield")
+        if not source.contains("bitfield RiscvUpperImmediateEncoding(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define upper immediate source-layout bitfield")
+        if not source.contains("bitfield RiscvExecuteControl(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define execute control bitfield")
+        if not source.contains("bitfield RiscvExecuteControlEncoding(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define execute control source-layout bitfield")
         if not source.contains("bitfield RiscvJumpImmediate(u32):"):
             errors.push("{self.xlen.to_text()} hardware source must define jump immediate bitfield")
         if not source.contains("bitfield RiscvJumpEncoding(u32):"):
@@ -479,6 +596,28 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must preserve store immediate low bits")
         if not source.contains("store_imm.high = store_inst.high as u32"):
             errors.push("{self.xlen.to_text()} hardware source must preserve store immediate high bits")
+        if not source.contains("val imm_inst = RiscvIImmediateEncoding.new(imem_rdata)"):
+            errors.push("{self.xlen.to_text()} hardware source must read I-type immediate through the I-immediate layout bitfield")
+        if not source.contains("var imm = RiscvIImmediate.new(0 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must reconstruct I-type immediate through bitfield writes")
+        if not source.contains("imm.value = imm_inst.value as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve the I-type immediate payload bits")
+        if not source.contains("val upper_inst = RiscvUpperImmediateEncoding.new(imem_rdata)"):
+            errors.push("{self.xlen.to_text()} hardware source must read upper immediate through the upper-immediate layout bitfield")
+        if not source.contains("var upper_imm = RiscvUpperImmediate.new(0 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must reconstruct upper immediate through bitfield writes")
+        if not source.contains("upper_imm.high20 = upper_inst.high20 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve the upper immediate high bits")
+        if not source.contains("val control_inst = RiscvExecuteControlEncoding.new(imem_rdata)"):
+            errors.push("{self.xlen.to_text()} hardware source must read execute control through the execute-control layout bitfield")
+        if not source.contains("var control = RiscvExecuteControl.new(0 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must reconstruct execute control through bitfield writes")
+        if not source.contains("control.funct3 = control_inst.funct3 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve execute control funct3 bits")
+        if not source.contains("control.bit30 = control_inst.bit30 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve execute control bit30")
+        if not source.contains("control.shamt6 = ((control_inst.shamt_bit5 as u32) << 5) | (control_inst.shamt_low5 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve execute control shift amount bits")
         if not source.contains("val jump_inst = RiscvJumpEncoding.new(imem_rdata)"):
             errors.push("{self.xlen.to_text()} hardware source must read jump immediate pieces through the jump layout bitfield")
         if not source.contains("var jump_imm = RiscvJumpImmediate.new(0 as u32)"):
@@ -513,11 +652,17 @@ impl RiscvFpgaLane:
             "-- source-map: RiscvBranchEncoding.bit12 => imem_rdata(31 downto 31)\n" +
             "-- source-map: RiscvStoreEncoding.low => imem_rdata(11 downto 7)\n" +
             "-- source-map: RiscvStoreEncoding.high => imem_rdata(31 downto 25)\n" +
+            "-- source-map: RiscvIImmediateEncoding.value => imem_rdata(31 downto 20)\n" +
+            "-- source-map: RiscvUpperImmediateEncoding.high20 => imem_rdata(31 downto 12)\n" +
+            "-- source-map: RiscvExecuteControlEncoding.funct3 => imem_rdata(14 downto 12)\n" +
+            "-- source-map: RiscvExecuteControlEncoding.shamt_low5 => imem_rdata(24 downto 20)\n" +
+            "-- source-map: RiscvExecuteControlEncoding.shamt_bit5 => imem_rdata(25 downto 25)\n" +
+            "-- source-map: RiscvExecuteControlEncoding.bit30 => imem_rdata(30 downto 30)\n" +
             "-- source-map: RiscvJumpEncoding.high8 => imem_rdata(19 downto 12)\n" +
             "-- source-map: RiscvJumpEncoding.bit11 => imem_rdata(20 downto 20)\n" +
             "-- source-map: RiscvJumpEncoding.low10 => imem_rdata(30 downto 21)\n" +
             "-- source-map: RiscvJumpEncoding.bit20 => imem_rdata(31 downto 31)\n" +
-            "-- readiness: {self.readiness_status().to_text()} linux-boot-validated=false\n\n"
+            "-- readiness: {self.readiness_status().to_text()} linux-boot-validated={self.readiness_is_boot_validated()}\n\n"
 
     fn package_vhdl() -> text:
         val bits = self.xlen.bits()
@@ -587,10 +732,14 @@ impl RiscvFpgaLane:
             "        variable decode_writeback_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_branch_immediate_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_store_immediate_bits : std_logic_vector(31 downto 0);\n" +
+            "        variable decode_i_immediate_bits : std_logic_vector(31 downto 0);\n" +
+            "        variable decode_upper_immediate_bits : std_logic_vector(31 downto 0);\n" +
+            "        variable decode_execute_control_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_jump_immediate_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_writeback_rd_i : integer range 0 to 31;\n" +
             "        variable branch_taken : boolean;\n" +
             "        variable shift_i : natural range 0 to 63;\n" +
+            "        variable decode_funct3 : std_logic_vector(2 downto 0);\n" +
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
@@ -609,6 +758,9 @@ impl RiscvFpgaLane:
             "                decode_writeback_bits := imem_rdata;\n" +
             "                decode_branch_immediate_bits := (others => '0');\n" +
             "                decode_store_immediate_bits := (others => '0');\n" +
+            "                decode_i_immediate_bits := (others => '0');\n" +
+            "                decode_upper_immediate_bits := (others => '0');\n" +
+            "                decode_execute_control_bits := (others => '0');\n" +
             "                decode_jump_immediate_bits := (others => '0');\n" +
             "                if imem_rdata(6 downto 0) = \"0010011\" then\n" +
             "                    decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(19 downto 15) & imem_rdata(6 downto 0);\n" +
@@ -621,16 +773,26 @@ impl RiscvFpgaLane:
             "                if imem_rdata(6 downto 0) = \"0100011\" then\n" +
             "                    decode_store_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 25) & imem_rdata(11 downto 7);\n" +
             "                end if;\n" +
+            "                if imem_rdata(6 downto 0) = \"0010011\" or imem_rdata(6 downto 0) = \"0000011\" then\n" +
+            "                    decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
+            "                end if;\n" +
+            "                if imem_rdata(6 downto 0) = \"0110111\" or imem_rdata(6 downto 0) = \"0010111\" then\n" +
+            "                    decode_upper_immediate_bits := imem_rdata(31 downto 12) & \"000000000000\";\n" +
+            "                end if;\n" +
+            "                if imem_rdata(6 downto 0) = \"0010011\" or imem_rdata(6 downto 0) = \"0110011\" or imem_rdata(6 downto 0) = \"1100011\" then\n" +
+            "                    decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                end if;\n" +
             "                if imem_rdata(6 downto 0) = \"1101111\" then\n" +
             "                    decode_jump_immediate_bits := \"000000000000\" & imem_rdata(31 downto 31) & imem_rdata(19 downto 12) & imem_rdata(20 downto 20) & imem_rdata(30 downto 21);\n" +
             "                end if;\n" +
             "                decode_writeback_rd_i := to_integer(unsigned(decode_writeback_bits(11 downto 7)));\n" +
-            "                imm_i := resize(signed(imem_rdata(31 downto 20)), XLEN);\n" +
-            "                imm_u := std_logic_vector(resize(signed(imem_rdata(31 downto 12) & x\"000\"), XLEN));\n" +
+            "                imm_i := resize(signed(decode_i_immediate_bits(11 downto 0)), XLEN);\n" +
+            "                imm_u := std_logic_vector(resize(signed(decode_upper_immediate_bits(31 downto 12) & \"000000000000\"), XLEN));\n" +
             "                branch_i := resize(signed(decode_branch_immediate_bits(11) & decode_branch_immediate_bits(10) & decode_branch_immediate_bits(9 downto 4) & decode_branch_immediate_bits(3 downto 0) & '0'), XLEN);\n" +
             "                jump_i := resize(signed(decode_jump_immediate_bits(19) & decode_jump_immediate_bits(18 downto 11) & decode_jump_immediate_bits(10) & decode_jump_immediate_bits(9 downto 0) & '0'), XLEN);\n" +
             "                branch_taken := false;\n" +
             "                shift_i := to_integer(unsigned(regs(rs2_i)(5 downto 0)));\n" +
+            "                decode_funct3 := decode_execute_control_bits(2 downto 0);\n" +
             "                case imem_rdata(6 downto 0) is\n" +
             "                    when \"0110111\" =>\n" +
             "                        if rd_i /= 0 then\n" +
@@ -644,7 +806,7 @@ impl RiscvFpgaLane:
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0010011\" =>\n" +
             "                        if decode_writeback_rd_i /= 0 then\n" +
-            "                            case imem_rdata(14 downto 12) is\n" +
+            "                            case decode_funct3 is\n" +
             "                                when \"000\" => regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
             "                                when \"010\" =>\n" +
             "                                    if signed(regs(rs1_i)) < imm_i then\n" +
@@ -661,12 +823,12 @@ impl RiscvFpgaLane:
             "                                when \"100\" => regs(decode_writeback_rd_i) <= regs(rs1_i) xor std_logic_vector(imm_i);\n" +
             "                                when \"110\" => regs(decode_writeback_rd_i) <= regs(rs1_i) or std_logic_vector(imm_i);\n" +
             "                                when \"111\" => regs(decode_writeback_rd_i) <= regs(rs1_i) and std_logic_vector(imm_i);\n" +
-            "                                when \"001\" => regs(decode_writeback_rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                when \"001\" => regs(decode_writeback_rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), to_integer(unsigned(decode_execute_control_bits(9 downto 4)))));\n" +
             "                                when \"101\" =>\n" +
-            "                                    if imem_rdata(30) = '1' then\n" +
-            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                    if decode_execute_control_bits(3) = '1' then\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), to_integer(unsigned(decode_execute_control_bits(9 downto 4)))));\n" +
             "                                    else\n" +
-            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), to_integer(unsigned(decode_execute_control_bits(9 downto 4)))));\n" +
             "                                    end if;\n" +
             "                                when others => trap_reg <= '1';\n" +
             "                            end case;\n" +
@@ -674,9 +836,9 @@ impl RiscvFpgaLane:
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0110011\" =>\n" +
             "                        if decode_writeback_rd_i /= 0 then\n" +
-            "                            case imem_rdata(14 downto 12) is\n" +
+            "                            case decode_funct3 is\n" +
             "                                when \"000\" =>\n" +
-            "                                    if imem_rdata(30) = '1' then\n" +
+            "                                    if decode_execute_control_bits(3) = '1' then\n" +
             "                                        regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
             "                                    else\n" +
             "                                        regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
@@ -696,7 +858,7 @@ impl RiscvFpgaLane:
             "                                    end if;\n" +
             "                                when \"100\" => regs(decode_writeback_rd_i) <= regs(rs1_i) xor regs(rs2_i);\n" +
             "                                when \"101\" =>\n" +
-            "                                    if imem_rdata(30) = '1' then\n" +
+            "                                    if decode_execute_control_bits(3) = '1' then\n" +
             "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), shift_i));\n" +
             "                                    else\n" +
             "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), shift_i));\n" +
@@ -722,7 +884,7 @@ impl RiscvFpgaLane:
             "                        dmem_we_reg <= '1';\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"1100011\" =>\n" +
-            "                        case imem_rdata(14 downto 12) is\n" +
+            "                        case decode_funct3 is\n" +
             "                            when \"000\" => branch_taken := regs(rs1_i) = regs(rs2_i);\n" +
             "                            when \"001\" => branch_taken := regs(rs1_i) /= regs(rs2_i);\n" +
             "                            when \"100\" => branch_taken := signed(regs(rs1_i)) < signed(regs(rs2_i));\n" +
@@ -806,7 +968,7 @@ impl FpgaPrepareManifest:
     fn readiness_summary() -> text:
         var out = "board={self.board.name} part={self.board.part} lanes={self.lanes.len()}"
         for lane in self.lanes:
-            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.top_module}"
+            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.platform_profile.name}:{lane.top_module}"
         out
 
     fn rtl_manifest_text(root_dir: text) -> text:
@@ -826,8 +988,13 @@ impl FpgaPrepareManifest:
             out = out + "package_file = \"{lane_dir}/{lane.package_name()}.vhd\"\n"
             out = out + "core_file = \"{lane_dir}/{lane.top_module}.vhd\"\n"
             out = out + "readiness = \"{lane.readiness_status().to_text()}\"\n"
+            out = out + "platform = \"{lane.platform_profile.name}\"\n"
+            out = out + "scope = \"{lane.scope_note}\"\n"
             out = out + "linux_policy = \"{lane.xlen.linux_policy()}\"\n"
-            out = out + "mmu = \"{lane.xlen.mmu_mode()}\"\n"
+            out = out + "abi = \"{lane.linux_profile.abi.to_text()}\"\n"
+            out = out + "mmu = \"{lane.linux_profile.mmu_mode.to_text()}\"\n"
+            out = out + "firmware_mode = \"{lane.linux_profile.firmware_mode.to_text()}\"\n"
+            out = out + "kernel_alignment = {lane.linux_profile.kernel_alignment}\n"
         out
 
 class RiscvFpgaRtlBundle:

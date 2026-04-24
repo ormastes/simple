@@ -38,6 +38,30 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+wait_for_log_marker() {
+    log_file="$1"
+    marker_expr="$2"
+    timeout_sec="$3"
+    pid="$4"
+    elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -f "$log_file" ] && grep -a -E -q "$marker_expr" "$log_file"; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if [ "$elapsed" -ge "$timeout_sec" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    wait "$pid"
+    return $?
+}
+
 check_tools() {
     missing=""
     for tool in git gh unzip python3 make gcc g++ verilator; do
@@ -127,24 +151,50 @@ run_sim() {
     fi
     echo "[rv32] running LiteX/VexRiscv Verilator simulation; log=$LOG_FILE"
     rm -f "$LOG_FILE"
+    exit_code=0
     if have script; then
         if have timeout; then
-            (cd "$SRC_DIR" && script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 timeout $TIMEOUT_SEC $VENV_DIR/bin/python ./sim.py $SIM_ARGS" "$LOG_FILE") >/dev/null 2>&1 || true
+            (
+                cd "$SRC_DIR" &&
+                script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 timeout $TIMEOUT_SEC $VENV_DIR/bin/python ./sim.py $SIM_ARGS" "$LOG_FILE"
+            ) >/dev/null 2>&1 &
+            sim_pid=$!
+            wait_for_log_marker "$LOG_FILE" "Unpacking initramfs|Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
         else
-            (cd "$SRC_DIR" && script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 $VENV_DIR/bin/python ./sim.py $SIM_ARGS" "$LOG_FILE") >/dev/null 2>&1 || true
+            (
+                cd "$SRC_DIR" &&
+                script -q -f -e -c "env PATH=$VENV_DIR/bin:\$PATH PYTHONUNBUFFERED=1 $VENV_DIR/bin/python ./sim.py $SIM_ARGS" "$LOG_FILE"
+            ) >/dev/null 2>&1 &
+            sim_pid=$!
+            wait_for_log_marker "$LOG_FILE" "Unpacking initramfs|Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
         fi
     elif have timeout; then
-        (cd "$SRC_DIR" && PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" "$VENV_DIR/bin/python" ./sim.py $SIM_ARGS) >"$LOG_FILE" 2>&1 || true
+        (
+            cd "$SRC_DIR" &&
+            PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" "$VENV_DIR/bin/python" ./sim.py $SIM_ARGS
+        ) >"$LOG_FILE" 2>&1 &
+        sim_pid=$!
+        wait_for_log_marker "$LOG_FILE" "Unpacking initramfs|Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
     else
-        (cd "$SRC_DIR" && PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 "$VENV_DIR/bin/python" ./sim.py $SIM_ARGS) >"$LOG_FILE" 2>&1 || true
+        (
+            cd "$SRC_DIR" &&
+            PATH="$VENV_DIR/bin:$PATH" PYTHONUNBUFFERED=1 "$VENV_DIR/bin/python" ./sim.py $SIM_ARGS
+        ) >"$LOG_FILE" 2>&1 &
+        sim_pid=$!
+        wait_for_log_marker "$LOG_FILE" "Unpacking initramfs|Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
+    fi
+    if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+        echo "FAIL: RV32 RTL simulation command exited with status $exit_code" >&2
+        tail -n 80 "$LOG_FILE" >&2 || true
+        return 1
     fi
     if ! grep -a -q "Linux version" "$LOG_FILE"; then
         echo "FAIL: RV32 RTL simulation did not reach Linux version marker" >&2
         tail -n 80 "$LOG_FILE" >&2 || true
         return 1
     fi
-    if ! grep -a -E -q "Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$LOG_FILE"; then
-        echo "FAIL: RV32 RTL simulation did not reach init/userspace marker" >&2
+    if ! grep -a -E -q "Unpacking initramfs|Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$LOG_FILE"; then
+        echo "FAIL: RV32 RTL simulation did not reach initramfs/userspace marker" >&2
         tail -n 80 "$LOG_FILE" >&2 || true
         return 1
     fi

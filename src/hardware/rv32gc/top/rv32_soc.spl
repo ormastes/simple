@@ -1,0 +1,88 @@
+"""
+# RV32GC SoC — Linux-capable RV32 platform assembly
+"""
+
+use hardware.rv32gc.core.rv32_memory.{MemResult, mem_fault}
+use hardware.rv32gc.core.rv32_regfile.Rv32RegFile
+use hardware.rv32gc.core.rv32_csr.Rv32CsrFile
+use hardware.rv32gc.core.rv32_pipeline_ctrl.Rv32PipelineControl
+use hardware.rv32gc.mem.rv32_bus.Rv32Bus
+use hardware.rv32gc.mmu.rv32_sv32.Rv32Sv32
+use hardware.rv32gc.mmu.rv32_pmp.{Rv32Pmp, Rv32AccessType}
+use hardware.rv32gc.privilege.rv32_privilege.Rv32PrivilegeState
+use hardware.rv32gc.privilege.rv32_trap.Rv32TrapController
+use hardware.rv32gc.privilege.rv32_interrupt.Rv32InterruptController
+
+class Rv32Soc:
+    regs: Rv32RegFile
+    csr: Rv32CsrFile
+    pipeline: Rv32PipelineControl
+    bus: Rv32Bus
+    mmu: Rv32Sv32
+    pmp: Rv32Pmp
+    privilege: Rv32PrivilegeState
+    trap: Rv32TrapController
+    interrupts: Rv32InterruptController
+    pc: i64
+    num_harts: i64
+    cycle_count: i64
+
+    static fn create(num_harts: i64, ram_size: i64, reset_vector: i64) -> Rv32Soc:
+        Rv32Soc(
+            regs: Rv32RegFile.create(),
+            csr: Rv32CsrFile.create(),
+            pipeline: Rv32PipelineControl.create(),
+            bus: Rv32Bus.create(ram_size, num_harts),
+            mmu: Rv32Sv32.create(),
+            pmp: Rv32Pmp.create(),
+            privilege: Rv32PrivilegeState.create(),
+            trap: Rv32TrapController.create(),
+            interrupts: Rv32InterruptController.create(),
+            pc: reset_vector and 0xFFFFFFFF,
+            num_harts: num_harts,
+            cycle_count: 0
+        )
+
+    me set_linux_handoff(hartid: i64, dtb_addr: i64):
+        self.regs.write(10, hartid)
+        self.regs.write(11, dtb_addr)
+        self.csr.write_satp(0)
+        self.privilege.enter_supervisor()
+        self.mmu.set_enabled(false)
+
+    fn read_mem(addr: i64, width: i64) -> MemResult:
+        if not self.pmp.allow(addr, width, Rv32AccessType.Load):
+            return mem_fault(5)
+        val paddr = self.mmu.translate(addr)
+        if width == 1:
+            return self.bus.read8(paddr)
+        if width == 2:
+            return self.bus.read16(paddr)
+        self.bus.read32(paddr)
+
+    me write_mem(addr: i64, value: i64, width: i64) -> MemResult:
+        if not self.pmp.allow(addr, width, Rv32AccessType.Store):
+            return mem_fault(7)
+        val paddr = self.mmu.translate(addr)
+        if width == 1:
+            return self.bus.write8(paddr, value)
+        if width == 2:
+            return self.bus.write16(paddr, value)
+        self.bus.write32(paddr, value)
+
+    me tick():
+        self.bus.tick()
+        self.cycle_count = self.cycle_count + 1
+        self.interrupts.machine_software_pending = self.bus.clint.get_msip(0)
+        self.interrupts.machine_timer_pending = self.bus.clint.get_mtip(0)
+        self.interrupts.machine_external_pending = self.bus.plic.has_pending(0)
+        if self.interrupts.has_pending() and self.pipeline.active():
+            self.trap.take(0x80000007, self.pc)
+        if self.pipeline.active():
+            self.pc = (self.pc + 4) and 0xFFFFFFFF
+
+    me load_binary(addr: i64, bytes: [i64]):
+        self.bus.load_binary(addr, bytes)
+
+    fn get_cycle_count() -> i64:
+        self.cycle_count

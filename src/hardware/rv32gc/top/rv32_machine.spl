@@ -1,0 +1,78 @@
+"""
+# RV32GC Machine — QEMU Virt Machine Profile
+"""
+
+use hardware.rv32gc.top.rv32_soc.Rv32Soc
+use hardware.rv32gc.core.rv32_memory.MemResult
+use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvLinuxProfile, RiscvPlatformProfile, Rv32LinuxBootArtifacts}
+
+val DEFAULT_RAM_SIZE: i64 = 0x8000000
+val DEFAULT_RESET_VECTOR: i64 = 0x80000000
+val DEFAULT_NUM_HARTS: i64 = 1
+val VIRT_DRAM_BASE: i64 = 0x80000000
+
+fn qemu_virt_rv32_platform_profile() -> RiscvPlatformProfile:
+    RiscvPlatformProfile.qemu_virt_rv32()
+
+fn rv32_qemu_virt_linux_profile() -> RiscvLinuxProfile:
+    qemu_virt_rv32_platform_profile().linux
+
+fn default_rv32_linux_boot_artifacts() -> Rv32LinuxBootArtifacts:
+    Rv32LinuxBootArtifacts.empty()
+
+class Rv32Machine:
+    soc: Rv32Soc
+    name: text
+
+    static fn create(name: text, num_harts: i64, ram_size: i64) -> Rv32Machine:
+        val platform = qemu_virt_rv32_platform_profile()
+        Rv32Machine(
+            soc: Rv32Soc.create(num_harts, ram_size, platform.reset_vector),
+            name: name
+        )
+
+    static fn default() -> Rv32Machine:
+        Rv32Machine.create("rv32-virt", DEFAULT_NUM_HARTS, DEFAULT_RAM_SIZE)
+
+    me load_binary(addr: i64, bytes: [i64]):
+        self.soc.load_binary(addr, bytes)
+
+    me load_kernel(bytes: [i64]):
+        self.soc.load_binary(VIRT_DRAM_BASE, bytes)
+
+    me configure_linux_handoff(hartid: i64, dtb_addr: i64):
+        self.soc.set_linux_handoff(hartid, dtb_addr)
+
+    me step() -> bool:
+        self.soc.tick()
+        self.soc.pipeline.active()
+
+    me run(max_cycles: i64) -> i64:
+        var cycles: i64 = 0
+        while cycles < max_cycles and self.step():
+            cycles = cycles + 1
+        cycles
+
+    fn get_hart_pc(hartid: i64) -> i64:
+        self.soc.pc
+
+    fn get_hart_reg(hartid: i64, reg: i64) -> i64:
+        self.soc.regs.read(reg)
+
+    fn read_mem(addr: i64, width: i64) -> MemResult:
+        self.soc.read_mem(addr, width)
+
+    me write_mem(addr: i64, value: i64, width: i64) -> MemResult:
+        self.soc.write_mem(addr, value, width)
+
+    fn get_cycle_count() -> i64:
+        self.soc.get_cycle_count()
+
+    fn get_name() -> text:
+        self.name
+
+    me uart_input(byte: i64):
+        self.soc.bus.uart.push_rx(byte)
+
+    me uart_output() -> i64:
+        self.soc.bus.uart.consume_tx()

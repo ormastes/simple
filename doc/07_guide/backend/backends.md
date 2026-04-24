@@ -75,8 +75,9 @@ bin/simple compile --backend=vhdl source.spl    # Produces source.vhd
 bin/simple compile --backend=vhdl source.spl -o out.vhd
 ```
 
-**Strengths:** Direct hardware synthesis from Simple source, strict fail-fast on unsupported constructs, compile-time constraint verification (width, CDC, combinational loops, latch inference).
+**Strengths:** Direct hardware synthesis from Simple source, strict fail-fast on unsupported constructs, compile-time constraint verification (width, CDC, combinational loops, latch inference), and deterministic source-map comments for generated VHDL review.
 **Limitations:** Restricted to a documented hardware subset (integers, booleans, records, enums, processes). No floating-point, dynamic allocation, or general polymorphism. Simulation-backed execution is a follow-on milestone.
+**Current proof surface:** The repo's `hardware.fpga_linux` RISC-V lane uses generated helper contracts plus exact MIR/VHDL/source-map assertions to prove slice-based lowering for selected decode and immediate paths rather than relying on handwritten backend special cases.
 **References:** [Subset Contract](../../04_architecture/vhdl_hardware_subset_contract.md) | [Support Matrix](../../04_architecture/vhdl_support_matrix.md)
 
 ---

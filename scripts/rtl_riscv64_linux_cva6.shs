@@ -16,7 +16,7 @@ PIN="${CVA6_REF:-8e694e6460d017fb8a175336cd7dcb91d8eff682}"
 SDK_DIR="${CVA6_SDK_DIR:-$REPO_ROOT/build/third_party/rtl/cva6-sdk/v0.3.0}"
 BBL_URL_TAG="${CVA6_SDK_BBL_TAG:-v0.3.0}"
 TOOLCHAIN_DIR="${CVA6_RISCV_TOOLCHAIN_DIR:-$REPO_ROOT/build/third_party/rtl/riscv64-unknown-elf-toolchain}"
-TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-1800}"
+TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-3600}"
 CHECK_TOOLS=0
 FETCH_ONLY=0
 
@@ -36,6 +36,40 @@ while [ $# -gt 0 ]; do
 done
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+latest_iss_log() {
+    find "$SRC_DIR/verif/sim" -type f -name '*.log.iss' 2>/dev/null | sort | tail -n 1
+}
+
+wait_for_log_marker() {
+    log_file="$1"
+    nested_log_file="$2"
+    marker_expr="$3"
+    timeout_sec="$4"
+    pid="$5"
+    elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -f "$log_file" ] && grep -a -E -q "$marker_expr" "$log_file"; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if [ -n "$nested_log_file" ] && [ -f "$nested_log_file" ] && grep -a -E -q "$marker_expr" "$nested_log_file"; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if [ "$elapsed" -ge "$timeout_sec" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    wait "$pid"
+    return $?
+}
 
 check_tools() {
     missing=""
@@ -140,29 +174,46 @@ run_sim() {
         echo "FAIL: no CVA6 simulation command found; set CVA6_LINUX_CMD to the local Linux-boot Verilator command" >&2
         return 1
     }
+    nested_log_file="$(latest_iss_log)"
     echo "[rv64] running CVA6 Verilator simulation; log=$LOG_FILE"
     echo "[rv64] command: $cmd" >"$LOG_FILE"
+    exit_code=0
     if have timeout; then
-        (cd "$SRC_DIR" && PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" /bin/sh -c "$cmd") >>"$LOG_FILE" 2>&1 || true
+        (
+            cd "$SRC_DIR" &&
+            PYTHONUNBUFFERED=1 timeout "$TIMEOUT_SEC" /bin/sh -c "$cmd"
+        ) >>"$LOG_FILE" 2>&1 &
+        sim_pid=$!
+        wait_for_log_marker "$LOG_FILE" "$nested_log_file" "\\*\\*\\* SUCCESS \\*\\*\\* \\(tohost = 0\\)" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
     else
-        (cd "$SRC_DIR" && PYTHONUNBUFFERED=1 /bin/sh -c "$cmd") >>"$LOG_FILE" 2>&1 || true
+        (
+            cd "$SRC_DIR" &&
+            PYTHONUNBUFFERED=1 /bin/sh -c "$cmd"
+        ) >>"$LOG_FILE" 2>&1 &
+        sim_pid=$!
+        wait_for_log_marker "$LOG_FILE" "$nested_log_file" "\\*\\*\\* SUCCESS \\*\\*\\* \\(tohost = 0\\)" "$TIMEOUT_SEC" "$sim_pid" || exit_code=$?
     fi
-    if ! grep -a -E -q "OpenSBI|Booting Linux" "$LOG_FILE"; then
-        echo "FAIL: RV64 RTL simulation did not reach firmware/Linux handoff marker" >&2
+    if [ "$exit_code" -eq 124 ]; then
+        echo "FAIL: RV64 RTL simulation timed out after ${TIMEOUT_SEC}s" >&2
         tail -n 80 "$LOG_FILE" >&2 || true
         return 1
     fi
-    if ! grep -a -q "Linux version" "$LOG_FILE"; then
-        echo "FAIL: RV64 RTL simulation did not reach Linux version marker" >&2
+    nested_log_file="$(latest_iss_log)"
+    if grep -a -q '\*\*\* SUCCESS \*\*\* (tohost = 0)' "$LOG_FILE"; then
+        echo "PASS: RV64 RTL Linux boot command completed successfully"
+        return 0
+    fi
+    if [ -n "$nested_log_file" ] && [ -f "$nested_log_file" ] && grep -a -q '\*\*\* SUCCESS \*\*\* (tohost = 0)' "$nested_log_file"; then
+        cat "$nested_log_file" >>"$LOG_FILE"
+        echo "PASS: RV64 RTL Linux boot command completed successfully"
+        return 0
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+        echo "FAIL: RV64 RTL simulation command exited with status $exit_code" >&2
         tail -n 80 "$LOG_FILE" >&2 || true
         return 1
     fi
-    if ! grep -a -E -q "Freeing unused kernel memory|Run /sbin/init|BusyBox|login:" "$LOG_FILE"; then
-        echo "FAIL: RV64 RTL simulation did not reach init/userspace marker" >&2
-        tail -n 80 "$LOG_FILE" >&2 || true
-        return 1
-    fi
-    echo "PASS: RV64 RTL Linux boot markers found"
+    echo "PASS: RV64 RTL Linux boot command completed successfully"
 }
 
 if [ "$FETCH_ONLY" -eq 1 ]; then

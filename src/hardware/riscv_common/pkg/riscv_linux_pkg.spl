@@ -2,7 +2,7 @@
 # RISC-V Linux Profiles — Shared Linux/platform contracts
 
 Shared RISC-V Linux-capable platform metadata used by hardware orchestration,
-RV64 platform contracts, and backend target policy.
+repo-native RV32/RV64 SoC contracts, and backend target policy.
 """
 
 enum RiscvTargetAbi:
@@ -67,7 +67,7 @@ impl RiscvLinuxProfile:
             opensbi_required: true
         )
 
-    static fn rv32_compiler_parity_linux() -> RiscvLinuxProfile:
+    static fn rv32_qemu_virt_linux() -> RiscvLinuxProfile:
         RiscvLinuxProfile(
             xlen: 32,
             abi: RiscvTargetAbi.ILP32D,
@@ -110,10 +110,10 @@ impl RiscvPlatformProfile:
             satp_mode_off: true
         )
 
-    static fn rv32_compiler_parity() -> RiscvPlatformProfile:
+    static fn qemu_virt_rv32() -> RiscvPlatformProfile:
         RiscvPlatformProfile(
-            name: "rv32_compiler_parity",
-            linux: RiscvLinuxProfile.rv32_compiler_parity_linux(),
+            name: "qemu_virt_rv32",
+            linux: RiscvLinuxProfile.rv32_qemu_virt_linux(),
             reset_vector: 0x80000000,
             dram_base: 0x80000000,
             uart_base: 0x10000000,
@@ -126,11 +126,11 @@ impl RiscvPlatformProfile:
         )
 
     fn required_soc_blocks() -> [text]:
-        var blocks = ["clint", "plic", "uart16550", "memory-bus", "dtb"]
+        var blocks = ["clint", "plic", "uart16550", "memory-bus", "dtb", "linux-handoff"]
         if self.linux.xlen == 64:
             blocks.push("rv64gc-core")
         else:
-            blocks.push("rv32-compiler-parity")
+            blocks.push("rv32gc-core")
         if self.linux.mmu_mode == RiscvMmuMode.Sv39:
             blocks.push("sv39-mmu")
         elif self.linux.mmu_mode == RiscvMmuMode.Sv32:
@@ -157,16 +157,56 @@ impl Rv64LinuxBootArtifacts:
         )
 
     fn validate_for(profile: RiscvLinuxProfile) -> [text]:
-        var errors: [text] = []
-        if self.kernel_image == "":
-            errors.push("kernel_image is required")
-        if self.initrd_rootfs == "":
-            errors.push("initrd_rootfs is required")
-        if profile.dtb_required and self.dtb == "":
-            errors.push("dtb is required")
-        if profile.opensbi_required and self.opensbi == "" and self.uboot == "":
-            errors.push("OpenSBI or U-Boot firmware is required")
-        errors
+        validate_linux_boot_artifacts(
+            profile,
+            self.opensbi,
+            self.kernel_image,
+            self.initrd_rootfs,
+            self.dtb,
+            self.uboot
+        )
 
     fn has_firmware() -> bool:
         self.opensbi != "" or self.uboot != ""
+
+struct Rv32LinuxBootArtifacts:
+    opensbi: text
+    kernel_image: text
+    initrd_rootfs: text
+    dtb: text
+    uboot: text
+
+impl Rv32LinuxBootArtifacts:
+    static fn empty() -> Rv32LinuxBootArtifacts:
+        Rv32LinuxBootArtifacts(
+            opensbi: "",
+            kernel_image: "",
+            initrd_rootfs: "",
+            dtb: "",
+            uboot: ""
+        )
+
+    fn validate_for(profile: RiscvLinuxProfile) -> [text]:
+        validate_linux_boot_artifacts(
+            profile,
+            self.opensbi,
+            self.kernel_image,
+            self.initrd_rootfs,
+            self.dtb,
+            self.uboot
+        )
+
+    fn has_firmware() -> bool:
+        self.opensbi != "" or self.uboot != ""
+
+fn validate_linux_boot_artifacts(profile: RiscvLinuxProfile, opensbi: text, kernel_image: text, initrd_rootfs: text, dtb: text, uboot: text) -> [text]:
+    var errors: [text] = []
+    if kernel_image == "":
+        errors.push("kernel_image is required")
+    if initrd_rootfs == "":
+        errors.push("initrd_rootfs is required")
+    if profile.dtb_required and dtb == "":
+        errors.push("dtb is required")
+    if profile.opensbi_required and opensbi == "" and uboot == "":
+        errors.push("OpenSBI or U-Boot firmware is required")
+    errors

@@ -39,8 +39,9 @@ Each test:
 """
 
 use std.sspec.*
-use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms}
-use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, SshStringResult, SshTextResult}
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys}
+use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, ssh_get_u32, SshStringResult, SshTextResult}
+use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.crypto.ecdsa_p256.{ssh_mpint_pair_to_fixed64}
 
@@ -224,6 +225,50 @@ describe "ssh-ed25519 host key signing":
         val tampered = _tampered_hash(hash)
         val bad = rt_ed25519_verify(pubkey, tampered, raw_sig)
         expect(bad).to_equal(0)
+
+describe "host-key aware KEXINIT builder":
+    it "round-trips an ed25519-only KEXINIT through the transport parser":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val parsed = ssh_parse_kexinit(payload)
+        expect(parsed.is_ok()).to_equal(true)
+        val kex = parsed.unwrap()
+        expect(kex.kex_algorithms).to_equal("curve25519-sha256")
+        expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519")
+        expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com")
+        expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com")
+        expect(kex.mac_client_to_server).to_equal("none")
+        expect(kex.mac_server_to_client).to_equal("none")
+        expect(kex.compression_client_to_server).to_equal("none")
+        expect(kex.compression_server_to_client).to_equal("none")
+        expect(kex.first_kex_packet_follows).to_equal(false)
+
+    it "encodes the KEXINIT cookie, languages, and reserved trailer at fixed offsets":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        expect(payload[0]).to_equal(20)
+        var i: u64 = 1
+        while i < 17:
+            expect(payload[i]).to_equal(0)
+            i = i + 1
+        expect(ssh_get_u32(payload, 17)).to_equal(17)
+
+        var off: u64 = 17
+        var field: u64 = 0
+        while field < 10:
+            val field_len = ssh_get_u32(payload, off).to_u64()
+            off = off + 4 + field_len
+            field = field + 1
+        expect(payload[off]).to_equal(0)
+        off = off + 1
+        expect(ssh_get_u32(payload, off)).to_equal(0)
+        expect(off + 4).to_equal(payload.len())
 
 # ============================================================================
 # rsa-sha2-256 Tests

@@ -1,9 +1,11 @@
 # RISC-V FPGA Linux Feature Requirements
 
-- REQ-RFL-001: Provide a Xilinx board-profile contract with board name, part, clock, reset, memory, UART, constraints, programmer, and Vivado mode.
-- REQ-RFL-002: Permit `xilinx_generic` for pre-hardware preparation, but reject it for hardware boot validation.
-- REQ-RFL-003: Define RV32 and RV64 CPU SoC lanes with top module, RTL output directory, boot ROM path, Linux artifact set, MMU mode, required SoC blocks, and boot markers.
-- REQ-RFL-004: Mark RV64 Linux as upstream and require firmware handoff through OpenSBI or U-Boot before Linux boot validation.
-- REQ-RFL-005: Mark RV32 Linux as experimental and require externally supplied kernel, rootfs, DTB, and toolchain artifacts before boot validation.
-- REQ-RFL-006: Generate a deterministic Vivado TCL preparation plan from the board profile and lane manifests.
-- REQ-RFL-007: Keep pre-hardware validation executable without a connected FPGA.
+Superseded as the canonical Linux-capable hardware/program scope by `rv64_linux_rtl_pipeline`.
+This file remains historical context for the earlier mixed-lane orchestration and helper-proof milestone only.
+
+Historical requirement interpretation:
+
+- REQ-RFL-001..002 remain the board-profile baseline for prepare-only generation and hardware-boot gating.
+- REQ-RFL-003..007 now describe orchestration history, not current Linux truth. Current repo truth is RV64-first; RV32 remains compiler-parity only and default output no longer claims a first-class RV32 Linux CPU/RTL lane.
+- REQ-RFL-008..011 are complete for the bounded helper-proof milestone. The implemented helper set is `decode_writeback`, `decode_branch_immediate`, `decode_store_immediate`, `decode_i_immediate`, `decode_upper_immediate`, `decode_execute_control`, and `decode_jump_immediate`, with exact MIR/VHDL/source-map assertions.
+- No requirement in this historical file should be read as a claim that the repo already has a full Linux-capable generated CPU or SoC. CSR, privilege, MMU runtime behavior, interrupts, traps, and Linux boot proof remain outside this artifact.

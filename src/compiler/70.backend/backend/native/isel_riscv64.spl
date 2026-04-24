@@ -20,11 +20,18 @@
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, LocalId, LocalKind, BlockId, SwitchCase}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
 use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
+
+fn rv64_linux_contract() -> RiscvTargetContract:
+    riscv_linux_target_contract(CodegenTarget.Riscv64)
+
+val RV64_WORD_SIZE = rv64_linux_contract().pointer_bits / 8
 
 # ============================================================================
 # Operand Lowering
@@ -144,12 +151,13 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
 
-    # Set frame size (aligned to 16 as required by RISC-V ABI)
+    # Set frame size using the shared Linux ABI stack alignment contract.
     var frame_size = local_ctx.next_frame_offset
-    # Add space for ra and s0 (16 bytes minimum)
-    frame_size = frame_size + 16
-    if frame_size % 16 != 0:
-        frame_size = frame_size + (16 - (frame_size % 16))
+    # Add space for ra and s0 using the shared RV64 pointer-size contract.
+    frame_size = frame_size + (RV64_WORD_SIZE * 2)
+    val stack_align = rv64_linux_contract().stack_align_bytes
+    if frame_size % stack_align != 0:
+        frame_size = frame_size + (stack_align - (frame_size % stack_align))
     mach_func = mach_func_set_frame_size(mach_func, frame_size)
 
     # Propagate context back

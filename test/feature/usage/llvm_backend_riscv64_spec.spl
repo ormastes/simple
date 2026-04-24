@@ -10,47 +10,54 @@
 Validates that the LLVM backend correctly generates code for RISC-V 64-bit targets.
 """
 
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRBuilder__create, MirToLlvm, MirToLlvm__create}
-use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetTriple__from_target, LlvmTargetConfig, LlvmTargetConfig__for_target}
-use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, LlvmTypeMapper__create_for_target}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, MirToLlvm}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_type_mapper.{LlvmTypeMapper}
 use compiler.backend.entry_point.halt_instruction_for_target
-use compiler.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.{CodegenTarget, riscv_linux_target_contract}
 
 describe "LLVM Backend RISC-V 64":
 
     context "target triple":
         it "generates correct riscv64 triple":
-            val triple = LlvmTargetTriple__from_target(CodegenTarget.Riscv64)
+            val triple = LlvmTargetTriple.from_target(CodegenTarget.Riscv64)
             expect(triple.arch).to_equal("riscv64")
-            expect(triple.to_text()).to_contain("riscv64")
+            expect(triple.to_text()).to_equal("riscv64-unknown-linux-gnu")
 
     context "datalayout":
         it "contains correct riscv64 layout":
-            val triple = LlvmTargetTriple__from_target(CodegenTarget.Riscv64)
+            val triple = LlvmTargetTriple.from_target(CodegenTarget.Riscv64)
             val dl = triple.datalayout()
             expect(dl).to_contain("p:64:64")
 
     context "CPU defaults":
         it "defaults to generic-rv64":
-            val config = LlvmTargetConfig__for_target(CodegenTarget.Riscv64, nil)
+            val config = LlvmTargetConfig.for_target(CodegenTarget.Riscv64, nil)
             expect(config.cpu).to_equal("generic-rv64")
+            expect(config.abi.unwrap()).to_equal("lp64d")
 
         it "includes standard extensions":
-            val config = LlvmTargetConfig__for_target(CodegenTarget.Riscv64, nil)
+            val config = LlvmTargetConfig.for_target(CodegenTarget.Riscv64, nil)
             expect(config.features).to_contain("+m")
             expect(config.features).to_contain("+a")
             expect(config.features).to_contain("+f")
             expect(config.features).to_contain("+d")
             expect(config.features).to_contain("+c")
 
+        it "matches the shared RV64 Linux target contract":
+            val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
+            expect(contract.triple()).to_equal("riscv64-unknown-linux-gnu")
+            expect(contract.abi.to_text()).to_equal("lp64d")
+            expect(contract.march).to_equal("rv64gc")
+
     context "native integer type":
         it "native_int_type is i64":
-            var translator = MirToLlvm__create("test", CodegenTarget.Riscv64, nil)
+            var translator = MirToLlvm.create("test", CodegenTarget.Riscv64, nil)
             expect(translator.native_int()).to_equal("i64")
 
     context "type mapping":
         it "uses 64-bit target_bits":
-            val mapper = LlvmTypeMapper__create_for_target(CodegenTarget.Riscv64)
+            val mapper = LlvmTypeMapper.create_for_target(CodegenTarget.Riscv64)
             expect(mapper.target_bits).to_equal(64)
 
     context "bare-metal entry":
@@ -60,6 +67,6 @@ describe "LLVM Backend RISC-V 64":
 
     context "builder size type":
         it "uses i64 size type":
-            val triple = LlvmTargetTriple__from_target(CodegenTarget.Riscv64)
-            var builder = LlvmIRBuilder__create("test", triple)
+            val triple = LlvmTargetTriple.from_target(CodegenTarget.Riscv64)
+            var builder = LlvmIRBuilder.create("test", triple)
             expect(builder.size_type).to_equal("i64")

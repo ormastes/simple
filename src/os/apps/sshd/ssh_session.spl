@@ -23,6 +23,7 @@ extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
+extern fn rt_net_recv_version_text(sock_fd: i64) -> text
 extern fn rt_net_close(sock_fd: i64) -> i64
 
 # ============================================================================
@@ -105,20 +106,16 @@ impl SshSession:
     me run():
         """Main session loop. Drives the SSH protocol state machine."""
         serial_println("[sshd-session] start")
-        self.do_version_exchange()
-        if self.state != SessionState.KexInit:
+        if not self.do_version_exchange():
             return
 
-        self.do_kex()
-        if self.state != SessionState.Authentication:
+        if not self.do_kex():
             return
 
-        self.do_service_request()
-        if self.state != SessionState.Authentication:
+        if not self.do_service_request():
             return
 
-        self.do_auth()
-        if self.state != SessionState.Interactive:
+        if not self.do_auth():
             return
 
         self.do_interactive()
@@ -127,72 +124,37 @@ impl SshSession:
     # Phase 1: Version Exchange
     # ========================================================================
 
-    me do_version_exchange():
+    me do_version_exchange() -> bool:
         """Exchange SSH version strings (RFC 4253 section 4.2)."""
         serial_println("[sshd-session] version exchange")
         # Send our version string
         val our_version = ssh_build_version_string()
         self.raw_send(our_version)
 
-        # Read the client banner. The first TCP read may also contain the first
-        # SSH packet, so preserve bytes after the CRLF terminator for KEX.
-        val client_data = self.raw_recv(256)
-        if client_data.len() == 0:
+        # Read the client banner via the C TCP ring directly. The byte-array
+        # marshalling path is not reliable enough on this baremetal lane for
+        # SSH version parsing.
+        val client_version = rt_net_recv_version_text(self.socket_fd as i64)
+        if client_version == "":
             self.state = SessionState.Closed
-            return
+            return false
 
-        var line_end: u64 = 0
-        var line_term_len: u64 = 0
-        var found_line_end = false
-        while line_end < client_data.len():
-            if client_data[line_end] == 0x0A:
-                found_line_end = true
-                line_term_len = 1
-                if line_end > 0 and client_data[line_end - 1] == 0x0D:
-                    line_term_len = 2
-                    line_end = line_end - 1
-                break
-            line_end = line_end + 1
-
-        if not found_line_end:
-            line_end = client_data.len()
-            line_term_len = 0
-
-        var version_line: [u8] = []
-        var i: u64 = 0
-        while i < line_end + line_term_len:
-            version_line.push(client_data[i])
-            i = i + 1
-
-        while i < client_data.len():
-            self.recv_buf.push(client_data[i])
-            i = i + 1
-
-        if line_end < 8 or
-           version_line[0] != 0x53 or  # S
-           version_line[1] != 0x53 or  # S
-           version_line[2] != 0x48 or  # H
-           version_line[3] != 0x2D:    # -
-            serial_println("[sshd-session] invalid version prefix len={line_end} b0={version_line[0]} b1={version_line[1]} b2={version_line[2]} b3={version_line[3]}")
+        if not client_version.starts_with("SSH-2.0-"):
+            serial_println("[sshd-session] invalid version text={client_version}")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
-            return
+            return false
 
-        var version_bytes: [u8] = []
-        i = 0
-        while i < line_end:
-            version_bytes.push(version_line[i])
-            i = i + 1
-
-        self.client_version = rt_string_from_byte_array(version_bytes)
-        serial_println("[sshd-session] version parsed len={version_bytes.len()} text={self.client_version}")
+        self.client_version = client_version
+        serial_println("[sshd-session] version parsed text={self.client_version}")
         serial_println("[sshd-session] version exchange ok")
         self.state = SessionState.KexInit
+        true
 
     # ========================================================================
     # Phase 2: Key Exchange
     # ========================================================================
 
-    me do_kex():
+    me do_kex() -> bool:
         """Perform key exchange (curve25519-sha256)."""
         serial_println("[sshd-session] kex start")
         # Send our KEXINIT — advertise algorithms available in our host key set
@@ -204,14 +166,14 @@ impl SshSession:
         val client_payload = self.recv_packet_payload()
         if client_payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
-            return
+            return false
         self.client_kexinit_payload = client_payload
 
         # Parse client KEXINIT
         val r_client_kex = ssh_parse_kexinit(client_payload)
         if r_client_kex.is_err():
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
-            return
+            return false
         val client_kex = r_client_kex.unwrap()
 
         # Parse our own KEXINIT (for negotiation)
@@ -222,18 +184,18 @@ impl SshSession:
         val r_algos = ssh_negotiate_algorithms(client_kex, server_kex)
         if r_algos.is_err():
             self.disconnect(3, "algorithm negotiation failed")
-            return
+            return false
 
         # Receive KEX_ECDH_INIT (client's ephemeral public key)
         val kex_init_payload = self.recv_packet_payload()
         if kex_init_payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
-            return
+            return false
 
         val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
         if r_client_pub.is_err():
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
-            return
+            return false
         val client_public = r_client_pub.unwrap()
 
         # Generate our ephemeral keypair
@@ -271,7 +233,7 @@ impl SshSession:
         val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
         if r_sig.is_err():
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
-            return
+            return false
         val sig_blob = r_sig.unwrap()
 
         # Send KEX_ECDH_REPLY
@@ -286,31 +248,32 @@ impl SshSession:
         val client_newkeys = self.recv_packet_payload()
         if client_newkeys.len() == 0 or client_newkeys[0] != SSH_MSG_NEWKEYS:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
-            return
+            return false
 
         # Derive session keys and activate cipher based on negotiated algorithm
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
         if (algos_early.cipher_c2s != "aes256-gcm@openssh.com" or
             algos_early.cipher_s2c != "aes256-gcm@openssh.com"):
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
-            return
+            return false
         self.cipher.activate(keys, self.recv_seq, self.send_seq)
         serial_println("[sshd-session] cipher activated: c2s_seq={self.recv_seq} s2c_seq={self.send_seq}")
         serial_println("[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
+        true
 
     # ========================================================================
     # Phase 3: Service Request
     # ========================================================================
 
-    me do_service_request():
+    me do_service_request() -> bool:
         """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
         serial_println("[sshd-session] service request")
         val payload = self.recv_packet_payload()
         if payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
-            return
+            return false
 
         if payload[0] == SSH_MSG_SERVICE_REQUEST:
             val r = ssh_parse_service_request(payload)
@@ -320,17 +283,18 @@ impl SshSession:
                     val accept = ssh_build_service_accept("ssh-userauth")
                     self.send_packet(accept)
                     serial_println("[sshd-session] service request ok")
-                    return
+                    return true
 
             self.disconnect(7, "service not available")
         else:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected SERVICE_REQUEST")
+        false
 
     # ========================================================================
     # Phase 4: Authentication
     # ========================================================================
 
-    me do_auth():
+    me do_auth() -> bool:
         """Handle authentication requests. Loops until success or max attempts."""
         serial_println("[sshd-session] auth")
         var attempts: u32 = 0
@@ -343,7 +307,7 @@ impl SshSession:
             val payload = self.recv_packet_payload()
             if payload.len() == 0:
                 self.state = SessionState.Closed
-                return
+                return false
 
             if payload[0] != SSH_MSG_USERAUTH_REQUEST:
                 # Ignore non-auth messages during auth phase
@@ -372,7 +336,7 @@ impl SshSession:
                     self.send_packet(success)
                     serial_println("[sshd-session] auth ok")
                     self.state = SessionState.Interactive
-                    return
+                    return true
                 else:
                     attempts = attempts + 1
                     val fail = ssh_build_auth_failure(["publickey", "password"], false)
@@ -412,7 +376,7 @@ impl SshSession:
                             self.send_packet(success)
                             serial_println("[sshd-session] auth ok (publickey)")
                             self.state = SessionState.Interactive
-                            return
+                            return true
                         else:
                             attempts = attempts + 1
                             val fail = ssh_build_auth_failure(["publickey", "password"], false)
@@ -430,6 +394,7 @@ impl SshSession:
 
         # Too many failed attempts
         self.disconnect(14, "too many authentication failures")
+        false
 
     # ========================================================================
     # Phase 5: Interactive (Channel Management)

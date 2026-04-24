@@ -457,6 +457,21 @@ if [ "$ARCH_MODE" = "x86_64" ] && build_disk_hello_elf; then
     ELFSEEDED=1
 fi
 
+restage_uefi_boot_files() {
+    if [ -z "${SIMPLEOS_UEFI_KERNEL:-}" ]; then
+        return 0
+    fi
+    if [ -f "build/os/esp/EFI/BOOT/BOOTX64.EFI" ]; then
+        mkdir -p "$TMPDIR/EFI/BOOT"
+        cp "build/os/esp/EFI/BOOT/BOOTX64.EFI" "$TMPDIR/EFI/BOOT/BOOTX64.EFI" || return 1
+    fi
+    if [ -f "$TMPDIR/boot/grub/grub.cfg" ]; then
+        mkdir -p "$TMPDIR/boot/grub"
+        cp "$TMPDIR/boot/grub/grub.cfg" "$TMPDIR/boot/grub/grub.cfg" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 build_remote_window_elf() {
     SRC="$1"
     DEST_PRIMARY="$2"
@@ -490,6 +505,33 @@ build_remote_window_elf() {
         cp "$ELF" "$DEST_SECONDARY"
     fi
     echo "[make_os_disk] Seeded $(basename "$SRC" .c) ELF"
+    return 0
+}
+
+build_simple_app_elf() {
+    SRC="$1"
+    DEST_PRIMARY="$2"
+    DEST_SECONDARY="$3"
+    CACHE_KEY="$4"
+    CACHE_PATH="$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE/${CACHE_KEY}.smf"
+    LOG_PATH="$SIMPLEOS_CLI_APP_CACHE_ROOT/logs/${CACHE_KEY}.log"
+
+    mkdir -p "$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE" "$SIMPLEOS_CLI_APP_CACHE_ROOT/logs"
+
+    if [ ! -f "$CACHE_PATH" ] || [ "$SRC" -nt "$CACHE_PATH" ]; then
+        echo "[make_os_disk] Compiling Simple app: $CACHE_KEY"
+        if ! bin/simple compile "$SRC" --target "$SIMPLEOS_CLI_BUILD_TARGET" -o "$CACHE_PATH" >"$LOG_PATH" 2>&1; then
+            echo "[make_os_disk] ERROR: failed to compile $CACHE_KEY from $SRC"
+            tail -n 40 "$LOG_PATH" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    cp "$CACHE_PATH" "$DEST_PRIMARY" || return 1
+    if [ -n "$DEST_SECONDARY" ]; then
+        cp "$CACHE_PATH" "$DEST_SECONDARY" || return 1
+    fi
+    echo "[make_os_disk] Seeded ${CACHE_KEY} ELF"
     return 0
 }
 
@@ -692,10 +734,11 @@ else
         "$TMPDIR/usr/bin/editor" || true
     make_exec_smf "$TMPDIR/SYS/APPS/editor" "$TMPDIR/EDITORSM.SMF" || true
     cp "$TMPDIR/EDITORSM.SMF" "$TMPDIR/SYS/APPS/EDITORSM.SMF" 2>/dev/null || true
-    build_remote_window_elf \
-        "examples/simpleos_remote_gui/simple_browser_gui.c" \
+    build_simple_app_elf \
+        "src/app/hosted_apps/simple_browser_client.spl" \
         "$TMPDIR/SYS/APPS/simple_browser" \
-        "$TMPDIR/usr/local/bin/simple-browser" || true
+        "$TMPDIR/usr/local/bin/simple-browser" \
+        "simple_browser" || true
     make_exec_smf "$TMPDIR/SYS/APPS/simple_browser" "$TMPDIR/SBROWSMF.SMF" || true
     cp "$TMPDIR/SBROWSMF.SMF" "$TMPDIR/SYS/APPS/SBROWSMF.SMF" 2>/dev/null || true
     cp "$TMPDIR/SBROWSMF.SMF" "$TMPDIR/SYS/APPS/simple_browser.smf" 2>/dev/null || true
@@ -741,6 +784,8 @@ else
     # FR-SOS-024 Phase 3: ring-3 smoke ELF for the EnterUserBlocking test
     build_ring3_smoke_elf || true
 fi
+
+restage_uefi_boot_files || exit 1
 
 populate_with_python_fat32() {
     if ! command -v python3 >/dev/null 2>&1; then

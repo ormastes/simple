@@ -1,0 +1,105 @@
+"""
+# RV32 System Bus — address decode and MMIO routing
+"""
+
+use hardware.rv32gc.core.rv32_memory.{MemResult, mem_ok, mem_fault}
+use hardware.rv32gc.mem.rv32_ram.Rv32Ram
+use hardware.rv32gc.periph.rv32_uart.Rv32Uart
+use hardware.rv32gc.periph.rv32_clint.Rv32Clint
+use hardware.rv32gc.periph.rv32_plic.Rv32Plic
+use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvPlatformProfile}
+
+val UART0_SIZE: i64 = 0x100
+val CLINT_SIZE: i64 = 0x10000
+val PLIC_SIZE: i64 = 0x4000000
+val DRAM_BASE: i64 = 0x80000000
+
+fn rv32_bus_platform_profile() -> RiscvPlatformProfile:
+    RiscvPlatformProfile.qemu_virt_rv32()
+
+class Rv32Bus:
+    ram: Rv32Ram
+    uart: Rv32Uart
+    clint: Rv32Clint
+    plic: Rv32Plic
+
+    static fn create(ram_size: i64, num_harts: i64) -> Rv32Bus:
+        Rv32Bus(
+            ram: Rv32Ram.create(ram_size),
+            uart: Rv32Uart.create(),
+            clint: Rv32Clint.create(num_harts),
+            plic: Rv32Plic.create(num_harts * 2)
+        )
+
+    fn _is_uart(addr: i64) -> bool:
+        val platform = rv32_bus_platform_profile()
+        addr >= platform.uart_base and addr < (platform.uart_base + UART0_SIZE)
+
+    fn _is_clint(addr: i64) -> bool:
+        val platform = rv32_bus_platform_profile()
+        addr >= platform.clint_base and addr < (platform.clint_base + CLINT_SIZE)
+
+    fn _is_plic(addr: i64) -> bool:
+        val platform = rv32_bus_platform_profile()
+        addr >= platform.plic_base and addr < (platform.plic_base + PLIC_SIZE)
+
+    fn _is_dram(addr: i64) -> bool:
+        addr >= rv32_bus_platform_profile().dram_base
+
+    fn _dram_offset(addr: i64) -> i64:
+        addr - rv32_bus_platform_profile().dram_base
+
+    fn read8(addr: i64) -> MemResult:
+        val platform = rv32_bus_platform_profile()
+        if self._is_uart(addr):
+            return mem_ok(self.uart.read_reg(addr - platform.uart_base))
+        if self._is_dram(addr):
+            return self.ram.read8(self._dram_offset(addr))
+        mem_fault(5)
+
+    fn read16(addr: i64) -> MemResult:
+        if self._is_dram(addr):
+            return self.ram.read16(self._dram_offset(addr))
+        mem_fault(5)
+
+    fn read32(addr: i64) -> MemResult:
+        val platform = rv32_bus_platform_profile()
+        if self._is_clint(addr):
+            return mem_ok(self.clint.read(addr - platform.clint_base))
+        if self._is_plic(addr):
+            return mem_ok(self.plic.read(addr - platform.plic_base))
+        if self._is_dram(addr):
+            return self.ram.read32(self._dram_offset(addr))
+        mem_fault(5)
+
+    me write8(addr: i64, value: i64) -> MemResult:
+        val platform = rv32_bus_platform_profile()
+        if self._is_uart(addr):
+            self.uart.write_reg(addr - platform.uart_base, value)
+            return mem_ok(0)
+        if self._is_dram(addr):
+            return self.ram.write8(self._dram_offset(addr), value)
+        mem_fault(7)
+
+    me write16(addr: i64, value: i64) -> MemResult:
+        if self._is_dram(addr):
+            return self.ram.write16(self._dram_offset(addr), value)
+        mem_fault(7)
+
+    me write32(addr: i64, value: i64) -> MemResult:
+        val platform = rv32_bus_platform_profile()
+        if self._is_clint(addr):
+            self.clint.write(addr - platform.clint_base, value)
+            return mem_ok(0)
+        if self._is_plic(addr):
+            self.plic.write_reg(addr - platform.plic_base, value)
+            return mem_ok(0)
+        if self._is_dram(addr):
+            return self.ram.write32(self._dram_offset(addr), value)
+        mem_fault(7)
+
+    me tick():
+        self.clint.tick()
+
+    me load_binary(base_addr: i64, bytes: [i64]):
+        self.ram.load_bytes(base_addr - rv32_bus_platform_profile().dram_base, bytes)

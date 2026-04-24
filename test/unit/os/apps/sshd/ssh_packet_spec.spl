@@ -1,0 +1,140 @@
+# @cover src/os/apps/sshd/ssh_packet.spl 75%
+use std.sspec.*
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_build_kexinit_for_host_keys}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_packet_build, ssh_packet_read}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        return c - 0x30
+    if c >= 0x61 and c <= 0x66:
+        return c - 0x61 + 10
+    if c >= 0x41 and c <= 0x46:
+        return c - 0x41 + 10
+    0
+
+fn _hex_decode(hex: text) -> [u8]:
+    val hex_bytes = hex.to_bytes()
+    var result: [u8] = []
+    var i: u64 = 0
+    while i + 1 < hex_bytes.len():
+        val hi = _hex_nibble(hex_bytes[i])
+        val lo = _hex_nibble(hex_bytes[i + 1])
+        result.push((hi << 4) | lo)
+        i = i + 2
+    result
+
+fn _ed25519_seed() -> [u8]:
+    _hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55")
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _expect_prefix(actual: [u8], expected_hex: text):
+    val expected = _hex_decode(expected_hex)
+    expect(actual.len() >= expected.len()).to_equal(true)
+    var i: u64 = 0
+    while i < expected.len():
+        expect(_u8_at(actual, i)).to_equal(_u8_at(expected, i))
+        i = i + 1
+
+describe "SSH packet build":
+    it "preserves a host-key aware KEXINIT payload byte-for-byte inside the packet":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val packet = ssh_packet_build(payload, 0)
+
+        expect(ssh_get_u32(packet, 0)).to_equal(156)
+        expect(_u8_at(packet, 4)).to_equal(5)
+        expect(_u8_at(packet, 5)).to_equal(20)
+
+        var i: u64 = 0
+        while i < payload.len():
+            expect(_u8_at(packet, 5 + i)).to_equal(_u8_at(payload, i))
+            i = i + 1
+
+    it "keeps the expected KEXINIT wire prefix after packet wrapping":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val packet = ssh_packet_build(payload, 0)
+        _expect_prefix(
+            packet,
+            "0000009c05140000000000000000000000000000000000000011637572766532353531392d7368613235360000000b7373682d65643235353139"
+        )
+
+    it "round-trips a host-key aware KEXINIT packet through ssh_packet_read":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val packet = ssh_packet_build(payload, 0)
+        val parsed = ssh_packet_read(packet, 0)
+        expect(parsed.is_ok()).to_equal(true)
+        val pair = parsed.unwrap()
+        expect(pair.consumed).to_equal(packet.len())
+        expect(pair.packet.payload.len()).to_equal(payload.len())
+
+        var i: u64 = 0
+        while i < payload.len():
+            expect(_u8_at(pair.packet.payload, i)).to_equal(_u8_at(payload, i))
+            i = i + 1
+
+    it "does not zero out payload bytes after the first length field":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val packet = ssh_packet_build(payload, 0)
+
+        expect(_u8_at(packet, 11)).to_equal(0)
+        expect(_u8_at(packet, 12)).to_equal(0)
+        expect(_u8_at(packet, 13)).to_equal(0)
+        expect(_u8_at(packet, 14)).to_equal(17)
+        expect(_u8_at(packet, 15)).to_equal(0x63)
+        expect(_u8_at(packet, 16)).to_equal(0x75)
+        expect(_u8_at(packet, 17)).to_equal(0x72)
+        expect(_u8_at(packet, 18)).to_equal(0x76)
+
+describe "SSH packet read errors":
+    it "returns Err when fewer than 5 bytes are available":
+        val truncated = _hex_decode("0000009c")
+        val parsed = ssh_packet_read(truncated, 0)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("ssh_packet_read: need at least 5 bytes")
+
+    it "returns Err when packet_length is smaller than 2":
+        val invalid = _hex_decode("0000000100")
+        val parsed = ssh_packet_read(invalid, 0)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("ssh_packet_read: packet_length too small")
+
+    it "returns Err when packet bytes are incomplete":
+        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
+            ed25519_seed: _ed25519_seed(),
+            rsa_pkcs8: nil,
+            ecdsa_p256_pkcs8: nil
+        ))
+        val packet = ssh_packet_build(payload, 0)
+        var truncated: [u8] = []
+        var i: u64 = 0
+        while i + 3 < packet.len():
+            truncated.push(_u8_at(packet, i))
+            i = i + 1
+        val parsed = ssh_packet_read(truncated, 0)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("ssh_packet_read: incomplete packet")
+
+    it "returns Err when padding exceeds packet_length":
+        val invalid = _hex_decode("0000000202")
+        val parsed = ssh_packet_read(invalid, 0)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("ssh_packet_read: padding exceeds packet")

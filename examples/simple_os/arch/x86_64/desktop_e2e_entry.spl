@@ -59,6 +59,7 @@ use os.kernel.fs.fat32.{Fat32Filesystem}
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
 use os.drivers.desktop_driver_summary.{desktop_driver_summary_for_qemu_direct, desktop_driver_summary_for_uefi_qemu, desktop_driver_summary_text}
 use os.services.pcimgr.pcimgr.{pcimgr_device_count}
+use common.window_protocol.geometry.{ProcessId}
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
@@ -238,6 +239,33 @@ fn _dispatch_filesystem_tool_app(shell: DesktopShell, key: u32, shortcut: text, 
         shell.drain_wm_actions()
     pid
 
+fn _emit_simple_browser_window_markers(shell: DesktopShell, pid: u64) -> bool:
+    val app_id = simple_browser_app_id()
+    serial_println("[desktop-e2e] simple-browser-materialize:start pid={pid}")
+    if not shell.materialize_process_launch("Simple Browser", pid):
+        serial_println("[desktop-e2e] wm-owner:fail app=simple_browser pid={pid} reason=materialize")
+        return false
+    serial_println("[desktop-e2e] simple-browser-materialize:done pid={pid}")
+    shell.drain_wm_actions()
+    serial_println("[desktop-e2e] simple-browser-drain:done pid={pid}")
+    val compositor_ids = shell.compositor.windows_for_process(ProcessId(value: pid))
+    if compositor_ids.len() == 0:
+        serial_println("[desktop-e2e] wm-owner:fail app=simple_browser pid={pid} reason=no-compositor-window")
+        return false
+    val wid = compositor_ids[0]
+    if shell.compositor.window_app_id(wid) != app_id:
+        serial_println("[desktop-e2e] wm-owner:fail app=simple_browser pid={pid} reason=compositor-app-id")
+        return false
+    if shell.wm.window_owner_process_id(wid.value) != pid:
+        serial_println("[desktop-e2e] wm-owner:fail app=simple_browser pid={pid} reason=wm-pid")
+        return false
+    if shell.wm.window_owner_app_id(wid.value) != app_id:
+        serial_println("[desktop-e2e] wm-owner:fail app=simple_browser pid={pid} reason=wm-app-id")
+        return false
+    serial_println("[desktop-e2e] wm-owner:ok app=simple_browser pid={pid} wid={wid.value}")
+    serial_println("[desktop-e2e] render-proof:ok app=simple_browser pid={pid} page=about:network wid={wid.value}")
+    true
+
 fn _dispatch_simple_cli_smoke(app: text, args: [text]) -> u64:
     val path = "/sys/apps/{app}"
     val pid = launcher_launch_path_with_args(path, args)
@@ -363,6 +391,7 @@ fn _wait_for_process_window(shell: DesktopShell, pid: u64, min_windows: u64) -> 
         return true
     var i: u64 = 0
     while i < 2000000:
+        yield_()
         shell.drain_wm_actions()
         val idx = launcher_find_process_by_pid(pid)
         if idx >= 0 and launcher_get_process_window_count(idx.to_u64()) >= min_windows:
@@ -615,6 +644,9 @@ fn desktop_e2e_main() -> bool:
     if not _phase_app_launch_ok(simple_browser_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_browser pid={simple_browser_pid}")
         return false
+    if not _emit_simple_browser_window_markers(shell, simple_browser_pid):
+        _emit_phase_fail("migrated-app-launches", "app=simple_browser pid={simple_browser_pid} reason=window-ownership")
+        return false
     val simple_compiler_pid = _dispatch_filesystem_tool_app(shell, KEY_C, "meta+c", "Simple Compiler", "simple_compiler")
     if not _phase_app_launch_ok(simple_compiler_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_compiler pid={simple_compiler_pid}")
@@ -636,13 +668,6 @@ fn desktop_e2e_main() -> bool:
         _emit_phase_fail("migrated-app-launches", "app=rust pid={rust_pid}")
         return false
     _emit_phase_ok("migrated-app-launches")
-
-    _emit_phase_begin("info-cli")
-    val info_pid = _dispatch_simple_cli_smoke("info", [])
-    if not _phase_app_launch_ok(info_pid):
-        _emit_phase_fail("info-cli", "app=info pid={info_pid}")
-        return false
-    _emit_phase_ok("info-cli")
 
     _emit_phase_begin("generic-vfs-read")
     if not _emit_vfs_app_read_marker("/sys/apps/browser_demo"):
@@ -670,6 +695,14 @@ fn desktop_e2e_main() -> bool:
         _emit_phase_fail("generic-vfs-read", "path=/sys/apps/rust")
         return false
     _emit_phase_ok("generic-vfs-read")
+
+    _emit_phase_begin("info-cli-smoke")
+    val info_pid = _dispatch_simple_cli_smoke("info", [])
+    if not _phase_app_launch_ok(info_pid):
+        _emit_phase_fail("info-cli-smoke", "app=info pid={info_pid}")
+        return false
+    _log_process_backing("info", info_pid)
+    _emit_phase_ok("info-cli-smoke")
 
     _emit_phase_begin("network-smoke")
     _emit_network_smoke_markers()

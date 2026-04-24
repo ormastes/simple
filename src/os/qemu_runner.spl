@@ -1890,7 +1890,10 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     args.push("-m")
     args.push(scenario.memory)
     args.push("-serial")
-    args.push("stdio")
+    if scenario.name == "x64-desktop-uefi":
+        args.push("file:" + desktop_uefi_serial_log_path())
+    else:
+        args.push("stdio")
     if not scenario.gui_mode:
         args.push("-display")
         args.push("none")
@@ -1914,6 +1917,20 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
     for extra in scenario.qemu_extra:
         args.push(extra)
     args
+
+fn desktop_uefi_serial_log_path() -> text:
+    "build/os/x64-desktop-uefi.serial.log"
+
+fn _clear_serial_log(path: text):
+    val _ = rt_process_run_timeout("/bin/sh", ["-c", "rm -f \"" + path + "\""], 5000)
+
+fn _read_serial_log(path: text) -> text:
+    if not rt_file_exists(path):
+        return ""
+    val (stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + path + "\""], 5000)
+    if exit_code != 0:
+        return ""
+    stdout
 
 fn build_scenario(scenario: QemuScenario) -> bool:
     """Build the kernel image required by a named scenario."""
@@ -1941,9 +1958,15 @@ fn run_scenario(scenario: QemuScenario) -> bool:
     val qemu_args = cmd_parts.slice(1)
     print "[run] {scenario.name}: {cmd_parts.join(" ")}"
     val timeout: i64 = if scenario.gui_mode: 600000 else: 30000
+    if scenario.name == "x64-desktop-uefi":
+        _clear_serial_log(desktop_uefi_serial_log_path())
     val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
-    if stdout != "":
-        print "[run] serial output:\n{stdout}"
+    val serial_output = if scenario.name == "x64-desktop-uefi":
+        _read_serial_log(desktop_uefi_serial_log_path())
+    else:
+        stdout
+    if serial_output != "":
+        print "[run] serial output:\n{serial_output}"
     if stderr != "":
         print "[run] stderr:\n{stderr}"
     val success = exit_code == 0 or exit_code == 1
@@ -1965,8 +1988,13 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
+    if scenario.name == "x64-desktop-uefi":
+        _clear_serial_log(desktop_uefi_serial_log_path())
     val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
-    val serial_output = stdout + stderr
+    val serial_output = if scenario.name == "x64-desktop-uefi":
+        _read_serial_log(desktop_uefi_serial_log_path()) + stderr
+    else:
+        stdout + stderr
     print "[test] serial output:\n{serial_output}"
     val accepted = if scenario.name == "x64-desktop-uefi":
         desktop_uefi_serial_accepts_completion(serial_output)
@@ -2011,6 +2039,9 @@ fn desktop_uefi_required_marker_fragments() -> [text]:
         "[desktop-e2e] process-backed:ok app=file_manager pid=",
         "[desktop-e2e] simple-cli:ok app=info pid=",
         "[desktop-e2e] process-backed:ok app=simple_browser pid=",
+        "[desktop-e2e] wm-owner:ok app=simple_browser pid=",
+        "[desktop-e2e] render-proof:ok app=simple_browser pid=",
+        "[simple_browser] page_rendered app_id=/sys/apps/simple_browser",
         "[desktop-e2e] process-backed:ok app=simple_compiler pid=",
         "[desktop-e2e] process-backed:ok app=simple_interpreter pid=",
         "[desktop-e2e] process-backed:ok app=simple_loader pid=",

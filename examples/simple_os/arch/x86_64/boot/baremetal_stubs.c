@@ -1256,19 +1256,39 @@ static struct {
     uint64_t sector_count;
 } _nvme;
 
+typedef struct {
+    size_t prev_heap_off;
+    size_t alloc_end_off;
+} nvme_aligned_alloc_header_t;
+
 /* Allocate page-aligned memory from the bump allocator.
  * NVMe requires queue and data buffers to be page-aligned (4KB).
  * We waste up to (alignment-1) bytes of padding to get the alignment. */
 static void *nvme_alloc_aligned(size_t size, size_t alignment)
 {
+    if (alignment == 0) return (void *)0;
     /* Allocate extra space so we can align within it */
-    size_t total = size + alignment;
+    size_t total = size + alignment + sizeof(nvme_aligned_alloc_header_t);
+    size_t prev_heap_off = _heap_off;
     void *raw = malloc(total);
     if (!raw) return (void *)0;
     /* Align the pointer within the allocated region */
-    uintptr_t addr = (uintptr_t)raw;
+    uintptr_t addr = (uintptr_t)raw + sizeof(nvme_aligned_alloc_header_t);
     uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
+    nvme_aligned_alloc_header_t *hdr =
+        (nvme_aligned_alloc_header_t *)(aligned - sizeof(nvme_aligned_alloc_header_t));
+    hdr->prev_heap_off = prev_heap_off;
+    hdr->alloc_end_off = _heap_off;
     return (void *)aligned;
+}
+
+static void nvme_free_aligned(void *ptr)
+{
+    if (!ptr) return;
+    nvme_aligned_alloc_header_t *hdr =
+        (nvme_aligned_alloc_header_t *)((uintptr_t)ptr - sizeof(nvme_aligned_alloc_header_t));
+    if (_heap_off == hdr->alloc_end_off && hdr->prev_heap_off <= hdr->alloc_end_off)
+        _heap_off = hdr->prev_heap_off;
 }
 
 /* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
@@ -1636,8 +1656,9 @@ enabled:
  * Returns 0 on success, negative on error. */
 static int _nvme_read_sector_impl(uint64_t lba, void *buf)
 {
+    int rc = 0;
     if (!_nvme.initialized) {
-        int rc = _nvme_init_controller();
+        rc = _nvme_init_controller();
         if (rc < 0) return rc;
     }
 
@@ -1656,13 +1677,17 @@ static int _nvme_read_sector_impl(uint64_t lba, void *buf)
     uint32_t cdw11 = (uint32_t)(lba >> 32);
     uint32_t cdw12 = 0; /* 1 sector (0-based) */
 
-    int rc = nvme_io_cmd(0x02, 1,
-                         (uint64_t)(uintptr_t)dma_buf, 0,
-                         cdw10, cdw11, cdw12);
-    if (rc < 0) return rc;
+    rc = nvme_io_cmd(0x02, 1,
+                     (uint64_t)(uintptr_t)dma_buf, 0,
+                     cdw10, cdw11, cdw12);
+    if (rc < 0) {
+        nvme_free_aligned(dma_buf);
+        return rc;
+    }
 
     /* Copy from DMA buffer to caller's buffer */
     __builtin_memcpy(buf, dma_buf, _nvme.sector_size);
+    nvme_free_aligned(dma_buf);
     return 0;
 }
 
@@ -1672,8 +1697,9 @@ static int _nvme_read_sector_impl(uint64_t lba, void *buf)
  * Returns 0 on success, negative on error. */
 static int _nvme_write_sector_impl(uint64_t lba, const void *buf)
 {
+    int rc = 0;
     if (!_nvme.initialized) {
-        int rc = _nvme_init_controller();
+        rc = _nvme_init_controller();
         if (rc < 0) return rc;
     }
 
@@ -1685,9 +1711,11 @@ static int _nvme_write_sector_impl(uint64_t lba, const void *buf)
     uint32_t cdw11 = (uint32_t)(lba >> 32);
     uint32_t cdw12 = 0; /* 1 sector (0-based) */
 
-    return nvme_io_cmd(0x01, 1,
-                       (uint64_t)(uintptr_t)dma_buf, 0,
-                       cdw10, cdw11, cdw12);
+    rc = nvme_io_cmd(0x01, 1,
+                     (uint64_t)(uintptr_t)dma_buf, 0,
+                     cdw10, cdw11, cdw12);
+    nvme_free_aligned(dma_buf);
+    return rc;
 }
 
 /* Syscall 85 handler: NvmeReadSector
@@ -2003,12 +2031,14 @@ static int _fat32_init(void) {
 
     if (_nvme_read_sector_impl(0, bpb) != 0) {
         _simpleos_log_write_cstr(4, "[fat32-c] Failed to read sector 0");
+        nvme_free_aligned(bpb);
         return -1;
     }
 
     /* Check boot signature at bytes 510-511 */
     if (bpb[510] != 0x55 || bpb[511] != 0xAA) {
         _simpleos_log_write_cstr(4, "[fat32-c] Invalid BPB signature");
+        nvme_free_aligned(bpb);
         return -1;
     }
 
@@ -2039,6 +2069,7 @@ static int _fat32_init(void) {
     serial_puts("\r\n");
 
     _fat32.initialized = 1;
+    nvme_free_aligned(bpb);
     return 0;
 }
 
@@ -2078,14 +2109,17 @@ static uint32_t _fat32_next_cluster(uint32_t cluster) {
     if (!sector_buf) return 0x0FFFFFFF; /* treat alloc failure as EOC */
     __builtin_memset(sector_buf, 0, 512);
 
-    if (_nvme_read_sector_impl(fat_sector, sector_buf) != 0)
+    if (_nvme_read_sector_impl(fat_sector, sector_buf) != 0) {
+        nvme_free_aligned(sector_buf);
         return 0x0FFFFFFF; /* treat read failure as EOC */
+    }
 
     uint32_t entry = (uint32_t)sector_buf[fat_offset_in_sector]
                    | ((uint32_t)sector_buf[fat_offset_in_sector + 1] << 8)
                    | ((uint32_t)sector_buf[fat_offset_in_sector + 2] << 16)
                    | ((uint32_t)sector_buf[fat_offset_in_sector + 3] << 24);
     entry &= 0x0FFFFFFF; /* mask upper 4 bits (reserved in FAT32) */
+    nvme_free_aligned(sector_buf);
     return entry;
 }
 
@@ -2147,8 +2181,10 @@ static int _fat32_find_root_dir_slot(const char name83[11], uint32_t *out_cluste
     int have_free = 0;
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
-        if (_fat32_read_cluster(cluster, dir_buf) != 0)
+        if (_fat32_read_cluster(cluster, dir_buf) != 0) {
+            nvme_free_aligned(dir_buf);
             return -1;
+        }
 
         uint32_t entries_per_cluster = cluster_bytes / 32;
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -2158,6 +2194,7 @@ static int _fat32_find_root_dir_slot(const char name83[11], uint32_t *out_cluste
                 *out_entry_index = have_free ? free_index : i;
                 *out_found = 0;
                 *out_old_cluster = 0;
+                nvme_free_aligned(dir_buf);
                 return 0;
             }
             if (entry[0] == 0xE5) {
@@ -2177,6 +2214,7 @@ static int _fat32_find_root_dir_slot(const char name83[11], uint32_t *out_cluste
                 *out_entry_index = i;
                 *out_found = 1;
                 *out_old_cluster = lo | (hi << 16);
+                nvme_free_aligned(dir_buf);
                 return 0;
             }
         }
@@ -2192,8 +2230,10 @@ static int _fat32_find_root_dir_slot(const char name83[11], uint32_t *out_cluste
         *out_entry_index = free_index;
         *out_found = 0;
         *out_old_cluster = 0;
+        nvme_free_aligned(dir_buf);
         return 0;
     }
+    nvme_free_aligned(dir_buf);
     return -1;
 }
 
@@ -2253,14 +2293,19 @@ static int _fat32_find_in_dir(uint32_t dir_cluster, const char *name,
     uint32_t cluster = dir_cluster;
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
-        if (_fat32_read_cluster(cluster, dir_buf) != 0)
+        if (_fat32_read_cluster(cluster, dir_buf) != 0) {
+            nvme_free_aligned(dir_buf);
             return -1;
+        }
 
         int entries_per_cluster = (int)(cluster_bytes / 32);
         for (int i = 0; i < entries_per_cluster; i++) {
             uint8_t *entry = dir_buf + i * 32;
 
-            if (entry[0] == 0x00) return -1; /* end of directory */
+            if (entry[0] == 0x00) {
+                nvme_free_aligned(dir_buf);
+                return -1; /* end of directory */
+            }
             if (entry[0] == 0xE5) continue;  /* deleted entry */
             if ((entry[11] & 0x0F) == 0x0F) continue; /* LFN entry, skip */
 
@@ -2272,11 +2317,13 @@ static int _fat32_find_in_dir(uint32_t dir_cluster, const char *name,
                 *out_size = (uint32_t)entry[28] | ((uint32_t)entry[29] << 8)
                           | ((uint32_t)entry[30] << 16) | ((uint32_t)entry[31] << 24);
                 if (out_attr) *out_attr = entry[11];
+                nvme_free_aligned(dir_buf);
                 return 0;
             }
         }
         cluster = _fat32_next_cluster(cluster);
     }
+    nvme_free_aligned(dir_buf);
     return -1; /* not found */
 }
 
@@ -2349,7 +2396,10 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
     uint32_t offset = 0;
 
     while (remaining > 0 && cluster >= 2 && cluster < 0x0FFFFFF8) {
-        if (_fat32_read_cluster(cluster, cluster_buf) != 0) return -1;
+        if (_fat32_read_cluster(cluster, cluster_buf) != 0) {
+            nvme_free_aligned(cluster_buf);
+            return -1;
+        }
 
         uint32_t copy = remaining < cluster_bytes ? remaining : cluster_bytes;
         __builtin_memcpy(buf + offset, cluster_buf, copy);
@@ -2359,6 +2409,7 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
     }
 
     *bytes_read = offset;
+    nvme_free_aligned(cluster_buf);
     return 0;
 }
 
@@ -2516,10 +2567,21 @@ int64_t simpleos_fat32_read_path(const char *path, int64_t path_len)
 
 RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
 {
-    int64_t rc = simpleos_fat32_read_path(path, path_len);
-    int64_t file_size = simpleos_fat32_read_path_size(path, path_len);
+    char path_buf[128];
+    uint32_t cluster = 0;
+    uint32_t file_size = 0;
+    uint32_t bytes_read = 0;
 
-    if (rc != 0 || file_size <= 0 || (uint64_t)file_size > simpleos_fat32_path_read_buf_size)
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return rt_array_new((RuntimeValue)0);
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return rt_array_new((RuntimeValue)0);
+    if (file_size == 0 || (uint64_t)file_size > simpleos_fat32_path_read_buf_size)
+        return rt_array_new((RuntimeValue)0);
+    if (fat32_read_file(path_buf, simpleos_fat32_path_read_buf,
+                        simpleos_fat32_path_read_buf_size, &bytes_read) != 0)
+        return rt_array_new((RuntimeValue)0);
+    if (bytes_read != file_size)
         return rt_array_new((RuntimeValue)0);
 
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
@@ -2527,10 +2589,10 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
         return rt_array_new((RuntimeValue)0);
     a->hdr.type = HEAP_ARRAY;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
-    a->len = (uint32_t)file_size;
-    a->cap = (uint32_t)file_size;
+    a->len = file_size;
+    a->cap = file_size;
     a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < (uint32_t)file_size; i++)
+    for (uint32_t i = 0; i < file_size; i++)
         a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
     return ENCODE_PTR(a);
 }
@@ -4039,6 +4101,13 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
     case TCP_ESTABLISHED:
         /* Handle incoming data */
         if (tcp_data_len > 0) {
+            uint16_t preview = tcp_data_len < 8 ? tcp_data_len : 8;
+            serial_puts("[tcp-rx] first-bytes=");
+            for (uint16_t j = 0; j < preview; j++) {
+                if (j) serial_puts(" ");
+                serial_put_hex(tcp_data[j]);
+            }
+            serial_puts("\r\n");
             /* Store in receive buffer */
             for (uint16_t i = 0; i < tcp_data_len; i++) {
                 uint32_t next = (s->rx_head + 1) % TCP_RXBUF_SIZE;
@@ -6712,7 +6781,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     uint32_t data_len = (uint32_t)arr->len;
     uint8_t *buf = (uint8_t *)malloc(data_len);
     if (!buf) return ENCODE_INT(-12);
-    uint32_t preview = data_len < 8 ? data_len : 8;
+    uint32_t preview = data_len < 64 ? data_len : 64;
     for (uint32_t i = 0; i < data_len; i++) {
         buf[i] = _rv_byte(arr->items[i]);
     }
@@ -6781,6 +6850,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     a->cap = read_len;
 
     struct tcp_socket *s = &_sockets[fd];
+    uint32_t preview = read_len < 8 ? read_len : 8;
     for (uint32_t i = 0; i < read_len; i++) {
         uint8_t byte = s->rxbuf[s->rx_tail];
         s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
@@ -6790,8 +6860,50 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     serial_put_dec(read_len);
     serial_puts(" bytes from fd=");
     serial_put_dec(fd);
+    serial_puts(" first-bytes=");
+    for (uint32_t i = 0; i < preview; i++) {
+        if (i) serial_puts(" ");
+        serial_put_hex((uint8_t)DECODE_INT(a->items[i]));
+    }
     serial_puts("\r\n");
     return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_net_recv_version_text(int64_t sock_fd)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+        return rt_string_from_cstr("");
+    }
+
+    int timeout = 0;
+    while (_tcp_rx_available(fd) == 0 &&
+           _sockets[fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+
+    struct tcp_socket *s = &_sockets[fd];
+    uint32_t avail = _tcp_rx_available(fd);
+    if (avail == 0) return rt_string_from_cstr("");
+
+    char buf[256];
+    uint32_t copied = 0;
+    while (copied + 1 < sizeof(buf) && s->rx_tail != s->rx_head) {
+        uint8_t byte = s->rxbuf[s->rx_tail];
+        s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
+        if (byte == '\n') break;
+        if (byte == '\r') continue;
+        buf[copied++] = (char)byte;
+    }
+    buf[copied] = '\0';
+
+    serial_puts("[tcp-recv-version] text=");
+    serial_puts(buf);
+    serial_puts("\r\n");
+    return rt_string_from_cstr(buf);
 }
 
 RuntimeValue rt_tls13_recv_record(int64_t sock_fd)
