@@ -325,6 +325,12 @@ static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
     return (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
 }
 
+static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
+{
+    if (!a) return NULL;
+    return a->items ? a->items : runtime_array_inline_items(a);
+}
+
 /* ===================================================================
  * 3a. x86_64 AP startup trampoline support
  * =================================================================== */
@@ -858,7 +864,7 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
         int64_t i = (int64_t)idx;
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-        return a->items[i];
+        return runtime_array_items(a)[i];
     }
     if (h->type == HEAP_MAP) {
         /* Map indexing: key is the idx argument */
@@ -876,7 +882,7 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
         int64_t i = (int64_t)idx;
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-        a->items[i] = val;
+        runtime_array_items(a)[i] = val;
         return val;
     }
     if (h->type == HEAP_MAP) {
@@ -4937,11 +4943,12 @@ int64_t rt_sha512_hash(int64_t data_rv, int64_t unused)
     if (!hdr || hdr->type != HEAP_ARRAY) return -1;
     RuntimeArray *arr = (RuntimeArray *)hdr;
     uint32_t data_len = arr->len;
+    RuntimeValue *items = runtime_array_items(arr);
 
     uint8_t *data = (uint8_t *)malloc(data_len + 256);
     if (!data) return -1;
     for (uint32_t i = 0; i < data_len; i++)
-        data[i] = (uint8_t)(DECODE_INT(arr->items[i]) & 0xFF);
+        data[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
 
     /* SHA-512 padding */
     uint64_t bit_len = (uint64_t)data_len * 8;
@@ -5991,10 +5998,11 @@ static uint8_t *_ed_rv_to_bytes(int64_t rv, uint32_t *out_len)
     if (!hdr || hdr->type != HEAP_ARRAY) return (void*)0;
     RuntimeArray *arr = (RuntimeArray *)hdr;
     uint32_t len = arr->len;
+    RuntimeValue *items = runtime_array_items(arr);
     uint8_t *buf = (uint8_t *)malloc(len);
     if (!buf) return (void*)0;
     for (uint32_t i = 0; i < len; i++)
-        buf[i] = (uint8_t)(DECODE_INT(arr->items[i]) & 0xFF);
+        buf[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
     *out_len = len;
     return buf;
 }
@@ -6012,8 +6020,9 @@ static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
     if (!hdr || hdr->type != HEAP_ARRAY) return -1;
     RuntimeArray *arr = (RuntimeArray *)hdr;
     if (arr->len < src_len) return -1;
+    RuntimeValue *items = runtime_array_items(arr);
     for (uint32_t i = 0; i < src_len; i++)
-        arr->items[i] = ENCODE_INT(src[i]);
+        items[i] = ENCODE_INT(src[i]);
     return 0;
 }
 
@@ -6139,13 +6148,14 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return rt_string_new(0, 0);
     uint32_t len = a->len;
+    RuntimeValue *items = runtime_array_items(a);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     for (uint32_t i = 0; i < len; i++) {
-        RuntimeValue v = a->items[i];
+        RuntimeValue v = items[i];
         /* Items may be tagged (from BoxInt push) or raw */
         int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
         s->data[i] = (char)(byte_val & 0xFF);
@@ -6175,6 +6185,7 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = len;
     a->cap = len;
+    a->items = runtime_array_inline_items(a);
     for (uint32_t i = 0; i < len; i++) {
         a->items[i] = ENCODE_INT((uint8_t)s->data[i]);
     }
@@ -6480,6 +6491,7 @@ int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data_rv)
     RuntimeArray *arr = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
     if (!arr) return -22;
     uint32_t payload_len = arr->len;
+    RuntimeValue *items = runtime_array_items(arr);
     uint32_t len = payload_len + 4;
     uint8_t *buf = NULL;
     if (len > 0) {
@@ -6490,7 +6502,7 @@ int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data_rv)
         buf[2] = (uint8_t)((method >> 16) & 0xFF);
         buf[3] = (uint8_t)((method >> 24) & 0xFF);
         for (uint32_t i = 0; i < payload_len; i++) {
-            buf[i + 4] = _rv_byte(arr->items[i]);
+            buf[i + 4] = _rv_byte(items[i]);
         }
     }
     int64_t rc = _ipc_send_handler(port, method, 0, (uint64_t)(uintptr_t)buf, len);
@@ -6509,6 +6521,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
+        a->items = runtime_array_inline_items(a);
         return ENCODE_PTR(a);
     }
     uint8_t *buf = (uint8_t *)malloc((size_t)max_len);
@@ -6522,6 +6535,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
+        a->items = runtime_array_inline_items(a);
         return ENCODE_PTR(a);
     }
     uint32_t len = (uint32_t)rc;
@@ -6534,6 +6548,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
     a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
     a->len = len;
     a->cap = len;
+    a->items = runtime_array_inline_items(a);
     for (uint32_t i = 0; i < len; i++) {
         a->items[i] = ENCODE_INT(buf[i]);
     }
@@ -6776,6 +6791,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     }
     RuntimeArray *arr = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
     if (!arr || arr->len == 0) return ENCODE_INT(0);
+    RuntimeValue *items = runtime_array_items(arr);
 
     /* Copy items to contiguous buffer (items are tagged RuntimeValues) */
     uint32_t data_len = (uint32_t)arr->len;
@@ -6783,7 +6799,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     if (!buf) return ENCODE_INT(-12);
     uint32_t preview = data_len < 64 ? data_len : 64;
     for (uint32_t i = 0; i < data_len; i++) {
-        buf[i] = _rv_byte(arr->items[i]);
+        buf[i] = _rv_byte(items[i]);
     }
     serial_puts("[tcp-send] first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
@@ -6836,6 +6852,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
+        a->items = runtime_array_inline_items(a);
         return ENCODE_PTR(a);
     }
     uint32_t read_len = avail;
@@ -6848,6 +6865,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
     a->len = read_len;
     a->cap = read_len;
+    a->items = runtime_array_inline_items(a);
 
     struct tcp_socket *s = &_sockets[fd];
     uint32_t preview = read_len < 8 ? read_len : 8;
@@ -6863,7 +6881,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     serial_puts(" first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
         if (i) serial_puts(" ");
-        serial_put_hex((uint8_t)DECODE_INT(a->items[i]));
+        serial_put_hex((uint8_t)DECODE_INT(runtime_array_items(a)[i]));
     }
     serial_puts("\r\n");
     return ENCODE_PTR(a);

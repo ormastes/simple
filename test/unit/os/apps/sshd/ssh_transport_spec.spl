@@ -44,6 +44,13 @@ fn _ecdsa_p256_pkcs8_der() -> [u8]:
         "0104207707839500"
     )
 
+fn _host_keys_ed25519_only() -> HostKeySet:
+    HostKeySet(
+        ed25519_seed: _ed25519_seed(),
+        rsa_pkcs8: nil,
+        ecdsa_p256_pkcs8: nil
+    )
+
 fn _client_kex(
     kex: text,
     host_keys: text,
@@ -123,11 +130,7 @@ describe "SSH transport KEXINIT parsing":
         expect(parsed.err()).to_equal("not a KEXINIT message")
 
     it "returns Err for a truncated KEXINIT name-list":
-        val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
-            ed25519_seed: _ed25519_seed(),
-            rsa_pkcs8: nil,
-            ecdsa_p256_pkcs8: nil
-        ))
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
         var truncated: [u8] = []
         var i: u64 = 0
         while i + 8 < payload.len():
@@ -136,6 +139,28 @@ describe "SSH transport KEXINIT parsing":
         val parsed = ssh_parse_kexinit(truncated)
         expect(parsed.is_err()).to_equal(true)
         expect(parsed.err()).to_equal("KEXINIT: bad comp_s2c")
+
+    it "returns Err for a KEXINIT with trailing bytes after reserved":
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
+        payload.push(0xAA)
+        val parsed = ssh_parse_kexinit(payload)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("KEXINIT: trailing bytes after reserved")
+
+    it "returns Err for a KEXINIT with a truncated reserved field":
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
+        payload.pop()
+        val parsed = ssh_parse_kexinit(payload)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("KEXINIT: truncated reserved")
+
+    it "returns Err for a KEXINIT with a non-zero reserved field":
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
+        val reserved_offset = payload.len() - 4
+        payload[reserved_offset + 3] = 1
+        val parsed = ssh_parse_kexinit(payload)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err()).to_equal("KEXINIT: non-zero reserved")
 
 describe "SSH transport algorithm negotiation":
     it "honors client preference order for host key algorithms":
