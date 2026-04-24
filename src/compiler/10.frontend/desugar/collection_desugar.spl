@@ -12,6 +12,7 @@
 #   Pattern C:  x += [item]              →  x.push(item)
 #   Pattern D:  dict[k] = dict[k] + [x]  →  dict[k].push(x)
 #   Pattern E:  x = x.push(item)         →  x.push(item)  (drop redundant assign)
+#   Pattern F:  for x in s.chars()       →  for x in s    (text is Iterable<char>; avoids List<char> alloc)
 #
 # Safety: The rewrite is valid because:
 #   - .push(item) mutates the array in-place (O(1) amortized)
@@ -22,10 +23,11 @@
 use compiler.core.ast_expr.{
     EXPR_ASSIGN, EXPR_BINARY, EXPR_ARRAY_LIT, EXPR_IDENT,
     EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_INDEX,
-    EXPR_FIELD_ACCESS,
+    EXPR_FIELD_ACCESS, EXPR_FOR, EXPR_LIST_COMP,
     expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
     expr_args, expr_count
 }
+use compiler.core.ast_stmt.{STMT_FOR, stmt_tag, stmt_expr, stmt_count}
 use compiler.core.tokens.{TOK_PLUS}
 
 var _collection_desugar_rewrites: i64 = 0
@@ -37,11 +39,10 @@ fn collection_desugar_rewrite_count() -> i64:
 # Main Entry Point
 # ============================================================================
 
-fn desugar_collections(start_from: i64):
-    """Scan expression arena from start_from and rewrite collection anti-patterns.
-
-    Called after parsing each file. start_from is the expr arena index
-    before parsing began, so only new nodes are processed.
+fn desugar_collections(start_from: i64, stmt_start: i64):
+    """Scan expression and statement arenas from start_from/stmt_start and rewrite
+    collection anti-patterns. Called after parsing each file so only new nodes
+    are processed.
     """
     _collection_desugar_rewrites = 0
     var i = start_from
@@ -56,7 +57,18 @@ fn desugar_collections(start_from: i64):
         elif tag == EXPR_COMPOUND_ASSIGN:
             try_rewrite_compound_assign(i)
 
+        elif tag == EXPR_FOR or tag == EXPR_LIST_COMP:
+            try_rewrite_chars_iter_expr(i)
+
         i = i + 1
+
+    # Scan statement arena: STMT_FOR stores iterable in stmt_expr
+    var j = stmt_start
+    val s_count = stmt_count()
+    while j < s_count:
+        if stmt_tag[j] == STMT_FOR:
+            try_rewrite_chars_iter_stmt(j)
+        j = j + 1
 
 # ============================================================================
 # Pattern A/B/D/E: x = x + [item] / x = x + arr / dict[k] / x = x.push()
@@ -156,6 +168,36 @@ fn try_rewrite_compound_assign(e: i64):
     expr_s_val[e] = "merge"
     expr_args[e] = [value]
     expr_right[e] = -1
+    _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+
+# ============================================================================
+# Pattern F: for x in s.chars() → for x in s
+# ============================================================================
+
+fn try_rewrite_chars_iter_expr(e: i64):
+    val iterable = expr_left[e]
+    if iterable < 0:
+        return
+    if expr_tag[iterable] != EXPR_METHOD_CALL:
+        return
+    if expr_s_val[iterable] != "chars":
+        return
+    if expr_args[iterable].len() != 0:
+        return
+    expr_left[e] = expr_left[iterable]
+    _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+
+fn try_rewrite_chars_iter_stmt(s: i64):
+    val iterable = stmt_expr[s]
+    if iterable < 0:
+        return
+    if expr_tag[iterable] != EXPR_METHOD_CALL:
+        return
+    if expr_s_val[iterable] != "chars":
+        return
+    if expr_args[iterable].len() != 0:
+        return
+    stmt_expr[s] = expr_left[iterable]
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
 # ============================================================================

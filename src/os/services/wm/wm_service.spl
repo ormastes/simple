@@ -367,6 +367,11 @@ class WmService:
     owner_ports_fixed: [u64; 256]
     owner_process_ids: [u64; 256]
     owner_app_ids: [text; 256]
+    shadow_window_id: u64
+    shadow_owner_port: u64
+    shadow_process_id: u64
+    shadow_app_id: text
+    shadow_active: bool
     owner_count: i32
     max_windows: i32
     initialized: bool
@@ -384,6 +389,11 @@ impl WmService:
             owner_ports_fixed: [0; 256],
             owner_process_ids: [0; 256],
             owner_app_ids: [""; 256],
+            shadow_window_id: 0,
+            shadow_owner_port: 0,
+            shadow_process_id: 0,
+            shadow_app_id: "",
+            shadow_active: false,
             owner_count: 0,
             max_windows: WM_MAX_WINDOWS,
             initialized: false,
@@ -403,21 +413,38 @@ impl WmService:
             i = i + 1
         -1
 
+    fn find_owner_record_index(self, window_id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.owners.len():
+            if self.owners[i].window_id == window_id:
+                return i
+            i = i + 1
+        -1
+
     me upsert_owner(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
+        self.shadow_window_id = window_id
+        self.shadow_owner_port = owner_port
+        self.shadow_process_id = process_id
+        self.shadow_app_id = app_id
+        self.shadow_active = true
         val idx = self.find_owner_index(window_id)
         if idx >= 0:
             self.owner_window_ids[idx] = window_id
             self.owner_ports_fixed[idx] = owner_port
             self.owner_process_ids[idx] = process_id
             self.owner_app_ids[idx] = app_id
-            return
-        if self.owner_count >= WM_MAX_WINDOWS:
-            return
-        self.owner_window_ids[self.owner_count] = window_id
-        self.owner_ports_fixed[self.owner_count] = owner_port
-        self.owner_process_ids[self.owner_count] = process_id
-        self.owner_app_ids[self.owner_count] = app_id
-        self.owner_count = self.owner_count + 1
+        elif self.owner_count < WM_MAX_WINDOWS:
+            self.owner_window_ids[self.owner_count] = window_id
+            self.owner_ports_fixed[self.owner_count] = owner_port
+            self.owner_process_ids[self.owner_count] = process_id
+            self.owner_app_ids[self.owner_count] = app_id
+            self.owner_count = self.owner_count + 1
+        val record_idx = self.find_owner_record_index(window_id)
+        val owner = WindowOwner(window_id: window_id, owner_port: owner_port, process_id: process_id, app_id: app_id)
+        if record_idx >= 0:
+            self.owners[record_idx] = owner
+        else:
+            self.owners = self.owners.push(owner)
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -849,27 +876,42 @@ impl WmService:
 
     fn find_owner(window_id: u64) -> u64:
         """Look up the owner port for a window. Returns 0 if not found."""
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_owner_port
         val idx = self.find_owner_index(window_id)
-        if idx < 0:
+        if idx >= 0:
+            return self.owner_ports_fixed[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
             return 0
-        self.owner_ports_fixed[idx]
+        self.owners[record_idx].owner_port
 
     me remove_owner(window_id: u64):
         """Remove ownership tracking for a window."""
+        if self.shadow_active and self.shadow_window_id == window_id:
+            self.shadow_window_id = 0
+            self.shadow_owner_port = 0
+            self.shadow_process_id = 0
+            self.shadow_app_id = ""
+            self.shadow_active = false
         val idx = self.find_owner_index(window_id)
-        if idx < 0:
-            return
-        val last = self.owner_count - 1
-        if idx != last:
-            self.owner_window_ids[idx] = self.owner_window_ids[last]
-            self.owner_ports_fixed[idx] = self.owner_ports_fixed[last]
-            self.owner_process_ids[idx] = self.owner_process_ids[last]
-            self.owner_app_ids[idx] = self.owner_app_ids[last]
-        self.owner_window_ids[last] = 0
-        self.owner_ports_fixed[last] = 0
-        self.owner_process_ids[last] = 0
-        self.owner_app_ids[last] = ""
-        self.owner_count = self.owner_count - 1
+        if idx >= 0:
+            val last = self.owner_count - 1
+            if idx != last:
+                self.owner_window_ids[idx] = self.owner_window_ids[last]
+                self.owner_ports_fixed[idx] = self.owner_ports_fixed[last]
+                self.owner_process_ids[idx] = self.owner_process_ids[last]
+                self.owner_app_ids[idx] = self.owner_app_ids[last]
+            self.owner_window_ids[last] = 0
+            self.owner_ports_fixed[last] = 0
+            self.owner_process_ids[last] = 0
+            self.owner_app_ids[last] = ""
+            self.owner_count = self.owner_count - 1
+        var kept: [WindowOwner] = []
+        for owner in self.owners:
+            if owner.window_id != window_id:
+                kept = kept.push(owner)
+        self.owners = kept
 
     me remove_all_windows_for_port(port: u64) -> [u64]:
         """Remove all ownership entries for a disconnected port.
@@ -891,42 +933,73 @@ impl WmService:
         to_destroy
 
     fn window_owner_process_id(window_id: u64) -> u64:
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_process_id
         val idx = self.find_owner_index(window_id)
-        if idx < 0:
+        if idx >= 0:
+            return self.owner_process_ids[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
             return 0
-        self.owner_process_ids[idx]
+        self.owners[record_idx].process_id
 
     fn window_owner_app_id(window_id: u64) -> text:
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_app_id
         val idx = self.find_owner_index(window_id)
-        if idx < 0:
+        if idx >= 0:
+            return self.owner_app_ids[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
             return ""
-        self.owner_app_ids[idx]
+        self.owners[record_idx].app_id
 
     fn window_ids_for_owner_port(port: u64) -> [u64]:
         var ids: [u64] = []
+        if self.shadow_active and self.shadow_owner_port == port:
+            ids = ids.push(self.shadow_window_id)
         var i: i32 = 0
         while i < self.owner_count:
             if self.owner_ports_fixed[i] == port:
                 ids = ids.push(self.owner_window_ids[i])
             i = i + 1
+        if ids.len() > 0:
+            return ids
+        for owner in self.owners:
+            if owner.owner_port == port:
+                ids = ids.push(owner.window_id)
         ids
 
     fn window_ids_for_process(process_id: u64) -> [u64]:
         var ids: [u64] = []
+        if self.shadow_active and self.shadow_process_id == process_id:
+            ids = ids.push(self.shadow_window_id)
         var i: i32 = 0
         while i < self.owner_count:
-            if self.owner_process_ids[i] == process_id:
+            if self.owner_process_ids[i] == process_id and self.owner_window_ids[i] != self.shadow_window_id:
                 ids = ids.push(self.owner_window_ids[i])
             i = i + 1
+        if ids.len() > 0:
+            return ids
+        for owner in self.owners:
+            if owner.process_id == process_id and owner.window_id != self.shadow_window_id:
+                ids = ids.push(owner.window_id)
         ids
 
     fn window_ids_for_app(app_id: text) -> [u64]:
         var ids: [u64] = []
+        if self.shadow_active and self.shadow_app_id == app_id:
+            ids = ids.push(self.shadow_window_id)
         var i: i32 = 0
         while i < self.owner_count:
-            if self.owner_app_ids[i] == app_id:
+            if self.owner_app_ids[i] == app_id and self.owner_window_ids[i] != self.shadow_window_id:
                 ids = ids.push(self.owner_window_ids[i])
             i = i + 1
+        if ids.len() > 0:
+            return ids
+        for owner in self.owners:
+            if owner.app_id == app_id and owner.window_id != self.shadow_window_id:
+                ids = ids.push(owner.window_id)
         ids
 
     fn window_count_for_owner_port(port: u64) -> i32:

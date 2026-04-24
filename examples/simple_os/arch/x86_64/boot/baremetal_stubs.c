@@ -5907,126 +5907,27 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
 
 static void _ed25519_create_keypair(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
 {
-    uint8_t h[64];
-    _ed25519_sha512(seed, 32, h);
-    h[0] &= 248;
-    h[31] &= 127;
-    h[31] |= 64;
-
-    ge_p3 A;
-    ge_scalarmult_base(&A, h);
-    ge_tobytes(pk, &A);
-
-    for (int i = 0; i < 32; i++) sk[i] = seed[i];
-    for (int i = 0; i < 32; i++) sk[32+i] = pk[i];
+    extern int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64]);
+    if (rt_tls13_ring_ed25519_keypair_raw(seed, pk, sk) == 0) return;
+    for (int i = 0; i < 32; i++) pk[i] = 0;
+    for (int i = 0; i < 64; i++) sk[i] = 0;
 }
 
 static void _ed25519_sign(const uint8_t *msg, uint32_t msg_len,
                            const uint8_t sk[64], uint8_t sig[64])
 {
-    uint8_t h[64];
-    _ed25519_sha512(sk, 32, h);
-
-    uint8_t a_scalar[32];
-    for (int i = 0; i < 32; i++) a_scalar[i] = h[i];
-    a_scalar[0] &= 248;
-    a_scalar[31] &= 127;
-    a_scalar[31] |= 64;
-
-    /* r = H(h[32..63] || msg) mod L */
-    uint8_t nonce[64];
-    {
-        uint32_t total = 32 + msg_len;
-        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
-        if (!tmp) return;
-        for (int i = 0; i < 32; i++) tmp[i] = h[32+i];
-        for (uint32_t i = 0; i < msg_len; i++) tmp[32+i] = msg[i];
-        _ed25519_sha512(tmp, total, nonce);
-        free(tmp);
-    }
-    uint8_t r_scalar[32];
-    sc_reduce(r_scalar, nonce);
-
-    /* R = [r]B */
-    ge_p3 R;
-    ge_scalarmult_base(&R, r_scalar);
-    uint8_t R_bytes[32];
-    ge_tobytes(R_bytes, &R);
-
-    /* S = r + H(R || pk || msg) * a mod L */
-    uint8_t hram[64];
-    {
-        uint32_t total = 32 + 32 + msg_len;
-        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
-        if (!tmp) return;
-        for (int i = 0; i < 32; i++) tmp[i] = R_bytes[i];
-        for (int i = 0; i < 32; i++) tmp[32+i] = sk[32+i];
-        for (uint32_t i = 0; i < msg_len; i++) tmp[64+i] = msg[i];
-        _ed25519_sha512(tmp, total, hram);
-        free(tmp);
-    }
-    uint8_t hram_reduced[32];
-    sc_reduce(hram_reduced, hram);
-
-    uint8_t S[32];
-    sc_muladd(S, hram_reduced, a_scalar, r_scalar);
-
-    for (int i = 0; i < 32; i++) sig[i] = R_bytes[i];
-    for (int i = 0; i < 32; i++) sig[32+i] = S[i];
+    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                                  const uint8_t sk[64], uint8_t sig[64]);
+    if (rt_tls13_ring_ed25519_sign_raw(msg, msg_len, sk, sig) == 0) return;
+    for (int i = 0; i < 64; i++) sig[i] = 0;
 }
 
-/* Verify: check [S]B == R + [H(R||pk||msg)]A.
- * The baremetal runtime has had sign-convention drift in the point decode
- * path, so we accept either of the two equivalent point orientations here
- * and preserve the strict R/S equality check. */
 static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
                             const uint8_t pk[32], const uint8_t sig[64])
 {
-    ge_p3 A;
-    if (ge_frombytes_negate_vartime(&A, pk) != 0) return -1;
-
-    uint8_t h[64];
-    {
-        uint32_t total = 32 + 32 + msg_len;
-        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
-        if (!tmp) return -1;
-        for (int i = 0; i < 32; i++) tmp[i] = sig[i];
-        for (int i = 0; i < 32; i++) tmp[32+i] = pk[i];
-        for (uint32_t i = 0; i < msg_len; i++) tmp[64+i] = msg[i];
-        _ed25519_sha512(tmp, total, h);
-        free(tmp);
-    }
-    uint8_t h_scalar[32];
-    sc_reduce(h_scalar, h);
-
-    ge_p3 sB;
-    ge_scalarmult_base(&sB, sig + 32);
-
-    ge_p3 hA;
-    ge_scalarmult(&hA, h_scalar, &A);
-
-    ge_cached hA_c;
-    ge_p3_to_cached(&hA_c, &hA);
-    ge_p1p1 sum_add;
-    ge_p3 check_add;
-    ge_add_cached(&sum_add, &sB, &hA_c);
-    ge_p1p1_to_p3(&check_add, &sum_add);
-
-    ge_p1p1 sum_sub;
-    ge_p3 check_sub;
-    ge_sub_cached(&sum_sub, &sB, &hA_c);
-    ge_p1p1_to_p3(&check_sub, &sum_sub);
-
-    uint8_t check_bytes[32];
-    uint8_t diff = 0;
-    ge_tobytes(check_bytes, &check_add);
-    for (int i = 0; i < 32; i++) diff |= check_bytes[i] ^ sig[i];
-    if (diff == 0) return 0;
-
-    diff = 0;
-    ge_tobytes(check_bytes, &check_sub);
-    for (int i = 0; i < 32; i++) diff |= check_bytes[i] ^ sig[i];
-    return diff == 0 ? 0 : -1;
+    extern int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
+                                                    const uint8_t pk[32], const uint8_t sig[64]);
+    return rt_tls13_ring_ed25519_verify_raw(msg, msg_len, pk, sig);
 }
 
 /* ---------- RuntimeValue API wrappers ---------- */
@@ -6103,16 +6004,11 @@ int64_t rt_ed25519_verify(int64_t msg_rv, int64_t pk_rv, int64_t sig_rv)
     }
     int result = _ed25519_verify(msg ? msg : (const uint8_t*)"", msg_len, pk, sig);
     if (msg) free(msg); free(pk); free(sig);
-    return (int64_t)result;
+    return result == 0 ? 1 : 0;
 }
 
-/* rt_ed25519_self_test: Sign+Verify roundtrip test.
- * Returns 0 on pass, -1 on fail.
- *
- * NOTE: We verify internal consistency (sign then verify) rather than
- * matching RFC 8032 test vectors, because our ge_frombytes picks one of
- * two valid square roots for the base point X coordinate. Both choices
- * produce valid Ed25519 schemes that are internally consistent. */
+/* rt_ed25519_self_test: RFC 8032 §7.1 TEST 1 plus negative checks.
+ * Returns 0 on pass, -1 on fail. */
 int64_t rt_ed25519_self_test(void)
 {
     _ed25519_init_consts();
@@ -6123,37 +6019,51 @@ int64_t rt_ed25519_self_test(void)
         0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
         0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
     };
+    static const uint8_t expected_pk[32] = {
+        0xd7,0x5a,0x98,0x01,0x82,0xb1,0x0a,0xb7,
+        0xd5,0x4b,0xfe,0xd3,0xc9,0x64,0x07,0x3a,
+        0x0e,0xe1,0x72,0xf3,0xda,0xa6,0x23,0x25,
+        0xaf,0x02,0x1a,0x68,0xf7,0x07,0x51,0x1a
+    };
+    static const uint8_t expected_sig[64] = {
+        0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,
+        0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
+        0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,
+        0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
+        0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,
+        0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
+        0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,
+        0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b
+    };
 
-    /* 1. Generate keypair */
-    serial_puts("[ed25519-c] step 1: keypair gen...\r\n");
+    serial_puts("[ed25519-c] step 1: RFC keypair...\r\n");
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);
-    serial_puts("[ed25519-c] step 1: keypair OK (pk=");
-    for (int i = 0; i < 4; i++) serial_puthex(pk[i]);
-    serial_puts("...)\r\n");
+    for (int i = 0; i < 32; i++) {
+        if (pk[i] != expected_pk[i]) {
+            serial_puts("[ed25519-c] FAIL: RFC keypair mismatch\r\n");
+            return -1;
+        }
+    }
+    serial_puts("[ed25519-c] step 1: RFC keypair OK\r\n");
 
-    /* 2. Sign empty message */
-    serial_puts("[ed25519-c] step 2: sign empty msg...\r\n");
+    serial_puts("[ed25519-c] step 2: RFC sign empty msg...\r\n");
     uint8_t sig[64];
     _ed25519_sign((const uint8_t *)"", 0, sk, sig);
-    serial_puts("[ed25519-c] step 2: sign OK\r\n");
+    for (int i = 0; i < 64; i++) {
+        if (sig[i] != expected_sig[i]) {
+            serial_puts("[ed25519-c] FAIL: RFC signature mismatch\r\n");
+            return -1;
+        }
+    }
+    serial_puts("[ed25519-c] step 2: RFC signature OK\r\n");
 
-    /* 3. Verify valid signature */
-    serial_puts("[ed25519-c] step 3: verify...\r\n");
-    serial_puts("[ed25519-c]   sig R=");
-    for (int i = 0; i < 4; i++) serial_puthex(sig[i]);
-    serial_puts("... S=");
-    for (int i = 32; i < 36; i++) serial_puthex(sig[i]);
-    serial_puts("...\r\n");
+    serial_puts("[ed25519-c] step 3: RFC verify...\r\n");
     if (_ed25519_verify((const uint8_t *)"", 0, pk, sig) != 0) {
-        serial_puts("[ed25519-c] FAIL: verify rejected valid sig\r\n");
-        /* Dump full sig for post-mortem */
-        serial_puts("[ed25519-c]   full sig: ");
-        for (int i = 0; i < 64; i++) serial_puthex(sig[i]);
-        serial_puts("\r\n");
+        serial_puts("[ed25519-c] FAIL: RFC verify rejected valid sig\r\n");
         return -1;
     }
-    serial_puts("[ed25519-c] step 3: verify OK\r\n");
+    serial_puts("[ed25519-c] step 3: RFC verify OK\r\n");
 
     /* 4. Verify tampered message fails */
     serial_puts("[ed25519-c] step 4: verify-reject...\r\n");
@@ -9385,7 +9295,12 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
         if (point) free(point);
         return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
     }
-    _tls_x25519_scalarmult(out, scalar, point);
+    extern int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],
+                                                               const uint8_t point[32],
+                                                               uint8_t out[32]);
+    if (rt_tls13_ring_x25519_shared_secret_into_raw(scalar, point, out) != 0) {
+        _tls_x25519_scalarmult(out, scalar, point);
+    }
     free(scalar);
     free(point);
     return _tls_runtime_array_from_bytes(out, 32U);
@@ -9414,7 +9329,12 @@ int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue 
     }
 
     uint8_t out[32];
-    _tls_x25519_scalarmult(out, scalar, point);
+    extern int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],
+                                                               const uint8_t point[32],
+                                                               uint8_t out[32]);
+    if (rt_tls13_ring_x25519_shared_secret_into_raw(scalar, point, out) != 0) {
+        _tls_x25519_scalarmult(out, scalar, point);
+    }
     RuntimeValue *out_items = runtime_array_items(out_arr);
     for (uint32_t i = 0; i < 32U; i++) {
         out_items[i] = ENCODE_INT(out[i]);

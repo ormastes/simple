@@ -97,6 +97,40 @@ fn find_mold_for_native() -> text:
         return which_result
     ""
 
+fn native_link_hardening_flags(platform: text) -> text:
+    if platform == "linux" or platform == "freebsd":
+        return " -Wl,--allow-multiple-definition -Wl,--unresolved-symbols=ignore-all"
+    ""
+
+fn should_strip_llvm_constructors_for_platform(platform: text) -> bool:
+    platform == "linux" or platform == "freebsd"
+
+fn find_objcopy_for_native_archive() -> text:
+    val tools = ["llvm-objcopy-18", "llvm-objcopy-17", "llvm-objcopy", "objcopy"]
+    for tool in tools:
+        val found = shell_output("which {tool} 2>/dev/null")
+        if found != "":
+            return tool
+    ""
+
+fn strip_native_all_constructors(native_lib_path: text, platform: text, verbose: bool) -> text:
+    if not should_strip_llvm_constructors_for_platform(platform):
+        return native_lib_path
+    val objcopy = find_objcopy_for_native_archive()
+    if objcopy == "":
+        return native_lib_path
+    val temp_dir = _get_temp_dir()
+    val filtered = "{temp_dir}/libsimple_native_all_stripped_{rt_getpid()}.a"
+    val cmd = "{objcopy} --remove-section=.init_array --remove-section=.ctors --remove-section=.fini_array --remove-section=.dtors '{native_lib_path}' '{filtered}' 2>&1"
+    val (out, err, exit_code) = shell(cmd)
+    if exit_code == 0 and rt_file_exists(filtered):
+        if verbose:
+            debug("compile", "Stripped LLVM constructors from native_all: {filtered}")
+        return filtered
+    if verbose and (out != "" or err != ""):
+        warn("compile", "native_all constructor strip skipped: {out}{err}")
+    native_lib_path
+
 # ============================================================================
 # Multi-File Dependency Collection
 # ============================================================================
@@ -312,6 +346,8 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 
     # Step 3: Build compile command
     val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
+    val platform = detect_platform()
+    val hardening_flags = native_link_hardening_flags(platform)
 
     val mold_path = find_mold_for_native()
     var mold_link = ""
@@ -335,10 +371,12 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     # Link libsimple_native_all.a if available (provides Cranelift FFI + runtime)
     var native_lib_flags = ""
     val native_lib_path = "src/compiler_rust/target/release/libsimple_native_all.a"
+    var linked_native_lib_path = native_lib_path
     if rt_file_exists(native_lib_path):
-        native_lib_flags = " {native_lib_path} -lstdc++ -lm"
+        linked_native_lib_path = strip_native_all_constructors(native_lib_path, platform, verbose)
+        native_lib_flags = " {linked_native_lib_path} -lstdc++ -lm"
 
-    val clang_cmd = "{cc} -std=gnu11 {san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    val clang_cmd = "{cc} -std=gnu11 {san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
     if verbose:
         debug("compile", "Compiling: {cc} -std=c++20 ...")
 
@@ -346,6 +384,8 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 
     # Step 4: Cleanup temp file
     file_delete(temp_cpp)
+    if linked_native_lib_path != native_lib_path and rt_file_exists(linked_native_lib_path):
+        file_delete(linked_native_lib_path)
 
     # Step 5: Report results
     if clang_exit != 0:

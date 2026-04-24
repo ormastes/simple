@@ -145,7 +145,7 @@ int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
     if (!pk || !sig) return -1;
 
     ge_p3 A;
-    if (x25519_ge_frombytes_vartime(&A, pk) != 0) return -1;
+    if (x25519_ge_frombytes_vartime(&A, pk) == 0) return -1;
     ge_p3 negA = A;
     fe_loose neg_x;
     fe_loose neg_t;
@@ -180,6 +180,79 @@ int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
     fe_tobytes(check, &y);
     check[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
     return ring_core_0_17_14__CRYPTO_memcmp(check, sig, 32) == 0 ? 0 : -1;
+}
+
+int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
+{
+    if (!seed || !pk || !sk) return -1;
+
+    uint8_t h[64];
+    _tls_sha512_hash(seed, 32, h);
+    x25519_sc_mask(h);
+
+    ge_p3 A;
+    x25519_ge_scalarmult_base(&A, h, 0);
+    fe recip;
+    fe x;
+    fe y;
+    fe_invert(&recip, &A.Z);
+    fe_mul_ttt(&x, &A.X, &recip);
+    fe_mul_ttt(&y, &A.Y, &recip);
+    fe_tobytes(pk, &y);
+    pk[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
+
+    for (uint32_t i = 0; i < 32; i++) {
+        sk[i] = seed[i];
+        sk[32 + i] = pk[i];
+    }
+    return 0;
+}
+
+int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                       const uint8_t sk[64], uint8_t sig[64])
+{
+    if (!sk || !sig) return -1;
+
+    uint8_t h[64];
+    _tls_sha512_hash(sk, 32, h);
+    uint8_t a_scalar[32];
+    for (uint32_t i = 0; i < 32; i++) a_scalar[i] = h[i];
+    x25519_sc_mask(a_scalar);
+
+    uint32_t nonce_input_len = 32u + msg_len;
+    uint8_t *nonce_input = (uint8_t *)malloc(nonce_input_len ? nonce_input_len : 1);
+    if (!nonce_input) return -1;
+    for (uint32_t i = 0; i < 32; i++) nonce_input[i] = h[32 + i];
+    for (uint32_t i = 0; i < msg_len; i++) nonce_input[32 + i] = msg ? msg[i] : 0;
+    uint8_t nonce[64];
+    _tls_sha512_hash(nonce_input, nonce_input_len, nonce);
+    free(nonce_input);
+    x25519_sc_reduce(nonce);
+
+    ge_p3 R;
+    x25519_ge_scalarmult_base(&R, nonce, 0);
+    fe recip;
+    fe x;
+    fe y;
+    fe_invert(&recip, &R.Z);
+    fe_mul_ttt(&x, &R.X, &recip);
+    fe_mul_ttt(&y, &R.Y, &recip);
+    fe_tobytes(sig, &y);
+    sig[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
+
+    uint32_t hram_input_len = 64u + msg_len;
+    uint8_t *hram_input = (uint8_t *)malloc(hram_input_len ? hram_input_len : 1);
+    if (!hram_input) return -1;
+    for (uint32_t i = 0; i < 32; i++) hram_input[i] = sig[i];
+    for (uint32_t i = 0; i < 32; i++) hram_input[32 + i] = sk[32 + i];
+    for (uint32_t i = 0; i < msg_len; i++) hram_input[64 + i] = msg ? msg[i] : 0;
+    uint8_t hram[64];
+    _tls_sha512_hash(hram_input, hram_input_len, hram);
+    free(hram_input);
+    x25519_sc_reduce(hram);
+
+    x25519_sc_muladd(sig + 32, hram, a_scalar, nonce);
+    return 0;
 }
 
 RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue point_rv)
@@ -220,4 +293,26 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     out->cap = 32;
     for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
     return ENCODE_PTR(out);
+}
+
+int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],
+                                                    const uint8_t point[32],
+                                                    uint8_t out[32])
+{
+    if (!scalar || !point || !out) return -1;
+
+    uint8_t scalar_raw[32];
+    uint8_t point_raw[32];
+    for (uint32_t i = 0; i < 32; i++) {
+        scalar_raw[i] = scalar[i];
+        point_raw[i] = point[i];
+    }
+
+    scalar_raw[0] &= 248u;
+    scalar_raw[31] &= 127u;
+    scalar_raw[31] |= 64u;
+    point_raw[31] &= 127u;
+
+    x25519_scalar_mult_generic_masked(out, scalar_raw, point_raw);
+    return 0;
 }

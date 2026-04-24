@@ -7,8 +7,9 @@
 #
 # GCM nonce construction:
 #   RFC 5647 uses a 12-byte IV split into a 4-byte fixed field and an
-#   8-byte invocation counter field. The invocation counter is XORed with
-#   the SSH sequence number for each packet.
+#   8-byte invocation counter field. The invocation counter is incremented
+#   for each packet; with the SSH KDF-derived IV this is equivalent to
+#   adding the packet sequence number as a 64-bit offset.
 #
 # ChaCha20-Poly1305 for SSH:
 #   Uses two separate ChaCha20 instances: one for packet length (K2)
@@ -271,15 +272,16 @@ fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
             nonce.push(0)
         i = i + 1
 
-    # Read the 8-byte invocation counter and XOR it with the packet
-    # sequence number. The resulting nonce remains 12 bytes total.
+    # Read the 8-byte invocation counter and advance it by the packet
+    # sequence number. RFC 5647 treats this field as a 64-bit integer that
+    # increments after each AES-GCM invocation.
     var counter: u64 = 0
     while i < 12:
         val b = if i < base_iv.len(): base_iv[i] else: 0
         counter = (counter << 8) | b.to_u64()
         i = i + 1
 
-    counter = counter ^ seq.to_u64()
+    counter = counter + seq.to_u64()
 
     nonce.push(((counter >> 56) & 0xFF).to_u8())
     nonce.push(((counter >> 48) & 0xFF).to_u8())

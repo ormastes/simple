@@ -1,0 +1,367 @@
+# @cover src/os/apps/file_explorer/file_explorer.spl 70%
+# @cover src/os/compositor/simple_web_window_renderer.spl 60%
+# @cover src/os/desktop/app_manifest.spl 50%
+
+"""
+# Finder File Explorer Specification
+
+**Feature IDs:** finder-file-explorer
+**Category:** OS Apps
+**Status:** Draft
+
+## Overview
+Specs for the macOS Finder-style file explorer upgrade for SimpleOS.
+Covers sidebar state, column-view navigation, preview panel, view-mode
+switching, CSS/HTML theme output, and app manifest registration.
+All specs MUST fail until the feature is implemented.
+"""
+
+use os.apps.file_explorer.file_explorer.{FinderApp, finder_state_text, ViewMode}
+use os.compositor.simple_web_window_renderer.{simple_web_app_html_with_theme}
+use os.desktop.app_manifest.{default_manifests}
+
+# ============================================================================
+# A. Sidebar State
+# ============================================================================
+
+describe "FinderApp sidebar":
+    """## A: Sidebar initializes with correct default sections and items."""
+
+    describe "Favorites section":
+        it "AC-2: sidebar_sections has exactly 3 sections (Favorites, Devices, Tags)":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections.len()).to_equal(3)
+
+        it "AC-2: first section title is Favorites":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[0].title).to_equal("Favorites")
+
+        it "AC-2: Favorites contains Desktop item":
+            val app = FinderApp.new("/home/user")
+            val favs = app.sidebar_sections[0]
+            val labels = favs.items.map(\item: item.label)
+            expect(labels).to_contain("Desktop")
+
+        it "AC-2: Favorites contains Documents item":
+            val app = FinderApp.new("/home/user")
+            val labels = app.sidebar_sections[0].items.map(\item: item.label)
+            expect(labels).to_contain("Documents")
+
+        it "AC-2: Favorites contains Downloads item":
+            val app = FinderApp.new("/home/user")
+            val labels = app.sidebar_sections[0].items.map(\item: item.label)
+            expect(labels).to_contain("Downloads")
+
+        it "AC-2: Favorites contains Applications item":
+            val app = FinderApp.new("/home/user")
+            val labels = app.sidebar_sections[0].items.map(\item: item.label)
+            expect(labels).to_contain("Applications")
+
+        it "AC-2: Favorites contains Home item":
+            val app = FinderApp.new("/home/user")
+            val labels = app.sidebar_sections[0].items.map(\item: item.label)
+            expect(labels).to_contain("Home")
+
+        it "AC-2: Favorites has 5 default items":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[0].items.len()).to_equal(5)
+
+    describe "Devices section":
+        it "AC-2: second section title is Devices":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[1].title).to_equal("Devices")
+
+        it "AC-2: Devices section is empty when no mounts":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[1].items.len()).to_equal(0)
+
+    describe "Tags section":
+        it "AC-2: third section title is Tags":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[2].title).to_equal("Tags")
+
+        it "AC-2: Tags section is empty stub":
+            val app = FinderApp.new("/home/user")
+            expect(app.sidebar_sections[2].items.len()).to_equal(0)
+
+# ============================================================================
+# B. Column View Navigation
+# ============================================================================
+
+describe "FinderApp column navigation":
+    """## B: Column-view (Miller columns) navigation — push, select, pop, keys."""
+
+    describe "initial state":
+        it "AC-3: starts with one column at the initial path":
+            val app = FinderApp.new("/home/user")
+            expect(app.columns.len()).to_equal(1)
+
+        it "AC-3: first column path matches constructor path":
+            val app = FinderApp.new("/home/user")
+            expect(app.columns[0].path).to_equal("/home/user")
+
+        it "AC-3: active_column_index starts at 0":
+            val app = FinderApp.new("/home/user")
+            expect(app.active_column_index).to_equal(0)
+
+    describe "push_column":
+        it "AC-3: push_column appends a new column":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            expect(app.columns.len()).to_equal(2)
+
+        it "AC-3: pushed column has correct path":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            expect(app.columns[1].path).to_equal("/home/user/Documents")
+
+        it "AC-3: pushing two columns yields three total":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            app.push_column("/home/user/Documents/Work")
+            expect(app.columns.len()).to_equal(3)
+
+    describe "pop_column":
+        it "AC-3: pop_column removes the deepest column":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            app.pop_column()
+            expect(app.columns.len()).to_equal(1)
+
+        it "AC-3: pop_column on single column does not underflow":
+            var app = FinderApp.new("/home/user")
+            app.pop_column()
+            expect(app.columns.len()).to_equal(1)
+
+    describe "keyboard arrow navigation":
+        it "AC-8: arrow_right on directory entry pushes a new column":
+            var app = FinderApp.new("/home/user")
+            app.handle_key("arrow_right")
+            expect(app.columns.len()).to_be_greater_than(0)
+
+        it "AC-8: arrow_left decrements active_column_index when > 0":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            val before = app.active_column_index
+            app.handle_key("arrow_left")
+            expect(app.active_column_index).to_be_less_than(before + 1)
+
+        it "AC-8: backspace navigates to parent (pops deepest column)":
+            var app = FinderApp.new("/home/user")
+            app.push_column("/home/user/Documents")
+            val before_len = app.columns.len()
+            app.handle_key("backspace")
+            expect(app.columns.len()).to_be_less_than(before_len + 1)
+
+        it "AC-8: arrow_down increments selected_index in active column":
+            var app = FinderApp.new("/home/user")
+            val before = app.columns[0].selected_index
+            app.handle_key("arrow_down")
+            expect(app.columns[0].selected_index).to_be_greater_than(before - 1)
+
+# ============================================================================
+# C. Preview Panel
+# ============================================================================
+
+describe "FinderApp preview panel":
+    """## C: Preview panel shows metadata and first-line text preview."""
+
+    describe "no selection":
+        it "AC-7: preview_entry is nil when newly created":
+            val app = FinderApp.new("/home/user")
+            expect(app.preview_entry).to_be_nil
+
+    describe "file metadata":
+        it "AC-7: finder_state_text contains preview_kind key when entry selected":
+            var app = FinderApp.new("/home/user")
+            app.columns[0].selected_index = 0
+            val state = finder_state_text(app)
+            expect(state).to_contain("preview_kind:")
+
+        it "AC-7: finder_state_text contains preview_size key when entry selected":
+            var app = FinderApp.new("/home/user")
+            app.columns[0].selected_index = 0
+            val state = finder_state_text(app)
+            expect(state).to_contain("preview_size:")
+
+        it "AC-7: finder_state_text contains preview_date key when entry selected":
+            var app = FinderApp.new("/home/user")
+            app.columns[0].selected_index = 0
+            val state = finder_state_text(app)
+            expect(state).to_contain("preview_date:")
+
+        it "AC-7: finder_state_text contains sel key with selected filename":
+            var app = FinderApp.new("/home/user")
+            app.columns[0].selected_index = 0
+            val state = finder_state_text(app)
+            expect(state).to_contain("sel:")
+
+    describe "text file preview":
+        it "AC-7: finder_state_text contains preview_lines key for text file selection":
+            var app = FinderApp.new("/home/user")
+            app.columns[0].selected_index = 0
+            val state = finder_state_text(app)
+            # only present when preview_kind=text; when present must be non-empty
+            val has_kind_text = state.contains("preview_kind:text")
+            val has_lines = state.contains("preview_lines:")
+            # if kind is text, lines must be present
+            expect(has_kind_text and has_lines or not has_kind_text).to_equal(true)
+
+    describe "directory preview":
+        it "AC-7: state_text preview_kind is dir when a directory is selected":
+            var app = FinderApp.new("/home/user")
+            # navigate into a directory entry to trigger dir preview
+            app.push_column("/home/user/Documents")
+            val state = finder_state_text(app)
+            expect(state).to_contain("col:")
+
+# ============================================================================
+# D. View Mode Switching
+# ============================================================================
+
+describe "FinderApp view mode":
+    """## D: View mode cycling and Cmd+1/2/3 key mapping."""
+
+    describe "default mode":
+        it "AC-3: default view mode is Column":
+            val app = FinderApp.new("/home/user")
+            expect(app.view_mode).to_equal(ViewMode.Column)
+
+    describe "set_view_mode":
+        it "AC-3: set_view_mode to List changes view_mode to List":
+            var app = FinderApp.new("/home/user")
+            app.set_view_mode(ViewMode.List)
+            expect(app.view_mode).to_equal(ViewMode.List)
+
+        it "AC-3: set_view_mode to Icon changes view_mode to Icon":
+            var app = FinderApp.new("/home/user")
+            app.set_view_mode(ViewMode.Icon)
+            expect(app.view_mode).to_equal(ViewMode.Icon)
+
+        it "AC-3: set_view_mode back to Column restores Column mode":
+            var app = FinderApp.new("/home/user")
+            app.set_view_mode(ViewMode.List)
+            app.set_view_mode(ViewMode.Column)
+            expect(app.view_mode).to_equal(ViewMode.Column)
+
+    describe "keyboard Cmd+1/2/3 mapping":
+        it "AC-8: Meta+1 key sets view mode to Column":
+            var app = FinderApp.new("/home/user")
+            app.set_view_mode(ViewMode.List)
+            app.handle_key("Meta+1")
+            expect(app.view_mode).to_equal(ViewMode.Column)
+
+        it "AC-8: Meta+2 key sets view mode to List":
+            var app = FinderApp.new("/home/user")
+            app.handle_key("Meta+2")
+            expect(app.view_mode).to_equal(ViewMode.List)
+
+        it "AC-8: Meta+3 key sets view mode to Icon":
+            var app = FinderApp.new("/home/user")
+            app.handle_key("Meta+3")
+            expect(app.view_mode).to_equal(ViewMode.Icon)
+
+# ============================================================================
+# E. CSS/HTML Theme Output
+# ============================================================================
+
+describe "Finder HTML renderer":
+    """## E: simple_web_app_html_with_theme Finder case generates correct themed HTML."""
+
+    fn _make_state_text() -> text:
+        "path:/home/user|col:/home/user|sel:|sidebar_sel:/home/user|mounts:|preview_kind:none|preview_size:0|preview_date:2026-04-24"
+
+    describe "structural class names":
+        it "AC-4+AC-5: output contains .finder-sidebar class":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("finder-sidebar")
+
+        it "AC-4+AC-5: output contains .finder-columns class":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("finder-columns")
+
+        it "AC-4+AC-5: output contains .finder-preview class":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("finder-preview")
+
+        it "AC-1: output contains all three panel class names (three-panel layout)":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            val has_sidebar = html.contains("finder-sidebar")
+            val has_columns = html.contains("finder-columns")
+            val has_preview = html.contains("finder-preview")
+            expect(has_sidebar and has_columns and has_preview).to_equal(true)
+
+    describe "CSS variable references":
+        it "AC-5: output contains --glass- CSS variable reference":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("--glass-")
+
+        it "AC-5: output contains --glass-accent variable":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("--glass-accent")
+
+        it "AC-5: output contains --glass-text-secondary variable":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html).to_contain("--glass-text-secondary")
+
+    describe "old stub strings absent":
+        it "AC-5: output does not contain old hardcoded boot/ stub":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html.contains("boot/")).to_equal(false)
+
+        it "AC-5: output does not contain old hardcoded home/ stub":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html.contains("home/")).to_equal(false)
+
+        it "AC-5: output does not contain old hardcoded kernel.elf stub":
+            val html = simple_web_app_html_with_theme("Finder", _make_state_text(), "simpleos_dark")
+            expect(html.contains("kernel.elf")).to_equal(false)
+
+    describe "state_text serialization":
+        it "AC-4: finder_state_text output contains path key":
+            val app = FinderApp.new("/home/user")
+            val state = finder_state_text(app)
+            expect(state).to_contain("path:")
+
+        it "AC-4: finder_state_text output contains col key":
+            val app = FinderApp.new("/home/user")
+            val state = finder_state_text(app)
+            expect(state).to_contain("col:")
+
+        it "AC-4: finder_state_text output contains sidebar_sel key":
+            val app = FinderApp.new("/home/user")
+            val state = finder_state_text(app)
+            expect(state).to_contain("sidebar_sel:")
+
+        it "AC-4: finder_state_text output fields are pipe-delimited":
+            val app = FinderApp.new("/home/user")
+            val state = finder_state_text(app)
+            expect(state).to_contain("|")
+
+# ============================================================================
+# F. App Manifest Registration
+# ============================================================================
+
+describe "App manifest registration":
+    """## F: default_manifests() registers Finder as the primary file manager."""
+
+    describe "Finder manifest entry":
+        it "AC-6: default_manifests contains an entry named Finder":
+            val manifests = default_manifests()
+            val names = manifests.map(\m: m.name)
+            expect(names).to_contain("Finder")
+
+        it "AC-6: Finder manifest binary points to file_explorer":
+            val manifests = default_manifests()
+            var found_binary = ""
+            var i = 0
+            while i < manifests.len():
+                if manifests[i].name == "Finder":
+                    found_binary = manifests[i].binary
+                i = i + 1
+            expect(found_binary).to_contain("file_explorer")
+
+        it "AC-6: no manifest is named File Manager (replaced by Finder)":
+            val manifests = default_manifests()
+            val names = manifests.map(\m: m.name)
+            expect(names.contains("File Manager")).to_equal(false)

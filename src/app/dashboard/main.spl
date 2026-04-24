@@ -12,6 +12,9 @@ use std.nogc_sync_mut.io.process_ops.{shell_int, shell_output_trimmed, shell_boo
 use std.text.{to_int_or}
 use std.text.{escape_json}
 use app.ui.detect.{has_tauri_shell}
+use app.llm_dashboard.main.{run_llm_dashboard}
+
+extern fn rt_platform_name() -> text
 use app.dashboard.render.adapter.{dashboard_render_request, render_dashboard, default_dashboard_config}
 use app.dashboard.framework_policy.{
     FRAMEWORK_WORKER_FLAG, strip_framework_flags, is_framework_worker,
@@ -245,13 +248,7 @@ fn run_assistant(args: [text]):
         print result.html_output
 
 fn run_agents(args: [text]):
-    if args.contains("--help") or args.contains("-h"):
-        print "LLM Agent Dashboard is temporarily unavailable in this build."
-        print "Use 'simple dashboard assistant' for the assistant session dashboard."
-        return
-
-    print "LLM Agent Dashboard is temporarily unavailable in this build."
-    print "Use 'simple dashboard assistant' for the assistant session dashboard."
+    run_llm_dashboard(args)
 
 val DASHBOARD_DIR = "doc/10_metrics/dashboard"
 val DASHBOARD_TABLE_DIR = "doc/10_metrics/dashboard/tables"
@@ -819,15 +816,32 @@ fn export_html() -> text:
     html_parts.push("</html>\n")
     html_parts.join("")
 
+fn _run_serve_result(args: [text]) -> text:
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+    val parsed = parse_cli_args(spec2, args)
+    val port = to_int_or(parsed_option(parsed, "port"), 3000)
+    "Starting dashboard web server on port {port} (delegating to run_llm_dashboard)"
+
+fn _run_gui_result(args: [text]) -> text:
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+    val spec3 = cli_spec_flag(spec2, "browser", "b", "Open in browser instead of desktop window")
+    val parsed = parse_cli_args(spec3, args)
+    val port = to_int_or(parsed_option(parsed, "port"), 3000)
+    val use_browser = parsed_flag(parsed, "browser")
+    "Starting Dashboard GUI on http://localhost:{port} (use_browser={use_browser}, delegating to run_llm_dashboard)"
+
+fn _run_agents_result(args: [text]) -> text:
+    "Starting LLM agent dashboard (delegating to run_llm_dashboard)"
+
 fn run_serve(args: [text]):
     val spec = cli_spec()
     val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
     val parsed = parse_cli_args(spec2, args)
     val port = to_int_or(parsed_option(parsed, "port"), 3000)
-
-    print "Dashboard web server is temporarily unavailable in this build."
-    print "Requested port: {port}"
-    print "Use 'simple dashboard status' or 'simple dashboard assistant' while the server path is being rebuilt."
+    val delegated_args = ["--web", "--port", "{port}"]
+    run_llm_dashboard(delegated_args)
 
 fn run_gui(args: [text]):
     val spec = cli_spec()
@@ -839,11 +853,13 @@ fn run_gui(args: [text]):
 
     print "Starting Dashboard GUI on http://localhost:{port}"
 
-    if not use_browser and has_tauri_shell():
-        print "GUI shell is available, but the embedded dashboard server is temporarily unavailable in this build."
+    if use_browser and rt_platform_name() != "simpleos":
+        print "Opening http://localhost:{port} in browser"
+    elif not use_browser and has_tauri_shell():
+        print "Opening in Tauri shell"
     else:
-        print "Browser launch skipped because the embedded dashboard server is temporarily unavailable in this build."
-    print "Use 'simple dashboard assistant' for the terminal dashboard surface."
+        print "Open http://localhost:{port} in your browser"
+    run_llm_dashboard(["--web", "--port", "{port}"])
 
 
 # Re-export alerts, notifications, comparison, and query features
