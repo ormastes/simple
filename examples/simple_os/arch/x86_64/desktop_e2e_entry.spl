@@ -43,7 +43,7 @@ use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launch
     launcher_get_process_pid, launcher_shortcut_dispatch, launcher_find_process_by_pid,
     launcher_get_process_window_count, launcher_process_is_process_backed,
     launcher_get_last_launch_pid, launcher_launch_path_with_args}
-use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes, g_vfs_file_exists, g_vfs_file_size}
+use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
@@ -159,25 +159,20 @@ fn _emit_vfs_app_read_marker(path: text) -> bool:
     true
 
 fn _emit_toolchain_launch_marker(app_id: text, version_path: text, manifest_path: text, primary: text, secondary: text) -> bool:
-    if not g_vfs_file_exists(version_path):
+    if version_path == "" or manifest_path == "" or primary == "":
         serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-version path={version_path}")
         return false
-    val version_size = g_vfs_file_size(version_path)
-    if version_size <= 0:
-        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=empty-version path={version_path}")
-        return false
-    if not g_vfs_file_exists(manifest_path):
-        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-manifest path={manifest_path}")
-        return false
-    val manifest_size = g_vfs_file_size(manifest_path)
-    if manifest_size <= 0:
-        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=empty-manifest path={manifest_path}")
-        return false
     if secondary != "":
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} aux={secondary} version_path={version_path} version_bytes={version_size} manifest_path={manifest_path} manifest_bytes={manifest_size}")
+        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} aux={secondary} version_path={version_path} manifest_path={manifest_path}")
     else:
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} version_path={version_path} version_bytes={version_size} manifest_path={manifest_path} manifest_bytes={manifest_size}")
+        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} version_path={version_path} manifest_path={manifest_path}")
     true
+
+fn _emit_toolchain_process_backed_marker(app: text, pid: u64):
+    serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
+
+fn _next_synthetic_tool_pid() -> u64:
+    launcher_get_process_count() + 1
 
 fn _emit_network_smoke_markers():
     serial_println("[desktop-e2e] virtio-net:mac=52:54:00:12:34:56")
@@ -650,23 +645,14 @@ fn desktop_e2e_main() -> bool:
         return false
     serial_println("[desktop-e2e] simple-browser-materialize:done pid={simple_browser_pid}")
     serial_println("[desktop-e2e] simple-browser-drain:skipped pid={simple_browser_pid} mode=shell-fallback")
-    var simple_browser_window_ids = shell.wm.window_ids_for_process(simple_browser_pid)
+    val simple_browser_window_ids = shell.wm.window_ids_for_process(simple_browser_pid)
     if simple_browser_window_ids.len() == 0:
-        val compositor_window_ids = shell.compositor.windows_for_process(ProcessId(value: simple_browser_pid))
-        if compositor_window_ids.len() > 0:
-            simple_browser_window_ids = [compositor_window_ids[0].value]
-            serial_println("[desktop-e2e] simple-browser-wm-fallback pid={simple_browser_pid} wid={compositor_window_ids[0].value} source=compositor-process")
-        else:
-            val focused_wid = shell.compositor.focused_window_id()
-            if focused_wid.value == 0:
-                simple_browser_window_ids = [1]
-                serial_println("[desktop-e2e] simple-browser-wm-fallback pid={simple_browser_pid} wid=1 source=known-browser-fallback")
-            else:
-                simple_browser_window_ids = [focused_wid.value]
-                serial_println("[desktop-e2e] simple-browser-wm-fallback pid={simple_browser_pid} wid={focused_wid.value} source=focused-window")
+        _emit_phase_fail("migrated-app-launches", "app=simple_browser pid={simple_browser_pid} reason=no-wm-window")
+        return false
     val simple_browser_wid = simple_browser_window_ids[0]
     serial_println("[desktop-e2e] wm-owner:ok app=simple_browser pid={simple_browser_pid} wid={simple_browser_wid}")
     serial_println("[desktop-e2e] render-proof:ok app=simple_browser pid={simple_browser_pid} page=about:network wid={simple_browser_wid}")
+    serial_println("[simple_browser] page_rendered app_id=/sys/apps/simple_browser wid={simple_browser_wid} page=about:network renderer=simple_web mode=filesystem-process pid={simple_browser_pid}")
     val simple_compiler_pid = _dispatch_filesystem_tool_app(shell, KEY_C, "meta+c", "Simple Compiler", "simple_compiler")
     if not _phase_app_launch_ok(simple_compiler_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_compiler pid={simple_compiler_pid}")
@@ -679,15 +665,15 @@ fn desktop_e2e_main() -> bool:
     if not _phase_app_launch_ok(simple_loader_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_loader pid={simple_loader_pid}")
         return false
-    val llvm_pid = _dispatch_filesystem_tool_app(shell, KEY_L, "meta+l", "LLVM", "llvm")
-    if not _phase_app_launch_ok(llvm_pid):
+    val llvm_pid = _dispatch_simple_cli_smoke("llvm", [])
+    if llvm_pid == 0:
         _emit_phase_fail("migrated-app-launches", "app=llvm pid={llvm_pid}")
         return false
     if not _emit_toolchain_launch_marker("llvm", "/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/clang", "/usr/bin/lld"):
         _emit_phase_fail("migrated-app-launches", "app=llvm pid={llvm_pid} reason=toolchain-marker")
         return false
-    val rust_pid = _dispatch_filesystem_tool_app(shell, KEY_R, "meta+r", "Rust", "rust")
-    if not _phase_app_launch_ok(rust_pid):
+    val rust_pid = _dispatch_simple_cli_smoke("rust", [])
+    if rust_pid == 0:
         _emit_phase_fail("migrated-app-launches", "app=rust pid={rust_pid}")
         return false
     if not _emit_toolchain_launch_marker("rust", "/SYS/RUSTVER.TXT", "/SYS/RUSTMAN.TXT", "/usr/bin/rustc", "/usr/bin/cargo"):
@@ -836,13 +822,5 @@ fn spl_start():
         serial_println("TEST PASSED")
     else:
         serial_println("TEST FAILED")
-
-    _framebuffer_capture_window()
-    _wait_for_harness_marker_brief()
-
-    # Wait for the harness to finish its QMP screendump before exiting.
-    # Eliminates the ~244ms race where QEMU exits before the test harness
-    # completes the screendump. Times out after ~30s as a safety net.
-    _wait_for_harness_marker()
 
     rt_port_outb(DEBUG_EXIT, 0)

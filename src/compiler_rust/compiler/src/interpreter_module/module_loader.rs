@@ -627,29 +627,34 @@ pub fn load_and_merge_module(
                                     sib_source
                                 };
                                 let mut sib_parser = simple_parser::Parser::new(&sib_source);
-                                if let Ok(sib_module) = sib_parser.parse() {
-                                    // Evaluate sibling exports in isolation. Preloading is only
-                                    // meant to seed __init__.spl bare exports; it should not let
-                                    // helper/fallback files mutate the caller's global symbol
-                                    // tables or shadow unrelated imports.
-                                    let mut preload_functions = HashMap::new();
-                                    let mut preload_classes = HashMap::new();
-                                    let mut preload_enums = HashMap::new();
-                                    if let Ok((_env, sib_exports, _funcs, _classes, _enums)) = evaluate_module_exports(
-                                        &sib_module.items,
-                                        Some(sibling_path),
-                                        &mut preload_functions,
-                                        &mut preload_classes,
-                                        &mut preload_enums,
-                                    ) {
-                                        for (k, v) in sib_exports {
-                                            // Preserve the first provider for a symbol.
-                                            // This matters for packages like std.nogc_sync_mut.io
-                                            // where real implementations and fallback stubs coexist:
-                                            // env_ops/dir_ops should win, and later stub files should
-                                            // not silently replace them during __init__ preloading.
-                                            merged_exports.entry(k).or_insert(v);
+                                match sib_parser.parse() {
+                                    Ok(sib_module) => {
+                                        // Evaluate sibling exports in isolation. Preloading is only
+                                        // meant to seed __init__.spl bare exports; it should not let
+                                        // helper/fallback files mutate the caller's global symbol
+                                        // tables or shadow unrelated imports.
+                                        let mut preload_functions = HashMap::new();
+                                        let mut preload_classes = HashMap::new();
+                                        let mut preload_enums = HashMap::new();
+                                        if let Ok((_env, sib_exports, _funcs, _classes, _enums)) = evaluate_module_exports(
+                                            &sib_module.items,
+                                            Some(sibling_path),
+                                            &mut preload_functions,
+                                            &mut preload_classes,
+                                            &mut preload_enums,
+                                        ) {
+                                            for (k, v) in sib_exports {
+                                                // Preserve the first provider for a symbol.
+                                                // This matters for packages like std.nogc_sync_mut.io
+                                                // where real implementations and fallback stubs coexist:
+                                                // env_ops/dir_ops should win, and later stub files should
+                                                // not silently replace them during __init__ preloading.
+                                                merged_exports.entry(k).or_insert(v);
+                                            }
                                         }
+                                    }
+                                    Err(e) => {
+                                        error!(path = ?sibling_path, error = %e, "Failed to parse preloaded sibling module");
                                     }
                                 }
                             }
