@@ -106,19 +106,19 @@ impl SshSession:
         """Main session loop. Drives the SSH protocol state machine."""
         serial_println("[sshd-session] start")
         self.do_version_exchange()
-        if self.state == SessionState.Closed:
+        if self.state != SessionState.KexInit:
             return
 
         self.do_kex()
-        if self.state == SessionState.Closed:
+        if self.state != SessionState.Authentication:
             return
 
         self.do_service_request()
-        if self.state == SessionState.Closed:
+        if self.state != SessionState.Authentication:
             return
 
         self.do_auth()
-        if self.state == SessionState.Closed:
+        if self.state != SessionState.Interactive:
             return
 
         self.do_interactive()
@@ -142,20 +142,25 @@ impl SshSession:
             return
 
         var line_end: u64 = 0
-        var found_crlf = false
-        while line_end + 1 < client_data.len():
-            if client_data[line_end] == 0x0D and client_data[line_end + 1] == 0x0A:
-                found_crlf = true
+        var line_term_len: u64 = 0
+        var found_line_end = false
+        while line_end < client_data.len():
+            if client_data[line_end] == 0x0A:
+                found_line_end = true
+                line_term_len = 1
+                if line_end > 0 and client_data[line_end - 1] == 0x0D:
+                    line_term_len = 2
+                    line_end = line_end - 1
                 break
             line_end = line_end + 1
 
-        if not found_crlf:
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
-            return
+        if not found_line_end:
+            line_end = client_data.len()
+            line_term_len = 0
 
         var version_line: [u8] = []
         var i: u64 = 0
-        while i <= line_end + 1:
+        while i < line_end + line_term_len:
             version_line.push(client_data[i])
             i = i + 1
 
@@ -168,6 +173,7 @@ impl SshSession:
            version_line[1] != 0x53 or  # S
            version_line[2] != 0x48 or  # H
            version_line[3] != 0x2D:    # -
+            serial_println("[sshd-session] invalid version prefix len={line_end} b0={version_line[0]} b1={version_line[1]} b2={version_line[2]} b3={version_line[3]}")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
             return
 
@@ -178,6 +184,7 @@ impl SshSession:
             i = i + 1
 
         self.client_version = rt_string_from_byte_array(version_bytes)
+        serial_println("[sshd-session] version parsed len={version_bytes.len()} text={self.client_version}")
         serial_println("[sshd-session] version exchange ok")
         self.state = SessionState.KexInit
 

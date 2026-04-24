@@ -3,16 +3,16 @@
 ## Current Trace State
 
 - REQ-RFL-001 through REQ-RFL-009 remain covered by the existing hardware feature specs for board profiles, lane defaults, prepare manifests, generated Simple source, VHDL source maps, and RTL manifests.
-- REQ-RFL-010 is partially satisfied: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and the current regressions already prove typed bitfield reads plus `rd` writeback recomposition for bounded helper cases.
+- REQ-RFL-010 is satisfied for the implemented helper set: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and regressions prove typed bitfield reads plus writeback/branch/store/jump recomposition through dedicated helpers.
 - REQ-RFL-010 also has a usable compiler trace surface through the expanded MIR JSON export: module functions, blocks, instruction payloads, and terminators.
-- REQ-RFL-011 remains downstream because VHDL slice emission should consume typed MIR bitfield facts rather than re-parse generated Simple hardware source, and because the backend proof still needs exact guard/source-map coverage on the generated helper paths.
+- REQ-RFL-011 is satisfied for the same helper set because VHDL slice emission is now proven against exact helper guards, concat shapes, and source-map entries rather than inferred from partial substrings.
 
 ## Active Gate
 
-The stale frontend/semantic blocker is cleared. The remaining gate is broader generated-source-backed decode coverage, including at least one immediate reconstruction path, plus exact VHDL/source-map assertions for the generated helper cases. REQ-RFL-010 should stay partial until that wider decode/immediate coverage exists, and REQ-RFL-011 should stay planned until the backend proof is exact rather than inferred from partial substrings.
+The stale frontend/semantic blocker is cleared and this helper-proof milestone is complete. Generated-source-backed decode coverage now includes writeback, branch immediate, store immediate, and jump immediate helpers, and the backend proof is exact rather than inferred from partial substrings.
 
 ## Next Bounded Tasks
 
-1. Extend the generated helper coverage with one immediate reconstruction case so REQ-RFL-010 advances beyond the current opcode/rd/funct3/rs1/rs2/funct7 writeback-focused helpers.
-2. Tighten MIR and generated-source regressions to keep asserting bounded extraction metadata for those fields through the expanded MIR JSON export surface.
-3. Add exact VHDL backend assertions for guard structure, slice usage, concat/update expressions, and source-map entries for the generated helper paths, then advance REQ-RFL-011.
+1. Preserve the exact helper contract when future decode helpers are added; new helper paths should follow the same overlay-bitfield plus field-write pattern.
+2. Keep MIR and backend regressions exact for any additional immediate/decode families so the proof surface stays slice-based and source-mapped.
+3. Continue the handwritten-core migration without reintroducing raw `imem_rdata` reconstruction when a generated helper contract already exists.

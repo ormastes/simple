@@ -1,0 +1,172 @@
+"""
+# RISC-V Linux Profiles — Shared Linux/platform contracts
+
+Shared RISC-V Linux-capable platform metadata used by hardware orchestration,
+RV64 platform contracts, and backend target policy.
+"""
+
+enum RiscvTargetAbi:
+    ILP32
+    ILP32D
+    LP64
+    LP64D
+
+impl RiscvTargetAbi:
+    fn to_text() -> text:
+        match self:
+            ILP32: "ilp32"
+            ILP32D: "ilp32d"
+            LP64: "lp64"
+            LP64D: "lp64d"
+
+    fn xlen_bits() -> i64:
+        match self:
+            ILP32 | ILP32D: 32
+            LP64 | LP64D: 64
+
+enum RiscvMmuMode:
+    Bare
+    Sv32
+    Sv39
+
+impl RiscvMmuMode:
+    fn to_text() -> text:
+        match self:
+            Bare: "bare"
+            Sv32: "sv32"
+            Sv39: "sv39"
+
+enum RiscvFirmwareMode:
+    Machine
+    Supervisor
+
+impl RiscvFirmwareMode:
+    fn to_text() -> text:
+        match self:
+            Machine: "machine"
+            Supervisor: "supervisor"
+
+struct RiscvLinuxProfile:
+    xlen: i64
+    abi: RiscvTargetAbi
+    mmu_mode: RiscvMmuMode
+    firmware_mode: RiscvFirmwareMode
+    kernel_alignment: i64
+    dtb_required: bool
+    opensbi_required: bool
+
+impl RiscvLinuxProfile:
+    static fn rv64_qemu_virt_linux() -> RiscvLinuxProfile:
+        RiscvLinuxProfile(
+            xlen: 64,
+            abi: RiscvTargetAbi.LP64D,
+            mmu_mode: RiscvMmuMode.Sv39,
+            firmware_mode: RiscvFirmwareMode.Supervisor,
+            kernel_alignment: 0x200000,
+            dtb_required: true,
+            opensbi_required: true
+        )
+
+    static fn rv32_compiler_parity_linux() -> RiscvLinuxProfile:
+        RiscvLinuxProfile(
+            xlen: 32,
+            abi: RiscvTargetAbi.ILP32D,
+            mmu_mode: RiscvMmuMode.Sv32,
+            firmware_mode: RiscvFirmwareMode.Supervisor,
+            kernel_alignment: 0x200000,
+            dtb_required: true,
+            opensbi_required: true
+        )
+
+    fn summary() -> text:
+        "{self.xlen}-bit {self.abi.to_text()} {self.mmu_mode.to_text()} firmware={self.firmware_mode.to_text()}"
+
+struct RiscvPlatformProfile:
+    name: text
+    linux: RiscvLinuxProfile
+    reset_vector: i64
+    dram_base: i64
+    uart_base: i64
+    clint_base: i64
+    plic_base: i64
+    generated_dtb: bool
+    hartid_register: text
+    dtb_register: text
+    satp_mode_off: bool
+
+impl RiscvPlatformProfile:
+    static fn qemu_virt_rv64() -> RiscvPlatformProfile:
+        RiscvPlatformProfile(
+            name: "qemu_virt_rv64",
+            linux: RiscvLinuxProfile.rv64_qemu_virt_linux(),
+            reset_vector: 0x80000000,
+            dram_base: 0x80000000,
+            uart_base: 0x10000000,
+            clint_base: 0x02000000,
+            plic_base: 0x0C000000,
+            generated_dtb: true,
+            hartid_register: "a0",
+            dtb_register: "a1",
+            satp_mode_off: true
+        )
+
+    static fn rv32_compiler_parity() -> RiscvPlatformProfile:
+        RiscvPlatformProfile(
+            name: "rv32_compiler_parity",
+            linux: RiscvLinuxProfile.rv32_compiler_parity_linux(),
+            reset_vector: 0x80000000,
+            dram_base: 0x80000000,
+            uart_base: 0x10000000,
+            clint_base: 0x02000000,
+            plic_base: 0x0C000000,
+            generated_dtb: true,
+            hartid_register: "a0",
+            dtb_register: "a1",
+            satp_mode_off: true
+        )
+
+    fn required_soc_blocks() -> [text]:
+        var blocks = ["clint", "plic", "uart16550", "memory-bus", "dtb"]
+        if self.linux.xlen == 64:
+            blocks.push("rv64gc-core")
+        else:
+            blocks.push("rv32-compiler-parity")
+        if self.linux.mmu_mode == RiscvMmuMode.Sv39:
+            blocks.push("sv39-mmu")
+        elif self.linux.mmu_mode == RiscvMmuMode.Sv32:
+            blocks.push("sv32-mmu")
+        if self.linux.opensbi_required:
+            blocks.push("opensbi-handoff")
+        blocks
+
+struct Rv64LinuxBootArtifacts:
+    opensbi: text
+    kernel_image: text
+    initrd_rootfs: text
+    dtb: text
+    uboot: text
+
+impl Rv64LinuxBootArtifacts:
+    static fn empty() -> Rv64LinuxBootArtifacts:
+        Rv64LinuxBootArtifacts(
+            opensbi: "",
+            kernel_image: "",
+            initrd_rootfs: "",
+            dtb: "",
+            uboot: ""
+        )
+
+    fn validate_for(profile: RiscvLinuxProfile) -> [text]:
+        var errors: [text] = []
+        if self.kernel_image == "":
+            errors.push("kernel_image is required")
+        if self.initrd_rootfs == "":
+            errors.push("initrd_rootfs is required")
+        if profile.dtb_required and self.dtb == "":
+            errors.push("dtb is required")
+        if profile.opensbi_required and self.opensbi == "" and self.uboot == "":
+            errors.push("OpenSBI or U-Boot firmware is required")
+        errors
+
+    fn has_firmware() -> bool:
+        self.opensbi != "" or self.uboot != ""

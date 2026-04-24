@@ -1226,16 +1226,17 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
     """
     use os.services.fat32.fat32_write.{FAT32_EOC, FAT32_MASK, DELETED_MARKER, END_MARKER, DIR_ENTRY_SIZE}
 
+    var write_ctx: Fat32WriteContext = ctx
     val upper_name = name.to_upper()
     var current = dir_cluster
     var max_iter: u32 = 100000
     while current >= 2 and max_iter > 0:
-        val data_result = ctx.read_cluster(current)
+        val data_result = write_ctx.read_cluster(current)
         if data_result.is_err():
             return Result.Err(_fat32_unwrap_err(data_result))
         var data = data_result.unwrap()
 
-        val entries_per_cluster = (ctx.sectors_per_cluster * ctx.bytes_per_sector) / DIR_ENTRY_SIZE
+        val entries_per_cluster = (write_ctx.sectors_per_cluster * write_ctx.bytes_per_sector) / DIR_ENTRY_SIZE
         var idx: u32 = 0
         while idx < entries_per_cluster:
             val off = (idx * DIR_ENTRY_SIZE).to_i32()
@@ -1265,13 +1266,24 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
             if entry_name.to_upper() == upper_name:
                 # Mark as deleted
                 data[off] = DELETED_MARKER
-                return ctx.write_cluster_data(current, data)
+                return write_ctx.write_cluster_data(current, data)
             idx = idx + 1
 
-        val next_result = ctx.read_fat_entry(current)
-        if next_result.is_err():
-            return Result.Err(_fat32_unwrap_err(next_result))
-        val next = next_result.unwrap()
+        val fat_offset = current * 4
+        val fat_sector = write_ctx.reserved_sectors.to_u64() + (fat_offset / write_ctx.bytes_per_sector).to_u64()
+        val entry_offset = (fat_offset % write_ctx.bytes_per_sector).to_i32()
+        var fat_buf: [u8] = []
+        var fat_i: u32 = 0
+        while fat_i < write_ctx.bytes_per_sector:
+            fat_buf.push(0)
+            fat_i = fat_i + 1
+        val fat_result = write_ctx.device.read_sector(fat_sector, fat_buf)
+        if fat_result.is_err():
+            return Result.Err("failed to read FAT sector")
+        val next = (((fat_buf[entry_offset + 3].to_u32() << 24) |
+                     (fat_buf[entry_offset + 2].to_u32() << 16) |
+                     (fat_buf[entry_offset + 1].to_u32() << 8) |
+                     fat_buf[entry_offset].to_u32()) & FAT32_MASK)
         if next >= FAT32_EOC or next < 2:
             break
         current = next

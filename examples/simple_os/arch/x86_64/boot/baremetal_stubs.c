@@ -4504,9 +4504,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return 1; /* bare-metal: PID 1 */
         case 13: /* SpawnBinary */
         {
-            uint64_t app_id = simpleos_known_app_id_from_path(a0, a1);
-            uint64_t path_ptr = app_id ? app_id : simpleos_decode_path_data_ptr(a0, a1);
-            uint64_t path_len = app_id ? 0 : a1;
+            uint64_t path_ptr = simpleos_decode_path_data_ptr(a0, a1);
+            uint64_t path_len = a1;
             return kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
                 id, path_ptr, path_len, a2, a3, a4, 0
             );

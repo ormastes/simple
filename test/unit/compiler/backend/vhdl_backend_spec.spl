@@ -2289,7 +2289,7 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("control_raw(7 downto 4) & (to_unsigned(1, 1) when next_enabled = '1' else to_unsigned(0, 1)) & control_raw(2 downto 0)"))
 
-    it "lowers generated rv32 decode/writeback source through exact helper guards, slices, and concat":
+    it "lowers generated rv32 decode helpers through exact MIR slices, concat shapes, guards, and source maps":
         val src = RiscvFpgaLane.rv32_default().hardware_source_spl()
         val path = "testdata/simple_rv32i_core_generated_hw.spl"
         val log = make_logger()
@@ -2300,17 +2300,30 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         val mir_module = mir_lowering.lower_module(hir_module)
 
         val mir_funcs = mir_module.functions.values()
-        check(mir_funcs.len() >= 2)
-        var saw_opcode_slice = false
-        var saw_funct3_slice = false
-        var saw_funct7_slice = false
-        var saw_rs1_slice = false
-        var saw_rs2_slice = false
+        check(mir_funcs.len() >= 5)
+        var saw_writeback_opcode_slice = false
+        var saw_writeback_funct3_slice = false
+        var saw_writeback_funct7_slice = false
+        var saw_writeback_rs1_slice = false
+        var saw_writeback_rs2_slice = false
+        var saw_branch_opcode_slice = false
         var saw_branch_low_slice = false
         var saw_branch_high_slice = false
         var saw_branch_bit11_slice = false
         var saw_branch_bit12_slice = false
-        var saw_rd_concat = false
+        var saw_store_opcode_slice = false
+        var saw_store_low_slice = false
+        var saw_store_high_slice = false
+        var saw_jump_opcode_slice = false
+        var saw_jump_low10_slice = false
+        var saw_jump_high8_slice = false
+        var saw_jump_bit11_slice = false
+        var saw_jump_bit20_slice = false
+        var saw_writeback_rd_concat = false
+        var saw_branch_concat = false
+        var saw_store_concat = false
+        var saw_jump_concat = false
+        var saw_helper_shift_mask_fallback = false
         for mir_fn in mir_funcs:
             if mir_fn.name == "simple_rv32i_core_decode_writeback":
                 for block in mir_fn.blocks:
@@ -2318,15 +2331,30 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
                         match inst.kind:
                             case VhdlSlice(dest, signal, hi, lo):
                                 if hi == 6 and lo == 0:
-                                    saw_opcode_slice = true
+                                    saw_writeback_opcode_slice = true
                                 if hi == 14 and lo == 12:
-                                    saw_funct3_slice = true
+                                    saw_writeback_funct3_slice = true
                                 if hi == 31 and lo == 25:
-                                    saw_funct7_slice = true
+                                    saw_writeback_funct7_slice = true
                                 if hi == 19 and lo == 15:
-                                    saw_rs1_slice = true
+                                    saw_writeback_rs1_slice = true
                                 if hi == 24 and lo == 20:
-                                    saw_rs2_slice = true
+                                    saw_writeback_rs2_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 3:
+                                    saw_writeback_rd_concat = true
+                            case _:
+                                nil
+            if mir_fn.name == "simple_rv32i_core_decode_branch_immediate":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_branch_opcode_slice = true
                                 if hi == 11 and lo == 8:
                                     saw_branch_low_slice = true
                                 if hi == 30 and lo == 25:
@@ -2335,28 +2363,88 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
                                     saw_branch_bit11_slice = true
                                 if hi == 31 and lo == 31:
                                     saw_branch_bit12_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
                             case VhdlConcat(dest, parts):
-                                if parts.len() == 3:
-                                    saw_rd_concat = true
+                                if parts.len() == 5:
+                                    saw_branch_concat = true
                             case _:
                                 nil
-        check(saw_opcode_slice)
-        check(saw_funct3_slice)
-        check(saw_funct7_slice)
-        check(saw_rs1_slice)
-        check(saw_rs2_slice)
+            if mir_fn.name == "simple_rv32i_core_decode_store_immediate":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_store_opcode_slice = true
+                                if hi == 11 and lo == 7:
+                                    saw_store_low_slice = true
+                                if hi == 31 and lo == 25:
+                                    saw_store_high_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 3:
+                                    saw_store_concat = true
+                            case _:
+                                nil
+            if mir_fn.name == "simple_rv32i_core_decode_jump_immediate":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_jump_opcode_slice = true
+                                if hi == 30 and lo == 21:
+                                    saw_jump_low10_slice = true
+                                if hi == 19 and lo == 12:
+                                    saw_jump_high8_slice = true
+                                if hi == 20 and lo == 20:
+                                    saw_jump_bit11_slice = true
+                                if hi == 31 and lo == 31:
+                                    saw_jump_bit20_slice = true
+                            case BinOp(dest, op, left, right):
+                                if op == MirBinOp.BitAnd or op == MirBinOp.BitOr or op == MirBinOp.Shl or op == MirBinOp.Shr:
+                                    saw_helper_shift_mask_fallback = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 5:
+                                    saw_jump_concat = true
+                            case _:
+                                nil
+        check(saw_writeback_opcode_slice)
+        check(saw_writeback_funct3_slice)
+        check(saw_writeback_funct7_slice)
+        check(saw_writeback_rs1_slice)
+        check(saw_writeback_rs2_slice)
+        check(saw_branch_opcode_slice)
         check(saw_branch_low_slice)
         check(saw_branch_high_slice)
         check(saw_branch_bit11_slice)
         check(saw_branch_bit12_slice)
-        check(saw_rd_concat)
+        check(saw_store_opcode_slice)
+        check(saw_store_low_slice)
+        check(saw_store_high_slice)
+        check(saw_jump_opcode_slice)
+        check(saw_jump_low10_slice)
+        check(saw_jump_high8_slice)
+        check(saw_jump_bit11_slice)
+        check(saw_jump_bit20_slice)
+        check(saw_writeback_rd_concat)
+        check(saw_branch_concat)
+        check(saw_store_concat)
+        check(saw_jump_concat)
+        check(not saw_helper_shift_mask_fallback)
 
         val result = make_simple_backend().compile(mir_module)
         check(result.is_ok())
         val vhdl = result.unwrap().vhdl
         check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(19, 32) then"))
         check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(51, 32) and unsigned(v_funct3) = to_unsigned(0, 32) and unsigned(v_funct7) = to_unsigned(0, 32) then"))
-        check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(99, 32) then"))
+        check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(99, 32) then"))
+        check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(35, 32) then"))
+        check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(111, 32) then"))
         check(vhdl.contains("imem_rdata(6 downto 0)"))
         check(vhdl.contains("imem_rdata(14 downto 12)"))
         check(vhdl.contains("imem_rdata(31 downto 25)"))
@@ -2366,9 +2454,24 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(vhdl.contains("imem_rdata(30 downto 25)"))
         check(vhdl.contains("imem_rdata(7 downto 7)"))
         check(vhdl.contains("imem_rdata(31 downto 31)"))
+        check(vhdl.contains("imem_rdata(11 downto 7)"))
+        check(vhdl.contains("imem_rdata(19 downto 12)"))
+        check(vhdl.contains("imem_rdata(20 downto 20)"))
+        check(vhdl.contains("imem_rdata(30 downto 21)"))
         check(vhdl.contains("imem_rdata(31 downto 12) & resize(unsigned(v_inst_rs1), 5) & imem_rdata(6 downto 0)"))
         check(vhdl.contains("imem_rdata(31 downto 12) & resize(unsigned(v_inst_rs2), 5) & imem_rdata(6 downto 0)"))
         check(vhdl.contains("to_unsigned(0, 20) & resize(unsigned(v_branch_inst_bit12), 1) & resize(unsigned(v_branch_inst_bit11), 1) & resize(unsigned(v_branch_inst_high), 6) & resize(unsigned(v_branch_inst_low), 4)"))
+        check(vhdl.contains("to_unsigned(0, 20) & resize(unsigned(v_store_inst_high), 7) & resize(unsigned(v_store_inst_low), 5)"))
+        check(vhdl.contains("to_unsigned(0, 12) & resize(unsigned(v_jump_inst_bit20), 1) & resize(unsigned(v_jump_inst_high8), 8) & resize(unsigned(v_jump_inst_bit11), 1) & resize(unsigned(v_jump_inst_low10), 10)"))
+        check(vhdl.contains("-- source-map: Rv32Instruction.funct3 => imem_rdata(14 downto 12)"))
+        check(vhdl.contains("-- source-map: Rv32Instruction.funct7 => imem_rdata(31 downto 25)"))
+        check(vhdl.contains("-- source-map: RiscvBranchEncoding.low => imem_rdata(11 downto 8)"))
+        check(vhdl.contains("-- source-map: RiscvStoreEncoding.low => imem_rdata(11 downto 7)"))
+        check(vhdl.contains("-- source-map: RiscvStoreEncoding.high => imem_rdata(31 downto 25)"))
+        check(vhdl.contains("-- source-map: RiscvJumpEncoding.high8 => imem_rdata(19 downto 12)"))
+        check(vhdl.contains("-- source-map: RiscvJumpEncoding.bit11 => imem_rdata(20 downto 20)"))
+        check(vhdl.contains("-- source-map: RiscvJumpEncoding.low10 => imem_rdata(30 downto 21)"))
+        check(vhdl.contains("-- source-map: RiscvJumpEncoding.bit20 => imem_rdata(31 downto 31)"))
 
     it "rejects non-positive fixed-width bit lanes before VHDL emission":
         val src_local = make_arg_local(1, 0, "bad", make_bits(0))
