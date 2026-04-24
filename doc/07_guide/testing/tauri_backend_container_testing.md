@@ -45,23 +45,30 @@ open build/android-test/android_screenshot.png
 Requires: `xvfb`, `dbus-x11`, Tauri build deps (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`)
 
 ```bash
-# Build
-cd tools/tauri-shell/src-tauri && cargo build
+# Build bundled desktop shell
+cd tools/tauri-shell
+mkdir -p dist && cp index.html dist/index.html
+cargo build --manifest-path src-tauri/Cargo.toml
 
 # Start virtual display
 Xvfb :99 -screen 0 1280x720x24 &
 
-# Run (dbus-run-session is required for WebKitGTK)
+# Run standalone shell (dbus-run-session is required for WebKitGTK)
 DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
   dbus-run-session -- \
-  ./target/debug/simple-tauri-shell <simple-binary> <entry-file>
+  ./src-tauri/target/debug/simple-tauri-shell <simple-binary> <entry-file>
+
+# Convenience helper (defaults to ../../bin/simple + hello_tauri.ui.sdn)
+DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+  dbus-run-session -- \
+  ./run-desktop.command
 
 # Take screenshot
 DISPLAY=:99 xwd -root -out /tmp/screenshot.xwd
 convert /tmp/screenshot.xwd /tmp/screenshot.png
 ```
 
-### Entry Files
+### Entry Files and Limits
 
 The Tauri shell accepts two types of entry files:
 
@@ -69,6 +76,10 @@ The Tauri shell accepts two types of entry files:
 |------|-----------|----------|
 | `.spl` | `simple <file>` | Any Simple binary |
 | `.ui.sdn` | `simple tauri-entry <file>` | Simple binary with `ui` command |
+
+Current limitation:
+- `simple-tauri-shell` is standalone single-window mode only.
+- `--shared-wm` and `SIMPLE_UI_TAURI_SHARED_WM=1` are rejected explicitly because the Tauri shell does not yet wire the shared host WM event loop through its native window bootstrap.
 
 For testing with older Simple binaries, use `.spl` files that output render JSON:
 

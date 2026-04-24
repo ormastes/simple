@@ -138,3 +138,58 @@ Remaining auto_stubs on SimpleOS builds should be investigated and either:
 3. Promoted to `_stub_panic_*` — panics on call so bugs surface loudly in-guest.
 
 **Methodology:** Grepped `src/runtime/` for libc call sites; ran `nm -T libsimpleos_c.a | grep ' T '`; cross-referenced per symbol; inspected `simpleos_pthread.c` for ENOSYS stubs; searched `baremetal_stubs.c` for `__attribute__((weak))`.
+
+---
+
+## Native-Surface Reduction Buckets
+
+**Date:** 2026-04-24  
+**Driver:** staged SimpleOS native-surface reduction program
+
+The migration tracker now uses three buckets for `src/os/libc` source files:
+
+### Replace Immediately in Simple
+
+- `simpleos_alloc.c`
+- `simpleos_epoll.c`
+- `simpleos_eventfd.c`
+- `simpleos_fork.c`
+- `simpleos_fs.c`
+- `simpleos_fs_walk.c`
+- `simpleos_inotify.c`
+- `simpleos_ipc.c`
+- `simpleos_libc.c`
+- `simpleos_libc_ext.c`
+- `simpleos_math.c`
+- `simpleos_math_ext.c`
+- `simpleos_poll.c`
+- `simpleos_printf_float.c`
+- `simpleos_process.c`
+- `simpleos_process_wait.c`
+- `simpleos_pthread.c`
+- `simpleos_pthread_cond.c`
+- `simpleos_pthread_rwlock.c`
+- `simpleos_signal.c`
+- `simpleos_signalfd.c`
+- `simpleos_stdlib_ext.c`
+- `simpleos_string_ext.c`
+- `simpleos_time.c`
+- `simpleos_timerfd.c`
+
+### Temporary Native Boundary
+
+- `simpleos_crt0.S`
+- `simpleos_cxxabi.c`
+- `simpleos_dlmalloc.c`
+- `simpleos_setjmp.S`
+- `simpleos_syscall.S`
+
+These remain native because they are ABI-sensitive entry, trampoline, unwinding, or allocator boundary pieces.
+
+### Delete or Stub-Track
+
+- `simpleos_glob_stub.c`
+- `simpleos_pwd_stub.c`
+- `simpleos_strfmon.c`
+
+`src/os/port/native_surface_policy_verify.spl` prints this same bucket inventory from source control and fails if a new native file lands in the covered SimpleOS reduction scope without being added to the approved manifest deliberately.

@@ -34,6 +34,13 @@ SECTIONS
         *(.text)
         *(.text.*)
     }
+    /* The x86_64 boot crt0 places a fixed 12-byte Multiboot1 header at the
+     * start of .text.entry, followed immediately by the 32-bit boot entry.
+     * Some current toolchain paths are dropping the assembler's _entry32
+     * symbol from the final ELF symbol table, which leaves e_entry as 0 and
+     * makes QEMU reject the kernel image. Recreate the symbol at link time so
+     * ENTRY(_entry32) always resolves to the actual boot code. */
+    _entry32 = ADDR(.text) + 12;
 
     /* Read-only data */
     .rodata ALIGN(4K) :

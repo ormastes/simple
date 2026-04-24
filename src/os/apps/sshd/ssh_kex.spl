@@ -18,7 +18,7 @@
 
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
-use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.rsa.{rsa_sha256_sign, rsa_sha512_sign}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_bool, ssh_put_mpint, ssh_get_string, SshStringResult}
@@ -26,6 +26,7 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
+extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
 
 # ============================================================================
 # Constants
@@ -36,6 +37,14 @@ val SSH_MSG_KEX_ECDH_REPLY: u8 = 31
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _zeroed_32_bytes() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
 
 # ============================================================================
 # Types
@@ -165,6 +174,44 @@ fn _push_ssh_ed25519_bytes(buf: [u8]) -> [u8]:
     out = rt_push_byte(out, 0x35)
     out = rt_push_byte(out, 0x31)
     out = rt_push_byte(out, 0x39)
+    out
+
+fn _push_bytes(buf: [u8], data: [u8]) -> [u8]:
+    var out = buf
+    var i: u64 = 0
+    while i < data.len():
+        out = rt_push_byte(out, _u8_at(data, i))
+        i = i + 1
+    out
+
+fn _push_string_32(buf: [u8], data: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x20)
+    out = _push_bytes(out, data)
+    out
+
+fn _push_string_64(buf: [u8], data: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x40)
+    out = _push_bytes(out, data)
+    out
+
+fn _push_string_bytes(buf: [u8], data: [u8]) -> [u8]:
+    var data_len: u64 = data.len()
+    var out = _push_u32_literal(
+        buf,
+        ((data_len >> 24) & 0xFF).to_u8(),
+        ((data_len >> 16) & 0xFF).to_u8(),
+        ((data_len >> 8) & 0xFF).to_u8(),
+        (data_len & 0xFF).to_u8()
+    )
+    out = _push_bytes(out, data)
+    out
+
+fn _reverse_bytes(data: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = data.len().to_i64() - 1
+    while i >= 0:
+        out = rt_push_byte(out, _u8_at(data, i.to_u64()))
+        i = i - 1
     out
 
 fn _push_rsa_sha2_pair_bytes(buf: [u8]) -> [u8]:
@@ -321,6 +368,7 @@ fn ssh_kex_compute_exchange_hash(
     except the shared secret K which is encoded as an SSH mpint.
     """
     var hash_input: [u8] = []
+    val shared_secret_mpint = _reverse_bytes(shared_secret)
 
     # V_C: client version string (without CR LF)
     ssh_put_text(hash_input, client_version)
@@ -329,22 +377,22 @@ fn ssh_kex_compute_exchange_hash(
     ssh_put_text(hash_input, server_version)
 
     # I_C: client KEXINIT payload (the full packet payload including msg type)
-    ssh_put_string(hash_input, client_kexinit)
+    hash_input = _push_string_bytes(hash_input, client_kexinit)
 
     # I_S: server KEXINIT payload
-    ssh_put_string(hash_input, server_kexinit)
+    hash_input = _push_string_bytes(hash_input, server_kexinit)
 
     # K_S: server host key blob
-    ssh_put_string(hash_input, host_key_blob)
+    hash_input = _push_string_bytes(hash_input, host_key_blob)
 
     # Q_C: client ephemeral public key (as string, 32 bytes)
-    ssh_put_string(hash_input, client_public)
+    hash_input = _push_string_32(hash_input, client_public)
 
     # Q_S: server ephemeral public key (as string, 32 bytes)
-    ssh_put_string(hash_input, server_public)
+    hash_input = _push_string_32(hash_input, server_public)
 
     # K: shared secret (as mpint — big-endian with sign handling)
-    ssh_put_mpint(hash_input, shared_secret)
+    ssh_put_mpint(hash_input, shared_secret_mpint)
 
     sha256(hash_input)
 
@@ -365,7 +413,8 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     """
     # Build the initial hash input: mpint(K) || H || letter || session_id
     var input: [u8] = []
-    ssh_put_mpint(input, shared_secret)
+    val shared_secret_mpint = _reverse_bytes(shared_secret)
+    ssh_put_mpint(input, shared_secret_mpint)
 
     var i: u64 = 0
     while i < exchange_hash.len():
@@ -392,7 +441,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     while key_material.len() < needed:
         # next = SHA-256(K || H || K1 || K2 || ...)
         var ext_input: [u8] = []
-        ssh_put_mpint(ext_input, shared_secret)
+        ssh_put_mpint(ext_input, shared_secret_mpint)
 
         i = 0
         while i < exchange_hash.len():
@@ -455,9 +504,8 @@ fn ssh_build_ed25519_host_key_blob(public_key: [u8]) -> [u8]:
 
     Format: string "ssh-ed25519" + string public_key (32 bytes).
     """
-    var blob: [u8] = []
-    _push_ascii_text(blob, [0x73u8, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
-    ssh_put_string(blob, public_key)
+    var blob = _push_ssh_ed25519([])
+    blob = _push_string_32(blob, public_key)
     blob
 
 fn ssh_build_rsa_host_key_blob(e_bytes: [u8], n_bytes: [u8]) -> [u8]:
@@ -504,14 +552,15 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
         if host_keys.ed25519_seed == nil:
             return Err("ssh-ed25519: no ed25519 seed configured")
         val seed = host_keys.ed25519_seed
-        val keypair = ed25519_keypair_from_seed(seed)
-        val pubkey = keypair.1
+        val pubkey = _zeroed_32_bytes()
+        val rc = rt_ed25519_keypair(seed, pubkey)
+        if rc != 0:
+            return Err("ssh-ed25519: keypair derive failed")
         val sig_raw = ed25519_sign(seed, pubkey, exchange_hash)
         if sig_raw.len() == 0:
             return Err("ssh-ed25519: signing failed")
-        var blob: [u8] = []
-        _push_ascii_text(blob, [0x73u8, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
-        ssh_put_string(blob, sig_raw)
+        var blob = _push_ssh_ed25519([])
+        blob = _push_string_64(blob, sig_raw)
         return Ok(blob)
 
     elif algo == "rsa-sha2-256":
@@ -628,7 +677,7 @@ fn ssh_build_kex_ecdh_reply(host_key_blob: [u8], server_public: [u8], signature:
     var buf: [u8] = []
     buf.push(SSH_MSG_KEX_ECDH_REPLY)
     ssh_put_string(buf, host_key_blob)
-    ssh_put_string(buf, server_public)
+    buf = _push_string_32(buf, server_public)
     ssh_put_string(buf, signature)
     buf
 

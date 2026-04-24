@@ -87,3 +87,23 @@ The architecture tree now prefers family-level Simple helpers for MMIO periphera
 - x86: `src/os/kernel/arch/x86/com1_common.spl` centralizes COM1 port setup and blocking writes for x86_32 and x86_64.
 
 Leaf modules under `riscv32`, `riscv64`, `arm32`, `arm64`, `x86_32`, and `x86_64` are HAL adapters. They preserve public symbol names and target-specific compatibility behavior while delegating duplicate register logic to the shared Simple helpers.
+
+## Native-Surface Reduction Policy
+
+<!-- codex-design -->
+
+The platform catalog now carries explicit native-surface policy for each target:
+
+- `boot_impl_kind`: whether boot sequencing is currently `Simple`, `EmbeddedAsm`, `StandaloneAsm`, `NativeC`, or `NativeObject`
+- `runtime_impl_kind`: whether the steady-state runtime is Simple-native or still depends on a native island
+- `standalone_asm_policy`: whether standalone assembly is forbidden, allowed only for entry stubs, or still broadly tolerated during migration
+
+Primary reduction targets are pinned as follows:
+
+- `x86_64-simpleos`: `boot_impl_kind=StandaloneAsm`, `runtime_impl_kind=Simple`, `standalone_asm_policy=EntryStubsOnly`
+- `riscv64gc-simpleos`: `boot_impl_kind=EmbeddedAsm`, `runtime_impl_kind=Simple`, `standalone_asm_policy=EntryStubsOnly`
+- `riscv32imac-simpleos`: `boot_impl_kind=EmbeddedAsm`, `runtime_impl_kind=Simple`, `standalone_asm_policy=EntryStubsOnly`
+
+Legacy x86_32 and ARM lanes remain catalogued as broader native-surface targets for now so the migration can land incrementally without lying about current boot dependencies.
+
+Enforcement is handled by `src/os/port/native_surface_policy_verify.spl`. The verifier audits the covered primary-target trees plus `src/os/libc`, prints a live libc migration inventory, and fails if new native C or standalone asm sources appear outside the approved exception manifest.

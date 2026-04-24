@@ -12,6 +12,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { resolveNativeWindowTarget } = require('./native_window_launch');
 
 let mainWindow = null;
 let simpleProcess = null;
@@ -130,17 +131,17 @@ function emitNativeWindowEvent(type, windowId, bw, extra = {}) {
     }
 }
 
-function resolveNativeWindowUrl(rawUrl) {
-    const url = String(rawUrl || '');
-    if (/^[a-zA-Z]+:\/\//.test(url)) return url;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        try {
-            return new URL(url, mainWindow.webContents.getURL()).toString();
-        } catch (err) {
-            debugLog(`resolveNativeWindowUrl failed for ${url}: ${err.message}`);
-        }
+function resolveNativeWindowUrl(rawUrl, title = '') {
+    const resolved = resolveNativeWindowTarget({
+        rawUrl,
+        title,
+        mainWindowUrl: mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : '',
+        localHttpPort: process.env.SIMPLE_UI_WEB_PORT || ''
+    });
+    if (resolved.reason) {
+        debugLog(`resolveNativeWindowUrl fallback reason=${resolved.reason} rawUrl=${String(rawUrl || '')}`);
     }
-    return url || 'about:blank';
+    return resolved.url;
 }
 
 function registerNativeWindowEvents(windowId, bw) {
@@ -179,7 +180,7 @@ function spawnNativeWindow({ windowId, url, width, height, title }) {
             contextIsolation: true
         }
     });
-    bw.loadURL(resolveNativeWindowUrl(url));
+    bw.loadURL(resolveNativeWindowUrl(url, title));
     registerNativeWindowEvents(normalizedWindowId, bw);
     map.set(normalizedWindowId, bw);
     debugLog(`spawned BrowserWindow windowId=${normalizedWindowId} url=${url}`);

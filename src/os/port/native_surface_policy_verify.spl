@@ -1,0 +1,223 @@
+## native_surface_policy_verify.spl
+##
+## Audits the current SimpleOS native surface for the staged reduction plan.
+## The primary acceptance scope covers x86_64, riscv32, and riscv64 plus the
+## transitional libc directory. New native C or standalone assembly files in
+## these covered subsystems fail verification unless they are in the approved
+## exception manifest below.
+
+use std.process
+
+val COVERED_ROOTS: [text] = [
+    "examples/simple_os/arch/x86_64",
+    "src/os/kernel/arch/riscv",
+    "src/os/kernel/arch/riscv32",
+    "src/os/kernel/arch/riscv64",
+    "src/os/kernel/arch/x86",
+    "src/os/kernel/arch/x86_64",
+    "src/os/libc"
+]
+
+val APPROVED_NATIVE_SOURCES: [text] = [
+    "examples/simple_os/arch/x86_64/boot/ap_trampoline.s",
+    "examples/simple_os/arch/x86_64/boot/auto_stubs.c",
+    "examples/simple_os/arch/x86_64/boot/baremetal_stubs.c",
+    "examples/simple_os/arch/x86_64/boot/collections.c",
+    "examples/simple_os/arch/x86_64/boot/crt0.s",
+    "examples/simple_os/arch/x86_64/boot/curve25519_ring_helper.c",
+    "examples/simple_os/arch/x86_64/boot/ed25519_verify_helper.c",
+    "examples/simple_os/arch/x86_64/boot/enter_user_first.s",
+    "examples/simple_os/arch/x86_64/boot/glass_render.c",
+    "examples/simple_os/arch/x86_64/boot/hashmap.c",
+    "examples/simple_os/arch/x86_64/boot/primitives.c",
+    "examples/simple_os/arch/x86_64/boot/rt_extras.c",
+    "examples/simple_os/arch/x86_64/boot/syscall_entry.s",
+    "examples/simple_os/arch/x86_64/boot/type_stubs.c",
+    "src/os/libc/simpleos_alloc.c",
+    "src/os/libc/simpleos_crt0.S",
+    "src/os/libc/simpleos_cxxabi.c",
+    "src/os/libc/simpleos_dlmalloc.c",
+    "src/os/libc/simpleos_epoll.c",
+    "src/os/libc/simpleos_eventfd.c",
+    "src/os/libc/simpleos_fork.c",
+    "src/os/libc/simpleos_fs.c",
+    "src/os/libc/simpleos_fs_walk.c",
+    "src/os/libc/simpleos_glob_stub.c",
+    "src/os/libc/simpleos_inotify.c",
+    "src/os/libc/simpleos_ipc.c",
+    "src/os/libc/simpleos_libc.c",
+    "src/os/libc/simpleos_libc_ext.c",
+    "src/os/libc/simpleos_math.c",
+    "src/os/libc/simpleos_math_ext.c",
+    "src/os/libc/simpleos_poll.c",
+    "src/os/libc/simpleos_printf_float.c",
+    "src/os/libc/simpleos_process.c",
+    "src/os/libc/simpleos_process_wait.c",
+    "src/os/libc/simpleos_pthread.c",
+    "src/os/libc/simpleos_pthread_cond.c",
+    "src/os/libc/simpleos_pthread_rwlock.c",
+    "src/os/libc/simpleos_pwd_stub.c",
+    "src/os/libc/simpleos_setjmp.S",
+    "src/os/libc/simpleos_signal.c",
+    "src/os/libc/simpleos_signalfd.c",
+    "src/os/libc/simpleos_stdlib_ext.c",
+    "src/os/libc/simpleos_strfmon.c",
+    "src/os/libc/simpleos_string_ext.c",
+    "src/os/libc/simpleos_syscall.S",
+    "src/os/libc/simpleos_time.c",
+    "src/os/libc/simpleos_timerfd.c"
+]
+
+val LIBC_REPLACE_NOW: [text] = [
+    "src/os/libc/simpleos_alloc.c",
+    "src/os/libc/simpleos_epoll.c",
+    "src/os/libc/simpleos_eventfd.c",
+    "src/os/libc/simpleos_fork.c",
+    "src/os/libc/simpleos_fs.c",
+    "src/os/libc/simpleos_fs_walk.c",
+    "src/os/libc/simpleos_inotify.c",
+    "src/os/libc/simpleos_ipc.c",
+    "src/os/libc/simpleos_libc.c",
+    "src/os/libc/simpleos_libc_ext.c",
+    "src/os/libc/simpleos_math.c",
+    "src/os/libc/simpleos_math_ext.c",
+    "src/os/libc/simpleos_poll.c",
+    "src/os/libc/simpleos_printf_float.c",
+    "src/os/libc/simpleos_process.c",
+    "src/os/libc/simpleos_process_wait.c",
+    "src/os/libc/simpleos_pthread.c",
+    "src/os/libc/simpleos_pthread_cond.c",
+    "src/os/libc/simpleos_pthread_rwlock.c",
+    "src/os/libc/simpleos_signal.c",
+    "src/os/libc/simpleos_signalfd.c",
+    "src/os/libc/simpleos_stdlib_ext.c",
+    "src/os/libc/simpleos_string_ext.c",
+    "src/os/libc/simpleos_time.c",
+    "src/os/libc/simpleos_timerfd.c"
+]
+
+val LIBC_TEMP_NATIVE_BOUNDARY: [text] = [
+    "src/os/libc/simpleos_crt0.S",
+    "src/os/libc/simpleos_cxxabi.c",
+    "src/os/libc/simpleos_dlmalloc.c",
+    "src/os/libc/simpleos_setjmp.S",
+    "src/os/libc/simpleos_syscall.S"
+]
+
+val LIBC_STUB_TRACK: [text] = [
+    "src/os/libc/simpleos_glob_stub.c",
+    "src/os/libc/simpleos_pwd_stub.c",
+    "src/os/libc/simpleos_strfmon.c"
+]
+
+fn is_native_source(path: text) -> bool:
+    path.ends_with(".c") or path.ends_with(".s") or path.ends_with(".S")
+
+fn contains_path(paths: [text], needle: text) -> bool:
+    for path in paths:
+        if path == needle:
+            return true
+    false
+
+fn native_sources_in_root(root: text) -> [text]:
+    var out: [text] = []
+    val result = process.run("find", [root, "-type", "f"])
+    if result.exit_code != 0:
+        print "  [WARN] find failed for {root}: {result.stderr.trim()}"
+        return out
+    for line in result.stdout.split("\n"):
+        val path = line.trim()
+        if path != "" and is_native_source(path):
+            out.push(path)
+    out
+
+fn collect_native_sources() -> [text]:
+    var found: [text] = []
+    for root in COVERED_ROOTS:
+        for path in native_sources_in_root(root):
+            found.push(path)
+    found
+
+fn unexpected_native_sources(found: [text]) -> [text]:
+    var unexpected: [text] = []
+    for path in found:
+        if not contains_path(APPROVED_NATIVE_SOURCES, path):
+            unexpected.push(path)
+    unexpected
+
+fn bucket_for_libc(path: text) -> text:
+    if contains_path(LIBC_REPLACE_NOW, path):
+        return "replace-now"
+    if contains_path(LIBC_TEMP_NATIVE_BOUNDARY, path):
+        return "temporary-boundary"
+    if contains_path(LIBC_STUB_TRACK, path):
+        return "stub-track"
+    "unclassified"
+
+fn print_libc_inventory(found: [text]):
+    var replace_now = 0
+    var temporary_boundary = 0
+    var stub_track = 0
+    var unclassified: [text] = []
+
+    print ""
+    print "libc migration inventory:"
+    for path in found:
+        if not path.starts_with("src/os/libc/"):
+            continue
+        val bucket = bucket_for_libc(path)
+        if bucket == "replace-now":
+            replace_now = replace_now + 1
+        else if bucket == "temporary-boundary":
+            temporary_boundary = temporary_boundary + 1
+        else if bucket == "stub-track":
+            stub_track = stub_track + 1
+        else:
+            unclassified.push(path)
+        print "  [{bucket}] {path}"
+
+    print ""
+    print "libc bucket summary:"
+    print "  replace-now: {replace_now}"
+    print "  temporary-boundary: {temporary_boundary}"
+    print "  stub-track: {stub_track}"
+    if unclassified.len() > 0:
+        print "  unclassified: {unclassified.len()}"
+        for path in unclassified:
+            print "    {path}"
+
+fn print_policy_summary(found: [text]):
+    print "covered native sources: {found.len()}"
+    print "covered roots:"
+    for root in COVERED_ROOTS:
+        print "  {root}"
+
+    print ""
+    print "approved entry-stub exceptions:"
+    print "  examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+    print "  examples/simple_os/arch/x86_64/boot/crt0.s"
+    print "  src/os/libc/simpleos_crt0.S"
+    print "  src/os/libc/simpleos_setjmp.S"
+    print "  src/os/libc/simpleos_syscall.S"
+    print ""
+    print "grandfathered migration backlog:"
+    print "  examples/simple_os/arch/x86_64/boot/*.{c,s}"
+
+fn main():
+    val found = collect_native_sources()
+    val unexpected = unexpected_native_sources(found)
+
+    print "=== SimpleOS Native-Surface Policy Verify ==="
+    print_policy_summary(found)
+    print_libc_inventory(found)
+
+    print ""
+    if unexpected.len() > 0:
+        print "unexpected native files in covered subsystems:"
+        for path in unexpected:
+            print "  [FAIL] {path}"
+        print ""
+        print "STATUS: FAIL ({unexpected.len()} unexpected native files)"
+        panic("native-surface policy regression")
+
+    print "STATUS: PASS"

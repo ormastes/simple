@@ -69,3 +69,26 @@ RISC-V and ARM now use shared family-level Simple console helpers:
 - `src/os/kernel/arch/x86/com1_common.spl` owns the COM1 port map, serial setup sequence, and blocking TX operations used by x86_32 and x86_64.
 
 The per-architecture console modules remain as the public HAL adapters. They keep only architecture-specific public names, readiness state, and compatibility differences such as the RV64 SBI pre-UART fallback, ARM32's `u32` base-address return shape, and x86 family type names.
+
+## Native-Surface Enforcement Detail
+
+<!-- codex-design -->
+
+`SimpleOsPlatformBuildTarget` now exposes three enforcement-facing fields:
+
+- `boot_impl_kind`
+- `runtime_impl_kind`
+- `standalone_asm_policy`
+
+The build/config helper layer forwards these through:
+
+- `simpleos_platform_boot_impl_kind(name)`
+- `simpleos_platform_runtime_impl_kind(name)`
+- `simpleos_platform_standalone_asm_policy(name)`
+- `simpleos_target_boot_impl_kind(target)`
+- `simpleos_target_runtime_impl_kind(target)`
+- `simpleos_target_standalone_asm_policy(target)`
+
+Focused unit coverage asserts the primary reduction policy for `x86_64`, `riscv64`, and `riscv32`, and also checks that the native-build facade returns the same policy.
+
+`src/os/port/native_surface_policy_verify.spl` is the regression gate for this phase. It walks the covered primary-target trees and `src/os/libc`, permits only the approved exception manifest, prints the current libc bucket inventory, and exits non-zero if a new native `.c`, `.s`, or `.S` file appears in those covered subsystems.

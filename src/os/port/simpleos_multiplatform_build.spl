@@ -5,6 +5,18 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 
+enum SimpleOsNativeImplementationKind:
+    Simple
+    EmbeddedAsm
+    StandaloneAsm
+    NativeC
+    NativeObject
+
+enum SimpleOsStandaloneAsmPolicy:
+    Disallowed
+    EntryStubsOnly
+    BroadNativeSurface
+
 class SimpleOsPlatformBuildTarget:
     name: text
     aliases: [text]
@@ -28,6 +40,9 @@ class SimpleOsPlatformBuildTarget:
     source_roots: [text]
     boot_c_sources: [text]
     boot_asm_sources: [text]
+    boot_impl_kind: SimpleOsNativeImplementationKind
+    runtime_impl_kind: SimpleOsNativeImplementationKind
+    standalone_asm_policy: SimpleOsStandaloneAsmPolicy
     c_flags: [text]
     asm_flags: [text]
     link_flags: [text]
@@ -122,12 +137,15 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             kernel_output: "build/os/simpleos_x86_64.elf",
             disk_image_output: "build/os/fat32-x86_64.img",
             source_roots: ["src", "examples"],
-            boot_c_sources: [],
-            boot_asm_sources: [],
+            boot_c_sources: ["examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"],
+            boot_asm_sources: ["examples/simple_os/arch/x86_64/boot/crt0.s"],
+            boot_impl_kind: SimpleOsNativeImplementationKind.StandaloneAsm,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.EntryStubsOnly,
             c_flags: _x86_64_c_flags(),
             asm_flags: _common_asm_flags("x86_64-unknown-none-elf"),
             link_flags: ["-nostdlib", "-static", "-z", "max-page-size=0x1000"],
-            notes: "64-bit x86 baremetal kernel and default hosted-wrapper lane"
+            notes: "64-bit x86 Multiboot1 baremetal kernel and hosted-wrapper lane"
         ),
         SimpleOsPlatformBuildTarget(
             name: "i686-simpleos",
@@ -152,6 +170,9 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/x86_32/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/x86_32/boot/crt0.s"],
+            boot_impl_kind: SimpleOsNativeImplementationKind.NativeC,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.BroadNativeSurface,
             c_flags: _x86_32_c_flags(),
             asm_flags: _x86_32_asm_flags(),
             link_flags: ["-nostdlib", "-static", "-Wl,-m,elf_i386"],
@@ -180,6 +201,9 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/arm64/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/arm64/boot/crt0.S"],
+            boot_impl_kind: SimpleOsNativeImplementationKind.NativeC,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.BroadNativeSurface,
             c_flags: _aarch64_c_flags(),
             asm_flags: _common_asm_flags("aarch64-unknown-none-elf"),
             link_flags: ["-nostdlib", "-static"],
@@ -208,6 +232,9 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/arm32/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/arm32/boot/crt0.s"],
+            boot_impl_kind: SimpleOsNativeImplementationKind.NativeC,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.BroadNativeSurface,
             c_flags: _arm32_c_flags(),
             asm_flags: _common_asm_flags("armv7-unknown-none-eabihf"),
             link_flags: ["-nostdlib", "-static"],
@@ -236,6 +263,9 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             source_roots: ["src", "examples"],
             boot_c_sources: [],
             boot_asm_sources: [],
+            boot_impl_kind: SimpleOsNativeImplementationKind.EmbeddedAsm,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.EntryStubsOnly,
             c_flags: _riscv64_c_flags(),
             asm_flags: _common_asm_flags("riscv64-unknown-none-elf"),
             link_flags: ["-nostdlib", "-static"],
@@ -264,6 +294,9 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             source_roots: ["src", "examples"],
             boot_c_sources: [],
             boot_asm_sources: [],
+            boot_impl_kind: SimpleOsNativeImplementationKind.EmbeddedAsm,
+            runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
+            standalone_asm_policy: SimpleOsStandaloneAsmPolicy.EntryStubsOnly,
             c_flags: _riscv32_c_flags(),
             asm_flags: _common_asm_flags("riscv32-unknown-none-elf"),
             link_flags: ["-nostdlib", "-static"],
@@ -391,3 +424,18 @@ fn simpleos_platform_needs_soft_float_runtime(name: text) -> bool:
     if val target = simpleos_platform_target_by_name(name):
         return target.float_abi == "soft"
     false
+
+fn simpleos_platform_boot_impl_kind(name: text) -> SimpleOsNativeImplementationKind:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.boot_impl_kind
+    SimpleOsNativeImplementationKind.NativeC
+
+fn simpleos_platform_runtime_impl_kind(name: text) -> SimpleOsNativeImplementationKind:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.runtime_impl_kind
+    SimpleOsNativeImplementationKind.NativeC
+
+fn simpleos_platform_standalone_asm_policy(name: text) -> SimpleOsStandaloneAsmPolicy:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.standalone_asm_policy
+    SimpleOsStandaloneAsmPolicy.BroadNativeSurface

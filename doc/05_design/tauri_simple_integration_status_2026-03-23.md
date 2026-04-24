@@ -69,18 +69,23 @@ tools/docker/
 
 **How to run:**
 ```bash
-# Build
-cd tools/tauri-shell/src-tauri && cargo build
+# Build standalone shell
+cd tools/tauri-shell
+mkdir -p dist && cp index.html dist/index.html
+cargo build --manifest-path src-tauri/Cargo.toml
 
 # Run (with display)
-DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 dbus-run-session -- \
-  ./target/debug/simple-tauri-shell <simple-binary> <file.spl>
+DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+  dbus-run-session -- \
+  ./src-tauri/target/debug/simple-tauri-shell <simple-binary> <file.spl>
 
-# Run in container
-docker run --rm -p 5900:5900 simple-tauri-gui
+# Or use the repo helper
+./run-desktop.command
 ```
 
 **Key requirement:** dbus-run-session is required for WebKitGTK initialization.
+
+**Current limitation:** the standalone Tauri shell is single-window only. `--shared-wm` / `SIMPLE_UI_TAURI_SHARED_WM=1` are intentionally rejected until the Tauri host bootstrap can hand off to the shared WM event loop.
 
 ### Android — APK Verified on Emulator
 

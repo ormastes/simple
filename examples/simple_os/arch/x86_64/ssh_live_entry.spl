@@ -21,10 +21,34 @@ use os.kernel.boot.init_services.{init_all_services, services_network_ready, ser
 # SSH
 use os.apps.sshd.sshd.{SSHD_PORT}
 extern fn apps__sshd__sshd__SshDaemon_dot_new(port: u64) -> u64
+extern fn apps__sshd__sshd__SshDaemon_dot_set_host_rsa_key(daemon: u64, pkcs8: [u8]) -> u64
 extern fn apps__sshd__sshd__SshDaemon_dot_start(daemon: u64) -> u64
 
 fn serial_println(msg: text):
     serial_writeln(msg)
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        return c - 0x30
+    if c >= 0x61 and c <= 0x66:
+        return c - 0x61 + 10
+    if c >= 0x41 and c <= 0x46:
+        return c - 0x41 + 10
+    0
+
+fn _hex_decode(hex: text) -> [u8]:
+    val hex_bytes = hex.to_bytes()
+    var result: [u8] = []
+    var i: u64 = 0
+    while i + 1 < hex_bytes.len():
+        val hi = _hex_nibble(hex_bytes[i])
+        val lo = _hex_nibble(hex_bytes[i + 1])
+        result.push((hi << 4) | lo)
+        i = i + 2
+    result
+
+fn _embedded_host_rsa_pkcs8() -> [u8]:
+    _hex_decode("308204a20201000282010100b9a57996db16d7c6440c3e576e3d56da0d18d2a26783937e169851b09ce1bf185b7322d32151563ecf5c601487c69b2b9234a719ddf21cf7f9c109624b7f1382cd349600beb06967432d38c8f77b80f7a8fc21bfd775c6d20f3c98396dd900b28cff552a6619421f945711b10167b636377624cc1b822eaae069c4b875454bc850a594d61bc322bed9903860ea782b1b7c2ad4d1c8610011241570d22a302ce31c61e49ef21ec923f0b4595bade919c42ce38449dfefefe4c90ec00f09df05f154f274357a5dea00f5b0fad5aeded6137d8965e70bba5afd1922c88ac704dca7f928fd09be14ce438248f40147f83a863c47ca4fc183440e1c0f2596f1482f2f0203010001028201000da3b1b63aac87f7e22200268e4be568a9d3ac0e108ae3383d52bd95bb40feb83c67ce2432eb75e9b17478fea927175971297b29745c0872d39fb21fcdaa2d75cbbbd45583ad146168d716b7f52ed6bfdb6382db446a3bcc4d204792d8963bede25c1416c45f90b31f43f261cdd79fd485e8a13579c3ebc7d42b112ff835ba26825970f25be849b7ea36035074925e66710e1809bf8fc5f9c79e4174c0bc0280a365765d988fcbd1b33ffdfd6a27d3539ea38d503ed4e64e18fe69139641b76af8a48ee4391828f7f1cbfe9193db44819dd49fbaaca4ab726241ad05adbef8103bfe2142b40c8c2ce84472061e7654040f871e856a28ab03998b51339b548c3902818100ecdb8ce00419f965de90f2bdbe9aa413dc83b28f7520ca60683bc2e6c99aae8240ed2a7f03a52c8a0d756713afaf5536240359ea8d4cb68bd8cf1b7ab65e7bee70cba64e4df87d4fbba7dabc3749fe0b8c1c9f35bbdd4d1a6d4b6f03e963b667ffa593bf09a6028706355282e0b5000c12632d698f80c93fc05da2e4ec380a4302818100c8a664b20bd2c2160bf6196e390f665790197dd245223f7f341cd35943839decda117a00837b5892eb4a5d569b3730ac578033872326ce3736ef1742db38c7dc805420a48e41b160f4ebeacba931d3c8a7fcfd2c522f3ef4b5f096dce70f0e5df53d96dd6e06aebc687071fc4704ff55a97c15669c722cbe0f30b3301aa406a502818067025cd418348ba8681135e09b82799541b3ecf643044dbf7bd571c01931b26f67793da01b9fbc2d16095718d2b13827e1a5ab773c987e5377a92ad44577f6020f002285af9740386aee674cafe6f81b6186191faf626163fae071998be917ad471b659411c827153df7f6b880ad7725c8e16520a18e6af7d4db643a9719102d0281801a932f3305addc56df2eb11f901f2206e6e6f96b280ce92c07d2e98b210e0594a12d3f636206ac2c894d481f785f4eeb048bce474fb88c07741726958c4370f51b6a0908c26ea0f79e78c09848c878ac52d387149fadf240a6f83e82f3776307bebb7187d252c041e3f340a59122704f002b970a081e771e9514762720e028a102818060a9d074ac11f318aef39ea2aea9f5df0a1265931f601b9e2db6be89b774015b2ba13b63b9c991738117f8177d2f7cc39de361f3b1cabaf9f1d804310be4531f5cd485da940cc3d11a4fb68b6f05f175aea96e718f05117a4ecd117c7fb18d51550cf6738f9eee1c01901a94577e5bc1efa6d03174775344b4e9edb26a86b13a")
 
 fn _start():
     serial_println("")
@@ -56,6 +80,9 @@ fn _start():
         serial_println("[boot] WARNING: SSHD_PORT constant differs from live entry port 22")
     serial_println("[boot] Starting SSH daemon on port 22...")
     val daemon = apps__sshd__sshd__SshDaemon_dot_new(22)
+    val rsa_pkcs8 = _embedded_host_rsa_pkcs8()
+    val _set_rsa = apps__sshd__sshd__SshDaemon_dot_set_host_rsa_key(daemon, rsa_pkcs8)
+    serial_println("[boot] Loaded embedded RSA host key ({rsa_pkcs8.len()} bytes)")
     serial_println("[boot] SSH daemon created (users: root/simpleos, user/password)")
     serial_println("[boot] Entering accept loop — connect with: ssh -p 2222 root@localhost")
     serial_println("")

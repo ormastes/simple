@@ -6,7 +6,6 @@
 # Each phase is implemented as a separate method called from run().
 # The session reads/writes via socket FDs using the POSIX socket API.
 
-use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
@@ -18,6 +17,7 @@ use os.apps.sshd.ssh_pty.{SshPty}
 use os.apps.shell.shell_app.{ShellApp}
 
 extern fn serial_println(msg: text)
+extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
@@ -55,6 +55,15 @@ fn _zeroed_32_bytes() -> [u8]:
         out.push(0)
         i = i + 1
     out
+
+fn _ed25519_public_key_from_seed(seed: [u8]?) -> [u8]:
+    if seed == nil:
+        return []
+    val pk = _zeroed_32_bytes()
+    val rc = rt_ed25519_keypair(seed, pk)
+    if rc != 0:
+        return []
+    pk
 
 # ============================================================================
 # Types
@@ -919,10 +928,9 @@ fn _build_host_key_blob_for_algo(algo: text, host_keys: HostKeySet) -> [u8]:
     Callers pass the blob directly into the exchange hash computation.
     """
     if algo == "ssh-ed25519":
-        if host_keys.ed25519_seed == nil:
+        val pubkey = _ed25519_public_key_from_seed(host_keys.ed25519_seed)
+        if pubkey.len() != 32:
             return []
-        val keypair = ed25519_keypair_from_seed(host_keys.ed25519_seed)
-        val pubkey = keypair.1
         return ssh_build_ed25519_host_key_blob(pubkey)
     # For RSA/ECDSA the server needs to supply the public key separately.
     # Return an empty blob; production deployments provide a pre-built blob.

@@ -85,15 +85,40 @@ fn show_error(app: &AppHandle, title: &str, detail: &str) {
     if let Some(win) = app.get_webview_window("main") {
         let escaped_title = js_escape(title);
         let escaped_detail = js_escape(detail);
-        // Trigger the demo UI fallback, then show error as a toast overlay
         let js = format!(
             r#"
             (function() {{
                 if (typeof showDemoUI === 'function') {{ showDemoUI(); }}
+                var root = document.getElementById('tauri-startup-error');
+                if (!root) {{
+                    root = document.createElement('div');
+                    root.id = 'tauri-startup-error';
+                    root.style.position = 'fixed';
+                    root.style.top = '20px';
+                    root.style.right = '20px';
+                    root.style.width = 'min(520px, calc(100vw - 40px))';
+                    root.style.maxHeight = 'calc(100vh - 40px)';
+                    root.style.overflow = 'auto';
+                    root.style.padding = '18px 20px';
+                    root.style.borderRadius = '14px';
+                    root.style.border = '1px solid rgba(255,180,171,0.42)';
+                    root.style.background = 'rgba(33, 12, 18, 0.96)';
+                    root.style.boxShadow = '0 18px 40px rgba(0,0,0,0.35)';
+                    root.style.zIndex = '99999';
+                    root.style.color = '#ffe2de';
+                    root.style.fontFamily = '"SFMono-Regular","Consolas","Liberation Mono",monospace';
+                    document.body.appendChild(root);
+                }}
+                root.innerHTML = '<div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#ffb4ab;margin-bottom:8px">Startup error</div>'
+                    + '<div style="font-size:20px;font-weight:700;margin-bottom:10px;color:#fff0ee">' + `{}` + '</div>'
+                    + '<pre style="white-space:pre-wrap;line-height:1.45;margin:0;color:#ffd7d2">' + `{}` + '</pre>';
+                if (typeof window.simpleStatus === 'function') {{
+                    window.simpleStatus(`{}`);
+                }}
                 console.warn(`{}` + ': ' + `{}`);
             }})();
             "#,
-            escaped_title, escaped_detail
+            escaped_title, escaped_detail, escaped_detail, escaped_title, escaped_detail
         );
         let _ = win.eval(&js);
     }
@@ -320,6 +345,13 @@ fn resolve_entry_file() -> Option<String> {
     }
 }
 
+fn shared_wm_requested() -> bool {
+    if env::var("SIMPLE_UI_TAURI_SHARED_WM").as_deref() == Ok("1") {
+        return true;
+    }
+    env::args().any(|arg| arg == "--shared-wm")
+}
+
 fn binary_supports_ui_command(simple_bin: &str) -> bool {
     let output = match Command::new(simple_bin).args(["ui", "--help"]).output() {
         Ok(out) => out,
@@ -359,6 +391,7 @@ fn log_entry_file_status(entry_file: &Option<String>) {
 pub fn run() {
     // Check for external URL mode (e.g. --url http://localhost:3000)
     let external_url = resolve_external_url();
+    let shared_wm_requested = shared_wm_requested();
 
     let simple_bin = resolve_simple_binary();
     let entry_file = resolve_entry_file();
@@ -366,6 +399,7 @@ pub fn run() {
     eprintln!("[tauri-shell] binary: {}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
     eprintln!("[tauri-shell] external_url: {:?}", external_url);
+    eprintln!("[tauri-shell] shared_wm_requested: {}", shared_wm_requested);
     log_entry_file_status(&entry_file);
 
     let mut startup_error: Option<String> = None;
@@ -375,7 +409,12 @@ pub fn run() {
     let mut child_slot = None;
 
     // In URL mode, skip subprocess spawning entirely
-    if external_url.is_none() {
+    if shared_wm_requested {
+        startup_error = Some(
+            "WM-hosted mode is not wired through simple-tauri-shell yet.\n\nUse standalone Tauri mode without `--shared-wm`, or launch a backend with shared-WM support directly (for example the browser or electron host shells).".to_string()
+        );
+        eprintln!("[tauri-shell] refusing unsupported shared WM request");
+    } else if external_url.is_none() {
         let ui_entry = entry_file
             .as_ref()
             .map(|entry| entry.ends_with(".ui.sdn"))

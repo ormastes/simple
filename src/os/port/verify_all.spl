@@ -19,7 +19,9 @@
 use std.fs
 use std.process
 use std.text
-use std.cli
+
+extern fn sys_get_args() -> [text]
+extern fn rt_exit(code: i32) -> void
 
 # ============================================================================
 # Configuration
@@ -125,7 +127,8 @@ fn print_usage():
 fn check_file_exists(path: text, desc: text, result: PhaseResult, verbose: bool) -> PhaseResult:
     """Check that a file exists and update the result."""
     var r = result
-    if fs.exists(path):
+    val check = process.run("test", ["-e", path])
+    if check.exit_code == 0:
         r.passed = r.passed + 1
         if verbose:
             print "  [PASS] {desc}: {path}"
@@ -138,8 +141,8 @@ fn check_file_exists(path: text, desc: text, result: PhaseResult, verbose: bool)
 fn check_command_exists(cmd: text, result: PhaseResult, verbose: bool) -> PhaseResult:
     """Check that an external command is available on PATH."""
     var r = result
-    val (_, _, code) = process.run("which", [cmd])
-    if code == 0:
+    val check = process.run("which", [cmd])
+    if check.exit_code == 0:
         r.passed = r.passed + 1
         if verbose:
             print "  [PASS] command: {cmd}"
@@ -153,13 +156,14 @@ fn check_file_contains(path: text, needle: text, desc: text, result: PhaseResult
                         verbose: bool) -> PhaseResult:
     """Check that a file exists and contains a string."""
     var r = result
-    if not fs.exists(path):
+    val exists_check = process.run("test", ["-e", path])
+    if exists_check.exit_code != 0:
         r.failed = r.failed + 1
         r.errors.push("Missing: {desc} ({path})")
         print "  [FAIL] {desc}: {path} not found"
         return r
-    val content = fs.read_text(path)
-    if content.contains(needle):
+    val grep = process.run("rg", ["-F", "-q", "--", needle, path])
+    if grep.exit_code == 0:
         r.passed = r.passed + 1
         if verbose:
             print "  [PASS] {desc}: contains '{needle}'"
@@ -397,12 +401,28 @@ fn verify_toolchain(config: VerifyConfig) -> PhaseResult:
         "string.h header", r, config.verbose)
     r = check_file_exists("src/os/libc/include/math.h",
         "math.h header", r, config.verbose)
+    r = check_file_exists("src/os/port/native_surface_policy_verify.spl",
+        "Native-surface policy verifier", r, config.verbose)
 
     section("Deployment Script")
     r = check_file_exists("src/os/port/deploy_toolchains.spl",
         "Deploy script", r, config.verbose)
     r = check_file_exists("src/os/port/simpleos_native_build_config.spl",
         "Native build config", r, config.verbose)
+
+    section("Native-Surface Reduction Policy")
+    val policy = process.run("bin/simple",
+        ["run", "src/os/port/native_surface_policy_verify.spl"])
+    if policy.exit_code == 0 and policy.stdout.contains("STATUS: PASS"):
+        r.passed = r.passed + 1
+        print "  [PASS] Native-surface policy verification passed"
+    else:
+        r.failed = r.failed + 1
+        r.errors.push("Native-surface policy verification failed (exit {policy.exit_code})")
+        print "  [FAIL] Native-surface policy verification failed"
+        if config.verbose:
+            print "  stdout: {policy.stdout}"
+            print "  stderr: {policy.stderr}"
 
     section("Host Toolchain")
     r = check_command_exists("clang", r, config.verbose)
@@ -548,7 +568,9 @@ fn print_final_summary(results: [PhaseResult]):
 # Main
 # ============================================================================
 
-fn main(args: [text]):
+fn main():
+    val all_args = sys_get_args()
+    val args = if all_args.len() > 1: all_args[1:] else: []
     val config = parse_args(args)
 
     print "SimpleOS Full Verification v{VERSION}"
@@ -599,4 +621,4 @@ fn main(args: [text]):
         if not r.ok():
             any_fail = true
     if any_fail:
-        process.exit(1)
+        rt_exit(1)
