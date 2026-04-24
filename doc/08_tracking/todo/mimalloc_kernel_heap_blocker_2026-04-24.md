@@ -2,9 +2,20 @@
 
 **Date:** 2026-04-24
 **Feature:** mold-mimalloc-default / AC-6
-**Status:** Deferred — concrete blocker identified
+**Status:** Partially resolved (2026-04-24) — naive wiring landed; sub-page bucketing remains
 
-## What needs to happen
+## What was done (2026-04-24)
+
+Landed naive mimalloc wiring: `heap_alloc`/`heap_free` in `heap.spl` now
+delegate to `mi_malloc_raw`/`mi_free_raw`. `heap_init` initialises mimalloc
+and injects `_kernel_pmm_page_alloc` (a bump allocator over the pre-mapped
+heap region) as the OS page provider. The free-list allocator is removed.
+
+**Known regression:** every `heap_alloc` call consumes at least one 4 KiB
+page regardless of requested size. Sub-page bucketing (Option A below)
+is required to fix this.
+
+## What still needs to happen
 
 Replace `src/os/kernel/memory/heap.spl`'s free-list allocator with mimalloc
 as the primary `heap_alloc`/`heap_free` implementation, so SimpleOS uses

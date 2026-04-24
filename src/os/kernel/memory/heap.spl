@@ -1,76 +1,31 @@
 #![allow(unnamed_duplicate_typed_args)]
 # Kernel Heap — Memory Layer (Layer 1)
 #
-# Free-list heap allocator for the kernel.
-# Follows the FreeListAllocator pattern from baremetal/allocator.spl
-# but uses 64-bit addresses for x86_64 virtual memory.
+# mimalloc-backed kernel heap. heap_alloc/heap_free delegate to
+# mi_malloc_raw/mi_free_raw. The OS page provider (_kernel_pmm_page_alloc)
+# is a bump allocator inside the pre-mapped heap region — one 4 KiB page
+# consumed per alloc regardless of size until sub-page bucketing lands.
 #
-# The heap sits in a dedicated virtual memory region. Pages are
-# demand-allocated from the VMM/PMM as the heap grows.
-#
-# TODO(AC-6 deferred): Replace this free-list with mimalloc as the default
-# kernel heap allocator. The mimalloc raw kernel API (mi_malloc_raw,
-# mi_free_raw, mimalloc_set_os_page_alloc) is available in
-# nogc_sync_mut.mimalloc — wiring is blocked on sub-page bucketing
-# (MiPage.base + offset arithmetic) so small allocs don't waste a full
-# PMM page per call.
-# Tracked: doc/08_tracking/todo/mimalloc_kernel_heap_blocker_2026-04-24.md
+# FIXME(AC-6 follow-up): Implement MiPage.base + offset arithmetic in
+# mimalloc.spl so small/medium allocs share a single PMM page rather than
+# each consuming one. Tracked:
+# doc/08_tracking/todo/mimalloc_kernel_heap_blocker_2026-04-24.md
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
-use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-val HEAP_BLOCK_HEADER_SIZE: u64 = 24    # size(8) + is_free(8) + next(8)
-val HEAP_MIN_ALLOC: u64 = 16            # Minimum payload size
-val HEAP_ALIGNMENT: u64 = 16            # 16-byte alignment (SSE requirement)
-
-# ============================================================================
-# Block Header (64-bit version)
-# ============================================================================
-
-struct HeapBlockHeader:
-    """Free-list block header for kernel heap.
-
-    Stored at the start of each block (both free and allocated).
-    Size includes the header itself.
-    """
-    size: u64           # Total block size including header
-    is_free: u64        # 1 = free, 0 = allocated (u64 for alignment)
-    next: u64           # Virtual address of next block (0 = last)
-
-impl HeapBlockHeader:
-    static fn read_from(addr: u64) -> HeapBlockHeader:
-        """Read block header from virtual address."""
-        HeapBlockHeader(
-            size: mmio_read64(addr),
-            is_free: mmio_read64(addr + 8),
-            next: mmio_read64(addr + 16)
-        )
-
-    fn write_to(addr: u64):
-        """Write block header to virtual address."""
-        mmio_write64(addr, self.size)
-        mmio_write64(addr + 8, self.is_free)
-        mmio_write64(addr + 16, self.next)
+use nogc_sync_mut.mimalloc.{MiHeap, mimalloc_init, mimalloc_set_os_page_alloc, mi_malloc_raw, mi_free_raw}
 
 # ============================================================================
 # Kernel Heap
 # ============================================================================
 
 struct KernelHeap:
-    """Kernel heap allocator using free-list with first-fit.
-
-    Manages a contiguous virtual address region. Blocks are
-    linked in address order for coalescing.
+    """Kernel heap state tracking. Allocation is handled by mimalloc via
+    mi_malloc_raw; this struct records bookkeeping totals only.
     """
     base: u64           # Virtual start of heap region
     size: u64           # Total heap size
-    first_block: u64    # Address of first block
-    total_allocated: u64    # Bytes currently allocated
-    total_free: u64         # Bytes currently free
+    total_allocated: u64    # Bytes currently allocated (approximate)
+    total_free: u64         # Bytes currently free (approximate)
     alloc_count: u64        # Number of active allocations
 
 # ============================================================================
@@ -80,11 +35,14 @@ struct KernelHeap:
 var g_heap: KernelHeap = KernelHeap(
     base: 0,
     size: 0,
-    first_block: 0,
     total_allocated: 0,
     total_free: 0,
     alloc_count: 0
 )
+
+# Bump pointer within the pre-mapped heap region (used by _kernel_pmm_page_alloc)
+var _g_bump_ptr: u64 = 0
+var _g_bump_end: u64 = 0
 
 # Forward declarations
 extern fn serial_println(msg: text)
@@ -94,12 +52,31 @@ extern fn pmm_alloc_page() -> PageFrame?
 use os.kernel.types.memory_types.{PageFrame}
 
 # ============================================================================
-# Alignment Helper
+# OS page provider for mimalloc — bump allocator inside pre-mapped heap region
+#
+# NOTE(AC-6 follow-up): Every mi_malloc_raw call, regardless of requested
+# size, consumes PAGE_SIZE bytes from the bump region. This is a deliberate
+# temporary regression accepted when landing the mimalloc wiring. Sub-page
+# bucketing (MiPage.base + offset arithmetic) will fix this.
 # ============================================================================
 
-fn _align_up_64(value: u64, alignment: u64) -> u64:
-    """Align value up to alignment boundary (alignment must be power of 2)."""
-    (value + alignment - 1) & ~(alignment - 1)
+val _HEAP_PAGE_SIZE: u64 = 4096
+
+fn _kernel_pmm_page_alloc(size: usize) -> usize:
+    """Bump allocator within the pre-mapped heap virtual region.
+
+    Returns the next aligned slot of at least PAGE_SIZE bytes, or 0 on
+    exhaustion. In interpreter/stub mode _g_bump_end == 0, so returns 0.
+    """
+    if _g_bump_ptr == 0 or _g_bump_end == 0:
+        return 0
+    val pages_needed = (size as u64 + _HEAP_PAGE_SIZE - 1) / _HEAP_PAGE_SIZE
+    val alloc_bytes = pages_needed * _HEAP_PAGE_SIZE
+    if _g_bump_ptr + alloc_bytes > _g_bump_end:
+        return 0
+    val addr = _g_bump_ptr
+    _g_bump_ptr = _g_bump_ptr + alloc_bytes
+    addr as usize
 
 # ============================================================================
 # Heap Initialization
@@ -108,18 +85,19 @@ fn _align_up_64(value: u64, alignment: u64) -> u64:
 fn heap_init(start: VirtAddr, size: u64):
     """Initialize the kernel heap.
 
-    Sets up a single large free block spanning the entire heap region.
-    The caller must ensure the virtual address range is already mapped
-    to physical memory (or will be demand-paged).
+    Maps the heap virtual region to physical pages, sets up the bump
+    allocator, initialises mimalloc, and injects the OS page provider.
+    The caller must ensure the virtual address range is available.
 
     Args:
         start: Virtual address of heap start (must be page-aligned)
-        size:  Heap size in bytes (must be >= HEAP_BLOCK_HEADER_SIZE + HEAP_MIN_ALLOC)
+        size:  Heap size in bytes (must be >= 4096)
     """
     serial_println("[HEAP] Initializing kernel heap...")
     serial_println("[HEAP] Base: 0x{start.addr} Size: {size} bytes ({size / 1024}KB)")
 
-    if size < HEAP_BLOCK_HEADER_SIZE + HEAP_MIN_ALLOC:
+    val heap_min: u64 = 4096
+    if size < heap_min:
         serial_println("[HEAP] FATAL: Heap too small")
         return
 
@@ -128,24 +106,24 @@ fn heap_init(start: VirtAddr, size: u64):
     # Map heap pages to physical memory
     _map_heap_region(base, size)
 
-    # Create initial free block covering entire heap
-    val initial_block = HeapBlockHeader(
-        size: size,
-        is_free: 1,
-        next: 0
-    )
-    initial_block.write_to(base)
-
+    # Initialize global heap tracking
     g_heap = KernelHeap(
         base: base,
         size: size,
-        first_block: base,
         total_allocated: 0,
-        total_free: size - HEAP_BLOCK_HEADER_SIZE,
+        total_free: size,
         alloc_count: 0
     )
 
-    serial_println("[HEAP] Initialization complete, {g_heap.total_free} bytes available")
+    # Set up bump region for the mimalloc OS page provider
+    _g_bump_ptr = base
+    _g_bump_end = base + size
+
+    # Wire mimalloc as the backing allocator
+    mimalloc_init(MiHeap(size_classes: [], pages_by_class: []))
+    mimalloc_set_os_page_alloc(_kernel_pmm_page_alloc)
+
+    serial_println("[HEAP] Initialization complete (mimalloc), {size} bytes available")
 
 fn _map_heap_region(base: u64, size: u64):
     """Map heap virtual pages to physical frames."""
@@ -169,10 +147,10 @@ fn _map_heap_region(base: u64, size: u64):
 # ============================================================================
 
 fn heap_alloc(size: u64) -> VirtAddr?:
-    """Allocate memory from the kernel heap.
+    """Allocate memory from the kernel heap via mimalloc.
 
-    Uses first-fit algorithm. Returns 16-byte aligned pointer.
-    Returns nil if allocation fails.
+    Delegates to mi_malloc_raw which uses the pre-mapped bump region.
+    Returns nil if allocation fails (exhausted or not yet initialized).
 
     Args:
         size: Requested allocation size in bytes
@@ -180,63 +158,16 @@ fn heap_alloc(size: u64) -> VirtAddr?:
     if size == 0:
         return nil
 
-    # Align requested size up
-    val aligned_size = _align_up_64(size, HEAP_ALIGNMENT)
-    val total_needed = HEAP_BLOCK_HEADER_SIZE + aligned_size
+    val addr = mi_malloc_raw(size as usize)
+    if addr == 0:
+        return nil
 
-    # First-fit search through block list
-    var current_addr = g_heap.first_block
-    var prev_addr: u64 = 0
+    g_heap.total_allocated = g_heap.total_allocated + size
+    if g_heap.total_free >= size:
+        g_heap.total_free = g_heap.total_free - size
+    g_heap.alloc_count = g_heap.alloc_count + 1
 
-    while current_addr != 0:
-        val header = HeapBlockHeader.read_from(current_addr)
-
-        if header.is_free == 1 and header.size >= total_needed:
-            # Found suitable block — try to split
-            val remainder = header.size - total_needed
-
-            if remainder >= HEAP_BLOCK_HEADER_SIZE + HEAP_MIN_ALLOC:
-                # Split: create new free block after this one
-                val new_block_addr = current_addr + total_needed
-                val new_block = HeapBlockHeader(
-                    size: remainder,
-                    is_free: 1,
-                    next: header.next
-                )
-                new_block.write_to(new_block_addr)
-
-                # Update current block (now allocated, smaller)
-                val alloc_block = HeapBlockHeader(
-                    size: total_needed,
-                    is_free: 0,
-                    next: new_block_addr
-                )
-                alloc_block.write_to(current_addr)
-
-                g_heap.total_allocated = g_heap.total_allocated + total_needed
-                g_heap.total_free = g_heap.total_free - total_needed
-            else:
-                # Use entire block (no split — remainder too small)
-                val alloc_block = HeapBlockHeader(
-                    size: header.size,
-                    is_free: 0,
-                    next: header.next
-                )
-                alloc_block.write_to(current_addr)
-
-                g_heap.total_allocated = g_heap.total_allocated + header.size
-                g_heap.total_free = g_heap.total_free - header.size
-
-            g_heap.alloc_count = g_heap.alloc_count + 1
-
-            # Return pointer past the header
-            return VirtAddr(addr: current_addr + HEAP_BLOCK_HEADER_SIZE)
-
-        prev_addr = current_addr
-        current_addr = header.next
-
-    # No suitable block found
-    nil
+    Some(VirtAddr(addr: addr as u64))
 
 # ============================================================================
 # Heap Deallocation
@@ -245,8 +176,9 @@ fn heap_alloc(size: u64) -> VirtAddr?:
 fn heap_free(addr: VirtAddr):
     """Free a heap allocation.
 
-    Marks the block as free and coalesces with adjacent free blocks
-    to reduce fragmentation.
+    Delegates to mi_free_raw. Page reclaim is not yet implemented in
+    mi_free_raw — the bump region is not reclaimed. This is acceptable
+    until sub-page bucketing lands (AC-6 follow-up).
 
     Args:
         addr: Virtual address previously returned by heap_alloc
@@ -254,75 +186,18 @@ fn heap_free(addr: VirtAddr):
     if addr.addr == 0:
         return
 
-    val block_addr = addr.addr - HEAP_BLOCK_HEADER_SIZE
-
-    # Validate: block must be within heap range
-    if block_addr < g_heap.base:
+    # Validate: address must be within heap range
+    if addr.addr < g_heap.base:
         serial_println("[HEAP] WARNING: free() on address below heap")
         return
-    if block_addr >= g_heap.base + g_heap.size:
+    if addr.addr >= g_heap.base + g_heap.size:
         serial_println("[HEAP] WARNING: free() on address above heap")
         return
 
-    # Mark block as free
-    var header = HeapBlockHeader.read_from(block_addr)
-    if header.is_free == 1:
-        serial_println("[HEAP] WARNING: double free detected at 0x{addr.addr}")
-        return
+    mi_free_raw(addr.addr as usize, 0)
 
-    header.is_free = 1
-    header.write_to(block_addr)
-
-    g_heap.total_allocated = g_heap.total_allocated - header.size
-    g_heap.total_free = g_heap.total_free + header.size
-    g_heap.alloc_count = g_heap.alloc_count - 1
-
-    # Coalesce with next block if free
-    _coalesce_forward(block_addr)
-
-    # Coalesce with previous block if free
-    _coalesce_backward(block_addr)
-
-fn _coalesce_forward(block_addr: u64):
-    """Merge block with next block if both are free."""
-    val header = HeapBlockHeader.read_from(block_addr)
-    if header.next == 0:
-        return
-
-    val next_header = HeapBlockHeader.read_from(header.next)
-    if next_header.is_free == 1:
-        # Merge: absorb next block into current
-        val merged = HeapBlockHeader(
-            size: header.size + next_header.size,
-            is_free: 1,
-            next: next_header.next
-        )
-        merged.write_to(block_addr)
-
-fn _coalesce_backward(block_addr: u64):
-    """Merge block with previous block if both are free.
-
-    Walks from the first block to find the predecessor.
-    """
-    if block_addr == g_heap.first_block:
-        return  # No previous block
-
-    # Walk the list to find the block before this one
-    var current = g_heap.first_block
-    while current != 0:
-        val header = HeapBlockHeader.read_from(current)
-        if header.next == block_addr:
-            # Found the previous block
-            if header.is_free == 1:
-                val target = HeapBlockHeader.read_from(block_addr)
-                val merged = HeapBlockHeader(
-                    size: header.size + target.size,
-                    is_free: 1,
-                    next: target.next
-                )
-                merged.write_to(current)
-            return
-        current = header.next
+    if g_heap.alloc_count > 0:
+        g_heap.alloc_count = g_heap.alloc_count - 1
 
 # ============================================================================
 # Heap Query Interface
@@ -341,43 +216,5 @@ fn heap_alloc_count() -> u64:
     g_heap.alloc_count
 
 fn heap_integrity_check() -> bool:
-    """Walk the block list and verify invariants.
-
-    Checks:
-    - All blocks are within heap bounds
-    - Block sizes sum to total heap size
-    - No overlapping blocks
-    """
-    var current = g_heap.first_block
-    var total_size: u64 = 0
-    var block_count: u64 = 0
-    val max_blocks: u64 = 1000000   # Safety limit
-
-    while current != 0:
-        if current < g_heap.base:
-            serial_println("[HEAP] Integrity: block below heap at 0x{current}")
-            return false
-        if current >= g_heap.base + g_heap.size:
-            serial_println("[HEAP] Integrity: block above heap at 0x{current}")
-            return false
-
-        val header = HeapBlockHeader.read_from(current)
-
-        if header.size < HEAP_BLOCK_HEADER_SIZE:
-            serial_println("[HEAP] Integrity: invalid block size {header.size}")
-            return false
-
-        total_size = total_size + header.size
-        block_count = block_count + 1
-
-        if block_count > max_blocks:
-            serial_println("[HEAP] Integrity: too many blocks (cycle?)")
-            return false
-
-        current = header.next
-
-    if total_size != g_heap.size:
-        serial_println("[HEAP] Integrity: size mismatch {total_size} vs {g_heap.size}")
-        return false
-
-    true
+    """Basic sanity check: allocated <= total heap size."""
+    g_heap.total_allocated <= g_heap.size
