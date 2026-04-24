@@ -47,6 +47,13 @@ class NativeFunction:
 
 # --- Object heap ---
 
+class ObjectLookupDiagnostic:
+    requested_obj_id: i64
+    normalized_obj_id: i64
+    property_count: i64
+    direct_scan_found: bool
+    snapshot_found: bool
+
 class ObjectStore:
     # Flat parallel arrays — avoids .get(i).field.mutate() copy bug in interpreter mode.
     # Object metadata (indexed by obj_id)
@@ -147,6 +154,33 @@ class ObjectStore:
                 return self.prop_values.get(i)
             i = i - 1
         JsValue.Undefined
+
+    fn inspect_property_lookup(obj_id: i64, key: text) -> ObjectLookupDiagnostic:
+        val snapshot = self.get_object(obj_id)
+        var snapshot_found = false
+        var pi = 0
+        while pi < snapshot.properties.len():
+            if snapshot.properties.get(pi).key == key:
+                snapshot_found = true
+                pi = snapshot.properties.len()
+            pi = pi + 1
+
+        var direct_scan_found = false
+        var i = self.prop_keys.len() - 1
+        while i >= 0:
+            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id) and self.prop_keys.get(i) == key:
+                direct_scan_found = true
+                i = -1
+            else:
+                i = i - 1
+
+        ObjectLookupDiagnostic(
+            requested_obj_id: obj_id,
+            normalized_obj_id: self._normalize_obj_id(obj_id),
+            property_count: snapshot.properties.len(),
+            direct_scan_found: direct_scan_found,
+            snapshot_found: snapshot_found
+        )
 
     fn array_length(obj_id: i64) -> i64:
         """Get the length of a dense array by counting distinct element keys."""

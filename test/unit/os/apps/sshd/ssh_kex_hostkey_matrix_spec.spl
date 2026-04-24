@@ -39,7 +39,7 @@ Each test:
 """
 
 use std.sspec.*
-use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys}
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, ssh_get_u32, SshStringResult, SshTextResult}
 use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
@@ -91,6 +91,29 @@ fn _tampered_hash(original: [u8]) -> [u8]:
     if t.len() > 0:
         t[0] = t[0] ^ 0xFF
     t
+
+fn _filled_bytes(len: u64, start: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        out.push((start.to_u64() + i).to_u8())
+        i = i + 1
+    out
+
+fn _ed25519_hash_for_server_public(server_public: [u8]) -> [u8]:
+    val seed = _ed25519_seed()
+    val host_pub = ed25519_keypair_from_seed(seed).1
+    val host_blob = ssh_build_ed25519_host_key_blob(host_pub)
+    ssh_kex_compute_exchange_hash(
+        "SSH-2.0-OpenSSH_9.6",
+        "SSH-2.0-SimpleOS_1.0",
+        _filled_bytes(32, 0x10),
+        _filled_bytes(48, 0x40),
+        host_blob,
+        _filled_bytes(32, 0x80),
+        server_public,
+        _filled_bytes(32, 0xC0)
+    )
 
 fn _decode_sig_blob(blob: [u8]) -> (text, [u8]):
     """Decode SSH signature blob: string algo-name + string raw-sig.
@@ -231,6 +254,28 @@ describe "ssh-ed25519 host key signing":
         val tampered = _tampered_hash(hash)
         val bad = rt_ed25519_verify(pubkey, tampered, raw_sig)
         expect(bad).to_equal(0)
+
+    it "changing Q_S changes the exchange hash":
+        val hash_1 = _ed25519_hash_for_server_public(_filled_bytes(32, 0x01))
+        val hash_2 = _ed25519_hash_for_server_public(_filled_bytes(32, 0x21))
+        expect(hash_1 == hash_2).to_equal(false)
+
+    it "changing Q_S changes the Ed25519 host-key signature":
+        val seed = _ed25519_seed()
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        val host_keys = HostKeySet(
+            ed25519_seed: seed,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val hash_1 = _ed25519_hash_for_server_public(_filled_bytes(32, 0x01))
+        val hash_2 = _ed25519_hash_for_server_public(_filled_bytes(32, 0x21))
+        val sig_1 = _decode_sig_blob(ssh_sign_exchange_hash("ssh-ed25519", host_keys, hash_1).unwrap()).1
+        val sig_2 = _decode_sig_blob(ssh_sign_exchange_hash("ssh-ed25519", host_keys, hash_2).unwrap()).1
+        expect(sig_1 == sig_2).to_equal(false)
+        expect(rt_ed25519_verify(pubkey, hash_1, sig_1)).to_equal(1)
+        expect(rt_ed25519_verify(pubkey, hash_2, sig_2)).to_equal(1)
 
 describe "host-key aware KEXINIT builder":
     it "round-trips an ed25519-only KEXINIT through the transport parser":

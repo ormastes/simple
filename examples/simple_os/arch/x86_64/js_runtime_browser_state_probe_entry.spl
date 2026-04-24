@@ -14,6 +14,23 @@ use std.js.types.js_types.{JsValue}
 extern fn serial_println(msg: text)
 extern fn rt_port_outb(port: u16, value: u8)
 
+fn _log_lookup_diag(runtime: JsRuntime, obj_id: i64, key: text):
+    val diag = runtime.inspect_host_property(obj_id, key)
+    serial_println(
+        "[JRB] lookup key={key} requested={diag.requested_obj_id} normalized={diag.normalized_obj_id} props={diag.property_count} direct={diag.direct_scan_found} snapshot={diag.snapshot_found}"
+    )
+
+fn _expect_string_property(runtime: JsRuntime, obj_id: i64, key: text, expected_fragment: text, err_prefix: text) -> Result<bool, text>:
+    match runtime.get_host_property(obj_id, key):
+        JsValue.String(v):
+            if expected_fragment != "" and not v.contains(expected_fragment):
+                _log_lookup_diag(runtime, obj_id, key)
+                return Err("{err_prefix} mismatch")
+            return Ok(true)
+        _:
+            _log_lookup_diag(runtime, obj_id, key)
+            return Err("{err_prefix} missing or wrong type")
+
 fn _probe() -> Result<bool, text>:
     val logger = Logger.new("browser-session-js", LogLevel.Error)
     var runtime = JsRuntime.new(logger)
@@ -28,11 +45,7 @@ fn _probe() -> Result<bool, text>:
     serial_println("[JRB] body property count={body_obj.properties.len()}")
     if body_obj.properties.len() > 0:
         serial_println("[JRB] first body key={body_obj.properties.get(0).key}")
-    if val JsValue.String(v) = runtime.get_host_property(body_id, "alpha"):
-        if v != "A":
-            return Err("alpha readback mismatch after runtime bootstrap")
-    else:
-        return Err("alpha missing after runtime bootstrap")
+    _expect_string_property(runtime, body_id, "alpha", "A", "alpha readback after runtime bootstrap")?
 
     val html_doc = """<html><head><title>Boot</title></head><body>boot<script>
 document.title = 'Runtime Ready';
@@ -45,11 +58,8 @@ document.cookie = 'runtime=ok; Path=/';
     runtime.set_host_property(body_id, "textContent", JsValue.String(v: ""))
     serial_println("[JRB] after textContent set")
 
-    if val JsValue.String(v) = runtime.get_host_property(body_id, "innerHTML"):
-        if not v.contains("Runtime Ready"):
-            return Err("innerHTML readback mismatch")
-    else:
-        return Err("innerHTML missing or wrong type")
+    _expect_string_property(runtime, body_id, "innerHTML", "Runtime Ready", "innerHTML readback")?
+    _expect_string_property(runtime, body_id, "textContent", "", "textContent readback")?
 
     Ok(true)
 
