@@ -13,7 +13,11 @@
 
 #include "toolchain_panel_runtime.c"
 
-#define APP_PRE_WINDOW_HOOK() toolchain_pre_window_hook("llvm")
-#define APP_RUNTIME_CONTENT(argc, argv) toolchain_runtime_content(argc, argv)
-
-#include "remote_window_runtime.c"
+int main(int argc, char **argv) {
+    int status = toolchain_pre_window_hook("llvm");
+    if (status != 0) {
+        return status;
+    }
+    puts(toolchain_runtime_content(argc, argv));
+    return 0;
+}

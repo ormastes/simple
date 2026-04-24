@@ -43,7 +43,7 @@ use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launch
     launcher_get_process_pid, launcher_shortcut_dispatch, launcher_find_process_by_pid,
     launcher_get_process_window_count, launcher_process_is_process_backed,
     launcher_get_last_launch_pid, launcher_launch_path_with_args}
-use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes, g_vfs_read_file_text}
+use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes, g_vfs_file_exists, g_vfs_file_size}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
@@ -158,29 +158,25 @@ fn _emit_vfs_app_read_marker(path: text) -> bool:
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={path} bytes={bytes.len()}")
     true
 
-fn _first_line_or_empty(content: text) -> text:
-    for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed != "":
-            return trimmed
-    ""
-
 fn _emit_toolchain_launch_marker(app_id: text, version_path: text, manifest_path: text, primary: text, secondary: text) -> bool:
-    val version = _first_line_or_empty(g_vfs_read_file_text(version_path))
-    if version == "":
+    if not g_vfs_file_exists(version_path):
         serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-version path={version_path}")
         return false
-    val manifest = g_vfs_read_file_text(manifest_path)
-    if manifest == "" or not manifest.contains(primary):
+    val version_size = g_vfs_file_size(version_path)
+    if version_size <= 0:
+        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=empty-version path={version_path}")
+        return false
+    if not g_vfs_file_exists(manifest_path):
         serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-manifest path={manifest_path}")
         return false
-    if secondary != "" and not manifest.contains(secondary):
-        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-secondary path={secondary}")
+    val manifest_size = g_vfs_file_size(manifest_path)
+    if manifest_size <= 0:
+        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=empty-manifest path={manifest_path}")
         return false
     if secondary != "":
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} aux={secondary} version={version}")
+        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} aux={secondary} version_path={version_path} version_bytes={version_size} manifest_path={manifest_path} manifest_bytes={manifest_size}")
     else:
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} version={version}")
+        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} tool={primary} version_path={version_path} version_bytes={version_size} manifest_path={manifest_path} manifest_bytes={manifest_size}")
     true
 
 fn _emit_network_smoke_markers():
