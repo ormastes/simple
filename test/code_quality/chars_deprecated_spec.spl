@@ -1,10 +1,10 @@
 """
 # text.chars() Deprecation Replacement Spec
 
-**Feature IDs:** fix-foreach-deprecated
+**Feature IDs:** fix-foreach-deprecated, fix-char-at
 **Category:** Testing
 **Difficulty:** 1/5
-**Status:** In Progress
+**Status:** Complete
 **Requirements:** N/A
 **Plan:** N/A
 **Design:** N/A
@@ -13,18 +13,23 @@
 
 ## Overview
 
-Canary spec verifying that the replacement APIs for the deprecated `text.chars()`
-method work correctly. Pattern A (iteration) callers will be migrated this task;
-Pattern B (indexed access via `chars()[i]`) is deferred pending a `char_at` API.
+Canary spec locking the replacement APIs for the deprecated `text.chars()` method.
+All migration waves are complete:
+- Pattern B/C (indexed access `chars()[i]`, stored `val cs = s.chars(); cs[i]`) — migrated to `s.get(i)`.
+- Pattern D (`.chars().first()/.last()/.filter()/.reverse()/.enumerate()`) — migrated to direct API.
+- Pattern A (`for ch in s.chars()`) — handled by `collection_desugar.spl` Pattern F: the compiler
+  automatically rewrites `for x in s.chars()` → `for x in s` at AST level, eliminating the
+  `List<char>` allocation without requiring source changes.
 
-Replacements for `text.chars()` iteration usage:
-- Inline iteration: `for ch in s` (preferred — text implements Iterable<char>)
+Replacements for `text.chars()` usage:
+- Iteration: `for ch in s` (preferred — text implements Iterable<char>; auto-desugared from `s.chars()`)
 - Callback iteration: `s.each(fn)` (use when callback is a named function)
 - Indexed iteration: `s.each_with_index(fn)` (replaces enumerate patterns)
+- Random access: `s.get(i)` returns `Option<char>` (replaces `s.chars()[i]`)
 
-NOTE: `text.chars()` remains `@deprecated` until Pattern B (indexed) callers are
-migrated via a follow-up `fix-char-at` task. These specs lock the replacement
-contract for Pattern A so it cannot regress.
+`text.chars()` remains `@deprecated` because non-for patterns (`.chars().len()`,
+`.chars().map(...)`) still allocate. These specs lock the replacement contract
+so regressions are caught.
 """
 
 use std.sspec.*
@@ -131,3 +136,41 @@ describe "text.each_with_index provides index alongside character":
             first_index = i
         )
         expect(first_index).to_equal(0)
+
+
+# ============================================================================
+# Pattern F regression guard — for x in s.chars() semantic contract
+# ============================================================================
+
+describe "for ch in s.chars() produces same result as for ch in s (Pattern F)":
+    """
+    ## Pattern F desugar regression guard
+
+    `collection_desugar.spl` Pattern F rewrites `for x in s.chars()` → `for x in s`
+    at AST level, eliminating the List<char> allocation. These tests lock the
+    semantic contract so any regression in the desugar or in text's Iterable<char>
+    impl is caught immediately.
+    """
+
+    it "for ch in s.chars() accumulates same string as for ch in s":
+        val s = "hello"
+        var from_chars = ""
+        for ch in s.chars():
+            from_chars = from_chars + ch.to_string()
+        var from_s = ""
+        for ch in s:
+            from_s = from_s + ch.to_string()
+        expect(from_chars).to_equal(from_s)
+
+    it "for ch in s.chars() on empty string iterates zero times":
+        var count = 0
+        for ch in "".chars():
+            count = count + 1
+        expect(count).to_equal(0)
+
+    it "for ch in s.chars() visits characters in forward order":
+        val s = "abc"
+        var result = ""
+        for ch in s.chars():
+            result = result + ch.to_string()
+        expect(result).to_equal("abc")
