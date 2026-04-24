@@ -27,6 +27,7 @@ Generated artifact details:
 - The emitted package/core VHDL carries a source-map header in comment form.
 - Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/jump overlay fields.
 - The handwritten VHDL shell keeps entity/package/process structure stable, but now consumes helper-aligned packed variables for writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, memory access control, and jump immediate instead of independently reconstructing those values from ad hoc raw slices.
+- Memory accesses stay bounded to the current bus contract: helper-derived `funct3` drives load sign/zero extension and alignment traps, while unsupported store widths still trap instead of implying byte-strobe support the shell does not expose.
 - Current default generation is RV64-first. RV32 remains a parity-only contract lane and is intentionally not emitted by the default manifest.
 
 Validation:

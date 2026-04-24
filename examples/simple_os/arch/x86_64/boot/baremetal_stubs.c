@@ -11421,6 +11421,7 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeValue *items = runtime_array_items(a);
     int64_t s = DECODE_INT(start);
     int64_t e = DECODE_INT(end);
     if (s < 0) s = 0;

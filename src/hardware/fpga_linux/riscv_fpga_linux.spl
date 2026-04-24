@@ -651,6 +651,12 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must reconstruct memory access control through bitfield writes")
         if not source.contains("access.funct3 = access_inst.funct3 as u32"):
             errors.push("{self.xlen.to_text()} hardware source must preserve memory access control funct3 bits")
+        if not source.contains("if decode_memory_funct3 = \"001\" or decode_memory_funct3 = \"101\" then"):
+            errors.push("{self.xlen.to_text()} hardware source must guard halfword memory accesses through helper-derived funct3")
+        if not source.contains("if addr_i(1 downto 0) /= \"00\" then"):
+            errors.push("{self.xlen.to_text()} hardware source must guard word-aligned memory accesses")
+        if not source.contains("if addr_i(2 downto 0) /= \"000\" then"):
+            errors.push("{self.xlen.to_text()} hardware source must guard doubleword-aligned memory accesses")
         if not source.contains("val jump_inst = RiscvJumpEncoding.new(imem_rdata)"):
             errors.push("{self.xlen.to_text()} hardware source must read jump immediate pieces through the jump layout bitfield")
         if not source.contains("var jump_imm = RiscvJumpImmediate.new(0 as u32)"):
@@ -913,67 +919,103 @@ impl RiscvFpgaLane:
             "                    when \"0000011\" =>\n" +
             "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
-            "                        case decode_memory_funct3 is\n" +
-            "                            when \"000\" =>\n" +
-            "                                if rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(7 downto 0)), XLEN));\n" +
-            "                                end if;\n" +
-            "                            when \"001\" =>\n" +
-            "                                if rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(15 downto 0)), XLEN));\n" +
-            "                                end if;\n" +
-            "                            when \"010\" =>\n" +
-            "                                if rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
-            "                                end if;\n" +
-            "                            when \"011\" =>\n" +
-            "                                if XLEN = 64 then\n" +
-            "                                    if rd_i /= 0 then\n" +
-            "                                        regs(rd_i) <= dmem_rdata;\n" +
-            "                                    end if;\n" +
-            "                                else\n" +
+            "                        if decode_memory_funct3 = \"001\" or decode_memory_funct3 = \"101\" then\n" +
+            "                            if addr_i(0) = '1' then\n" +
+            "                                trap_reg <= '1';\n" +
+            "                            end if;\n" +
+            "                        elif decode_memory_funct3 = \"010\" or decode_memory_funct3 = \"110\" then\n" +
+            "                            if addr_i(1 downto 0) /= \"00\" then\n" +
+            "                                trap_reg <= '1';\n" +
+            "                            end if;\n" +
+            "                        elif decode_memory_funct3 = \"011\" then\n" +
+            "                            if XLEN = 64 then\n" +
+            "                                if addr_i(2 downto 0) /= \"000\" then\n" +
             "                                    trap_reg <= '1';\n" +
             "                                end if;\n" +
-            "                            when \"100\" =>\n" +
-            "                                if rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(7 downto 0)), XLEN));\n" +
-            "                                end if;\n" +
-            "                            when \"101\" =>\n" +
-            "                                if rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(15 downto 0)), XLEN));\n" +
-            "                                end if;\n" +
-            "                            when \"110\" =>\n" +
-            "                                if XLEN = 64 then\n" +
+            "                            else\n" +
+            "                                trap_reg <= '1';\n" +
+            "                            end if;\n" +
+            "                        end if;\n" +
+            "                        if trap_reg = '0' then\n" +
+            "                            case decode_memory_funct3 is\n" +
+            "                                when \"000\" =>\n" +
             "                                    if rd_i /= 0 then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(7 downto 0)), XLEN));\n" +
             "                                    end if;\n" +
-            "                                else\n" +
-            "                                    trap_reg <= '1';\n" +
-            "                                end if;\n" +
-            "                            when others => trap_reg <= '1';\n" +
-            "                        end case;\n" +
+            "                                when \"001\" =>\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(15 downto 0)), XLEN));\n" +
+            "                                    end if;\n" +
+            "                                when \"010\" =>\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                    end if;\n" +
+            "                                when \"011\" =>\n" +
+            "                                    if XLEN = 64 then\n" +
+            "                                        if rd_i /= 0 then\n" +
+            "                                            regs(rd_i) <= dmem_rdata;\n" +
+            "                                        end if;\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                when \"100\" =>\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(7 downto 0)), XLEN));\n" +
+            "                                    end if;\n" +
+            "                                when \"101\" =>\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(15 downto 0)), XLEN));\n" +
+            "                                    end if;\n" +
+            "                                when \"110\" =>\n" +
+            "                                    if XLEN = 64 then\n" +
+            "                                        if rd_i /= 0 then\n" +
+            "                                            regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                        end if;\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                when others => trap_reg <= '1';\n" +
+            "                            end case;\n" +
+            "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0100011\" =>\n" +
             "                        imm_i := resize(signed(decode_store_immediate_bits(11 downto 5) & decode_store_immediate_bits(4 downto 0)), XLEN);\n" +
             "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
-            "                        case decode_memory_funct3 is\n" +
-            "                            when \"010\" =>\n" +
-            "                                if XLEN = 32 then\n" +
-            "                                    dmem_wdata_reg <= regs(rs2_i);\n" +
-            "                                    dmem_we_reg <= '1';\n" +
-            "                                else\n" +
+            "                        if decode_memory_funct3 = \"010\" then\n" +
+            "                            if addr_i(1 downto 0) /= \"00\" then\n" +
+            "                                trap_reg <= '1';\n" +
+            "                            end if;\n" +
+            "                        elif decode_memory_funct3 = \"011\" then\n" +
+            "                            if XLEN = 64 then\n" +
+            "                                if addr_i(2 downto 0) /= \"000\" then\n" +
             "                                    trap_reg <= '1';\n" +
             "                                end if;\n" +
-            "                            when \"011\" =>\n" +
-            "                                if XLEN = 64 then\n" +
-            "                                    dmem_wdata_reg <= regs(rs2_i);\n" +
-            "                                    dmem_we_reg <= '1';\n" +
-            "                                else\n" +
-            "                                    trap_reg <= '1';\n" +
-            "                                end if;\n" +
-            "                            when others => trap_reg <= '1';\n" +
-            "                        end case;\n" +
+            "                            else\n" +
+            "                                trap_reg <= '1';\n" +
+            "                            end if;\n" +
+            "                        else\n" +
+            "                            trap_reg <= '1';\n" +
+            "                        end if;\n" +
+            "                        if trap_reg = '0' then\n" +
+            "                            case decode_memory_funct3 is\n" +
+            "                                when \"010\" =>\n" +
+            "                                    if XLEN = 32 then\n" +
+            "                                        dmem_wdata_reg <= regs(rs2_i);\n" +
+            "                                        dmem_we_reg <= '1';\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                when \"011\" =>\n" +
+            "                                    if XLEN = 64 then\n" +
+            "                                        dmem_wdata_reg <= regs(rs2_i);\n" +
+            "                                        dmem_we_reg <= '1';\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                when others => trap_reg <= '1';\n" +
+            "                            end case;\n" +
+            "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"1100011\" =>\n" +
             "                        case decode_funct3 is\n" +
