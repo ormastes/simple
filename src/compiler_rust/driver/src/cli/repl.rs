@@ -61,7 +61,7 @@ impl rustyline::ConditionalEventHandler for TabHandler {
 /// The issue: rustyline's command execution overrides Movement::BackwardChar(n) repeat
 /// counts with the event's repeat count (always 1 for single backspace press).
 ///
-/// See doc/research/REPL_BACKSPACE_LIMITATION.md for full details.
+/// See doc/01_research/REPL_BACKSPACE_LIMITATION.md for full details.
 ///
 /// WORKAROUND: Users should use Ctrl+U to delete full indents (4 spaces at once).
 /// Regular backspace deletes one character at a time (standard behavior).

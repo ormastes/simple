@@ -3,7 +3,7 @@
 //! This module provides test-time mocking capabilities using the same
 //! predicate system as AOP and DI. Mocks are only available in test context.
 //!
-//! See doc/research/aop.md section 9 for the complete specification.
+//! See doc/01_research/aop.md section 9 for the complete specification.
 
 use crate::predicate::{MatchContext, Predicate, PredicateContext};
 use std::collections::HashMap;

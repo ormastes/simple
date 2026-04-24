@@ -144,7 +144,7 @@ fn test_expect_rustyline_bug_exists() {
         println!("║  ⚠️  CRITICAL: rustyline limitation appears FIXED!    ║");
         println!("╠════════════════════════════════════════════════════════╣");
         println!("║  Action items:                                         ║");
-        println!("║  1. Update doc/research/REPL_BACKSPACE_LIMITATION.md  ║");
+        println!("║  1. Update doc/01_research/REPL_BACKSPACE_LIMITATION.md  ║");
         println!("║  2. Update TUI_REPL.md to note bug is fixed           ║");
         println!("║  3. Consider removing TUI workaround recommendation   ║");
         println!("║  4. Update all documentation references               ║");

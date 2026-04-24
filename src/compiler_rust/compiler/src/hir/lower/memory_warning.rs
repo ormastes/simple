@@ -3,7 +3,7 @@
 //! This module implements warning codes W1001-W1006 for detecting memory safety
 //! violations without breaking existing code. In strict mode, these become errors.
 //!
-//! See: doc/plan/manual_memory_safety_plan.md
+//! See: doc/03_plan/manual_memory_safety_plan.md
 
 use simple_parser::Span;
 

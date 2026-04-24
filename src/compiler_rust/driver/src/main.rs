@@ -1184,7 +1184,7 @@ fn handle_file_execution(
 /// Current Rust sspec-docgen implementation.
 fn run_sspec_docgen_rust(args: &[String]) -> i32 {
     // Parse arguments
-    let mut output_dir = PathBuf::from("doc/spec");
+    let mut output_dir = PathBuf::from("doc/06_spec");
     let mut spec_files: Vec<PathBuf> = Vec::new();
 
     let mut i = 1; // Skip command name
@@ -1205,7 +1205,7 @@ fn run_sspec_docgen_rust(args: &[String]) -> i32 {
             println!("  <spec_file>...    One or more sspec files (*_spec.spl)");
             println!();
             println!("Options:");
-            println!("  --output <dir>    Output directory (default: doc/spec)");
+            println!("  --output <dir>    Output directory (default: doc/06_spec)");
             println!("  -o <dir>          Short form of --output");
             println!("  --help, -h        Show this help message");
             return 0;

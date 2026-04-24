@@ -4,7 +4,7 @@
 //! It detects join points (execution, decision, condition) and inserts
 //! advice calls (before, after_success, after_error, around).
 //!
-//! See doc/research/aop.md for the complete specification.
+//! See doc/01_research/aop.md for the complete specification.
 
 pub mod diagnostics;
 pub mod matcher;

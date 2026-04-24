@@ -3,7 +3,7 @@
 //! This module provides architecture validation using the unified predicate system.
 //! Rules can forbid or allow specific dependencies, imports, or type usage patterns.
 //!
-//! See doc/research/aop.md section 10 for the complete specification.
+//! See doc/01_research/aop.md section 10 for the complete specification.
 
 use crate::hir::HirModule;
 use crate::predicate::{MatchContext, Predicate, PredicateContext};

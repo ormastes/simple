@@ -6,7 +6,7 @@
 //! - Test mocking selection (test-only)
 //! - Architecture rules (static dependency validation)
 //!
-//! See doc/research/aop.md for the complete specification.
+//! See doc/01_research/aop.md for the complete specification.
 
 use std::fmt;
 

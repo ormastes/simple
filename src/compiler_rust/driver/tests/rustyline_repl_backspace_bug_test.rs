@@ -164,7 +164,7 @@ fn test_rustyline_backspace_bug_reproduction() -> Result<(), Box<dyn std::error:
     println!("╠════════════════════════════════════════════════════════╣");
     println!("║  This bug is a known rustyline architectural          ║");
     println!("║  limitation documented in:                            ║");
-    println!("║  doc/research/REPL_BACKSPACE_LIMITATION.md            ║");
+    println!("║  doc/01_research/REPL_BACKSPACE_LIMITATION.md         ║");
     println!("║                                                        ║");
     println!("║  Workaround: Use TUI REPL with --tui flag             ║");
     println!("║  Command: ./target/release/simple --tui               ║");

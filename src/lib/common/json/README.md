@@ -241,4 +241,4 @@ if not valid:
 
 - Parent: `src/lib/common/json/` (facade)
 - Tests: `test/std/json_parser_utils_spec.spl`
-- Plan: `doc/report/stdlib_utils_refactoring_plan_2026-02-12.md`
+- Plan: `doc/09_report/stdlib_utils_refactoring_plan_2026-02-12.md`

@@ -385,7 +385,7 @@ When adding new verification models:
 
 ## Related Documentation
 
-- [Lean Verification Specification](../../../doc/research/lean_verification_with_aop.md)
-- [Implementation Plan](../../../doc/plans/lean_verification_implementation.md)
+- [Lean Verification Specification](../../../doc/01_research/lean_verification_with_aop.md)
+- [Implementation Plan](../../../doc/03_plan/lean_verification_implementation.md)
 - [Existing Lean Proofs](../../../verification/)
 - [Feature Documentation](../../../doc/features/feature.md)
