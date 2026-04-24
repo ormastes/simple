@@ -68,9 +68,10 @@ Located in `src/os/apps/shell/shell_tools.spl`:
 
 Bootstrap-oriented additions in the x86_64 guest lane:
 - `mkdir -p`, `cp -r`, and `rm -r/-f` are supported for the common bootstrap subset
-- `which` now resolves staged `/usr/bin/*` payloads through PATH + VFS lookup
+- `which` now resolves packaged `/usr/bin/*` toolchain commands through PATH + VFS lookup
 - `uname -s|-m|-a` reports a SimpleOS identity
-- `ninja --version` is available as a guest shim backed by the staged `/usr/bin/ninja` payload
+- `cmake --version` and `cmake -E capabilities` are available through the packaged `/usr/bin/cmake` wrapper
+- `ninja --version` is available through the packaged `/usr/bin/ninja` wrapper
 
 ### 1.3 Shell Features
 
@@ -661,7 +662,7 @@ bin/simple run src/os/port/verify_all.spl -- --phase bootstrap
 |-------|------|----------------|
 | 1 | `shell` | 26 core commands, 14 extended tools, features (pipes, redirects, bg) |
 | 2 | `vcs` | Native VCS, git wrapper (15 cmds), jj wrapper (14 cmds), host tools |
-| 3 | `build-tools` | simple_make, cmake/ninja/make ports, host tool availability |
+| 3 | `build-tools` | simple_make, promoted cmake/ninja guest command paths, make host availability |
 | 4 | `toolchain` | LLVM/Rust build scripts, 4 target specs, libc, sysroot, smoke tests |
 | 5 | `bootstrap` | Bootstrap scripts, Rust seed, entry points, source dirs, native config |
 

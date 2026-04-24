@@ -25,6 +25,9 @@ use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contrac
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_env_cwd() -> text
@@ -462,6 +465,14 @@ fn arch_display_name(arch: Architecture) -> text:
 fn build_os(target: OsTarget) -> bool:
     build_os_with_backend(target, _os_build_backend_for_target(target))
 
+pub fn os_native_build_sources(target: OsTarget) -> [text]:
+    """Return the source roots passed to `simple native-build` for an OS target."""
+    _build_sources(target)
+
+pub fn os_native_build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
+    """Return the build environment prefix for an OS target."""
+    _build_env_prefix(target, objcopy_prefix)
+
 fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     """Build the argv passed to `simple native-build` for an OS target."""
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
@@ -496,6 +507,10 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """
     val arch_label = arch_display_name(target.arch)
     val timeout_ms = _os_build_timeout_ms()
+    val build_marker = if _is_ssh_live_target(target): _ssh_live_build_marker_value(backend) else: ""
+    if not _prepare_build_output(target, build_marker):
+        print "[build][{arch_label}] phase=prepare FAILED output={target.output}"
+        return false
 
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name}"
@@ -524,6 +539,11 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
             print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
+    if not rt_file_exists(target.output):
+        print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
+        return false
+    if build_marker != "":
+        print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
     true
 
 fn _objcopy_path_prefix() -> text:
@@ -584,6 +604,8 @@ fn _find_simple_binary() -> text:
     "bin/simple"
 
 fn _build_sources(target: OsTarget) -> [text]:
+    if _is_ssh_live_target(target):
+        return ["src/os", "src/lib", "examples/simple_os", "build/os/generated"]
     if _is_x86_64_kernel_target(target):
         return ["src/os", "src/lib", "examples/simple_os"]
     if _is_browser_wrapper_target(target):
@@ -618,6 +640,36 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     if objcopy_prefix != "":
         envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
     envs.join(" ")
+
+fn _is_ssh_live_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_64/ssh_live_entry.spl"
+
+fn _ssh_live_build_marker_value(backend: text) -> text:
+    "ssh-live-build:{backend}:{_now_ms()}"
+
+fn _ssh_live_build_marker_path() -> text:
+    "build/os/generated/ssh_live_build_marker.spl"
+
+fn _ssh_live_build_marker_source(marker: text) -> text:
+    "pub fn ssh_live_build_marker() -> text:\n" +
+        "    \"" + marker + "\"\n"
+
+fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
+    if rt_file_exists(target.output):
+        if not rt_file_delete(target.output):
+            print "[build] could not remove stale artifact: {target.output}"
+            return false
+    if _is_ssh_live_target(target):
+        if not rt_dir_create_all("build/os/generated"):
+            print "[build] could not create build/os/generated"
+            return false
+        if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
+            print "[build] could not write SSH live build marker"
+            return false
+        if not rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
+            print "[build] could not export SIMPLE_SSH_LIVE_BUILD_MARKER"
+            return false
+    true
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
     val cwd = rt_env_cwd()
@@ -1615,15 +1667,19 @@ pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> te
         "mdir -i \"{img_path}\" ::/SYS/APPS/llvm.smf >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/APPS/rust >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/APPS/rust.smf >/dev/null 2>&1 && " +
+        "mdir -i \"{img_path}\" ::/usr/bin/cmake >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/usr/bin/clang >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/usr/bin/rustc >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/usr/bin/cargo >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/usr/bin/ninja >/dev/null 2>&1 && " +
+        "mdir -i \"{img_path}\" ::/SYS/CMAKEVER.TXT >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/LLVMVER.TXT >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/RUSTVER.TXT >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/NINJAVER.TXT >/dev/null 2>&1 && " +
+        "mdir -i \"{img_path}\" ::/SYS/CMAKEMAN.TXT >/dev/null 2>&1 && " +
         "mdir -i \"{img_path}\" ::/SYS/LLVMMAN.TXT >/dev/null 2>&1 && " +
-        "mdir -i \"{img_path}\" ::/SYS/RUSTMAN.TXT >/dev/null 2>&1; " +
+        "mdir -i \"{img_path}\" ::/SYS/RUSTMAN.TXT >/dev/null 2>&1 && " +
+        "mdir -i \"{img_path}\" ::/SYS/NINJAMAN.TXT >/dev/null 2>&1; " +
         "else " +
         "grep -a -q 'SBROWSMF' \"{img_path}\" && " +
         "grep -a -q 'info|src/app/info/main.spl' \"{img_path}\" && " +
@@ -1632,6 +1688,7 @@ pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> te
         "grep -a -q 'SLOADSMF' \"{img_path}\" && " +
         "grep -a -q 'LLVMSMF' \"{img_path}\" && " +
         "grep -a -q 'RUSTSMF' \"{img_path}\" && " +
+        "grep -a -q '/usr/bin/cmake' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/clang' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/rustc' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/cargo' \"{img_path}\" && " +
@@ -1659,12 +1716,15 @@ pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> te
         "mtype -i \"{img_path}\" ::/SYS/APPS/rust 2>/dev/null | strings | grep -q '/sys/apps/rust' && " +
         "mtype -i \"{img_path}\" ::/SYS/APPS/rust.smf 2>/dev/null | strings | grep -q '/sys/apps/rust' && " +
         "mtype -i \"{img_path}\" ::/SYS/APPS/rust.smf 2>/dev/null | grep -a -q 'SMF' && " +
+        "mtype -i \"{img_path}\" ::/SYS/CMAKEVER.TXT 2>/dev/null | grep -q '^simple_cmake native wrapper ' && " +
         "mtype -i \"{img_path}\" ::/SYS/LLVMVER.TXT 2>/dev/null | grep -q '^clang version ' && " +
         "mtype -i \"{img_path}\" ::/SYS/RUSTVER.TXT 2>/dev/null | grep -q '^rustc ' && " +
         "mtype -i \"{img_path}\" ::/SYS/CARGOVER.TXT 2>/dev/null | grep -q '^cargo ' && " +
         "mtype -i \"{img_path}\" ::/SYS/NINJAVER.TXT 2>/dev/null | grep -q '^[0-9]' && " +
+        "mtype -i \"{img_path}\" ::/SYS/CMAKEMAN.TXT 2>/dev/null | grep -q '/usr/bin/cmake' && " +
         "mtype -i \"{img_path}\" ::/SYS/LLVMMAN.TXT 2>/dev/null | grep -q '/usr/bin/clang' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q '/usr/bin/rustc'; " +
+        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q '/usr/bin/rustc' && " +
+        "mtype -i \"{img_path}\" ::/SYS/NINJAMAN.TXT 2>/dev/null | grep -q '/usr/bin/ninja'; " +
         "else " +
         "grep -a -q '/sys/apps/simple_browser' \"{img_path}\" && " +
         "grep -a -q 'info|src/app/info/main.spl|smoke|staged' \"{img_path}\" && " +
@@ -1673,6 +1733,7 @@ pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> te
         "grep -a -q '/sys/apps/simple_loader' \"{img_path}\" && " +
         "grep -a -q '/sys/apps/llvm' \"{img_path}\" && " +
         "grep -a -q '/sys/apps/rust' \"{img_path}\" && " +
+        "grep -a -q '/usr/bin/cmake' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/clang' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/rustc' \"{img_path}\" && " +
         "grep -a -q '/usr/bin/cargo' \"{img_path}\" && " +

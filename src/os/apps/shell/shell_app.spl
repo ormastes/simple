@@ -28,7 +28,7 @@ use os.apps.shell.shell_pipe.{parse_pipeline, has_pipeline, execute_pipeline}
 use os.apps.shell.shell_redirect.{parse_redirects, apply_redirects, restore_redirects, ParsedCommand, SavedFd}
 use os.apps.shell.shell_async.{spawn_command_async, spawn_command_bg}
 use os.apps.shell.shell_async_file.{read_file_posix, read_file_async}
-use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat, tool_uname, tool_ninja}
+use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat, tool_uname, tool_cmake, tool_ninja, tool_try_staged_toolchain}
 use os.tools.shell.cat.cat_tool.{tool_cat}
 use os.tools.shell.ls.ls_tool.{tool_ls}
 use os.tools.shell.echo.echo_tool.{tool_echo}
@@ -303,6 +303,7 @@ impl ShellApp:
             "which":    self.last_exit_code = tool_which(self.vfs, self.cwd, self._get_env("PATH"), args, self.tool_registry, self.terminal)
             "date":     self.last_exit_code = tool_date(self.terminal)
             "uname":    self.last_exit_code = tool_uname(args, self.terminal)
+            "cmake":    self.last_exit_code = tool_cmake(self.vfs, self.cwd, self.env, args, self.terminal)
             "ninja":    self.last_exit_code = tool_ninja(self.vfs, self.cwd, self.env, args, self.terminal)
             "true":     self.last_exit_code = tool_true()
             "false":    self.last_exit_code = tool_false()
@@ -381,6 +382,7 @@ impl ShellApp:
             "which": true
             "date": true
             "uname": true
+            "cmake": true
             "ninja": true
             "true": true
             "false": true
@@ -436,6 +438,12 @@ impl ShellApp:
 
     me _try_external(command: text, args: [text]):
         """Try to run an external command synchronously."""
+        val toolchain_shim = tool_try_staged_toolchain(
+            self.vfs, self.cwd, self._get_env("PATH"), command, args, self.terminal)
+        if toolchain_shim != nil:
+            self.last_exit_code = toolchain_shim.unwrap()
+            return
+
         val result = spawn_command_async(command, args, self.cwd, self._get_env("PATH"))
         match result:
             Ok(future):

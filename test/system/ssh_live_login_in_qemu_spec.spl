@@ -11,7 +11,7 @@ use std.nogc_sync_mut.ffi.io.{dir_create_all}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
-extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_get(key: text) -> text?
 
 fn _ssh_probe_command() -> text:
     _ssh_probe_command_for_port(2299)
@@ -59,13 +59,14 @@ fn _assert_ssh_live_login(backend: text):
     val target = get_ssh_live_target()
     val host_port = 2299
     val scenario = _scenario_x64_ssh_on_port(host_port)
-    expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
     val built = build_os_with_backend(target, backend)
     if backend == "llvm" and not built:
         print "[ssh_live_login_in_qemu_spec] LLVM backend unavailable, skipping build lane"
         expect(backend).to_equal("llvm")
         return
     expect(built).to_equal(true)
+    val build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    expect(build_marker.len() > 0).to_equal(true)
     expect(can_run_target(target)).to_equal(true)
     expect(ensure_scenario_media(scenario)).to_equal(true)
 
@@ -91,6 +92,7 @@ fn _assert_ssh_live_login(backend: text):
             expect(login[2]).to_equal(0)
 
             val serial = read_serial_log(handle)
+            expect(serial.contains("[boot] Build marker: {build_marker}")).to_equal(true)
             expect(serial.contains("[sshd] Ed25519 self-test: PASS")).to_equal(true)
             expect(serial.contains("[ed25519-c] FAIL")).to_equal(false)
             expect(serial.contains("heap exhausted")).to_equal(false)

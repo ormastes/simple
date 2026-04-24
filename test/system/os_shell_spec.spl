@@ -3,7 +3,7 @@
 # Tests: ShellApp command execution with VFS backing
 # QEMU scenario: x64-nvme-fat32
 # Exercises: ls, cat, echo, mkdir, pwd, cd, help, env, mem, run, reboot,
-# bootstrap-oriented which/uname/ninja and recursive file ops
+# bootstrap-oriented which/uname/toolchain shims and recursive file ops
 #
 # Instead of injecting stdin (impossible in QEMU serial tests), this test
 # creates a ShellApp.with_vfs() and calls execute() directly with command
@@ -170,15 +170,23 @@ fn os_shell_test():
     val nested_dir = g_vfs.stat("/shelltree/inner/leaf")
     _assert(nested_dir.is_ok(), "mkdir -p creates nested directories")
 
-    # ---- Test 15: which resolves staged /usr/bin clang through PATH ----
+    # ---- Test 15: which resolves packaged /usr/bin cmake through PATH ----
+    shell.output_lines = []
+    shell.execute("which cmake")
+    val which_cmake_output = shell.output_lines
+    _assert(which_cmake_output.len() > 0, "which cmake produces output")
+    if which_cmake_output.len() > 0:
+        _assert(which_cmake_output[0].contains("/usr/bin/cmake"), "which cmake resolves packaged wrapper")
+
+    # ---- Test 16: which resolves packaged /usr/bin clang through PATH ----
     shell.output_lines = []
     shell.execute("which clang")
     val which_output = shell.output_lines
     _assert(which_output.len() > 0, "which clang produces output")
     if which_output.len() > 0:
-        _assert(which_output[0].contains("/usr/bin/clang"), "which clang resolves staged payload")
+        _assert(which_output[0].contains("/usr/bin/clang"), "which clang resolves packaged wrapper")
 
-    # ---- Test 16: uname reports SimpleOS identity ----
+    # ---- Test 17: uname reports SimpleOS identity ----
     shell.output_lines = []
     shell.execute("uname -a")
     val uname_output = shell.output_lines
@@ -186,13 +194,63 @@ fn os_shell_test():
     if uname_output.len() > 0:
         _assert(uname_output[0].contains("SimpleOS"), "uname -a reports SimpleOS")
 
-    # ---- Test 17: ninja --version is available in guest bootstrap shim ----
+    # ---- Test 18: cmake wrapper supports version/help discovery ----
+    shell.output_lines = []
+    shell.execute("cmake --version")
+    val cmake_version_output = shell.output_lines
+    _assert(cmake_version_output.len() > 0, "cmake --version produces output")
+    if cmake_version_output.len() > 0:
+        _assert(cmake_version_output[0].contains("simple_cmake native wrapper"), "cmake wrapper reports packaged version")
+
+    shell.output_lines = []
+    shell.execute("cmake -E capabilities")
+    val cmake_capabilities_output = shell.output_lines
+    _assert(cmake_capabilities_output.len() > 0, "cmake -E capabilities produces output")
+    if cmake_capabilities_output.len() > 0:
+        _assert(cmake_capabilities_output[0].contains("serverMode=false"), "cmake capabilities reports wrapper metadata")
+
+    # ---- Test 19: ninja --version is available in guest bootstrap shim ----
     shell.output_lines = []
     shell.execute("ninja --version")
     val ninja_output = shell.output_lines
     _assert(ninja_output.len() > 0, "ninja --version produces output")
 
-    # ---- Test 18: cp -r copies a directory tree and rm -rf removes it ----
+    # ---- Test 20: clang/rustc/cargo expose packaged guest wrappers ----
+    shell.output_lines = []
+    shell.execute("clang --version")
+    val clang_output = shell.output_lines
+    _assert(clang_output.len() > 0, "clang --version produces output")
+    if clang_output.len() > 0:
+        _assert(clang_output[0].contains("clang version"), "clang shim reports staged LLVM version")
+
+    shell.output_lines = []
+    shell.execute("rustc --version")
+    val rustc_output = shell.output_lines
+    _assert(rustc_output.len() > 0, "rustc --version produces output")
+    if rustc_output.len() > 0:
+        _assert(rustc_output[0].contains("rustc "), "rustc shim reports staged Rust version")
+
+    shell.output_lines = []
+    shell.execute("cargo --version")
+    val cargo_output = shell.output_lines
+    _assert(cargo_output.len() > 0, "cargo --version produces output")
+    if cargo_output.len() > 0:
+        _assert(cargo_output[0].contains("cargo "), "cargo shim reports staged Cargo version")
+
+    # ---- Test 21: unsupported toolchain ops fail clearly instead of fake exec ----
+    shell.output_lines = []
+    shell.execute("cmake -S /src -B /build -G Ninja")
+    val cmake_fail_output = shell.output_lines
+    _assert(cmake_fail_output.len() > 0, "cmake unsupported configure reports an error")
+    _assert(shell.last_exit_code != 0, "cmake unsupported configure exits nonzero")
+
+    shell.output_lines = []
+    shell.execute("clang -c /hello.c -o /tmp/hello.o")
+    val clang_fail_output = shell.output_lines
+    _assert(clang_fail_output.len() > 0, "clang unsupported op reports an error")
+    _assert(shell.last_exit_code != 0, "clang unsupported op exits nonzero")
+
+    # ---- Test 22: cp -r copies a directory tree and rm -rf removes it ----
     shell.output_lines = []
     shell.execute("mkdir -p /shellcopy/src")
     shell.execute("echo copied > /shellcopy/src/file.txt")
@@ -203,7 +261,7 @@ fn os_shell_test():
     val removed_tree = g_vfs.stat("/shellcopy")
     _assert(removed_tree.is_err(), "rm -rf removes copied directory trees")
 
-    # ---- Test 19: exit sets running to false ----
+    # ---- Test 23: exit sets running to false ----
     shell.execute("exit")
     _assert(not shell.running, "exit command stops shell")
 

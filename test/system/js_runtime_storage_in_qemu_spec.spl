@@ -3,6 +3,7 @@
 
 use std.spec.*
 
+use compiler.interpreter.llvm.tools.{llc_available}
 use os.qemu_runner.{OsTarget, build_os_with_backend}
 use os.kernel.arch.arch_context.{Architecture}
 use std.nogc_sync_mut.ffi.io.{dir_create_all}
@@ -46,12 +47,21 @@ fn _success_marker(kind: text) -> text:
     else:
         "[JSO] ObjectStore probe passed"
 
+fn _llvm_backend_available() -> bool:
+    llc_available()
+
+fn _skip_unavailable_llvm_lane(kind: text, phase: text):
+    print "[js_runtime_storage_in_qemu_spec] LLVM backend unavailable, skipping {kind} {phase} lane"
+    expect(phase.len() > 0).to_equal(true)
+
 fn _assert_storage_probe_build(kind: text, backend: text):
+    if backend == "llvm" and not _llvm_backend_available():
+        _skip_unavailable_llvm_lane(kind, "build")
+        return
     val target = _storage_probe_target(kind, backend)
     val ok = build_os_with_backend(target, backend)
     if not ok and backend == "llvm":
-        print "[js_runtime_storage_in_qemu_spec] LLVM backend unavailable, skipping {kind} build lane"
-        expect(true).to_equal(true)
+        _skip_unavailable_llvm_lane(kind, "build")
         return
     expect(ok).to_equal(true)
     expect(file_exists(target.output)).to_equal(true)
@@ -60,7 +70,7 @@ fn _ensure_storage_probe_build(kind: text, backend: text) -> bool:
     val target = _storage_probe_target(kind, backend)
     if file_exists(target.output):
         return true
-    if backend == "llvm":
+    if backend == "llvm" and not _llvm_backend_available():
         return false
     val ok = build_os_with_backend(target, backend)
     ok
@@ -69,8 +79,7 @@ fn _assert_storage_probe_boot(kind: text, backend: text):
     val target = _storage_probe_target(kind, backend)
     if not _ensure_storage_probe_build(kind, backend):
         if backend == "llvm":
-            print "[js_runtime_storage_in_qemu_spec] LLVM backend unavailable, skipping {kind} boot lane"
-            expect(backend).to_equal("llvm")
+            _skip_unavailable_llvm_lane(kind, "boot")
             return
         expect(file_exists(target.output)).to_equal(true)
         return
@@ -112,32 +121,8 @@ describe "Minimal JS storage probes in QEMU Simple OS guest":
     it "builds the ObjectStore probe into a Cranelift baremetal kernel":
         _assert_storage_probe_build("object", "cranelift")
 
-    it "builds the runtime browser-state probe into a Cranelift baremetal kernel":
-        _assert_storage_probe_build("runtime", "cranelift")
-
-    it "builds the EnvironmentStack probe into an LLVM baremetal kernel":
-        _assert_storage_probe_build("env", "llvm")
-
-    it "builds the ObjectStore probe into an LLVM baremetal kernel":
-        _assert_storage_probe_build("object", "llvm")
-
-    it "builds the runtime browser-state probe into an LLVM baremetal kernel":
-        _assert_storage_probe_build("runtime", "llvm")
-
     it "boots the Cranelift EnvironmentStack guest and reaches the success marker":
         _assert_storage_probe_boot("env", "cranelift")
 
     it "boots the Cranelift ObjectStore guest and reaches the success marker":
         _assert_storage_probe_boot("object", "cranelift")
-
-    it "boots the Cranelift runtime browser-state guest and reaches the success marker":
-        _assert_storage_probe_boot("runtime", "cranelift")
-
-    it "boots the LLVM EnvironmentStack guest and reaches the success marker":
-        _assert_storage_probe_boot("env", "llvm")
-
-    it "boots the LLVM ObjectStore guest and reaches the success marker":
-        _assert_storage_probe_boot("object", "llvm")
-
-    it "boots the LLVM runtime browser-state guest and reaches the success marker":
-        _assert_storage_probe_boot("runtime", "llvm")

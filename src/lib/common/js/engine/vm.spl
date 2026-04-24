@@ -2,7 +2,6 @@
 # Executes BytecodeChunk opcodes with a frame-based call stack.
 
 use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
-use std.js.types.pair.{Pair}
 use std.js.types.bytecode_types.{OpCode, BytecodeChunk, ConstantPool}
 use std.js.types.js_types.{JsValue, JsObject, JsProperty}
 use std.js.engine.interpreter_types.{f64_to_i64}
@@ -89,6 +88,19 @@ class ObjectStore:
     fn _stored_obj_id_equals(stored_id: i64, expected_id: i64) -> bool:
         self._normalize_obj_id(stored_id) == self._normalize_obj_id(expected_id)
 
+    fn _normalize_value_ids(value: JsValue) -> JsValue:
+        match value:
+            case JsValue.Object(id):
+                JsValue.Object(id: self._normalize_obj_id(id))
+            case JsValue.Array(id):
+                JsValue.Array(id: self._normalize_obj_id(id))
+            case JsValue.Function(id):
+                JsValue.Function(id: self._normalize_obj_id(id))
+            case JsValue.Symbol(id):
+                JsValue.Symbol(id: self._normalize_obj_id(id))
+            case _:
+                value
+
     me allocate() -> JsObject:
         val id = self.next_id
         self.next_id = self.next_id + 1
@@ -121,7 +133,7 @@ class ObjectStore:
                     if is_enum:
                         props.push(JsProperty(
                             key: key,
-                            value: self.prop_values.get(i),
+                            value: self._normalize_value_ids(self.prop_values.get(i)),
                             writable: true,
                             enumerable: true,
                             configurable: self.prop_configurables.get(i)
@@ -150,8 +162,9 @@ class ObjectStore:
         # Scan from end — latest entry wins
         var i = self.prop_keys.len() - 1
         while i >= 0:
-            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id) and self.prop_keys.get(i) == key:
-                return self.prop_values.get(i)
+            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id):
+                if self.prop_keys.get(i) == key:
+                    return self._normalize_value_ids(self.prop_values.get(i))
             i = i - 1
         JsValue.Undefined
 
@@ -184,6 +197,8 @@ class ObjectStore:
 
     fn array_length(obj_id: i64) -> i64:
         """Get the length of a dense array by counting distinct element keys."""
+        if val JsValue.Number(v) = self.get_property(obj_id, "length"):
+            return f64_to_i64(v)
         var seen_keys: [text] = []
         var derived_len = 0
         var i = self.prop_keys.len() - 1

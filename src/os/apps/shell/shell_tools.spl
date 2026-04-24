@@ -157,6 +157,157 @@ fn _tool_path_candidates(command: text, cwd: text, path_env: text) -> [text]:
             candidates = candidates.push(_normalize("{dir}/{command}"))
     candidates
 
+fn _tool_path_exists(vfs: VfsManager?, cwd: text, path_env: text, command: text) -> bool:
+    if vfs == nil:
+        return false
+    for candidate in _tool_path_candidates(command, cwd, path_env):
+        if vfs.stat(candidate).is_ok():
+            return true
+    false
+
+fn _toolchain_manifest_paths(command: text) -> (text, text, text):
+    match command:
+        "cmake":
+            ("/SYS/CMAKEVER.TXT", "/SYS/CMAKEMAN.TXT", "/usr/bin/cmake")
+        "clang":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/clang")
+        "clang-20":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/clang-20")
+        "lld":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/lld")
+        "ld.lld":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/ld.lld")
+        "llvm-ar":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-ar")
+        "llvm-nm":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-nm")
+        "llvm-ranlib":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-ranlib")
+        "llvm-objdump":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-objdump")
+        "llvm-objcopy":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-objcopy")
+        "llvm-strip":
+            ("/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/llvm-strip")
+        "rustc":
+            ("/SYS/RUSTVER.TXT", "/SYS/RUSTMAN.TXT", "/usr/bin/rustc")
+        "cargo":
+            ("/SYS/CARGOVER.TXT", "/SYS/RUSTMAN.TXT", "/usr/bin/cargo")
+        "cargo-simpleos":
+            ("/SYS/CARGOVER.TXT", "/SYS/RUSTMAN.TXT", "/usr/bin/cargo-simpleos")
+        "ninja":
+            ("/SYS/NINJAVER.TXT", "/SYS/NINJAMAN.TXT", "/usr/bin/ninja")
+        _:
+            ("", "", "")
+
+fn _toolchain_command_supported(command: text) -> bool:
+    val paths = _toolchain_manifest_paths(command)
+    paths.0 != ""
+
+fn _toolchain_help_lines(command: text) -> [text]:
+    if command == "cmake":
+        return [
+            "cmake: SimpleOS native wrapper backed by the in-tree simple_cmake port",
+            "supported: --version, --help",
+            "configure/build generation is packaged but not execution-complete in this guest lane yet",
+        ]
+    if command == "clang" or command == "clang-20" or command == "lld" or
+       command == "ld.lld" or command == "llvm-ar" or command == "llvm-nm" or
+       command == "llvm-ranlib" or command == "llvm-objdump" or
+       command == "llvm-objcopy" or command == "llvm-strip":
+        return [
+            "{command}: SimpleOS native wrapper for staged LLVM payloads",
+            "supported: --version, --help, --print-target-triple",
+            "real guest LLVM execution is not port-complete yet",
+        ]
+    if command == "rustc":
+        return [
+            "rustc: SimpleOS native wrapper for staged Rust payloads",
+            "supported: --version, --help, --print target-list",
+            "real guest rustc execution is not port-complete yet",
+        ]
+    if command == "cargo":
+        return [
+            "cargo: SimpleOS native wrapper for staged Rust payloads",
+            "supported: --version, --help",
+            "use cargo-simpleos once real guest cargo execution lands",
+        ]
+    if command == "cargo-simpleos":
+        return [
+            "cargo-simpleos: native wrapper entry for SimpleOS bootstrap",
+            "supported: --version, --help",
+            "delegates to the staged bootstrap flow; real guest cargo is pending",
+        ]
+    if command == "ninja":
+        return [
+            "ninja: SimpleOS native wrapper backed by the in-tree simple_ninja port",
+            "supported: --version, --help",
+            "build execution is packaged but not execution-complete in this guest lane yet",
+        ]
+    []
+
+fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
+                             command: text, args: [text], terminal: Terminal) -> i32?:
+    """Execute a filesystem-backed native-wrapper surface for guest toolchain commands.
+
+    The FAT image currently stages host-built LLVM/Rust/Ninja binaries under
+    `/usr/bin`, and packages the promoted native build-tool entrypoints at the
+    same stable paths. The wrappers are truthful about what works in-guest while
+    the full native execution lanes are still landing.
+    """
+    if not _toolchain_command_supported(command):
+        return nil
+    if not _tool_path_exists(vfs, cwd, path_env, command):
+        return nil
+
+    val paths = _toolchain_manifest_paths(command)
+    val version_path = paths.0
+    val manifest_path = paths.1
+    val canonical_path = paths.2
+    val version = _tool_file_first_line(vfs, version_path) ?? "{command} staged payload"
+    val primary = if args.len() > 0: args[0] else: "--version"
+
+    if primary == "--version":
+        _write_line(terminal, version)
+        return 0
+
+    if command == "cmake":
+        if primary == "-E" and args.len() > 1 and args[1] == "capabilities":
+            _write_line(terminal, "serverMode=false")
+            _write_line(terminal, "generators=Ninja")
+            _write_line(terminal, "tool=/usr/bin/cmake")
+            return 0
+
+    if command == "clang" or command == "clang-20":
+        if primary == "--print-target-triple":
+            _write_line(terminal, "x86_64-simpleos")
+            return 0
+    if command == "rustc":
+        if primary == "--print" and args.len() > 1 and args[1] == "target-list":
+            _write_line(terminal, "x86_64-unknown-simpleos")
+            return 0
+
+    if primary == "--help" or primary == "-h":
+        for line in _toolchain_help_lines(command):
+            _write_line(terminal, line)
+        val manifest = _tool_file_first_line(vfs, manifest_path)
+        if manifest != nil and manifest.unwrap() != "":
+            _write_line(terminal, "manifest: {manifest.unwrap()}")
+        _write_line(terminal, "payload: {canonical_path}")
+        return 0
+
+    _write_error(terminal,
+        "{command}: native wrapper available at {canonical_path} but execution is not complete on this guest lane")
+    _write_error(terminal,
+        "{command}: supported guest wrapper options are --version and --help")
+    if command == "cmake":
+        _write_error(terminal,
+            "{command}: supported discovery option available: -E capabilities")
+    if command == "clang" or command == "clang-20" or command == "rustc":
+        _write_error(terminal,
+            "{command}: additional discovery option available: --print target metadata")
+    1
+
 # =========================================================================
 # touch — Create empty files or update timestamps
 # =========================================================================
@@ -511,24 +662,21 @@ fn tool_uname(args: [text], terminal: Terminal) -> i32:
             return 1
     0
 
-fn tool_ninja(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
-    """Bootstrap-oriented ninja shim backed by the staged filesystem payload."""
+fn tool_cmake(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
+    """Guest-facing cmake wrapper bound to the stable /usr/bin/cmake path."""
     val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
-    var found_payload = false
-    for candidate in _tool_path_candidates("ninja", cwd, path_env):
-        if vfs != nil and vfs.stat(candidate).is_ok():
-            found_payload = true
-            break
-    if not found_payload:
-        _write_error(terminal, "ninja: staged payload not found on PATH")
+    if not _tool_path_exists(vfs, cwd, path_env, "cmake"):
+        _write_error(terminal, "cmake: native wrapper not found on PATH")
         return 127
+    tool_try_staged_toolchain(vfs, cwd, path_env, "cmake", args, terminal) ?? 127
 
-    val version = _tool_file_first_line(vfs, "/SYS/NINJAVER.TXT") ?? "ninja staged payload"
-    if args.len() == 0 or args[0] == "--version":
-        _write_line(terminal, version)
-        return 0
-    _write_error(terminal, "ninja: only --version is supported in the guest bootstrap shim")
-    1
+fn tool_ninja(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
+    """Guest-facing ninja wrapper bound to the stable /usr/bin/ninja path."""
+    val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
+    if not _tool_path_exists(vfs, cwd, path_env, "ninja"):
+        _write_error(terminal, "ninja: native wrapper not found on PATH")
+        return 127
+    tool_try_staged_toolchain(vfs, cwd, path_env, "ninja", args, terminal) ?? 127
 
 # =========================================================================
 # true / false — Exit with known code

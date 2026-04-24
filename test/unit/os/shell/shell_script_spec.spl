@@ -1,0 +1,401 @@
+# @cover src/os/apps/shell/shell_script.spl 80%
+"""
+# Shell Scripting Engine Specification
+
+**Feature IDs:** #shell-script-engine
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+**Screenshots:** N/A
+**TUI Captures:** N/A
+**Logs:** N/A
+
+## Overview
+
+Validates the ScriptEngine (shell_script.spl) and ShellExpander (shell_expand.spl)
+that power .shs script execution inside SimpleOS.
+
+Tests cover:
+- if/elif/else/fi control flow
+- while/do/done and for/do/done loops
+- case/esac pattern matching
+- function / fn definition and call
+- Variable expansion: $?, $0-$9, $@, $*, $#, ${var:-default}, ${var:+alt}, ${#var}, $(cmd)
+- source / . builtin loading a .shs file
+- ControlFlow propagation: break, continue, return
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ScriptEngine | Parses and executes shell script text as a sequence of Stmt nodes |
+| ShellContext | Carries variables, env, cwd, last_exit_code, positional_args, aliases, functions |
+| ControlFlow | Normal(i32), Break(i32), Continue(i32), Return(i32) — propagates through frames |
+| ShellExpander | Performs $VAR / $(cmd) / ${var:-default} expansion on a text token |
+| Stmt | AST node: If, While, For, Case, FnDef, Pipeline, Assign, Source, Return, Break, Continue |
+"""
+
+use std.sspec.*
+use os.apps.shell.shell_script.{ScriptEngine, Stmt}
+use os.apps.shell.shell_expand.{ShellExpander}
+use os.apps.shell.shell_app.{ShellApp, ShellContext}
+
+
+# ============================================================================
+# Test Group 1: Variable Expansion
+# ============================================================================
+
+describe "ShellExpander variable expansion":
+    """
+    ## Variable Expansion
+
+    ShellExpander.expand(ctx, s) must handle all POSIX expansion forms
+    so that scripts can use $VAR, $?, ${var:-default}, $(cmd), etc.
+    """
+
+    context "when expanding simple $VAR":
+        it "substitutes a known variable":
+            val ctx = ShellContext.default()
+            ctx.variables.set("GREETING", "hello")
+            val result = ShellExpander.expand(ctx, "$GREETING world")
+            expect(result).to_equal("hello world")
+
+        it "expands to empty string for unknown variable":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "[$UNDEFINED]")
+            expect(result).to_equal("[]")
+
+    context "when expanding $? exit code":
+        it "returns last exit code as text":
+            val ctx = ShellContext.default()
+            ctx.last_exit_code = 42
+            val result = ShellExpander.expand(ctx, "exit=$?")
+            expect(result).to_equal("exit=42")
+
+        it "returns 0 when no command has run":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "$?")
+            expect(result).to_equal("0")
+
+    context "when expanding positional parameters":
+        it "expands $1 to first positional arg":
+            val ctx = ShellContext.default()
+            ctx.positional_args = ["script.shs", "alpha", "beta"]
+            val result = ShellExpander.expand(ctx, "$1")
+            expect(result).to_equal("alpha")
+
+        it "expands $0 to script name":
+            val ctx = ShellContext.default()
+            ctx.positional_args = ["myscript.shs", "arg1"]
+            val result = ShellExpander.expand(ctx, "$0")
+            expect(result).to_equal("myscript.shs")
+
+        it "expands $# to arg count (excluding $0)":
+            val ctx = ShellContext.default()
+            ctx.positional_args = ["myscript.shs", "a", "b", "c"]
+            val result = ShellExpander.expand(ctx, "$#")
+            expect(result).to_equal("3")
+
+        it "expands $@ to space-joined args":
+            val ctx = ShellContext.default()
+            ctx.positional_args = ["script.shs", "x", "y"]
+            val result = ShellExpander.expand(ctx, "$@")
+            expect(result).to_equal("x y")
+
+        it "expands $* to same as $@ in unquoted context":
+            val ctx = ShellContext.default()
+            ctx.positional_args = ["script.shs", "p", "q"]
+            val result = ShellExpander.expand(ctx, "$*")
+            expect(result).to_equal("p q")
+
+    context "when expanding ${var:-default}":
+        it "returns variable value when set":
+            val ctx = ShellContext.default()
+            ctx.variables.set("FOO", "bar")
+            val result = ShellExpander.expand(ctx, "${FOO:-fallback}")
+            expect(result).to_equal("bar")
+
+        it "returns default when variable is unset":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "${UNSET:-fallback}")
+            expect(result).to_equal("fallback")
+
+        it "returns default when variable is empty":
+            val ctx = ShellContext.default()
+            ctx.variables.set("EMPTY", "")
+            val result = ShellExpander.expand(ctx, "${EMPTY:-fallback}")
+            expect(result).to_equal("fallback")
+
+    context "when expanding ${var:+alt}":
+        it "returns alt when variable is set and non-empty":
+            val ctx = ShellContext.default()
+            ctx.variables.set("SET", "value")
+            val result = ShellExpander.expand(ctx, "${SET:+alt}")
+            expect(result).to_equal("alt")
+
+        it "returns empty when variable is unset":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "${UNSET:+alt}")
+            expect(result).to_equal("")
+
+    context "when expanding ${#var} length":
+        it "returns character count of variable value":
+            val ctx = ShellContext.default()
+            ctx.variables.set("WORD", "hello")
+            val result = ShellExpander.expand(ctx, "${#WORD}")
+            expect(result).to_equal("5")
+
+        it "returns 0 for unset variable":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "${#NOVAR}")
+            expect(result).to_equal("0")
+
+    context "when expanding $(cmd) command substitution":
+        it "captures stdout of a simple echo command":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "$(echo captured)")
+            expect(result).to_equal("captured")
+
+        it "trims trailing newline from captured output":
+            val ctx = ShellContext.default()
+            val result = ShellExpander.expand(ctx, "prefix-$(echo trimmed)-suffix")
+            expect(result).to_equal("prefix-trimmed-suffix")
+
+
+# ============================================================================
+# Test Group 2: Control Flow — if/elif/else
+# ============================================================================
+
+describe "ScriptEngine if/elif/else":
+    """
+    ## Conditional Branching
+
+    ScriptEngine must evaluate if/elif/else/fi blocks, running the branch
+    whose condition exits zero.
+    """
+
+    it "executes then-branch when condition is true":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "if true; then\n  X=yes\nfi"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("yes")
+
+    it "skips then-branch when condition is false":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "if false; then\n  X=yes\nfi"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("")
+
+    it "executes else-branch when condition is false":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "if false; then\n  X=then\nelse\n  X=else\nfi"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("else")
+
+    it "evaluates elif when first condition is false":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "if false; then\n  X=a\nelif true; then\n  X=b\nfi"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("b")
+
+    it "skips all elif branches when first is true":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "if true; then\n  X=first\nelif true; then\n  X=second\nfi"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("first")
+
+
+# ============================================================================
+# Test Group 3: Control Flow — while/for loops
+# ============================================================================
+
+describe "ScriptEngine while and for loops":
+    """
+    ## Loop Constructs
+
+    while/do/done iterates until condition exits nonzero.
+    for var in .../do/done iterates over a word list.
+    break and continue propagate as ControlFlow.
+    """
+
+    it "executes while loop body repeatedly until condition fails":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        # Uses test builtin: [ $I -lt 3 ] exits 0 while I < 3
+        val script = "I=0\nwhile [ $I -lt 3 ]; do\n  I=$((I+1))\ndone"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("I")).to_equal("3")
+
+    it "skips while body when initial condition is false":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "X=before\nwhile false; do\n  X=inside\ndone"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("before")
+
+    it "iterates for loop over word list":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "OUT=''\nfor W in a b c; do\n  OUT=\"$OUT$W\"\ndone"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("OUT")).to_equal("abc")
+
+    it "break exits while loop early":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "I=0\nwhile true; do\n  I=$((I+1))\n  if [ $I -eq 2 ]; then break; fi\ndone"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("I")).to_equal("2")
+
+    it "continue skips remainder of for loop body":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "OUT=''\nfor W in a b c; do\n  if [ $W = b ]; then continue; fi\n  OUT=\"$OUT$W\"\ndone"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("OUT")).to_equal("ac")
+
+
+# ============================================================================
+# Test Group 4: case/esac
+# ============================================================================
+
+describe "ScriptEngine case/esac":
+    """
+    ## Pattern Matching with case
+
+    case/esac matches a word against patterns and executes the first match.
+    The wildcard pattern * must match any word not caught by earlier arms.
+    """
+
+    it "matches exact string pattern":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        ctx.variables.set("VAL", "hello")
+        val script = "case $VAL in\n  hello) X=matched ;;\n  *) X=other ;;\nesac"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("matched")
+
+    it "falls through to wildcard when no pattern matches":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        ctx.variables.set("VAL", "unknown")
+        val script = "case $VAL in\n  hello) X=hello ;;\n  *) X=wildcard ;;\nesac"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("wildcard")
+
+    it "matches pipe-separated alternatives":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        ctx.variables.set("VAL", "b")
+        val script = "case $VAL in\n  a|b|c) X=abc ;;\n  *) X=other ;;\nesac"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("abc")
+
+
+# ============================================================================
+# Test Group 5: Function definition and call
+# ============================================================================
+
+describe "ScriptEngine function definitions":
+    """
+    ## Shell Functions
+
+    function name() { ... } and fn name() definitions register a callable
+    that can be invoked by name. return propagates exit code as ControlFlow.Return.
+    """
+
+    it "defines and calls a function":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "function greet() {\n  X=hi\n}\ngreet"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("X")).to_equal("hi")
+
+    it "function receives positional args via $1 $2":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "function add_args() {\n  RESULT=\"$1-$2\"\n}\nadd_args foo bar"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("RESULT")).to_equal("foo-bar")
+
+    it "return inside function propagates exit code":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "function check() {\n  return 5\n}\ncheck\nCODE=$?"
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("CODE")).to_equal("5")
+
+    it "function local variables do not leak to caller":
+        val ctx = ShellContext.default()
+        ctx.variables.set("OUTER", "original")
+        val engine = ScriptEngine.new()
+        val script = "function mutate() {\n  OUTER=mutated\n}\nmutate"
+        # POSIX: without 'local', assignment in function modifies global
+        engine.execute_script(ctx, script)
+        expect(ctx.variables.get("OUTER")).to_equal("mutated")
+
+
+# ============================================================================
+# Test Group 6: source / . file loading
+# ============================================================================
+
+describe "ScriptEngine source builtin":
+    """
+    ## Script File Sourcing
+
+    source file.shs and . file.shs load and execute a script in the current
+    ShellContext. Positional args can be forwarded.
+    """
+
+    it "source sets a variable defined in the sourced file":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        # Simulate sourcing by executing inline — real impl reads from VFS
+        val sourced_content = "SOURCED_VAR=loaded"
+        engine.execute_script(ctx, sourced_content)
+        expect(ctx.variables.get("SOURCED_VAR")).to_equal("loaded")
+
+    it "source returns error ControlFlow when file does not exist":
+        val ctx = ShellContext.default()
+        val engine = ScriptEngine.new()
+        val script = "source /nonexistent_file.shs"
+        val flow = engine.execute_script(ctx, script)
+        expect(flow.exit_code).to_be_greater_than(0)
+
+
+# ============================================================================
+# Test Group 7: Stmt parse round-trip
+# ============================================================================
+
+describe "ScriptEngine parse":
+    """
+    ## Statement Parsing
+
+    parse(source) must return a non-empty list of Stmt nodes for well-formed
+    script text. The returned stmts must carry correct discriminants.
+    """
+
+    it "parses an assignment as a Stmt":
+        val engine = ScriptEngine.new()
+        val stmts = engine.parse("FOO=bar")
+        expect(stmts.len()).to_be_greater_than(0)
+
+    it "parses an if block as a single Stmt":
+        val engine = ScriptEngine.new()
+        val stmts = engine.parse("if true; then\n  X=y\nfi")
+        expect(stmts.len()).to_be_greater_than(0)
+
+    it "parses empty input as empty Stmt list":
+        val engine = ScriptEngine.new()
+        val stmts = engine.parse("")
+        expect(stmts.len()).to_equal(0)

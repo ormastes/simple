@@ -7,13 +7,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::env;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 
 // ---------------------------------------------------------------------------
 // IPC message types (subprocess → shell)
@@ -60,6 +64,11 @@ type StdinHandle = Arc<Mutex<Option<std::process::ChildStdin>>>;
 struct SimpleProcess {
     stdin: StdinHandle,
     child: Mutex<Option<Child>>,
+}
+
+struct BundledRuntimeAsset {
+    bytes: &'static [u8],
+    filename: &'static str,
 }
 
 impl SimpleProcess {
@@ -170,13 +179,19 @@ fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: App
                 eprintln!("[tauri-shell] parse error: {} — line: {}", e, trimmed);
                 update_status(
                     &app,
-                    &format!("Subprocess produced non-IPC stdout:\n{}\n\nParse error: {}", trimmed, e),
+                    &format!(
+                        "Subprocess produced non-IPC stdout:\n{}\n\nParse error: {}",
+                        trimmed, e
+                    ),
                 );
             }
         }
     }
     eprintln!("[tauri-shell] subprocess stdout closed");
-    update_status(&app, "Simple subprocess stdout closed before a valid render arrived.");
+    update_status(
+        &app,
+        "Simple subprocess stdout closed before a valid render arrived.",
+    );
 }
 
 fn read_subprocess_stderr(
@@ -276,9 +291,15 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
                 match action.as_str() {
-                    "minimize" => { let _ = win.minimize(); }
-                    "maximize" => { let _ = win.maximize(); }
-                    "close" => { let _ = win.close(); }
+                    "minimize" => {
+                        let _ = win.minimize();
+                    }
+                    "maximize" => {
+                        let _ = win.maximize();
+                    }
+                    "close" => {
+                        let _ = win.close();
+                    }
                     _ => {}
                 }
             }
@@ -323,15 +344,112 @@ fn resolve_external_url() -> Option<String> {
     env::var("SIMPLE_DASHBOARD_URL").ok()
 }
 
-fn resolve_simple_binary() -> String {
-    let args: Vec<String> = env::args().collect();
+fn resolve_simple_binary_from(
+    args: &[String],
+    env_bin: Option<String>,
+    is_mobile: bool,
+) -> Option<String> {
     if args.len() > 1 && !args[1].starts_with('-') {
-        return args[1].clone();
+        return Some(args[1].clone());
     }
-    if let Ok(bin) = env::var("SIMPLE_BIN") {
-        return bin;
+    if let Some(bin) = env_bin {
+        return Some(bin);
     }
-    "../../bin/simple".to_string()
+    if is_mobile {
+        None
+    } else {
+        Some("../../bin/simple".to_string())
+    }
+}
+
+fn resolve_simple_binary() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    let env_bin = env::var("SIMPLE_BIN").ok();
+    resolve_simple_binary_from(&args, env_bin, cfg!(mobile))
+}
+
+#[cfg(mobile)]
+fn bundled_mobile_runtime_asset() -> Option<BundledRuntimeAsset> {
+    #[cfg(all(target_os = "android", target_arch = "aarch64"))]
+    {
+        return ANDROID_RUNTIME_AARCH64.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-aarch64-linux-android",
+        });
+    }
+    #[cfg(all(target_os = "android", target_arch = "x86_64"))]
+    {
+        return ANDROID_RUNTIME_X86_64.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-x86_64-linux-android",
+        });
+    }
+    #[cfg(all(target_os = "android", target_arch = "arm"))]
+    {
+        return ANDROID_RUNTIME_ARMV7.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-armv7-linux-androideabi",
+        });
+    }
+    #[cfg(all(target_os = "android", target_arch = "x86"))]
+    {
+        return ANDROID_RUNTIME_I686.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-i686-linux-android",
+        });
+    }
+    #[cfg(not(any(
+        all(target_os = "android", target_arch = "aarch64"),
+        all(target_os = "android", target_arch = "x86_64"),
+        all(target_os = "android", target_arch = "arm"),
+        all(target_os = "android", target_arch = "x86"),
+    )))]
+    None
+}
+
+#[cfg(not(mobile))]
+fn bundled_mobile_runtime_asset() -> Option<BundledRuntimeAsset> {
+    None
+}
+
+#[cfg(unix)]
+fn mark_executable(path: &PathBuf) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = fs::metadata(path)
+        .map_err(|e| format!("failed to stat bundled runtime: {}", e))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).map_err(|e| format!("failed to chmod bundled runtime: {}", e))
+}
+
+#[cfg(not(unix))]
+fn mark_executable(_path: &PathBuf) -> Result<(), String> {
+    Ok(())
+}
+
+fn prepare_bundled_mobile_runtime() -> Result<Option<String>, String> {
+    let Some(asset) = bundled_mobile_runtime_asset() else {
+        return Ok(None);
+    };
+
+    let mut runtime_dir = env::temp_dir();
+    runtime_dir.push("simple-tauri-shell");
+    fs::create_dir_all(&runtime_dir)
+        .map_err(|e| format!("failed to create mobile runtime dir: {}", e))?;
+
+    let runtime_path = runtime_dir.join(asset.filename);
+    let should_write = match fs::metadata(&runtime_path) {
+        Ok(meta) => meta.len() != asset.bytes.len() as u64,
+        Err(_) => true,
+    };
+    if should_write {
+        fs::write(&runtime_path, asset.bytes)
+            .map_err(|e| format!("failed to extract bundled mobile runtime: {}", e))?;
+        mark_executable(&runtime_path)?;
+    }
+
+    Ok(Some(runtime_path.to_string_lossy().into_owned()))
 }
 
 fn resolve_entry_file() -> Option<String> {
@@ -356,7 +474,10 @@ fn binary_supports_ui_command(simple_bin: &str) -> bool {
     let output = match Command::new(simple_bin).args(["ui", "--help"]).output() {
         Ok(out) => out,
         Err(err) => {
-            eprintln!("[tauri-shell] failed to probe '{} ui --help': {}", simple_bin, err);
+            eprintln!(
+                "[tauri-shell] failed to probe '{} ui --help': {}",
+                simple_bin, err
+            );
             return false;
         }
     };
@@ -392,17 +513,34 @@ pub fn run() {
     // Check for external URL mode (e.g. --url http://localhost:3000)
     let external_url = resolve_external_url();
     let shared_wm_requested = shared_wm_requested();
-
-    let simple_bin = resolve_simple_binary();
+    let (simple_bin, mut startup_error): (Option<String>, Option<String>) =
+        match resolve_simple_binary() {
+            Some(path) => (Some(path), None),
+            None => match prepare_bundled_mobile_runtime() {
+                Ok(path) => (path, None),
+                Err(err) => {
+                    eprintln!(
+                        "[tauri-shell] bundled mobile runtime extraction failed: {}",
+                        err
+                    );
+                    (
+                        None,
+                        Some(format!(
+                            "Bundled mobile runtime extraction failed.\n\n{}",
+                            err
+                        )),
+                    )
+                }
+            },
+        };
     let entry_file = resolve_entry_file();
 
-    eprintln!("[tauri-shell] binary: {}", simple_bin);
+    eprintln!("[tauri-shell] binary: {:?}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
     eprintln!("[tauri-shell] external_url: {:?}", external_url);
     eprintln!("[tauri-shell] shared_wm_requested: {}", shared_wm_requested);
     log_entry_file_status(&entry_file);
 
-    let mut startup_error: Option<String> = None;
     let mut child_stdout = None;
     let mut child_stderr = None;
     let mut child_stdin = None;
@@ -420,45 +558,52 @@ pub fn run() {
             .map(|entry| entry.ends_with(".ui.sdn"))
             .unwrap_or(false);
 
-        if ui_entry && !binary_supports_ui_command(&simple_bin) {
-            startup_error = Some(format!(
-                "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
-                simple_bin,
-                entry_file.clone().unwrap_or_default()
-            ));
-            eprintln!(
-                "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
-                simple_bin
-            );
-        } else {
-            let mut cmd = Command::new(&simple_bin);
-            if let Some(ref entry) = entry_file {
-                if entry.ends_with(".ui.sdn") {
-                    cmd.arg("tauri-entry").arg(entry);
-                } else {
-                    cmd.arg("run").arg(entry);
+        if let Some(simple_bin) = simple_bin.as_ref() {
+            if ui_entry && !binary_supports_ui_command(simple_bin) {
+                startup_error = Some(format!(
+                    "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
+                    simple_bin,
+                    entry_file.clone().unwrap_or_default()
+                ));
+                eprintln!(
+                    "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
+                    simple_bin
+                );
+            } else {
+                let mut cmd = Command::new(simple_bin);
+                if let Some(ref entry) = entry_file {
+                    if entry.ends_with(".ui.sdn") {
+                        cmd.arg("tauri-entry").arg(entry);
+                    } else {
+                        cmd.arg("run").arg(entry);
+                    }
                 }
-            }
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+                cmd.stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
 
-            match cmd.spawn() {
-                Ok(mut child) => {
-                    eprintln!("[tauri-shell] subprocess pid={}", child.id());
-                    child_stdout = child.stdout.take();
-                    child_stderr = child.stderr.take();
-                    child_stdin = child.stdin.take();
-                    child_slot = Some(child);
-                }
-                Err(e) => {
-                    startup_error = Some(format!(
-                        "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
-                        simple_bin, entry_file, e
-                    ));
-                    eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        eprintln!("[tauri-shell] subprocess pid={}", child.id());
+                        child_stdout = child.stdout.take();
+                        child_stderr = child.stderr.take();
+                        child_stdin = child.stdin.take();
+                        child_slot = Some(child);
+                    }
+                    Err(e) => {
+                        startup_error = Some(format!(
+                            "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
+                            simple_bin, entry_file, e
+                        ));
+                        eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+                    }
                 }
             }
+        } else {
+            startup_error = Some(
+                "Mobile shell started without a bundled Simple runtime.\n\nProvide an Android-compatible runtime at build time with one of:\n- SIMPLE_ANDROID_RUNTIME_AARCH64\n- SIMPLE_ANDROID_RUNTIME_X86_64\n- SIMPLE_ANDROID_RUNTIME_ARMV7\n- SIMPLE_ANDROID_RUNTIME_I686\n\nOr set `SIMPLE_BIN` to a valid mobile runtime path, or use `--url` / `SIMPLE_DASHBOARD_URL` to attach the shell to an external UI service.".to_string()
+            );
+            eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; skipping subprocess launch");
         }
     }
 
@@ -480,18 +625,17 @@ pub fn run() {
         ])
         .setup(move |app| {
             let url = if let Some(ref ext_url) = external_url {
-                eprintln!("[tauri-shell] creating window with external URL: {}", ext_url);
+                eprintln!(
+                    "[tauri-shell] creating window with external URL: {}",
+                    ext_url
+                );
                 WebviewUrl::External(ext_url.parse().expect("invalid --url value"))
             } else {
                 eprintln!("[tauri-shell] creating window from app://index.html");
                 WebviewUrl::App("index.html".into())
             };
 
-            let builder = WebviewWindowBuilder::new(
-                app,
-                "main",
-                url,
-            );
+            let builder = WebviewWindowBuilder::new(app, "main", url);
             #[cfg(desktop)]
             let builder = builder.title("Simple UI").inner_size(1280.0, 720.0);
             let _win = builder.build()?;
@@ -511,7 +655,10 @@ pub fn run() {
                     let handle = app.handle().clone();
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_millis(500));
-                        update_status(&handle, "Waiting for first render from Simple subprocess...");
+                        update_status(
+                            &handle,
+                            "Waiting for first render from Simple subprocess...",
+                        );
                         read_subprocess_stdout(BufReader::new(stdout), handle);
                     });
                 }
@@ -541,7 +688,8 @@ pub fn run() {
                         if let Some(status) = exit_status {
                             if !status.success() {
                                 let code = status.code().unwrap_or(-1);
-                                let collected = lines.lock().map(|l| l.join("\n")).unwrap_or_default();
+                                let collected =
+                                    lines.lock().map(|l| l.join("\n")).unwrap_or_default();
                                 let msg = if collected.is_empty() {
                                     format!("Simple subprocess exited with code {}.", code)
                                 } else {
@@ -580,4 +728,40 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("tauri error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_simple_binary_from;
+    use crate::{ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64};
+
+    #[test]
+    fn desktop_defaults_to_repo_binary() {
+        let args = vec!["simple-tauri-shell".to_string()];
+        assert_eq!(
+            resolve_simple_binary_from(&args, None, false),
+            Some("../../bin/simple".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_requires_explicit_binary() {
+        let args = vec!["simple-tauri-shell".to_string()];
+        assert_eq!(resolve_simple_binary_from(&args, None, true), None);
+    }
+
+    #[test]
+    fn explicit_binary_overrides_mobile_default() {
+        let args = vec!["simple-tauri-shell".to_string()];
+        assert_eq!(
+            resolve_simple_binary_from(&args, Some("/data/local/tmp/simple".to_string()), true),
+            Some("/data/local/tmp/simple".to_string())
+        );
+    }
+
+    #[test]
+    fn bundled_runtime_constants_are_absent_without_env() {
+        assert!(ANDROID_RUNTIME_AARCH64.is_none() || !ANDROID_RUNTIME_AARCH64.unwrap().is_empty());
+        assert!(ANDROID_RUNTIME_X86_64.is_none() || !ANDROID_RUNTIME_X86_64.unwrap().is_empty());
+    }
 }

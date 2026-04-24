@@ -39,7 +39,7 @@ Each test:
 """
 
 use std.sspec.*
-use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_kex_public_from_private, ssh_kex_compute_shared}
 use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, ssh_get_u32, SshStringResult, SshTextResult}
 use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
@@ -113,6 +113,21 @@ fn _ed25519_hash_for_server_public(server_public: [u8]) -> [u8]:
         _filled_bytes(32, 0x80),
         server_public,
         _filled_bytes(32, 0xC0)
+    )
+
+fn _full_transcript_hash(client_version: text, server_public: [u8], shared_secret: [u8]) -> [u8]:
+    val seed = _ed25519_seed()
+    val host_pub = ed25519_keypair_from_seed(seed).1
+    val host_blob = ssh_build_ed25519_host_key_blob(host_pub)
+    ssh_kex_compute_exchange_hash(
+        client_version,
+        "SSH-2.0-SimpleOS_1.0",
+        _filled_bytes(32, 0x11),
+        _filled_bytes(48, 0x44),
+        host_blob,
+        _filled_bytes(32, 0x88),
+        server_public,
+        shared_secret
     )
 
 fn _decode_sig_blob(blob: [u8]) -> (text, [u8]):
@@ -191,6 +206,18 @@ describe "ssh-ed25519 host key signing":
         )
         val result = ssh_sign_exchange_hash("ssh-ed25519", host_keys, _test_exchange_hash())
         expect(result.is_ok()).to_equal(true)
+
+    it "derives 32-byte X25519 public keys and a matching shared secret":
+        val private_1 = _filled_bytes(32, 0x11)
+        val private_2 = _filled_bytes(32, 0x33)
+        val public_1 = ssh_kex_public_from_private(private_1)
+        val public_2 = ssh_kex_public_from_private(private_2)
+        val shared_1 = ssh_kex_compute_shared(private_1, public_2)
+        val shared_2 = ssh_kex_compute_shared(private_2, public_1)
+        expect(public_1.len()).to_equal(32)
+        expect(public_2.len()).to_equal(32)
+        expect(shared_1.len()).to_equal(32)
+        expect(shared_1 == shared_2).to_equal(true)
 
     it "returns Err when Ed25519 seed is absent":
         val host_keys = HostKeySet(
@@ -276,6 +303,22 @@ describe "ssh-ed25519 host key signing":
         expect(sig_1 == sig_2).to_equal(false)
         expect(rt_ed25519_verify(pubkey, hash_1, sig_1)).to_equal(1)
         expect(rt_ed25519_verify(pubkey, hash_2, sig_2)).to_equal(1)
+
+    it "binds the Ed25519 signature to the full KEX transcript":
+        val seed = _ed25519_seed()
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        val host_keys = HostKeySet(
+            ed25519_seed: seed,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val hash_1 = _full_transcript_hash("SSH-2.0-OpenSSH_9.6", _filled_bytes(32, 0x21), _filled_bytes(32, 0xC0))
+        val hash_2 = _full_transcript_hash("SSH-2.0-OpenSSH_9.7", _filled_bytes(32, 0x21), _filled_bytes(32, 0xC0))
+        val sig = _decode_sig_blob(ssh_sign_exchange_hash("ssh-ed25519", host_keys, hash_1).unwrap()).1
+        expect(hash_1 == hash_2).to_equal(false)
+        expect(rt_ed25519_verify(pubkey, hash_1, sig)).to_equal(1)
+        expect(rt_ed25519_verify(pubkey, hash_2, sig)).to_equal(0)
 
 describe "host-key aware KEXINIT builder":
     it "round-trips an ed25519-only KEXINIT through the transport parser":

@@ -498,6 +498,13 @@ stage_simpleos_toolchain_payloads() {
         "$TMPDIR/etc/cargo" \
         "$TMPDIR/SYS"
 
+    cat > "$TMPDIR/usr/bin/cmake" <<'EOF'
+#!/bin/sh
+echo "simple_cmake native wrapper: use the in-guest shell command surface"
+exit 0
+EOF
+    chmod +x "$TMPDIR/usr/bin/cmake" 2>/dev/null || true
+
     cp -L "$LLVM_CLANG" "$TMPDIR/usr/bin/clang" || return 1
     cp -L "$LLVM_CLANG" "$TMPDIR/usr/bin/clang-20" || return 1
     cp -L "$LLVM_LLD" "$TMPDIR/usr/bin/lld" || return 1
@@ -526,19 +533,31 @@ stage_simpleos_toolchain_payloads() {
         "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/target.json" || return 1
     cp "src/os/toolchain/rust/cargo_config.toml" "$TMPDIR/etc/cargo/config.toml" || return 1
 
+    CMAKE_VERSION_LINE="simple_cmake native wrapper 0.1.0"
     LLVM_VERSION_LINE="$("$LLVM_CLANG" --version | sed -n '1p')"
     RUST_VERSION_LINE="$("$RUST_RUSTC" --version | sed -n '1p')"
     CARGO_VERSION_LINE="$("$RUST_CARGO" --version | sed -n '1p')"
     NINJA_VERSION_LINE="$("$NINJA_BIN" --version | sed -n '1p')"
     RUSTLIB_FILE_COUNT="$(find "$RUST_RUSTLIB_DIR"/lib -maxdepth 1 -type f 2>/dev/null | wc -l | awk '{print $1}')"
 
+    printf '%s\n' "$CMAKE_VERSION_LINE" > "$TMPDIR/SYS/CMAKEVER.TXT"
     printf '%s\n' "$LLVM_VERSION_LINE" > "$TMPDIR/SYS/LLVMVER.TXT"
     printf '%s\n' "$RUST_VERSION_LINE" > "$TMPDIR/SYS/RUSTVER.TXT"
     printf '%s\n' "$CARGO_VERSION_LINE" > "$TMPDIR/SYS/CARGOVER.TXT"
     printf '%s\n' "$NINJA_VERSION_LINE" > "$TMPDIR/SYS/NINJAVER.TXT"
 
+    cat > "$TMPDIR/SYS/CMAKEMAN.TXT" <<EOF
+payload=cmake
+mode=native-wrapper
+generator=Ninja
+version=$CMAKE_VERSION_LINE
+/usr/bin/cmake
+examples/cmake/simple_cmake.spl
+EOF
+
     cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
 payload=llvm
+mode=native-wrapper
 version=$LLVM_VERSION_LINE
 /usr/bin/clang
 /usr/bin/clang-20
@@ -556,6 +575,7 @@ EOF
 
     cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
 payload=rust
+mode=native-wrapper
 rustc=$RUST_VERSION_LINE
 cargo=$CARGO_VERSION_LINE
 rustlib_files=$RUSTLIB_FILE_COUNT
@@ -567,15 +587,24 @@ rustlib_files=$RUSTLIB_FILE_COUNT
 /etc/cargo/config.toml
 EOF
 
+    cat > "$TMPDIR/SYS/NINJAMAN.TXT" <<EOF
+payload=ninja
+mode=native-wrapper
+version=$NINJA_VERSION_LINE
+/usr/bin/ninja
+examples/ninja/simple_ninja.spl
+EOF
+
     cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
 [toolchain]
 lane = "x86_64-simpleos"
+cmake = "/usr/bin/cmake"
 llvm = "/sys/apps/llvm -> /usr/bin/clang"
 rust = "/sys/apps/rust -> /usr/bin/rustc"
 ninja = "/usr/bin/ninja"
 EOF
 
-    echo "[make_os_disk] Staged x86_64 LLVM/Rust/Ninja guest payloads under /usr and /SYS"
+    echo "[make_os_disk] Staged x86_64 CMake/Ninja/LLVM/Rust guest payloads under /usr and /SYS"
     return 0
 }
 

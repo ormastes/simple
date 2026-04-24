@@ -1,0 +1,160 @@
+# @cover src/lib/nogc_sync_mut/mimalloc.spl 70%
+"""
+# mimalloc OS Allocator Specification
+
+**Feature IDs:** #mimalloc-default-allocator
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented (library layer); kernel wiring deferred — see AC-6 blocker.
+
+## Overview
+
+Tests the `MimallocAllocator` library path (AC-4/AC-5) in interpreter-safe mode.
+Kernel heap delegation (AC-6) is deferred pending real VMM/PMM-backed page store.
+
+## Behavior
+
+- `mimalloc_init()` must be called before any allocation
+- `mi_malloc(size)` returns a `[u8]?` of at least `size` bytes
+- `mi_free(ptr, size)` deallocates without crashing
+- `MimallocAllocator` implements `Allocator` (allocate/deallocate/reallocate)
+- `default_allocator()` returns an uninitialized `MimallocAllocator`
+
+## Implementation Notes
+
+In interpreter mode, mimalloc uses array-backed mock pointers (D-3 constraint).
+`mi_malloc` returns `[u8]?`; casting to `VirtAddr` is not valid —
+that is the AC-6 blocker (tracked in `doc/08_tracking/todo/`).
+"""
+
+use std.sspec.*
+use std.io_runtime.{file_exists}
+use nogc_sync_mut.mimalloc.{
+    MiHeap, MiPage, MiSegment,
+    MimallocAllocator,
+    mimalloc_init,
+    mi_malloc,
+    mi_free,
+    default_allocator
+}
+
+
+# ============================================================================
+# Test Group 1: heap initialization
+# ============================================================================
+
+describe "mimalloc_init":
+    """
+    ## Heap Initialization
+
+    `mimalloc_init` sets up the global heap state. An allocator created
+    after init must be able to serve allocation requests.
+    """
+
+    it "mimalloc_init accepts a MiHeap value without error":
+        val heap = MiHeap(
+            pages: [],
+            segments: [],
+            free_size_class_heads: [],
+            total_allocated: 0,
+            total_freed: 0
+        )
+        # Should not crash or return an error — init is a side-effecting call.
+        mimalloc_init(heap)
+        expect(true).to_equal(true)
+
+    it "default_allocator returns an uninitialized MimallocAllocator":
+        val alloc = default_allocator()
+        # Before init, initialized field is false.
+        expect(alloc.initialized).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: mi_malloc / mi_free
+# ============================================================================
+
+describe "mi_malloc and mi_free":
+    """
+    ## Allocation and Deallocation
+
+    `mi_malloc` returns a `[u8]?` of the requested size class.
+    `mi_free` releases it without crashing.
+    Interpreter mode: arrays are the backing store.
+    """
+
+    before_each:
+        val heap = MiHeap(
+            pages: [],
+            segments: [],
+            free_size_class_heads: [],
+            total_allocated: 0,
+            total_freed: 0
+        )
+        mimalloc_init(heap)
+
+    it "mi_malloc(8) returns a non-nil result":
+        val ptr = mi_malloc(8)
+        expect(ptr.?).to_equal(true)
+
+    it "mi_malloc(64) returns a non-nil result":
+        val ptr = mi_malloc(64)
+        expect(ptr.?).to_equal(true)
+
+    it "mi_malloc(1024) returns a non-nil result":
+        val ptr = mi_malloc(1024)
+        expect(ptr.?).to_equal(true)
+
+    it "mi_malloc(0) returns nil (zero-size is invalid)":
+        val ptr = mi_malloc(0)
+        expect(ptr.?).to_equal(false)
+
+    it "mi_free does not crash on a valid allocation":
+        val ptr = mi_malloc(32)
+        if ptr.?:
+            mi_free(ptr.unwrap(), 32)
+        expect(true).to_equal(true)
+
+    it "mi_malloc returns different objects for successive calls":
+        val a = mi_malloc(16)
+        val b = mi_malloc(16)
+        # Both must be non-nil (interpreter array backing supports multiple allocs).
+        expect(a.?).to_equal(true)
+        expect(b.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: MimallocAllocator trait surface
+# ============================================================================
+
+describe "MimallocAllocator":
+    """
+    ## Allocator Trait Surface
+
+    `MimallocAllocator` implements `Allocator` with allocate/deallocate/reallocate.
+    Before `mimalloc_init`, all operations return nil / no-op.
+    """
+
+    it "allocate returns nil when not initialized":
+        var alloc = default_allocator()
+        val result = alloc.allocate(64, 8)
+        expect(result.?).to_equal(false)
+
+    it "deallocate is a no-op when not initialized — no crash":
+        var alloc = default_allocator()
+        # Passing a dummy byte array; should not crash.
+        val dummy: [u8] = []
+        alloc.deallocate(dummy, 0, 8)
+        expect(true).to_equal(true)
+
+    it "allocate succeeds after marking initialized":
+        val heap = MiHeap(
+            pages: [],
+            segments: [],
+            free_size_class_heads: [],
+            total_allocated: 0,
+            total_freed: 0
+        )
+        mimalloc_init(heap)
+        var alloc = MimallocAllocator(initialized: true)
+        val result = alloc.allocate(32, 8)
+        expect(result.?).to_equal(true)

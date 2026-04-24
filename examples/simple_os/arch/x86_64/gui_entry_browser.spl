@@ -88,17 +88,6 @@ fn _resolve_guest_transport(request: BrowserRequest) -> BrowserResponse:
         error: live.2
     )
 
-fn _apply_request(session: BrowserSession, request: BrowserRequest) -> Result<bool, text>:
-    serial_println("[BE] Session request {request.id}: {request.kind} {request.method} {request.url}")
-    val response = _resolve_guest_transport(request)
-    serial_println("[BE] Session response {request.id}: status={response.status} headers_len={response.headers.len()} body_len={response.body.len()}")
-    match session.commit_network_response(response):
-        Ok(_) =>
-            serial_println("[BE] Session commit complete: url={session.current_url} title={session.current_title}")
-            Ok(true)
-        Err(e) =>
-            Err(e)
-
 fn _make_request(id: text, kind: text, url: text) -> BrowserRequest:
     BrowserRequest.create(
         id: id,
@@ -115,12 +104,18 @@ fn _probe_live_transport():
     serial_println("[BE] Live transport unavailable: {browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}")
 
 fn _drain_guest_requests(session: BrowserSession) -> Result<bool, text>:
-    while true:
+    while session.has_pending_requests():
         match session.take_pending_request():
             Some(request) =>
-                val _ = _apply_request(session, request)?
+                serial_println("[BE] Session request {request.id}: {request.kind} {request.method} {request.url}")
+                val response = _resolve_guest_transport(request)
+                serial_println("[BE] Session response {request.id}: status={response.status} headers_len={response.headers.len()} body_len={response.body.len()}")
+                val _ = session.commit_network_response(response)
+                serial_println("[BE] Session commit call returned")
+                serial_println("[BE] Session commit complete: url={session.current_url} title={session.current_title}")
             nil =>
-                return Ok(true)
+                return Err("pending request reported but request dequeue returned nil")
+    Ok(true)
 
 fn _pump_guest_session(session: BrowserSession) -> Result<bool, text>:
     _probe_live_transport()

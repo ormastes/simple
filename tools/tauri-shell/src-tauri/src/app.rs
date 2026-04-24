@@ -297,15 +297,28 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 // Entry point
 // ---------------------------------------------------------------------------
 
-fn resolve_simple_binary() -> String {
-    let args: Vec<String> = env::args().collect();
+fn resolve_simple_binary_from(
+    args: &[String],
+    env_bin: Option<String>,
+    is_mobile: bool,
+) -> Option<String> {
     if args.len() > 1 && !args[1].starts_with('-') {
-        return args[1].clone();
+        return Some(args[1].clone());
     }
-    if let Ok(bin) = env::var("SIMPLE_BIN") {
-        return bin;
+    if let Some(bin) = env_bin {
+        return Some(bin);
     }
-    "../../bin/simple".to_string()
+    if is_mobile {
+        None
+    } else {
+        Some("../../bin/simple".to_string())
+    }
+}
+
+fn resolve_simple_binary() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    let env_bin = env::var("SIMPLE_BIN").ok();
+    resolve_simple_binary_from(&args, env_bin, cfg!(mobile))
 }
 
 fn resolve_entry_file() -> Option<String> {
@@ -354,7 +367,7 @@ pub fn run() {
     let simple_bin = resolve_simple_binary();
     let entry_file = resolve_entry_file();
 
-    eprintln!("[tauri-shell] binary: {}", simple_bin);
+    eprintln!("[tauri-shell] binary: {:?}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
     log_entry_file_status(&entry_file);
 
@@ -369,46 +382,53 @@ pub fn run() {
         .map(|entry| entry.ends_with(".ui.sdn"))
         .unwrap_or(false);
 
-    if ui_entry && !binary_supports_ui_command(&simple_bin) {
-        startup_error = Some(format!(
-            "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
-            simple_bin,
-            entry_file.clone().unwrap_or_default()
-        ));
-        eprintln!(
-            "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
-            simple_bin
-        );
-    } else {
-        let mut cmd = Command::new(&simple_bin);
-        if let Some(ref entry) = entry_file {
-            if entry.ends_with(".ui.sdn") {
-                cmd.arg("tauri-entry").arg(entry);
-            } else {
-                // Pass file directly (compatible with all Simple versions)
-                cmd.arg(entry);
+    if let Some(simple_bin) = simple_bin.as_ref() {
+        if ui_entry && !binary_supports_ui_command(simple_bin) {
+            startup_error = Some(format!(
+                "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
+                simple_bin,
+                entry_file.clone().unwrap_or_default()
+            ));
+            eprintln!(
+                "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
+                simple_bin
+            );
+        } else {
+            let mut cmd = Command::new(simple_bin);
+            if let Some(ref entry) = entry_file {
+                if entry.ends_with(".ui.sdn") {
+                    cmd.arg("tauri-entry").arg(entry);
+                } else {
+                    // Pass file directly (compatible with all Simple versions)
+                    cmd.arg(entry);
+                }
             }
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        match cmd.spawn() {
-            Ok(mut child) => {
-                eprintln!("[tauri-shell] subprocess pid={}", child.id());
-                child_stdout = child.stdout.take();
-                child_stderr = child.stderr.take();
-                child_stdin = child.stdin.take();
-                child_slot = Some(child);
-            }
-            Err(e) => {
-                startup_error = Some(format!(
-                    "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
-                    simple_bin, entry_file, e
-                ));
-                eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    eprintln!("[tauri-shell] subprocess pid={}", child.id());
+                    child_stdout = child.stdout.take();
+                    child_stderr = child.stderr.take();
+                    child_stdin = child.stdin.take();
+                    child_slot = Some(child);
+                }
+                Err(e) => {
+                    startup_error = Some(format!(
+                        "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
+                        simple_bin, entry_file, e
+                    ));
+                    eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+                }
             }
         }
+    } else {
+        startup_error = Some(
+            "Mobile shell started without a bundled Simple runtime.\n\nProvide an Android-compatible runtime at build time with one of:\n- SIMPLE_ANDROID_RUNTIME_AARCH64\n- SIMPLE_ANDROID_RUNTIME_X86_64\n- SIMPLE_ANDROID_RUNTIME_ARMV7\n- SIMPLE_ANDROID_RUNTIME_I686\n\nOr set `SIMPLE_BIN` to a valid mobile runtime path, or use `--url` / `SIMPLE_DASHBOARD_URL` to attach the shell to an external UI service.".to_string()
+        );
+        eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; skipping subprocess launch");
     }
 
     let process = Arc::new(SimpleProcess {

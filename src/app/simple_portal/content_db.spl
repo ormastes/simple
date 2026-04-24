@@ -1,0 +1,313 @@
+#![allow(unnamed_duplicate_typed_args)]
+# simple_portal content database
+#
+# Filesystem-rooted, read-mostly content records for the hosted portal and the
+# `/sys/apps/simple_portal/` filesystem app layout.
+
+use std.json.builder.{escape_json}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct PortalPageRecord:
+    slug: text
+    title: text
+    summary: text
+    body_path: text
+
+struct PortalExampleRecord:
+    example_id: text
+    title: text
+    runtime: text
+    execution_mode: text
+    summary: text
+    source_path: text
+
+struct PortalReleaseRecord:
+    version: text
+    channel: text
+    label: text
+    url: text
+
+struct PortalLinkRecord:
+    link_id: text
+    label: text
+    kind: text
+    url: text
+
+struct PortalContentDb:
+    pages: [PortalPageRecord]
+    examples: [PortalExampleRecord]
+    releases: [PortalReleaseRecord]
+    links: [PortalLinkRecord]
+
+pub fn simple_portal_default_app_root() -> text:
+    val env_root = rt_env_get("SIMPLE_PORTAL_APP_ROOT")
+    if env_root != "":
+        return env_root
+    "src/app/simple_portal/app"
+
+pub fn simple_portal_default_data_root() -> text:
+    val env_root = rt_env_get("SIMPLE_PORTAL_DATA_ROOT")
+    if env_root != "":
+        return env_root
+    "var/lib/simple_portal"
+
+extern fn rt_env_get(key: text) -> text
+
+pub fn portal_content_db_load(app_root: text) -> Result<PortalContentDb, text>:
+    val pages_path = "{app_root}/content/pages.db"
+    val examples_path = "{app_root}/content/examples.db"
+    val releases_path = "{app_root}/content/releases.db"
+    val links_path = "{app_root}/content/links.db"
+    if not rt_file_exists(pages_path):
+        return Err("Missing portal content file: {pages_path}")
+    if not rt_file_exists(examples_path):
+        return Err("Missing portal content file: {examples_path}")
+    if not rt_file_exists(releases_path):
+        return Err("Missing portal content file: {releases_path}")
+    if not rt_file_exists(links_path):
+        return Err("Missing portal content file: {links_path}")
+    portal_content_db_from_text(
+        rt_file_read_text(pages_path),
+        rt_file_read_text(examples_path),
+        rt_file_read_text(releases_path),
+        rt_file_read_text(links_path)
+    )
+
+pub fn portal_content_db_from_text(
+    pages_text: text,
+    examples_text: text,
+    releases_text: text,
+    links_text: text
+) -> Result<PortalContentDb, text>:
+    val pages = _parse_pages(pages_text)?
+    val examples = _parse_examples(examples_text)?
+    val releases = _parse_releases(releases_text)?
+    val links = _parse_links(links_text)?
+    Ok(PortalContentDb(
+        pages: pages,
+        examples: examples,
+        releases: releases,
+        links: links
+    ))
+
+pub fn portal_page_by_slug(db: PortalContentDb, slug: text) -> PortalPageRecord?:
+    for page in db.pages:
+        if page.slug == slug:
+            return Some(page)
+    nil
+
+pub fn portal_example_by_id(db: PortalContentDb, example_id: text) -> PortalExampleRecord?:
+    for example in db.examples:
+        if example.example_id == example_id:
+            return Some(example)
+    nil
+
+pub fn portal_read_page_body(app_root: text, page: PortalPageRecord) -> text:
+    val path = "{app_root}/content/{page.body_path}"
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path)
+
+pub fn portal_read_example_source(app_root: text, example: PortalExampleRecord) -> text:
+    val path = "{app_root}/content/{example.source_path}"
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path)
+
+pub fn portal_pages_json(db: PortalContentDb, app_root: text) -> text:
+    var out = "["
+    var first = true
+    for page in db.pages:
+        if not first:
+            out = out + ","
+        first = false
+        val body = escape_json(portal_read_page_body(app_root, page))
+        out = out + "{\"slug\":\"" + escape_json(page.slug) + "\","
+        out = out + "\"title\":\"" + escape_json(page.title) + "\","
+        out = out + "\"summary\":\"" + escape_json(page.summary) + "\","
+        out = out + "\"body\":\"" + body + "\"}"
+    out + "]"
+
+pub fn portal_examples_json(db: PortalContentDb, app_root: text) -> text:
+    var out = "["
+    var first = true
+    for example in db.examples:
+        if not first:
+            out = out + ","
+        first = false
+        val source = escape_json(portal_read_example_source(app_root, example))
+        val client_supported = if example.execution_mode == "client":
+            "true"
+        else:
+            "false"
+        out = out + "{\"id\":\"" + escape_json(example.example_id) + "\","
+        out = out + "\"title\":\"" + escape_json(example.title) + "\","
+        out = out + "\"runtime\":\"" + escape_json(example.runtime) + "\","
+        out = out + "\"execution_mode\":\"" + escape_json(example.execution_mode) + "\","
+        out = out + "\"client_supported\":" + client_supported + ","
+        out = out + "\"summary\":\"" + escape_json(example.summary) + "\","
+        out = out + "\"source\":\"" + source + "\"}"
+    out + "]"
+
+pub fn portal_releases_json(db: PortalContentDb) -> text:
+    var out = "["
+    var first = true
+    for release in db.releases:
+        if not first:
+            out = out + ","
+        first = false
+        out = out + "{\"version\":\"" + escape_json(release.version) + "\","
+        out = out + "\"channel\":\"" + escape_json(release.channel) + "\","
+        out = out + "\"label\":\"" + escape_json(release.label) + "\","
+        out = out + "\"url\":\"" + escape_json(release.url) + "\"}"
+    out + "]"
+
+pub fn portal_links_json(db: PortalContentDb) -> text:
+    var out = "["
+    var first = true
+    for link in db.links:
+        if not first:
+            out = out + ","
+        first = false
+        out = out + "{\"id\":\"" + escape_json(link.link_id) + "\","
+        out = out + "\"label\":\"" + escape_json(link.label) + "\","
+        out = out + "\"kind\":\"" + escape_json(link.kind) + "\","
+        out = out + "\"url\":\"" + escape_json(link.url) + "\"}"
+    out + "]"
+
+fn _parse_pages(input: text) -> Result<[PortalPageRecord], text>:
+    var rows: [PortalPageRecord] = []
+    var line_no = 0
+    for raw in input.split("\n"):
+        line_no = line_no + 1
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val parts = line.split("|")
+        if parts.length() != 4:
+            return Err("Invalid page record at line {line_no}")
+        val slug = parts[0].trim()
+        val title = parts[1].trim()
+        val summary = parts[2].trim()
+        val body_path = parts[3].trim()
+        if not _safe_identifier(slug):
+            return Err("Unsafe page slug at line {line_no}")
+        if title == "" or summary == "":
+            return Err("Empty page fields at line {line_no}")
+        if not _safe_relative_content_path(body_path, "pages/"):
+            return Err("Unsafe page body path at line {line_no}")
+        rows.push(PortalPageRecord(slug: slug, title: title, summary: summary, body_path: body_path))
+    Ok(rows)
+
+fn _parse_examples(input: text) -> Result<[PortalExampleRecord], text>:
+    var rows: [PortalExampleRecord] = []
+    var line_no = 0
+    for raw in input.split("\n"):
+        line_no = line_no + 1
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val parts = line.split("|")
+        if parts.length() != 6:
+            return Err("Invalid example record at line {line_no}")
+        val example_id = parts[0].trim()
+        val title = parts[1].trim()
+        val runtime = parts[2].trim()
+        val execution_mode = parts[3].trim()
+        val summary = parts[4].trim()
+        val source_path = parts[5].trim()
+        if not _safe_identifier(example_id):
+            return Err("Unsafe example id at line {line_no}")
+        if title == "" or summary == "":
+            return Err("Empty example fields at line {line_no}")
+        if runtime != "simple":
+            return Err("Unsupported example runtime at line {line_no}")
+        if execution_mode != "client" and execution_mode != "sandbox":
+            return Err("Unsupported example execution mode at line {line_no}")
+        if not _safe_relative_content_path(source_path, "examples/"):
+            return Err("Unsafe example source path at line {line_no}")
+        rows.push(PortalExampleRecord(
+            example_id: example_id,
+            title: title,
+            runtime: runtime,
+            execution_mode: execution_mode,
+            summary: summary,
+            source_path: source_path
+        ))
+    Ok(rows)
+
+fn _parse_releases(input: text) -> Result<[PortalReleaseRecord], text>:
+    var rows: [PortalReleaseRecord] = []
+    var line_no = 0
+    for raw in input.split("\n"):
+        line_no = line_no + 1
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val parts = line.split("|")
+        if parts.length() != 4:
+            return Err("Invalid release record at line {line_no}")
+        val version = parts[0].trim()
+        val channel = parts[1].trim()
+        val label = parts[2].trim()
+        val url = parts[3].trim()
+        if version == "" or channel == "" or label == "":
+            return Err("Empty release fields at line {line_no}")
+        if not _safe_public_url(url):
+            return Err("Unsafe release url at line {line_no}")
+        rows.push(PortalReleaseRecord(version: version, channel: channel, label: label, url: url))
+    Ok(rows)
+
+fn _parse_links(input: text) -> Result<[PortalLinkRecord], text>:
+    var rows: [PortalLinkRecord] = []
+    var line_no = 0
+    for raw in input.split("\n"):
+        line_no = line_no + 1
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val parts = line.split("|")
+        if parts.length() != 4:
+            return Err("Invalid link record at line {line_no}")
+        val link_id = parts[0].trim()
+        val label = parts[1].trim()
+        val kind = parts[2].trim()
+        val url = parts[3].trim()
+        if not _safe_identifier(link_id):
+            return Err("Unsafe link id at line {line_no}")
+        if label == "" or kind == "":
+            return Err("Empty link fields at line {line_no}")
+        if not _safe_public_url(url):
+            return Err("Unsafe link url at line {line_no}")
+        rows.push(PortalLinkRecord(link_id: link_id, label: label, kind: kind, url: url))
+    Ok(rows)
+
+fn _safe_identifier(value: text) -> bool:
+    if value == "":
+        return false
+    for ch in value.bytes():
+        val ok = (
+            (ch >= 48 and ch <= 57) or
+            (ch >= 97 and ch <= 122) or
+            ch == 45 or
+            ch == 95
+        )
+        if not ok:
+            return false
+    true
+
+fn _safe_relative_content_path(path: text, prefix: text) -> bool:
+    if path == "":
+        return false
+    if not path.starts_with(prefix):
+        return false
+    if path.starts_with("/") or path.contains("..") or path.contains("\\"):
+        return false
+    true
+
+fn _safe_public_url(url: text) -> bool:
+    if url == "":
+        return false
+    url.starts_with("https://") or url.starts_with("/")

@@ -1,0 +1,332 @@
+#![allow(unnamed_duplicate_typed_args)]
+# simple_portal hosted/filesystem server
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.http_server.response.{
+    html_response, json_response, text_response, error_response,
+    add_response_header, serialize_response
+}
+use std.json.builder.{escape_json}
+use app.simple_portal.content_db.{
+    PortalContentDb, portal_content_db_load, portal_page_by_slug,
+    portal_example_by_id, portal_pages_json, portal_examples_json,
+    portal_releases_json, portal_links_json, portal_read_page_body,
+    portal_read_example_source
+}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+var g_simple_portal_run_seq: i64 = 0
+
+class SimplePortalServer:
+    port: i32
+    app_root: text
+    data_root: text
+    run_token: text
+    db: PortalContentDb
+    max_body_bytes: i64
+
+    static fn new(port: i32, app_root: text, data_root: text, run_token: text) -> Result<SimplePortalServer, text>:
+        val db_result = portal_content_db_load(app_root)
+        match db_result:
+            Err(e):
+                Err(e)
+            Ok(db):
+                Ok(SimplePortalServer(
+                    port: port,
+                    app_root: app_root,
+                    data_root: data_root,
+                    run_token: run_token,
+                    db: db,
+                    max_body_bytes: 16384
+                ))
+
+    fn start():
+        print "Starting simple_portal on port {self.port}"
+        print "Content root: {self.app_root}"
+        match TcpListener.bind("0.0.0.0:{self.port}"):
+            Err(e):
+                print "Failed to bind simple_portal: {e}"
+            Ok(listener):
+                loop:
+                    match listener.accept():
+                        Ok(stream):
+                            self.handle_connection(stream)
+                        Err(e):
+                            print "Accept error: {e}"
+
+    fn handle_connection(stream: TcpStream):
+        match stream.read_line():
+            Err(_):
+                val _ = stream.close()
+            Ok(request_line):
+                val parsed = _parse_request_line(request_line)
+                val method = parsed.0
+                val path = parsed.1
+                var headers = ""
+                var content_length = 0
+                loop:
+                    match stream.read_line():
+                        Ok(header_line):
+                            if header_line.trim() == "":
+                                break
+                            headers = headers + header_line + "\n"
+                            if header_line.lower().starts_with("content-length:"):
+                                val raw_len = header_line.split(":")
+                                if raw_len.length() >= 2:
+                                    content_length = (raw_len[1].trim().to_i64() ?? 0)
+                        Err(_):
+                            break
+                var body = ""
+                if content_length > 0 and content_length <= self.max_body_bytes:
+                    match stream.read_bytes(content_length):
+                        Ok(data):
+                            body = data
+                        Err(_):
+                            body = ""
+                val response = self.route_request(method, path, body, headers)
+                val _ = stream.write_text(response)
+                val _ = stream.close()
+
+    fn route_request(method: text, path: text, body: text, headers: text) -> text:
+        val normalized = _normalize_path(path)
+        if normalized.1 != "":
+            return self._error(normalized.1, 400)
+        val clean_path = normalized.0
+
+        if method != "GET" and method != "HEAD" and method != "POST":
+            return self._method_not_allowed(clean_path)
+
+        if body.length() > self.max_body_bytes:
+            return self._finalize(error_response(413, "Request entity too large"), false, true)
+
+        if clean_path.starts_with("/static/"):
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            return self._serve_static(clean_path, method == "HEAD")
+
+        if clean_path == "/":
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            return self._serve_index(method == "HEAD")
+
+        if clean_path == "/api/portal/pages":
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val payload = "{\"pages\":" + portal_pages_json(self.db, self.app_root) + "}"
+            return self._finalize(json_response(200, payload), method == "HEAD", false)
+
+        if clean_path.starts_with("/api/portal/pages/"):
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val slug = clean_path["/api/portal/pages/".length():]
+            return self._serve_page(slug, method == "HEAD")
+
+        if clean_path == "/api/portal/examples":
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val payload = "{\"examples\":" + portal_examples_json(self.db, self.app_root) + "}"
+            return self._finalize(json_response(200, payload), method == "HEAD", false)
+
+        if clean_path.starts_with("/api/portal/examples/"):
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val example_id = clean_path["/api/portal/examples/".length():]
+            return self._serve_example(example_id, method == "HEAD")
+
+        if clean_path == "/api/portal/releases":
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val payload = "{\"releases\":" + portal_releases_json(self.db) + "}"
+            return self._finalize(json_response(200, payload), method == "HEAD", false)
+
+        if clean_path == "/api/portal/links":
+            if method != "GET" and method != "HEAD":
+                return self._method_not_allowed(clean_path)
+            val payload = "{\"links\":" + portal_links_json(self.db) + "}"
+            return self._finalize(json_response(200, payload), method == "HEAD", false)
+
+        if clean_path == "/api/playground/run":
+            if method != "POST":
+                return self._method_not_allowed(clean_path)
+            return self._run_playground(body, headers)
+
+        self._finalize(error_response(404, "Not Found"), false, false)
+
+    fn _serve_index(head_only: bool) -> text:
+        val index_path = "{self.app_root}/public/index.html"
+        if not rt_file_exists(index_path):
+            return self._error("Missing portal shell", 500)
+        self._finalize(html_response(200, rt_file_read_text(index_path)), head_only, false)
+
+    fn _serve_static(clean_path: text, head_only: bool) -> text:
+        val rel = clean_path["/static/".length():]
+        if rel == "" or rel.contains("..") or rel.contains("\\") or rel.starts_with("/"):
+            return self._error("Static path traversal rejected", 404)
+        val full_path = "{self.app_root}/public/{rel}"
+        if not rt_file_exists(full_path):
+            return self._finalize(error_response(404, "Not Found"), false, false)
+        val mime = _mime_type(full_path)
+        val resp = if mime == "text/html":
+            html_response(200, rt_file_read_text(full_path))
+        elif mime == "application/json":
+            json_response(200, rt_file_read_text(full_path))
+        else:
+            text_response(200, rt_file_read_text(full_path))
+        self._finalize(resp, head_only, false)
+
+    fn _serve_page(slug: text, head_only: bool) -> text:
+        if val page = portal_page_by_slug(self.db, slug):
+            val body = portal_read_page_body(self.app_root, page)
+            val payload = "{\"slug\":\"" + escape_json(page.slug) + "\","
+            val payload2 = payload + "\"title\":\"" + escape_json(page.title) + "\","
+            val payload3 = payload2 + "\"summary\":\"" + escape_json(page.summary) + "\","
+            val payload4 = payload3 + "\"body\":\"" + escape_json(body) + "\"}"
+            return self._finalize(json_response(200, payload4), head_only, false)
+        self._finalize(error_response(404, "Unknown page"), false, false)
+
+    fn _serve_example(example_id: text, head_only: bool) -> text:
+        if val example = portal_example_by_id(self.db, example_id):
+            val source = portal_read_example_source(self.app_root, example)
+            val payload = "{\"id\":\"" + escape_json(example.example_id) + "\","
+            val payload2 = payload + "\"title\":\"" + escape_json(example.title) + "\","
+            val payload3 = payload2 + "\"runtime\":\"" + escape_json(example.runtime) + "\","
+            val payload4 = payload3 + "\"execution_mode\":\"" + escape_json(example.execution_mode) + "\","
+            val payload5 = payload4 + "\"summary\":\"" + escape_json(example.summary) + "\","
+            val payload6 = payload5 + "\"source\":\"" + escape_json(source) + "\"}"
+            return self._finalize(json_response(200, payload6), head_only, false)
+        self._finalize(error_response(404, "Unknown example"), false, false)
+
+    fn _run_playground(body: text, headers: text) -> text:
+        if not _authorized_run(headers, self.port, self.run_token):
+            return self._finalize(error_response(403, "Forbidden"), false, true)
+        val body_kind = _body_kind(body)
+        if body_kind == "":
+            return self._finalize(error_response(400, "Missing example_id or source"), false, true)
+        g_simple_portal_run_seq = g_simple_portal_run_seq + 1
+        val audit_id = "run-" + g_simple_portal_run_seq.to_string()
+        val envelope = _execution_envelope(body, body_kind, audit_id)
+        val _ = rt_dir_create(self.data_root, true)
+        val _ = rt_file_write_text("{self.data_root}/{audit_id}.json", envelope)
+        self._finalize(json_response(202, envelope), false, true)
+
+    fn _method_not_allowed(clean_path: text) -> text:
+        var resp = error_response(405, "Method Not Allowed")
+        val allow = if clean_path == "/api/playground/run":
+            "POST"
+        else:
+            "GET, HEAD"
+        resp = add_response_header(resp, "Allow", allow)
+        self._finalize(resp, false, false)
+
+    fn _error(message: text, status: i64) -> text:
+        self._finalize(error_response(status, message), false, false)
+
+    fn _finalize(resp: (i64, text, list, text), head_only: bool, no_store: bool) -> text:
+        var out = resp
+        out = add_response_header(out, "Connection", "close")
+        out = add_response_header(out, "Cache-Control", if no_store: "no-store" else: "public, max-age=60")
+        out = add_response_header(out, "Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: https:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'")
+        out = add_response_header(out, "X-Content-Type-Options", "nosniff")
+        out = add_response_header(out, "X-Frame-Options", "DENY")
+        out = add_response_header(out, "Referrer-Policy", "strict-origin-when-cross-origin")
+        if head_only:
+            val status = out.at(0)
+            val reason = out.at(1)
+            val headers = out.at(2)
+            out = (status, reason, headers, "")
+        serialize_response(out)
+
+fn _parse_request_line(request_line: text) -> (text, text):
+    var method = ""
+    var path = ""
+    var idx = 0
+    for part in request_line.split(" "):
+        if idx == 0:
+            method = part
+        elif idx == 1:
+            path = part
+            break
+        idx = idx + 1
+    (method, path)
+
+fn _normalize_path(path: text) -> (text, text):
+    if path == "":
+        return ("", "Empty path")
+    var clean = path
+    if clean.contains("?"):
+        clean = clean[0:clean.index_of("?") ?? clean.length()]
+    clean = clean.replace("%2F", "/")
+    clean = clean.replace("%2f", "/")
+    clean = clean.replace("%5C", "\\")
+    clean = clean.replace("%5c", "\\")
+    while clean.contains("//"):
+        clean = clean.replace("//", "/")
+    if not clean.starts_with("/"):
+        clean = "/" + clean
+    if clean.length() > 1 and clean.ends_with("/"):
+        clean = clean[0:clean.length() - 1]
+    if clean.contains("..") or clean.contains("\\") or clean.contains("\0") or clean.contains("%00"):
+        return ("", "Bad request path")
+    (clean, "")
+
+fn _header_value(headers: text, name: text) -> text:
+    val wanted = name.lower()
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val idx = line.index_of(":")
+        if idx <= 0:
+            continue
+        val key = line[0:idx].trim().lower()
+        if key == wanted:
+            return line[idx + 1:].trim()
+    ""
+
+fn _authorized_run(headers: text, port: i32, run_token: text) -> bool:
+    val origin = _header_value(headers, "Origin")
+    val token = _header_value(headers, "X-Simple-Portal-Token")
+    val capability = _header_value(headers, "X-Simple-Portal-Capability")
+    val localhost_origin = "http://localhost:{port}"
+    val origin_ok = origin == localhost_origin or origin == "app://simple_portal"
+    if not origin_ok:
+        return false
+    if token == "" or token != run_token:
+        return false
+    capability == "playground.run"
+
+fn _body_kind(body: text) -> text:
+    if body.contains("\"example_id\""):
+        return "example"
+    if body.contains("\"source\""):
+        return "source"
+    ""
+
+fn _execution_envelope(body: text, body_kind: text, audit_id: text) -> text:
+    var runner = "client"
+    if body.contains("\"mode\":\"sandbox\""):
+        runner = "simple run --sandbox"
+    var envelope = "{"
+    envelope = envelope + "\"audit_id\":\"" + escape_json(audit_id) + "\","
+    envelope = envelope + "\"accepted\":true,"
+    envelope = envelope + "\"request_kind\":\"" + escape_json(body_kind) + "\","
+    envelope = envelope + "\"runner\":\"" + escape_json(runner) + "\","
+    envelope = envelope + "\"sandbox\":{\"filesystem\":false,\"network\":false,\"process\":false},"
+    envelope = envelope + "\"rate_limited\":false,"
+    envelope = envelope + "\"body\":\"" + escape_json(body) + "\"}"
+    envelope
+
+fn _mime_type(path: text) -> text:
+    if path.ends_with(".html"):
+        return "text/html"
+    if path.ends_with(".css"):
+        return "text/css"
+    if path.ends_with(".js"):
+        return "application/javascript"
+    if path.ends_with(".json"):
+        return "application/json"
+    "text/plain"

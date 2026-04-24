@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# install-mold.shs — Download pre-built mold 2.35.1 to bin/mold/mold.
+#
+# Usage: scripts/install-mold.shs
+#
+# Supports Linux x86_64 and aarch64 only. Skips gracefully on other platforms.
+# Idempotent: exits 0 immediately if bin/mold/mold already exists.
+#
+# After running, Simple's find_mold_path() will pick up bin/mold/mold before
+# any system linker, making mold the unconditional default linker.
+
+set -eu
+
+MOLD_VERSION="2.35.1"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEST_DIR="${REPO_ROOT}/bin/mold"
+DEST_BIN="${DEST_DIR}/mold"
+
+# Idempotent: skip if already installed.
+if [ -f "${DEST_BIN}" ]; then
+    echo "[install-mold] bin/mold/mold already exists — skipping download."
+    exit 0
+fi
+
+# Platform detection.
+arch="$(uname -m 2>/dev/null || echo unknown)"
+kernel="$(uname -s 2>/dev/null || echo unknown)"
+
+case "${kernel}" in
+    Linux) ;;
+    *)
+        echo "[install-mold] Unsupported platform '${kernel}' — mold pre-built only available for Linux. Install mold manually."
+        exit 0
+        ;;
+esac
+
+case "${arch}" in
+    x86_64|amd64) tarball_arch="x86_64" ;;
+    aarch64|arm64) tarball_arch="aarch64" ;;
+    *)
+        echo "[install-mold] Unsupported arch '${arch}' — mold pre-built only available for x86_64/aarch64. Install mold manually."
+        exit 0
+        ;;
+esac
+
+TARBALL="mold-${MOLD_VERSION}-${tarball_arch}-linux.tar.gz"
+URL="https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/${TARBALL}"
+
+echo "[install-mold] Downloading mold ${MOLD_VERSION} for ${tarball_arch}-linux..."
+echo "[install-mold]   URL: ${URL}"
+
+# Create destination directory.
+mkdir -p "${DEST_DIR}"
+
+# Use a temp dir for extraction.
+TMP_DIR="$(mktemp -d /tmp/install-mold-XXXXXX)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+# Download.
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "${TMP_DIR}/${TARBALL}" "${URL}"
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "${TMP_DIR}/${TARBALL}" "${URL}"
+else
+    echo "[install-mold] ERROR: neither curl nor wget found. Install one and retry."
+    exit 1
+fi
+
+# Extract only the mold binary.
+echo "[install-mold] Extracting mold binary..."
+tar -xzf "${TMP_DIR}/${TARBALL}" -C "${TMP_DIR}" --strip-components=1 \
+    "mold-${MOLD_VERSION}-${tarball_arch}-linux/bin/mold"
+
+# Install.
+cp "${TMP_DIR}/bin/mold" "${DEST_BIN}"
+chmod +x "${DEST_BIN}"
+
+echo "[install-mold] Installed: ${DEST_BIN}"
+echo "[install-mold] mold is now the default linker for 'bin/simple build'."

@@ -12,12 +12,15 @@ use os.qemu_runner.{
     desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
     desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
-    os_native_build_args, desktop_uefi_disk_image_tool_app_validation_command,
+    os_native_build_args, os_native_build_sources, os_native_build_env_prefix,
+    desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
     OsTarget,
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
 extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -45,6 +48,7 @@ fn desktop_tool_app_fallback_fixture() -> text:
         "SLOADSMF\n" +
         "LLVMSMF\n" +
         "RUSTSMF\n" +
+        "simple_cmake native wrapper 0.1.0\n" +
         "clang version 20.0.0git\n" +
         "rustc 1.91.0-nightly\n" +
         "cargo 1.91.1\n" +
@@ -56,6 +60,7 @@ fn desktop_tool_app_fallback_fixture() -> text:
         "/sys/apps/simple_loader\n" +
         "/sys/apps/llvm\n" +
         "/sys/apps/rust\n" +
+        "/usr/bin/cmake\n" +
         "/usr/bin/clang\n" +
         "/usr/bin/rustc\n" +
         "/usr/bin/cargo\n" +
@@ -236,10 +241,12 @@ describe "Qemu runner serial routing":
         expect(cmd).to_contain("::/SYS/APPS/llvm.smf")
         expect(cmd).to_contain("::/SYS/APPS/rust")
         expect(cmd).to_contain("::/SYS/APPS/rust.smf")
+        expect(cmd).to_contain("::/usr/bin/cmake")
         expect(cmd).to_contain("::/usr/bin/clang")
         expect(cmd).to_contain("::/usr/bin/rustc")
         expect(cmd).to_contain("::/usr/bin/cargo")
         expect(cmd).to_contain("::/usr/bin/ninja")
+        expect(cmd).to_contain("::/SYS/CMAKEVER.TXT")
         expect(cmd).to_contain("::/SYS/LLVMVER.TXT")
         expect(cmd).to_contain("::/SYS/RUSTVER.TXT")
         expect(cmd).to_contain("::/SYS/NINJAVER.TXT")
@@ -256,6 +263,7 @@ describe "Qemu runner serial routing":
         expect(cmd).to_contain("/sys/apps/simple_loader")
         expect(cmd).to_contain("/sys/apps/llvm")
         expect(cmd).to_contain("/sys/apps/rust")
+        expect(cmd).to_contain("grep -q '^simple_cmake native wrapper '")
         expect(cmd).to_contain("grep -q '^clang version '")
         expect(cmd).to_contain("grep -q '^rustc '")
         expect(cmd).to_contain("grep -q '^cargo '")
@@ -387,6 +395,31 @@ describe "Qemu runner native-build prerequisites":
         expect(hint).to_contain("Cranelift cannot build this freestanding target")
         expect(hint).to_contain("LLVM-enabled")
 
+    it "adds the generated SSH live marker source to the live build source set":
+        val sources = os_native_build_sources(get_ssh_live_target())
+        expect(sources).to_contain("src/os")
+        expect(sources).to_contain("src/lib")
+        expect(sources).to_contain("examples/simple_os")
+        expect(sources).to_contain("build/os/generated")
+
+    it "uses the baremetal bootstrap env for the SSH live target":
+        val env_prefix = os_native_build_env_prefix(get_ssh_live_target(), "")
+        expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+
+    it "does not reuse a stale SSH live artifact after a failed build":
+        val target = get_ssh_live_target()
+        expect(rt_dir_create_all("build/os")).to_equal(true)
+        expect(rt_file_write_text(target.output, "stale-kernel")).to_equal(true)
+        expect(rt_file_exists(target.output)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", "/definitely-missing/simple")).to_equal(true)
+
+        val built = build_os_with_backend(target, "cranelift")
+
+        expect(built).to_equal(false)
+        expect(rt_file_exists(target.output)).to_equal(false)
+        expect(rt_env_set("SIMPLE_BINARY", "bin/simple")).to_equal(true)
+
 describe "Qemu runner release artifacts":
     it "prefers release disk images before platform and legacy build fixtures":
         val candidates = desktop_disk_image_candidates()
@@ -428,8 +461,11 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect_tool_app_validation_reference(cmd, "simple_loader", "SLOADSMF", "/sys/apps/simple_loader")
         expect_tool_app_validation_reference(cmd, "llvm", "LLVMSMF", "/sys/apps/llvm")
         expect_tool_app_validation_reference(cmd, "rust", "RUSTSMF", "/sys/apps/rust")
+        expect(cmd).to_contain("::/SYS/CMAKEMAN.TXT")
         expect(cmd).to_contain("::/SYS/LLVMMAN.TXT")
         expect(cmd).to_contain("::/SYS/RUSTMAN.TXT")
+        expect(cmd).to_contain("::/SYS/NINJAMAN.TXT")
+        expect(cmd).to_contain("/usr/bin/cmake")
         expect(cmd).to_contain("/usr/bin/clang")
         expect(cmd).to_contain("/usr/bin/rustc")
         expect(cmd).to_contain("/usr/bin/cargo")

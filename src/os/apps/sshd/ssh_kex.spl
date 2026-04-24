@@ -18,6 +18,7 @@
 
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
+use os.crypto.curve25519.{x25519_base}
 use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.rsa.{RsaSignBackend, rsa_sha256_sign_with_backend, rsa_sha512_sign_with_backend}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
@@ -25,6 +26,9 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_
 
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_dh_curve25519_keypair() -> i64
+extern fn rt_dh_curve25519_public_key(handle: i64) -> [u8]
+extern fn rt_dh_curve25519_shared_secret(handle: i64, their_pub: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
 
@@ -34,9 +38,40 @@ extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
 
 val SSH_MSG_KEX_ECDH_INIT: u8 = 30
 val SSH_MSG_KEX_ECDH_REPLY: u8 = 31
+val _SSH_KEX_HANDLE_TAG: [u8] = [0x53, 0x53, 0x48, 0x4b, 0x45, 0x58, 0x31, 0x39]
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _encode_handle_backed_private_key(handle: i64) -> [u8]:
+    var encoded = _SSH_KEX_HANDLE_TAG
+    var remaining = handle.to_u64()
+    var i: u64 = 0
+    while i < 8:
+        encoded.push((remaining & 0xFF).to_u8())
+        remaining = remaining >> 8
+        i = i + 1
+    while encoded.len() < 32:
+        encoded.push(0)
+    encoded
+
+fn _is_handle_backed_private_key(private: [u8]) -> bool:
+    if private.len() != 32:
+        return false
+    var i: u64 = 0
+    while i < _SSH_KEX_HANDLE_TAG.len():
+        if private[i] != _SSH_KEX_HANDLE_TAG[i]:
+            return false
+        i = i + 1
+    true
+
+fn _decode_handle_backed_private_key(private: [u8]) -> i64:
+    var handle: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        handle = handle | (private[8 + i].to_u64() << (i * 8))
+        i = i + 1
+    handle.to_i64()
 
 fn _zeroed_32_bytes() -> [u8]:
     var out: [u8] = []
@@ -326,20 +361,29 @@ fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
 
 fn ssh_kex_generate_private_key() -> [u8]:
     """Generate a 32-byte ephemeral Curve25519 private key."""
+    val handle = rt_dh_curve25519_keypair()
+    if handle > 0:
+        return _encode_handle_backed_private_key(handle)
     random_bytes(32)
+
+fn ssh_kex_generate_keypair() -> ([u8], [u8]):
+    """Generate a hosted-test-friendly Curve25519 keypair."""
+    val private = random_bytes(32)
+    (private, x25519_base(private))
 
 fn ssh_kex_public_from_private(private: [u8]) -> [u8]:
     """Derive the Curve25519 public key from a private scalar."""
-    rt_tls13_x25519_shared_secret(
-        private,
-        [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    )
+    if _is_handle_backed_private_key(private):
+        return rt_dh_curve25519_public_key(_decode_handle_backed_private_key(private))
+    x25519_base(private)
 
 fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
     """Compute DH shared secret via X25519.
 
     Returns: 32-byte shared secret.
     """
+    if _is_handle_backed_private_key(our_private):
+        return rt_dh_curve25519_shared_secret(_decode_handle_backed_private_key(our_private), their_public)
     rt_tls13_x25519_shared_secret(our_private, their_public)
 
 # ============================================================================
