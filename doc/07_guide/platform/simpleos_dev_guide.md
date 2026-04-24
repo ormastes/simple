@@ -296,11 +296,11 @@ LLVM/Rust payloads.
 | `riscv64gc-simpleos` | RISC-V 64 | GC extensions |
 | `riscv32imac-simpleos` | RISC-V 32 | IMAC extensions |
 
-`x86_64-simpleos` is the supported bootstrap lane for the current guest-toolchain
-slice. The x86_64 FAT32/UEFI image stages real filesystem payloads for LLVM,
-Rust, and Ninja under `/usr`, while `/sys/apps/llvm` and `/sys/apps/rust` now
-launch the same native-wrapper surfaces and report manifest-backed execution
-instead of only validating file presence.
+`simpleos-x86_64` is the canonical bootstrap target selector for the current
+guest-toolchain slice. It maps to the underlying guest lane
+`x86_64-simpleos`. The x86_64 FAT32/UEFI image stages real filesystem payloads
+for LLVM, Rust, and Ninja under `/usr`; LLVM is verified as `guest-exec`,
+while Rust remains manifest-backed `report-and-gate`.
 
 ### 4.3 Sysroot Layout
 
@@ -584,20 +584,18 @@ SimpleOS Rust seed ─→ Stage 1 ─→ Stage 2 ─→ Stage 3
 ### 5.2 Verification Script
 
 ```bash
-# Check all prerequisites (no build)
-bin/simple run src/os/port/bootstrap_verify.spl -- --dry-run
+# Main bootstrap entrypoint for the SimpleOS guest target lane
+scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64
 
-# Run full 3-stage bootstrap
-bin/simple run src/os/port/bootstrap_verify.spl
+# Direct cross-bootstrap entrypoint
+bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64
 
-# Run up to stage 2 only
-bin/simple run src/os/port/bootstrap_verify.spl -- --stage 2
+# Check staged artifact status
+bin/simple run src/os/port/bootstrap_cross.spl -- --status
 
-# Use custom seed binary
-bin/simple run src/os/port/bootstrap_verify.spl -- --seed /path/to/seed
-
-# Verbose output
-bin/simple run src/os/port/bootstrap_verify.spl -- --verbose
+# Live guest toolchain proof (requires QEMU + sshpass)
+SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE=1 \
+  bin/simple test test/system/simpleos_guest_toolchain_live_spec.spl
 ```
 
 ### 5.3 Cross-Compilation Bootstrap
@@ -606,13 +604,13 @@ Build the Simple compiler FOR SimpleOS from a host machine:
 
 ```bash
 # Cross-compile for x86_64
-bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos
+bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64
 
 # Cross-compile for aarch64
 bin/simple run src/os/port/bootstrap_cross.spl -- --target aarch64-simpleos
 
 # Create deployable archive
-bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos --package
+bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64 --package
 
 # Check build status for all targets
 bin/simple run src/os/port/bootstrap_cross.spl -- --status
@@ -671,7 +669,7 @@ bin/simple run src/os/port/verify_all.spl -- --phase bootstrap
 
 ```
 SimpleOS Full Verification v1.0.0
-Target: x86_64-simpleos
+Target: simpleos-x86_64
 
 ================================================================
   Phase 1: Shell Tools

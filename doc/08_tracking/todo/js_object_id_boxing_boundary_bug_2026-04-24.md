@@ -22,6 +22,27 @@ Observed during debugging:
 - the local `nested_array_id` observed by the probe could become `"16"`
 - similar instability appears on some later high ids for other ref kinds
 
+Additional direct QEMU probe evidence from `js_object_store_probe_entry.spl`:
+
+- object allocation after churn: expected `15`, local `15`
+- next allocation used as array id source: expected `16`, local `2`
+- next allocation used as function id source: expected `17`, local formatted as `<object>`
+- following symbol allocation: expected `18`, local `18`
+
+Dedicated boundary probe evidence from
+[examples/simple_os/arch/x86_64/js_object_id_boundary_probe_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/js_object_id_boundary_probe_entry.spl):
+
+- immediate `create_object()` returns are stable
+- passing returned ids through a plain helper arg is stable
+- formatting ids through a helper function arg is stable
+- `set_*_property_ref()` calls persist the correct ids
+- but direct text interpolation of retained local ids later in the same frame can misread them
+
+Observed exact mismatch:
+
+- stored object ref text: `49`
+- direct interpolation of the retained local expected to hold that id rendered as `<object>`
+
 The currently passing probe avoids this corrupted caller-side value by comparing against `store.next_id` captured before allocation, which stayed stable in guest runs.
 
 ## What is already fixed
@@ -50,8 +71,10 @@ Investigate these in order:
 
 1. Returning bare `i64` from mutating `me` methods after internal state changes
 2. Local variable assignment of returned `i64` in guest code
-3. Text interpolation of returned `i64` values
-4. Struct/enum wrapping paths that may box ids differently than flat array storage
+3. Direct text interpolation of retained `i64` locals after later calls
+4. Stack-slot reuse or value-tag confusion for retained scalar locals in the same frame
+5. Struct/enum wrapping paths that may box ids differently than flat array storage
+6. Helper-path interaction, especially `create_array_from()`, after prior object-store churn
 
 ## Constraints
 

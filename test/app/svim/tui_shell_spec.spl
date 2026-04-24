@@ -1,0 +1,52 @@
+# @cover src/app/svim/tui_shell.spl 80%
+
+use std.spec
+use app.svim.core.SvimSession
+use app.svim.core.SvimMode
+use app.svim.tui_shell.{svim_shell_help_text, svim_shell_prompt, svim_shell_classify_line, svim_render_tui, svim_render_buffer_list}
+
+
+describe "svim host shell helpers":
+    it "renders help text with shared and host commands":
+        val help = svim_shell_help_text()
+        expect help.contains(":w <path>") == true
+        expect help.contains("open <path>") == true
+        expect help.contains(".buffers") == true
+
+    it "formats pending prompts for open save and search flows":
+        val session = SvimSession.new()
+        expect svim_shell_prompt(session, "open-buffer") == "open path> "
+        expect svim_shell_prompt(session, "save-as") == "write path> "
+        expect svim_shell_prompt(session, "search-forward") == "search> "
+
+    it "classifies host aliases and shell meta commands":
+        val open_cmd = svim_shell_classify_line(SvimMode.Normal, "open /tmp/demo.txt")
+        expect open_cmd.0 == "dispatch"
+        expect open_cmd.1 == "open-buffer:/tmp/demo.txt"
+        val write_cmd = svim_shell_classify_line(SvimMode.Normal, "write /tmp/demo.txt")
+        expect write_cmd.0 == "dispatch"
+        expect write_cmd.1 == "save-as:/tmp/demo.txt"
+        val buffers_cmd = svim_shell_classify_line(SvimMode.Normal, ".buffers")
+        expect buffers_cmd.0 == "buffers"
+        expect buffers_cmd.1 == ""
+
+    it "routes insert mode text and shell escapes distinctly":
+        val insert_text = svim_shell_classify_line(SvimMode.Insert, "hello")
+        expect insert_text.0 == "insert"
+        expect insert_text.1 == "hello"
+        val insert_escape = svim_shell_classify_line(SvimMode.Insert, ".esc")
+        expect insert_escape.0 == "dispatch"
+        expect insert_escape.1 == "set-mode:normal"
+        val insert_commandline = svim_shell_classify_line(SvimMode.Insert, ":w")
+        expect insert_commandline.0 == "dispatch"
+        expect insert_commandline.1 == ":w"
+
+    it "renders session status and buffer listings":
+        var session = SvimSession.new()
+        session.open_text("/tmp/alpha.txt", "alpha")
+        val tui = svim_render_tui(session)
+        expect tui.contains("mode NORMAL") == true
+        expect tui.contains("/tmp/alpha.txt") == true
+        val buffers = svim_render_buffer_list(session)
+        expect buffers.contains("[No Name]") == true
+        expect buffers.contains("/tmp/alpha.txt") == true

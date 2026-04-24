@@ -6,8 +6,10 @@
 ##
 ## When LLVM_BUILD is set this spec verifies:
 ##   1. The cross clang binary exists at $LLVM_BUILD/bin/clang
-##   2. Compiling examples/simpleos_hello_c/hello.c to an x86_64-simpleos .o exits 0
-##   3. llvm-nm on the resulting .o shows the 'main' symbol
+##   2. clang --print-target-triple reports x86_64-simpleos
+##   3. Compiling examples/simpleos_hello_c/hello.c to an x86_64-simpleos .o exits 0
+##   4. llvm-nm on the resulting .o shows the 'main' symbol
+##   5. When the sysroot is present, ld.lld links the object into a SimpleOS ELF
 ##
 ## Run:
 ##   bin/simple test test/os/port/llvm/smoke_clang_spec.spl
@@ -21,6 +23,13 @@ extern fn rt_env_get(key: text) -> text
 
 val HELLO_C = "examples/simpleos_hello_c/hello.c"
 val OUT_O   = "/tmp/smoke_clang_hello.o"
+val OUT_ELF = "/tmp/smoke_clang_hello.elf"
+
+fn sysroot_dir() -> text:
+    val env = rt_env_get("SIMPLEOS_SYSROOT")
+    if env != nil and env.unwrap() != "":
+        return env.unwrap()
+    "build/os/sysroot"
 
 fn llvm_build() -> text:
     """Return the LLVM_BUILD env var, or empty string if unset."""
@@ -41,6 +50,16 @@ describe "SimpleOS cross clang smoke":
         val clang = "{lb}/bin/clang"
         fs.exists(clang).to_equal(true)
 
+    it "reports x86_64-simpleos as the target triple":
+        """Skip when LLVM_BUILD is unset; otherwise verify the guest lane triple."""
+        val lb = llvm_build()
+        if lb == "":
+            return "skip: LLVM_BUILD not set"
+        val clang = "{lb}/bin/clang"
+        val (out, err, code) = process.run(clang, ["--print-target-triple"])
+        code.to_equal(0)
+        out.trim().to_equal("x86_64-simpleos")
+
     it "compiles hello.c to x86_64-simpleos .o with exit 0":
         """Skip when LLVM_BUILD is unset; otherwise cross-compile and check exit code."""
         val lb = llvm_build()
@@ -48,7 +67,7 @@ describe "SimpleOS cross clang smoke":
             return "skip: LLVM_BUILD not set"
         val clang = "{lb}/bin/clang"
         val (out, err, code) = process.run(clang, [
-            "--target=x86_64-unknown-linux-musl",
+            "--target=x86_64-simpleos",
             "-c",
             HELLO_C,
             "-o",
@@ -66,3 +85,23 @@ describe "SimpleOS cross clang smoke":
         val (out, err, code) = process.run(nm, [OUT_O])
         code.to_equal(0)
         out.contains("main").to_equal(true)
+
+    it "links the object into a SimpleOS ELF when the sysroot is available":
+        """Skip when LLVM_BUILD is unset or the sysroot is absent; otherwise link with ld.lld."""
+        val lb = llvm_build()
+        if lb == "":
+            return "skip: LLVM_BUILD not set"
+        val sysroot = sysroot_dir()
+        if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
+            return "skip: SimpleOS sysroot not built"
+        val lld = "{lb}/bin/ld.lld"
+        val (out, err, code) = process.run(lld, [
+            "-T", "{sysroot}/share/simpleos/simpleos.ld",
+            "{sysroot}/lib/crt0.o",
+            OUT_O,
+            "-L", "{sysroot}/lib",
+            "-lsimpleos_c",
+            "-o", OUT_ELF,
+        ])
+        code.to_equal(0)
+        fs.exists(OUT_ELF).to_equal(true)

@@ -16,7 +16,7 @@ SimpleOS has evolved from a demo kernel to a functional L4-style microkernel pla
 - TCP/IP network stack (full RFC 793 TCP state machine)
 - Interactive shell with 27 built-in commands, job control, pipelines, and SSH server
 - Compositor, window manager, desktop shell, and widget-based GUI library
-- LLVM/Clang and Rust cross-compilation infrastructure (framework complete, sysroot built)
+- LLVM guest-exec lane plus Rust report-and-gate guest wrappers on the `simpleos-x86_64` bootstrap target lane
 - Freestanding C library (4,922 lines across 35 files, 21 headers)
 - All implementations in pure Simple language (no external runtimes)
 
@@ -31,8 +31,8 @@ SimpleOS has evolved from a demo kernel to a functional L4-style microkernel pla
 | 2 | PCI/Driver Supervisor | COMPLETE | pcimgr + supervisor + registry |
 | 3 | Async Driver Runtime | COMPLETE | Event loop, lifecycle, IPC helpers |
 | 3.5 | Async Exokernel Services | COMPLETE | NVMe, VirtIO-net, TCP/IP, shell, SSH, crypto |
-| 4 | LLVM/Clang Porting | FRAMEWORK COMPLETE | Build scripts, sysroot layout, CMake toolchain; needs LLVM source checkout for full build |
-| 5 | Rust Porting | FRAMEWORK COMPLETE | Target spec JSON, build scripts, 2 examples; needs Rust nightly for full build |
+| 4 | LLVM/Clang Porting | GUEST-EXEC LANE READY | Build scripts, sysroot layout, CMake toolchain, staged guest wrapper surface |
+| 5 | Rust Porting | REPORT-AND-GATE | Target spec JSON, build scripts, staged discovery surface; build operations still intentionally gated |
 | 6 | Storage/Network Drivers | COMPLETE | Async NVMe + VirtIO-net with restart |
 | 7 | GPU User Driver | COMPLETE | VirtIO-GPU 2D with fence/IRQ |
 | 8 | GPU Acceleration | PARTIAL | Render scene abstraction done; GPU bridge created |
@@ -93,8 +93,8 @@ Including C/header files in libc, total is approximately 74,600 lines across 327
 
 ### Cross-Compilation Infrastructure
 
-- **LLVM/Clang:** Sysroot with headers, static archive, linker script, CMake toolchain file. Smoke tests validate sysroot layout, header integrity, and libc symbols even without LLVM installed.
-- **Rust:** Target spec JSON (`x86_64-unknown-simpleos.json`), build scripts, 2 example programs (`hello.rs`, `ipc_sample.rs`). Validate subcommand checks prerequisites without requiring Rust nightly.
+- **LLVM/Clang:** Sysroot with headers, static archive, linker script, CMake toolchain file, and a staged guest wrapper surface that reports `lane=x86_64-simpleos status=guest-exec`.
+- **Rust:** Target spec JSON (`x86_64-unknown-simpleos.json`), build scripts, 2 example programs (`hello.rs`, `ipc_sample.rs`), and staged guest discovery commands that report `status=report-and-gate` for unsupported build operations.
 
 ---
 

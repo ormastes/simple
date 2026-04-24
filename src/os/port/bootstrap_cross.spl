@@ -4,7 +4,7 @@
 ## Cross-compiles the Rust seed, then runs staged bootstrap targeting SimpleOS.
 ##
 ## Usage:
-##   bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos
+##   bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64
 ##   bin/simple run src/os/port/bootstrap_cross.spl -- --target aarch64-simpleos
 ##   bin/simple run src/os/port/bootstrap_cross.spl -- --status
 ##   bin/simple run src/os/port/bootstrap_cross.spl -- --package
@@ -12,19 +12,44 @@
 use std.fs
 use std.process
 use std.text
-use std.cli
-use std.env
+
+extern fn sys_get_args() -> [text]
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_exit(code: i32) -> void
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
+val SIMPLEOS_X86_64_SELECTOR = "simpleos-x86_64"
+val SIMPLEOS_X86_64_GUEST_LANE = "x86_64-simpleos"
+
 val SUPPORTED_TARGETS = [
-    "x86_64-simpleos",
+    SIMPLEOS_X86_64_SELECTOR,
     "aarch64-simpleos",
     "riscv64gc-simpleos",
     "riscv32imac-simpleos",
 ]
+
+val SUPPORTED_TARGET_ALIASES = [
+    SIMPLEOS_X86_64_GUEST_LANE,
+]
+
+fn normalize_target_selector(target: text) -> text:
+    """Map the public selector surface onto the underlying guest lane triple."""
+    if target == SIMPLEOS_X86_64_SELECTOR:
+        return SIMPLEOS_X86_64_GUEST_LANE
+    target
+
+fn target_selector_name(target: text) -> text:
+    """Return the canonical artifact directory name for a requested target."""
+    if target == SIMPLEOS_X86_64_SELECTOR or target == SIMPLEOS_X86_64_GUEST_LANE:
+        return SIMPLEOS_X86_64_SELECTOR
+    target
+
+fn is_recognized_target(target: text) -> bool:
+    """Accept the canonical selector plus the legacy x86_64 guest-lane triple."""
+    SUPPORTED_TARGETS.contains(target) or SUPPORTED_TARGET_ALIASES.contains(target)
 
 val RUST_SEED_DIR = "src/compiler_rust"
 val DEFAULT_BUILD_DIR = "build/os/bootstrap"
@@ -33,6 +58,20 @@ val IN_GUEST_SYSROOT = "/usr/sysroot"
 
 # Maximum attempts for a transient cross-link invocation before giving up.
 val CROSS_LINK_MAX_ATTEMPTS = 3
+
+fn path_exists(path: text) -> bool:
+    """Runtime-compatible file existence check."""
+    process.run("test", ["-e", path]).exit_code == 0
+
+fn path_is_dir(path: text) -> bool:
+    """Runtime-compatible directory existence check."""
+    process.run("test", ["-d", path]).exit_code == 0
+
+fn env_get_text(key: text) -> text:
+    val value = rt_env_get(key)
+    if value == nil:
+        return ""
+    value.unwrap()
 
 fn effective_sysroot(config_sysroot: text, target: text) -> text:
     """Resolve the sysroot path, respecting SIMPLE_SYSROOT env and in-guest
@@ -45,10 +84,10 @@ fn effective_sysroot(config_sysroot: text, target: text) -> text:
       3. The caller-supplied `config_sysroot` (host-relative default
          `build/os/sysroot`).
     """
-    val env_sysroot = env.get("SIMPLE_SYSROOT")
+    val env_sysroot = env_get_text("SIMPLE_SYSROOT")
     if env_sysroot != "" :
         return env_sysroot
-    if target.ends_with("-simpleos") and fs.dir_exists(IN_GUEST_SYSROOT):
+    if target.ends_with("-simpleos") and path_is_dir(IN_GUEST_SYSROOT):
         return IN_GUEST_SYSROOT
     config_sysroot
 
@@ -141,7 +180,7 @@ fn expand_lib_sources(src_root: text) -> [text]:
         return out
     for entry in top.unwrap():
         val top_path = "{lib_root}/{entry}"
-        if not fs.dir_exists(top_path):
+        if not path_is_dir(top_path):
             continue
         val children = fs.list_dir(top_path)
         if not children.is_ok():
@@ -150,7 +189,7 @@ fn expand_lib_sources(src_root: text) -> [text]:
             var any_sub = false
             for sub in children.unwrap():
                 val sub_path = "{top_path}/{sub}"
-                if fs.dir_exists(sub_path):
+                if path_is_dir(sub_path):
                     out.push(sub_path)
                     any_sub = true
             if not any_sub:
@@ -201,15 +240,16 @@ impl CrossConfig:
         """Path where the cross-compiled Rust seed will be placed."""
         if self.seed_path != "":
             return self.seed_path
-        "{self.build_dir}/{self.target}/seed/simple"
+        "{self.build_dir}/{target_selector_name(self.target)}/seed/simple"
 
     fn stage_path(stage: i64) -> text:
         """Path for a stage binary."""
-        "{self.build_dir}/{self.target}/stage{stage}/simple"
+        "{self.build_dir}/{target_selector_name(self.target)}/stage{stage}/simple"
 
     fn archive_path() -> text:
         """Path for the deployable archive."""
-        "{self.build_dir}/{self.target}/simple-{self.target}.tar.gz"
+        val selector = target_selector_name(self.target)
+        "{self.build_dir}/{selector}/simple-{selector}.tar.gz"
 
 # ============================================================================
 # Argument Parsing
@@ -269,20 +309,25 @@ fn parse_args(args: [text]) -> CrossConfig:
 
     if show_help:
         print_usage()
-        process.exit(0)
+        rt_exit(0)
 
     if show_status:
         print_status(config)
-        process.exit(0)
+        rt_exit(0)
 
     # Validate target
-    if not SUPPORTED_TARGETS.contains(config.target):
+    if not is_recognized_target(config.target):
         print "ERROR: Unsupported target '{config.target}'"
         print "Supported targets:"
         for t in SUPPORTED_TARGETS:
             print "  {t}"
-        process.exit(1)
+        if SUPPORTED_TARGET_ALIASES.len() > 0:
+            print "Accepted legacy aliases:"
+            for t in SUPPORTED_TARGET_ALIASES:
+                print "  {t}"
+        rt_exit(1)
 
+    config.target = normalize_target_selector(config.target)
     config
 
 # ============================================================================
@@ -294,29 +339,32 @@ fn print_status(config: CrossConfig):
     print "=== SimpleOS Cross-Bootstrap Status ==="
     print ""
 
-    for target in SUPPORTED_TARGETS:
+    for listed_target in SUPPORTED_TARGETS:
         var tc = config
-        tc.target = target
+        tc.target = normalize_target_selector(listed_target)
 
         val seed = tc.seed_output_path()
         val s1 = tc.stage_path(1)
         val s2 = tc.stage_path(2)
         val s3 = tc.stage_path(3)
         val archive = tc.archive_path()
+        val lane = tc.target
 
-        print "  {target}:"
-        print "    seed:     {if fs.exists(seed): \"BUILT\" else: \"not built\"}"
-        print "    stage 1:  {if fs.exists(s1): \"BUILT\" else: \"not built\"}"
-        print "    stage 2:  {if fs.exists(s2): \"BUILT\" else: \"not built\"}"
-        print "    stage 3:  {if fs.exists(s3): \"BUILT\" else: \"not built\"}"
-        print "    archive:  {if fs.exists(archive): \"READY\" else: \"not packaged\"}"
+        print "  {listed_target}:"
+        if listed_target != lane:
+            print "    guest lane: {lane}"
+        print "    seed:     {if path_exists(seed): \"BUILT\" else: \"not built\"}"
+        print "    stage 1:  {if path_exists(s1): \"BUILT\" else: \"not built\"}"
+        print "    stage 2:  {if path_exists(s2): \"BUILT\" else: \"not built\"}"
+        print "    stage 3:  {if path_exists(s3): \"BUILT\" else: \"not built\"}"
+        print "    archive:  {if path_exists(archive): \"READY\" else: \"not packaged\"}"
         print ""
 
     # Sysroot
     print "  sysroot:"
-    print "    libc:     {if fs.exists(\"{config.sysroot_dir}/lib/libsimpleos_c.a\"): \"READY\" else: \"not built\"}"
-    print "    headers:  {if fs.dir_exists(\"{config.sysroot_dir}/include\"): \"READY\" else: \"not installed\"}"
-    print "    crt0:     {if fs.exists(\"{config.sysroot_dir}/lib/crt0.o\"): \"READY\" else: \"not built\"}"
+    print "    libc:     {if path_exists(\"{config.sysroot_dir}/lib/libsimpleos_c.a\"): \"READY\" else: \"not built\"}"
+    print "    headers:  {if path_is_dir(\"{config.sysroot_dir}/include\"): \"READY\" else: \"not installed\"}"
+    print "    crt0:     {if path_exists(\"{config.sysroot_dir}/lib/crt0.o\"): \"READY\" else: \"not built\"}"
 
 # ============================================================================
 # Sysroot
@@ -324,7 +372,7 @@ fn print_status(config: CrossConfig):
 
 fn ensure_sysroot(config: CrossConfig) -> bool:
     """Build sysroot if it does not exist."""
-    if fs.exists("{config.sysroot_dir}/lib/libsimpleos_c.a"):
+    if path_exists("{config.sysroot_dir}/lib/libsimpleos_c.a"):
         print "[sysroot] Already built"
         return true
 
@@ -350,7 +398,7 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
     """
     if config.skip_seed:
         print "[seed] Skipping Rust seed build (using {config.seed_output_path()})"
-        return fs.exists(config.seed_output_path())
+        return path_exists(config.seed_output_path())
 
     val output = config.seed_output_path()
     print "[seed] Cross-compiling Rust seed for {config.target}..."
@@ -363,7 +411,7 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
 
     # Build target spec path
     val target_spec = "src/os/toolchain/rust/{config.target}.json"
-    if not fs.exists(target_spec):
+    if not path_exists(target_spec):
         # Fallback: use the triple directly and hope rustc knows it
         print "[seed] WARNING: target spec {target_spec} not found, using triple directly"
 
@@ -404,13 +452,13 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
 
     # Copy binary to output location
     val cargo_output = "{RUST_SEED_DIR}/target/{config.target}/bootstrap/simple"
-    if not fs.exists(cargo_output):
+    if not path_exists(cargo_output):
         # Try with the spec file name
         val spec_name = target_spec.rsplit_once("/")
         if spec_name != nil:
             val base = spec_name.1.replace(".json", "")
             val alt_path = "{RUST_SEED_DIR}/target/{base}/bootstrap/simple"
-            if fs.exists(alt_path):
+            if path_exists(alt_path):
                 fs.copy(alt_path, output)
                 print "[seed] Cross-compiled seed ready at {output}"
                 return true
@@ -504,7 +552,7 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
             print result.stderr
         return false
 
-    if not fs.exists(output):
+    if not path_exists(output):
         print "[stage {stage}] ERROR: Output binary not found"
         return false
 
@@ -531,7 +579,7 @@ fn package_bootstrap(config: CrossConfig) -> bool:
     - bootstrap_verify.spl          -- verification script
     """
     val stage3 = config.stage_path(3)
-    if not fs.exists(stage3):
+    if not path_exists(stage3):
         print "[package] ERROR: Stage 3 binary not found at {stage3}"
         return false
 
@@ -599,7 +647,8 @@ fn run_cross_bootstrap(config: CrossConfig) -> bool:
     """Run the full cross-compilation bootstrap pipeline."""
     print "=== SimpleOS Cross-Compilation Bootstrap ==="
     print ""
-    print "  Target:     {config.target}"
+    print "  Target:     {target_selector_name(config.target)}"
+    print "  Guest lane: {config.target}"
     print "  Build dir:  {config.build_dir}"
     print "  Sysroot:    {config.sysroot_dir}"
     print "  Package:    {config.package}"
@@ -714,19 +763,24 @@ fn print_usage():
     print "Supported targets:"
     for t in SUPPORTED_TARGETS:
         print "  {t}"
+    if SUPPORTED_TARGET_ALIASES.len() > 0:
+        print ""
+        print "Accepted legacy aliases:"
+        for t in SUPPORTED_TARGET_ALIASES:
+            print "  {t}  (maps to {target_selector_name(t)})"
     print ""
     print "Examples:"
     print "  # Full cross-bootstrap for x86_64:"
-    print "  bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos"
+    print "  bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64"
     print ""
     print "  # Use existing host seed, skip Rust cross-compile:"
     print "  bin/simple run src/os/port/bootstrap_cross.spl -- \\"
     print "    --seed src/compiler_rust/target/bootstrap/simple \\"
-    print "    --target x86_64-simpleos"
+    print "    --target simpleos-x86_64"
     print ""
     print "  # Cross-build and package for deployment:"
     print "  bin/simple run src/os/port/bootstrap_cross.spl -- \\"
-    print "    --target x86_64-simpleos --package"
+    print "    --target simpleos-x86_64 --package"
     print ""
     print "  # Check status of all targets:"
     print "  bin/simple run src/os/port/bootstrap_cross.spl -- --status"
@@ -742,7 +796,7 @@ fn is_supported_target(target: text) -> bool:
     CARGO_TARGET_*_LINKER) and would otherwise cascade into opaque
     cross-build errors deep in the pipeline.
     """
-    SUPPORTED_TARGETS.contains(target)
+    is_recognized_target(target)
 
 fn retry_transient(attempts: i32, label: text, action: fn() -> bool) -> bool:
     """Run `action` up to `attempts` times, surfacing label on failure.
@@ -759,12 +813,13 @@ fn retry_transient(attempts: i32, label: text, action: fn() -> bool) -> bool:
     false
 
 fn main():
-    val args = cli.args()
+    val all_args = sys_get_args()
+    val args = if all_args.len() > 1: all_args[1:] else: []
     val config = parse_args(args)
     if not is_supported_target(config.target):
         print "cross-bootstrap: unsupported target: " + config.target
         print "supported: " + SUPPORTED_TARGETS.to_text()
-        process.exit(2)
+        rt_exit(2)
     val ok = run_cross_bootstrap(config)
     if not ok:
-        process.exit(1)
+        rt_exit(1)

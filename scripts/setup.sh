@@ -12,6 +12,8 @@ set -eu
 # Options:
 #   --prefix=<dir>   Install prefix for system-wide install (default: repo-local)
 #   --triple=<T>     Override auto-detected platform triple
+#                    SimpleOS guest bootstrap uses
+#                    scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64
 #   --dry-run        Show what would be done without doing it
 #   --help           Show this help
 
@@ -30,6 +32,8 @@ Creates runtime entry points:
 Options:
   --prefix=<dir>   Install prefix for symlink (default: repo bin/)
   --triple=<T>     Override auto-detected platform triple
+                   SimpleOS guest bootstrap uses bootstrap-from-scratch.sh
+                   with --target=simpleos-x86_64
   --dry-run        Show what would be done without doing it
   --help           Show this help
 
@@ -37,6 +41,7 @@ Examples:
   scripts/setup.sh                         # Auto-detect, create symlink
   scripts/setup.sh --triple=x86_64-pc-windows-gnu
   scripts/setup.sh --dry-run               # Preview only
+  scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64
 EOF
 }
 

@@ -1,0 +1,170 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Smux App — filesystem-runnable CLI/process entry for the native multiplexer.
+
+extern fn rt_env_get(key: text) -> text
+
+use os.apps.smux.api.{
+    smux_is_deferred_feature,
+    smux_create_session,
+    smux_list_sessions,
+    smux_list_windows,
+    smux_list_panes,
+    smux_attach,
+    smux_send_command,
+    smux_capture
+}
+use os.apps.smux.smux_remote.{SMUX_APP_ID, smux_ready_marker, smux_remote_launch_once, smux_remote_main}
+
+fn split_args(args_str: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    val terminated = "{args_str} "
+    for ch in terminated:
+        if ch == " ":
+            val part = current.trim()
+            if part != "":
+                parts = parts.push(part)
+            current = ""
+        else:
+            current = "{current}{ch}"
+    parts
+
+fn smux_help_text() -> text:
+    var lines: [text] = []
+    lines.append("smux - native SimpleOS multiplexer")
+    lines.append("")
+    lines.append("Commands:")
+    lines.append("  smux new [name]              Create a session")
+    lines.append("  smux ls                      List sessions")
+    lines.append("  smux attach <session>        Attach a client to a session")
+    lines.append("  smux send <session> <cmd>    Send a command to the active pane")
+    lines.append("  smux capture <session>       Capture the active pane")
+    lines.append("  smux deferred <feature>      Query whether a parity feature is deferred")
+    lines.append("  smux help                    Show this help")
+    lines.join("\n")
+
+fn _find_session_id(name_or_id: text) -> text:
+    val sessions = smux_list_sessions()
+    for session in sessions:
+        if session.id == name_or_id or session.name == name_or_id:
+            return session.id
+    ""
+
+fn _active_window_id(session_id: text) -> text:
+    val windows = smux_list_windows(session_id)
+    if windows.len() == 0:
+        return ""
+    windows[0].id
+
+fn _active_pane_id(session_id: text, window_id: text) -> text:
+    val panes = smux_list_panes(session_id, window_id)
+    if panes.len() == 0:
+        return ""
+    panes[0].id
+
+fn smux_new(args: [text]) -> i64:
+    val name = if args.len() > 0: args[0] else: "main"
+    val session = smux_create_session(name)
+    print "smux: created session {session.name} ({session.id})"
+    0
+
+fn smux_ls() -> i64:
+    val sessions = smux_list_sessions()
+    if sessions.len() == 0:
+        print "smux: no sessions"
+        return 0
+    for session in sessions:
+        print "{session.id}\t{session.name}\tclients={session.attached_clients}"
+    0
+
+fn smux_attach_cmd(args: [text]) -> i64:
+    if args.len() == 0:
+        print "usage: smux attach <session>"
+        return 1
+    val session_id = _find_session_id(args[0])
+    if session_id == "":
+        print "smux: session not found: {args[0]}"
+        return 1
+    val result = smux_attach(session_id, "cli", 120, 40)
+    if not result.attached:
+        print "smux: attach failed"
+        return 1
+    print "smux: attached cli to {session_id}"
+    0
+
+fn smux_send(args: [text]) -> i64:
+    if args.len() < 2:
+        print "usage: smux send <session> <command>"
+        return 1
+    val session_id = _find_session_id(args[0])
+    if session_id == "":
+        print "smux: session not found: {args[0]}"
+        return 1
+    val window_id = _active_window_id(session_id)
+    val pane_id = _active_pane_id(session_id, window_id)
+    if window_id == "" or pane_id == "":
+        print "smux: session has no active pane"
+        return 1
+    var command = args[1]
+    var i = 2
+    while i < args.len():
+        command = "{command} {args[i]}"
+        i = i + 1
+    if not smux_send_command(session_id, window_id, pane_id, command):
+        print "smux: send failed"
+        return 1
+    print "smux: sent command to {pane_id}"
+    0
+
+fn smux_capture_cmd(args: [text]) -> i64:
+    if args.len() == 0:
+        print "usage: smux capture <session>"
+        return 1
+    val session_id = _find_session_id(args[0])
+    if session_id == "":
+        print "smux: session not found: {args[0]}"
+        return 1
+    val window_id = _active_window_id(session_id)
+    val pane_id = _active_pane_id(session_id, window_id)
+    if window_id == "" or pane_id == "":
+        print "smux: session has no active pane"
+        return 1
+    val capture = smux_capture(session_id, window_id, pane_id, 50)
+    print capture.content
+    0
+
+fn smux_deferred(args: [text]) -> i64:
+    if args.len() == 0:
+        print "usage: smux deferred <feature>"
+        return 1
+    val deferred = smux_is_deferred_feature(args[0])
+    if deferred:
+        print "deferred"
+    else:
+        print "active"
+    0
+
+fn smux_run_cmd(args: [text]) -> i64:
+    if args.len() == 0:
+        print smux_help_text()
+        return 0
+    match args[0]:
+        "new": smux_new(args.slice(1, args.len()))
+        "ls": smux_ls()
+        "attach": smux_attach_cmd(args.slice(1, args.len()))
+        "send": smux_send(args.slice(1, args.len()))
+        "capture": smux_capture_cmd(args.slice(1, args.len()))
+        "deferred": smux_deferred(args.slice(1, args.len()))
+        "help": 
+            print smux_help_text()
+            0
+        _:
+            print "smux: unknown command: {args[0]}"
+            1
+
+fn main() -> i64:
+    val args_str = rt_env_get("SMUX_ARGS")
+    if args_str != "":
+        return smux_run_cmd(split_args(args_str))
+    print smux_help_text()
+    0

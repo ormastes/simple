@@ -1,7 +1,120 @@
 use app.svim.core.*
 
 
+fn svim_shell_help_text() -> text:
+    """Host-shell guidance for the line-based svim runner."""
+    "svim host shell\n"
+    + "shared commands: h j k l, i, v, dd, yy, p, u, ctrl-o, ctrl-i, /term, :w, :w <path>, :e <path>, :bn, :bp, :cn, :cp, :split, :tabnew, :q\n"
+    + "host aliases: open <path>, write [path], save [path], search <term>\n"
+    + "shell helpers: .help, .buffers, .snapshot, .quit, .cancel\n"
+    + "insert helpers: plain text inserts, .esc leaves insert, .bs backspace, .nl newline"
+
+fn svim_shell_prompt(session: SvimSession, pending_action: text) -> text:
+    """Build the interactive prompt, including pending file/search prompts."""
+    if pending_action == "open-buffer":
+        return "open path> "
+    if pending_action == "save-as":
+        return "write path> "
+    if pending_action == "search-forward":
+        return "search> "
+    val label = svim_shell_active_buffer_label(session)
+    "svim[{_svim_shell_mode_name(session.mode_state.mode)} {label}]> "
+
+fn svim_shell_status_line(session: SvimSession) -> text:
+    """Compact session status shown above each snapshot."""
+    var out = "mode {_svim_shell_mode_name(session.mode_state.mode)} | buffer {svim_shell_active_buffer_label(session)} | buffers {session.buffers.len()} | tabs {session.tabs.len()}"
+    if session.quickfix.items.len() > 0:
+        out = out + " | quickfix {session.quickfix.selected_index + 1}/{session.quickfix.items.len()}"
+    out
+
 fn svim_render_tui(session: SvimSession) -> text:
     """Render the current shared session as a host-side textual TUI snapshot."""
-    svim_snapshot_text(session)
+    svim_shell_status_line(session)
+    + "\n"
+    + svim_snapshot_text(session)
+    + "commands: .help for host shortcuts, :w/:e for files, /term for search\n"
 
+fn svim_render_buffer_list(session: SvimSession) -> text:
+    """Render the current buffer list for host-shell inspection."""
+    var out = "buffers\n"
+    var active_idx = session.active_buffer_index()
+    var i = 0
+    while i < session.buffers.len():
+        val marker = if i == active_idx then "*" else: " "
+        val label = if session.buffers[i].path == nil or session.buffers[i].path == "" then "[No Name]" else: session.buffers[i].path
+        out = out + "  {marker} {i + 1}: {label}\n"
+        i = i + 1
+    out
+
+fn svim_shell_classify_line(mode: SvimMode, line: text) -> (text, text):
+    """Classify host-shell input into meta actions, prompt requests, dispatches, or insert text."""
+    val trimmed = line.trim()
+    if trimmed == "":
+        return ("refresh", "")
+    if trimmed == ".help" or trimmed == ".?" or trimmed == "help":
+        return ("help", "")
+    if trimmed == ".buffers":
+        return ("buffers", "")
+    if trimmed == ".snapshot":
+        return ("refresh", "")
+    if trimmed == ".quit" or trimmed == ".exit":
+        return ("quit", "")
+    if trimmed == ".cancel":
+        return ("cancel", "")
+    if trimmed == ":e" or trimmed == "open":
+        return ("prompt", "open-buffer")
+    if trimmed == "save-as" or trimmed == "saveas" or trimmed == "writeas" or trimmed == "write-as":
+        return ("prompt", "save-as")
+    if trimmed == "search" or trimmed == "/":
+        return ("prompt", "search-forward")
+    if trimmed.starts_with("open "):
+        return ("dispatch", "open-buffer:{trimmed.slice(5, trimmed.len()).trim()}")
+    if trimmed == "write" or trimmed == "save":
+        return ("dispatch", "save")
+    if trimmed.starts_with("write "):
+        return ("dispatch", "save-as:{trimmed.slice(6, trimmed.len()).trim()}")
+    if trimmed.starts_with("save "):
+        return ("dispatch", "save-as:{trimmed.slice(5, trimmed.len()).trim()}")
+    if trimmed == "buffer-next":
+        return ("dispatch", "next-buffer")
+    if trimmed == "buffer-prev":
+        return ("dispatch", "prev-buffer")
+    if trimmed == "quickfix-next":
+        return ("dispatch", "quickfix-next")
+    if trimmed == "quickfix-prev":
+        return ("dispatch", "quickfix-prev")
+    if trimmed == "jump-back":
+        return ("dispatch", "jump-back")
+    if trimmed == "jump-forward":
+        return ("dispatch", "jump-forward")
+    if trimmed == "split":
+        return ("dispatch", "commandline:split")
+    if trimmed == "tabnew":
+        return ("dispatch", "commandline:tabnew")
+    if trimmed.starts_with("search "):
+        return ("dispatch", "search-forward:{trimmed.slice(7, trimmed.len()).trim()}")
+    if trimmed.starts_with(":") or trimmed.starts_with("/"):
+        return ("dispatch", trimmed)
+    if mode == SvimMode.Insert:
+        if trimmed == ".esc":
+            return ("dispatch", "set-mode:normal")
+        if trimmed == ".bs":
+            return ("dispatch", "backspace")
+        if trimmed == ".nl":
+            return ("dispatch", "newline")
+        return ("insert", line)
+    ("dispatch", trimmed)
+
+fn svim_shell_active_buffer_label(session: SvimSession) -> text:
+    """Display label for the active buffer."""
+    val label = session.active_buffer()?.path ?? ""
+    if label == "":
+        return "[No Name]"
+    label
+
+fn _svim_shell_mode_name(mode: SvimMode) -> text:
+    match mode:
+        SvimMode.Insert => "INSERT"
+        SvimMode.Visual => "VISUAL"
+        SvimMode.Command => "COMMAND"
+        _ => "NORMAL"

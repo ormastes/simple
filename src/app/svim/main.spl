@@ -1,32 +1,35 @@
 use std.cli.cli_util.{get_cli_args}
 use app.svim.core.*
-use app.svim.tui_shell.{svim_render_tui}
+use app.svim.tui_shell.{svim_render_tui, svim_shell_help_text, svim_shell_prompt, svim_shell_classify_line, svim_render_buffer_list}
 use app.ui.tui.input.{read_user_input}
 
 
 fn _svim_help():
-    print "Usage: simple run src/app/svim/main.spl [path] [options]"
+    print "Usage: simple run src/app/svim/main.spl [path ...] [options]"
     print ""
-    print "Host-side svim snapshot shell."
+    print "Host-side svim line shell over the shared session API."
     print ""
     print "Options:"
-    print "  --cmd=<name[:payload]>   Run one or more shared-core commands before rendering"
+    print "  --cmd=<command>          Run one or more shared-core commands before rendering"
     print "  --mode=<mode>            Set editor mode before rendering"
     print "  --interactive            Run a line-based interactive shell"
     print "  --help                   Show this help"
-
-fn _svim_prompt(mode: SvimMode) -> text:
-    match mode:
-        SvimMode.Insert => "insert> "
-        SvimMode.Command => ":"
-        SvimMode.Visual => "visual> "
-        _ => "svim> "
+    print ""
+    print "Examples:"
+    print "  simple run src/app/svim/main.spl notes.txt --cmd=':w;/term' "
+    print "  simple run src/app/svim/main.spl a.txt b.txt --interactive"
+    print "  interactive aliases: open <path>, write [path], search <term>, .buffers"
 
 fn _svim_should_quit(result: CommandResult) -> bool:
     for event in result.events:
         if event.kind == "quit-requested":
             return true
     false
+
+fn _svim_result_prefix(result: CommandResult) -> text:
+    if result.ok:
+        return "ok"
+    "error"
 
 fn _svim_split_cli_commands(raw: text) -> [text]:
     var out: [text] = []
@@ -36,21 +39,54 @@ fn _svim_split_cli_commands(raw: text) -> [text]:
             out.push(trimmed)
     out
 
-fn _svim_run_cli_command(session: SvimSession, line: text) -> CommandResult:
-    if line.starts_with("insert-text:") or line.starts_with("set-mode:") or line.starts_with("open-buffer:") or line.starts_with("save-as:") or line.starts_with("search-forward:") or line.starts_with("commandline:"):
-        val rpc = session.handle_rpc(RpcRequest(id: "cli", method: "svim.command", params_json: line))
-        return CommandResult(ok: rpc.ok, message: if rpc.ok then rpc.result_json else: rpc.error_text, events: [])
+fn _svim_execute_dispatch(session: SvimSession, line: text) -> CommandResult:
+    if line == "save":
+        return session.execute(CommandRequest(name: "save", count: 1, register_name: "", payload: ""))
+    if line == "next-buffer":
+        return session.execute(CommandRequest(name: "next-buffer", count: 1, register_name: "", payload: ""))
+    if line == "prev-buffer":
+        return session.execute(CommandRequest(name: "prev-buffer", count: 1, register_name: "", payload: ""))
+    if line == "quickfix-next":
+        return session.execute(CommandRequest(name: "quickfix-next", count: 1, register_name: "", payload: ""))
+    if line == "quickfix-prev":
+        return session.execute(CommandRequest(name: "quickfix-prev", count: 1, register_name: "", payload: ""))
+    if line == "jump-back":
+        return session.execute(CommandRequest(name: "jump-back", count: 1, register_name: "", payload: ""))
+    if line == "jump-forward":
+        return session.execute(CommandRequest(name: "jump-forward", count: 1, register_name: "", payload: ""))
+    if line == "backspace":
+        return session.execute(CommandRequest(name: "backspace", count: 1, register_name: "", payload: ""))
+    if line == "newline":
+        return session.execute(CommandRequest(name: "newline", count: 1, register_name: "", payload: ""))
+    if line.starts_with("set-mode:"):
+        return session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: line.slice(9, line.len())))
+    if line.starts_with("insert-text:"):
+        return session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: line.slice(12, line.len())))
+    if line.starts_with("open-buffer:"):
+        return session.execute(CommandRequest(name: "open-buffer", count: 1, register_name: "", payload: line.slice(12, line.len())))
+    if line.starts_with("save-as:"):
+        return session.execute(CommandRequest(name: "save-as", count: 1, register_name: "", payload: line.slice(8, line.len())))
+    if line.starts_with("search-forward:"):
+        return session.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: line.slice(15, line.len())))
+    if line.starts_with("commandline:"):
+        return session.execute(CommandRequest(name: "commandline", count: 1, register_name: "", payload: line.slice(12, line.len())))
     _svim_dispatch_line(session, line)
 
 fn _svim_run_cli_commands(session: SvimSession, commands: [text]) -> i64:
-    for command in commands:
-        val result = _svim_run_cli_command(session, command)
+    print "running {commands.len()} command(s)"
+    var i = 0
+    while i < commands.len():
+        val command = commands[i]
+        print "[{i + 1}/{commands.len()}] {command}"
+        val result = _svim_execute_dispatch(session, command)
+        if result.message != "":
+            print "{_svim_result_prefix(result)}: {result.message}"
         if not result.ok:
-            print result.message
             return 1
         if _svim_should_quit(result):
             return 0
-    0
+        i = i + 1
+    return 0
 
 fn _svim_dispatch_line(session: SvimSession, line: text) -> CommandResult:
     if session.mode_state.mode == SvimMode.Insert:
@@ -64,24 +100,87 @@ fn _svim_dispatch_line(session: SvimSession, line: text) -> CommandResult:
     val request = svim_parse_normal_command(line)
     session.execute(request)
 
+fn _svim_pending_dispatch(session: SvimSession, pending_action: text, value: text) -> CommandResult:
+    if pending_action == "open-buffer":
+        return _svim_execute_dispatch(session, "open-buffer:{value}")
+    if pending_action == "save-as":
+        return _svim_execute_dispatch(session, "save-as:{value}")
+    if pending_action == "search-forward":
+        return _svim_execute_dispatch(session, "search-forward:{value}")
+    CommandResult(ok: false, message: "unknown pending action: {pending_action}", events: [])
+
+fn _svim_pending_from_result(command: text, result: CommandResult) -> text:
+    if result.message == "buffer has no path" and (command == "save" or command == ":w" or command == "commandline:w"):
+        return "save-as"
+    ""
+
 fn _svim_run_interactive(session: SvimSession) -> i64:
+    var pending_action = ""
+    print svim_shell_help_text()
     print svim_render_tui(session)
     while true:
-        print _svim_prompt(session.mode_state.mode)
+        print svim_shell_prompt(session, pending_action)
         val line = read_user_input()
+        if pending_action != "":
+            if line == "":
+                print svim_render_tui(session)
+                continue
+            if line.trim() == ".cancel":
+                pending_action = ""
+                print "cancelled"
+                print svim_render_tui(session)
+                continue
+            val pending_result = _svim_pending_dispatch(session, pending_action, line)
+            pending_action = ""
+            if pending_result.message != "":
+                print "{_svim_result_prefix(pending_result)}: {pending_result.message}"
+            if not pending_result.ok:
+                pending_action = _svim_pending_from_result("save", pending_result)
+            if _svim_should_quit(pending_result):
+                return 0
+            print svim_render_tui(session)
+            continue
         if line == "":
             print svim_render_tui(session)
             continue
-        val result = _svim_dispatch_line(session, line)
-        if not result.ok and result.message != "":
-            print result.message
+        val classified = svim_shell_classify_line(session.mode_state.mode, line)
+        val action = classified.0
+        val payload = classified.1
+        if action == "help":
+            print svim_shell_help_text()
+            print svim_render_tui(session)
+            continue
+        if action == "buffers":
+            print svim_render_buffer_list(session)
+            print svim_render_tui(session)
+            continue
+        if action == "refresh":
+            print svim_render_tui(session)
+            continue
+        if action == "cancel":
+            print "nothing pending"
+            print svim_render_tui(session)
+            continue
+        if action == "quit":
+            return 0
+        if action == "prompt":
+            pending_action = payload
+            continue
+        val result = if action == "insert" then
+            session.execute(CommandRequest(name: "insert-text", count: 1, register_name: "", payload: payload))
+        else:
+            _svim_execute_dispatch(session, payload)
+        if result.message != "":
+            print "{_svim_result_prefix(result)}: {result.message}"
+        if not result.ok:
+            pending_action = _svim_pending_from_result(payload, result)
         if _svim_should_quit(result):
             return 0
         print svim_render_tui(session)
 
 fn main() -> i64:
     val args = get_cli_args()
-    var path = ""
+    var paths: [text] = []
     var rpc_cmds: [text] = []
     var mode = ""
     var interactive = false
@@ -96,15 +195,20 @@ fn main() -> i64:
             mode = arg.slice(7, arg.len())
         elif arg == "--interactive":
             interactive = true
-        elif not arg.starts_with("-") and path == "":
-            path = arg
+        elif not arg.starts_with("-"):
+            paths.push(arg)
 
     var session = SvimSession.new()
-    if path != "":
+    for path in paths:
         val opened = session.open_path(path)
         if not opened.ok:
             print opened.message
             return 1
+    if paths.len() > 1:
+        var rewind = 1
+        while rewind < paths.len():
+            val _ = session.execute(CommandRequest(name: "prev-buffer", count: 1, register_name: "", payload: ""))
+            rewind = rewind + 1
     if mode != "":
         val _ = session.execute(CommandRequest(name: "set-mode", count: 1, register_name: "", payload: mode))
     if rpc_cmds.len() > 0:

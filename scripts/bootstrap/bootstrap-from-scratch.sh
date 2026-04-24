@@ -22,13 +22,17 @@ Linux:
 FreeBSD / --target=freebsd-x86_64:
   Runs the FreeBSD seed bootstrap verifier using bin/freebsd/simple.
 
+SimpleOS / --target=simpleos-x86_64:
+  Runs the host-driven SimpleOS bootstrap target lane and stages guest artifacts
+  for the underlying x86_64-simpleos lane.
+
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm-lib)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
-  --target=<triple>  Target platform (freebsd-x86_64 dispatches to FreeBSD flow)
+  --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
   --jobs=<n>         Accepted for compatibility
   --no-mcp           Skip MCP server builds (Stage 5)
@@ -88,6 +92,15 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
 
+normalize_target() {
+  case "${1-}" in
+    simpleos-x86_64|x86_64-simpleos) echo "simpleos-x86_64" ;;
+    *) echo "${1-}" ;;
+  esac
+}
+
+target=$(normalize_target "${target}")
+
 # ===========================================================================
 # Platform detection — <arch>-<vendor>-<os>-<abi> target triple
 # ===========================================================================
@@ -107,6 +120,23 @@ if [ "${target}" = "freebsd-x86_64" ] || [ "${host_os}" = "FreeBSD" ]; then
     freebsd_args="${freebsd_args} --jobs=${jobs}"
   fi
   exec "${repo_root}/scripts/bootstrap/bootstrap-freebsd-seed.sh" ${freebsd_args}
+fi
+
+# SimpleOS target-lane dispatch (host-driven bootstrap to staged guest artifacts)
+if [ "${target}" = "simpleos-x86_64" ]; then
+  simpleos_args="--target=simpleos-x86_64 --build-dir=${output_dir}"
+  if [ "${verbose}" -eq 1 ]; then
+    simpleos_args="${simpleos_args} --verbose"
+  fi
+  if [ -n "${jobs}" ]; then
+    simpleos_args="${simpleos_args} --jobs=${jobs}"
+  fi
+  if [ "${deploy}" -eq 1 ]; then
+    simpleos_args="${simpleos_args} --package"
+  fi
+  echo "Bootstrap target lane: simpleos-x86_64"
+  echo "  guest lane: x86_64-simpleos"
+  exec "${repo_root}/bin/simple" run src/os/port/bootstrap_cross.spl -- ${simpleos_args}
 fi
 
 # Shared platform detection

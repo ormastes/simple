@@ -9,12 +9,22 @@
 ##   bin/simple run src/os/port/bootstrap_verify.spl -- --dry-run
 ##   bin/simple run src/os/port/bootstrap_verify.spl -- --stage 2
 ##   bin/simple run src/os/port/bootstrap_verify.spl -- --seed /path/to/seed
-##   bin/simple run src/os/port/bootstrap_verify.spl -- --target x86_64-simpleos
+##   bin/simple run src/os/port/bootstrap_verify.spl -- --target simpleos-x86_64
 
 use std.fs
 use std.process
 use std.text
-use std.cli
+
+extern fn sys_get_args() -> [text]
+extern fn rt_exit(code: i32) -> void
+
+fn path_exists(path: text) -> bool:
+    """Runtime-compatible file existence check."""
+    process.run("test", ["-e", path]).exit_code == 0
+
+fn path_is_dir(path: text) -> bool:
+    """Runtime-compatible directory existence check."""
+    process.run("test", ["-d", path]).exit_code == 0
 
 # ============================================================================
 # Configuration
@@ -44,6 +54,12 @@ impl BootstrapConfig:
             verbose: false,
             strip: true
         )
+
+fn normalize_target(target: text) -> text:
+    """Map the public bootstrap selector onto the underlying guest lane triple."""
+    if target == "simpleos-x86_64":
+        return "x86_64-simpleos"
+    target
 
 # ============================================================================
 # Argument Parsing
@@ -99,9 +115,10 @@ fn parse_args(args: [text]) -> BootstrapConfig:
             config.sysroot_dir = arg.slice(10, arg.len())
         else if arg == "--help" or arg == "-h":
             print_usage()
-            process.exit(0)
+            rt_exit(0)
         i = i + 1
 
+    config.target = normalize_target(config.target)
     config
 
 # ============================================================================
@@ -124,14 +141,14 @@ fn check_tool(name: text) -> PrereqResult:
 
 fn check_file(name: text, path: text) -> PrereqResult:
     """Check if a required file exists."""
-    if fs.exists(path):
+    if path_exists(path):
         PrereqResult(name: name, passed: true, message: "exists at {path}")
     else:
         PrereqResult(name: name, passed: false, message: "missing: {path}")
 
 fn check_dir(name: text, path: text) -> PrereqResult:
     """Check if a required directory exists."""
-    if fs.dir_exists(path):
+    if path_is_dir(path):
         PrereqResult(name: name, passed: true, message: "exists at {path}")
     else:
         PrereqResult(name: name, passed: false, message: "missing: {path}")
@@ -221,7 +238,7 @@ fn build_stage(config: BootstrapConfig, stage: i64, compiler_path: text) -> Stag
     val output_dir = output.rsplit_once("/")
     if output_dir != nil:
         val dir = output_dir.0
-        if not fs.dir_exists(dir):
+        if not path_is_dir(dir):
             fs.mkdir_p(dir)
 
     # Build args
@@ -269,7 +286,7 @@ fn build_stage(config: BootstrapConfig, stage: i64, compiler_path: text) -> Stag
         )
 
     # Verify output exists
-    if not fs.exists(output):
+    if not path_exists(output):
         return StageResult(
             stage: stage,
             success: false,
@@ -307,10 +324,10 @@ fn compare_binaries(path_a: text, path_b: text) -> bool:
     print "  A: {path_a}"
     print "  B: {path_b}"
 
-    if not fs.exists(path_a):
+    if not path_exists(path_a):
         print "[verify] FAIL: {path_a} does not exist"
         return false
-    if not fs.exists(path_b):
+    if not path_exists(path_b):
         print "[verify] FAIL: {path_b} does not exist"
         return false
 
@@ -480,7 +497,7 @@ fn print_usage():
     print "  --dry-run              Check prerequisites only, do not build"
     print "  --stage N              Run only up to stage N (1, 2, or 3)"
     print "  --seed PATH            Path to Rust seed binary"
-    print "  --target TRIPLE        Target triple (e.g. x86_64-simpleos)"
+    print "  --target TRIPLE        Target triple (e.g. simpleos-x86_64)"
     print "  --source-root PATH     Path to source tree root"
     print "  --build-dir PATH       Output directory for stage binaries"
     print "  --sysroot PATH         Path to SimpleOS sysroot"
@@ -500,11 +517,12 @@ fn print_usage():
     print ""
     print "  # Use custom seed and target SimpleOS:"
     print "  bin/simple run src/os/port/bootstrap_verify.spl -- \\"
-    print "    --seed build/cross/simple --target x86_64-simpleos"
+    print "    --seed build/cross/simple --target simpleos-x86_64"
 
 fn main():
-    val args = cli.args()
+    val all_args = sys_get_args()
+    val args = if all_args.len() > 1: all_args[1:] else: []
     val config = parse_args(args)
     val ok = run_bootstrap(config)
     if not ok:
-        process.exit(1)
+        rt_exit(1)

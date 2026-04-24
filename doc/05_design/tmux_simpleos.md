@@ -35,6 +35,7 @@ smux_send_input(session_id, window_id, pane_id, bytes)
 smux_send_text(session_id, window_id, pane_id, text)
 smux_send_command(session_id, window_id, pane_id, command)
 smux_capture(session_id, window_id, pane_id, history_lines)
+smux_is_deferred_feature(feature)
 
 smux_list_sessions()
 smux_list_windows(session_id)
@@ -175,6 +176,14 @@ Current `std.tmux` model maps naturally:
 
 The first native implementation should keep that mapping obvious so dashboard
 and panel adapters stay thin.
+
+## Deferred Boundary
+
+The first release should expose deferred parity features explicitly via
+`smux_is_deferred_feature(feature)` rather than silently pretending to support
+them. This gives tests and adapters a stable way to detect intentionally
+missing tmux-parity slices such as copy mode, mouse support, key-table
+compatibility, config-language parsing, and full control-mode compatibility.
 
 ## Security / Isolation Notes
 

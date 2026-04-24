@@ -118,6 +118,15 @@ class SvimViewport:
     width: i64
     height: i64
 
+fn svim_command(name: text, payload: text, count: i64, register_name: text) -> CommandRequest:
+    CommandRequest(name: name, count: count, register_name: register_name, payload: payload)
+
+fn svim_rpc_request(id: text, method: text, params_json: text) -> RpcRequest:
+    RpcRequest(id: id, method: method, params_json: params_json)
+
+fn svim_diagnostic(row: i64, col: i64, severity: text, message: text) -> DiagnosticItem:
+    DiagnosticItem(row: row, col: col, severity: severity, message: message)
+
 
 # ============================================================================
 # Piece table
@@ -282,6 +291,7 @@ class SvimSession:
     jumps: JumpList
     quickfix: QuickfixList
     last_search: text
+    last_search_direction: i64
     selection: Selection?
 
 impl SvimSession:
@@ -300,6 +310,7 @@ impl SvimSession:
             jumps: JumpList(locations: [], index: 0),
             quickfix: QuickfixList(items: [], selected_index: 0),
             last_search: "",
+            last_search_direction: 1,
             selection: nil
         )
         val buffer_id = session.open_text(nil, "")
@@ -587,16 +598,36 @@ impl SvimSession:
                 self.new_tab_from_current_buffer()
             "search-forward":
                 self._search_forward(request.payload)
+            "search-next":
+                self._search_repeat(1)
+            "search-prev":
+                self._search_repeat(-1)
             "jump-back":
                 self._jump_back()
             "jump-forward":
                 self._jump_forward()
+            "delete-motion":
+                self._delete_motion(request.payload, count, request.register_name)
+                CommandResult(ok: true, message: "deleted", events: [])
+            "yank-motion":
+                self._yank_motion(request.payload, count, request.register_name)
+                CommandResult(ok: true, message: "yanked", events: [])
+            "delete-text-object":
+                self._delete_text_object(request.payload, request.register_name)
+                CommandResult(ok: true, message: "deleted", events: [])
+            "yank-text-object":
+                self._yank_text_object(request.payload, request.register_name)
+                CommandResult(ok: true, message: "yanked", events: [])
             "next-buffer":
                 self._cycle_buffer(1)
                 CommandResult(ok: true, message: "next buffer", events: [])
             "prev-buffer":
                 self._cycle_buffer(-1)
                 CommandResult(ok: true, message: "prev buffer", events: [])
+            "quickfix-next":
+                self._cycle_quickfix(1, count)
+            "quickfix-prev":
+                self._cycle_quickfix(-1, count)
             "save":
                 self.save_current_buffer()
             "save-as":
@@ -622,10 +653,20 @@ impl SvimSession:
             return self.execute(CommandRequest(name: "next-buffer", count: 1, register_name: "", payload: ""))
         if commandline == "bp" or commandline == "bprev":
             return self.execute(CommandRequest(name: "prev-buffer", count: 1, register_name: "", payload: ""))
+        if commandline == "n" or commandline == "next" or commandline == "snext":
+            return self.execute(CommandRequest(name: "search-next", count: 1, register_name: "", payload: ""))
+        if commandline == "N" or commandline == "prev" or commandline == "sprev":
+            return self.execute(CommandRequest(name: "search-prev", count: 1, register_name: "", payload: ""))
+        if commandline == "cnext" or commandline == "cn":
+            return self.execute(CommandRequest(name: "quickfix-next", count: 1, register_name: "", payload: ""))
+        if commandline == "cprev" or commandline == "cp":
+            return self.execute(CommandRequest(name: "quickfix-prev", count: 1, register_name: "", payload: ""))
         if commandline.starts_with("w "):
             return self.save_current_buffer_as(commandline.slice(2, commandline.len()).trim())
         if commandline.starts_with("e "):
             return self.open_path(commandline.slice(2, commandline.len()).trim())
+        if commandline.starts_with("search "):
+            return self.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: commandline.slice(7, commandline.len()).trim()))
         CommandResult(ok: false, message: "unknown commandline: {commandline}", events: [])
 
     me handle_rpc(request: RpcRequest) -> RpcResponse:
@@ -719,35 +760,20 @@ impl SvimSession:
         val buffer_idx = self.active_buffer_index()
         if buffer_idx < 0 or self.selection == nil:
             return
-        val text = self.buffers[buffer_idx].piece_table.to_text()
         val bounds = _svim_selection_bounds(self.buffers[buffer_idx].line_starts, self.selection)
-        val name = if register_name == "" then "\"" else: register_name
-        self._store_register(name, text.slice(bounds.0, bounds.1), false)
+        self._yank_range(register_name, bounds.0, bounds.1)
         self._set_mode(SvimMode.Normal)
 
     me _delete_selection(register_name: text):
         val buffer_idx = self.active_buffer_index()
         if buffer_idx < 0 or self.selection == nil:
             return
-        val cursor = self.current_cursor()
-        val text = self.buffers[buffer_idx].piece_table.to_text()
         val bounds = _svim_selection_bounds(self.buffers[buffer_idx].line_starts, self.selection)
         if bounds.1 <= bounds.0:
             self._set_mode(SvimMode.Normal)
             return
-        val start_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, bounds.0)
-        val end_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, bounds.1)
-        val name = if register_name == "" then "\"" else: register_name
-        self._push_undo_snapshot(cursor)
-        self._store_register(name, text.slice(bounds.0, bounds.1), false)
-        var buffer = self.buffers[buffer_idx]
-        buffer.piece_table.delete(bounds.0, bounds.1)
-        buffer.anchors.apply_delete(start_cursor.row, start_cursor.col, end_cursor.row, end_cursor.col)
-        buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
-        buffer.version = buffer.version + 1
-        self.buffers[buffer_idx] = buffer
+        self._delete_range(register_name, bounds.0, bounds.1, false)
         self._set_mode(SvimMode.Normal)
-        self.set_current_cursor(start_cursor.row, start_cursor.col)
 
     me _put_after(register_name: text):
         val buffer_idx = self.active_buffer_index()
@@ -802,6 +828,71 @@ impl SvimSession:
         val after = _svim_position_after_insert(start_cursor.row, start_cursor.col, true, start_cursor.row, start_cursor.col, stats.0, stats.1)
         self.set_current_cursor(after.row, after.col)
 
+    me _yank_motion(motion: text, count: i64, register_name: text):
+        val bounds = self._motion_bounds(motion, count)
+        self._yank_range(register_name, bounds.0, bounds.1)
+
+    me _delete_motion(motion: text, count: i64, register_name: text):
+        val bounds = self._motion_bounds(motion, count)
+        self._delete_range(register_name, bounds.0, bounds.1, false)
+
+    me _yank_text_object(name: text, register_name: text):
+        val bounds = self._text_object_bounds(name)
+        self._yank_range(register_name, bounds.0, bounds.1)
+
+    me _delete_text_object(name: text, register_name: text):
+        val bounds = self._text_object_bounds(name)
+        self._delete_range(register_name, bounds.0, bounds.1, false)
+
+    me _motion_bounds(motion: text, count: i64) -> (i64, i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return (0, 0)
+        val cursor = self.current_cursor()
+        val target = _svim_apply_motion(self.buffers[buffer_idx].piece_table.to_text(), self.buffers[buffer_idx].line_starts, cursor, motion, count)
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        val end_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, target.row, target.col)
+        if end_offset >= start_offset:
+            return (start_offset, end_offset)
+        (end_offset, start_offset)
+
+    me _text_object_bounds(name: text) -> (i64, i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return (0, 0)
+        _svim_text_object_bounds(self.buffers[buffer_idx].piece_table.to_text(), self.buffers[buffer_idx].line_starts, self.current_cursor(), name)
+
+    me _yank_range(register_name: text, start: i64, end: i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or end <= start:
+            return
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val name = if register_name == "" then "\"" else: register_name
+        self._store_register(name, text.slice(start, end), false)
+
+    me _delete_range(register_name: text, start: i64, end: i64, linewise: bool):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or end <= start:
+            return
+        val cursor = self.current_cursor()
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val start_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, start)
+        val end_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, end)
+        val name = if register_name == "" then "\"" else: register_name
+        self._push_undo_snapshot(cursor)
+        self._store_register(name, text.slice(start, end), linewise)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.delete(start, end)
+        buffer.anchors.apply_delete(start_cursor.row, start_cursor.col, end_cursor.row, end_cursor.col)
+        val new_text = buffer.piece_table.to_text()
+        buffer.line_starts = _svim_compute_line_starts(new_text)
+        if new_text.len() == 0:
+            buffer.piece_table = PieceTable.from_text("")
+            buffer.line_starts = [0]
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        self.set_current_cursor(start_cursor.row, start_cursor.col)
+
     me _move_horizontal(delta: i64):
         val cursor = self.current_cursor()
         self.set_current_cursor(cursor.row, cursor.col + delta)
@@ -815,6 +906,7 @@ impl SvimSession:
         if buffer_idx < 0:
             return CommandResult(ok: false, message: "no active buffer", events: [])
         self.last_search = term
+        self.last_search_direction = 1
         val text = self.buffers[buffer_idx].piece_table.to_text()
         val cursor = self.current_cursor()
         val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
@@ -827,6 +919,32 @@ impl SvimSession:
         self._record_jump(self.buffers[buffer_idx].id, cursor)
         self.set_current_cursor(target.row, target.col)
         CommandResult(ok: true, message: "found {term}", events: [EditorEvent(kind: "search-hit", message: term)])
+
+    me _search_repeat(direction: i64) -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        if self.last_search == "":
+            return CommandResult(ok: false, message: "no prior search", events: [])
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val cursor = self.current_cursor()
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        val actual_direction = self.last_search_direction * direction
+        var found = -1
+        if actual_direction >= 0:
+            found = text.find(self.last_search, start_offset + 1) ?? -1
+            if found < 0:
+                found = text.find(self.last_search, 0) ?? -1
+        else:
+            found = _svim_find_last_before(text, self.last_search, start_offset)
+            if found < 0:
+                found = _svim_find_last_before(text, self.last_search, text.len())
+        if found < 0:
+            return CommandResult(ok: false, message: "pattern not found", events: [])
+        val target = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, found)
+        self._record_jump(self.buffers[buffer_idx].id, cursor)
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "found {self.last_search}", events: [EditorEvent(kind: "search-hit", message: self.last_search)])
 
     me _jump_back() -> CommandResult:
         if self.jumps.locations.len() == 0 or self.jumps.index < 0:
@@ -867,6 +985,16 @@ impl SvimSession:
         elif next >= self.buffers.len():
             next = 0
         self.focus_buffer(self.buffers[next].id)
+
+    me _cycle_quickfix(direction: i64, count: i64) -> CommandResult:
+        if self.quickfix.items.len() == 0:
+            return CommandResult(ok: false, message: "quickfix empty", events: [])
+        var target = self.quickfix.selected_index + (direction * count)
+        while target < 0:
+            target = target + self.quickfix.items.len()
+        while target >= self.quickfix.items.len():
+            target = target - self.quickfix.items.len()
+        self.jump_to_quickfix(target)
 
     me _push_undo_snapshot(cursor: Cursor):
         val buffer_idx = self.active_buffer_index()
@@ -1259,10 +1387,18 @@ fn svim_parse_normal_command(raw: text) -> CommandRequest:
         return CommandRequest(name: "jump-back", count: 1, register_name: "", payload: "")
     if trimmed == "ctrl-i":
         return CommandRequest(name: "jump-forward", count: 1, register_name: "", payload: "")
+    if trimmed == "n":
+        return CommandRequest(name: "search-next", count: 1, register_name: "", payload: "")
+    if trimmed == "N":
+        return CommandRequest(name: "search-prev", count: 1, register_name: "", payload: "")
     if trimmed == "bn":
         return CommandRequest(name: "next-buffer", count: 1, register_name: "", payload: "")
     if trimmed == "bp":
         return CommandRequest(name: "prev-buffer", count: 1, register_name: "", payload: "")
+    if trimmed == "]q":
+        return CommandRequest(name: "quickfix-next", count: 1, register_name: "", payload: "")
+    if trimmed == "[q":
+        return CommandRequest(name: "quickfix-prev", count: 1, register_name: "", payload: "")
     var idx = 0
     while idx < trimmed.len():
         val ch = trimmed.char_at(idx)
@@ -1271,6 +1407,9 @@ fn svim_parse_normal_command(raw: text) -> CommandRequest:
         idx = idx + 1
     val count = if idx > 0 then trimmed.slice(0, idx).to_int() else: 1
     val cmd = trimmed.slice(idx, trimmed.len())
+    val composed = _svim_parse_operator_command(cmd, count)
+    if composed.name != "":
+        return composed
     if cmd == "h":
         return CommandRequest(name: "move-left", count: count, register_name: "", payload: "")
     if cmd == "j":
@@ -1291,6 +1430,10 @@ fn svim_parse_normal_command(raw: text) -> CommandRequest:
         return CommandRequest(name: "put-after", count: count, register_name: "", payload: "")
     if cmd == "u":
         return CommandRequest(name: "undo", count: count, register_name: "", payload: "")
+    if cmd == "]q":
+        return CommandRequest(name: "quickfix-next", count: count, register_name: "", payload: "")
+    if cmd == "[q":
+        return CommandRequest(name: "quickfix-prev", count: count, register_name: "", payload: "")
     CommandRequest(name: cmd, count: count, register_name: "", payload: "")
 
 fn _svim_trim_jumps(items: [JumpLocation], limit: i64) -> [JumpLocation]:
@@ -1309,3 +1452,124 @@ fn _svim_selection_bounds(line_starts: [i64], selection: Selection?) -> (i64, i6
     if start_offset <= end_offset:
         return (start_offset, end_offset)
     (end_offset, start_offset)
+
+fn _svim_parse_operator_command(cmd: text, count: i64) -> CommandRequest:
+    if cmd == "dd":
+        return CommandRequest(name: "delete-line", count: count, register_name: "", payload: "")
+    if cmd == "yy":
+        return CommandRequest(name: "yank-line", count: count, register_name: "", payload: "")
+    if cmd.starts_with("d"):
+        return _svim_parse_operator_payload("delete", cmd.slice(1, cmd.len()), count)
+    if cmd.starts_with("y"):
+        return _svim_parse_operator_payload("yank", cmd.slice(1, cmd.len()), count)
+    CommandRequest(name: "", count: 1, register_name: "", payload: "")
+
+fn _svim_parse_operator_payload(kind: text, raw_payload: text, operator_count: i64) -> CommandRequest:
+    if raw_payload == "":
+        val name = if kind == "delete" then "delete-line" else: "yank-line"
+        return CommandRequest(name: name, count: operator_count, register_name: "", payload: "")
+    var idx = 0
+    while idx < raw_payload.len():
+        val ch = raw_payload.char_at(idx)
+        if ch < "0" or ch > "9":
+            break
+        idx = idx + 1
+    val motion_count = if idx > 0 then raw_payload.slice(0, idx).to_int() else: 1
+    val payload = raw_payload.slice(idx, raw_payload.len())
+    val total = operator_count * motion_count
+    if payload == "iw" or payload == "aw":
+        val name = if kind == "delete" then "delete-text-object" else: "yank-text-object"
+        return CommandRequest(name: name, count: 1, register_name: "", payload: payload)
+    val motion_name = _svim_motion_name(payload)
+    if motion_name == "":
+        return CommandRequest(name: "", count: 1, register_name: "", payload: "")
+    val name = if kind == "delete" then "delete-motion" else: "yank-motion"
+    CommandRequest(name: name, count: total, register_name: "", payload: motion_name)
+
+fn _svim_motion_name(raw: text) -> text:
+    if raw == "h":
+        return "left"
+    if raw == "j":
+        return "down"
+    if raw == "k":
+        return "up"
+    if raw == "l":
+        return "right"
+    if raw == "w":
+        return "word"
+    ""
+
+fn _svim_apply_motion(content: text, line_starts: [i64], cursor: Cursor, motion: text, count: i64) -> Cursor:
+    if motion == "left":
+        return _svim_offset_to_cursor(line_starts, _svim_clamp_i64(_svim_row_col_to_offset(line_starts, cursor.row, cursor.col) - count, 0, content.len()))
+    if motion == "right":
+        return _svim_offset_to_cursor(line_starts, _svim_clamp_i64(_svim_row_col_to_offset(line_starts, cursor.row, cursor.col) + count, 0, content.len()))
+    if motion == "up":
+        return Cursor(row: _svim_clamp_i64(cursor.row - count, 0, _svim_max_row(line_starts)), col: cursor.col)
+    if motion == "down":
+        return Cursor(row: _svim_clamp_i64(cursor.row + count, 0, _svim_max_row(line_starts)), col: cursor.col)
+    if motion == "word":
+        return _svim_word_motion(content, line_starts, cursor, count)
+    cursor
+
+fn _svim_word_motion(content: text, line_starts: [i64], cursor: Cursor, count: i64) -> Cursor:
+    var offset = _svim_row_col_to_offset(line_starts, cursor.row, cursor.col)
+    var remaining = count
+    while remaining > 0:
+        offset = _svim_next_word_offset(content, offset)
+        remaining = remaining - 1
+    _svim_offset_to_cursor(line_starts, offset)
+
+fn _svim_next_word_offset(content: text, offset: i64) -> i64:
+    val total = content.len()
+    var idx = _svim_clamp_i64(offset, 0, total)
+    if idx >= total:
+        return total
+    if _svim_is_word_char(content.char_at(idx)):
+        while idx < total and _svim_is_word_char(content.char_at(idx)):
+            idx = idx + 1
+    while idx < total and not _svim_is_word_char(content.char_at(idx)):
+        idx = idx + 1
+    idx
+
+fn _svim_find_last_before(content: text, term: text, before: i64) -> i64:
+    if term == "":
+        return -1
+    val limit = _svim_clamp_i64(before, 0, content.len())
+    var idx = 0
+    var found = -1
+    while idx < limit:
+        val at = content.find(term, idx) ?? -1
+        if at < 0 or at >= limit:
+            break
+        found = at
+        idx = at + 1
+    found
+
+fn _svim_text_object_bounds(content: text, line_starts: [i64], cursor: Cursor, name: text) -> (i64, i64):
+    val total = content.len()
+    if total == 0:
+        return (0, 0)
+    var current = _svim_clamp_i64(_svim_row_col_to_offset(line_starts, cursor.row, cursor.col), 0, total - 1)
+    if not _svim_is_word_char(content.char_at(current)):
+        current = _svim_next_word_offset(content, current)
+        if current >= total:
+            return (total, total)
+    var start = current
+    var end = current
+    while start > 0 and _svim_is_word_char(content.char_at(start - 1)):
+        start = start - 1
+    while end < total and _svim_is_word_char(content.char_at(end)):
+        end = end + 1
+    if name == "aw":
+        while start > 0 and _svim_is_space_char(content.char_at(start - 1)):
+            start = start - 1
+        while end < total and _svim_is_space_char(content.char_at(end)):
+            end = end + 1
+    (start, end)
+
+fn _svim_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _svim_is_space_char(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n"

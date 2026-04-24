@@ -38,7 +38,7 @@ Excluded from this slice:
 | REQ-009 | native-first backend, no upstream tmux dependency |
 | REQ-010 | backend swap readiness boundary |
 | REQ-011 | explicit non-fatal failure handling |
-| REQ-012 | declared deferrals remain deferred |
+| REQ-012 | declared deferrals remain deferred and are queryable |
 | NFR-007 | startup/operation observability counters are exposed |
 
 ## Execution
@@ -77,7 +77,7 @@ bin/simple test test/os/kernel/loader/executable_source_vfs_spec.spl
 | REQ-009 | service works without checking host tmux availability |
 | REQ-010 | backend contract can be queried independently of adapter surface |
 | REQ-011 | invalid targets and launch failures return explicit errors |
-| REQ-012 | deferred parity features are not required for pass |
+| REQ-012 | deferred parity features report `true` through the deferred-feature query |
 | NFR-007 | metrics getter reports startup and operation counters |
 | NFR-001/NFR-002 | perf smoke records hosted/dev startup and send/capture latency budgets |
 

@@ -17,7 +17,7 @@ Prove that the Simple compiler can be built and verified for SimpleOS guest targ
 
 ### Phase 2: Host-Driven Cross Bootstrap
 
-- Use `src/os/port/bootstrap_cross.spl` to build the seed, stage1, stage2, and stage3 compiler artifacts for a selected `*-simpleos` target
+- Use `src/os/port/bootstrap_cross.spl` to build the seed, stage1, stage2, and stage3 compiler artifacts for the `simpleos-x86_64` bootstrap selector (guest lane `x86_64-simpleos`)
 - Package staged outputs when required for deployment or guest testing
 - Compare stage2 and stage3 outputs and inspect auto-stub counts when byte identity is not yet available
 
@@ -37,6 +37,6 @@ Prove that the Simple compiler can be built and verified for SimpleOS guest targ
 
 - Toolchain dry-run verification passes
 - Bootstrap prerequisite verification passes
-- Cross bootstrap can produce stage2 and stage3 artifacts for the selected target
+- Cross bootstrap can produce stage2 and stage3 artifacts for the selected bootstrap selector and its underlying guest lane
 - Native-surface policy verification passes for the covered SimpleOS reduction scope
 - In-guest native convergence path remains documented and executable when guest-side prerequisites are available
