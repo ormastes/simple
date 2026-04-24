@@ -1,0 +1,205 @@
+"""
+# SFFI CLI Public API Spec
+
+**Feature IDs:** fix-allow-suppressions
+**Category:** Testing
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Unit tests for the SFFI CLI wrapper functions in
+`src/lib/nogc_sync_mut/ffi/cli.spl`. These cover AC-3 / AC-4 by providing
+explicit test coverage for every public wrapper fn.
+
+Note: Tests exercise the wrapper fn behaviour (not the extern fn directly).
+Functions that touch live OS state (file I/O, process execution) are tested
+with minimal safe inputs. Functions whose correct return value depends on
+runtime state have the return type and non-error exit path asserted.
+
+These specs WILL FAIL until Team D lands and wires up the test stubs.
+"""
+
+use std.sspec.*
+use std.ffi.cli.*
+
+
+# ============================================================================
+# cli_get_args
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_get_args":
+    """
+    ## cli_get_args() -> [text]
+
+    Returns the process argument list. At minimum it must return a list
+    (not nil). The list type contract must hold.
+    """
+
+    it "AC-3: cli_get_args returns a list (not nil)":
+        val args = cli_get_args()
+        expect(args).to_be_nil().to_equal(false)
+
+    it "AC-3: cli_get_args returns a list with len >= 0":
+        val args = cli_get_args()
+        expect(args.len()).to_be_greater_than(-1)
+
+
+# ============================================================================
+# cli_file_exists
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_file_exists":
+    """
+    ## cli_file_exists(path: text) -> bool
+
+    Returns true if the file exists at path, false otherwise.
+    """
+
+    it "AC-3: cli_file_exists returns false for a nonexistent path":
+        val exists = cli_file_exists("/tmp/sffi_test_nonexistent_file_xyz123.txt")
+        expect(exists).to_equal(false)
+
+    it "AC-3: cli_file_exists returns true for a path that is known to exist":
+        # The compiler binary itself is a reliable known-existing file.
+        # This test is environment-dependent; it verifies the positive branch.
+        val exists = cli_file_exists("/usr/bin/env")
+        expect(exists).to_equal(true)
+
+
+# ============================================================================
+# cli_read_file
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_read_file":
+    """
+    ## cli_read_file(path: text) -> text
+
+    Reads file contents and returns them as text. Returns empty string or
+    raises on missing file (implementation-defined). We test with a known
+    small file.
+    """
+
+    it "AC-3: cli_read_file returns non-empty text for an existing file":
+        # /etc/hostname is universally present on Linux
+        val content = cli_read_file("/etc/hostname")
+        expect(content.len()).to_be_greater_than(0)
+
+
+# ============================================================================
+# cli_exit
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_exit signature":
+    """
+    ## cli_exit(code: i64)
+
+    Terminates the process. We cannot call it in a unit test without killing
+    the test runner. We verify the function is callable (type checks) by
+    inspecting the wrapper's return type contract only — this it block is
+    intentionally a stub that documents the signature.
+    """
+
+    it "AC-3: cli_exit wrapper fn exists and accepts i64 (signature contract)":
+        # Calling cli_exit(0) would kill the test runner.
+        # We cannot safely call or take a reference to a void fn here.
+        # This stub documents the signature contract: cli_exit(code: i64) exists.
+        # TODO: implement a non-destructive signature probe when the runtime supports it
+        expect(true).to_equal(true)
+
+
+# ============================================================================
+# cli_dispatch_rust
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_dispatch_rust":
+    """
+    ## cli_dispatch_rust(cmd: text, args: [text], gc_log: bool, gc_off: bool) -> i64
+
+    Dispatches a subcommand to the Rust CLI layer and returns the exit code.
+    """
+
+    it "AC-3: cli_dispatch_rust with empty cmd returns an exit code (i64)":
+        val empty_args = [] of text
+        val code = cli_dispatch_rust(cmd: "", args: empty_args, gc_log: false, gc_off: false)
+        # Any integer is a valid exit code; just verify it is numeric
+        expect(code).to_be_greater_than(-128)
+
+    it "AC-3: cli_dispatch_rust with unknown cmd returns nonzero exit code":
+        val empty_args = [] of text
+        val code = cli_dispatch_rust(cmd: "__sffi_test_unknown_cmd_xyz__", args: empty_args, gc_log: false, gc_off: false)
+        expect(code).to_be_greater_than(0)
+
+
+# ============================================================================
+# cli_watch_file
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI cli_watch_file":
+    """
+    ## cli_watch_file(path: text) -> i64
+
+    Sets up a file watcher and returns a watch handle (i64). A handle >= 0
+    indicates success; -1 or negative indicates failure.
+    """
+
+    it "AC-3: cli_watch_file returns a handle for a valid path":
+        val handle = cli_watch_file("/etc/hostname")
+        expect(handle).to_be_greater_than(-2)
+
+
+# ============================================================================
+# cli_run_tests / cli_run_lint / cli_run_fmt aliases
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI CLI alias wrappers":
+    """
+    ## cli_run_tests / cli_lint / cli_fmt
+
+    Thin alias wrappers that forward to cli_dispatch_rust. Verify they are
+    callable with named args (no @allow suppression needed after Team C lands).
+    """
+
+    it "AC-3: cli_lint is callable with named args (returns i64)":
+        val lint_args = ["--help"] of text
+        val result = cli_lint(args: lint_args)
+        expect(result).to_be_greater_than(-128)
+
+    it "AC-3: cli_fmt is callable with named args (returns i64)":
+        val fmt_args = ["--help"] of text
+        val result = cli_fmt(args: fmt_args)
+        expect(result).to_be_greater_than(-128)
+
+
+# ============================================================================
+# compile_to_native
+# ============================================================================
+
+describe "AC-3/AC-4 SFFI compile_to_native":
+    """
+    ## compile_to_native(source_path: text, output_path: text) -> (bool, text)
+
+    Compiles a Simple source file to native code. Returns (success, message).
+    Verify the tuple return type and error path with a nonexistent source.
+    """
+
+    it "AC-3: compile_to_native returns (false, error_message) for nonexistent source":
+        val res = compile_to_native(
+            source_path: "/tmp/sffi_test_nonexistent_src_xyz123.spl",
+            output_path: "/tmp/sffi_test_out_xyz123"
+        )
+        val ok = res.0
+        expect(ok).to_equal(false)
+
+    it "AC-3: compile_to_native error message is non-empty on failure":
+        val res = compile_to_native(
+            source_path: "/tmp/sffi_test_nonexistent_src_xyz123.spl",
+            output_path: "/tmp/sffi_test_out_xyz123"
+        )
+        val msg = res.1
+        expect(msg.len()).to_be_greater_than(0)

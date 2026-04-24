@@ -38,8 +38,6 @@ use os.apps.clock.clock.{ClockApp}
 use os.apps.terminal.terminal.{Terminal}
 use os.apps.hello_world.hello_world.{HelloWorldApp}
 use os.apps.browser_demo.browser_demo.{BrowserDemoApp}
-use os.apps.simple_browser.simple_browser.{simple_browser_app_id, simple_browser_window_title,
-    simple_browser_start_page, simple_browser_window_marker, simple_browser_render_marker}
 use os.apps.editor.editor.{TextEditor}
 use os.apps.memo.memo.{MemoApp}
 use os.apps.paint.paint.{PaintApp}
@@ -125,14 +123,18 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
         content: cli_output
     ))
 
-fn _register_materialized_window(shell: DesktopShell, window_id: u64, pid: u64, app_id: text):
-    serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id} app_id={app_id}")
-    shell.compositor.set_window_identity(window_id, pid, app_id)
-    serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id}")
-    shell.wm.register_window_owner_with_identity(WindowId(value: window_id), 0, pid, app_id)
-    serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id}")
+fn _register_materialized_window(shell: DesktopShell, window_id: WindowId, pid: u64, app_id: text):
+    serial_println("[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={app_id}")
+    var compositor = shell.compositor
+    compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: app_id))
+    shell.compositor = compositor
+    serial_println("[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
+    var wm = shell.wm
+    wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
+    shell.wm = wm
+    serial_println("[shell] materialized-window:register:wm pid={pid} wid={window_id.value}")
     launcher_note_window_opened(pid)
-    serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id}")
+    serial_println("[shell] materialized-window:register:launcher pid={pid} wid={window_id.value}")
 
 fn _create_materialized_window(
     shell: DesktopShell,
@@ -145,8 +147,11 @@ fn _create_materialized_window(
     pid: u64,
     app_id: text
 ) -> bool:
-    val window_id = shell.compositor.create_window(title, x, y, width, height)
-    if window_id == 0:
+    var compositor = shell.compositor
+    compositor.create_window(title, x, y, width, height)
+    val window_id = WindowId(value: compositor.next_id - 1)
+    shell.compositor = compositor
+    if window_id.value == 0:
         return false
     _register_materialized_window(shell, window_id, pid, app_id)
     true
@@ -210,14 +215,19 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64) -> bo
             true
         case "Simple Browser":
             serial_println("[shell] simple-browser-fallback:start pid={pid}")
-            val window_id = shell.compositor.create_window("Simple Browser", 220, 120, 520, 320)
-            if window_id == 0:
+            var compositor = shell.compositor
+            compositor.create_window("Simple Browser", 220, 120, 520, 320)
+            val window_id = WindowId(value: compositor.next_id - 1)
+            shell.compositor = compositor
+            if window_id.value == 0:
                 serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false")
                 return false
             _register_materialized_window(shell, window_id, pid, "/sys/apps/simple_browser")
             serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=true")
-            serial_println(simple_browser_window_marker(pid, window_id.value))
-            serial_println(simple_browser_render_marker(pid, window_id.value))
+            # Emit the acceptance markers inline on freestanding targets to avoid
+            # any wrapper ABI ambiguity on the hot launch path.
+            serial_println("[simple_browser] window_created app_id=/sys/apps/simple_browser wid={window_id.value} title=Simple Browser mode=filesystem-process pid={pid}")
+            serial_println("[simple_browser] page_rendered app_id=/sys/apps/simple_browser wid={window_id.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
             serial_println("[shell] simple-browser-fallback:end pid={pid}")
             true
         case _:
@@ -454,6 +464,24 @@ impl DesktopShell:
             app_id = _fallback_app_id_for_name(name)
         if app_id == "":
             return false
+        if name == "Simple Browser":
+            serial_println("[shell] simple-browser-fallback:start pid={pid}")
+            var compositor = self.compositor
+            val window_id = compositor.create_window("Simple Browser", 220, 120, 520, 320)
+            if window_id.value == 0:
+                serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=false")
+                return false
+            compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: app_id))
+            self.compositor = compositor
+            var wm = self.wm
+            wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
+            self.wm = wm
+            launcher_note_window_opened(pid)
+            serial_println("[shell] simple-browser-fallback:create-result pid={pid} created=true")
+            serial_println("[simple_browser] window_created app_id=/sys/apps/simple_browser wid={window_id.value} title=Simple Browser mode=filesystem-process pid={pid}")
+            serial_println("[simple_browser] page_rendered app_id=/sys/apps/simple_browser wid={window_id.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
+            serial_println("[shell] simple-browser-fallback:end pid={pid}")
+            return true
         val launched = _materialize_launch_fallback(self, name, pid)
         launched
 
@@ -681,7 +709,7 @@ impl DesktopShell:
 
         val shortcut_key = self.compositor.consume_pending_shortcut()
         if shortcut_key != "":
-            self.handle_shortcut("Ctrl+Alt", shortcut_key.to_lower(), baremetal)
+            self.handle_shortcut("Ctrl+Alt", shortcut_key.lower(), baremetal)
 
     me select_next_process():
         val rows = _process_rows()

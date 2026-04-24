@@ -6931,6 +6931,102 @@ RuntimeValue rt_net_recv_version_text(int64_t sock_fd)
     return rt_string_from_cstr(buf);
 }
 
+RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+        return NIL_VALUE;
+    }
+
+    struct tcp_socket *s = &_sockets[fd];
+    int timeout = 0;
+    while (_tcp_rx_available(fd) < 5U &&
+           _sockets[fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+
+    uint32_t avail = _tcp_rx_available(fd);
+    if (avail < 5U) {
+        RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+        if (!empty) return NIL_VALUE;
+        empty->hdr.type = HEAP_ARRAY;
+        empty->hdr.size = sizeof(RuntimeArray);
+        empty->len = 0;
+        empty->cap = 0;
+        empty->items = runtime_array_inline_items(empty);
+        return ENCODE_PTR(empty);
+    }
+
+    uint32_t idx = s->rx_tail;
+    uint8_t header[5];
+    for (uint32_t i = 0; i < 5U; i++) {
+        header[i] = s->rxbuf[idx];
+        idx = (idx + 1U) % TCP_RXBUF_SIZE;
+    }
+
+    uint32_t packet_length =
+        ((uint32_t)header[0] << 24) |
+        ((uint32_t)header[1] << 16) |
+        ((uint32_t)header[2] << 8) |
+        (uint32_t)header[3];
+    uint32_t padding_length = (uint32_t)header[4];
+    if (packet_length < 2U || packet_length > 35000U || padding_length + 1U > packet_length) {
+        serial_puts("[tcp-ssh-plain] invalid packet header\r\n");
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+
+    uint32_t total = 4U + packet_length;
+    while (_tcp_rx_available(fd) < total &&
+           _sockets[fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    avail = _tcp_rx_available(fd);
+    if (avail < total) {
+        serial_puts("[tcp-ssh-plain] incomplete packet\r\n");
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+
+    uint32_t payload_length = packet_length - padding_length - 1U;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)payload_length * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)payload_length * sizeof(RuntimeValue));
+    out->len = payload_length;
+    out->cap = payload_length;
+    out->items = runtime_array_inline_items(out);
+
+    /* Consume header */
+    for (uint32_t i = 0; i < 5U; i++) {
+        s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
+    }
+    /* Consume payload */
+    for (uint32_t i = 0; i < payload_length; i++) {
+        out->items[i] = ENCODE_INT(s->rxbuf[s->rx_tail]);
+        s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
+    }
+    /* Discard padding */
+    for (uint32_t i = 0; i < padding_length; i++) {
+        s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
+    }
+
+    serial_puts("[tcp-ssh-plain] payload-len=");
+    serial_put_dec(payload_length);
+    serial_puts(" first-byte=");
+    if (payload_length > 0U) {
+        serial_put_hex((uint8_t)_rv_byte(out->items[0]));
+    } else {
+        serial_put_hex(0);
+    }
+    serial_puts("\r\n");
+    return ENCODE_PTR(out);
+}
+
 RuntimeValue rt_tls13_recv_record(int64_t sock_fd)
 {
     int fd = (int)sock_fd;
@@ -11427,6 +11523,7 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (s < 0) s = 0;
     if (e > (int64_t)a->len) e = (int64_t)a->len;
     if (s >= e) return rt_array_new(ENCODE_INT(1));
+    RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
     for (int64_t i = s; i < e; i++) {
         result = rt_array_push(result, items[i]);

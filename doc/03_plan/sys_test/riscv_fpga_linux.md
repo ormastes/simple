@@ -29,4 +29,7 @@ Historical helper-proof scope:
 - REQ-RFL-010 is satisfied for the current helper milestone. Generated RISC-V hardware source now carries dedicated writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, memory access control, and jump immediate helpers through the real frontend -> HIR -> MIR lowering path with bounded structured evidence.
 - REQ-RFL-011 is satisfied for the same helper set. Backend specs now pin exact VHDL guard structure, slice usage, concat/update expressions, and source-map records instead of relying on partial substring evidence.
 - Memory behavior remains intentionally bounded: specs now assert helper-driven alignment guards for halfword/word/doubleword accesses, but byte-enable or strobe-capable store plumbing is still deferred to a later interface slice.
+- The bounded memory-interface slice now has executable proof for `dmem_re`/`dmem_width` exposure, but subword write strobes and byte-enable semantics remain deferred.
+- The bounded memory-interface slice now also proves `dmem_wstrb` exposure plus address-derived mask/data packing for `SB/SH/SW` on RV32 and `SB/SH/SW/SD` on RV64.
+- The bounded memory-interface slice now also proves load-side lane extraction from aligned `dmem_rdata` through address-derived shifts before extension.
 - Remaining RTL work is outside this trace milestone: broader handwritten-core replacement, CSR/privilege/MMU/trap coverage, and Linux boot validation still belong to later slices.

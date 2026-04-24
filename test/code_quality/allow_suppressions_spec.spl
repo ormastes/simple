@@ -1,0 +1,131 @@
+"""
+# Allow Suppressions Canary Spec
+
+**Feature IDs:** fix-allow-suppressions
+**Category:** Testing
+**Difficulty:** 1/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Canary spec for AC-1 / AC-2: verifies that representative files touched by
+Teams A, B, and C now use properly named arguments instead of relying on
+`@allow(unnamed_duplicate_typed_args)` suppressions.
+
+NOTE: These specs verify the *replacement API compiles correctly* with named
+args and explicit imports. They cannot directly assert the absence of a
+`@allow(...)` annotation at the file level — that is a grep gate executed at
+phase 7-verify: `rg -F '@allow(unnamed_duplicate_typed_args)' src/`.
+
+These specs WILL FAIL until Team A/B/C land because the called functions
+do not yet have named argument signatures (they still use positional arg forms
+suppressed by `@allow(unnamed_duplicate_typed_args)`).
+"""
+
+use std.sspec.*
+
+
+# ============================================================================
+# Team A canary: compiler module (unnamed_duplicate_typed_args fix)
+# ============================================================================
+
+describe "AC-1/AC-2 Compiler suppression canary":
+    """
+    ## Compiler unnamed_duplicate_typed_args
+
+    Verifies that representative compiler functions accept clearly named
+    parameters after the @allow(unnamed_duplicate_typed_args) suppressions
+    are removed in Team A's scope.
+
+    These specs will FAIL (no impl) until Team A renames the args and removes
+    the suppression annotations from src/compiler/.
+    """
+
+    it "AC-2: riscv_encode_i_type accepts named imm12 rs1 funct3 rd opcode args":
+        # After fix: function must have distinct named args — this call must
+        # compile without an @allow suppression in the caller or callee.
+        # Arrange: known I-type encoding for ADDI x5, x0, 1
+        val imm12  = 1
+        val rs1    = 0   # x0
+        val funct3 = 0
+        val rd     = 5   # x5
+        val opcode = 0x13  # ADDI opcode
+        # Act: call with explicit named args (not positional duplicate-typed)
+        val result = riscv_encode_i_type(imm12: imm12, rs1: rs1, funct3: funct3, rd: rd, opcode: opcode)
+        # Assert: ADDI x5, x0, 1  -> bits: imm[11:0]=1, rs1=0, funct3=0, rd=5, opcode=0x13
+        # Word = (1 << 20) | (0 << 15) | (0 << 12) | (5 << 7) | 0x13
+        #      = 0x00100293
+        expect(result).to_equal(0x00100293)
+
+    it "AC-2: riscv_encode_r_type accepts named funct7 rs2 rs1 funct3 rd opcode args":
+        # After fix: no @allow(unnamed_duplicate_typed_args) in encode_riscv32/64
+        # ADD x1, x2, x3: funct7=0, rs2=3, rs1=2, funct3=0, rd=1, opcode=0x33
+        val funct7 = 0
+        val rs2    = 3
+        val rs1    = 2
+        val funct3 = 0
+        val rd     = 1
+        val opcode = 0x33
+        val result = riscv_encode_r_type(funct7: funct7, rs2: rs2, rs1: rs1, funct3: funct3, rd: rd, opcode: opcode)
+        # ADD x1, x2, x3 = 0x003100B3
+        expect(result).to_equal(0x003100B3)
+
+
+# ============================================================================
+# Team B canary: lib module (star_import fix)
+# ============================================================================
+
+describe "AC-1/AC-2 Lib star_import suppression canary":
+    """
+    ## Lib star_import explicit imports
+
+    After Team B replaces wildcard `use module.*` with explicit named imports,
+    the following calls must still compile and behave correctly.
+
+    These it blocks will FAIL until Team B lands the explicit-import refactor.
+    """
+
+    it "AC-2: Set operations compile with explicit imports (no star_import suppression)":
+        # Arrange: create a set using the explicit-import path
+        val s = Set.new()
+        s.insert("a")
+        s.insert("b")
+        # Act
+        val found = s.has("a")
+        # Assert
+        expect(found).to_equal(true)
+
+    it "AC-2: Map operations compile with explicit imports (no star_import suppression)":
+        val m = Map.new()
+        m.put("key", "value")
+        val found = m.has("key")
+        expect(found).to_equal(true)
+
+
+# ============================================================================
+# Team C canary: app / compiler_rust suppression fixes
+# ============================================================================
+
+describe "AC-1/AC-2 App suppression canary":
+    """
+    ## App/compiler_rust unnamed_duplicate_typed_args + hardcoded_secret fixes
+
+    After Team C lands, these representative function calls must compile
+    without @allow(unnamed_duplicate_typed_args) in any app source file.
+    """
+
+    it "AC-2: cli_dispatch_rust accepts named cmd args gc_log gc_off args":
+        # cli_dispatch_rust(cmd: text, args: [text], gc_log: bool, gc_off: bool)
+        # After fix: no @allow suppression needed — args have distinct names
+        val cmd     = "version"
+        val args    = [] of text
+        val gc_log  = false
+        val gc_off  = false
+        val result  = cli_dispatch_rust(cmd: cmd, args: args, gc_log: gc_log, gc_off: gc_off)
+        # Returns exit code; 0 for success
+        expect(result).to_be_greater_than(-1)

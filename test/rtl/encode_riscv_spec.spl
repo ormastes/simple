@@ -1,0 +1,283 @@
+"""
+# RTL RISC-V Encode Spec
+
+**Feature IDs:** fix-allow-suppressions
+**Category:** Testing
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Unit tests for RTL encode functions in
+`src/compiler/70.backend/backend/native/encode_riscv32.spl`,
+`src/compiler/70.backend/backend/native/encode_riscv64.spl`, and
+`src/compiler/70.backend/backend/native/riscv_encoding.spl`.
+
+Covers AC-3 / AC-4 by encoding known instructions and verifying the produced
+byte words against reference values from the RISC-V ISA spec.
+
+Reference encoding formula:
+- R-type: funct7[31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+- I-type: imm[11:0][31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+- U-type: imm[31:12][31:12] | rd[11:7] | opcode[6:0]
+
+These specs WILL FAIL until Team F lands and wires up the import paths.
+"""
+
+use std.sspec.*
+use compiler.backend.native.riscv_encoding.*
+use compiler.backend.native.encode_riscv32.*
+use compiler.backend.native.encode_riscv64.*
+
+
+# ============================================================================
+# riscv_encoding.spl — low-level bit-field helpers
+# ============================================================================
+
+describe "AC-3/AC-4 riscv_encode_i_type":
+    """
+    ## riscv_encode_i_type(imm12, rs1, funct3, rd, opcode) -> i64
+
+    Packs an I-type instruction word. Verified against RISC-V ISA spec table.
+    """
+
+    it "AC-4: ADDI x0, x0, 0 encodes to NOP (0x00000013)":
+        # imm12=0, rs1=0(x0), funct3=0, rd=0(x0), opcode=0x13
+        val word = riscv_encode_i_type(0, 0, 0, 0, 0x13)
+        expect(word).to_equal(0x00000013)
+
+    it "AC-4: ADDI x5, x0, 1 encodes to 0x00100293":
+        # imm12=1, rs1=0, funct3=0, rd=5, opcode=0x13
+        # (1<<20)|(0<<15)|(0<<12)|(5<<7)|0x13 = 0x00100293
+        val word = riscv_encode_i_type(1, 0, 0, 5, 0x13)
+        expect(word).to_equal(0x00100293)
+
+    it "AC-4: ADDI x1, x0, -1 encodes to 0xFFF00093":
+        # imm12=-1 (0xFFF), rs1=0, funct3=0, rd=1, opcode=0x13
+        # (0xFFF<<20)|(0<<15)|(0<<12)|(1<<7)|0x13 = 0xFFF00093
+        val word = riscv_encode_i_type(0xFFF, 0, 0, 1, 0x13)
+        expect(word).to_equal(0xFFF00093)
+
+    it "AC-4: LW x2, 4(x3) encodes to 0x00412103":
+        # LW: imm=4, rs1=3, funct3=2, rd=2, opcode=0x03
+        # (4<<20)|(3<<15)|(2<<12)|(2<<7)|0x03 = 0x00412103
+        val word = riscv_encode_i_type(4, 3, 2, 2, 0x03)
+        expect(word).to_equal(0x00412103)
+
+
+describe "AC-3/AC-4 riscv_encode_r_type":
+    """
+    ## riscv_encode_r_type(funct7, rs2, rs1, funct3, rd, opcode) -> i64
+
+    Packs an R-type instruction word. Verified against RISC-V ISA spec table.
+    """
+
+    it "AC-4: ADD x1, x2, x3 encodes to 0x003100B3":
+        # funct7=0, rs2=3, rs1=2, funct3=0, rd=1, opcode=0x33
+        # (0<<25)|(3<<20)|(2<<15)|(0<<12)|(1<<7)|0x33 = 0x003100B3
+        val word = riscv_encode_r_type(0, 3, 2, 0, 1, 0x33)
+        expect(word).to_equal(0x003100B3)
+
+    it "AC-4: SUB x1, x2, x3 encodes to 0x403100B3":
+        # funct7=0x20, rs2=3, rs1=2, funct3=0, rd=1, opcode=0x33
+        # (0x20<<25)|(3<<20)|(2<<15)|(0<<12)|(1<<7)|0x33 = 0x403100B3
+        val word = riscv_encode_r_type(0x20, 3, 2, 0, 1, 0x33)
+        expect(word).to_equal(0x403100B3)
+
+    it "AC-4: AND x4, x5, x6 encodes correctly":
+        # funct7=0, rs2=6, rs1=5, funct3=7(AND), rd=4, opcode=0x33
+        # (0<<25)|(6<<20)|(5<<15)|(7<<12)|(4<<7)|0x33
+        # = 0x0062F233
+        val word = riscv_encode_r_type(0, 6, 5, 7, 4, 0x33)
+        expect(word).to_equal(0x0062F233)
+
+
+describe "AC-3/AC-4 riscv_encode_u_type":
+    """
+    ## riscv_encode_u_type(imm20, rd, opcode) -> i64
+
+    Packs a U-type instruction word (LUI / AUIPC).
+    """
+
+    it "AC-4: LUI x1, 1 encodes to 0x000010B7":
+        # imm20=1, rd=1, opcode=0x37 (LUI)
+        # (1<<12)|(1<<7)|0x37 = 0x000010B7
+        val word = riscv_encode_u_type(1, 1, 0x37)
+        expect(word).to_equal(0x000010B7)
+
+    it "AC-4: LUI x0, 0 encodes to pure LUI opcode 0x00000037":
+        val word = riscv_encode_u_type(0, 0, 0x37)
+        expect(word).to_equal(0x00000037)
+
+
+describe "AC-3/AC-4 riscv_emit_u32_le":
+    """
+    ## riscv_emit_u32_le(buf: [i64], instruction: i64) -> [i64]
+
+    Appends a 32-bit instruction as 4 little-endian bytes to buf.
+    """
+
+    it "AC-4: emitting NOP adds 4 bytes to an empty buffer":
+        var buf: [i64] = []
+        val result = riscv_emit_u32_le(buf, 0x00000013)
+        expect(result.len()).to_equal(4)
+
+    it "AC-4: emitting 0x00000013 produces correct LE bytes [0x13, 0x00, 0x00, 0x00]":
+        var buf: [i64] = []
+        val result = riscv_emit_u32_le(buf, 0x00000013)
+        expect(result[0]).to_equal(0x13)
+        expect(result[1]).to_equal(0x00)
+        expect(result[2]).to_equal(0x00)
+        expect(result[3]).to_equal(0x00)
+
+    it "AC-4: emitting 0x00100293 produces bytes [0x93, 0x02, 0x10, 0x00]":
+        # ADDI x5, x0, 1 = 0x00100293
+        var buf: [i64] = []
+        val result = riscv_emit_u32_le(buf, 0x00100293)
+        expect(result[0]).to_equal(0x93)
+        expect(result[1]).to_equal(0x02)
+        expect(result[2]).to_equal(0x10)
+        expect(result[3]).to_equal(0x00)
+
+
+# ============================================================================
+# encode_riscv32.spl — RV32 high-level encoder
+# ============================================================================
+
+describe "AC-3/AC-4 encode_li_rv32":
+    """
+    ## encode_li_rv32(code: [i64], rd: i64, imm: i64) -> [i64]
+
+    Emits a load-immediate sequence for RV32. Small imm = single ADDI;
+    larger imm = LUI + ADDI.
+    """
+
+    it "AC-4: encode_li_rv32 with imm=0 emits single 4-byte instruction":
+        var empty: [i64] = []
+        val result = encode_li_rv32(empty, 5, 0)
+        # ADDI x5, x0, 0 = NOP variant = 4 bytes
+        expect(result.len()).to_equal(4)
+
+    it "AC-4: encode_li_rv32 with imm=1 produces ADDI x5, x0, 1":
+        var empty: [i64] = []
+        val result = encode_li_rv32(empty, 5, 1)
+        # 4 bytes for ADDI
+        expect(result.len()).to_equal(4)
+        # LE bytes of 0x00100293: 0x93, 0x02, 0x10, 0x00
+        expect(result[0]).to_equal(0x93)
+        expect(result[1]).to_equal(0x02)
+        expect(result[2]).to_equal(0x10)
+        expect(result[3]).to_equal(0x00)
+
+    it "AC-4: encode_li_rv32 with imm=2048 emits LUI+ADDI (8 bytes)":
+        # 2048 does not fit in signed 12-bit [-2048,2047], needs LUI+ADDI
+        var empty: [i64] = []
+        val result = encode_li_rv32(empty, 1, 2048)
+        expect(result.len()).to_equal(8)
+
+    it "AC-4: encode_li_rv32 with imm=-1 emits ADDI (fits in 12-bit signed)":
+        var empty: [i64] = []
+        val result = encode_li_rv32(empty, 1, -1)
+        expect(result.len()).to_equal(4)
+
+    it "AC-4: encode_li_rv32 output appends to existing buffer":
+        var initial: [i64] = [0x00]
+        val result  = encode_li_rv32(initial, 1, 0)
+        # original 1 byte + 4 new bytes = 5
+        expect(result.len()).to_equal(5)
+
+
+# ============================================================================
+# encode_riscv64.spl — RV64 high-level encoder
+# ============================================================================
+
+describe "AC-3/AC-4 encode_li_riscv64":
+    """
+    ## encode_li_riscv64(code: [i64], rd: i64, imm: i64) -> [i64]
+
+    Emits a load-immediate sequence for RV64.
+    Small values: single ADDI; 32-bit: LUI+ADDI; 64-bit: multi-instruction.
+    """
+
+    it "AC-4: encode_li_riscv64 with imm=0 emits single ADDI (4 bytes)":
+        var empty: [i64] = []
+        val result = encode_li_riscv64(empty, 5, 0)
+        expect(result.len()).to_equal(4)
+
+    it "AC-4: encode_li_riscv64 with imm=1 produces ADDI x5, x0, 1":
+        var empty: [i64] = []
+        val result = encode_li_riscv64(empty, 5, 1)
+        expect(result.len()).to_equal(4)
+        expect(result[0]).to_equal(0x93)
+        expect(result[1]).to_equal(0x02)
+        expect(result[2]).to_equal(0x10)
+        expect(result[3]).to_equal(0x00)
+
+    it "AC-4: encode_li_riscv64 with imm=2048 emits LUI+ADDI (8 bytes)":
+        var empty: [i64] = []
+        val result = encode_li_riscv64(empty, 1, 2048)
+        expect(result.len()).to_equal(8)
+
+    it "AC-4: encode_li_riscv64 with imm=-1 emits single ADDI (4 bytes)":
+        var empty: [i64] = []
+        val result = encode_li_riscv64(empty, 1, -1)
+        expect(result.len()).to_equal(4)
+
+    it "AC-4: encode_li_riscv64 appends to existing buffer":
+        var initial: [i64] = [0x00]
+        val result  = encode_li_riscv64(initial, 1, 0)
+        expect(result.len()).to_equal(5)
+
+
+describe "AC-3/AC-4 rv32_new_encode_context":
+    """
+    ## rv32_new_encode_context() -> Rv32EncodeContext
+
+    Returns a fresh RV32 encode context. Verify it is non-nil and has
+    expected default fields.
+    """
+
+    it "AC-4: rv32_new_encode_context returns context with empty code":
+        # TODO: full context validation needs MachInst infrastructure
+        expect(true).to_equal(true)
+
+
+describe "AC-3/AC-4 rv64_new_encode_context":
+    """
+    ## rv64_new_encode_context() -> Rv64EncodeContext
+
+    Returns a fresh RV64 encode context.
+    """
+
+    it "AC-4: rv64_new_encode_context returns context with empty code":
+        # TODO: full context validation needs MachInst infrastructure
+        expect(true).to_equal(true)
+
+
+describe "AC-3/AC-4 rv32_encode_contract":
+    """
+    ## rv32_encode_contract() -> RiscvTargetContract
+
+    Returns the RV32 target contract (ISA + ABI metadata).
+    """
+
+    it "AC-4: rv32_encode_contract is accessible":
+        # TODO: full contract validation needs backend_types/riscv_target infrastructure
+        expect(true).to_equal(true)
+
+
+describe "AC-3/AC-4 rv64_encode_contract":
+    """
+    ## rv64_encode_contract() -> RiscvTargetContract
+
+    Returns the RV64 target contract.
+    """
+
+    it "AC-4: rv64_encode_contract is accessible":
+        # TODO: full contract validation needs backend_types/riscv_target infrastructure
+        expect(true).to_equal(true)

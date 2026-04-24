@@ -7,7 +7,7 @@
 # The session reads/writes via socket FDs using the POSIX socket API.
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
-use os.apps.sshd.ssh_packet.{SshPacket, SshPacketResult, SshTextResult, SshStringResult, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
+use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
@@ -23,14 +23,29 @@ extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
+extern fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]
 extern fn rt_net_recv_version_text(sock_fd: i64) -> text
 extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
+extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 
 # ============================================================================
 # Constants
 # ============================================================================
 
 val RECV_BUF_SIZE: u64 = 8192
+
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _slice_range(data: [u8], start: u64, end: u64) -> [u8]:
+    if start >= data.len() or start >= end:
+        return rt_bytes_slice(data, 0, 0)
+    var capped_end = end
+    if capped_end > data.len():
+        capped_end = data.len()
+    rt_bytes_slice(data, start.to_i64(), (capped_end - start).to_i64())
 
 # ============================================================================
 # Types
@@ -164,7 +179,9 @@ impl SshSession:
 
         # Receive client KEXINIT
         val client_payload = self.recv_packet_payload()
+        serial_println("[sshd-session] client kexinit received")
         if client_payload.len() == 0:
+            serial_println("[sshd-session] client kexinit missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
             return false
         self.client_kexinit_payload = client_payload
@@ -172,9 +189,11 @@ impl SshSession:
         # Parse client KEXINIT
         val r_client_kex = ssh_parse_kexinit(client_payload)
         if r_client_kex.is_err():
+            serial_println("[sshd-session] client kexinit parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
             return false
         val client_kex = r_client_kex.unwrap()
+        serial_println("[sshd-session] client kexinit parsed")
 
         # Parse our own KEXINIT (for negotiation)
         val r_server_kex = ssh_parse_kexinit(server_kexinit)
@@ -183,17 +202,23 @@ impl SshSession:
         # Negotiate algorithms
         val r_algos = ssh_negotiate_algorithms(client_kex, server_kex)
         if r_algos.is_err():
+            serial_println("[sshd-session] algo negotiation failed")
             self.disconnect(3, "algorithm negotiation failed")
             return false
+        val algos_early = r_algos.unwrap()
+        serial_println("[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
 
         # Receive KEX_ECDH_INIT (client's ephemeral public key)
         val kex_init_payload = self.recv_packet_payload()
+        serial_println("[sshd-session] client ecdh init received")
         if kex_init_payload.len() == 0:
+            serial_println("[sshd-session] client ecdh init missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
             return false
 
         val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
         if r_client_pub.is_err():
+            serial_println("[sshd-session] client ecdh init parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
             return false
         val client_public = r_client_pub.unwrap()
@@ -210,7 +235,6 @@ impl SshSession:
         serial_println("[sshd-session] shared secret len={shared_secret.len()}")
 
         # Resolve negotiated algorithms — needed now for host-key-blob type
-        val algos_early = r_algos.unwrap()
         val negotiated_hk_algo = algos_early.host_key
 
         # Build host key blob for the negotiated algorithm
@@ -237,6 +261,7 @@ impl SshSession:
         # Sign the exchange hash with the appropriate host key
         val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
         if r_sig.is_err():
+            serial_println("[sshd-session] host key signing err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
             return false
         val sig_blob = r_sig.unwrap()
@@ -253,7 +278,7 @@ impl SshSession:
 
         # Receive client NEWKEYS
         val client_newkeys = self.recv_packet_payload()
-        if client_newkeys.len() == 0 or client_newkeys[0] != SSH_MSG_NEWKEYS:
+        if client_newkeys.len() == 0 or _u8_at(client_newkeys, 0) != SSH_MSG_NEWKEYS:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
             return false
 
@@ -282,7 +307,7 @@ impl SshSession:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
             return false
 
-        if payload[0] == SSH_MSG_SERVICE_REQUEST:
+        if _u8_at(payload, 0) == SSH_MSG_SERVICE_REQUEST:
             val r = ssh_parse_service_request(payload)
             if r.is_ok():
                 val service = r.unwrap()
@@ -316,7 +341,7 @@ impl SshSession:
                 self.state = SessionState.Closed
                 return false
 
-            if payload[0] != SSH_MSG_USERAUTH_REQUEST:
+            if _u8_at(payload, 0) != SSH_MSG_USERAUTH_REQUEST:
                 # Ignore non-auth messages during auth phase
                 attempts = attempts + 1
                 continue
@@ -425,7 +450,7 @@ impl SshSession:
                 self.state = SessionState.Closed
                 return
 
-            val msg_type = payload[0]
+            val msg_type = _u8_at(payload, 0)
 
             if msg_type == SSH_MSG_CHANNEL_OPEN:
                 self._handle_channel_open(payload)
@@ -783,15 +808,23 @@ impl SshSession:
 
         Accumulates data in recv_buf until a complete packet can be parsed.
         """
+        if not self.cipher.active:
+            # Plaintext mode on baremetal: frame one packet directly in the
+            # runtime socket ring to avoid SPL-side buffering corruption.
+            val payload = rt_net_recv_ssh_plain_packet_payload(self.socket_fd as i64)
+            if payload.len() == 0:
+                serial_println("[sshd-session] plaintext incomplete")
+                return []
+            serial_println("[sshd-session] plaintext packet ok")
+            self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+            return payload
+
         var i: u64 = 0
         if self.recv_buf.len() == 0:
             val new_data = self.raw_recv(RECV_BUF_SIZE)
             if new_data.len() == 0:
                 return []
-
-            while i < new_data.len():
-                self.recv_buf.push(new_data[i])
-                i = i + 1
+            self.recv_buf = new_data
 
         if self.cipher.active:
             # Encrypted mode: need at least 4 bytes for length + 16 for tag
@@ -806,25 +839,16 @@ impl SshSession:
                 val more = self.raw_recv(RECV_BUF_SIZE)
                 if more.len() == 0:
                     return []
-                i = 0
-                while i < more.len():
-                    self.recv_buf.push(more[i])
-                    i = i + 1
+                if self.recv_buf.len() == 0:
+                    self.recv_buf = more
+                else:
+                    self.recv_buf = rt_bytes_concat(self.recv_buf, more)
 
             # Extract the encrypted packet
-            var enc_packet: [u8] = []
-            i = 0
-            while i < total_needed:
-                enc_packet.push(self.recv_buf[i])
-                i = i + 1
+            var enc_packet = rt_bytes_slice(self.recv_buf, 0, total_needed.to_i64())
 
             # Remove consumed bytes from recv_buf
-            var remaining: [u8] = []
-            i = total_needed
-            while i < self.recv_buf.len():
-                remaining.push(self.recv_buf[i])
-                i = i + 1
-            self.recv_buf = remaining
+            self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
 
             # Decrypt
             val r = self.cipher.decrypt_packet(enc_packet)
@@ -836,46 +860,7 @@ impl SshSession:
                 return []
 
         else:
-            # Plaintext mode
-            val r = ssh_packet_read(self.recv_buf, 0)
-            if r.is_ok():
-                val pair = r.unwrap()
-                val packet = pair.packet
-                val consumed = pair.consumed
-
-                # Remove consumed bytes
-                var remaining: [u8] = []
-                i = consumed
-                while i < self.recv_buf.len():
-                    remaining.push(self.recv_buf[i])
-                    i = i + 1
-                self.recv_buf = remaining
-
-                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                return packet.payload
-            else:
-                # Need more data — try once more
-                val more = self.raw_recv(RECV_BUF_SIZE)
-                i = 0
-                while i < more.len():
-                    self.recv_buf.push(more[i])
-                    i = i + 1
-
-                val r2 = ssh_packet_read(self.recv_buf, 0)
-                if r2.is_ok():
-                    val pair2 = r2.unwrap()
-                    val packet2 = pair2.packet
-                    val consumed2 = pair2.consumed
-                    var remaining2: [u8] = []
-                    i = consumed2
-                    while i < self.recv_buf.len():
-                        remaining2.push(self.recv_buf[i])
-                        i = i + 1
-                    self.recv_buf = remaining2
-                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                    return packet2.payload
-                else:
-                    return []
+            return []
 
     me disconnect(reason: u32, description: text):
         """Send SSH_MSG_DISCONNECT and close the session."""

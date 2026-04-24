@@ -28,6 +28,9 @@ Generated artifact details:
 - Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/jump overlay fields.
 - The handwritten VHDL shell keeps entity/package/process structure stable, but now consumes helper-aligned packed variables for writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, memory access control, and jump immediate instead of independently reconstructing those values from ad hoc raw slices.
 - Memory accesses stay bounded to the current bus contract: helper-derived `funct3` drives load sign/zero extension and alignment traps, while unsupported store widths still trap instead of implying byte-strobe support the shell does not expose.
+- The bounded memory shell now exposes `dmem_re` and `dmem_width` next to `dmem_we`, using helper-derived width codes `00/01/10/11` for byte/halfword/word/doubleword intent.
+- The bounded store path now also exposes `dmem_wstrb` and lane-packed `dmem_wdata`, covering `SB/SH/SW` on RV32 and `SB/SH/SW/SD` on RV64 through address-derived masks and shifts.
+- The bounded load path now mirrors that lane behavior by extracting bytes, halfwords, and words from aligned `dmem_rdata` via address-derived right shifts before sign or zero extension.
 - Current default generation is RV64-first. RV32 remains a parity-only contract lane and is intentionally not emitted by the default manifest.
 
 Validation:
