@@ -551,6 +551,8 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must define upper immediate helper")
         if not source.contains("fn {self.top_module}_decode_execute_control"):
             errors.push("{self.xlen.to_text()} hardware source must define execute control helper")
+        if not source.contains("fn {self.top_module}_decode_memory_access_control"):
+            errors.push("{self.xlen.to_text()} hardware source must define memory access control helper")
         if not source.contains("fn {self.top_module}_decode_jump_immediate"):
             errors.push("{self.xlen.to_text()} hardware source must define jump immediate helper")
         if not source.contains("writeback.rd = inst.rs1 as u32"):
@@ -577,6 +579,10 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must define execute control bitfield")
         if not source.contains("bitfield RiscvExecuteControlEncoding(u32):"):
             errors.push("{self.xlen.to_text()} hardware source must define execute control source-layout bitfield")
+        if not source.contains("bitfield RiscvMemoryAccessControl(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define memory access control bitfield")
+        if not source.contains("bitfield RiscvMemoryAccessControlEncoding(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define memory access control source-layout bitfield")
         if not source.contains("bitfield RiscvJumpImmediate(u32):"):
             errors.push("{self.xlen.to_text()} hardware source must define jump immediate bitfield")
         if not source.contains("bitfield RiscvJumpEncoding(u32):"):
@@ -639,6 +645,12 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must preserve execute control bit30")
         if not source.contains("control.shamt6 = ((control_inst.shamt_bit5 as u32) << 5) | (control_inst.shamt_low5 as u32)"):
             errors.push("{self.xlen.to_text()} hardware source must preserve execute control shift amount bits")
+        if not source.contains("val access_inst = RiscvMemoryAccessControlEncoding.new(imem_rdata)"):
+            errors.push("{self.xlen.to_text()} hardware source must read memory access control through the memory-access layout bitfield")
+        if not source.contains("var access = RiscvMemoryAccessControl.new(0 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must reconstruct memory access control through bitfield writes")
+        if not source.contains("access.funct3 = access_inst.funct3 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve memory access control funct3 bits")
         if not source.contains("val jump_inst = RiscvJumpEncoding.new(imem_rdata)"):
             errors.push("{self.xlen.to_text()} hardware source must read jump immediate pieces through the jump layout bitfield")
         if not source.contains("var jump_imm = RiscvJumpImmediate.new(0 as u32)"):
@@ -679,6 +691,7 @@ impl RiscvFpgaLane:
             "-- source-map: RiscvExecuteControlEncoding.shamt_low5 => imem_rdata(24 downto 20)\n" +
             "-- source-map: RiscvExecuteControlEncoding.shamt_bit5 => imem_rdata(25 downto 25)\n" +
             "-- source-map: RiscvExecuteControlEncoding.bit30 => imem_rdata(30 downto 30)\n" +
+            "-- source-map: RiscvMemoryAccessControlEncoding.funct3 => imem_rdata(14 downto 12)\n" +
             "-- source-map: RiscvJumpEncoding.high8 => imem_rdata(19 downto 12)\n" +
             "-- source-map: RiscvJumpEncoding.bit11 => imem_rdata(20 downto 20)\n" +
             "-- source-map: RiscvJumpEncoding.low10 => imem_rdata(30 downto 21)\n" +
@@ -756,11 +769,13 @@ impl RiscvFpgaLane:
             "        variable decode_i_immediate_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_upper_immediate_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_execute_control_bits : std_logic_vector(31 downto 0);\n" +
+            "        variable decode_memory_access_control_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_jump_immediate_bits : std_logic_vector(31 downto 0);\n" +
             "        variable decode_writeback_rd_i : integer range 0 to 31;\n" +
             "        variable branch_taken : boolean;\n" +
             "        variable shift_i : natural range 0 to 63;\n" +
             "        variable decode_funct3 : std_logic_vector(2 downto 0);\n" +
+            "        variable decode_memory_funct3 : std_logic_vector(2 downto 0);\n" +
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
@@ -782,6 +797,7 @@ impl RiscvFpgaLane:
             "                decode_i_immediate_bits := (others => '0');\n" +
             "                decode_upper_immediate_bits := (others => '0');\n" +
             "                decode_execute_control_bits := (others => '0');\n" +
+            "                decode_memory_access_control_bits := (others => '0');\n" +
             "                decode_jump_immediate_bits := (others => '0');\n" +
             "                if imem_rdata(6 downto 0) = \"0010011\" then\n" +
             "                    decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(19 downto 15) & imem_rdata(6 downto 0);\n" +
@@ -803,6 +819,9 @@ impl RiscvFpgaLane:
             "                if imem_rdata(6 downto 0) = \"0010011\" or imem_rdata(6 downto 0) = \"0110011\" or imem_rdata(6 downto 0) = \"1100011\" then\n" +
             "                    decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                end if;\n" +
+            "                if imem_rdata(6 downto 0) = \"0000011\" or imem_rdata(6 downto 0) = \"0100011\" then\n" +
+            "                    decode_memory_access_control_bits := \"00000000000000000000000000000\" & imem_rdata(14 downto 12);\n" +
+            "                end if;\n" +
             "                if imem_rdata(6 downto 0) = \"1101111\" then\n" +
             "                    decode_jump_immediate_bits := \"000000000000\" & imem_rdata(31 downto 31) & imem_rdata(19 downto 12) & imem_rdata(20 downto 20) & imem_rdata(30 downto 21);\n" +
             "                end if;\n" +
@@ -814,6 +833,7 @@ impl RiscvFpgaLane:
             "                branch_taken := false;\n" +
             "                shift_i := to_integer(unsigned(regs(rs2_i)(5 downto 0)));\n" +
             "                decode_funct3 := decode_execute_control_bits(2 downto 0);\n" +
+            "                decode_memory_funct3 := decode_memory_access_control_bits(2 downto 0);\n" +
             "                case imem_rdata(6 downto 0) is\n" +
             "                    when \"0110111\" =>\n" +
             "                        if rd_i /= 0 then\n" +
@@ -893,16 +913,67 @@ impl RiscvFpgaLane:
             "                    when \"0000011\" =>\n" +
             "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
-            "                        if rd_i /= 0 then\n" +
-            "                            regs(rd_i) <= dmem_rdata;\n" +
-            "                        end if;\n" +
+            "                        case decode_memory_funct3 is\n" +
+            "                            when \"000\" =>\n" +
+            "                                if rd_i /= 0 then\n" +
+            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(7 downto 0)), XLEN));\n" +
+            "                                end if;\n" +
+            "                            when \"001\" =>\n" +
+            "                                if rd_i /= 0 then\n" +
+            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(15 downto 0)), XLEN));\n" +
+            "                                end if;\n" +
+            "                            when \"010\" =>\n" +
+            "                                if rd_i /= 0 then\n" +
+            "                                    regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                end if;\n" +
+            "                            when \"011\" =>\n" +
+            "                                if XLEN = 64 then\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= dmem_rdata;\n" +
+            "                                    end if;\n" +
+            "                                else\n" +
+            "                                    trap_reg <= '1';\n" +
+            "                                end if;\n" +
+            "                            when \"100\" =>\n" +
+            "                                if rd_i /= 0 then\n" +
+            "                                    regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(7 downto 0)), XLEN));\n" +
+            "                                end if;\n" +
+            "                            when \"101\" =>\n" +
+            "                                if rd_i /= 0 then\n" +
+            "                                    regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(15 downto 0)), XLEN));\n" +
+            "                                end if;\n" +
+            "                            when \"110\" =>\n" +
+            "                                if XLEN = 64 then\n" +
+            "                                    if rd_i /= 0 then\n" +
+            "                                        regs(rd_i) <= std_logic_vector(resize(unsigned(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                    end if;\n" +
+            "                                else\n" +
+            "                                    trap_reg <= '1';\n" +
+            "                                end if;\n" +
+            "                            when others => trap_reg <= '1';\n" +
+            "                        end case;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0100011\" =>\n" +
             "                        imm_i := resize(signed(decode_store_immediate_bits(11 downto 5) & decode_store_immediate_bits(4 downto 0)), XLEN);\n" +
             "                        addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                        dmem_addr_reg <= std_logic_vector(addr_i);\n" +
-            "                        dmem_wdata_reg <= regs(rs2_i);\n" +
-            "                        dmem_we_reg <= '1';\n" +
+            "                        case decode_memory_funct3 is\n" +
+            "                            when \"010\" =>\n" +
+            "                                if XLEN = 32 then\n" +
+            "                                    dmem_wdata_reg <= regs(rs2_i);\n" +
+            "                                    dmem_we_reg <= '1';\n" +
+            "                                else\n" +
+            "                                    trap_reg <= '1';\n" +
+            "                                end if;\n" +
+            "                            when \"011\" =>\n" +
+            "                                if XLEN = 64 then\n" +
+            "                                    dmem_wdata_reg <= regs(rs2_i);\n" +
+            "                                    dmem_we_reg <= '1';\n" +
+            "                                else\n" +
+            "                                    trap_reg <= '1';\n" +
+            "                                end if;\n" +
+            "                            when others => trap_reg <= '1';\n" +
+            "                        end case;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"1100011\" =>\n" +
             "                        case decode_funct3 is\n" +

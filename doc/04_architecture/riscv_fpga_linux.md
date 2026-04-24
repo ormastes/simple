@@ -23,7 +23,7 @@ Future implementation layers should consume this historical contract shape witho
 
 Traceability handoff:
 
-- REQ-RFL-010 is satisfied for the implemented helper set: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and bounded specs prove typed bitfield reads and dedicated writeback/branch/store/I-type/upper/execute-control/jump helper recomposition.
+- REQ-RFL-010 is satisfied for the implemented helper set: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and bounded specs prove typed bitfield reads and dedicated writeback/branch/store/I-type/upper/execute-control/memory-access/jump helper recomposition.
 - REQ-RFL-011 is satisfied for the same helper set: specs show those typed MIR extracts lower to stable slices, exact guard structure, concat/update expressions, and source-map records without re-parsing facade source strings.
 - Future decode families should extend the same contract rather than bypass it with handwritten bit slicing or backend-specific special cases.
 - MIR JSON export is the trace boundary between compiler lowering and RTL/VHDL tests. It must expose enough structured module shape for specs to identify functions, basic blocks, emitted instructions, and terminators without depending on raw debug logs.
