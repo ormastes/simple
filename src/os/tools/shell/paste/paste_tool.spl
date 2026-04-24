@@ -1,0 +1,68 @@
+#![allow(unnamed_duplicate_typed_args)]
+# paste — Merge lines from multiple files side by side
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_paste(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Merge lines from multiple files side by side.
+
+    Flag: -d DELIM (delimiter, default tab)
+    Usage: paste [-d DELIM] FILE1 FILE2 ...
+    """
+    var delimiter = "\t"
+    var file_paths: [text] = []
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-d" and i + 1 < args.len():
+            i = i + 1
+            delimiter = args[i]
+        elif arg.starts_with("-d") and arg.len() > 2:
+            delimiter = arg.slice(2, arg.len())
+        elif not arg.starts_with("-"):
+            file_paths = file_paths.push(arg)
+        i = i + 1
+
+    if file_paths.len() == 0:
+        write_error(terminal, "paste: missing file operand")
+        write_error(terminal, "Usage: paste [-d DELIM] FILE1 FILE2 ...")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "paste: no filesystem mounted")
+        return 1
+
+    # Read all files into list-of-lists
+    var all_file_lines: [[text]] = []
+    var max_lines = 0
+
+    for fp in file_paths:
+        val path = resolve_path(cwd, fp)
+        val result = vfs.read_text(path)
+        if result.is_err():
+            write_error(terminal, "paste: {path}: {result.unwrap_err()}")
+            return 1
+        val file_lines = split_lines(result.unwrap())
+        if file_lines.len() > max_lines:
+            max_lines = file_lines.len()
+        all_file_lines = all_file_lines.push(file_lines)
+
+    # For each row index, join the Nth line from each file with delimiter
+    var row = 0
+    while row < max_lines:
+        var out = ""
+        var fi = 0
+        while fi < all_file_lines.len():
+            if fi > 0:
+                out = "{out}{delimiter}"
+            val file_lines = all_file_lines[fi]
+            if row < file_lines.len():
+                out = "{out}{file_lines[row]}"
+            fi = fi + 1
+        write_line(terminal, out)
+        row = row + 1
+
+    return 0

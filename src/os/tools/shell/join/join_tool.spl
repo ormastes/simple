@@ -1,0 +1,132 @@
+#![allow(unnamed_duplicate_typed_args)]
+# join — Join lines from two files on a common field
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines, split_text_on}
+
+fn tool_join(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Join lines from two files on a common field.
+
+    Flags: -1 N  (join field in file1, 1-based, default 1)
+           -2 N  (join field in file2, 1-based, default 1)
+           -t C  (field separator character, default space)
+    Output: join_field + remaining fields from file1 + remaining fields from file2
+    Usage: join [-1 N] [-2 N] [-t C] FILE1 FILE2
+    """
+    var field1 = 1
+    var field2 = 1
+    var separator = " "
+    var file_paths: [text] = []
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-1" and i + 1 < args.len():
+            i = i + 1
+            field1 = _parse_int(args[i])
+        elif arg == "-2" and i + 1 < args.len():
+            i = i + 1
+            field2 = _parse_int(args[i])
+        elif arg == "-t" and i + 1 < args.len():
+            i = i + 1
+            separator = args[i]
+        elif arg.starts_with("-t") and arg.len() > 2:
+            separator = arg.slice(2, arg.len())
+        elif not arg.starts_with("-"):
+            file_paths = file_paths.push(arg)
+        i = i + 1
+
+    if file_paths.len() < 2:
+        write_error(terminal, "join: missing operand")
+        write_error(terminal, "Usage: join [-1 N] [-2 N] [-t C] FILE1 FILE2")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "join: no filesystem mounted")
+        return 1
+
+    val path1 = resolve_path(cwd, file_paths[0])
+    val path2 = resolve_path(cwd, file_paths[1])
+
+    val result1 = vfs.read_text(path1)
+    if result1.is_err():
+        write_error(terminal, "join: {path1}: {result1.unwrap_err()}")
+        return 1
+
+    val result2 = vfs.read_text(path2)
+    if result2.is_err():
+        write_error(terminal, "join: {path2}: {result2.unwrap_err()}")
+        return 1
+
+    val lines1 = split_lines(result1.unwrap())
+    val lines2 = split_lines(result2.unwrap())
+
+    val idx1 = field1 - 1
+    val idx2 = field2 - 1
+
+    # For each line in file1, find matching lines in file2
+    for l1 in lines1:
+        if l1.trim() == "":
+            pass_dn
+        val parts1 = _split_on_sep(l1, separator)
+        if idx1 >= parts1.len():
+            pass_dn
+        val key1 = parts1[idx1]
+
+        for l2 in lines2:
+            if l2.trim() == "":
+                pass_dn
+            val parts2 = _split_on_sep(l2, separator)
+            if idx2 >= parts2.len():
+                pass_dn
+            val key2 = parts2[idx2]
+
+            if key1 == key2:
+                # Build output: join_field + remaining from file1 + remaining from file2
+                var out = key1
+                var ci = 0
+                while ci < parts1.len():
+                    if ci != idx1:
+                        out = "{out}{separator}{parts1[ci]}"
+                    ci = ci + 1
+                var cj = 0
+                while cj < parts2.len():
+                    if cj != idx2:
+                        out = "{out}{separator}{parts2[cj]}"
+                    cj = cj + 1
+                write_line(terminal, out)
+
+    return 0
+
+fn _split_on_sep(line: text, sep: text) -> [text]:
+    """Split a line on the given separator (single char or space = whitespace split)."""
+    if sep == " ":
+        return _split_whitespace(line)
+    return split_text_on(line, sep)
+
+fn _split_whitespace(line: text) -> [text]:
+    """Split on whitespace, collapsing runs."""
+    var parts: [text] = []
+    var current = ""
+    var in_word = false
+    for ch in line:
+        if ch == " " or ch == "\t":
+            if in_word:
+                parts = parts.push(current)
+                current = ""
+                in_word = false
+        else:
+            current = "{current}{ch}"
+            in_word = true
+    if in_word and current != "":
+        parts = parts.push(current)
+    return parts
+
+fn _parse_int(s: text) -> i32:
+    """Parse a decimal integer string."""
+    var result: i32 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32())
+    return result
