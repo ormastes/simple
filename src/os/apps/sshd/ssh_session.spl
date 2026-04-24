@@ -29,7 +29,6 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
-extern fn rt_tls13_x25519_shared_secret_into(scalar: [u8], point: [u8], out: [u8]) -> i64
 
 # ============================================================================
 # Constants
@@ -47,6 +46,21 @@ fn _slice_range(data: [u8], start: u64, end: u64) -> [u8]:
     if capped_end > data.len():
         capped_end = data.len()
     rt_bytes_slice(data, start.to_i64(), (capped_end - start).to_i64())
+
+fn _hex_digit(v: u8) -> text:
+    val digits = "0123456789abcdef"
+    digits[(v & 0x0F).to_i64()]
+
+fn _byte_hex(v: u8) -> text:
+    "{_hex_digit((v >> 4) & 0x0F)}{_hex_digit(v & 0x0F)}"
+
+fn _bytes_to_hex(data: [u8]) -> text:
+    var out = ""
+    var i: u64 = 0
+    while i < data.len():
+        out = out + _byte_hex(_u8_at(data, i))
+        i = i + 1
+    out
 
 fn _zeroed_32_bytes() -> [u8]:
     var out: [u8] = []
@@ -247,21 +261,15 @@ impl SshSession:
 
         # Generate our ephemeral keypair
         val server_private = ssh_kex_generate_private_key()
-        val server_public = _zeroed_32_bytes()
-        val r_server_public = rt_tls13_x25519_shared_secret_into(
-            server_private,
-            [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            server_public
-        )
-        if r_server_public != 1:
+        val server_public = ssh_kex_public_from_private(server_private)
+        if server_public.len() != 32:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 public failed")
             return false
         serial_println("[sshd-session] server ecdh pub len={server_public.len()}")
 
         # Compute shared secret
-        val shared_secret = _zeroed_32_bytes()
-        val r_shared_secret = rt_tls13_x25519_shared_secret_into(server_private, client_public, shared_secret)
-        if r_shared_secret != 1:
+        val shared_secret = ssh_kex_compute_shared(server_private, client_public)
+        if shared_secret.len() != 32:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 shared failed")
             return false
         serial_println("[sshd-session] shared secret len={shared_secret.len()}")
@@ -298,6 +306,12 @@ impl SshSession:
             return false
         val sig_blob = r_sig.unwrap()
         serial_println("[sshd-session] sig blob len={sig_blob.len()}")
+        if negotiated_hk_algo == "ssh-ed25519":
+            val ed_pub = _extract_ed25519_pubkey(host_key_blob)
+            val ed_sig = _unwrap_ssh_signature(sig_blob)
+            serial_println("[sshd-session] ed25519 k_s={_bytes_to_hex(ed_pub)}")
+            serial_println("[sshd-session] ed25519 h={_bytes_to_hex(exchange_hash)}")
+            serial_println("[sshd-session] ed25519 sig={_bytes_to_hex(ed_sig)}")
 
         # Send KEX_ECDH_REPLY
         val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob)
