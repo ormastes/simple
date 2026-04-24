@@ -71,4 +71,4 @@ Verification shall include:
 - requirement-traceable system tests
 - failure-path coverage for invalid targets and missing shell/runtime cases
 - representative interactive smoke checks
-
+- hosted/dev perf smoke for startup and send/capture latency budgets

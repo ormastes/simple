@@ -183,6 +183,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 }
             }
             "--force-rebuild" => options.force_rebuild = true,
+            "--clean" => options.clean = true,
             "--no-cache" => options.no_cache = true,
             "--no-db" => options.no_db = true,
             "--keep-artifacts" => options.keep_artifacts = true,
@@ -354,6 +355,14 @@ mod tests {
         let args = vec!["test/my_test.spl".to_string()];
         let opts = parse_test_args(&args);
         assert_eq!(opts.path, Some(PathBuf::from("test/my_test.spl")));
+    }
+
+    #[test]
+    fn test_parse_clean() {
+        let args = vec!["--clean".to_string(), "test/system/os_shell_spec.spl".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.clean);
+        assert_eq!(opts.path, Some(PathBuf::from("test/system/os_shell_spec.spl")));
     }
 
     #[test]

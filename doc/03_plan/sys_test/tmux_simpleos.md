@@ -49,6 +49,12 @@ Focused design-level feature spec:
 bin/simple test doc/06_spec/app/simpleos/feature/tmux_simpleos_spec.spl
 ```
 
+Perf smoke for hosted/dev NFR evidence:
+
+```bash
+bin/simple test test/perf/smux_perf_spec.spl
+```
+
 Recommended adjacent checks once implementation exists:
 
 ```bash
@@ -73,6 +79,7 @@ bin/simple test test/os/kernel/loader/executable_source_vfs_spec.spl
 | REQ-011 | invalid targets and launch failures return explicit errors |
 | REQ-012 | deferred parity features are not required for pass |
 | NFR-007 | metrics getter reports startup and operation counters |
+| NFR-001/NFR-002 | perf smoke records hosted/dev startup and send/capture latency budgets |
 
 ## Pass Criteria
 

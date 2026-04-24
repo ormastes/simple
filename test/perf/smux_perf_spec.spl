@@ -1,0 +1,108 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Smux performance smoke.
+#
+# Records lightweight hosted/dev timing evidence for the native smux slice.
+
+extern fn rt_time_now_nanos() -> i64
+
+use std.spec.{describe, it, expect}
+use os.apps.smux.api.{
+    smux_reset_for_test,
+    smux_create_session,
+    smux_list_windows,
+    smux_list_panes,
+    smux_send_command,
+    smux_capture
+}
+
+fn slow_it(name: text, block: fn()):
+    it(name, block)
+
+fn _sort(samples: [i64]) -> [i64]:
+    var result: [i64] = samples
+    var i: i64 = 1
+    while i < result.len():
+        val key = result[i as i32]
+        var j = i - 1
+        while j >= 0 and result[j as i32] > key:
+            result[(j + 1) as i32] = result[j as i32]
+            j = j - 1
+        result[(j + 1) as i32] = key
+        i = i + 1
+    result
+
+fn _percentile(samples: [i64], pct_num: i64, pct_den: i64) -> i64:
+    if samples.len() == 0:
+        return 0
+    val sorted = _sort(samples)
+    var idx = (sorted.len() * pct_num) / pct_den
+    if idx >= sorted.len():
+        idx = sorted.len() - 1
+    sorted[idx as i32]
+
+fn _average(samples: [i64]) -> i64:
+    if samples.len() == 0:
+        return 0
+    var total = 0i64
+    var i = 0
+    while i < samples.len():
+        total = total + samples[i]
+        i = i + 1
+    total / samples.len()
+
+fn _measure_ns(warmup: i64, iterations: i64, body: fn()) -> [i64]:
+    var i = 0
+    while i < warmup:
+        body()
+        i = i + 1
+
+    var samples: [i64] = []
+    i = 0
+    while i < iterations:
+        val start = rt_time_now_nanos()
+        body()
+        samples = samples.push(rt_time_now_nanos() - start)
+        i = i + 1
+    samples
+
+describe "smux performance smoke":
+    slow_it "keeps reset plus initial session startup under the hosted smoke budget":
+        val samples = _measure_ns(3, 20, \:
+            smux_reset_for_test()
+            val session = smux_create_session("perf-startup")
+            val windows = smux_list_windows(session.id)
+            val panes = smux_list_panes(session.id, windows[0].id)
+            expect(windows.len()).to_equal(1)
+            expect(panes.len()).to_equal(1)
+        )
+
+        val avg_ms = _average(samples) / 1000000
+        val p95_ms = _percentile(samples, 95, 100) / 1000000
+        print "[perf] smux startup avg={avg_ms}ms p95={p95_ms}ms iters={samples.len()}"
+        expect(avg_ms).to_be_less_than(200)
+        expect(p95_ms).to_be_less_than(200)
+
+    slow_it "keeps send plus capture p95 within the interactive smoke budget":
+        smux_reset_for_test()
+        val session = smux_create_session("perf-io")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+
+        expect(smux_send_command(session.id, window.id, pane.id, "pwd")).to_equal(true)
+        val preflight = smux_capture(session.id, window.id, pane.id, 20)
+        expect(preflight.rows).to_be_greater_than(0)
+
+        var seq = 0
+        val samples = _measure_ns(5, 50, \:
+            seq = seq + 1
+            expect(smux_send_command(session.id, window.id, pane.id, "echo smux-perf-{seq}")).to_equal(true)
+            val capture = smux_capture(session.id, window.id, pane.id, 50)
+            expect(capture.rows).to_be_greater_than(0)
+            expect(capture.content.contains("smux-perf-{seq}")).to_equal(true)
+        )
+
+        val avg_ms = _average(samples) / 1000000
+        val p95_ms = _percentile(samples, 95, 100) / 1000000
+        print "[perf] smux send/capture avg={avg_ms}ms p95={p95_ms}ms iters={samples.len()}"
+        expect(avg_ms).to_be_less_than(20)
+        expect(p95_ms).to_be_less_than(20)

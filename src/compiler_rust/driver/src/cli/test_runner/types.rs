@@ -199,6 +199,8 @@ pub struct TestOptions {
     pub execution_mode: TestExecutionMode,
     /// Force rebuild of cached test artifacts
     pub force_rebuild: bool,
+    /// Bypass result cache reads/writes for this test run
+    pub clean: bool,
     /// Disable result cache reads/writes for this test run
     pub no_cache: bool,
     /// Disable test database writes for this test run
@@ -284,6 +286,7 @@ impl Default for TestOptions {
             show_tags: false,
             execution_mode: TestExecutionMode::Interpreter,
             force_rebuild: false,
+            clean: false,
             no_cache: false,
             no_db: false,
             keep_artifacts: false,

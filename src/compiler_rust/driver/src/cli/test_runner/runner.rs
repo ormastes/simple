@@ -683,7 +683,7 @@ fn execute_test_files(
 
     // Load result cache for incremental test runs (skip unchanged files)
     let mut result_cache = super::result_cache::ResultCache::load();
-    let use_cache = !options.force_rebuild && !options.coverage && !options.no_cache;
+    let use_cache = !options.force_rebuild && !options.clean && !options.coverage && !options.no_cache;
 
     // Performance warning for listing with filters (scans many files)
     let list_mode = options.list || options.list_ignored;
@@ -713,8 +713,13 @@ fn execute_test_files(
             continue;
         }
 
-        // Check result cache — skip unchanged files
-        if use_cache && !list_mode {
+        let is_system_spec = path.components().any(|c| c.as_os_str() == "system")
+            && path.components().any(|c| c.as_os_str() == "test");
+
+        // Check result cache — skip unchanged files.
+        // System specs must always execute because they drive real side effects
+        // such as QEMU guests and serial/framebuffer validation.
+        if use_cache && !list_mode && !is_system_spec {
             if let Some(cached) = result_cache.check(path) {
                 // Only use cache if the test passed last time (re-run failures)
                 if cached.failed == 0 {
@@ -809,8 +814,6 @@ fn execute_test_files(
                 // would silently report them as PASSED (0ms) without running
                 // anything, hiding real regressions. Route system specs through
                 // the real interpreter path instead.
-                let is_system_spec = path.components().any(|c| c.as_os_str() == "system")
-                    && path.components().any(|c| c.as_os_str() == "test");
                 if !options.coverage && !options.safe_mode && !is_system_spec {
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {
@@ -894,7 +897,7 @@ fn execute_test_files(
         let memory_abort = result.error.as_ref().is_some_and(|e| e.contains("MEMORY LIMIT"));
 
         // Record result in cache
-        if use_cache && !list_mode {
+        if use_cache && !list_mode && !is_system_spec {
             result_cache.record(path, result.passed, result.failed, result.skipped, result.duration_ms);
         }
 
