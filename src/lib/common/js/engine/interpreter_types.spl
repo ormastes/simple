@@ -39,6 +39,19 @@ class EnvironmentStack:
             var_env_ids: rt_array_new_with_cap_i64(4096)
         )
 
+    fn _normalize_env_id(stored_id: i64) -> i64:
+        # Bare-metal guest array reads can return boxed nonzero i64 values.
+        if stored_id < 0:
+            return stored_id
+        if stored_id >= self.next_id and stored_id % 8 == 0:
+            val decoded = stored_id / 8
+            if decoded >= -1 and decoded < self.next_id:
+                return decoded
+        stored_id
+
+    fn _stored_env_id_equals(stored_id: i64, expected_id: i64) -> bool:
+        self._normalize_env_id(stored_id) == expected_id
+
     me create_env(parent_id: i64) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
@@ -47,7 +60,7 @@ class EnvironmentStack:
 
     me _env_parent(env_id: i64) -> i64:
         if env_id >= 0 and env_id < self.env_parent_ids.len():
-            return self.env_parent_ids.get(env_id)
+            return self._normalize_env_id(self.env_parent_ids.get(env_id))
         -1
 
     # Get a variable by searching up the scope chain
@@ -57,7 +70,7 @@ class EnvironmentStack:
         while current_id >= 0:
             var j = self.var_names.len() - 1
             while j >= 0:
-                if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
+                if self._stored_env_id_equals(self.var_env_ids.get(j), current_id) and self.var_names.get(j) == name:
                     return Some(self.var_values.get(j))
                 j = j - 1
             current_id = self._env_parent(current_id)
@@ -70,7 +83,7 @@ class EnvironmentStack:
         while current_id >= 0:
             var j = self.var_names.len() - 1
             while j >= 0:
-                if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
+                if self._stored_env_id_equals(self.var_env_ids.get(j), current_id) and self.var_names.get(j) == name:
                     # Found in this scope — push update
                     self.var_names.push(name)
                     self.var_values.push(value)

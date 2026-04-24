@@ -17,6 +17,11 @@
 use std.nogc_sync_mut.io.signature_ffi.{rt_rsa_sha256_sign, rt_rsa_sha512_sign, rt_rsa_sha256_verify, rt_rsa_sha512_verify}
 use os.crypto.rsa_fallback.{rsa_sha256_sign_fallback, rsa_sha512_sign_fallback, rsa_sha512_sign_embedded_host}
 
+enum RsaSignBackend:
+    Auto
+    HostedReference
+    PureSimple
+
 # ============================================================================
 # Helper
 # ============================================================================
@@ -35,6 +40,19 @@ fn _unwrap_sig(maybe: [u8]) -> [u8]:
         bytes
     else:
         []
+
+fn _rsa_sha256_sign_hosted(pkcs8: [u8], message: [u8]) -> [u8]:
+    _unwrap_sig(rt_rsa_sha256_sign(pkcs8, message))
+
+fn _rsa_sha512_sign_hosted(pkcs8: [u8], message: [u8]) -> [u8]:
+    _unwrap_sig(rt_rsa_sha512_sign(pkcs8, message))
+
+fn _rsa_sha512_sign_pure_simple_auto(pkcs8: [u8], message: [u8]) -> [u8]:
+    if pkcs8.len() == 1216:
+        val embedded_sig = rsa_sha512_sign_embedded_host(message)
+        if embedded_sig.len() > 0:
+            return embedded_sig
+    rsa_sha512_sign_fallback(pkcs8, message)
 
 # ============================================================================
 # SHA-256 variant
@@ -56,7 +74,22 @@ fn rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
     Deterministic: identical key + message always yields the same signature.
     PKCS#1 v1.5 padding is applied internally.
     """
-    val sig = _unwrap_sig(rt_rsa_sha256_sign(pkcs8, message))
+    rsa_sha256_sign_with_backend(pkcs8, message, RsaSignBackend.Auto)
+
+fn rsa_sha256_sign_with_backend(pkcs8: [u8], message: [u8], backend: RsaSignBackend) -> [u8]:
+    """Sign with an explicitly selected RSA backend.
+
+    Backends:
+      Auto              — hosted runtime first, then pure-Simple fallback
+      HostedReference   — hosted runtime only
+      PureSimple        — pure-Simple fallback only
+    """
+    if backend == RsaSignBackend.HostedReference:
+        return _rsa_sha256_sign_hosted(pkcs8, message)
+    if backend == RsaSignBackend.PureSimple:
+        return rsa_sha256_sign_fallback(pkcs8, message)
+
+    val sig = _rsa_sha256_sign_hosted(pkcs8, message)
     if sig.len() > 0:
         return sig
     rsa_sha256_sign_fallback(pkcs8, message)
@@ -93,14 +126,25 @@ fn rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]:
     Deterministic: identical key + message always yields the same signature.
     PKCS#1 v1.5 padding with SHA-512 digest is applied internally.
     """
-    val sig = _unwrap_sig(rt_rsa_sha512_sign(pkcs8, message))
+    rsa_sha512_sign_with_backend(pkcs8, message, RsaSignBackend.Auto)
+
+fn rsa_sha512_sign_with_backend(pkcs8: [u8], message: [u8], backend: RsaSignBackend) -> [u8]:
+    """Sign with an explicitly selected RSA backend.
+
+    Backends:
+      Auto              — hosted runtime first, then embedded-host/pure-Simple fallback
+      HostedReference   — hosted runtime only
+      PureSimple        — pure-Simple fallback only
+    """
+    if backend == RsaSignBackend.HostedReference:
+        return _rsa_sha512_sign_hosted(pkcs8, message)
+    if backend == RsaSignBackend.PureSimple:
+        return _rsa_sha512_sign_pure_simple_auto(pkcs8, message)
+
+    val sig = _rsa_sha512_sign_hosted(pkcs8, message)
     if sig.len() > 0:
         return sig
-    if pkcs8.len() == 1216:
-        val embedded_sig = rsa_sha512_sign_embedded_host(message)
-        if embedded_sig.len() > 0:
-            return embedded_sig
-    rsa_sha512_sign_fallback(pkcs8, message)
+    _rsa_sha512_sign_pure_simple_auto(pkcs8, message)
 
 fn rsa_sha512_verify(spki_der: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an RSA-PKCS1-SHA512 signature (RFC 8332 rsa-sha2-512).

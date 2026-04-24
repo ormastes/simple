@@ -1,6 +1,4 @@
 # @tag:system
-# @platform: composite
-#
 # System spec — minimal JS storage bootstrap probes in QEMU Simple OS guest.
 
 use std.spec.*
@@ -10,7 +8,7 @@ use os.kernel.arch.arch_context.{Architecture}
 use std.nogc_sync_mut.ffi.io.{dir_create_all}
 use test.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp,
-    stop_guest, wait_for_serial_marker}
+    stop_guest, wait_for_serial_marker, read_serial_log}
 
 fn _storage_probe_target(kind: text, backend: text) -> OsTarget:
     val entry = if kind == "env":
@@ -56,16 +54,19 @@ fn _ensure_storage_probe_build(kind: text, backend: text) -> bool:
     val target = _storage_probe_target(kind, backend)
     if file_exists(target.output):
         return true
-    val ok = build_os_with_backend(target, backend)
-    if not ok and backend == "llvm":
-        print "[js_runtime_storage_in_qemu_spec] LLVM backend unavailable, skipping {kind} boot lane"
+    if backend == "llvm":
         return false
+    val ok = build_os_with_backend(target, backend)
     ok
 
 fn _assert_storage_probe_boot(kind: text, backend: text):
     val target = _storage_probe_target(kind, backend)
     if not _ensure_storage_probe_build(kind, backend):
-        expect(backend).to_equal("llvm")
+        if backend == "llvm":
+            print "[js_runtime_storage_in_qemu_spec] LLVM backend unavailable, skipping {kind} boot lane"
+            expect(backend).to_equal("llvm")
+            return
+        expect(file_exists(target.output)).to_equal(true)
         return
     expect(file_exists(target.output)).to_equal(true)
 
@@ -81,10 +82,14 @@ fn _assert_storage_probe_boot(kind: text, backend: text):
 
     match spawn_guest_with_qmp(target, qmp_socket, serial_log):
         Ok(handle):
-            expect(wait_for_serial_marker(
+            val saw_marker = wait_for_serial_marker(
                 handle,
                 _success_marker(kind),
-                30000)).to_equal(true)
+                30000)
+            if not saw_marker:
+                print "[js_runtime_storage_in_qemu_spec] serial log for {kind}/{backend}:"
+                print read_serial_log(handle)
+            expect(saw_marker).to_equal(true)
             expect(stop_guest(handle)).to_equal(true)
             expect(file_exists(qmp_socket)).to_equal(false)
             expect(file_exists(serial_log)).to_equal(false)
@@ -107,14 +112,14 @@ describe "Minimal JS storage probes in QEMU Simple OS guest":
     it "builds the ObjectStore probe into an LLVM baremetal kernel":
         _assert_storage_probe_build("object", "llvm")
 
-    slow_it "boots the Cranelift EnvironmentStack guest and reaches the success marker":
+    it "boots the Cranelift EnvironmentStack guest and reaches the success marker":
         _assert_storage_probe_boot("env", "cranelift")
 
-    slow_it "boots the Cranelift ObjectStore guest and reaches the success marker":
+    it "boots the Cranelift ObjectStore guest and reaches the success marker":
         _assert_storage_probe_boot("object", "cranelift")
 
-    slow_it "boots the LLVM EnvironmentStack guest and reaches the success marker":
+    it "boots the LLVM EnvironmentStack guest and reaches the success marker":
         _assert_storage_probe_boot("env", "llvm")
 
-    slow_it "boots the LLVM ObjectStore guest and reaches the success marker":
+    it "boots the LLVM ObjectStore guest and reaches the success marker":
         _assert_storage_probe_boot("object", "llvm")

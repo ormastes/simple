@@ -1,0 +1,107 @@
+use std.sspec.*
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash}
+use os.apps.sshd.ssh_packet.{ssh_get_text, ssh_get_string}
+use os.crypto.rsa.{rsa_sha512_verify}
+use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+val TEST_DIR = "/tmp/ssh_kex_rsa_contract_spec"
+val RSA_PEM = TEST_DIR + "/rsa.pem"
+val RSA_PK8 = TEST_DIR + "/rsa.pk8"
+val RSA_SPKI = TEST_DIR + "/rsa.spki"
+
+fn openssl_available() -> bool:
+    val (_out, _err, code) = rt_process_run("which", ["openssl"])
+    code == 0
+
+fn _fixture_exists() -> bool:
+    rt_file_exists(RSA_PK8) and rt_file_exists(RSA_SPKI)
+
+fn _ensure_fixture_dir():
+    rt_dir_create(TEST_DIR, true)
+
+fn _run_or_print(cmd: text, args: [text]) -> bool:
+    val (out, err, code) = rt_process_run(cmd, args)
+    if code != 0:
+        print("{cmd} stdout: {out}")
+        print("{cmd} stderr: {err}")
+    code == 0
+
+fn _ensure_rsa_fixture() -> bool:
+    _ensure_fixture_dir()
+    if _fixture_exists():
+        return true
+    if not openssl_available():
+        return false
+    if not _run_or_print("openssl", [
+        "genpkey",
+        "-algorithm", "RSA",
+        "-pkeyopt", "rsa_keygen_bits:2048",
+        "-out", RSA_PEM
+    ]):
+        return false
+    if not _run_or_print("openssl", [
+        "pkcs8",
+        "-topk8",
+        "-nocrypt",
+        "-in", RSA_PEM,
+        "-outform", "DER",
+        "-out", RSA_PK8
+    ]):
+        return false
+    _run_or_print("openssl", [
+        "pkey",
+        "-in", RSA_PEM,
+        "-pubout",
+        "-outform", "DER",
+        "-out", RSA_SPKI
+    ])
+
+fn _load_rsa_pkcs8() -> [u8]:
+    match load_rsa_pkcs8_from_file(RSA_PK8):
+        Ok(bytes):
+            bytes
+        Err(msg):
+            print("load_rsa_pkcs8_from_file failed: {msg}")
+            []
+
+fn _load_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
+
+fn _exchange_hash() -> [u8]:
+    "ssh-kex-rsa-contract-hash-2026-04-24".to_bytes()
+
+fn _decode_sig_blob(blob: [u8]) -> (text, [u8]):
+    val r_algo = ssh_get_text(blob, 0)
+    if r_algo.is_err():
+        return ("", [])
+    val algo_pair = r_algo.unwrap()
+    val r_sig = ssh_get_string(blob, algo_pair.next_offset)
+    if r_sig.is_err():
+        return (algo_pair.value, [])
+    val sig_pair = r_sig.unwrap()
+    (algo_pair.value, sig_pair.data)
+
+describe "SSH KEX RSA host-key signing via contract":
+    it "produces a rsa-sha2-512 blob that verifies with a real RSA key":
+        if not _ensure_rsa_fixture():
+            return "skip: openssl RSA fixture generation unavailable"
+        val pkcs8 = _load_rsa_pkcs8()
+        val spki = _load_bytes(RSA_SPKI)
+        val exchange_hash = _exchange_hash()
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: pkcs8,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val result = ssh_sign_exchange_hash("rsa-sha2-512", host_keys, exchange_hash)
+        expect(result.is_ok()).to_equal(true)
+        val parts = _decode_sig_blob(result.unwrap())
+        expect(parts.0).to_equal("rsa-sha2-512")
+        expect(parts.1.len()).to_be_greater_than(0)
+        expect(rsa_sha512_verify(spki, exchange_hash, parts.1)).to_equal(true)

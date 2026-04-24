@@ -1,0 +1,265 @@
+# @cover src/os/crypto/rsa.spl 60%
+"""
+# RSA SHA-512 C -> Simple Reference Import Proof
+
+Compiled-mode SFFI proof for the RSA host-key signing contract:
+1. Generate RSA and EC PKCS#8 fixtures with OpenSSL.
+2. Build a narrow C shared library exposing RSA SHA-512 sign/verify helpers.
+3. Call that library from Simple via `extern fn` + `--link`.
+4. Lock observable behaviour before production switches backends.
+"""
+
+use std.spec
+
+val NL = "\n"
+val TEST_DIR = "/tmp/sffi_rsa_sha512_reference"
+val LIB_PATH = TEST_DIR + "/librsa_reference.so"
+val PARTIAL_LIB_PATH = TEST_DIR + "/librsa_partial.so"
+val RSA_PEM = TEST_DIR + "/rsa.pem"
+val RSA_PK8 = TEST_DIR + "/rsa.pk8"
+val RSA_SPKI = TEST_DIR + "/rsa.spki"
+val EC_PEM = TEST_DIR + "/ec.pem"
+val EC_PK8 = TEST_DIR + "/ec.pk8"
+val MSG_PATH = TEST_DIR + "/message.bin"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn setup_test_dir():
+    rt_dir_create(TEST_DIR, true)
+
+fn cleanup_test_dir():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
+
+fn tool_available(name: text) -> bool:
+    val (_out, _err, code) = rt_process_run("which", [name])
+    code == 0
+
+fn openssl_dev_available() -> bool:
+    if not tool_available("pkg-config"):
+        return false
+    val (_out, _err, code) = rt_process_run("pkg-config", ["--exists", "openssl"])
+    code == 0
+
+fn has_build_tools() -> bool:
+    tool_available("openssl") and (tool_available("gcc") or tool_available("cc")) and openssl_dev_available()
+
+fn c_compiler() -> text:
+    if tool_available("gcc"):
+        "gcc"
+    else:
+        "cc"
+
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+fn generate_crypto_fixtures() -> bool:
+    if not rt_file_write_bytes(MSG_PATH, "rsa-sha512-sffi-reference".to_bytes()):
+        return false
+    val commands = [
+        "openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out " + RSA_PEM,
+        "openssl pkcs8 -topk8 -nocrypt -in " + RSA_PEM + " -outform DER -out " + RSA_PK8,
+        "openssl pkey -in " + RSA_PEM + " -pubout -outform DER -out " + RSA_SPKI,
+        "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out " + EC_PEM,
+        "openssl pkcs8 -topk8 -nocrypt -in " + EC_PEM + " -outform DER -out " + EC_PK8
+    ]
+
+    for cmd in commands:
+        val (out, err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+        if code != 0:
+            print("fixture cmd stdout: " + out)
+            print("fixture cmd stderr: " + err)
+            return false
+    true
+
+fn build_reference_library() -> bool:
+    val c_source = TEST_DIR + "/rsa_reference.c"
+    val c_code =
+        "#include <stdint.h>" + NL +
+        "#include <stdio.h>" + NL +
+        "#include <stdlib.h>" + NL +
+        "#include <openssl/evp.h>" + NL +
+        "" + NL +
+        "static int read_all(const char *path, unsigned char **out, size_t *len) {" + NL +
+        "    FILE *f = fopen(path, \"rb\");" + NL +
+        "    if (!f) return 0;" + NL +
+        "    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }" + NL +
+        "    long size = ftell(f);" + NL +
+        "    if (size < 0) { fclose(f); return 0; }" + NL +
+        "    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }" + NL +
+        "    unsigned char *buf = NULL;" + NL +
+        "    if (size > 0) {" + NL +
+        "        buf = (unsigned char *)malloc((size_t)size);" + NL +
+        "        if (!buf) { fclose(f); return 0; }" + NL +
+        "        if (fread(buf, 1, (size_t)size, f) != (size_t)size) { free(buf); fclose(f); return 0; }" + NL +
+        "    }" + NL +
+        "    fclose(f);" + NL +
+        "    *out = buf;" + NL +
+        "    *len = (size_t)size;" + NL +
+        "    return 1;" + NL +
+        "}" + NL +
+        "" + NL +
+        "static int write_all(const char *path, const unsigned char *buf, size_t len) {" + NL +
+        "    FILE *f = fopen(path, \"wb\");" + NL +
+        "    if (!f) return 0;" + NL +
+        "    if (len > 0 && fwrite(buf, 1, len, f) != len) { fclose(f); return 0; }" + NL +
+        "    fclose(f);" + NL +
+        "    return 1;" + NL +
+        "}" + NL +
+        "" + NL +
+        "int64_t rsa_sha512_sign_file(const char *pkcs8_path, const char *message_path, const char *sig_path) {" + NL +
+        "    unsigned char *pkcs8 = NULL, *msg = NULL, *sig = NULL;" + NL +
+        "    size_t pkcs8_len = 0, msg_len = 0, sig_len = 0;" + NL +
+        "    EVP_PKEY *pkey = NULL;" + NL +
+        "    EVP_MD_CTX *ctx = NULL;" + NL +
+        "    const unsigned char *p = NULL;" + NL +
+        "    int64_t ok = 0;" + NL +
+        "    if (!read_all(pkcs8_path, &pkcs8, &pkcs8_len)) goto cleanup;" + NL +
+        "    if (!read_all(message_path, &msg, &msg_len)) goto cleanup;" + NL +
+        "    p = pkcs8;" + NL +
+        "    pkey = d2i_AutoPrivateKey(NULL, &p, (long)pkcs8_len);" + NL +
+        "    if (!pkey || EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA) goto cleanup;" + NL +
+        "    ctx = EVP_MD_CTX_new();" + NL +
+        "    if (!ctx) goto cleanup;" + NL +
+        "    if (EVP_DigestSignInit(ctx, NULL, EVP_sha512(), NULL, pkey) != 1) goto cleanup;" + NL +
+        "    if (EVP_DigestSign(ctx, NULL, &sig_len, msg, msg_len) != 1) goto cleanup;" + NL +
+        "    sig = (unsigned char *)malloc(sig_len);" + NL +
+        "    if (!sig) goto cleanup;" + NL +
+        "    if (EVP_DigestSign(ctx, sig, &sig_len, msg, msg_len) != 1) goto cleanup;" + NL +
+        "    if (!write_all(sig_path, sig, sig_len)) goto cleanup;" + NL +
+        "    ok = 1;" + NL +
+        "cleanup:" + NL +
+        "    if (ctx) EVP_MD_CTX_free(ctx);" + NL +
+        "    if (pkey) EVP_PKEY_free(pkey);" + NL +
+        "    if (pkcs8) free(pkcs8);" + NL +
+        "    if (msg) free(msg);" + NL +
+        "    if (sig) free(sig);" + NL +
+        "    return ok;" + NL +
+        "}" + NL +
+        "" + NL +
+        "int64_t rsa_sha512_verify_file(const char *spki_path, const char *message_path, const char *sig_path) {" + NL +
+        "    unsigned char *spki = NULL, *msg = NULL, *sig = NULL;" + NL +
+        "    size_t spki_len = 0, msg_len = 0, sig_len = 0;" + NL +
+        "    EVP_PKEY *pkey = NULL;" + NL +
+        "    EVP_MD_CTX *ctx = NULL;" + NL +
+        "    const unsigned char *p = NULL;" + NL +
+        "    int64_t ok = 0;" + NL +
+        "    if (!read_all(spki_path, &spki, &spki_len)) goto cleanup;" + NL +
+        "    if (!read_all(message_path, &msg, &msg_len)) goto cleanup;" + NL +
+        "    if (!read_all(sig_path, &sig, &sig_len)) goto cleanup;" + NL +
+        "    p = spki;" + NL +
+        "    pkey = d2i_PUBKEY(NULL, &p, (long)spki_len);" + NL +
+        "    if (!pkey || EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA) goto cleanup;" + NL +
+        "    ctx = EVP_MD_CTX_new();" + NL +
+        "    if (!ctx) goto cleanup;" + NL +
+        "    if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha512(), NULL, pkey) != 1) goto cleanup;" + NL +
+        "    if (EVP_DigestVerify(ctx, sig, sig_len, msg, msg_len) != 1) goto cleanup;" + NL +
+        "    ok = 1;" + NL +
+        "cleanup:" + NL +
+        "    if (ctx) EVP_MD_CTX_free(ctx);" + NL +
+        "    if (pkey) EVP_PKEY_free(pkey);" + NL +
+        "    if (spki) free(spki);" + NL +
+        "    if (msg) free(msg);" + NL +
+        "    if (sig) free(sig);" + NL +
+        "    return ok;" + NL +
+        "}" + NL
+
+    assert_ok(write_source(c_source, c_code), "failed to write C reference source")
+    val compile_cmd = c_compiler() + " -shared -fPIC -o " + LIB_PATH + " " + c_source + " $(pkg-config --cflags --libs openssl)"
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", compile_cmd])
+    if code != 0:
+        print("compile stdout: " + out)
+        print("compile stderr: " + err)
+    code == 0 and rt_file_exists(LIB_PATH)
+
+fn build_partial_library() -> bool:
+    val c_source = TEST_DIR + "/rsa_partial.c"
+    val c_code = "#include <stdint.h>" + NL + "int64_t rsa_sha512_sign_file(const char *a, const char *b, const char *c) { return 0; }" + NL
+    assert_ok(write_source(c_source, c_code), "failed to write partial C source")
+    val (out, err, code) = rt_process_run(c_compiler(), ["-shared", "-fPIC", "-o", PARTIAL_LIB_PATH, c_source])
+    if code != 0:
+        print("partial compile stdout: " + out)
+        print("partial compile stderr: " + err)
+    code == 0 and rt_file_exists(PARTIAL_LIB_PATH)
+
+
+describe "RSA SHA-512 C reference import round-trip":
+
+    before_all:
+        setup_test_dir()
+
+    after_all:
+        cleanup_test_dir()
+
+    it "compiles the OpenSSL-backed reference library":
+        if not has_build_tools():
+            return "skip: missing cc/gcc, openssl, or pkg-config openssl"
+        expect(generate_crypto_fixtures()).to_equal(true)
+        expect(build_reference_library()).to_equal(true)
+
+    it "signs valid PKCS#8, re-signs deterministically, verifies, and rejects malformed and wrong-key inputs":
+        if not has_build_tools():
+            return "skip: missing cc/gcc, openssl, or pkg-config openssl"
+        if not rt_file_exists(LIB_PATH):
+            if not generate_crypto_fixtures() or not build_reference_library():
+                return "skip: failed to build reference library"
+
+        val malformed_path = TEST_DIR + "/malformed.pk8"
+        expect(rt_file_write_bytes(malformed_path, [0x30, 0x03, 0x02, 0x01, 0x00])).to_equal(true)
+
+        val spl_source = TEST_DIR + "/rsa_reference_driver.spl"
+        val spl_code =
+            "extern fn rsa_sha512_sign_file(pkcs8_path: text, message_path: text, sig_path: text) -> i64" + NL +
+            "extern fn rsa_sha512_verify_file(spki_path: text, message_path: text, sig_path: text) -> i64" + NL +
+            "extern fn rt_file_read_bytes(path: text) -> [u8]" + NL +
+            "val sig_a_path = \"" + TEST_DIR + "/sig_a.bin\"" + NL +
+            "val sig_b_path = \"" + TEST_DIR + "/sig_b.bin\"" + NL +
+            "val bad_sig_path = \"" + TEST_DIR + "/bad_sig.bin\"" + NL +
+            "assert rsa_sha512_sign_file(\"" + RSA_PK8 + "\", \"" + MSG_PATH + "\", sig_a_path) == 1" + NL +
+            "assert rsa_sha512_sign_file(\"" + RSA_PK8 + "\", \"" + MSG_PATH + "\", sig_b_path) == 1" + NL +
+            "val sig_a = rt_file_read_bytes(sig_a_path) ?? []" + NL +
+            "val sig_b = rt_file_read_bytes(sig_b_path) ?? []" + NL +
+            "assert sig_a.len() > 0" + NL +
+            "assert sig_a == sig_b" + NL +
+            "assert rsa_sha512_verify_file(\"" + RSA_SPKI + "\", \"" + MSG_PATH + "\", sig_a_path) == 1" + NL +
+            "assert rsa_sha512_sign_file(\"" + malformed_path + "\", \"" + MSG_PATH + "\", bad_sig_path) == 0" + NL +
+            "assert rsa_sha512_sign_file(\"" + EC_PK8 + "\", \"" + MSG_PATH + "\", bad_sig_path) == 0" + NL +
+            "print \"PASS: rsa_sha512 reference import\"" + NL
+
+        expect(write_source(spl_source, spl_code)).to_equal(true)
+        val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + LIB_PATH
+        val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
+        if code != 0:
+            print("driver stdout: " + out)
+            print("driver stderr: " + err)
+        expect(code).to_equal(0)
+        expect(out).to_contain("PASS")
+
+    it "reports a missing symbol when the linked library does not export the verify entrypoint":
+        if not has_build_tools():
+            return "skip: missing cc/gcc, openssl, or pkg-config openssl"
+        if not rt_file_exists(PARTIAL_LIB_PATH):
+            if not build_partial_library():
+                return "skip: failed to build partial library"
+
+        val spl_source = TEST_DIR + "/rsa_missing_symbol_driver.spl"
+        val spl_code =
+            "extern fn rsa_sha512_verify_file(spki_path: text, message_path: text, sig_path: text) -> i64" + NL +
+            "val rc = rsa_sha512_verify_file(\"a\", \"b\", \"c\")" + NL +
+            "print rc" + NL
+
+        expect(write_source(spl_source, spl_code)).to_equal(true)
+        val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + PARTIAL_LIB_PATH + " 2>&1"
+        val (out, _err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
+        if code == 0:
+            expect("missing symbol should fail").to_equal("")
+        expect(out).to_contain("rsa_sha512_verify_file")

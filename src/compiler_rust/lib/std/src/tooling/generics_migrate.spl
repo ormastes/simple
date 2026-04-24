@@ -116,8 +116,7 @@ fn migrate_file_generics(path: text, dry_run: bool) -> Result<bool, text>:
 # Migrate generic syntax from [] to <>
 # This is a two-pass implementation that properly tracks bracket conversions
 fn migrate_generic_syntax(source: text) -> text:
-    val chars = source.chars()
-    val len = chars.len()
+    val len = source.len()
 
     # First pass: identify which brackets should be converted
     var bracket_conversions: List<bool> = []
@@ -131,7 +130,7 @@ fn migrate_generic_syntax(source: text) -> text:
 
     # Pass 1: Mark brackets for conversion
     for i in 0..len:
-        val ch = chars[i]
+        val ch = source.char_at(i)
 
         if escape_next:
             escape_next = false
@@ -158,7 +157,7 @@ fn migrate_generic_syntax(source: text) -> text:
 
         if ch == "[":
             # Check if this should be a generic bracket
-            if is_generic_bracket_at_pos(chars, i):
+            if is_generic_bracket_at_pos(source, i):
                 bracket_conversions[i] = true
                 bracket_stack.append(i)
             else:
@@ -174,7 +173,7 @@ fn migrate_generic_syntax(source: text) -> text:
     # Pass 2: Build result with conversions
     var result = ""
     for i in 0..len:
-        val ch = chars[i]
+        val ch = source.char_at(i)
         if bracket_conversions[i]:
             if ch == "[":
                 result = result + "<"
@@ -188,11 +187,11 @@ fn migrate_generic_syntax(source: text) -> text:
     return result
 
 # Check if the '[' at position i should be converted to '<'
-fn is_generic_bracket_at_pos(chars: List<text>, pos: i32) -> bool:
+fn is_generic_bracket_at_pos(source: text, pos: i32) -> bool:
     # Look backward to find context
-    val before = chars.slice(0, pos).join("")
-    val after = if pos + 1 < chars.len():
-        chars.slice(pos + 1, min(pos + 21, chars.len())).join("")
+    val before = source.substring(0, pos)
+    val after = if pos + 1 < source.len():
+        source.substring(pos + 1, min(pos + 21, source.len()))
     else:
         ""
 
@@ -203,16 +202,19 @@ fn is_generic_bracket_at_pos(chars: List<text>, pos: i32) -> bool:
         return false
 
     # Rule 2: Check if preceded by an identifier
-    match trimmed_before.chars().last():
+    match trimmed_before.get(trimmed_before.len() - 1):
         Some(last_char) =>
             if last_char.is_alphanumeric() or last_char == "_" or last_char == ">":
                 # Extract the identifier before [
                 var ident = ""
-                for ch in trimmed_before.chars().reverse():
+                var j = trimmed_before.len() - 1
+                while j >= 0:
+                    val ch = trimmed_before.char_at(j)
                     if ch.is_alphanumeric() or ch == "_":
                         ident = ch + ident
                     else:
                         break
+                    j = j - 1
 
                 # Check for capitalized type names (List, Option, Result, etc.)
                 if ident.len() > 0:
@@ -253,7 +255,7 @@ fn is_generic_bracket_at_pos(chars: List<text>, pos: i32) -> bool:
     if is_array_type_syntax(after_trimmed):
         return false
 
-    match after_trimmed.chars().first():
+    match after_trimmed.get(0):
         Some(first) =>
             # Check for array literal patterns like [1, 2, 3]
             if first.is_numeric():

@@ -12,6 +12,32 @@ extern fn rt_array_new_with_cap_text(cap: i64) -> [text]
 extern fn rt_array_new_with_cap_js_value(cap: i64) -> [JsValue]
 extern fn rt_array_new_with_cap_bool(cap: i64) -> [bool]
 
+fn _digit_value(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn _parse_non_negative_i64(value: text) -> Option<i64>:
+    if value.len() == 0:
+        return nil
+    var parsed = 0
+    var i = 0
+    while i < value.len():
+        val digit = _digit_value(value[i])
+        if digit < 0:
+            return nil
+        parsed = parsed * 10 + digit
+        i = i + 1
+    Some(parsed)
+
 # --- Native function binding ---
 
 class NativeFunction:
@@ -43,6 +69,19 @@ class ObjectStore:
             prop_configurables: rt_array_new_with_cap_bool(16384)
         )
 
+    fn _normalize_obj_id(stored_id: i64) -> i64:
+        # Bare-metal guest array reads can return boxed nonzero i64 values.
+        if stored_id < 0:
+            return stored_id
+        if stored_id >= self.next_id and stored_id % 8 == 0:
+            val decoded = stored_id / 8
+            if decoded >= -1 and decoded < self.next_id:
+                return decoded
+        stored_id
+
+    fn _stored_obj_id_equals(stored_id: i64, expected_id: i64) -> bool:
+        self._normalize_obj_id(stored_id) == expected_id
+
     me allocate() -> JsObject:
         val id = self.next_id
         self.next_id = self.next_id + 1
@@ -60,7 +99,7 @@ class ObjectStore:
         var seen_keys: [text] = []
         var i = self.prop_keys.len() - 1
         while i >= 0:
-            if self.prop_obj_ids.get(i) == id:
+            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), id):
                 val key = self.prop_keys.get(i)
                 var already_seen = false
                 var si = 0
@@ -89,7 +128,7 @@ class ObjectStore:
             ri = ri - 1
         var proto_id = -1
         if id >= 0 and id < self.obj_proto_ids.len():
-            proto_id = self.obj_proto_ids.get(id)
+            proto_id = self._normalize_obj_id(self.obj_proto_ids.get(id))
         JsObject(id: id, properties: reversed, prototype_id: proto_id)
 
     me set_property(obj_id: i64, key: text, value: JsValue):
@@ -104,16 +143,38 @@ class ObjectStore:
         # Scan from end — latest entry wins
         var i = self.prop_keys.len() - 1
         while i >= 0:
-            if self.prop_obj_ids.get(i) == obj_id and self.prop_keys.get(i) == key:
+            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id) and self.prop_keys.get(i) == key:
                 return self.prop_values.get(i)
             i = i - 1
         JsValue.Undefined
 
     fn array_length(obj_id: i64) -> i64:
-        """Get the length of an array by reading its 'length' property."""
+        """Get the length of an array.
+
+        In bare-metal guest builds the Number->i64 conversion path for the
+        stored "length" property is currently unreliable, so derive the length
+        from the highest numeric element key and only fall back to the stored
+        property when that yields a larger value.
+        """
+        var derived_len = 0
+        var i = self.prop_keys.len() - 1
+        while i >= 0:
+            if self._stored_obj_id_equals(self.prop_obj_ids.get(i), obj_id):
+                val key = self.prop_keys.get(i)
+                if key != "length":
+                    if val Some(idx) = _parse_non_negative_i64(key):
+                        if idx + 1 > derived_len:
+                            derived_len = idx + 1
+            i = i - 1
+
+        var stored_len = 0
         match self.get_property(obj_id, "length"):
-            JsValue.Number(v): f64_to_i64(v)
-            _: 0
+            JsValue.Number(v): stored_len = f64_to_i64(v)
+            _: pass_dn
+
+        if stored_len > derived_len:
+            return stored_len
+        derived_len
 
     fn get_by_index(obj_id: i64, idx: i64) -> JsValue:
         """Get array element by numeric index."""

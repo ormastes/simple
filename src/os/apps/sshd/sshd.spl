@@ -207,17 +207,7 @@ impl SshDaemon:
             return
 
         # Build host key set from daemon's key material and create the session
-        var ed25519_seed = self.host_private_key
-        if self.host_rsa_pkcs8 != nil:
-            # The baremetal Ed25519 signer is still not interoperable with
-            # OpenSSH in the live lane. Prefer RSA when an RSA key is staged.
-            ed25519_seed = nil
-        var host_keys = HostKeySet(
-            ed25519_seed: ed25519_seed,
-            rsa_pkcs8: self.host_rsa_pkcs8,
-            rsa_public_blob: self.host_rsa_public_blob,
-            ecdsa_p256_pkcs8: nil
-        )
+        var host_keys = self.build_host_keys_for_session()
         var session = SshSession.new_with_host_keys(
             client_fd, self.user_db, host_keys
         )
@@ -243,6 +233,19 @@ impl SshDaemon:
                     active.push(s)
             i = i + 1
         self.sessions = active
+
+    fn build_host_keys_for_session() -> HostKeySet:
+        """Build the advertised host-key set for a live SSH session.
+
+        Keep Ed25519 available even when RSA is staged so OpenSSH can prefer
+        the cheaper interoperable path in the live lane.
+        """
+        HostKeySet(
+            ed25519_seed: self.host_private_key,
+            rsa_pkcs8: self.host_rsa_pkcs8,
+            rsa_public_blob: self.host_rsa_public_blob,
+            ecdsa_p256_pkcs8: nil
+        )
 
     me stop():
         """Stop the SSH daemon and close the listening socket."""
