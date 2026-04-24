@@ -743,6 +743,29 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     // skip hoisting the second occurrence and emit a warning comment.
     let mut hoisted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    fn rewrite_infix_expect_line(line: &str) -> String {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("expect ") || trimmed.starts_with("expect(") {
+            return line.to_string();
+        }
+
+        for matcher in ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with"] {
+            let needle = format!(" {} ", matcher);
+            if let Some(split_at) = trimmed.find(&needle) {
+                let actual = trimmed["expect ".len()..split_at].trim();
+                let expected = trimmed[split_at + needle.len()..].trim();
+                if actual.is_empty() || expected.is_empty() {
+                    return line.to_string();
+                }
+                let indent_len = line.len().saturating_sub(line.trim_start().len());
+                let indent = &line[..indent_len];
+                return format!("{indent}{matcher}(expect({actual}), {expected})");
+            }
+        }
+
+        line.to_string()
+    }
+
     fn extract_def_name(trimmed: &str) -> Option<String> {
         // "class Foo", "class Foo<T>", "class Foo(", "enum Bar:" etc.
         // Also "impl Foo" / "impl Trait for Foo" — for impl we use the
@@ -785,7 +808,9 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         top.push(String::new());
     };
 
-    for line in content.lines() {
+    for raw_line in content.lines() {
+        let rewritten_line = rewrite_infix_expect_line(raw_line);
+        let line = rewritten_line.as_str();
         let trimmed = line.trim();
 
         if trimmed.starts_with("\"\"\"") {
@@ -1655,5 +1680,28 @@ describe "extern hoist":
         assert!(extern_idx < main_idx, "extern should stay above fn main()");
         assert!(wrapped_source.contains("fn expect<T>(actual: T) -> T:"));
         assert!(wrapped_source.contains("fn to_equal<T>(actual: T, expected: T):"));
+    }
+
+    #[test]
+    fn test_preprocess_sspec_rewrites_infix_expect_matchers() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("infix_expect_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.sspec.*
+
+describe "infix":
+    it "rewrites":
+        expect value to_equal 1
+        expect output to_contain "ok"
+"#,
+        )
+        .expect("write spec");
+
+        let wrapped = preprocess_sspec_for_smf(&spec_path).expect("preprocess");
+        let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
+
+        assert!(wrapped_source.contains("to_equal(expect(value), 1)"));
+        assert!(wrapped_source.contains("to_contain(expect(output), \"ok\")"));
     }
 }
