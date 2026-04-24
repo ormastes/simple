@@ -105,58 +105,22 @@ fn _launcher_path_exists(path: text) -> bool:
         return true
     g_vfs_file_size(path) > 0
 
-fn _preferred_app_exec_path(path: text) -> text:
-    if path == "/sys/apps/simple_browser":
-        return "/sys/apps/simple_browser.smf"
-    if path == "/sys/apps/simple_compiler":
-        return "/sys/apps/simple_compiler.smf"
-    if path == "/sys/apps/simple_interpreter":
-        return "/sys/apps/simple_interpreter.smf"
-    if path == "/sys/apps/simple_loader":
-        return "/sys/apps/simple_loader.smf"
-    if path == "/sys/apps/llvm":
-        return "/sys/apps/llvm.smf"
-    if path == "/sys/apps/rust":
-        return "/sys/apps/rust.smf"
-    val smf_path = "{path}.smf"
-    if path == "/sys/apps/browser_demo" or path == "/sys/apps/hello_world" or path == "/sys/apps/file_manager" or path == "/sys/apps/shell" or path == "/sys/apps/editor" or path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_loader" or path == "/sys/apps/llvm" or path == "/sys/apps/rust":
-        return smf_path
-    if _launcher_path_exists(smf_path):
-        return smf_path
-    path
+fn _canonical_sys_app_name(name: text) -> text:
+    val raw = if name.ends_with(".smf"): name.slice(0, name.len() - 4) else: name
+    match raw:
+        case "sbrowser":
+            "simple_browser"
+        case "scompiler":
+            "simple_compiler"
+        case "sinterp":
+            "simple_interpreter"
+        case "sloader":
+            "simple_loader"
+        case _:
+            raw
 
-fn _canonical_app_identity(path: text) -> text:
+fn _canonical_sys_app_identity(path: text) -> text:
     match path:
-        case "/sys/apps/browser_demo.smf":
-            "/sys/apps/browser_demo"
-        case "/sys/apps/hello_world.smf":
-            "/sys/apps/hello_world"
-        case "/sys/apps/file_manager.smf":
-            "/sys/apps/file_manager"
-        case "/sys/apps/shell.smf":
-            "/sys/apps/shell"
-        case "/sys/apps/editor.smf":
-            "/sys/apps/editor"
-        case "/sys/apps/simple_browser.smf":
-            "/sys/apps/simple_browser"
-        case "/sys/apps/sbrowser.smf":
-            "/sys/apps/simple_browser"
-        case "/sys/apps/simple_compiler.smf":
-            "/sys/apps/simple_compiler"
-        case "/sys/apps/scompiler.smf":
-            "/sys/apps/simple_compiler"
-        case "/sys/apps/simple_interpreter.smf":
-            "/sys/apps/simple_interpreter"
-        case "/sys/apps/sinterp.smf":
-            "/sys/apps/simple_interpreter"
-        case "/sys/apps/simple_loader.smf":
-            "/sys/apps/simple_loader"
-        case "/sys/apps/sloader.smf":
-            "/sys/apps/simple_loader"
-        case "/sys/apps/llvm.smf":
-            "/sys/apps/llvm"
-        case "/sys/apps/rust.smf":
-            "/sys/apps/rust"
         case "/SYS/APPS/SBROWSMF.SMF":
             "/sys/apps/simple_browser"
         case "/SYS/APPS/SCOMPSMF.SMF":
@@ -170,7 +134,53 @@ fn _canonical_app_identity(path: text) -> text:
         case "/SYS/APPS/RUSTSMF.SMF":
             "/sys/apps/rust"
         case _:
-            path
+            if not path.starts_with("/sys/apps/"):
+                return ""
+            val raw = path.slice("/sys/apps/".len(), path.len())
+            if raw == "":
+                return ""
+            val name = _canonical_sys_app_name(raw)
+            "/sys/apps/{name}"
+
+pub fn launcher_command_resolution_candidates(command: text, cwd: text, path_env: text) -> [text]:
+    """Return filesystem candidates in the order the shell/launcher resolve them."""
+    if command == "":
+        return []
+    if command.contains("/"):
+        val direct = _resolve_against_cwd(command, cwd)
+        if direct == "":
+            return []
+        return [direct]
+
+    val app_name = _canonical_sys_app_name(command)
+    var candidates = [
+        "/sys/apps/{app_name}.smf",
+        "/sys/apps/{app_name}"
+    ]
+    val path_parts = path_env.split(":")
+    var i: u64 = 0
+    while i < path_parts.len().to_u64():
+        val dir = path_parts[i as i64].trim()
+        if dir != "":
+            val candidate = if dir == "/": "/{command}" else: "{dir}/{command}"
+            candidates = candidates.push(candidate)
+        i = i + 1
+    candidates
+
+fn _preferred_app_exec_path(path: text) -> text:
+    val sys_app = _canonical_sys_app_identity(path)
+    if sys_app != "":
+        return sys_app
+    val smf_path = "{path}.smf"
+    if _launcher_path_exists(smf_path):
+        return smf_path
+    path
+
+fn _canonical_app_identity(path: text) -> text:
+    val sys_app = _canonical_sys_app_identity(path)
+    if sys_app != "":
+        return sys_app
+    path
 
 fn _is_synthetic_pid(pid: u64) -> bool:
     pid >= 0x40000000
@@ -458,28 +468,9 @@ fn launcher_associated_app_for_path(path: text) -> text:
 
 fn launcher_resolve_command_path(command: text, cwd: text, path_env: text) -> text:
     """Resolve a command name or relative path into a filesystem path."""
-    if command == "":
-        return ""
-    if command.contains("/"):
-        val direct = _resolve_against_cwd(command, cwd)
-        if _launcher_path_exists(direct):
-            return direct
-        return ""
-    val path_parts = path_env.split(":")
-    var i: u64 = 0
-    while i < path_parts.len().to_u64():
-        val dir = path_parts[i as i64].trim()
-        if dir != "":
-            val candidate = if dir == "/": "/{command}" else: "{dir}/{command}"
-            if _launcher_path_exists(candidate):
-                return candidate
-        i = i + 1
-    val sys_app = "/sys/apps/{command}"
-    if _launcher_path_exists(sys_app):
-        return sys_app
-    val sys_app_smf = "{sys_app}.smf"
-    if _launcher_path_exists(sys_app_smf):
-        return sys_app_smf
+    for candidate in launcher_command_resolution_candidates(command, cwd, path_env):
+        if _launcher_path_exists(candidate):
+            return candidate
     ""
 
 fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
@@ -913,37 +904,37 @@ fn _dispatch_seeded_shortcut(key: u32, modifiers: u32) -> bool:
         return false
     match key:
         0x48:
-            _launch_seeded_app(0, "Hello World", "/sys/apps/hello_world.smf", "H", 0x48, MOD_META)
+            _launch_seeded_app(0, "Hello World", "/sys/apps/hello_world", "H", 0x48, MOD_META)
             true
         0x46:
-            _launch_seeded_app(1, "File Manager", "/sys/apps/file_manager.smf", "F", 0x46, MOD_META)
+            _launch_seeded_app(1, "File Manager", "/sys/apps/file_manager", "F", 0x46, MOD_META)
             true
         0x54:
-            _launch_seeded_app(2, "Terminal", "/sys/apps/shell.smf", ">", 0x54, MOD_META)
+            _launch_seeded_app(2, "Terminal", "/sys/apps/shell", ">", 0x54, MOD_META)
             true
         0x42:
-            _launch_seeded_app(3, "Browser Demo", "/sys/apps/browser_demo.smf", "B", 0x42, MOD_META)
+            _launch_seeded_app(3, "Browser Demo", "/sys/apps/browser_demo", "B", 0x42, MOD_META)
             true
         0x45:
-            _launch_seeded_app(4, "Editor", "/sys/apps/editor.smf", "E", 0x45, MOD_META)
+            _launch_seeded_app(4, "Editor", "/sys/apps/editor", "E", 0x45, MOD_META)
             true
         0x57:
-            _launch_seeded_app(5, "Simple Browser", "/sys/apps/simple_browser.smf", "W", 0x57, MOD_META)
+            _launch_seeded_app(5, "Simple Browser", "/sys/apps/simple_browser", "W", 0x57, MOD_META)
             true
         0x43:
-            _launch_seeded_app(6, "Simple Compiler", "/sys/apps/simple_compiler.smf", "C", 0x43, MOD_META)
+            _launch_seeded_app(6, "Simple Compiler", "/sys/apps/simple_compiler", "C", 0x43, MOD_META)
             true
         0x49:
-            _launch_seeded_app(7, "Simple Interpreter", "/sys/apps/simple_interpreter.smf", "I", 0x49, MOD_META)
+            _launch_seeded_app(7, "Simple Interpreter", "/sys/apps/simple_interpreter", "I", 0x49, MOD_META)
             true
         0x4F:
-            _launch_seeded_app(8, "Simple Loader", "/sys/apps/simple_loader.smf", "O", 0x4F, MOD_META)
+            _launch_seeded_app(8, "Simple Loader", "/sys/apps/simple_loader", "O", 0x4F, MOD_META)
             true
         0x4C:
-            _launch_seeded_app(9, "LLVM", "/sys/apps/llvm.smf", "L", 0x4C, MOD_META)
+            _launch_seeded_app(9, "LLVM", "/sys/apps/llvm", "L", 0x4C, MOD_META)
             true
         0x52:
-            _launch_seeded_app(10, "Rust", "/sys/apps/rust.smf", "R", 0x52, MOD_META)
+            _launch_seeded_app(10, "Rust", "/sys/apps/rust", "R", 0x52, MOD_META)
             true
         _:
             false

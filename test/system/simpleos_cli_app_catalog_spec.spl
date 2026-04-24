@@ -1,0 +1,41 @@
+# @tag:system
+
+use std.spec
+use os.qemu_runner.{ensure_desktop_disk_image, desktop_disk_image_path}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_shell(cmd: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", cmd])
+
+describe "SimpleOS CLI app catalog disk staging":
+    it "stages the full src/app catalog into the desktop FAT32 image":
+        dir_create_all("build/os")
+        val ok = ensure_desktop_disk_image()
+        if not ok:
+            print "[simpleos_cli_app_catalog_spec] disk image unavailable, skipping"
+            expect(ok).to_equal(false)
+        else:
+            val img_path = desktop_disk_image_path()
+            val cmd =
+                "src_count=$(grep -Ev '^(#|$)' scripts/simpleos_cli_app_catalog.txt | wc -l | tr -d ' ');" +
+                "if command -v mtype >/dev/null 2>&1; then " +
+                "mtype -i '" + img_path + "' ::/SYS/APPS/SHELL.APP 2>/dev/null | grep -q 'shell_remote_main' || exit 1; " +
+                "disk_catalog=$(mtype -i '" + img_path + "' ::/SYS/APPS/SIMPLECLI.CAT 2>/dev/null) || exit 1; " +
+                "printf '%s\n' \"$disk_catalog\" | grep -q '^info|src/app/info/main.spl|smoke|staged$' || exit 1; " +
+                "printf '%s\n' \"$disk_catalog\" | grep -q '^list|src/app/list/main.spl|smoke|staged$' || exit 1; " +
+                "printf '%s\n' \"$disk_catalog\" | grep -q '^stats|src/app/stats/main.spl|smoke|staged$' || exit 1; " +
+                "disk_count=$(printf '%s\n' \"$disk_catalog\" | grep -Ev '^(#|$)' | wc -l | tr -d ' '); " +
+                "[ \"$src_count\" = \"$disk_count\" ]; " +
+                "else " +
+                "grep -a -q 'shell_remote_main' '" + img_path + "' && " +
+                "grep -a -q 'info|src/app/info/main.spl|smoke|staged' '" + img_path + "' && " +
+                "grep -a -q 'list|src/app/list/main.spl|smoke|staged' '" + img_path + "' && " +
+                "grep -a -q 'stats|src/app/stats/main.spl|smoke|staged' '" + img_path + "'; " +
+                "fi"
+            val result = run_shell(cmd)
+            if result.2 != 0:
+                print result.0
+                print result.1
+            expect(result.2).to_equal(0)

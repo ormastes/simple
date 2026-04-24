@@ -6,20 +6,24 @@
 # Each phase is implemented as a separate method called from run().
 # The session reads/writes via socket FDs using the POSIX socket API.
 
-use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes, posix_close_socket}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_packet.{SshPacket, SshPacketResult, SshTextResult, SshStringResult, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
-use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
+use os.apps.shell.shell_app.{ShellApp}
 
 extern fn serial_println(msg: text)
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
+extern fn rt_net_close(sock_fd: i64) -> i64
 
 # ============================================================================
 # Constants
@@ -52,6 +56,7 @@ class SshSession:
     session_id: [u8]
     authenticated_user: text
     pty: SshPty?
+    shell: ShellApp?
     recv_buf: [u8]           # Accumulated received data
     send_seq: u32
     recv_seq: u32
@@ -87,6 +92,7 @@ impl SshSession:
             session_id: [],
             authenticated_user: "",
             pty: nil,
+            shell: nil,
             recv_buf: [],
             send_seq: 0,
             recv_seq: 0,
@@ -128,20 +134,52 @@ impl SshSession:
         val our_version = ssh_build_version_string()
         self.raw_send(our_version)
 
-        # Read client version string (up to 255 chars + CRLF)
+        # Read the client banner. The first TCP read may also contain the first
+        # SSH packet, so preserve bytes after the CRLF terminator for KEX.
         val client_data = self.raw_recv(256)
         if client_data.len() == 0:
             self.state = SessionState.Closed
             return
 
-        val r = ssh_parse_version_string(client_data)
-        if r.is_ok():
-            val version = r.unwrap()
-            self.client_version = version
-            serial_println("[sshd-session] version exchange ok")
-            self.state = SessionState.KexInit
-        else:
+        var line_end: u64 = 0
+        var found_crlf = false
+        while line_end + 1 < client_data.len():
+            if client_data[line_end] == 0x0D and client_data[line_end + 1] == 0x0A:
+                found_crlf = true
+                break
+            line_end = line_end + 1
+
+        if not found_crlf:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
+            return
+
+        var version_line: [u8] = []
+        var i: u64 = 0
+        while i <= line_end + 1:
+            version_line.push(client_data[i])
+            i = i + 1
+
+        while i < client_data.len():
+            self.recv_buf.push(client_data[i])
+            i = i + 1
+
+        if line_end < 8 or
+           version_line[0] != 0x53 or  # S
+           version_line[1] != 0x53 or  # S
+           version_line[2] != 0x48 or  # H
+           version_line[3] != 0x2D:    # -
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
+            return
+
+        var version_bytes: [u8] = []
+        i = 0
+        while i < line_end:
+            version_bytes.push(version_line[i])
+            i = i + 1
+
+        self.client_version = rt_string_from_byte_array(version_bytes)
+        serial_println("[sshd-session] version exchange ok")
+        self.state = SessionState.KexInit
 
     # ========================================================================
     # Phase 2: Key Exchange
@@ -398,7 +436,8 @@ impl SshSession:
         """
         serial_println("[sshd-session] interactive")
         while self.state == SessionState.Interactive:
-            # Check for data from shell (PTY master read)
+            # Check for data from the interactive shell before blocking on input.
+            self._forward_shell_output()
             self._forward_pty_output()
 
             # Receive a packet from the client
@@ -480,7 +519,12 @@ impl SshSession:
         self.channels.consume_local_window(recipient, data.len().to_u32())
 
         # Forward data to PTY master_write (user input to shell)
-        if val pty = self.pty:
+        if val shell = self.shell:
+            val text = rt_string_from_byte_array(data)
+            if not shell.feed_remote_input(text):
+                self.state = SessionState.Closed
+            self._forward_shell_output()
+        elif val pty = self.pty:
             pty.master_write(data)
 
         # Send window adjust if local window is getting low
@@ -569,11 +613,12 @@ impl SshSession:
             self._handle_shell_request(recipient, ch.remote_id, want_reply)
 
         elif req_type == "exec":
-            # exec request: run a single command
-            # For now, treat it like a shell request
+            self._handle_exec_request(payload, off, recipient, ch.remote_id, want_reply)
+
+        elif req_type == "subsystem":
             if want_reply:
-                val success = ssh_build_channel_success(ch.remote_id)
-                self.send_packet(success)
+                val fail = ssh_build_channel_failure(ch.remote_id)
+                self.send_packet(fail)
 
         elif req_type == "env":
             # Environment variable setting — parse but don't act on it
@@ -668,10 +713,69 @@ impl SshSession:
                 val pty = r_pty.unwrap()
                 self.pty = pty
 
-        # Write a welcome message to the PTY
-        if val pty = self.pty:
-            val welcome = "SimpleOS {self.authenticated_user}@simpleos:~$ ".to_bytes()
-            pty.slave_write(welcome)
+        self._ensure_shell_started()
+        self._forward_shell_output()
+
+    me _handle_exec_request(payload: [u8], off: u64, local_id: u32, remote_id: u32, want_reply: bool):
+        """Handle exec requests by running the command through the same shell REPL."""
+        var pos = off
+        val r_command = ssh_get_text(payload, pos)
+        if r_command.is_err():
+            if want_reply:
+                val fail = ssh_build_channel_failure(remote_id)
+                self.send_packet(fail)
+            return
+
+        var i: u64 = 0
+        while i < self.channels.channels.len():
+            if self.channels.channels[i].local_id == local_id:
+                self.channels.channels[i].shell_requested = true
+            i = i + 1
+
+        if want_reply:
+            val success = ssh_build_channel_success(remote_id)
+            self.send_packet(success)
+
+        self._ensure_shell_started()
+        if val shell = self.shell:
+            val command = r_command.unwrap().value
+            if not shell.feed_remote_input("{command}\n"):
+                self.state = SessionState.Closed
+            self._forward_shell_output()
+
+    me _ensure_shell_started():
+        """Create the shared SSH shell instance once per authenticated session."""
+        if self.shell != nil:
+            return
+        var shell = ShellApp.new()
+        shell.show_prompt()
+        self.shell = shell
+
+    me _forward_shell_output():
+        """Drain shell terminal output to the active SSH session channel."""
+        if val shell = self.shell:
+            val output = shell.take_remote_output()
+            if output != "":
+                self._send_shell_output(output.to_bytes())
+
+    me _send_shell_output(output: [u8]):
+        """Forward shell bytes to the first open shell-enabled session channel."""
+        if output.len() == 0:
+            return
+        var i: u64 = 0
+        while i < self.channels.channels.len():
+            val ch = self.channels.channels[i]
+            if ch.shell_requested:
+                match ch.state:
+                    ChannelState.Open:
+                        val send_len = output.len().to_u32()
+                        if self.channels.consume_remote_window(ch.local_id, send_len):
+                            val data_msg = ssh_build_channel_data(ch.remote_id, output)
+                            self.send_packet(data_msg)
+                        return
+                    _:
+                        pass_dn
+            i = i + 1
 
     me _forward_pty_output():
         """Check for shell output and forward it as CHANNEL_DATA."""
@@ -679,22 +783,7 @@ impl SshSession:
             if pty.master_has_data():
                 val output = pty.master_read(4096)
                 if output.len() > 0:
-                    # Find the first open session channel
-                    var i: u64 = 0
-                    while i < self.channels.channels.len():
-                        val ch = self.channels.channels[i]
-                        if ch.shell_requested:
-                            match ch.state:
-                                ChannelState.Open:
-                                    # Check remote window
-                                    val send_len = output.len().to_u32()
-                                    if self.channels.consume_remote_window(ch.local_id, send_len):
-                                        val data_msg = ssh_build_channel_data(ch.remote_id, output)
-                                        self.send_packet(data_msg)
-                                    return
-                                _:
-                                    pass_dn
-                        i = i + 1
+                    self._send_shell_output(output)
 
     # ========================================================================
     # Packet I/O
@@ -715,16 +804,15 @@ impl SshSession:
 
         Accumulates data in recv_buf until a complete packet can be parsed.
         """
-        # Read more data from socket
-        val new_data = self.raw_recv(RECV_BUF_SIZE)
-        if new_data.len() == 0:
-            return []
-
-        # Append to receive buffer
         var i: u64 = 0
-        while i < new_data.len():
-            self.recv_buf.push(new_data[i])
-            i = i + 1
+        if self.recv_buf.len() == 0:
+            val new_data = self.raw_recv(RECV_BUF_SIZE)
+            if new_data.len() == 0:
+                return []
+
+            while i < new_data.len():
+                self.recv_buf.push(new_data[i])
+                i = i + 1
 
         if self.cipher.active:
             # Encrypted mode: need at least 4 bytes for length + 16 for tag
@@ -818,22 +906,17 @@ impl SshSession:
 
     me raw_send(data: [u8]):
         """Send raw bytes over the TCP socket."""
-        posix_send_bytes(self.socket_fd, data, 0)
+        rt_net_send_bytes(self.socket_fd as i64, data)
 
     me raw_recv(max: u64) -> [u8]:
         """Receive raw bytes from the TCP socket."""
-        val r = posix_recv_bytes(self.socket_fd, max, 0)
-        if r.is_ok():
-            val data = r.unwrap()
-            data
-        else:
-            []
+        rt_net_recv_bytes(self.socket_fd as i64, max as i64)
 
     me close():
         """Clean up session resources."""
         if val pty = self.pty:
             pty.close()
-        posix_close_socket(self.socket_fd)
+        rt_net_close(self.socket_fd as i64)
         self.state = SessionState.Closed
 
 # ============================================================================
@@ -930,3 +1013,18 @@ fn _extract_ed25519_pubkey(key_blob: [u8]) -> [u8]:
             var key_pair = r_key.unwrap()
             return key_pair.data
     []
+
+pub fn ssh_shell_boot_output_for_test() -> text:
+    """Create a fresh SSH-backed shell and return its initial banner/prompt."""
+    var shell = ShellApp.new()
+    shell.show_prompt()
+    shell.take_remote_output()
+
+pub fn ssh_shell_roundtrip_output_for_test(input: text) -> text:
+    """Run transport text through a fresh shell and return the emitted output."""
+    var shell = ShellApp.new()
+    shell.show_prompt()
+    var output = shell.take_remote_output()
+    val _running = shell.feed_remote_input(input)
+    output = "{output}{shell.take_remote_output()}"
+    output

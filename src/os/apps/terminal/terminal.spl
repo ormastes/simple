@@ -106,6 +106,7 @@ class Terminal:
     bold: bool
     input_buffer: text
     output_buffer: text
+    mirrored_output: text
     # ANSI parser state
     ansi_state: AnsiState
     ansi_params: [i32]
@@ -136,6 +137,7 @@ impl Terminal:
             bold: false,
             input_buffer: "",
             output_buffer: "",
+            mirrored_output: "",
             ansi_state: AnsiState.Normal,
             ansi_params: [],
             ansi_current_param: "",
@@ -148,17 +150,21 @@ impl Terminal:
     me write_char(ch: text):
         """Write a single character at cursor position, advancing cursor."""
         if ch == "\n":
+            self.mirrored_output = "{self.mirrored_output}\n"
             self.newline()
             return
         if ch == "\r":
+            self.mirrored_output = "{self.mirrored_output}\r"
             self.cursor_col = 0
             return
         if ch == "\t":
+            self.mirrored_output = "{self.mirrored_output}\t"
             # Tab to next 8-column stop
             val next_stop = ((self.cursor_col / 8) + 1) * 8
             self.cursor_col = if next_stop >= self.cols: self.cols - 1 else: next_stop
             return
         if ch == "\u{0008}":
+            self.mirrored_output = "{self.mirrored_output}\u{0008}"
             # Backspace
             if self.cursor_col > 0:
                 self.cursor_col = self.cursor_col - 1
@@ -175,6 +181,7 @@ impl Terminal:
                     bold: self.bold
                 )
                 self.lines[self.cursor_row] = TerminalLine(chars: line.chars)
+                self.mirrored_output = "{self.mirrored_output}{ch}"
 
         # Advance cursor
         self.cursor_col = self.cursor_col + 1
@@ -446,6 +453,27 @@ impl Terminal:
         self.input_buffer = ""
         return result
 
+    me feed_remote_input(input: text):
+        """Append raw transport input into the terminal line buffer.
+
+        SSH sessions deliver already-decoded byte streams rather than UI key
+        events, so this helper mirrors the local key handling path while
+        preserving command echo for the remote peer.
+        """
+        for ch in input:
+            if ch == "\r":
+                pass_dn
+            elif ch == "\n":
+                self.input_buffer = "{self.input_buffer}\n"
+                self.write_string("\n")
+            elif ch == "\u{0008}" or ch == "\u{007f}":
+                if self.input_buffer.len() > 0:
+                    self.input_buffer = self.input_buffer.slice(0, self.input_buffer.len() - 1)
+                    self.write_string("\u{0008} \u{0008}")
+            else:
+                self.input_buffer = "{self.input_buffer}{ch}"
+                self.write_char(ch)
+
     fn peek_input() -> text:
         """Peek at the current input buffer without consuming it.
 
@@ -453,6 +481,12 @@ impl Terminal:
         Returns the buffer contents; call read_input() to consume.
         """
         self.input_buffer
+
+    fn take_mirrored_output() -> text:
+        """Return terminal output produced since the last drain."""
+        val out = self.mirrored_output
+        self.mirrored_output = ""
+        out
 
     me flush_output():
         """Write pending output buffer to the terminal display."""

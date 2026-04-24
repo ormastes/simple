@@ -7,6 +7,7 @@ use os.qemu_runner.{
     scenario_x64_net_user, scenario_x64_ssh,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
     riscv_fs_exec_disk_image_path, scenario_target, get_wm_simple_web_check_target,
+    get_ssh_live_target,
     default_os_build_backend_for_target,
     desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
@@ -38,11 +39,13 @@ fn shell_exit_code(cmd: text) -> i32:
 
 fn desktop_tool_app_fallback_fixture() -> text:
     "SBROWSMF\n" +
+        "info|src/app/info/main.spl|smoke|staged\n" +
         "SCOMPSMF\n" +
         "SINTSMF\n" +
         "SLOADSMF\n" +
         "LLVMSMF\n" +
         "RUSTSMF\n" +
+        "SIMPLECLI.CAT\n" +
         "/sys/apps/simple_browser\n" +
         "/sys/apps/simple_compiler\n" +
         "/sys/apps/simple_interpreter\n" +
@@ -50,6 +53,16 @@ fn desktop_tool_app_fallback_fixture() -> text:
         "/sys/apps/llvm\n" +
         "/sys/apps/rust\n" +
         "SMF\n"
+
+fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text, app_path: text):
+    val img_path = "build/os/fat32-x86_64.img"
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}")
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}.smf")
+    expect(cmd).to_contain("grep -a -q '{marker}'")
+    expect(cmd).to_contain("grep -a -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name} 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | grep -a -q 'SMF'")
 
 describe "Qemu runner serial routing":
     it "enumerates 32-bit x86 as a first-class target":
@@ -287,9 +300,14 @@ describe "Qemu runner serial routing":
         expect(net_cmd.contains("-net")).to_equal(false)
 
         val ssh = scenario_x64_ssh()
+        expect(scenario_name_or_missing("x64-ssh")).to_equal("x64-ssh")
         val ssh_cmd = build_scenario_command(ssh, "build/os/simpleos_x86_64.elf")
         expect(ssh_cmd).to_contain("user,id=n0,hostfwd=tcp::2222-:22")
         expect(ssh_cmd.contains("-net")).to_equal(false)
+        expect(scenario_test_timeout_ms(ssh)).to_equal(120000)
+        val ssh_target = scenario_target(ssh)
+        expect(ssh_target.entry).to_equal(get_ssh_live_target().entry)
+        expect(ssh_target.output).to_equal("build/os/simpleos_ssh_live_32.elf")
 
     it "keeps gui targets quiet by default":
         val target = get_gui_target()
@@ -377,25 +395,23 @@ describe "Qemu runner release artifacts":
         expect(candidates[0]).to_equal(iso_path)
 
 describe "Qemu runner desktop UEFI tool app validator":
-    it "builds raw-image fallback checks for all six migrated tool apps":
+    it "builds raw-image fallback checks for the migrated tool apps and CLI catalog":
         val cmd = desktop_uefi_disk_image_tool_app_validation_command("build/os/fat32-x86_64.img")
         expect(cmd).to_contain("if command -v mdir >/dev/null 2>&1; then")
         expect(cmd).to_contain("if command -v mtype >/dev/null 2>&1; then")
-        expect(cmd).to_contain("grep -a -q 'SBROWSMF'")
-        expect(cmd).to_contain("grep -a -q 'SCOMPSMF'")
-        expect(cmd).to_contain("grep -a -q 'SINTSMF'")
-        expect(cmd).to_contain("grep -a -q 'SLOADSMF'")
-        expect(cmd).to_contain("grep -a -q 'LLVMSMF'")
-        expect(cmd).to_contain("grep -a -q 'RUSTSMF'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/simple_browser'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/simple_compiler'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/simple_interpreter'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/simple_loader'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/llvm'")
-        expect(cmd).to_contain("grep -a -q '/sys/apps/rust'")
+        expect(cmd).to_contain("::/SYS/APPS/info")
+        expect(cmd).to_contain("::/SYS/APPS/info.smf")
+        expect(cmd).to_contain("::/SYS/APPS/SIMPLECLI.CAT")
+        expect(cmd).to_contain("grep -q '^info|src/app/info/main.spl|smoke|staged$'")
+        expect_tool_app_validation_reference(cmd, "simple_browser", "SBROWSMF", "/sys/apps/simple_browser")
+        expect_tool_app_validation_reference(cmd, "simple_compiler", "SCOMPSMF", "/sys/apps/simple_compiler")
+        expect_tool_app_validation_reference(cmd, "simple_interpreter", "SINTSMF", "/sys/apps/simple_interpreter")
+        expect_tool_app_validation_reference(cmd, "simple_loader", "SLOADSMF", "/sys/apps/simple_loader")
+        expect_tool_app_validation_reference(cmd, "llvm", "LLVMSMF", "/sys/apps/llvm")
+        expect_tool_app_validation_reference(cmd, "rust", "RUSTSMF", "/sys/apps/rust")
         expect(cmd).to_contain("grep -a -q 'SMF'")
 
-    it "accepts the raw-image fallback when mdir and mtype are unavailable but all six app artifacts are present":
+    it "accepts the raw-image fallback when mdir and mtype are unavailable but the CLI catalog marker is present":
         val root = "build/test-qemu-tool-app-validator"
         val bin_dir = root + "/bin"
         val img_path = root + "/desktop-uefi-tools.raw"
@@ -407,14 +423,14 @@ describe "Qemu runner desktop UEFI tool app validator":
         val cmd = "PATH=\"" + bin_dir + "\" " + desktop_uefi_disk_image_tool_app_validation_command(img_path)
         expect(shell_exit_code(cmd)).to_equal(0)
 
-    it "rejects the raw-image fallback when a migrated tool artifact marker is missing":
+    it "rejects the raw-image fallback when the CLI catalog marker is missing":
         val root = "build/test-qemu-tool-app-validator-missing"
         val bin_dir = root + "/bin"
         val img_path = root + "/desktop-uefi-tools.raw"
         expect(rt_dir_create_all(bin_dir)).to_equal(true)
         expect(shell_exit_code("ln -sf /usr/bin/grep \"" + bin_dir + "/grep\"")).to_equal(0)
         expect(shell_exit_code("ln -sf /usr/bin/strings \"" + bin_dir + "/strings\"")).to_equal(0)
-        expect(rt_file_write_text(img_path, desktop_tool_app_fallback_fixture().replace("RUSTSMF\n", ""))).to_equal(true)
+        expect(rt_file_write_text(img_path, desktop_tool_app_fallback_fixture().replace("info|src/app/info/main.spl|smoke|staged\n", ""))).to_equal(true)
 
         val cmd = "PATH=\"" + bin_dir + "\" " + desktop_uefi_disk_image_tool_app_validation_command(img_path)
         expect(shell_exit_code(cmd)).to_equal(1)

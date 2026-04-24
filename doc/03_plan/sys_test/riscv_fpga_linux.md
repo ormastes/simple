@@ -19,10 +19,11 @@
 | REQ-RFL-006..007 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` deterministic prepare manifest and Vivado plan | Full |
 | REQ-RFL-008 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` generated Simple hardware source expectations | Full |
 | REQ-RFL-009 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` VHDL source-map and RTL manifest expectations | Full |
-| REQ-RFL-010 | MIR bitfield lowering hook spec covering opcode/rd/funct3/rs1/rs2/funct7 extraction handoff to hardware decode, plus MIR JSON export visibility for functions, blocks, instructions, and terminators | Planned; blocked on frontend/semantic bitfield resolution for generated source |
-| REQ-RFL-011 | VHDL slice-emission spec proving typed MIR bitfield extracts lower to deterministic `downto` slices with source-map entries after the expanded MIR JSON export exposes the lowering shape | Planned; depends on REQ-RFL-010 blocker removal |
+| REQ-RFL-010 | MIR bitfield lowering hook spec covering opcode/rd/funct3/rs1/rs2/funct7 extraction handoff to hardware decode, plus MIR JSON export visibility for functions, blocks, instructions, and terminators | Partial; generated source now parses/lower through frontend -> HIR -> MIR and proves selected bitfield read/writeback helper paths, but broader decode/immediate coverage is still pending |
+| REQ-RFL-011 | VHDL slice-emission spec proving typed MIR bitfield extracts lower to deterministic `downto` slices with source-map entries after the expanded MIR JSON export exposes the lowering shape | Planned; gated on exact VHDL guard/source-map proof for generated helper paths and broader REQ-RFL-010 decode/immediate coverage |
 
-## Active Blockers
+## Active Gates
 
-- Frontend/semantic bitfield support is the next blocker for REQ-RFL-010. The generated RISC-V hardware source already uses `bitfield` definitions and field reads, but those must parse, resolve, and reach HIR/MIR as typed bitfield metadata before MIR lowering can prove bounded extraction on real generated source.
-- The expanded MIR JSON export now provides a usable trace surface for downstream specs by including function, block, instruction, and terminator payloads. The next spec update should assert bitfield-lowering instruction shape through that JSON surface once frontend/semantic resolution is unblocked.
+- REQ-RFL-010 is no longer blocked on frontend/semantic bitfield acceptance. Generated RISC-V hardware source already parses, resolves, and lowers typed bitfield metadata through frontend -> HIR -> MIR for the currently covered helper paths.
+- The remaining REQ-RFL-010 work is to widen generated-source-backed decode coverage, especially immediate reconstruction paths, while preserving the same bounded MIR JSON trace surface for functions, blocks, instructions, and terminators.
+- REQ-RFL-011 should stay gated until backend specs assert exact VHDL guard structure, slice usage, concat/update expressions, and source-map records for those generated helper paths.

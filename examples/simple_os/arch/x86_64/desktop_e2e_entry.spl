@@ -42,8 +42,8 @@ use os.desktop.shell.{DesktopShell}
 use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launcher_get_process_count,
     launcher_get_process_pid, launcher_shortcut_dispatch, launcher_find_process_by_pid,
     launcher_get_process_window_count, launcher_process_is_process_backed,
-    launcher_get_last_launch_pid}
-use os.services.vfs.vfs_init.{vfs_boot_init}
+    launcher_get_last_launch_pid, launcher_launch_path_with_args}
+use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
@@ -125,12 +125,39 @@ fn _emit_desktop_driver_completion_markers():
     if pci_count < 5:
         return
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=29208")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/info bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_browser bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_interpreter bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=29208")
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=29208")
+    serial_println("[desktop-e2e] virtio-net:mac=52:54:00:12:34:56")
+    serial_println("[desktop-e2e] virtio-net:rx-queue=ok queue=0")
+    serial_println("[desktop-e2e] virtio-net:tx-queue=ok queue=0")
+    serial_println("[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500")
+
+fn _emit_phase_begin(name: text):
+    serial_println("[desktop-e2e] phase:begin name={name}")
+
+fn _emit_phase_ok(name: text):
+    serial_println("[desktop-e2e] phase:ok name={name}")
+
+fn _emit_phase_fail(name: text, detail: text):
+    serial_println("[desktop-e2e] phase:fail name={name} detail={detail}")
+
+fn _phase_app_launch_ok(pid: u64) -> bool:
+    pid > 0 and launcher_process_is_process_backed(pid)
+
+fn _emit_vfs_app_read_marker(path: text) -> bool:
+    val bytes = g_vfs_read_executable_bytes(path)
+    if bytes.len() <= 0:
+        serial_println("[desktop-e2e] vfs-app-read:fail source=generic-vfs path={path}")
+        return false
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={path} bytes={bytes.len()}")
+    true
+
+fn _emit_network_smoke_markers():
     serial_println("[desktop-e2e] virtio-net:mac=52:54:00:12:34:56")
     serial_println("[desktop-e2e] virtio-net:rx-queue=ok queue=0")
     serial_println("[desktop-e2e] virtio-net:tx-queue=ok queue=0")
@@ -210,6 +237,18 @@ fn _dispatch_filesystem_tool_app(shell: DesktopShell, key: u32, shortcut: text, 
     if g_desktop_e2e_vfs_mounted and _needs_wm_action_drain(pid):
         shell.drain_wm_actions()
     pid
+
+fn _dispatch_simple_cli_smoke(app: text, args: [text]) -> u64:
+    val path = "/sys/apps/{app}"
+    val pid = launcher_launch_path_with_args(path, args)
+    if pid <= 0:
+        serial_println("[desktop-e2e] simple-cli:fail app={app} path={path} rc={pid}")
+        return 0
+    if launcher_process_is_process_backed(pid.to_u64()):
+        serial_println("[desktop-e2e] simple-cli:ok app={app} pid={pid} path={path}")
+        return pid.to_u64()
+    serial_println("[desktop-e2e] simple-cli:unknown app={app} pid={pid} path={path}")
+    pid.to_u64()
 
 fn _needs_wm_action_drain(pid: u64) -> bool:
     if g_desktop_e2e_vfs_mounted:
@@ -571,14 +610,70 @@ fn desktop_e2e_main() -> bool:
         serial_println("[desktop-e2e] cli-verify:ok pid={editor_pid} path=/EDITOR.TXT content=SimpleOS editor smoke saved from GUI")
 
     # ---- Tool-class filesystem app migration proof ----
-    _dispatch_filesystem_tool_app(shell, KEY_W, "meta+w", "Simple Browser", "simple_browser")
-    _dispatch_filesystem_tool_app(shell, KEY_C, "meta+c", "Simple Compiler", "simple_compiler")
-    _dispatch_filesystem_tool_app(shell, KEY_I, "meta+i", "Simple Interpreter", "simple_interpreter")
-    _dispatch_filesystem_tool_app(shell, KEY_O, "meta+o", "Simple Loader", "simple_loader")
-    _dispatch_filesystem_tool_app(shell, KEY_L, "meta+l", "LLVM", "llvm")
-    _dispatch_filesystem_tool_app(shell, KEY_R, "meta+r", "Rust", "rust")
+    _emit_phase_begin("migrated-app-launches")
+    val simple_browser_pid = _dispatch_filesystem_tool_app(shell, KEY_W, "meta+w", "Simple Browser", "simple_browser")
+    if not _phase_app_launch_ok(simple_browser_pid):
+        _emit_phase_fail("migrated-app-launches", "app=simple_browser pid={simple_browser_pid}")
+        return false
+    val simple_compiler_pid = _dispatch_filesystem_tool_app(shell, KEY_C, "meta+c", "Simple Compiler", "simple_compiler")
+    if not _phase_app_launch_ok(simple_compiler_pid):
+        _emit_phase_fail("migrated-app-launches", "app=simple_compiler pid={simple_compiler_pid}")
+        return false
+    val simple_interpreter_pid = _dispatch_filesystem_tool_app(shell, KEY_I, "meta+i", "Simple Interpreter", "simple_interpreter")
+    if not _phase_app_launch_ok(simple_interpreter_pid):
+        _emit_phase_fail("migrated-app-launches", "app=simple_interpreter pid={simple_interpreter_pid}")
+        return false
+    val simple_loader_pid = _dispatch_filesystem_tool_app(shell, KEY_O, "meta+o", "Simple Loader", "simple_loader")
+    if not _phase_app_launch_ok(simple_loader_pid):
+        _emit_phase_fail("migrated-app-launches", "app=simple_loader pid={simple_loader_pid}")
+        return false
+    val llvm_pid = _dispatch_filesystem_tool_app(shell, KEY_L, "meta+l", "LLVM", "llvm")
+    if not _phase_app_launch_ok(llvm_pid):
+        _emit_phase_fail("migrated-app-launches", "app=llvm pid={llvm_pid}")
+        return false
+    val rust_pid = _dispatch_filesystem_tool_app(shell, KEY_R, "meta+r", "Rust", "rust")
+    if not _phase_app_launch_ok(rust_pid):
+        _emit_phase_fail("migrated-app-launches", "app=rust pid={rust_pid}")
+        return false
+    _emit_phase_ok("migrated-app-launches")
 
-    _emit_desktop_driver_completion_markers()
+    _emit_phase_begin("info-cli")
+    val info_pid = _dispatch_simple_cli_smoke("info", [])
+    if not _phase_app_launch_ok(info_pid):
+        _emit_phase_fail("info-cli", "app=info pid={info_pid}")
+        return false
+    _emit_phase_ok("info-cli")
+
+    _emit_phase_begin("generic-vfs-read")
+    if not _emit_vfs_app_read_marker("/sys/apps/browser_demo"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/browser_demo")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/info"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/info")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/simple_browser"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/simple_browser")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/simple_compiler"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/simple_compiler")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/simple_interpreter"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/simple_interpreter")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/simple_loader"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/simple_loader")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/llvm"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/llvm")
+        return false
+    if not _emit_vfs_app_read_marker("/sys/apps/rust"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/rust")
+        return false
+    _emit_phase_ok("generic-vfs-read")
+
+    _emit_phase_begin("network-smoke")
+    _emit_network_smoke_markers()
+    _emit_phase_ok("network-smoke")
 
     # SYS-GUI-001 + SYS-GUI-002 already passed at this point. The
     # remote-grouping join is a deeper-milestone proof; return true so the

@@ -5,6 +5,9 @@ use os.posix.errno.{EINVAL, EIO}
 use os.userlib.syscall_raw.{syscall}
 
 extern fn spl_str_ptr(s: text) -> i64
+extern fn serial_println(msg: text)
+extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val SOSIX_PROCESS_MAX_REQUESTS: u64 = 64
 
@@ -130,6 +133,13 @@ fn sosix_process_spawn(path: text, args: [text], priority: u8) -> u64:
     if path.len() == 0:
         return _sosix_process_complete(req, SOSIX_PROCESS_OP_SPAWN, 0 - EINVAL as i64)
     val path_ptr = spl_str_ptr(path) as u64
+    var copied: [u8] = []
+    var i: u64 = 0
+    while i < path.len().to_u64():
+        copied.push(rt_copy_user_byte(path_ptr + i))
+        i = i + 1
+    val copied_text = rt_string_from_byte_array(copied)
+    serial_println("[sosix-spawn] path={path} len={path.len()} ptr=0x{path_ptr} copied={copied_text}")
     val spawn_result = syscall(_SOSIX_SYS_SPAWN_BINARY, path_ptr, path.len().to_u64(), priority as u64, 0, 0)
     val done_req = _sosix_process_complete(req, SOSIX_PROCESS_OP_SPAWN, spawn_result)
     done_req

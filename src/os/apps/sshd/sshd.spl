@@ -8,13 +8,18 @@
 #   var daemon = SshDaemon.new(22)
 #   daemon.start()
 
-use os.posix.socket_compat.{posix_socket, posix_bind, posix_listen, posix_accept, posix_close_socket, sockaddr_any, SOCK_STREAM, AF_INET}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_self_test}
 use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_kex.{HostKeySet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
 use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file}
+
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
+extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
+extern fn rt_net_accept(sock_fd: i64) -> i64
+extern fn rt_net_close(sock_fd: i64) -> i64
 
 # ============================================================================
 # Constants
@@ -23,6 +28,21 @@ use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file}
 val SSHD_PORT: u16 = 22
 val SSHD_BACKLOG: i32 = 5
 val SSHD_MAX_SESSIONS: u32 = 16
+
+fn decode_net_runtime_i32(raw: i64) -> i32:
+    """Decode tagged positive ints returned by the baremetal direct net runtime.
+
+    The direct C runtime returns ENCODE_INT(value) for success paths. Zero stays
+    zero, negative errno values stay negative enough for `< 0` checks, and
+    positive file descriptors need to be untagged before Simple code stores them.
+    """
+    if raw > 0:
+        return (raw >> 3).to_i32()
+    raw.to_i32()
+
+pub fn sshd_decode_net_runtime_i32_for_test(raw: i64) -> i32:
+    """Test hook for tagged direct-runtime integer decoding."""
+    decode_net_runtime_i32(raw)
 
 # ============================================================================
 # SSH Daemon
@@ -119,25 +139,26 @@ impl SshDaemon:
         self.host_public_key = keypair.1    # 32-byte Ed25519 public key
         serial_println("[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
 
-        # Create TCP socket
-        var fd = posix_socket(AF_INET, SOCK_STREAM, 0)
+        # The x64-ssh live lane uses the C-backed TCP runtime directly.
+        # Bypass the netstack IPC shim here so SSH can come up before the
+        # higher-level service loop exists in this boot profile.
+        val fd = decode_net_runtime_i32(rt_net_socket(1))
         if fd < 0:
-            serial_println("[sshd] posix_socket failed: {fd}")
+            serial_println("[sshd] rt_net_socket failed: {fd}")
             return Err("failed to create socket: {fd}")
-        self.listen_fd = fd.to_i32()
+        self.listen_fd = fd
 
         # Bind to 0.0.0.0:port
-        var addr = sockaddr_any(self.port)
-        var bind_result = posix_bind(self.listen_fd, addr)
+        val bind_result = decode_net_runtime_i32(rt_net_bind(self.listen_fd as i64, self.port as i64))
         if bind_result < 0:
-            posix_close_socket(self.listen_fd)
+            rt_net_close(self.listen_fd as i64)
             self.listen_fd = -1
             return Err("failed to bind to port {self.port}: {bind_result}")
 
         # Start listening
-        var listen_result = posix_listen(self.listen_fd, SSHD_BACKLOG)
+        val listen_result = decode_net_runtime_i32(rt_net_listen(self.listen_fd as i64, SSHD_BACKLOG as i64))
         if listen_result < 0:
-            posix_close_socket(self.listen_fd)
+            rt_net_close(self.listen_fd as i64)
             self.listen_fd = -1
             return Err("failed to listen: {listen_result}")
 
@@ -153,9 +174,9 @@ impl SshDaemon:
         A future improvement could spawn async tasks per connection.
         """
         while self.running:
-            var client_fd = posix_accept(self.listen_fd)
+            val client_fd = decode_net_runtime_i32(rt_net_accept(self.listen_fd as i64))
             if client_fd >= 0:
-                self.handle_connection(client_fd.to_i32())
+                self.handle_connection(client_fd)
             else:
                 # Accept error — if we're shutting down, that's expected
                 if not self.running:
@@ -166,15 +187,17 @@ impl SshDaemon:
         # Enforce session limit
         self._cleanup_closed_sessions()
         if self.sessions.len().to_u32() >= SSHD_MAX_SESSIONS:
-            posix_close_socket(client_fd)
+            rt_net_close(client_fd as i64)
             return
+
+        serial_println("[sshd] handle_connection fd={client_fd}")
 
         # Guard: host keys must have been generated in start()
         var priv_len: u64 = self.host_private_key.len()
         var pub_len: u64 = self.host_public_key.len()
         if priv_len < 1 or pub_len < 1:
             serial_println("[sshd] FATAL: host keys not initialized (priv={priv_len} pub={pub_len})")
-            posix_close_socket(client_fd)
+            rt_net_close(client_fd as i64)
             return
 
         # Build host key set from daemon's key material and create the session
@@ -186,7 +209,10 @@ impl SshDaemon:
         var session = SshSession.new_with_host_keys(
             client_fd, self.user_db, host_keys
         )
-        self.sessions.push(session)
+        # Sessions are handled synchronously in this boot profile.
+        # Pushing the local session value into self.sessions before run()
+        # corrupts the active instance on the current runtime, so drive the
+        # accepted connection through the local object directly.
         session.run()
 
         # Clean up after session ends
@@ -210,7 +236,7 @@ impl SshDaemon:
         """Stop the SSH daemon and close the listening socket."""
         self.running = false
         if self.listen_fd >= 0:
-            posix_close_socket(self.listen_fd)
+            rt_net_close(self.listen_fd as i64)
             self.listen_fd = -1
 
         # Close all active sessions

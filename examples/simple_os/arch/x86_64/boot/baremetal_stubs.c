@@ -447,7 +447,7 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 128 MB
+ * 4. Heap allocator — bump allocator, 192 MB
  *
  * NOTE: keep this within the QEMU scenario RAM budget minus a safety
  * margin for kernel code/rodata/data, linker-script .heap/.stack, and
@@ -460,20 +460,23 @@ void rt_print_value(RuntimeValue val);
  * keep this arena large enough for those flows.
  * =================================================================== */
 
-static const size_t BAREMETAL_HEAP_SIZE = 128ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 96ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
-static char   _heap[128ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
+    void *caller = __builtin_return_address(0);
     sz = (sz + 15) & ~(size_t)15;
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
         serial_puts(" off_before=");
         serial_put_hex((uint64_t)_heap_off);
+        serial_puts(" caller=");
+        serial_put_hex((uint64_t)(uintptr_t)caller);
         serial_puts("\r\n");
     }
     if (_heap_off + sz > sizeof(_heap)) {
@@ -2367,16 +2370,16 @@ static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
 static const char *simpleos_known_app_name(uint64_t app_id)
 {
     switch (app_id) {
-    case 1: return "/BROWSE~1.ELF";
-    case 2: return "/FILE_M~1.ELF";
-    case 3: return "/HELLO_~1.ELF";
-    case 4: return "/TERMIN~1.ELF";
-    case 5: return "/EDITOR~1.ELF";
-    case 11: return "/BROWSE~1.ELF";
-    case 12: return "/FILE_M~1.ELF";
-    case 13: return "/HELLO_~1.ELF";
-    case 14: return "/TERMIN~1.ELF";
-    case 15: return "/EDITOR~1.ELF";
+    case 1: return "/BROWSMF.SMF";
+    case 2: return "/FILESMF.SMF";
+    case 3: return "/HELLOSMF.SMF";
+    case 4: return "/SHELLSMF.SMF";
+    case 5: return "/EDITORSM.SMF";
+    case 11: return "/BROWSMF.SMF";
+    case 12: return "/FILESMF.SMF";
+    case 13: return "/HELLOSMF.SMF";
+    case 14: return "/SHELLSMF.SMF";
+    case 15: return "/EDITORSM.SMF";
     case 21: return "/HELLO.TXT";
     case 22: return "/NUMBERS.TXT";
     case 23: return "/HELLO.SPL";
@@ -3784,6 +3787,7 @@ struct tcp_socket {
     int      accept_queue[TCP_ACCEPT_QUEUE];
     int      aq_head;
     int      aq_tail;
+    int      aq_count;
     int      backlog;
     /* IPC reply buffer */
     int      has_reply;
@@ -4021,10 +4025,10 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
                 if (_sockets[i].in_use && _sockets[i].state == TCP_LISTEN &&
                     _sockets[i].local_port == s->local_port) {
                     struct tcp_socket *ls = &_sockets[i];
-                    int next = (ls->aq_tail + 1) % TCP_ACCEPT_QUEUE;
-                    if (next != ls->aq_head) {
+                    if (ls->aq_count < TCP_ACCEPT_QUEUE) {
                         ls->accept_queue[ls->aq_tail] = sid;
-                        ls->aq_tail = next;
+                        ls->aq_tail = (ls->aq_tail + 1) % TCP_ACCEPT_QUEUE;
+                        ls->aq_count++;
                     }
                     break;
                 }
@@ -4250,11 +4254,13 @@ static int64_t _ipc_send_handler(uint64_t port, uint64_t method,
         serial_put_dec(ls->aq_head);
         serial_puts(" aq_tail=");
         serial_put_dec(ls->aq_tail);
+        serial_puts(" aq_count=");
+        serial_put_dec(ls->aq_count);
         serial_puts(" port=");
         serial_put_dec(ls->local_port);
         serial_puts("\r\n");
         int timeout = 0;
-        while (ls->aq_head == ls->aq_tail && timeout < 100000) {
+        while (ls->aq_count == 0 && timeout < 100000) {
             _virtio_net_poll();
             timeout++;
             for (volatile int d = 0; d < 1000; d++) {}
@@ -4265,14 +4271,17 @@ static int64_t _ipc_send_handler(uint64_t port, uint64_t method,
         serial_put_dec(ls->aq_head);
         serial_puts(" aq_tail=");
         serial_put_dec(ls->aq_tail);
+        serial_puts(" aq_count=");
+        serial_put_dec(ls->aq_count);
         serial_puts("\r\n");
-        if (ls->aq_head == ls->aq_tail) {
+        if (ls->aq_count == 0) {
             _ipc_reply.status = -11; /* EAGAIN — no connections */
             serial_puts("[tcp-accept] EAGAIN\r\n");
             break;
         }
         int accepted_sid = ls->accept_queue[ls->aq_head];
         ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
+        ls->aq_count--;
         _ipc_reply.status = 0;
         _ipc_reply.value = accepted_sid;
         serial_puts("[tcp-accept] accepted socket ");
@@ -6522,6 +6531,9 @@ int64_t rt_net_listen(int64_t sock_fd, int64_t backlog)
     if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return ENCODE_INT(-9);
     _sockets[fd].state = TCP_LISTEN;
     _sockets[fd].backlog = (int)backlog;
+    _sockets[fd].aq_head = 0;
+    _sockets[fd].aq_tail = 0;
+    _sockets[fd].aq_count = 0;
     serial_puts("[tcp] Socket ");
     serial_put_dec(fd);
     serial_puts(" listening on port ");
@@ -6612,12 +6624,14 @@ int64_t rt_net_accept(int64_t sock_fd)
     serial_put_dec(ls->aq_head);
     serial_puts("/");
     serial_put_dec(ls->aq_tail);
+    serial_puts(" count=");
+    serial_put_dec(ls->aq_count);
     serial_puts(" port=");
     serial_put_dec(ls->local_port);
     serial_puts("\r\n");
 
     /* Send a gratuitous ARP to provoke network traffic */
-    if (ls->aq_head == ls->aq_tail) {
+    if (ls->aq_count == 0) {
         _vnet_send_gratuitous_arp();
         /* Also check ISR status */
         uint8_t isr = _vnet_rd8(0x13);
@@ -6632,7 +6646,7 @@ int64_t rt_net_accept(int64_t sock_fd)
 
     /* Poll for incoming connections (~2s per accept call) */
     int timeout = 0;
-    while (ls->aq_head == ls->aq_tail && timeout < 20000) {
+    while (ls->aq_count == 0 && timeout < 20000) {
         int rc = _virtio_net_poll();
         if (rc > 0) {
             serial_puts("[tcp-accept] poll got ");
@@ -6642,7 +6656,7 @@ int64_t rt_net_accept(int64_t sock_fd)
         timeout++;
         for (volatile int d = 0; d < 1000; d++) {}
     }
-    if (ls->aq_head == ls->aq_tail) {
+    if (ls->aq_count == 0) {
         serial_puts("[tcp-accept] EAGAIN (timeout=");
         serial_put_dec(timeout);
         serial_puts(")\r\n");
@@ -6650,6 +6664,7 @@ int64_t rt_net_accept(int64_t sock_fd)
     }
     int accepted_sid = ls->accept_queue[ls->aq_head];
     ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
+    ls->aq_count--;
     serial_puts("[tcp-accept] accepted socket ");
     serial_put_dec(accepted_sid);
     serial_puts("\r\n");
@@ -6665,6 +6680,9 @@ int64_t rt_net_close(int64_t sock_fd)
     }
     _sockets[fd].in_use = 0;
     _sockets[fd].state = TCP_CLOSED;
+    _sockets[fd].aq_head = 0;
+    _sockets[fd].aq_tail = 0;
+    _sockets[fd].aq_count = 0;
     return ENCODE_INT(0);
 }
 

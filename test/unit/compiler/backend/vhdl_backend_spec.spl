@@ -19,6 +19,7 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering.{MirLowering}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvFpgaLane}
 from hir_types import {SymbolId}
 from lexer import {Span}
 
@@ -1946,6 +1947,428 @@ fn bitfield_opcode(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:
         check(vhdl.contains("imem_rdata : in unsigned(31 downto 0);"))
         check(vhdl.contains("imem_rdata(6 downto 0)"))
         check(vhdl.contains("resize(unsigned("))
+
+    it "lowers low-edge hardware bitfield writes through MIR concat and slice":
+        val src = """
+bitfield Rv32Instruction(u32):
+    opcode: 7
+    rd: 5
+    funct3: 3
+    rs1: 5
+    rs2: 5
+    funct7: 7
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_opcode(clk: bool, reset_n: bool, imem_rdata: u32, next_opcode: u32) -> u32:
+    var inst = Rv32Instruction.new(imem_rdata)
+    inst.opcode = next_opcode
+    inst
+"""
+        val path = "testdata/bitfield_write_opcode_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_opcode_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_high = false
+        var has_concat = false
+        var has_cast = false
+        var concat_dest = -1
+        var returns_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 31 and lo == 7:
+                            has_preserved_high = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(7):
+                            has_cast = true
+                    case VhdlConcat(dest, parts):
+                        has_concat = true
+                        concat_dest = dest.id
+                    case Copy(dest, src):
+                        if concat_dest >= 0 and src.id == concat_dest:
+                            returns_concat = true
+                    case _:
+                        nil
+        check(has_preserved_high)
+        check(has_cast)
+        check(has_concat)
+        check(returns_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("imem_rdata(31 downto 7) & resize(unsigned(next_opcode), 7)"))
+
+    it "lowers top-edge hardware bitfield writes through MIR concat and slice":
+        val src = """
+bitfield Rv32Instruction(u32):
+    opcode: 7
+    rd: 5
+    funct3: 3
+    rs1: 5
+    rs2: 5
+    funct7: 7
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_funct7(clk: bool, reset_n: bool, imem_rdata: u32, next_funct7: u32) -> u32:
+    var inst = Rv32Instruction.new(imem_rdata)
+    inst.funct7 = next_funct7
+    inst
+"""
+        val path = "testdata/bitfield_write_funct7_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_funct7_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_low = false
+        var has_concat = false
+        var has_cast = false
+        var concat_dest = -1
+        var returns_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 24 and lo == 0:
+                            has_preserved_low = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(7):
+                            has_cast = true
+                    case VhdlConcat(dest, parts):
+                        has_concat = true
+                        concat_dest = dest.id
+                    case Copy(dest, src):
+                        if concat_dest >= 0 and src.id == concat_dest:
+                            returns_concat = true
+                    case _:
+                        nil
+        check(has_preserved_low)
+        check(has_cast)
+        check(has_concat)
+        check(returns_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("resize(unsigned(next_funct7), 7) & imem_rdata(24 downto 0)"))
+
+    it "lowers middle-field hardware bitfield writes through MIR concat and slices":
+        val src = """
+bitfield Rv32Instruction(u32):
+    opcode: 7
+    rd: 5
+    funct3: 3
+    rs1: 5
+    rs2: 5
+    funct7: 7
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_rd(clk: bool, reset_n: bool, imem_rdata: u32, next_rd: u32) -> u32:
+    var inst = Rv32Instruction.new(imem_rdata)
+    inst.rd = next_rd
+    inst
+"""
+        val path = "testdata/bitfield_write_rd_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_rd_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_high = false
+        var has_preserved_low = false
+        var has_concat = false
+        var has_cast = false
+        var concat_dest = -1
+        var returns_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 31 and lo == 12:
+                            has_preserved_high = true
+                        if hi == 6 and lo == 0:
+                            has_preserved_low = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(5):
+                            has_cast = true
+                    case VhdlConcat(dest, parts):
+                        if parts.len() == 3:
+                            has_concat = true
+                            concat_dest = dest.id
+                    case Copy(dest, src):
+                        if concat_dest >= 0 and src.id == concat_dest:
+                            returns_concat = true
+                    case _:
+                        nil
+        check(has_preserved_high)
+        check(has_preserved_low)
+        check(has_cast)
+        check(has_concat)
+        check(returns_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("imem_rdata(31 downto 12) & resize(unsigned(next_rd), 5) & imem_rdata(6 downto 0)"))
+
+    it "lowers bool hardware bitfield writes through MIR cast and concat":
+        val src = """
+bitfield Status(u8):
+    ready: bool
+    mode: 3
+    _: 4
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_ready(clk: bool, reset_n: bool, status_raw: u8, next_ready: bool) -> u8:
+    var status = Status.new(status_raw)
+    status.ready = next_ready
+    status
+"""
+        val path = "testdata/bitfield_write_ready_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_ready_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_high = false
+        var has_bool_cast = false
+        var has_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 7 and lo == 1:
+                            has_preserved_high = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(1):
+                            has_bool_cast = true
+                    case VhdlConcat(dest, parts):
+                        if parts.len() == 2:
+                            has_concat = true
+                    case _:
+                        nil
+        check(has_preserved_high)
+        check(has_bool_cast)
+        check(has_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("status_raw(7 downto 1) & (to_unsigned(1, 1) when next_ready = '1' else to_unsigned(0, 1))"))
+
+    it "lowers top-edge bool hardware bitfield writes through MIR cast and concat":
+        val src = """
+bitfield Flags(u8):
+    low: 7
+    enabled: bool
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_enabled(clk: bool, reset_n: bool, flags_raw: u8, next_enabled: bool) -> u8:
+    var flags = Flags.new(flags_raw)
+    flags.enabled = next_enabled
+    flags
+"""
+        val path = "testdata/bitfield_write_enabled_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_enabled_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_low = false
+        var has_bool_cast = false
+        var has_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 6 and lo == 0:
+                            has_preserved_low = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(1):
+                            has_bool_cast = true
+                    case VhdlConcat(dest, parts):
+                        if parts.len() == 2:
+                            has_concat = true
+                    case _:
+                        nil
+        check(has_preserved_low)
+        check(has_bool_cast)
+        check(has_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("(to_unsigned(1, 1) when next_enabled = '1' else to_unsigned(0, 1)) & flags_raw(6 downto 0)"))
+
+    it "lowers middle-field bool hardware bitfield writes through MIR cast and concat":
+        val src = """
+bitfield Control(u8):
+    low: 3
+    enabled: bool
+    high: 4
+
+@hardware
+@clocked(clk, reset_n)
+fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_enabled: bool) -> u8:
+    var control = Control.new(control_raw)
+    control.enabled = next_enabled
+    control
+"""
+        val path = "testdata/bitfield_write_enabled_mid_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "bitfield_write_enabled_mid_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() > 0)
+        val mir_fn = mir_funcs[0]
+        var has_preserved_high = false
+        var has_preserved_low = false
+        var has_bool_cast = false
+        var has_concat = false
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlSlice(dest, signal, hi, lo):
+                        if hi == 7 and lo == 4:
+                            has_preserved_high = true
+                        if hi == 2 and lo == 0:
+                            has_preserved_low = true
+                    case Cast(dest, operand, target):
+                        if target == MirType.bits(1):
+                            has_bool_cast = true
+                    case VhdlConcat(dest, parts):
+                        if parts.len() == 3:
+                            has_concat = true
+                    case _:
+                        nil
+        check(has_preserved_high)
+        check(has_preserved_low)
+        check(has_bool_cast)
+        check(has_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("control_raw(7 downto 4) & (to_unsigned(1, 1) when next_enabled = '1' else to_unsigned(0, 1)) & control_raw(2 downto 0)"))
+
+    it "lowers generated rv32 decode/writeback source through exact helper guards, slices, and concat":
+        val src = RiscvFpgaLane.rv32_default().hardware_source_spl()
+        val path = "testdata/simple_rv32i_core_generated_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "simple_rv32i_core_generated_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val mir_funcs = mir_module.functions.values()
+        check(mir_funcs.len() >= 2)
+        var saw_opcode_slice = false
+        var saw_funct3_slice = false
+        var saw_funct7_slice = false
+        var saw_rs1_slice = false
+        var saw_rs2_slice = false
+        var saw_branch_low_slice = false
+        var saw_branch_high_slice = false
+        var saw_branch_bit11_slice = false
+        var saw_branch_bit12_slice = false
+        var saw_rd_concat = false
+        for mir_fn in mir_funcs:
+            if mir_fn.name == "simple_rv32i_core_decode_writeback":
+                for block in mir_fn.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case VhdlSlice(dest, signal, hi, lo):
+                                if hi == 6 and lo == 0:
+                                    saw_opcode_slice = true
+                                if hi == 14 and lo == 12:
+                                    saw_funct3_slice = true
+                                if hi == 31 and lo == 25:
+                                    saw_funct7_slice = true
+                                if hi == 19 and lo == 15:
+                                    saw_rs1_slice = true
+                                if hi == 24 and lo == 20:
+                                    saw_rs2_slice = true
+                                if hi == 11 and lo == 8:
+                                    saw_branch_low_slice = true
+                                if hi == 30 and lo == 25:
+                                    saw_branch_high_slice = true
+                                if hi == 7 and lo == 7:
+                                    saw_branch_bit11_slice = true
+                                if hi == 31 and lo == 31:
+                                    saw_branch_bit12_slice = true
+                            case VhdlConcat(dest, parts):
+                                if parts.len() == 3:
+                                    saw_rd_concat = true
+                            case _:
+                                nil
+        check(saw_opcode_slice)
+        check(saw_funct3_slice)
+        check(saw_funct7_slice)
+        check(saw_rs1_slice)
+        check(saw_rs2_slice)
+        check(saw_branch_low_slice)
+        check(saw_branch_high_slice)
+        check(saw_branch_bit11_slice)
+        check(saw_branch_bit12_slice)
+        check(saw_rd_concat)
+
+        val result = make_simple_backend().compile(mir_module)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("if unsigned(v_opcode) = to_unsigned(19, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(51, 32) and unsigned(v_funct3) = to_unsigned(0, 32) and unsigned(v_funct7) = to_unsigned(0, 32) then"))
+        check(vhdl.contains("elsif unsigned(v_opcode) = to_unsigned(99, 32) then"))
+        check(vhdl.contains("imem_rdata(6 downto 0)"))
+        check(vhdl.contains("imem_rdata(14 downto 12)"))
+        check(vhdl.contains("imem_rdata(31 downto 25)"))
+        check(vhdl.contains("imem_rdata(19 downto 15)"))
+        check(vhdl.contains("imem_rdata(24 downto 20)"))
+        check(vhdl.contains("imem_rdata(11 downto 8)"))
+        check(vhdl.contains("imem_rdata(30 downto 25)"))
+        check(vhdl.contains("imem_rdata(7 downto 7)"))
+        check(vhdl.contains("imem_rdata(31 downto 31)"))
+        check(vhdl.contains("imem_rdata(31 downto 12) & resize(unsigned(v_inst_rs1), 5) & imem_rdata(6 downto 0)"))
+        check(vhdl.contains("imem_rdata(31 downto 12) & resize(unsigned(v_inst_rs2), 5) & imem_rdata(6 downto 0)"))
+        check(vhdl.contains("to_unsigned(0, 20) & resize(unsigned(v_branch_inst_bit12), 1) & resize(unsigned(v_branch_inst_bit11), 1) & resize(unsigned(v_branch_inst_high), 6) & resize(unsigned(v_branch_inst_low), 4)"))
 
     it "rejects non-positive fixed-width bit lanes before VHDL emission":
         val src_local = make_arg_local(1, 0, "bad", make_bits(0))

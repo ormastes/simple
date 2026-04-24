@@ -41,6 +41,10 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
 #define APP_PRE_WINDOW_HOOK() 0
 #endif
 
+#ifndef APP_RUNTIME_CONTENT
+#define APP_RUNTIME_CONTENT(argc, argv) APP_CONTENT
+#endif
+
 #define SYS_IPC_SEND 20
 #define SYS_IPC_RECV 21
 #define SYS_IPC_CREATE_PORT 22
@@ -182,16 +186,21 @@ static uint64_t _create_window(uint64_t compositor_port, uint64_t app_port) {
     return _read_u64(reply + 4);
 }
 
-static void _update_content(uint64_t compositor_port, uint64_t app_port, uint64_t window_id) {
+static void _update_content(uint64_t compositor_port, uint64_t app_port, uint64_t window_id,
+                            const char *content) {
     uint8_t msg[2048];
     size_t off = 0;
-    const size_t content_len = _strlen_local(APP_CONTENT);
+    size_t content_len = _strlen_local(content);
+    const size_t content_cap = sizeof(msg) - 16;
+    if (content_len > content_cap) {
+        content_len = content_cap;
+    }
 
     _push_u32(msg, &off, COMP_UPDATE_TREE);
     _push_u64(msg, &off, window_id);
     _push_u32(msg, &off, (uint32_t)content_len);
     for (size_t i = 0; i < content_len; i++) {
-        msg[off++] = (uint8_t)APP_CONTENT[i];
+        msg[off++] = (uint8_t)content[i];
     }
 
     if (_ipc_send(compositor_port, app_port, msg, (uint64_t)off) >= 0) {
@@ -244,6 +253,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    const char *content = APP_RUNTIME_CONTENT(argc, argv);
+    if (content == (const char *)0) {
+        content = APP_CONTENT;
+    }
+
     uint64_t app_port = 0;
     uint64_t compositor_port = _connect_compositor(&app_port);
     if (compositor_port == 0 || app_port == 0) {
@@ -255,7 +269,7 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    _update_content(compositor_port, app_port, window_id);
+    _update_content(compositor_port, app_port, window_id, content);
     _wait_for_close(app_port, window_id);
     _destroy_window(compositor_port, app_port, window_id);
     return 0;

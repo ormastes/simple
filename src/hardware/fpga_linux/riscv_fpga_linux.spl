@@ -283,6 +283,15 @@ impl RiscvFpgaLane:
             "    bit11: 1\n" +
             "    bit12: 1\n" +
             "    _: 20\n\n" +
+            "bitfield RiscvBranchEncoding(u32):\n" +
+            "    opcode: 7\n" +
+            "    bit11: 1\n" +
+            "    low: 4\n" +
+            "    funct3: 3\n" +
+            "    rs1: 5\n" +
+            "    rs2: 5\n" +
+            "    high: 6\n" +
+            "    bit12: 1\n\n" +
             "bitfield RiscvJumpImmediate(u32):\n" +
             "    low10: 10\n" +
             "    bit11: 1\n" +
@@ -290,16 +299,51 @@ impl RiscvFpgaLane:
             "    bit20: 1\n" +
             "    _: 12\n\n" +
             "@hardware\n" +
-            "@clocked\n" +
+            "@clocked(clk, reset_n)\n" +
+            "fn {self.top_module}_decode_writeback(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:\n" +
+            "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    val opcode = inst.opcode as u32\n" +
+            "    val funct3 = inst.funct3 as u32\n" +
+            "    val funct7 = inst.funct7 as u32\n" +
+            "    var writeback = {bitfield_name}.new(imem_rdata)\n" +
+            "    if opcode == 19 as u32:\n" +
+            "        writeback.rd = inst.rs1 as u32\n" +
+            "        writeback\n" +
+            "    elif opcode == 51 as u32 and funct3 == 0 as u32 and funct7 == 0 as u32:\n" +
+            "        writeback.rd = inst.rs2 as u32\n" +
+            "        writeback\n" +
+            "    elif opcode == 99 as u32:\n" +
+            "        val branch_inst = RiscvBranchEncoding.new(imem_rdata)\n" +
+            "        var branch_imm = RiscvBranchImmediate.new(0 as u32)\n" +
+            "        branch_imm.low = branch_inst.low as u32\n" +
+            "        branch_imm.high = branch_inst.high as u32\n" +
+            "        branch_imm.bit11 = branch_inst.bit11 as u32\n" +
+            "        branch_imm.bit12 = branch_inst.bit12 as u32\n" +
+            "        branch_imm\n" +
+            "    else:\n" +
+            "        imem_rdata\n\n" +
+            "@hardware\n" +
+            "@clocked(clk, reset_n)\n" +
             "fn {self.top_module}(clk: bool, reset_n: bool, imem_rdata: u32, dmem_rdata: u{self.xlen.bits()}) -> u{self.xlen.bits()}:\n" +
             "    val inst = {bitfield_name}.new(imem_rdata)\n" +
+            "    val opcode = inst.opcode as u32\n" +
+            "    val funct3 = inst.funct3 as u32\n" +
+            "    val funct7 = inst.funct7 as u32\n" +
+            "    val rd = inst.rd as u32\n" +
             "    # VHDL lowering owns these bitfield reads as slices:\n" +
             "    # inst.opcode -> imem_rdata(6 downto 0)\n" +
             "    # inst.rd -> imem_rdata(11 downto 7)\n" +
+            "    # inst.funct3 -> imem_rdata(14 downto 12)\n" +
             "    # inst.rs1 -> imem_rdata(19 downto 15)\n" +
             "    # inst.rs2 -> imem_rdata(24 downto 20)\n" +
+            "    # inst.funct7 -> imem_rdata(31 downto 25)\n" +
             "    # base integer instructions: {self.base_integer_instruction_mnemonics().join(\",\")}\n" +
-            "    imem_rdata as u{self.xlen.bits()}\n"
+            "    if opcode == 19 as u32:\n" +
+            "        rd as u{self.xlen.bits()}\n" +
+            "    elif opcode == 51 as u32 and funct3 == 0 as u32 and funct7 == 0 as u32:\n" +
+            "        rd as u{self.xlen.bits()}\n" +
+            "    else:\n" +
+            "        imem_rdata as u{self.xlen.bits()}\n"
 
     fn hardware_source_contract_errors() -> [text]:
         val source = self.hardware_source_spl()
@@ -312,6 +356,38 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must preserve @hardware metadata")
         if not source.contains("@clocked"):
             errors.push("{self.xlen.to_text()} hardware source must preserve @clocked metadata")
+        if not source.contains("fn {self.top_module}_decode_writeback"):
+            errors.push("{self.xlen.to_text()} hardware source must define decode/writeback helper")
+        if not source.contains("writeback.rd = inst.rs1 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express I-type writeback field update")
+        if not source.contains("writeback.rd = inst.rs2 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express R-type writeback field update")
+        if not source.contains("bitfield RiscvBranchImmediate(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define branch immediate bitfield")
+        if not source.contains("bitfield RiscvBranchEncoding(u32):"):
+            errors.push("{self.xlen.to_text()} hardware source must define branch immediate source-layout bitfield")
+        if not source.contains("val opcode = inst.opcode as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express opcode decode through bitfield reads")
+        if not source.contains("val funct3 = inst.funct3 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express funct3 decode through bitfield reads")
+        if not source.contains("val funct7 = inst.funct7 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express funct7 decode through bitfield reads")
+        if not source.contains("opcode == 51 as u32 and funct3 == 0 as u32 and funct7 == 0 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must express R-type add decode guard")
+        if not source.contains("elif opcode == 99 as u32:"):
+            errors.push("{self.xlen.to_text()} hardware source must express branch immediate decode guard")
+        if not source.contains("val branch_inst = RiscvBranchEncoding.new(imem_rdata)"):
+            errors.push("{self.xlen.to_text()} hardware source must read branch immediate pieces through the branch layout bitfield")
+        if not source.contains("var branch_imm = RiscvBranchImmediate.new(0 as u32)"):
+            errors.push("{self.xlen.to_text()} hardware source must reconstruct branch immediate through bitfield writes")
+        if not source.contains("branch_imm.low = branch_inst.low as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve branch immediate low bits")
+        if not source.contains("branch_imm.high = branch_inst.high as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve branch immediate high bits")
+        if not source.contains("branch_imm.bit11 = branch_inst.bit11 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve branch immediate bit11")
+        if not source.contains("branch_imm.bit12 = branch_inst.bit12 as u32"):
+            errors.push("{self.xlen.to_text()} hardware source must preserve the branch immediate sign bit")
         if not source.contains("base integer instructions:"):
             errors.push("{self.xlen.to_text()} hardware source must list RV base integer instructions")
         if source.contains("pass_todo") or source.contains("todo("):
@@ -393,6 +469,8 @@ impl RiscvFpgaLane:
             "        variable branch_i : signed(XLEN - 1 downto 0);\n" +
             "        variable jump_i : signed(XLEN - 1 downto 0);\n" +
             "        variable imm_u : xword_t;\n" +
+            "        variable decode_writeback_bits : std_logic_vector(31 downto 0);\n" +
+            "        variable decode_writeback_rd_i : integer range 0 to 31;\n" +
             "        variable branch_taken : boolean;\n" +
             "        variable shift_i : natural range 0 to 63;\n" +
             "    begin\n" +
@@ -410,6 +488,13 @@ impl RiscvFpgaLane:
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
             "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
+            "                decode_writeback_bits := imem_rdata;\n" +
+            "                if imem_rdata(6 downto 0) = \"0010011\" then\n" +
+            "                    decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(19 downto 15) & imem_rdata(6 downto 0);\n" +
+            "                elsif imem_rdata(6 downto 0) = \"0110011\" and imem_rdata(14 downto 12) = \"000\" and imem_rdata(31 downto 25) = \"0000000\" then\n" +
+            "                    decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(24 downto 20) & imem_rdata(6 downto 0);\n" +
+            "                end if;\n" +
+            "                decode_writeback_rd_i := to_integer(unsigned(decode_writeback_bits(11 downto 7)));\n" +
             "                imm_i := resize(signed(imem_rdata(31 downto 20)), XLEN);\n" +
             "                imm_u := std_logic_vector(resize(signed(imem_rdata(31 downto 12) & x\"000\"), XLEN));\n" +
             "                branch_i := resize(signed(imem_rdata(31) & imem_rdata(7) & imem_rdata(30 downto 25) & imem_rdata(11 downto 8) & '0'), XLEN);\n" +
@@ -428,66 +513,66 @@ impl RiscvFpgaLane:
             "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0010011\" =>\n" +
-            "                        if rd_i /= 0 then\n" +
+            "                        if decode_writeback_rd_i /= 0 then\n" +
             "                            case imem_rdata(14 downto 12) is\n" +
-            "                                when \"000\" => regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
+            "                                when \"000\" => regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) + imm_i);\n" +
             "                                when \"010\" =>\n" +
             "                                    if signed(regs(rs1_i)) < imm_i then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                        regs(decode_writeback_rd_i) <= (others => '0');\n" +
             "                                    end if;\n" +
             "                                when \"011\" =>\n" +
             "                                    if unsigned(regs(rs1_i)) < unsigned(std_logic_vector(imm_i)) then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                        regs(decode_writeback_rd_i) <= (others => '0');\n" +
             "                                    end if;\n" +
-            "                                when \"100\" => regs(rd_i) <= regs(rs1_i) xor std_logic_vector(imm_i);\n" +
-            "                                when \"110\" => regs(rd_i) <= regs(rs1_i) or std_logic_vector(imm_i);\n" +
-            "                                when \"111\" => regs(rd_i) <= regs(rs1_i) and std_logic_vector(imm_i);\n" +
-            "                                when \"001\" => regs(rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                when \"100\" => regs(decode_writeback_rd_i) <= regs(rs1_i) xor std_logic_vector(imm_i);\n" +
+            "                                when \"110\" => regs(decode_writeback_rd_i) <= regs(rs1_i) or std_logic_vector(imm_i);\n" +
+            "                                when \"111\" => regs(decode_writeback_rd_i) <= regs(rs1_i) and std_logic_vector(imm_i);\n" +
+            "                                when \"001\" => regs(decode_writeback_rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
             "                                when \"101\" =>\n" +
             "                                    if imem_rdata(30) = '1' then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), to_integer(unsigned(imem_rdata(25 downto 20)))));\n" +
             "                                    end if;\n" +
             "                                when others => trap_reg <= '1';\n" +
             "                            end case;\n" +
             "                        end if;\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    when \"0110011\" =>\n" +
-            "                        if rd_i /= 0 then\n" +
+            "                        if decode_writeback_rd_i /= 0 then\n" +
             "                            case imem_rdata(14 downto 12) is\n" +
             "                                when \"000\" =>\n" +
             "                                    if imem_rdata(30) = '1' then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) - signed(regs(rs2_i)));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(signed(regs(rs1_i)) + signed(regs(rs2_i)));\n" +
             "                                    end if;\n" +
-            "                                when \"001\" => regs(rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), shift_i));\n" +
+            "                                when \"001\" => regs(decode_writeback_rd_i) <= std_logic_vector(shift_left(unsigned(regs(rs1_i)), shift_i));\n" +
             "                                when \"010\" =>\n" +
             "                                    if signed(regs(rs1_i)) < signed(regs(rs2_i)) then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                        regs(decode_writeback_rd_i) <= (others => '0');\n" +
             "                                    end if;\n" +
             "                                when \"011\" =>\n" +
             "                                    if unsigned(regs(rs1_i)) < unsigned(regs(rs2_i)) then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(to_unsigned(1, XLEN));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= (others => '0');\n" +
+            "                                        regs(decode_writeback_rd_i) <= (others => '0');\n" +
             "                                    end if;\n" +
-            "                                when \"100\" => regs(rd_i) <= regs(rs1_i) xor regs(rs2_i);\n" +
+            "                                when \"100\" => regs(decode_writeback_rd_i) <= regs(rs1_i) xor regs(rs2_i);\n" +
             "                                when \"101\" =>\n" +
             "                                    if imem_rdata(30) = '1' then\n" +
-            "                                        regs(rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), shift_i));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(signed(regs(rs1_i)), shift_i));\n" +
             "                                    else\n" +
-            "                                        regs(rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), shift_i));\n" +
+            "                                        regs(decode_writeback_rd_i) <= std_logic_vector(shift_right(unsigned(regs(rs1_i)), shift_i));\n" +
             "                                    end if;\n" +
-            "                                when \"110\" => regs(rd_i) <= regs(rs1_i) or regs(rs2_i);\n" +
-            "                                when \"111\" => regs(rd_i) <= regs(rs1_i) and regs(rs2_i);\n" +
+            "                                when \"110\" => regs(decode_writeback_rd_i) <= regs(rs1_i) or regs(rs2_i);\n" +
+            "                                when \"111\" => regs(decode_writeback_rd_i) <= regs(rs1_i) and regs(rs2_i);\n" +
             "                                when others => trap_reg <= '1';\n" +
             "                            end case;\n" +
             "                        end if;\n" +

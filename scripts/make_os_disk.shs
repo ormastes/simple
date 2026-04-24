@@ -20,47 +20,52 @@ OUTPUT="${2:-build/os/fat32.img}"
 SEED_DIR="${3:-}"
 ARCH_MODE="${4:-x86_64}"
 SIMPLEOS_IMAGE_VERSION="${SIMPLEOS_IMAGE_VERSION:-0.1.0}"
+SIMPLEOS_CLI_APP_CATALOG="${SIMPLEOS_CLI_APP_CATALOG:-scripts/simpleos_cli_app_catalog.txt}"
+SIMPLEOS_CLI_APP_CACHE_ROOT="${SIMPLEOS_CLI_APP_CACHE_ROOT:-build/os/simple_cli_apps}"
+SIMPLEOS_CLI_BUILD_TARGET="${SIMPLEOS_CLI_BUILD_TARGET:-x86_64-unknown-none}"
+SIMPLEOS_REQUIRED_CLI_APPS="${SIMPLEOS_REQUIRED_CLI_APPS:-}"
 POPULATED=0
 ELFSEEDED=0
 
-# Ensure output directory exists
-mkdir -p "$(dirname "$OUTPUT")"
-
-# Create empty disk image. qemu-img is preferred when installed because it is
-# portable across Linux/macOS CI images and never needs loop privileges.
-if command -v qemu-img >/dev/null 2>&1; then
-    if qemu-img create -f raw "$OUTPUT" "${SIZE_MB}M" >/dev/null; then
-        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with qemu-img: $OUTPUT"
-    else
-        echo "[make_os_disk] ERROR: qemu-img failed to create raw image: $OUTPUT"
-        exit 1
-    fi
-else
-    if dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null; then
-        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with dd: $OUTPUT"
-    else
-        echo "[make_os_disk] ERROR: dd failed to create raw image: $OUTPUT"
-        exit 1
-    fi
+if [ -n "${SIMPLEOS_UEFI_KERNEL:-}" ] && [ -z "$SIMPLEOS_REQUIRED_CLI_APPS" ]; then
+    SIMPLEOS_REQUIRED_CLI_APPS="info"
 fi
 
-# Format as FAT32. Prefer mformat when present so the mtools-only path can
-# create and populate media without any mount helper.
-FORMATTED=0
-if command -v mformat >/dev/null 2>&1; then
-    mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
-    echo "[make_os_disk] Formatted as FAT32 (mformat)"
-    FORMATTED=1
-elif command -v mkfs.fat >/dev/null 2>&1; then
-    mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
-    echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
-    FORMATTED=1
-else
+create_raw_image() {
+    mkdir -p "$(dirname "$OUTPUT")"
+    rm -f "$OUTPUT"
+    if command -v qemu-img >/dev/null 2>&1; then
+        if qemu-img create -f raw "$OUTPUT" "${SIZE_MB}M" >/dev/null; then
+            echo "[make_os_disk] Created ${SIZE_MB}MB raw image with qemu-img: $OUTPUT"
+            return 0
+        fi
+        echo "[make_os_disk] ERROR: qemu-img failed to create raw image: $OUTPUT"
+        return 1
+    fi
+    if dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null; then
+        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with dd: $OUTPUT"
+        return 0
+    fi
+    echo "[make_os_disk] ERROR: dd failed to create raw image: $OUTPUT"
+    return 1
+}
+
+format_fat32_image() {
+    if command -v mformat >/dev/null 2>&1; then
+        mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
+        echo "[make_os_disk] Formatted as FAT32 (mformat)"
+        return 0
+    fi
+    if command -v mkfs.fat >/dev/null 2>&1; then
+        mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
+        echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
+        return 0
+    fi
     echo "[make_os_disk] ERROR: no FAT32 formatter found"
     echo "[make_os_disk] Install mtools (mformat) or dosfstools (mkfs.fat)."
     echo "[make_os_disk] Examples: apt install mtools dosfstools; brew install mtools dosfstools"
-    exit 1
-fi
+    return 1
+}
 
 # ============================================================================
 # Write test fixture files to image
@@ -69,6 +74,93 @@ fi
 # Prepare fixture content in temp directory
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+ensure_image_capacity() {
+    if ! command -v du >/dev/null 2>&1; then
+        return 0
+    fi
+    staged_mb="$(du -sm "$TMPDIR" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    case "$staged_mb" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+    required_mb=$((staged_mb + 32))
+    rounded_mb=$((((required_mb + 31) / 32) * 32))
+    if [ "$rounded_mb" -le "$SIZE_MB" ]; then
+        return 0
+    fi
+    echo "[make_os_disk] Growing FAT image from ${SIZE_MB}MB to ${rounded_mb}MB for ${staged_mb}MB staged payload"
+    SIZE_MB="$rounded_mb"
+    rm -f "$OUTPUT"
+    create_raw_image || return 1
+    format_fat32_image || return 1
+}
+
+create_raw_image || exit 1
+format_fat32_image || exit 1
+
+stage_simpleos_cli_catalog() {
+    [ -f "$SIMPLEOS_CLI_APP_CATALOG" ] || return 0
+
+    mkdir -p "$TMPDIR/SYS/APPS"
+    : > "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            while IFS='|' read -r app_name source_path smoke_tag; do
+                case "$app_name" in
+                    ""|\#*) continue ;;
+                esac
+                printf "%s|%s|%s|skipped-non-x86_64\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+            done < "$SIMPLEOS_CLI_APP_CATALOG"
+            echo "[make_os_disk] Recorded Simple CLI catalog metadata for $ARCH_MODE (payload staging is x86_64-only)"
+            return 0
+            ;;
+    esac
+
+    mkdir -p "$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE" "$SIMPLEOS_CLI_APP_CACHE_ROOT/logs" "$TMPDIR/SYS/APPS"
+    app_count=0
+    smoke_count=0
+
+    while IFS='|' read -r app_name source_path smoke_tag; do
+        case "$app_name" in
+            ""|\#*) continue ;;
+        esac
+
+        required_stage=0
+        case " $SIMPLEOS_REQUIRED_CLI_APPS " in
+            *" $app_name "*) required_stage=1 ;;
+        esac
+
+        if [ "$smoke_tag" != "smoke" ] && [ "$required_stage" -ne 1 ]; then
+            printf "%s|%s|%s|catalog-only\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+            continue
+        fi
+
+        cache_path="$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE/${app_name}.smf"
+        log_path="$SIMPLEOS_CLI_APP_CACHE_ROOT/logs/${app_name}.log"
+
+        if [ ! -f "$cache_path" ] || [ "$source_path" -nt "$cache_path" ] || [ "$SIMPLEOS_CLI_APP_CATALOG" -nt "$cache_path" ]; then
+            echo "[make_os_disk] Compiling Simple CLI app: $app_name"
+            if ! bin/simple compile "$source_path" --target "$SIMPLEOS_CLI_BUILD_TARGET" -o "$cache_path" >"$log_path" 2>&1; then
+                echo "[make_os_disk] ERROR: failed to compile $app_name from $source_path"
+                tail -n 40 "$log_path" 2>/dev/null || true
+                return 1
+            fi
+        fi
+
+        cp "$cache_path" "$TMPDIR/SYS/APPS/$app_name.smf" || return 1
+        cp "$cache_path" "$TMPDIR/SYS/APPS/$app_name" || return 1
+        printf "%s|%s|%s|staged\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+        app_count=$((app_count + 1))
+        smoke_count=$((smoke_count + 1))
+    done < "$SIMPLEOS_CLI_APP_CATALOG"
+
+    echo "[make_os_disk] Staged $app_count Simple CLI apps into /SYS/APPS ($smoke_count smoke targets)"
+}
 
 echo "Hello from SimpleOS!" > "$TMPDIR/hello.txt"
 
@@ -180,6 +272,7 @@ cp "$TMPDIR/SINTERP.APP" "$TMPDIR/SYS/APPS/SINTERP.APP"
 cp "$TMPDIR/SLOADER.APP" "$TMPDIR/SYS/APPS/SLOADER.APP"
 cp "$TMPDIR/LLVM.APP" "$TMPDIR/SYS/APPS/LLVM.APP"
 cp "$TMPDIR/RUST.APP" "$TMPDIR/SYS/APPS/RUST.APP"
+stage_simpleos_cli_catalog || exit 1
 
 mkdir -p "$TMPDIR/boot" "$TMPDIR/etc/pkg" "$TMPDIR/etc/shell" "$TMPDIR/bin" "$TMPDIR/sbin"
 mkdir -p "$TMPDIR/usr/bin" "$TMPDIR/usr/sbin" "$TMPDIR/usr/lib" "$TMPDIR/usr/libexec/simpleos-installer"
@@ -672,6 +765,8 @@ root_cluster = struct.unpack_from("<I", data, 44)[0]
 fat0 = reserved * bps
 cluster0 = (reserved + fat_count * spf) * bps
 cluster_size = bps * spc
+data_clusters = (len(data) - cluster0) // cluster_size
+max_cluster = root_cluster + data_clusters - 1
 next_cluster = 3
 
 def cluster_offset(cluster):
@@ -685,6 +780,10 @@ def set_fat(cluster, value):
 def alloc_cluster():
     global next_cluster
     cluster = next_cluster
+    if cluster > max_cluster:
+        raise RuntimeError(
+            f"FAT32 image capacity exhausted: next cluster {cluster} exceeds max {max_cluster}"
+        )
     next_cluster += 1
     start = cluster_offset(cluster)
     data[start:start + cluster_size] = b"\0" * cluster_size
@@ -703,6 +802,9 @@ def fat_name(path):
     if not base:
         raise ValueError(f"cannot encode empty FAT name for {path}")
     return base.ljust(8) + ext.ljust(3)
+
+def fat_special_name(base):
+    return base.ljust(11)
 
 def write_dir_entry(dir_cluster, index, name11, attr, first_cluster, size):
     off = cluster_offset(dir_cluster) + index * 32
@@ -736,7 +838,10 @@ def add_dir(path, parent_cluster):
     slot_cluster, index = alloc_dir_slot(parent_cluster)
     write_dir_entry(slot_cluster, index, fat_name(path), 0x10, cluster, 0)
     dirs[path] = cluster
-    dir_entries[cluster] = 0
+    parent_dir_cluster = 0 if parent_cluster == root_cluster else parent_cluster
+    write_dir_entry(cluster, 0, fat_special_name("."), 0x10, cluster, 0)
+    write_dir_entry(cluster, 1, fat_special_name(".."), 0x10, parent_dir_cluster, 0)
+    dir_entries[cluster] = 2
     dir_chains[cluster] = [cluster]
     return cluster
 
@@ -756,23 +861,53 @@ def add_file(path, parent_cluster):
     slot_cluster, index = alloc_dir_slot(parent_cluster)
     write_dir_entry(slot_cluster, index, fat_name(path), 0x20, first, len(payload))
 
-for root, dirnames, filenames in os.walk(source):
-    root_path = pathlib.Path(root)
-    parent_cluster = dirs[root_path]
-    dirnames[:] = sorted(dirnames)
-    for dirname in dirnames:
-        child = root_path / dirname
-        add_dir(child, parent_cluster)
-    for filename in sorted(filenames):
-        path = root_path / filename
-        try:
-            add_file(path, parent_cluster)
-        except ValueError:
-            pass
+try:
+    for root, dirnames, filenames in os.walk(source):
+        root_path = pathlib.Path(root)
+        parent_cluster = dirs[root_path]
+        dirnames[:] = sorted(dirnames)
+        for dirname in dirnames:
+            child = root_path / dirname
+            add_dir(child, parent_cluster)
+        for filename in sorted(filenames):
+            path = root_path / filename
+            try:
+                add_file(path, parent_cluster)
+            except ValueError:
+                pass
+except RuntimeError as err:
+    print(f"PYTHON_FAT32_CAPACITY_EXHAUSTED: {err}", file=sys.stderr)
+    sys.exit(2)
 
 image.write_bytes(data)
 PY
 }
+
+retry_python_fat32_population() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+    attempts=0
+    while [ "$attempts" -lt 4 ]; do
+        attempts=$((attempts + 1))
+        if populate_with_python_fat32; then
+            return 0
+        fi
+        rc=$?
+        if [ "$rc" -ne 2 ]; then
+            return "$rc"
+        fi
+        next_size_mb=$((SIZE_MB + 32))
+        echo "[make_os_disk] Growing FAT image from ${SIZE_MB}MB to ${next_size_mb}MB after python capacity check"
+        SIZE_MB="$next_size_mb"
+        rm -f "$OUTPUT"
+        create_raw_image || return 1
+        format_fat32_image || return 1
+    done
+    return 1
+}
+
+ensure_image_capacity || exit 1
 
 # Method 1: mtools (works on macOS and Linux without root)
 if command -v mcopy >/dev/null 2>&1; then
@@ -782,7 +917,7 @@ if command -v mcopy >/dev/null 2>&1; then
 
 # Method 2: pure userland fallback. It avoids privileged loop mounts and keeps
 # the QEMU disk lanes usable in unprivileged containers where Python exists.
-elif populate_with_python_fat32; then
+elif retry_python_fat32_population; then
     echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
     POPULATED=1
 
