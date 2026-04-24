@@ -164,6 +164,19 @@ class Compositor:
 
 impl Compositor:
 
+    me allocate_window_id() -> WindowId:
+        extern fn serial_println(msg: text)
+        var expected_next: u64 = 1
+        for _surface in self.surfaces:
+            expected_next = expected_next + 1
+        var raw_id = self.next_id
+        if raw_id == 0 or raw_id < expected_next or raw_id > 0x100000:
+            if raw_id != expected_next:
+                serial_println("[compositor] repair-window-id raw={raw_id} expected={expected_next}")
+            raw_id = expected_next
+        self.next_id = raw_id + 1
+        WindowId(value: raw_id)
+
     static fn new(fb: FramebufferDriver, keyboard: Ps2Keyboard, mouse: Ps2Mouse) -> Compositor:
         """Create a compositor with baremetal framebuffer and PS/2 input.
 
@@ -278,9 +291,8 @@ impl Compositor:
         extern fn serial_println(msg: text)
         if title == "Simple Browser":
             serial_println("[compositor] simple-browser:create-window:start")
-        val raw_id = self.next_id
-        self.next_id = self.next_id + 1
-        val id = WindowId(value: raw_id)
+        val id = self.allocate_window_id()
+        val raw_id = id.value
 
         val root = column("win_{raw_id}_root", [
             text_widget("win_{raw_id}_content", "")
@@ -355,9 +367,7 @@ impl Compositor:
 
     me add_surface(title: text, x: i32, y: i32, w: i32, h: i32) -> WindowId:
         """Create a lightweight window surface without a UISession widget tree."""
-        val raw_id = self.next_id
-        self.next_id = self.next_id + 1
-        val id = WindowId(value: raw_id)
+        val id = self.allocate_window_id()
 
         val surface = WindowSurface(
             id: id,
@@ -382,9 +392,7 @@ impl Compositor:
         extern fn serial_println(msg: text)
         if title == "Simple Browser":
             serial_println("[compositor] simple-browser:create-window-with-tree:start")
-        val raw_id = self.next_id
-        self.next_id = self.next_id + 1
-        val id = WindowId(value: raw_id)
+        val id = self.allocate_window_id()
 
         # Apply automatic icon to root if none provided
         val icon = self.get_icon_for_title(title)
@@ -415,6 +423,7 @@ impl Compositor:
             serial_println("[compositor] simple-browser:create-window-with-tree:surface")
 
         self.surfaces = self.surfaces.push(surface)
+        self.app_states = self.app_states.push(app_state_new())
         self.focused_idx = self.surfaces.len() - 1
         if title == "Simple Browser":
             serial_println("[compositor] simple-browser:create-window-with-tree:end")
@@ -502,9 +511,8 @@ impl Compositor:
         Input events for this window will be queued in pending_remote_events
         instead of dispatched directly to the UISession.
         """
-        val raw_id = self.next_id
-        self.next_id = self.next_id + 1
-        val id = WindowId(value: raw_id)
+        val id = self.allocate_window_id()
+        val raw_id = id.value
 
         val root = column("win_{raw_id}_root", [
             text_widget("win_{raw_id}_content", "")
@@ -530,6 +538,7 @@ impl Compositor:
         )
 
         self.surfaces = self.surfaces.push(surface)
+        self.app_states = self.app_states.push(app_state_new())
         self.focused_idx = self.surfaces.len() - 1
         return id
 
@@ -795,8 +804,11 @@ impl Compositor:
         s.app_id
 
     fn windows_for_process(process_id: ProcessId) -> [WindowId]:
+        extern fn serial_println(msg: text)
         var ids: [WindowId] = []
         for s in self.surfaces:
+            if s.title == "Simple Browser":
+                serial_println("[compositor] windows-for-process:surface pid={process_id.value} surface_wid={s.id.value} surface_pid={s.process_id.value} app_id={s.app_id.value}")
             if s.process_id.value == process_id.value:
                 ids = ids.push(s.id)
         ids
@@ -824,14 +836,27 @@ impl Compositor:
 
     me set_window_identity(id: WindowId, process_id: ProcessId, app_id: AppId):
         """Attach process/app identity metadata to a surface."""
-        var i: i32 = 0
-        while i < self.surfaces.len():
-            if self.surfaces[i].id.value == id.value:
-                self.surfaces[i].process_id = process_id
-                self.surfaces[i].app_id = app_id
-                self.surfaces[i].dirty = true
-                return
-            i = i + 1
+        extern fn serial_println(msg: text)
+        var updated: [WindowSurface] = []
+        for surface in self.surfaces:
+            if surface.id.value == id.value:
+                if surface.title == "Simple Browser":
+                    serial_println("[compositor] set-window-identity:match wid={id.value} pid={process_id.value} app_id={app_id.value} old_pid={surface.process_id.value} old_app_id={surface.app_id.value}")
+                updated = updated.push(WindowSurface(
+                    id: surface.id,
+                    title: surface.title,
+                    bounds: surface.bounds,
+                    visible: surface.visible,
+                    session: surface.session,
+                    dirty: true,
+                    owner_port: surface.owner_port,
+                    process_id: process_id,
+                    app_id: app_id,
+                    icon_id: surface.icon_id
+                ))
+            else:
+                updated = updated.push(surface)
+        self.surfaces = updated
 
     # -- Rendering -----------------------------------------------------------
 

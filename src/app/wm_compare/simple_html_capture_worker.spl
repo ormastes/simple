@@ -1,0 +1,86 @@
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.ffi.io.{file_write_bytes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+extern fn rt_file_read_text(path: text) -> text
+
+struct WorkerOpts:
+    html_path: text
+    output_path: text
+    width: i32
+    height: i32
+
+fn _parse_kv(arg: text, key: text) -> text:
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_opts(args: [text]) -> WorkerOpts:
+    var html_path = ""
+    var output_path = ""
+    var width: i32 = 0
+    var height: i32 = 0
+    for arg in args:
+        val html_v = _parse_kv(arg, "--html")
+        if html_v != "":
+            html_path = html_v
+        else:
+            val out_v = _parse_kv(arg, "--out")
+            if out_v != "":
+                output_path = out_v
+            else:
+                val width_v = _parse_kv(arg, "--width")
+                if width_v != "":
+                    width = width_v.to_i32()
+                else:
+                    val height_v = _parse_kv(arg, "--height")
+                    if height_v != "":
+                        height = height_v.to_i32()
+    WorkerOpts(
+        html_path: html_path,
+        output_path: output_path,
+        width: width,
+        height: height
+    )
+
+fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
+    if pixels.len() == 0 or width <= 0 or height <= 0:
+        return false
+    val header = "P6\n{width} {height}\n255\n"
+    var data: [u8] = []
+    for ch in header:
+        data = data + [ch as u8]
+    var i = 0
+    while i < pixels.len():
+        val p = pixels[i]
+        data = data + [
+            ((p >> 16) & 0xFF) as u8,
+            ((p >> 8) & 0xFF) as u8,
+            (p & 0xFF) as u8
+        ]
+        i = i + 1
+    file_write_bytes(path, data)
+    true
+
+fn main() -> i64:
+    val opts = parse_opts(get_cli_args())
+    if opts.html_path == "" or opts.output_path == "" or opts.width <= 0 or opts.height <= 0:
+        print "[simple_html_capture_worker] invalid args"
+        return 2
+
+    val html = rt_file_read_text(opts.html_path) ?? ""
+    if html == "":
+        print "[simple_html_capture_worker] empty html input: {opts.html_path}"
+        return 2
+
+    val pixels = simple_web_render_html_to_pixels(html, opts.width, opts.height)
+    if pixels.len() != opts.width * opts.height:
+        print "[simple_html_capture_worker] bad pixel count: {pixels.len()} expected {opts.width * opts.height}"
+        return 2
+    if not _write_ppm_local(pixels, opts.width, opts.height, opts.output_path):
+        print "[simple_html_capture_worker] failed to write ppm: {opts.output_path}"
+        return 2
+
+    print "[simple_html_capture_worker] wrote {opts.output_path} pixels={pixels.len()}"
+    0

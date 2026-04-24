@@ -40,6 +40,7 @@ use os.compositor.electron_capture.{CaptureResult, capture_error}
 # under bootstrap. Going through the runtime extern keeps the harness
 # portable across stages.
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 use os.compositor.screenshot_compare.{
     ComparisonResult, compare_exact, generate_diff_image}
 use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
@@ -50,9 +51,8 @@ use os.compositor.tolerance_profile.{
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
 # We inline a minimal P6 decoder below using `as i32` casts.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
-
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_cwd() -> text
 
 # ============================================================================
 # Fixture Catalog
@@ -149,6 +149,7 @@ struct HtmlCompatOpts:
     only: text                # if non-empty: run just this fixture id
     update_baseline: bool
     skip_simple: bool         # only capture Chrome (source A)
+    simple_timeout_ms: i64
     width: i32
     height: i32
     help: bool
@@ -158,6 +159,7 @@ fn default_opts() -> HtmlCompatOpts:
         only: "",
         update_baseline: false,
         skip_simple: false,
+        simple_timeout_ms: 20000,
         width: 320,
         height: 240,
         help: false
@@ -191,6 +193,10 @@ fn parse_opts(args: [text]) -> HtmlCompatOpts:
                     val v_h = _parse_kv(arg, "--height")
                     if v_h != "":
                         opts.height = v_h.to_i32()
+                    else:
+                        val v_simple_timeout = _parse_kv(arg, "--simple-timeout-ms")
+                        if v_simple_timeout != "":
+                            opts.simple_timeout_ms = v_simple_timeout.to_i64()
     opts
 
 fn print_help():
@@ -203,6 +209,8 @@ fn print_help():
     print "  --only=<fixture_id>   Run only this fixture (e.g. 02_block_boxes)"
     print "  --update-baseline     Recapture Chromium and overwrite chrome.ppm"
     print "  --skip-simple         With --update-baseline, regenerate Chromium only"
+    print "  --simple-timeout-ms=<n>"
+    print "                       Bound Simple source-B render in a child process (default 20000)"
     print "  --width=<n>           Capture width (default 320)"
     print "  --height=<n>          Capture height (default 240)"
     print "  -h, --help            Show this help"
@@ -301,22 +309,65 @@ fn load_chrome_golden(fixture: Fixture, width: i32, height: i32) -> CaptureResul
 # Capture: Source B (Simple Browser Engine)
 # ============================================================================
 
-fn capture_simple(html: text, width: i32, height: i32) -> CaptureResult:
-    """Capture HTML via the Simple browser engine."""
-    val pixels = simple_web_render_html_to_pixels(html, width, height)
-    if pixels.len() == 0:
+fn _simple_capture_input_path(fixture_id: text) -> text:
+    "/tmp/simple_html_compat_{fixture_id}.html"
+
+fn _simple_capture_output_path(fixture_id: text) -> text:
+    "/tmp/simple_html_compat_{fixture_id}.ppm"
+
+fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout_ms: i64) -> CaptureResult:
+    """Capture HTML via the Simple browser engine in a bounded child process."""
+    val html_path = _simple_capture_input_path(fixture_id)
+    val ppm_path = _simple_capture_output_path(fixture_id)
+    if not file_write_text(html_path, html):
         return capture_error(
             "simple_browser_engine", width, height,
-            "render_html_to_pixels returned empty buffer")
-    if pixels.len() != width * height:
+            "failed to write child input html: {html_path}")
+
+    val simple_bin = rt_env_cwd() + "/bin/simple"
+    val worker_path = "src/app/wm_compare/simple_html_capture_worker.spl"
+    val args = [
+        "run", worker_path,
+        "--html=" + html_path,
+        "--out=" + ppm_path,
+        "--width=" + width.to_string(),
+        "--height=" + height.to_string()
+    ]
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
+    if exit_code == -1:
         return capture_error(
             "simple_browser_engine", width, height,
-            "render_html_to_pixels returned {pixels.len()} pixels, expected {width * height}")
+            "timed out after {timeout_ms} ms while rendering source B in child process")
+    if exit_code != 0:
+        var detail = stderr
+        if detail == "":
+            detail = stdout
+        if detail == "":
+            detail = "exit_code={exit_code}"
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child render failed: {detail}")
+
+    val ppm_data: [u8] = rt_file_read_bytes(ppm_path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child render succeeded but wrote no ppm: {ppm_path}")
+
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child ppm decode failed: {img.error}")
+    if img.width != width or img.height != height:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child ppm dimensions {img.width}x{img.height}, expected {width}x{height}")
 
     CaptureResult(
-        pixels: pixels,
-        width: width,
-        height: height,
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
         backend_name: "simple_browser_engine",
         success: true,
         error: ""
@@ -553,7 +604,7 @@ fn _bool_text(b: bool) -> text:
     if b: "true" else: "false"
 
 fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
-                pair: PairResult) -> bool:
+                pair: PairResult, opts: HtmlCompatOpts) -> bool:
     """Write an SDN report for one fixture run."""
     var body = "(html_compat_report\n"
     body = body + "  fixture: {fixture.id}\n"
@@ -562,6 +613,7 @@ fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
     body = body + "  css: \"{fixture.css_path}\"\n"
     body = body + "  strict: {_bool_text(fixture.strict)}\n"
     body = body + "  tolerance: \"perceptual_match_floor_9900_10000\"\n"
+    body = body + "  simple_timeout_ms: {opts.simple_timeout_ms}\n"
     body = body + "  chromium_capture_source: \"checked_in_ppm_or_update_baseline_electron\"\n"
     body = body + "  chrome: (capture success: {_bool_text(chrome.success)}"
     body = body + " width: {chrome.width} height: {chrome.height}"
@@ -621,7 +673,7 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
 
     if not opts.skip_simple:
         print "[html_compat]   capturing source B (Simple browser engine)..."
-        simple = capture_simple(combined, opts.width, opts.height)
+        simple = capture_simple(fixture.id, combined, opts.width, opts.height, opts.simple_timeout_ms)
         if simple.success:
             print "[html_compat]     ok  pixels={simple.pixels.len()}"
             dir_create_all(baseline_dir(fixture.id))
@@ -631,7 +683,7 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
             print "[html_compat]     fail: {simple.error}"
 
     val pair = compare_pair(fixture, chrome, simple, opts.width, opts.height)
-    write_report(fixture, chrome, simple, pair)
+    write_report(fixture, chrome, simple, pair, opts)
 
     if not pair.chrome_ok:
         print "[html_compat]   RESULT: chrome capture failed"

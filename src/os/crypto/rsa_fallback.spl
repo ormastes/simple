@@ -8,6 +8,7 @@ use os.crypto.sha256.{sha256}
 use os.crypto.sha512.{sha512}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_embedded_host_rsa_component(which: i64) -> [u8]
 
 val _RSA_BIGINT_BASE: i64 = 1073741824
 val _RSA_BIGINT_BITS_PER_LIMB: i64 = 30
@@ -507,3 +508,30 @@ fn rsa_sha512_sign_fallback(pkcs8: [u8], message: [u8]) -> [u8]:
             return []
         return _crt_sign(em, modulus, p, q, d_p, d_q, q_inv)
     []
+
+fn rsa_sha512_sign_embedded_host(message: [u8]) -> [u8]:
+    val digest = sha512(message)
+    val prefix: [u8] = [
+        0x30u8, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+        0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40
+    ]
+    val modulus = rt_embedded_host_rsa_component(0)
+    val p = rt_embedded_host_rsa_component(1)
+    val q = rt_embedded_host_rsa_component(2)
+    val d_p = rt_embedded_host_rsa_component(3)
+    val d_q = rt_embedded_host_rsa_component(4)
+    val q_inv = rt_embedded_host_rsa_component(5)
+    if modulus.len() == 0 or p.len() == 0 or q.len() == 0 or d_p.len() == 0 or d_q.len() == 0 or q_inv.len() == 0:
+        return []
+    val em = _emsa_pkcs1_v15(prefix, digest, modulus.len())
+    if em.len() == 0:
+        return []
+    _crt_sign(em, modulus, p, q, d_p, d_q, q_inv)
+
+fn rsa_debug_parse_pkcs8(pkcs8: [u8]) -> text:
+    val parsed = _parse_pkcs8_rsa_private_key(pkcs8)
+    if val _RsaPrivateKey.Ok(modulus, p, q, d_p, d_q, q_inv) = parsed:
+        return "ok modulus={modulus.len()} p={p.len()} q={q.len()} dp={d_p.len()} dq={d_q.len()} qinv={q_inv.len()}"
+    if val _RsaPrivateKey.Err(msg) = parsed:
+        return msg
+    "unknown"

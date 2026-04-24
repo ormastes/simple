@@ -1,0 +1,68 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use std.js.engine.vm.{ObjectStore}
+use std.js.types.js_types.{JsValue}
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+fn _probe() -> Result<bool, text>:
+    var store = ObjectStore.new()
+    val obj_id = store.create_object()
+
+    store.set_property(obj_id, "alpha", JsValue.String(v: "A"))
+    store.set_property(obj_id, "count", JsValue.Number(v: 2.0))
+    store.set_property(obj_id, "count", JsValue.Number(v: 5.0))
+
+    if val JsValue.String(v) = store.get_property(obj_id, "alpha"):
+        if v != "A":
+            return Err("alpha value mismatch")
+    else:
+        return Err("alpha property missing or wrong type")
+
+    if val JsValue.Number(v) = store.get_property(obj_id, "count"):
+        if v != 5.0:
+            return Err("count latest-write mismatch")
+    else:
+        return Err("count property missing or wrong type")
+
+    store.remove_property(obj_id, "alpha")
+    if val JsValue.Undefined = store.get_property(obj_id, "alpha"):
+        pass_dn
+    else:
+        return Err("remove_property did not tombstone alpha")
+
+    val array_id = store.create_array_from([JsValue.Number(v: 3.0), JsValue.Number(v: 4.0)])
+    if store.array_length(array_id) != 2:
+        return Err("array length mismatch")
+    if val JsValue.Number(v) = store.get_by_index(array_id, 1):
+        if v != 4.0:
+            return Err("array index mismatch")
+    else:
+        return Err("array index missing or wrong type")
+
+    Ok(true)
+
+fn _start():
+    serial_init()
+    serial_writeln("SimpleOS x86_64 JS ObjectStore probe")
+
+    arch_x86_64_early_init()
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(128))
+    if not X86Interrupt.runtime_installed():
+        X86Interrupt.install_bootstrap_runtime(64)
+
+    match _probe():
+        Ok(_) =>
+            serial_println("[JSO] ObjectStore probe passed")
+        Err(e) =>
+            serial_println("[JSO] ObjectStore probe failed: {e}")
+
+    rt_port_outb(0xf4, 0u8)

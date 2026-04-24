@@ -29,6 +29,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "embedded_ssh_host_rsa.h"
+#include "embedded_ssh_host_rsa_crt.h"
+
 typedef int64_t RuntimeValue;
 
 
@@ -4842,6 +4845,42 @@ static const uint32_t _sha256_H[8] = {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
 };
+
+static RuntimeValue rt_bytes_from_rodata(const uint8_t *data, size_t len)
+{
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    a->len = (uint32_t)len;
+    a->cap = (uint32_t)len;
+    a->items = runtime_array_inline_items(a);
+    for (size_t i = 0; i < len; i++) a->items[i] = ENCODE_INT((int64_t)data[i]);
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_embedded_host_rsa_pkcs8(void)
+{
+    return rt_bytes_from_rodata(embedded_host_rsa_pkcs8, sizeof(embedded_host_rsa_pkcs8));
+}
+
+RuntimeValue rt_embedded_host_rsa_public_blob(void)
+{
+    return rt_bytes_from_rodata(embedded_host_rsa_public_blob, sizeof(embedded_host_rsa_public_blob));
+}
+
+RuntimeValue rt_embedded_host_rsa_component(int64_t which)
+{
+    switch (which) {
+        case 0: return rt_bytes_from_rodata(embedded_host_rsa_modulus, sizeof(embedded_host_rsa_modulus));
+        case 1: return rt_bytes_from_rodata(embedded_host_rsa_prime1, sizeof(embedded_host_rsa_prime1));
+        case 2: return rt_bytes_from_rodata(embedded_host_rsa_prime2, sizeof(embedded_host_rsa_prime2));
+        case 3: return rt_bytes_from_rodata(embedded_host_rsa_exponent1, sizeof(embedded_host_rsa_exponent1));
+        case 4: return rt_bytes_from_rodata(embedded_host_rsa_exponent2, sizeof(embedded_host_rsa_exponent2));
+        case 5: return rt_bytes_from_rodata(embedded_host_rsa_coefficient, sizeof(embedded_host_rsa_coefficient));
+        default: return NIL_VALUE;
+    }
+}
 
 static const uint8_t _aes_sbox[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
