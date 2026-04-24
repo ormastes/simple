@@ -2,7 +2,7 @@
 
 ## Implementation Increment
 
-This increment delivers the shared editor core and host TUI snapshot shell. It does not claim full Neovim parity; it establishes the stable architecture and core data model that later shells and language services will extend.
+This increment delivers the shared editor core, a richer host TUI line shell, a SimpleOS-facing adapter shim, and a minimal language bridge for diagnostics -> quickfix flow. It does not claim full Neovim parity; it establishes the stable architecture and core data model that later shells and language services will extend.
 
 ## Core Types
 
@@ -34,8 +34,10 @@ This increment delivers the shared editor core and host TUI snapshot shell. It d
 - `undo`, `redo`
 - `split-window`, `new-tab`
 - `search-forward`
+- `search-next`, `search-prev`
 - `save`, `save-as`
 - `commandline`
+- operator-pending delete/yank over motions and text objects (`w`, `iw`, `aw`)
 
 ## RPC Surface
 
@@ -46,7 +48,7 @@ This increment delivers the shared editor core and host TUI snapshot shell. It d
 
 ## Deferred Items
 
-- Visual selection editing semantics beyond mode state.
-- Full motion/operator grammar with counts and text objects.
-- Language-port decoration and diagnostics streaming.
-- SimpleOS WM surface adapter.
+- Raw key-event terminal handling beyond the current line shell.
+- Richer motion/text-object grammar beyond the current v1 `w` / `iw` / `aw` surface.
+- Decoration streaming and richer syntax services beyond parser diagnostics -> quickfix.
+- A full SimpleOS WM/window-protocol surface beyond the current thin adapter shim.

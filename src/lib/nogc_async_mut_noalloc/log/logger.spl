@@ -37,6 +37,8 @@ extern fn rt_string_new(data: i64, len: i64) -> text
 extern fn rt_simpleos_log_init(level: i64, targets: i64) -> bool
 extern fn rt_simpleos_log_is_enabled(level: i64) -> bool
 extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool
+extern fn rt_simpleos_log_set_device(kind: i64, base: i64) -> bool
+extern fn rt_log_target_device_write_bytes(ptr: i64, len: i64) -> bool
 
 # ============================================================================
 # Initialization
@@ -111,6 +113,38 @@ fn log_error(msg: text):
 fn log_fatal(msg: text):
     """Log at FATAL level."""
     log_at(LOG_FATAL, msg)
+
+# ============================================================================
+# Raw emission — bypass level filter and [LEVEL] prefix. For markers and
+# pre-formatted wire-byte output whose exact bytes must reach the device.
+# ============================================================================
+
+fn log_raw(msg: text):
+    """Emit bytes to the device target with NO level prefix and no filter.
+    For markers and other invariant pre-formatted output."""
+    if (g_log_targets & 1) != 0:
+        if rt_log_target_device_write_bytes(rt_string_data(msg), rt_string_len(msg)):
+            return
+    target_device_write(msg)
+
+fn log_raw_println(msg: text):
+    """log_raw + newline. Use this for marker lines (e.g. '[BOOT] entry')."""
+    log_raw(msg)
+    log_raw("\n")
+
+# ============================================================================
+# Device config — inject {kind, base} picked at boot from the active
+# MachineProfile. See src/os/kernel/log/log_setup.spl for the profile shim.
+# ============================================================================
+
+val LOG_DEV_KIND_COM1: i32    = 1
+val LOG_DEV_KIND_PL011: i32   = 2
+val LOG_DEV_KIND_NS16550: i32 = 3
+
+fn log_set_device(kind: i32, base: u64):
+    """Tell the runtime which serial device to drive. Safe to call multiple
+    times; takes effect on the next log_* call."""
+    rt_simpleos_log_set_device(kind.to_i64(), base.to_i64())
 
 # Unique wrapper names for environments that also expose userlib.log symbols.
 @export("C", name: "noalloc_log_init")

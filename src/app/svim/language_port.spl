@@ -1,0 +1,57 @@
+use app.svim.core.*
+use app.lsp.parser_adapter.{ParserAdapter, ParseDiagnostic}
+
+
+class SvimLanguagePort:
+    parser: ParserAdapter
+
+impl SvimLanguagePort:
+
+    static fn create() -> SvimLanguagePort:
+        SvimLanguagePort(parser: ParserAdapter.create())
+
+    static fn create_core() -> SvimLanguagePort:
+        SvimLanguagePort(parser: ParserAdapter.create_core())
+
+    fn buffer_text(session: SvimSession, buffer_id: BufferId) -> text:
+        val idx = _svim_language_buffer_index(session, buffer_id)
+        if idx < 0:
+            return ""
+        session.buffers[idx].piece_table.to_text()
+
+    me publish_buffer_diagnostics(session: SvimSession, buffer_id: BufferId) -> i64:
+        val idx = _svim_language_buffer_index(session, buffer_id)
+        if idx < 0:
+            return 0
+        val result = self.parser.parse(session.buffers[idx].piece_table.to_text())
+        var diagnostics: [DiagnosticItem] = []
+        for diag in result.diagnostics:
+            diagnostics.push(_svim_language_diag(diag))
+        session.replace_diagnostics(buffer_id, diagnostics)
+        diagnostics.len()
+
+
+fn _svim_language_buffer_index(session: SvimSession, buffer_id: BufferId) -> i64:
+    var i = 0
+    while i < session.buffers.len():
+        if session.buffers[i].id.value == buffer_id.value:
+            return i
+        i = i + 1
+    -1
+
+fn _svim_language_diag(diag: ParseDiagnostic) -> DiagnosticItem:
+    DiagnosticItem(
+        row: diag.line,
+        col: diag.column,
+        severity: _svim_language_severity(diag.severity),
+        message: diag.message
+    )
+
+fn _svim_language_severity(severity: i64) -> text:
+    if severity == 1:
+        return "error"
+    if severity == 2:
+        return "warn"
+    if severity == 3:
+        return "info"
+    "hint"

@@ -9306,6 +9306,21 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     return _tls_runtime_array_from_bytes(out, 32U);
 }
 
+RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
+{
+    uint32_t scalar_len = 0;
+    uint8_t *scalar = _tls_copy_runtime_bytes(scalar_rv, &scalar_len);
+    uint8_t basepoint[32] = {9};
+    uint8_t out[32];
+    if (!scalar || scalar_len != 32U) {
+        if (scalar) free(scalar);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    _tls_x25519_scalarmult(out, scalar, basepoint);
+    free(scalar);
+    return _tls_runtime_array_from_bytes(out, 32U);
+}
+
 int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue point_rv, RuntimeValue out_rv)
 {
     uint32_t scalar_len = 0, point_len = 0;

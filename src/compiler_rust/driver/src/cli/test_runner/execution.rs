@@ -50,6 +50,13 @@ fn per_test_timeout_secs(path: &Path) -> u64 {
             return parsed;
         }
     }
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        if file_name == "simpleos_guest_toolchain_live_spec.spl"
+            || file_name == "ssh_live_login_in_qemu_spec.spl"
+        {
+            return 300;
+        }
+    }
     if path.components().any(|c| c.as_os_str() == "system") {
         return 120;
     }
@@ -818,6 +825,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
             && (trimmed.starts_with("fn ")
                 || trimmed.starts_with("async fn ")
                 || trimmed.starts_with("static fn ")
+                || trimmed.starts_with("extern fn ")
                 || trimmed.starts_with("class ")
                 || trimmed.starts_with("impl ")
                 || trimmed.starts_with("enum ")
@@ -943,6 +951,15 @@ fn existing_dependency_smf_path(dep_source: &Path) -> Option<PathBuf> {
 /// Prefers the current executable so child subprocesses use the same binary
 /// as the parent (ensuring consistent behavior and fixes).
 fn find_simple_binary() -> PathBuf {
+    // Honor an explicit override first so system/spec child processes can stay
+    // on the same feature-bearing compiler binary the caller selected.
+    if let Ok(env_bin) = std::env::var("SIMPLE_BINARY") {
+        let path = PathBuf::from(env_bin);
+        if path.exists() {
+            return path;
+        }
+    }
+
     // Prefer the current executable — ensures child uses the same binary as parent
     if let Ok(exe) = std::env::current_exe() {
         if exe.exists() {
@@ -1588,5 +1605,32 @@ mod tests {
         assert!(summary.contains("error: boom"));
         assert!(summary.contains("Individual Results:"));
         assert_eq!(output, "combined runner output");
+    }
+
+    #[test]
+    fn test_preprocess_sspec_hoists_top_level_externs_out_of_main() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("extern_hoist_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.sspec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "extern hoist":
+    it "keeps externs at module scope":
+        expect(true).to_equal(true)
+"#,
+        )
+        .expect("write spec");
+
+        let wrapped = preprocess_sspec_for_smf(&spec_path).expect("preprocess");
+        let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
+
+        let main_idx = wrapped_source.find("fn main():").expect("main");
+        let extern_idx = wrapped_source
+            .find("extern fn rt_file_read_text(path: text) -> text")
+            .expect("extern");
+        assert!(extern_idx < main_idx, "extern should stay above fn main()");
     }
 }

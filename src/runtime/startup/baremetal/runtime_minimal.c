@@ -210,6 +210,25 @@ void rt_ltr(uint16_t selector) {
     __asm__ volatile ("ltr %0" : : "r"(selector));
 }
 
+void rt_reload_segments(void) {
+    __asm__ volatile (
+        "mov $0x10, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        "mov %%ax, %%ss\n\t"
+        "lea 1f(%%rip), %%rax\n\t"
+        "pushq $0x08\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        :
+        :
+        : "rax", "memory"
+    );
+}
+
 #else
 uint64_t rt_read_cr3(void) { return 0; }
 void rt_write_cr3(uint64_t val) { (void)val; }
@@ -223,4 +242,5 @@ void rt_hlt(void) {}
 void rt_lgdt(uint64_t a) { (void)a; }
 void rt_lidt(uint64_t a) { (void)a; }
 void rt_ltr(uint16_t s) { (void)s; }
+void rt_reload_segments(void) {}
 #endif

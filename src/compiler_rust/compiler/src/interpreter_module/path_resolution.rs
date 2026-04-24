@@ -336,6 +336,94 @@ fn stdlib_relative_parts(parts: &[String]) -> &[String] {
     }
 }
 
+/// Sentinel path returned for `use unit.*` imports when no concrete file is
+/// found on disk. The module loader recognises this marker and treats the
+/// import as an empty, well-known namespace (no symbols imported, no error).
+///
+/// Using a path rather than a dedicated `Result` variant keeps the existing
+/// `resolve_module_path_uncached -> Result<PathBuf, _>` signature intact.
+pub(crate) const UNIT_OPAQUE_SENTINEL: &str = "<unit-opaque>";
+
+/// Returns true if the resolved path is the opaque-unit sentinel.
+pub(crate) fn is_unit_opaque_sentinel(path: &Path) -> bool {
+    path.as_os_str() == UNIT_OPAQUE_SENTINEL
+}
+
+/// Resolve a `use unit.<...>` import path.
+///
+/// Try the canonical on-disk locations first (these will begin to exist as
+/// Track C lands catalog files), then fall back to an opaque sentinel so
+/// `use unit.length.km` never fails during the seed bootstrap.
+fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
+    // Candidate roots to try, in priority order. `base_dir` is often a file's
+    // parent so we also walk upward to the project root to find `src/unit/`.
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = find_project_root(base_dir) {
+        search_roots.push(root);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if !search_roots.iter().any(|r| r == &cwd) {
+            search_roots.push(cwd);
+        }
+    }
+
+    // `parts` looks like ["unit", ...tail]. Strip the leading "unit" segment.
+    let tail: &[String] = if parts.len() > 1 { &parts[1..] } else { &[] };
+
+    // Default-org rule: if first tail segment is not a known org directory,
+    // assume `simple-lang`. Matches arch §2.
+    let default_org = "simple-lang";
+    for root in &search_roots {
+        let unit_root = root.join("src/unit");
+        if !unit_root.exists() {
+            continue;
+        }
+
+        // Org detection: try <first_tail> directly, then <first_tail>.com,
+        // finally default org.
+        let (org_dir, rest): (PathBuf, &[String]) = if let Some(first) = tail.first() {
+            let direct = unit_root.join(first);
+            let dotcom = unit_root.join(format!("{}.com", first));
+            if direct.is_dir() {
+                (direct, &tail[1..])
+            } else if dotcom.is_dir() {
+                (dotcom, &tail[1..])
+            } else {
+                (unit_root.join(default_org), tail)
+            }
+        } else {
+            (unit_root.join(default_org), tail)
+        };
+
+        if !org_dir.exists() {
+            continue;
+        }
+
+        // Strip optional `.com` segment mid-path: `unit.acme.com.foo` →
+        // `unit/acme.com/foo`.
+        let rest: Vec<&str> = rest.iter().map(|s| s.as_str()).filter(|s| *s != "com").collect();
+
+        let rel: PathBuf = rest.iter().collect();
+
+        // Candidate 1: <org>/<rest>.spl
+        let mut cand = org_dir.join(&rel);
+        cand.set_extension("spl");
+        if cand.exists() && cand.is_file() {
+            return Ok(cand);
+        }
+
+        // Candidate 2: <org>/<rest>/__init__.spl
+        let init = org_dir.join(&rel).join("__init__.spl");
+        if init.exists() && init.is_file() {
+            return Ok(init);
+        }
+    }
+
+    // Opaque soft-accept: no concrete file found, return the sentinel so the
+    // module loader can treat the import as an empty well-known namespace.
+    Ok(PathBuf::from(UNIT_OPAQUE_SENTINEL))
+}
+
 /// Clear the path resolution cache (called between test runs)
 pub fn clear_path_resolution_cache() {
     PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -426,6 +514,21 @@ mod tests {
 }
 
 fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
+    // `unit.*` well-known namespace (see .sstack/unit-system-consolidation).
+    // The full unit-tree lives under `src/unit/simple-lang/...` and is resolved
+    // by the self-hosted compiler. The Rust seed only needs to accept the
+    // `use unit.<path>` form — if the tree is not yet on disk (e.g. before
+    // Track C lands catalog files), the unit literals still work via the
+    // seed fallback table in `lexer::numbers::SEED_UNITS`, so the resolver
+    // treats `unit.*` as opaque: try real paths first, return sentinel if
+    // missing.  The module loader recognises the sentinel and returns an
+    // empty module instead of raising a semantic error.
+    if let Some(first) = parts.first() {
+        if first == "unit" {
+            return resolve_unit_module_path(parts, base_dir);
+        }
+    }
+
     // Pre-compute the relative path segments once — reused across all strategies
     let relative: PathBuf = parts.iter().collect();
 

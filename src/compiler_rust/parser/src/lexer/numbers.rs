@@ -1,5 +1,42 @@
 use crate::token::{NumericSuffix, TokenKind};
 
+/// Minimal seed-only unit table. The full unit registry lives in the
+/// self-hosted compiler (see `src/unit/simple-lang/`). The Rust seed only
+/// needs enough entries to bootstrap stage 2, so this 11-unit table covers the
+/// cases that appear in stdlib/engine code before the full registry loads.
+///
+/// Entries are `(short_symbol, family)`. Families are informational — the seed
+/// does not do dimensional analysis; it just needs a non-empty family so
+/// `Value::Unit` can be constructed for well-known literals (e.g. `10_km`).
+/// See `.sstack/unit-system-consolidation/state.md` §8 "Dual-Compiler
+/// Coordination" for the full rationale.
+pub const SEED_UNITS: &[(&str, &str)] = &[
+    ("km", "length"),
+    ("m", "length"),
+    ("s", "time"),
+    ("kg", "mass"),
+    ("h", "time"),
+    ("kmph", "velocity"),
+    ("mps", "velocity"),
+    // x/y/z/w are vector-component markers — kept here so seed accepts them
+    // without dimensional analysis. The self-hosted compiler is responsible
+    // for the true vector-component semantics.
+    ("x", "vector_component"),
+    ("y", "vector_component"),
+    ("z", "vector_component"),
+    ("w", "vector_component"),
+];
+
+/// Look up a unit suffix in the minimal seed-only table.
+///
+/// Returns `(short_symbol, family)` when the suffix is recognised. Consumers
+/// should prefer the thread-local `UNIT_SUFFIX_TO_FAMILY` registry first and
+/// fall back to this table only when the registry is empty (i.e. during seed
+/// bootstrap before any `use unit.*` module has populated the registry).
+pub fn lookup_seed_unit(suffix: &str) -> Option<&'static (&'static str, &'static str)> {
+    SEED_UNITS.iter().find(|(name, _)| *name == suffix)
+}
+
 impl<'a> super::Lexer<'a> {
     /// Helper to check if underscore is followed by a unit suffix (not a digit separator).
     /// Takes a validator to check if a character is a valid digit for the current radix.

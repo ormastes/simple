@@ -122,24 +122,13 @@ impl BuildCache {
             return Ok(output);
         }
 
-        // Reuse file bytes already read by source_hash() when possible,
-        // falling back to a fresh read only if the cache was not populated.
-        let source_content = {
-            let cache = self.content_cache.borrow();
-            if let Some(bytes) = cache.get(source) {
-                String::from_utf8(bytes.clone()).map_err(|e| format!("Invalid UTF-8 in {}: {}", source.display(), e))?
-            } else {
-                drop(cache);
-                fs::read_to_string(source).map_err(|e| format!("Failed to read {}: {}", source.display(), e))?
-            }
-        };
-
         let mut pipeline = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler pipeline: {}", e))?;
+        pipeline.set_test_mode(true);
 
         let options = NativeBinaryOptions::new();
 
         pipeline
-            .compile_to_native_binary(&source_content, &output, Some(options))
+            .compile_file_to_native_binary(source, &output, Some(options))
             .map_err(|e| format!("Failed to compile {} to native binary: {}", source.display(), e))?;
 
         // Make executable on Unix

@@ -37,14 +37,16 @@ impl StatementCache:
         If not cached, prepares a new statement, adds it to the cache,
         and evicts the oldest entry if over capacity.
         """
-        var entries: Dict<text, PreparedStatement> = self.entries
-        if entries.has(sql):
-            # Cache hit — move to back of LRU order
-            self.hits = self.hits + 1
-            self._move_to_back(sql)
-            var stmt = entries[sql]
-            stmt.reset_stmt()?
-            return Ok(stmt)
+        match self.entries.get(sql):
+            Some(cached_stmt):
+                # Cache hit — move to back of LRU order
+                self.hits = self.hits + 1
+                self._move_to_back(sql)
+                var stmt = cached_stmt
+                stmt.reset_stmt()?
+                return Ok(stmt)
+            nil:
+                pass
 
         # Cache miss — prepare new statement
         self.misses = self.misses + 1
@@ -60,20 +62,24 @@ impl StatementCache:
 
     me invalidate(sql: text):
         """Finalize and remove a specific entry from the cache"""
-        var entries: Dict<text, PreparedStatement> = self.entries
-        if entries.has(sql):
-            var stmt = entries[sql]
-            stmt.finalize_stmt()
-            self.entries.remove(sql)
-            self._remove_from_order(sql)
+        match self.entries.get(sql):
+            Some(existing_stmt):
+                var stmt = existing_stmt
+                stmt.finalize_stmt()
+                self.entries.remove(sql)
+                self._remove_from_order(sql)
+            nil:
+                pass
 
     me clear():
         """Finalize all entries and empty the cache"""
-        var entries: Dict<text, PreparedStatement> = self.entries
         for key in self.order:
-            if entries.has(key):
-                var stmt = entries[key]
-                stmt.finalize_stmt()
+            match self.entries.get(key):
+                Some(existing_stmt):
+                    var stmt = existing_stmt
+                    stmt.finalize_stmt()
+                nil:
+                    pass
         self.entries.clear()
         self.order = []
         self.hits = 0
@@ -111,11 +117,13 @@ impl StatementCache:
             return
 
         val oldest_sql = self.order[0]
-        var entries: Dict<text, PreparedStatement> = self.entries
-        if entries.has(oldest_sql):
-            var stmt = entries[oldest_sql]
-            stmt.finalize_stmt()
-            self.entries.remove(oldest_sql)
+        match self.entries.get(oldest_sql):
+            Some(existing_stmt):
+                var stmt = existing_stmt
+                stmt.finalize_stmt()
+                self.entries.remove(oldest_sql)
+            nil:
+                pass
 
         # Remove front element
         var new_order: [text] = []

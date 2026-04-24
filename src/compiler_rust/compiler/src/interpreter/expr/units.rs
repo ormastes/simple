@@ -1,4 +1,5 @@
 use simple_parser::ast::{BinOp, UnaryOp};
+use simple_parser::lexer::numbers::lookup_seed_unit;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
@@ -64,6 +65,12 @@ pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     if let Some((_multiplier, _base, family)) = decompose_si_prefix(suffix) {
         return Some(family);
     }
+    // Seed-only fallback: minimal hard-coded table so the Rust bootstrap
+    // recognises a small set of well-known units (km, m, s, kg, h, kmph, mps,
+    // x, y, z, w) even before any `use unit.*` module populates the registry.
+    if let Some((_name, family)) = lookup_seed_unit(suffix) {
+        return Some((*family).to_string());
+    }
     None
 }
 
@@ -77,6 +84,10 @@ pub(super) fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Optio
     // Try SI prefix decomposition
     if let Some((multiplier, base, family)) = decompose_si_prefix(suffix) {
         return (Some(family), Some(multiplier), Some(base));
+    }
+    // Seed-only fallback (see `lookup_unit_family` for rationale).
+    if let Some((_name, family)) = lookup_seed_unit(suffix) {
+        return (Some((*family).to_string()), None, None);
     }
     (None, None, None)
 }

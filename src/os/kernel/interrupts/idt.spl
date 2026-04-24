@@ -12,7 +12,10 @@
 use os.kernel.types.task_types.{TaskContext}
 use os.kernel.interrupts.gdt.{GDT_KERNEL_CS}
 use os.kernel.interrupts.irq_routing.{irq_dispatch_routed}
-use std.baremetal.x86.io.{outb}
+use std.baremetal.x86.io.{inb, outb}
+
+extern fn rt_lidt(idtr_addr: u64)
+extern fn rt_read_cr2() -> u64
 
 # --- Exception Vectors ---
 
@@ -193,23 +196,16 @@ fn _make_gate_entry(addr: u64, selector: u16, ist: u8, gate_type: u8) -> IdtEntr
 
 fn _idt_load():
     """Execute lidt instruction to load the IDT register."""
-    asm """
-        lidt [{idt_pointer}]
-    """
+    rt_lidt(&idt_pointer as u64)
 
 # --- Serial Output Helpers (COM1 = 0x3F8) ---
 
 fn _serial_putchar(ch: u8):
     """Write a single character to COM1 serial port."""
     # Wait for transmit buffer empty (bit 5 of LSR at port+5)
-    var lsr: u8 = 0
+    var lsr: i32 = 0
     while (lsr & 0x20) == 0:
-        asm """
-            mov dx, 0x3FD
-            in al, dx
-            movzx eax, al
-            mov {lsr}, eax
-        """
+        lsr = inb(0x3FD)
     outb(0x3F8, ch as i32)
 
 fn _serial_puts(msg: text):
@@ -381,11 +377,7 @@ fn _isr_page_fault(ctx: TaskContext):
     _serial_puts("  RIP: ")
     _serial_print_hex(ctx.rip)
     # Read CR2 for faulting address
-    var cr2: u64 = 0
-    asm """
-        mov rax, cr2
-        mov {cr2}, rax
-    """
+    val cr2 = rt_read_cr2()
     _serial_puts("\n  CR2: ")
     _serial_print_hex(cr2)
     _serial_puts("\n  RSP: ")

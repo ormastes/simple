@@ -303,3 +303,133 @@ impl CompilerPipeline {
         self.process_hir_to_mir(hir_module)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::Codegen;
+    use crate::import_loader::load_module_with_imports;
+    use object::{Object, ObjectSymbol, SymbolKind, SymbolSection};
+    use simple_parser::ast::Node;
+    use std::collections::HashSet;
+    use std::fs;
+    use tempfile::tempdir_in;
+
+    #[test]
+    fn imported_static_methods_survive_lowering_with_context() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root");
+        let temp = tempdir_in(&repo_root).expect("tempdir in repo");
+        let entry = temp.path().join("native_import_probe.spl");
+        fs::write(
+            &entry,
+            "use app.svim.core.*\n\nfn main() -> i64:\n    var session = SvimSession.new()\n    session.execute_named(\"set-mode\", \"insert\", 1, \"\")\n    session.current_cursor().col\n",
+        )
+        .expect("write entry");
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).expect("load imports");
+        let stripped = simple_parser::ast::Module {
+            name: loaded.name,
+            items: loaded
+                .items
+                .into_iter()
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        Node::UseStmt(_)
+                            | Node::MultiUse(_)
+                            | Node::CommonUseStmt(_)
+                            | Node::ExportUseStmt(_)
+                            | Node::StructuredExportStmt(_)
+                            | Node::AutoImportStmt(_)
+                    )
+                })
+                .collect(),
+        };
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        let mir = pipeline
+            .type_check_and_lower_with_context(&stripped, &entry)
+            .expect("lower with context");
+
+        let imported = mir
+            .functions
+            .iter()
+            .find(|func| func.name == "SvimSession.new")
+            .expect("expected imported static method to be present in MIR");
+        assert!(
+            !imported.blocks.is_empty(),
+            "expected imported static method to keep its body in MIR"
+        );
+    }
+
+    #[test]
+    fn native_object_defines_imported_static_method_symbol() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root");
+        let temp = tempdir_in(&repo_root).expect("tempdir in repo");
+        let entry = temp.path().join("native_import_probe.spl");
+        fs::write(
+            &entry,
+            "use app.svim.core.*\n\nfn main() -> i64:\n    var session = SvimSession.new()\n    session.execute_named(\"set-mode\", \"insert\", 1, \"\")\n    session.current_cursor().col\n",
+        )
+        .expect("write entry");
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).expect("load imports");
+        let stripped = simple_parser::ast::Module {
+            name: loaded.name,
+            items: loaded
+                .items
+                .into_iter()
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        Node::UseStmt(_)
+                            | Node::MultiUse(_)
+                            | Node::CommonUseStmt(_)
+                            | Node::ExportUseStmt(_)
+                            | Node::StructuredExportStmt(_)
+                            | Node::AutoImportStmt(_)
+                    )
+                })
+                .collect(),
+        };
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        let mir = pipeline
+            .type_check_and_lower_with_context(&stripped, &entry)
+            .expect("lower with context");
+
+        let mut codegen = Codegen::for_target(simple_common::target::Target::host()).expect("codegen");
+        codegen.set_entry_module(true);
+        let object = codegen.compile_module(&mir).expect("compile object");
+        let file = object::File::parse(&*object).expect("parse object");
+
+        let all_symbols: Vec<String> = file
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(|name| name.to_string()))
+            .collect();
+        let symbol = file
+            .symbols()
+            .find(|symbol| symbol.name().ok() == Some("SvimSession_dot_new"))
+            .unwrap_or_else(|| {
+                let related: Vec<String> = all_symbols
+                    .iter()
+                    .filter(|name| name.contains("SvimSession") || name.contains("session"))
+                    .cloned()
+                    .collect();
+                panic!("SvimSession_dot_new symbol missing; related symbols: {:?}", related);
+            });
+        assert_eq!(symbol.kind(), SymbolKind::Text, "expected text symbol");
+        assert!(
+            !matches!(symbol.section(), SymbolSection::Undefined),
+            "expected imported static method symbol to be defined in the object"
+        );
+    }
+}

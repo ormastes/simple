@@ -21,6 +21,11 @@ use os.sosix.io_state.{
     sosix_async_get_result
 }
 
+extern fn rt_port_inb(port: u16) -> u8
+extern fn mmio_write8(addr: u64, val: u8)
+extern fn mmio_read8(addr: u64) -> u8
+extern fn unsafe_addr_of(ref: any) -> u64
+
 val _VFS_PORT: u64 = 1
 
 val _SYS_IPC_SEND: u64 = 20
@@ -40,8 +45,6 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
         if req < SOSIX_MAX_ASYNC_REQUESTS:
             sosix_req_fds[req] = fd
             sosix_req_methods[req] = VFS_READ
-            extern fn rt_port_inb(port: u16) -> u8
-            extern fn mmio_write8(addr: u64, val: u8)
             val byte = rt_port_inb(0x3F8)
             mmio_write8(buf_addr, byte)
             sosix_req_states[req] = SOSIX_ASYNC_COMPLETE
@@ -64,7 +67,6 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
         _sosix_async_push_u64(payload, offset)
         _sosix_async_push_u64(payload, count)
 
-        extern fn unsafe_addr_of(ref: any) -> u64
         val payload_ptr = unsafe_addr_of(payload)
         val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
         if send_result < 0:
@@ -84,7 +86,6 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
                     sosix_req_results[req] = status as i64
                 else:
                     val bytes_read = _sosix_async_read_u64(reply_buf, 4)
-                    extern fn mmio_write8(addr: u64, val_: u8)
                     var ci: u64 = 0
                     while ci < bytes_read and ci < count:
                         mmio_write8(buf_addr + ci, reply_buf[12 + ci])
@@ -125,13 +126,11 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
         _sosix_async_push_u64(payload, offset)
         _sosix_async_push_u64(payload, count)
 
-        extern fn mmio_read8(addr: u64) -> u8
         var ci: u64 = 0
         while ci < count:
             payload.push(mmio_read8(buf_addr + ci))
             ci = ci + 1
 
-        extern fn unsafe_addr_of(ref: any) -> u64
         val payload_ptr = unsafe_addr_of(payload)
         val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
         if send_result < 0:

@@ -1,7 +1,7 @@
 # svim Agent Task Breakdown
 
-1. Create `src/app/svim/` shared core and host TUI shell entrypoint.
-2. Add unit coverage for piece table, anchors, modal commands, registers, split/tab state, quickfix, and RPC.
-3. Add research, requirements, architecture, and design artifacts for the new product line.
-4. Add native-build feature spec for the host-first shell.
-5. Run targeted tests and snapshot-shell verification.
+1. Complete shared-core modal grammar, search repeat, text-object editing, quickfix traversal, and deterministic visual edit behavior.
+2. Keep the host shell thin while adding line-shell UX for multi-file sessions, open/save/search prompts, and command batching.
+3. Add a SimpleOS-facing adapter shim that reuses `SvimSession` instead of duplicating edit logic.
+4. Add a language bridge that converts parser diagnostics into shared buffer diagnostics and quickfix entries.
+5. Run targeted `svim` tests and host-shell verification; track the remaining native spec-wrapper limitation separately from shared-core behavior.

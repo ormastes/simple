@@ -21,9 +21,11 @@ struct LintWarning:
     message: text
     item_name: text
     field_or_param: text
+    code: text                  # "primitive_api" (default) | "raw_unit"
 
     fn fmt() -> text:
-        "primitive_api: {self.message} in '{self.item_name}' ({self.field_or_param})"
+        val prefix = if self.code == "": "primitive_api" else: self.code
+        "{prefix}: {self.message} in '{self.item_name}' ({self.field_or_param})"
 
 fn is_bare_primitive(ty: Type) -> bool:
     """Check if a type is a bare primitive that should be wrapped."""
@@ -85,7 +87,8 @@ fn check_function(func: FunctionDef) -> [LintWarning]:
                 warnings.push(LintWarning(
                     message: "bare primitive parameter type",
                     item_name: func.name,
-                    field_or_param: "param '{param.name}'"
+                    field_or_param: "param '{param.name}'",
+                    code: "primitive_api"
                 ))
 
     # Check return type
@@ -95,7 +98,8 @@ fn check_function(func: FunctionDef) -> [LintWarning]:
             warnings.push(LintWarning(
                 message: "bare primitive return type",
                 item_name: func.name,
-                field_or_param: "return type"
+                field_or_param: "return type",
+                code: "primitive_api"
             ))
 
     warnings
@@ -111,7 +115,8 @@ fn check_struct(struct_def: StructDef) -> [LintWarning]:
                 warnings.push(LintWarning(
                     message: "bare primitive field type",
                     item_name: struct_def.name,
-                    field_or_param: "field '{field.name}'"
+                    field_or_param: "field '{field.name}'",
+                    code: "primitive_api"
                 ))
 
     warnings
@@ -127,7 +132,8 @@ fn check_class(class_def: ClassDef) -> [LintWarning]:
                 warnings.push(LintWarning(
                     message: "bare primitive field type",
                     item_name: class_def.name,
-                    field_or_param: "field '{field.name}'"
+                    field_or_param: "field '{field.name}'",
+                    code: "primitive_api"
                 ))
 
     warnings
@@ -153,4 +159,84 @@ fn check_module_items(items: [Node]) -> [LintWarning]:
             case _: pass
 
     warnings
+
+# ---------------------------------------------------------------------------
+# raw_unit — call-site lint (unit-system-consolidation AC-4)
+# ---------------------------------------------------------------------------
+#
+# Emits when a raw integer/float literal is passed to a parameter whose type
+# is owned by a `unit.*` module (i.e., a unit type). Suppressible via
+# `#[allow(raw_unit)]` on the call site / enclosing statement / function /
+# module (handled by the shared allow-attr machinery).
+
+fn is_unit_type(ty: Type) -> bool:
+    """A type is a 'unit type' if its module path starts with `unit.` after resolution.
+
+    We accept both forms the compiler uses:
+      * Qualified(module_path, _): path starts with 'unit.'
+      * Simple(name): name looks like 'unit.foo.bar' (seen when unresolved dotted names flow through)."""
+    match ty:
+        case Qualified(module_path, _):
+            module_path.starts_with("unit.")
+        case Simple(name):
+            name.starts_with("unit.")
+        case _("Generic/Function/Tuple/Array types cannot be unit types"): false
+
+fn is_raw_primitive_expr(expr: any) -> bool:
+    """True for integer/float literals WITHOUT a unit suffix (ExprInt/ExprFloat
+    or AST nodes with kind IntLit/FloatLit). Suffixed literals — `10_km`,
+    `1.5_kg` — are treated as already unit-typed and do NOT trigger."""
+    match expr:
+        case IntLit(_): true
+        case FloatLit(_): true
+        case ExprInt(_): true
+        case ExprFloat(_): true
+        # Suffixed literals lower to typed nodes elsewhere; any kind carrying
+        # a suffix name is NOT a raw primitive.
+        case SuffixedInt(_, _): false
+        case SuffixedFloat(_, _): false
+        case _("non-literal exprs (calls, vars, casts) already carry a type; only bare literals count as raw"): false
+
+fn check_call_site(callee_name: text, args: [any], callee: FunctionDef) -> [LintWarning]:
+    """Emit `raw_unit` warnings for each arg where the callee's matching
+    parameter is a unit-typed param and the arg expression is a raw primitive
+    literal.
+
+    Caller responsibility: pass the resolved callee's `FunctionDef` plus the
+    call's argument expressions (AST nodes) and the callee's printable name.
+    This is the direct form used by resolution passes that already have the
+    three values in hand (e.g., `HirExpr::Call(callee, args)` in HIR)."""
+    var warnings = []
+    val params = callee.params
+    var i: i64 = 0
+    for arg in args:
+        if i >= params.len():
+            break
+        val param = params[i]
+        if param.ty.?:
+            val ty = param.ty.unwrap()
+            if is_unit_type(ty) and is_raw_primitive_expr(arg):
+                val unit_name = unit_type_short(ty)
+                val msg = "raw primitive passed to unit-typed parameter '{param.name}: {unit_name}'; use '<N>_{unit_name}' postfix or explicit conversion"
+                warnings.push(LintWarning(
+                    message: msg,
+                    item_name: callee_name,
+                    field_or_param: "arg #{i} ('{param.name}')",
+                    code: "raw_unit"
+                ))
+        i = i + 1
+    warnings
+
+fn unit_type_short(ty: Type) -> text:
+    """Last segment of a unit type's module path — i.e., the short unit symbol
+    (e.g. 'unit.length.km' → 'km')."""
+    var path: text = ""
+    match ty:
+        case Qualified(module_path, _): path = module_path
+        case Simple(name): path = name
+        case _("Generic/Function/Tuple types cannot be unit types — empty short symbol"): return ""
+    val parts = path.split(".")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
 

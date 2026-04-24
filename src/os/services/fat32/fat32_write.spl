@@ -11,8 +11,12 @@
 # This module provides Fat32WriteContext which operates on a Fat32Driver's
 # block device. The Fat32Driver delegates write/mkdir/unlink to this context.
 
-use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry, FAT32_ATTR_DIRECTORY, FAT32_ATTR_ARCHIVE, FAT32_ATTR_LFN}
+use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry}
 use os.services.block_device.{BlockDevice}
+
+val FAT32_ATTR_DIRECTORY: u8 = 0x10
+val FAT32_ATTR_ARCHIVE: u8 = 0x20
+val FAT32_ATTR_LFN: u8 = 0x0F
 
 # FAT32 special values
 val FAT32_FREE: u32 = 0x00000000
@@ -65,7 +69,7 @@ impl Fat32WriteContext:
     # FAT Table Operations
     # ========================================================================
 
-    me read_fat_entry(cluster: u32) -> Result<u32, text>:
+    me fn read_fat_entry(cluster: u32) -> Result<u32, text>:
         """Read a FAT table entry for the given cluster.
 
         Each FAT entry is 4 bytes. Calculate which sector of the FAT
@@ -95,7 +99,7 @@ impl Fat32WriteContext:
                      buffer[entry_offset].to_u32())
         Result.Ok(entry & FAT32_MASK)
 
-    me write_fat_entry(cluster: u32, value: u32) -> Result<bool, text>:
+    me fn write_fat_entry(cluster: u32, value: u32) -> Result<bool, text>:
         """Write a FAT table entry.
 
         Reads the sector, modifies the 4-byte entry (preserving upper 4 bits),
@@ -149,7 +153,7 @@ impl Fat32WriteContext:
     # Cluster Allocation
     # ========================================================================
 
-    me allocate_cluster() -> Result<u32, text>:
+    me fn allocate_cluster() -> Result<u32, text>:
         """Find and allocate a free cluster. Marks it as EOC in FAT.
 
         Scans the FAT starting from next_free_hint. Wraps around to
@@ -162,13 +166,13 @@ impl Fat32WriteContext:
         while checked < self.total_clusters:
             if cluster >= limit:
                 cluster = 2  # Wrap around
-            val entry_result = me read_fat_entry(cluster)
+            val entry_result = self.read_fat_entry(cluster)
             if entry_result.is_err():
                 return Result.Err(entry_result.unwrap_err())
             val entry = entry_result.unwrap()
             if entry == FAT32_FREE:
                 # Found free cluster -- mark as EOC
-                val write_result = me write_fat_entry(cluster, FAT32_EOC)
+                val write_result = self.write_fat_entry(cluster, FAT32_EOC)
                 if write_result.is_err():
                     return Result.Err(write_result.unwrap_err())
                 self.next_free_hint = cluster + 1
@@ -178,19 +182,19 @@ impl Fat32WriteContext:
 
         Result.Err("FAT32: no free clusters available")
 
-    me extend_chain(last_cluster: u32) -> Result<u32, text>:
+    me fn extend_chain(last_cluster: u32) -> Result<u32, text>:
         """Allocate a new cluster and append it to an existing chain.
 
         Sets last_cluster's FAT entry to point to the new cluster,
         and sets the new cluster's entry to EOC.
         """
-        val new_result = me allocate_cluster()
+        val new_result = self.allocate_cluster()
         if new_result.is_err():
             return new_result
         val new_cluster = new_result.unwrap()
 
         # Point last cluster to new cluster
-        val link_result = me write_fat_entry(last_cluster, new_cluster)
+        val link_result = self.write_fat_entry(last_cluster, new_cluster)
         if link_result.is_err():
             # Attempt to free the allocated cluster
             self.write_fat_entry(new_cluster, FAT32_FREE)
@@ -198,7 +202,7 @@ impl Fat32WriteContext:
 
         Result.Ok(new_cluster)
 
-    me free_chain(start_cluster: u32) -> Result<bool, text>:
+    me fn free_chain(start_cluster: u32) -> Result<bool, text>:
         """Free an entire cluster chain starting at start_cluster.
 
         Walks the chain and marks each cluster as FAT32_FREE.
@@ -222,7 +226,7 @@ impl Fat32WriteContext:
 
         Result.Ok(true)
 
-    me truncate_chain(first_cluster: u32, keep_bytes: u64) -> Result<u32, text>:
+    me fn truncate_chain(first_cluster: u32, keep_bytes: u64) -> Result<u32, text>:
         """Shrink a cluster chain to keep_bytes and return the new first cluster.
 
         A return value of 0 means the file has no allocated clusters.
@@ -298,7 +302,7 @@ impl Fat32WriteContext:
         val offset = (cluster - 2).to_u64() * self.sectors_per_cluster.to_u64()
         self.data_start_sector.to_u64() + offset
 
-    me read_cluster(cluster: u32) -> Result<[u8], text>:
+    me fn read_cluster(cluster: u32) -> Result<[u8], text>:
         """Read all sectors of a cluster into a buffer."""
         val sector = self.cluster_to_sector(cluster)
         val cluster_bytes = self.sectors_per_cluster * self.bytes_per_sector
@@ -325,7 +329,7 @@ impl Fat32WriteContext:
             sec = sec + 1
         Result.Ok(buffer)
 
-    me write_cluster_data(cluster: u32, data: [u8]) -> Result<bool, text>:
+    me fn write_cluster_data(cluster: u32, data: [u8]) -> Result<bool, text>:
         """Write data to a cluster's sectors.
 
         Writes up to cluster_size bytes. If data is shorter, the
@@ -355,7 +359,7 @@ impl Fat32WriteContext:
     # Directory Entry Operations
     # ========================================================================
 
-    me find_free_dir_slot(dir_cluster: u32) -> Result<DirSlot, text>:
+    me fn find_free_dir_slot(dir_cluster: u32) -> Result<DirSlot, text>:
         """Find a free directory entry slot in a directory's cluster chain.
 
         Returns the cluster and byte offset of the first free (0x00 or 0xE5)
@@ -365,7 +369,7 @@ impl Fat32WriteContext:
         var current = dir_cluster
         var max_iter: u32 = 100000
         while current >= 2 and max_iter > 0:
-            val data_result = me read_cluster(current)
+            val data_result = self.read_cluster(current)
             if data_result.is_err():
                 return Result.Err(data_result.unwrap_err())
             val data = data_result.unwrap()
@@ -380,13 +384,13 @@ impl Fat32WriteContext:
                 idx = idx + 1
 
             # Move to next cluster in chain
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
             if next >= FAT32_EOC or next < 2:
                 # No more clusters -- extend the directory
-                val ext_result = me extend_chain(current)
+                val ext_result = self.extend_chain(current)
                 if ext_result.is_err():
                     return Result.Err(ext_result.unwrap_err())
                 val new_cluster = ext_result.unwrap()
@@ -397,7 +401,7 @@ impl Fat32WriteContext:
                 while z < cluster_bytes:
                     zeros.push(0)
                     z = z + 1
-                val wc_result = me write_cluster_data(new_cluster, zeros)
+                val wc_result = self.write_cluster_data(new_cluster, zeros)
                 if wc_result.is_err():
                     return Result.Err(wc_result.unwrap_err())
                 return Result.Ok(DirSlot(cluster: new_cluster, offset: 0))
@@ -406,9 +410,9 @@ impl Fat32WriteContext:
 
         Result.Err("directory too deep or corrupted")
 
-    me write_dir_entry(slot: DirSlot, entry: Fat32DirEntry) -> Result<bool, text>:
+    me fn write_dir_entry(slot: DirSlot, entry: Fat32DirEntry) -> Result<bool, text>:
         """Write a 32-byte directory entry at the given slot."""
-        val data_result = me read_cluster(slot.cluster)
+        val data_result = self.read_cluster(slot.cluster)
         if data_result.is_err():
             return Result.Err(data_result.unwrap_err())
         var data = data_result.unwrap()
@@ -450,7 +454,7 @@ impl Fat32WriteContext:
 
         self.write_cluster_data(slot.cluster, data)
 
-    me create_file(dir_cluster: u32, name: text, is_dir: bool) -> Result<u32, text>:
+    me fn create_file(dir_cluster: u32, name: text, is_dir: bool) -> Result<u32, text>:
         """Create a new directory entry and allocate first cluster.
 
         Returns the first cluster of the new file/directory.
@@ -459,7 +463,7 @@ impl Fat32WriteContext:
         val name_bytes = format_8_3_name(name)
 
         # Allocate first cluster for the new file
-        val cluster_result = me allocate_cluster()
+        val cluster_result = self.allocate_cluster()
         if cluster_result.is_err():
             return Result.Err(cluster_result.unwrap_err())
         val first_cluster = cluster_result.unwrap()
@@ -471,13 +475,13 @@ impl Fat32WriteContext:
         while z < cluster_bytes:
             zeros.push(0)
             z = z + 1
-        val zero_result = me write_cluster_data(first_cluster, zeros)
+        val zero_result = self.write_cluster_data(first_cluster, zeros)
         if zero_result.is_err():
             self.write_fat_entry(first_cluster, FAT32_FREE)
             return Result.Err(zero_result.unwrap_err())
 
         # Find free slot in parent directory
-        val slot_result = me find_free_dir_slot(dir_cluster)
+        val slot_result = self.find_free_dir_slot(dir_cluster)
         if slot_result.is_err():
             self.write_fat_entry(first_cluster, FAT32_FREE)
             return Result.Err(slot_result.unwrap_err())
@@ -500,20 +504,20 @@ impl Fat32WriteContext:
             file_size: 0
         )
 
-        val write_result = me write_dir_entry(slot, entry)
+        val write_result = self.write_dir_entry(slot, entry)
         if write_result.is_err():
             self.write_fat_entry(first_cluster, FAT32_FREE)
             return Result.Err(write_result.unwrap_err())
 
         Result.Ok(first_cluster)
 
-    me create_directory(dir_cluster: u32, name: text) -> Result<u32, text>:
+    me fn create_directory(dir_cluster: u32, name: text) -> Result<u32, text>:
         """Create a new directory with . and .. entries.
 
         Allocates a cluster, writes . (self) and .. (parent) entries,
         then creates the directory entry in the parent.
         """
-        val first_cluster_result = me create_file(dir_cluster, name, true)
+        val first_cluster_result = self.create_file(dir_cluster, name, true)
         if first_cluster_result.is_err():
             return first_cluster_result
         val first_cluster = first_cluster_result.unwrap()
@@ -531,7 +535,7 @@ impl Fat32WriteContext:
             file_size: 0
         )
         val dot_slot = DirSlot(cluster: first_cluster, offset: 0)
-        val dot_result = me write_dir_entry(dot_slot, dot_entry)
+        val dot_result = self.write_dir_entry(dot_slot, dot_entry)
         if dot_result.is_err():
             return Result.Err(dot_result.unwrap_err())
 
@@ -548,13 +552,13 @@ impl Fat32WriteContext:
             file_size: 0
         )
         val dotdot_slot = DirSlot(cluster: first_cluster, offset: DIR_ENTRY_SIZE)
-        val dotdot_result = me write_dir_entry(dotdot_slot, dotdot_entry)
+        val dotdot_result = self.write_dir_entry(dotdot_slot, dotdot_entry)
         if dotdot_result.is_err():
             return Result.Err(dotdot_result.unwrap_err())
 
         Result.Ok(first_cluster)
 
-    me update_file_size(dir_cluster: u32, name: text, new_size: u32) -> Result<bool, text>:
+    me fn update_file_size(dir_cluster: u32, name: text, new_size: u32) -> Result<bool, text>:
         """Update the file size in its directory entry.
 
         Searches the directory cluster chain for the matching 8.3 name
@@ -564,7 +568,7 @@ impl Fat32WriteContext:
         var current = dir_cluster
         var max_iter: u32 = 100000
         while current >= 2 and max_iter > 0:
-            val data_result = me read_cluster(current)
+            val data_result = self.read_cluster(current)
             if data_result.is_err():
                 return Result.Err(data_result.unwrap_err())
             var data = data_result.unwrap()
@@ -587,10 +591,10 @@ impl Fat32WriteContext:
                     data[off + 29] = ((new_size >> 8) & 0xFF).to_u8()
                     data[off + 30] = ((new_size >> 16) & 0xFF).to_u8()
                     data[off + 31] = ((new_size >> 24) & 0xFF).to_u8()
-                    return me write_cluster_data(current, data)
+                    return self.write_cluster_data(current, data)
                 idx = idx + 1
 
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
@@ -601,13 +605,13 @@ impl Fat32WriteContext:
 
         Result.Err("file not found: {name}")
 
-    me update_file_metadata(dir_cluster: u32, name: text, first_cluster: u32, new_size: u32) -> Result<bool, text>:
+    me fn update_file_metadata(dir_cluster: u32, name: text, first_cluster: u32, new_size: u32) -> Result<bool, text>:
         """Update first-cluster and size fields in a directory entry."""
         val upper_name = name.upper()
         var current = dir_cluster
         var max_iter: u32 = 100000
         while current >= 2 and max_iter > 0:
-            val data_result = me read_cluster(current)
+            val data_result = self.read_cluster(current)
             if data_result.is_err():
                 return Result.Err(data_result.unwrap_err())
             var data = data_result.unwrap()
@@ -633,10 +637,10 @@ impl Fat32WriteContext:
                     data[off + 29] = ((new_size >> 8) & 0xFF).to_u8()
                     data[off + 30] = ((new_size >> 16) & 0xFF).to_u8()
                     data[off + 31] = ((new_size >> 24) & 0xFF).to_u8()
-                    return me write_cluster_data(current, data)
+                    return self.write_cluster_data(current, data)
                 idx = idx + 1
 
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
@@ -647,7 +651,7 @@ impl Fat32WriteContext:
 
         Result.Err("file not found: {name}")
 
-    me delete_file(dir_cluster: u32, name: text) -> Result<bool, text>:
+    me fn delete_file(dir_cluster: u32, name: text) -> Result<bool, text>:
         """Delete a file: free cluster chain and mark directory entry as deleted.
 
         Finds the directory entry, reads its first cluster, frees the entire
@@ -657,7 +661,7 @@ impl Fat32WriteContext:
         var current = dir_cluster
         var max_iter: u32 = 100000
         while current >= 2 and max_iter > 0:
-            val data_result = me read_cluster(current)
+            val data_result = self.read_cluster(current)
             if data_result.is_err():
                 return Result.Err(data_result.unwrap_err())
             var data = data_result.unwrap()
@@ -682,16 +686,16 @@ impl Fat32WriteContext:
 
                     # Free the cluster chain
                     if first_cluster >= 2:
-                        val free_result = me free_chain(first_cluster)
+                        val free_result = self.free_chain(first_cluster)
                         if free_result.is_err():
                             return Result.Err(free_result.unwrap_err())
 
                     # Mark directory entry as deleted
                     data[off] = DELETED_MARKER
-                    return me write_cluster_data(current, data)
+                    return self.write_cluster_data(current, data)
                 idx = idx + 1
 
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
@@ -702,7 +706,7 @@ impl Fat32WriteContext:
 
         Result.Err("file not found: {name}")
 
-    me write_file_data(first_cluster: u32, offset: u64, data: [u8]) -> Result<u64, text>:
+    me fn write_file_data(first_cluster: u32, offset: u64, data: [u8]) -> Result<u64, text>:
         """Write data to a file starting at the given byte offset.
 
         Walks the cluster chain to find the starting cluster for the offset,
@@ -719,13 +723,13 @@ impl Fat32WriteContext:
         # Walk to the starting cluster
         var current = first_cluster
         while clusters_to_skip > 0:
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(next_result.unwrap_err())
             val next = next_result.unwrap()
             if next >= FAT32_EOC or next < 2:
                 # Need to extend chain
-                val ext_result = me extend_chain(current)
+                val ext_result = self.extend_chain(current)
                 if ext_result.is_err():
                     return Result.Err(ext_result.unwrap_err())
                 current = ext_result.unwrap()
@@ -736,7 +740,7 @@ impl Fat32WriteContext:
         # Write data across clusters
         while data_pos < data_len:
             # Read current cluster data
-            val cluster_data_result = me read_cluster(current)
+            val cluster_data_result = self.read_cluster(current)
             if cluster_data_result.is_err():
                 return Result.Err(cluster_data_result.unwrap_err())
             var cluster_data = cluster_data_result.unwrap()
@@ -750,19 +754,19 @@ impl Fat32WriteContext:
                 bytes_written = bytes_written + 1
 
             # Write modified cluster back
-            val write_result = me write_cluster_data(current, cluster_data)
+            val write_result = self.write_cluster_data(current, cluster_data)
             if write_result.is_err():
                 return Result.Err(write_result.unwrap_err())
 
             # Move to next cluster if more data remains
             if data_pos < data_len:
-                val next_result = me read_fat_entry(current)
+                val next_result = self.read_fat_entry(current)
                 if next_result.is_err():
                     return Result.Err(next_result.unwrap_err())
                 val next = next_result.unwrap()
                 if next >= FAT32_EOC or next < 2:
                     # Extend chain
-                    val ext_result = me extend_chain(current)
+                    val ext_result = self.extend_chain(current)
                     if ext_result.is_err():
                         return Result.Err(ext_result.unwrap_err())
                     current = ext_result.unwrap()

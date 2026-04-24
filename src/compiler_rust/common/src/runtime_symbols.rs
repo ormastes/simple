@@ -616,6 +616,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dh_curve25519_public_key",
     "rt_dh_curve25519_shared_secret",
     "rt_dh_curve25519_free",
+    // TLS / X25519 helpers used by the baremetal SSH guest lane
+    "rt_tls13_x25519_public_key",
+    "rt_tls13_x25519_shared_secret",
 ];
 
 #[cfg(test)]

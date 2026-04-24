@@ -3,10 +3,11 @@ mod escapes;
 mod i18n;
 mod identifiers;
 mod indentation;
-mod numbers;
+pub mod numbers;
 mod strings;
 
 pub use crate::token::{NamePattern, NumericSuffix};
+pub use numbers::{lookup_seed_unit, SEED_UNITS};
 use crate::token::{Span, Token, TokenKind};
 
 #[derive(Clone)]

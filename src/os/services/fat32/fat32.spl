@@ -9,6 +9,8 @@
 use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
 use os.services.vfs.vfs.{Filesystem, SeekWhence}
 use os.services.block_device.{BlockDevice}
+use os.services.fat32.fat32_write.{Fat32WriteContext, format_8_3_name, FAT32_EOC, FAT32_MASK, DELETED_MARKER, END_MARKER, DIR_ENTRY_SIZE}
+use common.string_core.{str_char_at}
 
 # ============================================================================
 # FAT32 On-Disk Structures
@@ -123,7 +125,7 @@ impl Fat32Driver:
             next_handle: 1
         )
 
-    me read_bpb() -> Result<Fat32Bpb, text>:
+    me fn read_bpb() -> Result<Fat32Bpb, text>:
         """Read BIOS Parameter Block from sector 0."""
         var buffer: [u8] = []
         var i = 0
@@ -167,7 +169,7 @@ impl Fat32Driver:
         val offset = (cluster - 2).to_u64() * self.sectors_per_cluster.to_u64()
         self.data_start_sector.to_u64() + offset
 
-    me read_fat_entry(cluster: u32) -> Result<u32, text>:
+    me fn read_fat_entry(cluster: u32) -> Result<u32, text>:
         """Read FAT table entry for a cluster."""
         val fat_offset = cluster * 4
         val fat_sector = self.reserved_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
@@ -190,7 +192,7 @@ impl Fat32Driver:
         """Check if FAT entry is end-of-chain."""
         entry >= FAT32_EOC
 
-    me read_cluster(cluster: u32) -> Result<[u8], text>:
+    me fn read_cluster(cluster: u32) -> Result<[u8], text>:
         """Read all sectors of a cluster into a buffer."""
         val sector = self.cluster_to_sector(cluster)
         val cluster_bytes = self.sectors_per_cluster * self.bytes_per_sector
@@ -218,14 +220,14 @@ impl Fat32Driver:
             sec = sec + 1
         Result.Ok(buffer)
 
-    me follow_cluster_chain(start: u32) -> Result<[u32], text>:
+    me fn follow_cluster_chain(start: u32) -> Result<[u32], text>:
         """Follow FAT chain from start cluster, return list of all clusters."""
         var chain: [u32] = []
         var current = start
         var max_iter: i32 = 1000000  # Safety limit
         while not self.is_eoc(current) and current >= 2 and max_iter > 0:
             chain.push(current)
-            val next_result = me read_fat_entry(current)
+            val next_result = self.read_fat_entry(current)
             if next_result.is_err():
                 return Result.Err(_fat32_unwrap_err(next_result))
             current = next_result.unwrap()
@@ -329,16 +331,16 @@ impl Fat32Driver:
             i = i + 1
         true
 
-    me find_entry_in_dir(dir_cluster: u32, name: text) -> Result<Fat32DirEntry?, text>:
+    me fn find_entry_in_dir(dir_cluster: u32, name: text) -> Result<Fat32DirEntry?, text>:
         """Search directory cluster chain for entry with given name."""
-        val chain_result = me follow_cluster_chain(dir_cluster)
+        val chain_result = self.follow_cluster_chain(dir_cluster)
         if chain_result.is_err():
             return Result.Err(_fat32_unwrap_err(chain_result))
         val chain = chain_result.unwrap()
 
         val upper_name = name.upper()
         for cluster in chain:
-            val data_result = me read_cluster(cluster)
+            val data_result = self.read_cluster(cluster)
             if data_result.is_err():
                 return Result.Err(_fat32_unwrap_err(data_result))
             val data = data_result.unwrap()
@@ -385,7 +387,7 @@ impl Fat32Driver:
                 idx = idx + 1
         Result.Ok(nil)  # Not found
 
-    me resolve_path(path: text) -> Result<Fat32DirEntry?, text>:
+    me fn resolve_path(path: text) -> Result<Fat32DirEntry?, text>:
         """Traverse directory tree to find entry at path."""
         if path == "/" or path == "":
             # Root directory — synthesize entry
@@ -418,7 +420,7 @@ impl Fat32Driver:
         var dir_cluster = self.root_cluster
         var i = 0
         while i < parts.len():
-            val result = me find_entry_in_dir(dir_cluster, parts[i])
+            val result = self.find_entry_in_dir(dir_cluster, parts[i])
             if result.is_err():
                 return Result.Err(_fat32_unwrap_err(result))
             val entry = result.unwrap()
@@ -452,13 +454,13 @@ impl Fat32Driver:
             modified_ns: 0
         )
 
-    me find_open_file(handle: u64) -> Fat32OpenFile?:
+    me fn find_open_file(handle: u64) -> Fat32OpenFile?:
         for f in self.open_files:
             if f.handle == handle:
                 return f
         nil
 
-    me restore_open_file_cursor(handle: u64, current_cluster: u32, current_offset: u64) -> Result<bool, text>:
+    me fn restore_open_file_cursor(handle: u64, current_cluster: u32, current_offset: u64) -> Result<bool, text>:
         var idx = -1
         var scan = 0
         while scan < self.open_files.len():
@@ -481,7 +483,7 @@ impl Fat32Driver:
         )
         Result.Ok(true)
 
-    me count_free_clusters() -> Result<u32, text>:
+    me fn count_free_clusters() -> Result<u32, text>:
         """Count FAT32_FREE entries in the mounted FAT."""
         if not self.mounted:
             return Result.Err("filesystem not mounted")
@@ -497,7 +499,7 @@ impl Fat32Driver:
             cluster = cluster + 1
         Result.Ok(free_count)
 
-    me truncate_open_file(handle: u64, length: u64) -> Result<bool, text>:
+    me fn truncate_open_file(handle: u64, length: u64) -> Result<bool, text>:
         """Truncate an open file and keep the open-file table consistent."""
         var idx = -1
         var scan = 0
@@ -531,11 +533,11 @@ impl Fat32Driver:
         )
         Result.Ok(true)
 
-    me truncate_path(path: text, length: u64) -> Result<bool, text>:
+    me fn truncate_path(path: text, length: u64) -> Result<bool, text>:
         """Truncate a file by path and update any matching open handles."""
         if not self.mounted:
             return Result.Err("filesystem not mounted")
-        val result = me resolve_path(path)
+        val result = self.resolve_path(path)
         if result.is_err():
             return Result.Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
@@ -546,7 +548,7 @@ impl Fat32Driver:
             return Result.Err("cannot truncate directory: {path}")
 
         val parent_and_name = _split_path_parent(path)
-        val parent_result = me resolve_path(parent_and_name.parent)
+        val parent_result = self.resolve_path(parent_and_name.parent)
         if parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
@@ -588,8 +590,8 @@ impl Fat32Driver:
 impl Filesystem for Fat32Driver:
     fn fs_name() -> text: "fat32"
 
-    me mount(device: text, options: text) -> Result<bool, text>:
-        val bpb_result = me read_bpb()
+    me fn mount(device: text, options: text) -> Result<bool, text>:
+        val bpb_result = self.read_bpb()
         if bpb_result.is_err():
             return Result.Err(_fat32_unwrap_err(bpb_result))
 
@@ -621,13 +623,13 @@ impl Filesystem for Fat32Driver:
         self.mounted = true
         Result.Ok(true)
 
-    me unmount() -> Result<bool, text>:
+    me fn unmount() -> Result<bool, text>:
         # Close all open files
         self.open_files = []
         self.mounted = false
         Result.Ok(true)
 
-    me open(path: text, flags: FileFlags) -> Result<u64, text>:
+    me fn open(path: text, flags: FileFlags) -> Result<u64, text>:
         """Open a file by traversing directory tree.
 
         If the file does not exist and flags.create is set, creates
@@ -635,7 +637,7 @@ impl Filesystem for Fat32Driver:
         """
         if not self.mounted:
             return Result.Err("filesystem not mounted")
-        val result = me resolve_path(path)
+        val result = self.resolve_path(path)
         if result.is_err():
             return Result.Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
@@ -645,7 +647,7 @@ impl Filesystem for Fat32Driver:
                 val parent_and_name = _split_path_parent(path)
                 val parent_path = parent_and_name.parent
                 val file_name = parent_and_name.name
-                val parent_result = me resolve_path(parent_path)
+                val parent_result = self.resolve_path(parent_path)
                 if parent_result.is_err():
                     return Result.Err(_fat32_unwrap_err(parent_result))
                 val parent_opt = parent_result.unwrap()
@@ -675,7 +677,7 @@ impl Filesystem for Fat32Driver:
             return Result.Err("file not found: {path}")
         val entry = entry_opt.unwrap()
         val parent_and_name = _split_path_parent(path)
-        val parent_result = me resolve_path(parent_and_name.parent)
+        val parent_result = self.resolve_path(parent_and_name.parent)
         if parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
@@ -698,7 +700,7 @@ impl Filesystem for Fat32Driver:
         self.open_files.push(open_file)
         Result.Ok(handle)
 
-    me read(handle: u64, size: u64) -> Result<[u8], text>:
+    me fn read(handle: u64, size: u64) -> Result<[u8], text>:
         """Read data from open file following cluster chain."""
         var open_idx = -1
         var scan = 0
@@ -723,7 +725,7 @@ impl Filesystem for Fat32Driver:
         var offset_in_cluster = f.current_offset % cluster_size
 
         while bytes_read < read_size and not self.is_eoc(current_cluster):
-            val data_result = me read_cluster(current_cluster)
+            val data_result = self.read_cluster(current_cluster)
             if data_result.is_err():
                 return Result.Err(_fat32_unwrap_err(data_result))
             val data = data_result.unwrap()
@@ -735,7 +737,7 @@ impl Filesystem for Fat32Driver:
                 i = i + 1
 
             # Move to next cluster
-            val next_result = me read_fat_entry(current_cluster)
+            val next_result = self.read_fat_entry(current_cluster)
             if next_result.is_err():
                 break
             current_cluster = next_result.unwrap()
@@ -755,7 +757,7 @@ impl Filesystem for Fat32Driver:
             )
         Result.Ok(result_buf)
 
-    me write(handle: u64, data: [u8]) -> Result<u64, text>:
+    me fn write(handle: u64, data: [u8]) -> Result<u64, text>:
         """Write data to an open file at the current offset.
 
         Delegates to Fat32WriteContext for cluster allocation and data
@@ -812,7 +814,7 @@ impl Filesystem for Fat32Driver:
 
         Result.Ok(bytes_written)
 
-    me close(handle: u64) -> Result<bool, text>:
+    me fn close(handle: u64) -> Result<bool, text>:
         """Close an open file handle."""
         var i = 0
         while i < self.open_files.len():
@@ -829,7 +831,7 @@ impl Filesystem for Fat32Driver:
             i = i + 1
         Result.Err("invalid file handle")
 
-    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+    me fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
         """Seek to position in file."""
         var open_idx = -1
         var scan = 0
@@ -856,7 +858,7 @@ impl Filesystem for Fat32Driver:
             if new_offset % cluster_size == 0:
                 clusters_to_skip = clusters_to_skip - 1
             while clusters_to_skip > 0:
-                val next_result = me read_fat_entry(cluster)
+                val next_result = self.read_fat_entry(cluster)
                 if next_result.is_err():
                     return Result.Err(_fat32_unwrap_err(next_result))
                 val next = next_result.unwrap()
@@ -880,7 +882,7 @@ impl Filesystem for Fat32Driver:
         """Get file metadata by path."""
         if not self.mounted:
             return Result.Err("filesystem not mounted")
-        val result = me resolve_path(path)
+        val result = self.resolve_path(path)
         if result.is_err():
             return Result.Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
@@ -896,7 +898,7 @@ impl Filesystem for Fat32Driver:
     fn symlink(target: text, link_path: text) -> Result<bool, text>:
         Result.Err("symlinks not supported on FAT32")
 
-    me mkdir(path: text) -> Result<bool, text>:
+    me fn mkdir(path: text) -> Result<bool, text>:
         """Create a directory with . and .. entries.
 
         Parses the path to find the parent directory, then delegates
@@ -909,7 +911,7 @@ impl Filesystem for Fat32Driver:
         use os.services.fat32.fat32_write.{Fat32WriteContext}
 
         # Check if path already exists
-        val existing = me resolve_path(path)
+        val existing = self.resolve_path(path)
         if existing.is_ok():
             val ex = existing.unwrap()
             if ex.?:
@@ -919,7 +921,7 @@ impl Filesystem for Fat32Driver:
         val parent_path = parent_and_name.parent
         val dir_name = parent_and_name.name
 
-        val parent_result = me resolve_path(parent_path)
+        val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
@@ -936,7 +938,7 @@ impl Filesystem for Fat32Driver:
             return Result.Err(_fat32_unwrap_err(create_result))
         Result.Ok(true)
 
-    me rmdir(path: text) -> Result<bool, text>:
+    me fn rmdir(path: text) -> Result<bool, text>:
         """Remove an empty directory.
 
         Verifies the directory is empty (only . and .. entries), then
@@ -948,7 +950,7 @@ impl Filesystem for Fat32Driver:
         use os.services.fat32.fat32_write.{Fat32WriteContext}
 
         # Verify path is a directory
-        val dir_result = me resolve_path(path)
+        val dir_result = self.resolve_path(path)
         if dir_result.is_err():
             return Result.Err(_fat32_unwrap_err(dir_result))
         val dir_opt = dir_result.unwrap()
@@ -959,7 +961,7 @@ impl Filesystem for Fat32Driver:
             return Result.Err("not a directory: {path}")
 
         # Check directory is empty (readdir skips . and ..)
-        val contents = me readdir(path)
+        val contents = self.readdir(path)
         if contents.is_err():
             return Result.Err(_fat32_unwrap_err(contents))
         if contents.unwrap().len() > 0:
@@ -970,7 +972,7 @@ impl Filesystem for Fat32Driver:
         val parent_path = parent_and_name.parent
         val dir_name = parent_and_name.name
 
-        val parent_result = me resolve_path(parent_path)
+        val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
@@ -985,7 +987,7 @@ impl Filesystem for Fat32Driver:
         """List directory contents."""
         if not self.mounted:
             return Result.Err("filesystem not mounted")
-        val result = me resolve_path(path)
+        val result = self.resolve_path(path)
         if result.is_err():
             return Result.Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
@@ -996,14 +998,14 @@ impl Filesystem for Fat32Driver:
             return Result.Err("not a directory: {path}")
 
         val dir_cluster = self.entry_first_cluster(entry)
-        val chain_result = me follow_cluster_chain(dir_cluster)
+        val chain_result = self.follow_cluster_chain(dir_cluster)
         if chain_result.is_err():
             return Result.Err(_fat32_unwrap_err(chain_result))
         val chain = chain_result.unwrap()
 
         var entries: [DirEntry] = []
         for cluster in chain:
-            val data_result = me read_cluster(cluster)
+            val data_result = self.read_cluster(cluster)
             if data_result.is_err():
                 return Result.Err(_fat32_unwrap_err(data_result))
             val data = data_result.unwrap()
@@ -1050,7 +1052,7 @@ impl Filesystem for Fat32Driver:
                 idx = idx + 1
         Result.Ok(entries)
 
-    me unlink(path: text) -> Result<bool, text>:
+    me fn unlink(path: text) -> Result<bool, text>:
         """Delete a file.
 
         Finds the parent directory, then delegates to Fat32WriteContext
@@ -1062,7 +1064,7 @@ impl Filesystem for Fat32Driver:
         use os.services.fat32.fat32_write.{Fat32WriteContext}
 
         # Verify file exists and is not a directory
-        val file_result = me resolve_path(path)
+        val file_result = self.resolve_path(path)
         if file_result.is_err():
             return Result.Err(_fat32_unwrap_err(file_result))
         val file_opt = file_result.unwrap()
@@ -1076,7 +1078,7 @@ impl Filesystem for Fat32Driver:
         val parent_path = parent_and_name.parent
         val file_name = parent_and_name.name
 
-        val parent_result = me resolve_path(parent_path)
+        val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
@@ -1087,7 +1089,7 @@ impl Filesystem for Fat32Driver:
         var ctx = Fat32WriteContext.new(self)
         ctx.delete_file(parent_cluster, file_name)
 
-    me rename(old_path: text, new_path: text) -> Result<bool, text>:
+    me fn rename(old_path: text, new_path: text) -> Result<bool, text>:
         """Rename or move a file/directory.
 
         FAT32 rename within the same directory: updates the directory entry
@@ -1101,7 +1103,7 @@ impl Filesystem for Fat32Driver:
         use os.services.fat32.fat32_write.{Fat32WriteContext, format_8_3_name}
 
         # Verify source exists
-        val src_result = me resolve_path(old_path)
+        val src_result = self.resolve_path(old_path)
         if src_result.is_err():
             return Result.Err(_fat32_unwrap_err(src_result))
         val src_opt = src_result.unwrap()
@@ -1110,7 +1112,7 @@ impl Filesystem for Fat32Driver:
         val src_entry = src_opt.unwrap()
 
         # Verify destination does not exist
-        val dst_check = me resolve_path(new_path)
+        val dst_check = self.resolve_path(new_path)
         if dst_check.is_ok():
             val dc = dst_check.unwrap()
             if dc.?:
@@ -1120,7 +1122,7 @@ impl Filesystem for Fat32Driver:
         val new_parent_and_name = _split_path_parent(new_path)
 
         # Resolve old parent
-        val old_parent_result = me resolve_path(old_parent_and_name.parent)
+        val old_parent_result = self.resolve_path(old_parent_and_name.parent)
         if old_parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(old_parent_result))
         val old_parent_opt = old_parent_result.unwrap()
@@ -1129,7 +1131,7 @@ impl Filesystem for Fat32Driver:
         val old_parent_cluster = self.entry_first_cluster(old_parent_opt.unwrap())
 
         # Resolve new parent
-        val new_parent_result = me resolve_path(new_parent_and_name.parent)
+        val new_parent_result = self.resolve_path(new_parent_and_name.parent)
         if new_parent_result.is_err():
             return Result.Err(_fat32_unwrap_err(new_parent_result))
         val new_parent_opt = new_parent_result.unwrap()

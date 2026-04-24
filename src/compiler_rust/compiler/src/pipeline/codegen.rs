@@ -38,7 +38,6 @@ impl CompilerPipeline {
                 // During bootstrap, emit the entry module without mangling so the linker
                 // sees a public main symbol.
                 codegen.set_entry_module(true);
-                codegen.set_module_prefix(String::new());
                 codegen
                     .compile_module(mir_module)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))

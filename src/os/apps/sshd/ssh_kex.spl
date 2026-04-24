@@ -18,7 +18,7 @@
 
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
-use os.crypto.curve25519.{x25519_base}
+use os.crypto.curve25519.{x25519_base, x25519_base_bigint_probe, x25519_bigint_probe}
 use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.rsa.{RsaSignBackend, rsa_sha256_sign_with_backend, rsa_sha512_sign_with_backend}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
@@ -29,6 +29,7 @@ extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_dh_curve25519_keypair() -> i64
 extern fn rt_dh_curve25519_public_key(handle: i64) -> [u8]
 extern fn rt_dh_curve25519_shared_secret(handle: i64, their_pub: [u8]) -> [u8]
+extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
 
@@ -361,9 +362,10 @@ fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
 
 fn ssh_kex_generate_private_key() -> [u8]:
     """Generate a 32-byte ephemeral Curve25519 private key."""
-    val handle = rt_dh_curve25519_keypair()
-    if handle > 0:
-        return _encode_handle_backed_private_key(handle)
+    # The host runtime exposes handle-backed Curve25519 helpers, but the
+    # SimpleOS baremetal lane does not currently provide matching runtime
+    # symbols. Use the plain scalar form so the live guest stays on the
+    # self-hosted X25519 path that is actually available in-guest.
     random_bytes(32)
 
 fn ssh_kex_generate_keypair() -> ([u8], [u8]):
@@ -375,7 +377,16 @@ fn ssh_kex_public_from_private(private: [u8]) -> [u8]:
     """Derive the Curve25519 public key from a private scalar."""
     if _is_handle_backed_private_key(private):
         return rt_dh_curve25519_public_key(_decode_handle_backed_private_key(private))
-    x25519_base(private)
+    val runtime_public = rt_tls13_x25519_public_key(private)
+    if runtime_public.len() == 32:
+        return runtime_public
+    val public = x25519_base(private)
+    if public.len() == 32:
+        return public
+    # The guest-native fast path can still miscompile the small-limb X25519
+    # public derivation on some live images. Fall back to the bigint probe so
+    # the SSH lane stays self-hosted and decision-complete.
+    x25519_base_bigint_probe(private)
 
 fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
     """Compute DH shared secret via X25519.
@@ -384,7 +395,10 @@ fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
     """
     if _is_handle_backed_private_key(our_private):
         return rt_dh_curve25519_shared_secret(_decode_handle_backed_private_key(our_private), their_public)
-    rt_tls13_x25519_shared_secret(our_private, their_public)
+    val shared = rt_tls13_x25519_shared_secret(our_private, their_public)
+    if shared.len() == 32:
+        return shared
+    x25519_bigint_probe(our_private, their_public)
 
 # ============================================================================
 # Exchange Hash

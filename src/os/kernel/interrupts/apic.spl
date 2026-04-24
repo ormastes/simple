@@ -10,6 +10,10 @@
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.kernel.interrupts.idt.{VEC_TIMER, VEC_SPURIOUS}
 use os.kernel.interrupts.pic.{pic_disable}
+use std.baremetal.x86.io.{inb, outb}
+
+extern fn rt_read_msr(msr: u32) -> u64
+extern fn rt_write_msr(msr: u32, value: u64)
 
 # --- APIC Register Offsets ---
 # All offsets are from the APIC base address (0xFEE00000).
@@ -76,6 +80,7 @@ val TIMER_DIV_16: u32  = 0x03
 val TIMER_DIV_32: u32  = 0x08
 val TIMER_DIV_64: u32  = 0x09
 val TIMER_DIV_128: u32 = 0x0A
+val APIC_ENABLE_BIT: u64 = 1 << 11
 
 # --- Module State ---
 
@@ -214,12 +219,8 @@ fn apic_get_version() -> u32:
 fn _enable_apic_msr():
     """Enable APIC via IA32_APIC_BASE MSR (0x1B).
     Sets bit 11 (Global Enable) while preserving base address."""
-    asm """
-        mov ecx, 0x1B
-        rdmsr
-        or eax, 0x800
-        wrmsr
-    """
+    val current = rt_read_msr(0x1B as u32)
+    rt_write_msr(0x1B as u32, current | APIC_ENABLE_BIT)
 
 fn _calibrate_timer():
     """Calibrate APIC timer against PIT channel 2.
@@ -282,35 +283,19 @@ fn _calibrate_timer():
 
 fn _pit_read_gate() -> u8:
     """Read PIT gate/speaker control register (port 0x61)."""
-    var result: u8 = 0
-    asm """
-        in al, 0x61
-        movzx eax, al
-        mov {result}, eax
-    """
-    result
+    inb(0x61) as u8
 
 fn _pit_write_gate(value: u8):
     """Write PIT gate/speaker control register (port 0x61)."""
-    asm """
-        mov al, {value}
-        out 0x61, al
-    """
+    outb(0x61 as i32, value as i32)
 
 fn _pit_command(cmd: u8):
     """Write PIT command register (port 0x43)."""
-    asm """
-        mov al, {cmd}
-        out 0x43, al
-    """
+    outb(0x43 as i32, cmd as i32)
 
 fn _pit_write_count(count: u32):
     """Write 16-bit count to PIT channel 2 (port 0x42), LSB then MSB."""
     val lo = (count & 0xFF) as u8
     val hi = ((count >> 8) & 0xFF) as u8
-    asm """
-        mov al, {lo}
-        out 0x42, al
-        mov al, {hi}
-        out 0x42, al
-    """
+    outb(0x42 as i32, lo as i32)
+    outb(0x42 as i32, hi as i32)

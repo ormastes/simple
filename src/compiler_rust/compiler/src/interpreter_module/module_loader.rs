@@ -346,7 +346,18 @@ pub fn load_and_merge_module(
     let base_dir = current_file.and_then(|p| p.parent()).unwrap_or(Path::new("."));
 
     let module_path = match resolve_module_path(&parts, base_dir) {
-        Ok(p) => p,
+        Ok(p) => {
+            // `unit.*` opaque sentinel: the unit registry is resolved by the
+            // self-hosted compiler. The Rust seed accepts the import and
+            // returns an empty module so later stages see no missing symbols.
+            // See `.sstack/unit-system-consolidation/state.md` §8.
+            if super::path_resolution::is_unit_opaque_sentinel(&p) {
+                debug!(path = %parts.join("."), "unit.* opaque soft-accept");
+                decrement_load_depth();
+                return Ok(Value::Dict(Arc::new(HashMap::new())));
+            }
+            p
+        }
         Err(e) => {
             // FALLBACK: If resolution fails and we're not already extracting an item,
             // try treating the last path component as an item name instead of a module name.

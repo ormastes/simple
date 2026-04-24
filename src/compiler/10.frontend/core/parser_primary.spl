@@ -358,6 +358,7 @@ fn parse_primary_expr() -> i64:
         val suf_text = par_text_get()
         val suf_name = lex_cur_suffix_get()
         parser_advance()
+        parser_validate_unit_suffix(suf_name)
         val int_val = int(suf_text)
         return expr_suffixed_int(int_val, suf_name, 0)
 
@@ -365,6 +366,7 @@ fn parse_primary_expr() -> i64:
         val suf_text = par_text_get()
         val suf_name = lex_cur_suffix_get()
         parser_advance()
+        parser_validate_unit_suffix(suf_name)
         return expr_suffixed_float(suf_text, suf_name, 0)
 
     if par_kind_get() == TOK_STRING_LIT:
@@ -943,3 +945,52 @@ fn parse_asm_assert_expr() -> i64:
     """
     val spec_idx = parse_asm_target_spec()
     return expr_asm_assert(spec_idx, 0)
+
+# ---------------------------------------------------------------------------
+# Unit-suffix validation (unit-system-consolidation)
+# ---------------------------------------------------------------------------
+#
+# Numeric literal suffixes (`10_km`, `1.5_kg`) are first-class unit hints.
+# When a `UnitRegistry` is attached to the parser environment we validate the
+# suffix and emit a diagnostic with a Levenshtein-based "did you mean?" for
+# miss cases. Until the registry is wired through the parser env, known-builtin
+# primitive suffixes (`_i32`, `_u8`, …) are allowed silently; all other
+# alphabetic suffixes pass through untouched and the HIR-lowering pass does
+# the authoritative lookup.
+
+fn _is_builtin_primitive_suffix(suf: text) -> bool:
+    if suf == "": return false
+    if suf == "i8": return true
+    if suf == "i16": return true
+    if suf == "i32": return true
+    if suf == "i64": return true
+    if suf == "u8": return true
+    if suf == "u16": return true
+    if suf == "u32": return true
+    if suf == "u64": return true
+    if suf == "f32": return true
+    if suf == "f64": return true
+    if suf == "usize": return true
+    if suf == "isize": return true
+    false
+
+fn parser_validate_unit_suffix(suf_name: text) -> unit:
+    """Parser-time hook for numeric-literal suffix validation.
+
+    Contract:
+      * Empty suffix (plain `10`) — no-op.
+      * Built-in primitive suffix (`_i32`, `_f64`, …) — no-op.
+      * Otherwise — accepted here; HIR lowering resolves against the
+        `UnitRegistry` and emits an error with a Levenshtein suggestion
+        (see `src/compiler/30.types/units/unit_registry.spl::suggest_unit`)
+        if the suffix is unknown.
+    This function exists so future parser-env integration can raise diagnostics
+    earlier without having to re-plumb the literal sites."""
+    if suf_name == "":
+        return
+    if _is_builtin_primitive_suffix(suf_name):
+        return
+    # Future: if par_env_has_unit_registry(): look up via unit_registry_lookup,
+    # emit parser_error("unknown unit suffix '_" + suf_name + "'; did you mean '_" + nearest + "'?")
+    # when miss. For now, accept and defer to HIR lowering.
+    ()

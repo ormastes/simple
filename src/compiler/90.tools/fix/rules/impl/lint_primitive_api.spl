@@ -248,3 +248,142 @@ fn _title_token(name: text) -> text:
         val rest = if part.len() > 1: part.slice(1) else: ""
         result = result + first + rest
     result
+
+# ============================================================================
+# L:raw_unit_postfix — auto-fix for AC-4 raw-primitive → unit-typed parameter.
+#
+# Text-level heuristic rewrite: for call sites whose callee is a known
+# unit-taking function and the arg is an integer/float literal without a
+# suffix, suggest `<N>_<unit>` or `<N.M>_<unit>`. Confidence is Uncertain —
+# the real call-site resolution happens in the AST lint; this rule surfaces
+# the rewrite for `simple fix` tooling.
+#
+# Input to the rule: a line that matches `<callee>(<lit>, ...)` where
+# `<callee>` appears in KNOWN_UNIT_CALLEES → unit pairs. The allowlist is
+# populated from the unit registry at compile time when available; this file
+# carries a minimal bootstrap set (length + time + mass SI bases) that covers
+# stdlib bootstrap calls. AST-driven suggestions (see primitive_api.spl
+# `check_call_site`) supply the full set at runtime.
+# ============================================================================
+
+fn _raw_unit_bootstrap_pairs() -> [[text]]:
+    # Each inner = [callee_prefix, unit_short_symbol].
+    # Prefix match keeps this deliberately narrow — tune once the registry-
+    # backed path is wired through.
+    [["travel_km", "km"],
+     ["sleep_ms", "ms"],
+     ["sleep_s", "s"],
+     ["weigh_kg", "kg"]]
+
+fn _is_suffixed_literal(lit: text) -> bool:
+    """Treat `10_km`, `1.5_kg`, etc. as already-typed — do NOT rewrite them."""
+    val trimmed = lit.trim()
+    if trimmed.len() == 0:
+        return false
+    val underscore = trimmed.find("_")
+    if underscore < 0:
+        return false
+    # Everything before underscore must be digits (with optional '.', '-').
+    var i: i64 = 0
+    var saw_digit = false
+    while i < underscore:
+        val c = trimmed[i:i+1]
+        val is_digit = c >= "0" and c <= "9"
+        val is_dot = c == "."
+        val is_sign = c == "-" and i == 0
+        if is_digit:
+            saw_digit = true
+        else:
+            if not (is_dot or is_sign):
+                return false
+        i = i + 1
+    saw_digit
+
+fn _is_bare_numeric_literal(lit: text) -> bool:
+    """Match `10`, `-3`, `1.5`, `1_000` (digit separators stripped)."""
+    val trimmed = lit.trim()
+    if trimmed.len() == 0:
+        return false
+    var i: i64 = 0
+    var saw_digit = false
+    var dot_seen = false
+    while i < trimmed.len():
+        val c = trimmed[i:i+1]
+        val is_digit = c >= "0" and c <= "9"
+        val is_sep = c == "_"
+        val is_sign = c == "-" and i == 0
+        val is_dot = c == "."
+        if is_digit:
+            saw_digit = true
+        elif is_dot:
+            if dot_seen:
+                return false
+            dot_seen = true
+        elif not (is_sep or is_sign):
+            return false
+        i = i + 1
+    saw_digit
+
+fn _apply_unit_postfix(literal: text, unit_short: text) -> text:
+    """Rewrite `10` → `10_km`. Leaves suffixed literals unchanged."""
+    if _is_suffixed_literal(literal):
+        return literal
+    if not _is_bare_numeric_literal(literal):
+        return literal
+    literal.trim() + "_" + unit_short
+
+fn check_raw_unit_postfix(source: text, file: text) -> [EasyFix]:
+    """Scan text for call sites of known unit-taking functions with a leading
+    bare literal. Emits an Uncertain EasyFix proposing `<N>_<unit>` rewrite.
+
+    This is a bootstrap-only heuristic; AST-driven detection lives in
+    `src/compiler/35.semantics/lint/primitive_api.spl::check_call_site`."""
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    val pairs = _raw_unit_bootstrap_pairs()
+
+    for line in lines:
+        line_num = line_num + 1
+        for pair in pairs:
+            val callee = pair[0]
+            val unit_short = pair[1]
+            val marker = callee + "("
+            val idx = line.find(marker)
+            if idx < 0:
+                continue
+            val after = line.slice(idx + marker.len())
+            val comma = after.find(",")
+            val rparen = after.find(")")
+            var cut = rparen
+            if comma >= 0 and (rparen < 0 or comma < rparen):
+                cut = comma
+            if cut < 0:
+                continue
+            val first_arg = after.slice(0, cut).trim()
+            if not _is_bare_numeric_literal(first_arg):
+                continue
+            if _is_suffixed_literal(first_arg):
+                continue
+            val rewritten = _apply_unit_postfix(first_arg, unit_short)
+            val new_line = line.replace(callee + "(" + first_arg, callee + "(" + rewritten)
+            var fix = EasyFix.create(
+                id: "L:raw_unit_postfix:{line_num}",
+                description: "raw primitive passed to unit-typed parameter of '{callee}'; use '{rewritten}' postfix",
+                confidence: FixConfidence.Uncertain
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: byte_offset,
+                end: byte_offset + line.len(),
+                line: line_num,
+                column: 1,
+                new_text: new_line
+            ))
+            fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes

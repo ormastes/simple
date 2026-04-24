@@ -295,6 +295,35 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     return ENCODE_PTR(out);
 }
 
+RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
+{
+    if (!IS_HEAP(scalar_rv)) return NIL_VALUE;
+
+    RuntimeArray *scalar = (RuntimeArray *)DECODE_PTR(scalar_rv);
+    if (!scalar || scalar->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (scalar->len != 32) return NIL_VALUE;
+
+    uint8_t scalar_raw[32];
+    uint8_t point_raw[32] = {9};
+    uint8_t out_raw[32];
+    for (uint32_t i = 0; i < 32; i++) scalar_raw[i] = _rv_byte(scalar->items[i]);
+
+    scalar_raw[0] &= 248u;
+    scalar_raw[31] &= 127u;
+    scalar_raw[31] |= 64u;
+
+    x25519_scalar_mult_generic_masked(out_raw, scalar_raw, point_raw);
+
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
+    out->len = 32;
+    out->cap = 32;
+    for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
+    return ENCODE_PTR(out);
+}
+
 int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],
                                                     const uint8_t point[32],
                                                     uint8_t out[32])

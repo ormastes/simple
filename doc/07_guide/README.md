@@ -21,6 +21,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [language/module_system.md](language/module_system.md) | Imports, exports, `__init__.spl` |
 | [language/error_handling.md](language/error_handling.md) | `Result<T,E>`, `?` operator, error recovery |
 | [language/coding_style.md](language/coding_style.md) | Style guide, common mistakes |
+| [language/units.md](language/units.md) | Unit system — directory layout, postfix literals, imports, composite units, raw-primitive warning |
 
 ## Testing
 

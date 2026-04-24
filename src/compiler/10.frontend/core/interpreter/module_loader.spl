@@ -199,7 +199,7 @@ fn resolve_module_path(module_name: text, current_file: text) -> text:
     val result = _resolve_module_path_uncached(module_name, current_file)
     _interp_module_cache[cache_key] = result
     # Cache in fast path if it's a stdlib/lib import (not relative)
-    if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app."):
+    if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app.") or module_name.starts_with("unit."):
         _interp_module_fast_cache[module_name] = result
     result
 
@@ -211,7 +211,7 @@ fn _replace_text(value: text, from: text, to: text) -> text:
     value.replace(from, to)
 
 fn _domain_to_dir(domain: text) -> text:
-    _replace_text(domain, "-", "_")
+    _replace_text(value: domain, from: "-", to: "_")
 
 fn _interp_path_parent(path: text) -> text:
     val slash = path.last_index_of("/") ?? -1
@@ -249,11 +249,60 @@ fn _normalize_type_relative_path(module_name: text) -> text:
 
     ""
 
+fn resolve_unit_path(tail: [text]) -> text:
+    """Resolve `unit.<...>` import tail to a concrete src/unit/ file path.
+
+    Rules (see sstack unit-system-consolidation §2 Import Resolver):
+      * If tail[0] is `simple-lang` or `simple-lang.com` → org = `simple-lang`, drop it.
+      * Else if an org dir exists at `src/unit/<tail[0]>[.com]/` → use that org.
+      * Else → default org `simple-lang`, keep full tail.
+    A mid-path `.com` segment is stripped.
+    Both `src/unit/<org>/` and `src/unit/<org>.com/` are tried.
+    Each final segment is tried as `<name>.spl` then `<name>/__init__.spl`.
+    Returns the first existing path, or "" on miss."""
+    if tail.len() == 0:
+        return ""
+    var org: text = "simple-lang"
+    var rest: [text] = tail
+    val first = tail[0]
+    if first == "simple-lang" or first == "simple-lang.com":
+        org = "simple-lang"
+        rest = tail[1..]
+    else:
+        val direct_dir = rt_path_join(rt_path_join("src", "unit"), first)
+        val com_dir = rt_path_join(rt_path_join("src", "unit"), first + ".com")
+        if rt_file_exists(direct_dir) == 1 or rt_file_exists(com_dir) == 1:
+            org = first
+            rest = tail[1..]
+    # Strip a leading "com" segment mid-path (tolerates `unit.acme.com.robotics`).
+    if rest.len() >= 1 and rest[0] == "com":
+        rest = rest[1..]
+
+    val unit_root = rt_path_join("src", "unit")
+    val org_bare = rt_path_join(unit_root, org)
+    val org_com = rt_path_join(unit_root, org + ".com")
+    val joined = rest.join("/")
+
+    val cand1 = org_bare + "/" + joined + ".spl"
+    if rt_file_exists(cand1) == 1:
+        return cand1
+    val cand2 = org_bare + "/" + joined + "/__init__.spl"
+    if rt_file_exists(cand2) == 1:
+        return cand2
+    val cand3 = org_com + "/" + joined + ".spl"
+    if rt_file_exists(cand3) == 1:
+        return cand3
+    val cand4 = org_com + "/" + joined + "/__init__.spl"
+    if rt_file_exists(cand4) == 1:
+        return cand4
+    ""
+
 fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # Convert dotted name to file path
     # std.string → std/text.spl
     # app.io.mod → app/io/mod.spl
     # compiler.frontend.X → compiler/10.frontend/X.spl (numbered dir support)
+    # unit.length.km → src/unit/simple-lang/length/km.spl (unit-system-consolidation)
 
     val current_dir = rt_path_dirname(current_file)
     val type_relative_path = _normalize_type_relative_path(module_name)
@@ -264,6 +313,12 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
 
     # Split dotted module name into parts using array+join (avoids O(n²) concat)
     val path_parts = module_name.split(".")
+
+    # Unit-system routing: `unit.<...>` → src/unit/<org>/<...>.spl
+    if path_parts.len() >= 2 and path_parts[0] == "unit":
+        val unit_path = resolve_unit_path(path_parts[1..])
+        if unit_path != "":
+            return unit_path
 
     # Build relative path with / separator
     var relative_path = path_parts.join("/") + ".spl"
