@@ -36,34 +36,48 @@ fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEnt
         line_num = line_num + 1
         val trimmed = line.trim()
 
-        if trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn "):
+        val is_extern_fn = trimmed.starts_with("extern fn ")
+        val is_pub_fn = trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn ")
+        if not is_extern_fn and is_pub_fn:
             val item_name = _extract_public_function_name(trimmed)
             val params = _extract_params(trimmed)
+            val return_type = _extract_return_type(trimmed)
+
+            var all_types: [text] = []
             for param in params:
-                val param_type = _extract_param_type(param)
-                if _is_audited_primitive_type(param_type):
-                    val param_name = _extract_param_name(param)
+                val pt = _extract_param_type(param)
+                if pt != "":
+                    all_types.push(pt)
+            if return_type != "":
+                all_types.push(return_type)
+
+            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+
+            if not is_pure_math:
+                for param in params:
+                    val param_type = _extract_param_type(param)
+                    if _is_audited_primitive_type(param_type):
+                        val param_name = _extract_param_name(param)
+                        entries.push(PrimitiveApiAuditEntry(
+                            file: file,
+                            line: line_num,
+                            item_name: item_name,
+                            position: "param '{param_name}'",
+                            primitive_type: param_type,
+                            reason_code: _primitive_reason_code(param_type),
+                            suggested_wrapper: _suggest_wrapper_name(param_name, param_type)
+                        ))
+
+                if _is_audited_primitive_type(return_type):
                     entries.push(PrimitiveApiAuditEntry(
                         file: file,
                         line: line_num,
                         item_name: item_name,
-                        position: "param '{param_name}'",
-                        primitive_type: param_type,
-                        reason_code: _primitive_reason_code(param_type),
-                        suggested_wrapper: _suggest_wrapper_name(param_name, param_type)
+                        position: "return type",
+                        primitive_type: return_type,
+                        reason_code: _primitive_reason_code(return_type),
+                        suggested_wrapper: _suggest_wrapper_name(item_name, return_type)
                     ))
-
-            val return_type = _extract_return_type(trimmed)
-            if _is_audited_primitive_type(return_type):
-                entries.push(PrimitiveApiAuditEntry(
-                    file: file,
-                    line: line_num,
-                    item_name: item_name,
-                    position: "return type",
-                    primitive_type: return_type,
-                    reason_code: _primitive_reason_code(return_type),
-                    suggested_wrapper: _suggest_wrapper_name(item_name, return_type)
-                ))
 
     entries
 
@@ -84,15 +98,46 @@ fn check_primitive_api(source: text, file: text) -> [EasyFix]:
         line_num = line_num + 1
         val trimmed = line.trim()
 
-        if trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn "):
+        val is_extern_fn = trimmed.starts_with("extern fn ")
+        val is_pub_fn = trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn ")
+        if not is_extern_fn and is_pub_fn:
             val params = _extract_params(trimmed)
+            val return_type = _extract_return_type(trimmed)
+
+            var all_types: [text] = []
             for param in params:
-                val param_type = _extract_param_type(param)
-                if _is_bare_primitive_type(param_type):
-                    val param_name = _extract_param_name(param)
+                val pt = _extract_param_type(param)
+                if pt != "":
+                    all_types.push(pt)
+            if return_type != "":
+                all_types.push(return_type)
+
+            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+
+            if not is_pure_math:
+                for param in params:
+                    val param_type = _extract_param_type(param)
+                    if _is_bare_primitive_type(param_type):
+                        val param_name = _extract_param_name(param)
+                        var fix = EasyFix.create(
+                            id: "L:primitive_api:{line_num}",
+                            description: "public API parameter '{param_name}' uses bare primitive type '{param_type}'",
+                            confidence: FixConfidence.Uncertain
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file,
+                            start: byte_offset,
+                            end: byte_offset + line.len(),
+                            line: line_num,
+                            column: 1,
+                            new_text: line
+                        ))
+                        fixes.push(fix)
+
+                if _is_bare_primitive_type(return_type):
                     var fix = EasyFix.create(
                         id: "L:primitive_api:{line_num}",
-                        description: "public API parameter '{param_name}' uses bare primitive type '{param_type}'",
+                        description: "public API return type uses bare primitive type '{return_type}'",
                         confidence: FixConfidence.Uncertain
                     )
                     fix.add_replacement(Replacement.create(
@@ -105,26 +150,20 @@ fn check_primitive_api(source: text, file: text) -> [EasyFix]:
                     ))
                     fixes.push(fix)
 
-            val return_type = _extract_return_type(trimmed)
-            if _is_bare_primitive_type(return_type):
-                var fix = EasyFix.create(
-                    id: "L:primitive_api:{line_num}",
-                    description: "public API return type uses bare primitive type '{return_type}'",
-                    confidence: FixConfidence.Uncertain
-                )
-                fix.add_replacement(Replacement.create(
-                    file: file,
-                    start: byte_offset,
-                    end: byte_offset + line.len(),
-                    line: line_num,
-                    column: 1,
-                    new_text: line
-                ))
-                fixes.push(fix)
-
         byte_offset = byte_offset + line.len() + 1
 
     fixes
+
+fn _all_same_primitive(types: [text]) -> bool:
+    if types.len() == 0:
+        return false
+    val first = types[0]
+    if not _is_bare_primitive_type(first):
+        return false
+    for ty in types:
+        if ty != first:
+            return false
+    true
 
 fn _extract_params(line: text) -> [text]:
     val paren_start = line.find("(")

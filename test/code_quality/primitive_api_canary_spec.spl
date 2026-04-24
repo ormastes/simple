@@ -1,0 +1,105 @@
+"""
+# Primitive API Canary Spec — Wrapper-Type Shape Changes
+
+**Feature IDs:** fix-primitive-api-suppressions
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Canary specs that lock in specific public functions will use proper wrapper
+types instead of bare primitives after Teams D and B fix their suppressions
+(Phase 1).
+
+NOTE: These specs verify that the *wrapper-typed call compiles correctly*.
+They cannot directly assert the absence of bare `i64`/`i32` in a signature —
+that is a grep gate at phase 7-verify.  The specs WILL FAIL until the
+relevant team lands the wrapper-type refactor.
+
+Canary targets (from state.md Pre-Pass Types table, Team D scope):
+1. `Trace32Client.trace_capture(duration_ms: i32)` → `DurationMs` wrapper
+   File: `src/app/debug/remote/protocol/trace32.spl`
+2. `backend_shell_tuple(command: text) -> (text, text, i64)` → `ExitCode` in return
+   File: `src/compiler/70.backend/backend/io_compat.spl`
+3. `is_valid_handle(handle: i64) -> bool` → `Handle` wrapper
+   File: `src/app/io/sffi_common.spl`
+"""
+
+use std.sspec.*
+use types.{DurationMs, Handle, ExitCode}
+
+
+# ============================================================================
+# Canary 1: Trace32Client.trace_capture — DurationMs wrapper
+# ============================================================================
+
+describe "AC-2/AC-4 canary: Trace32Client.trace_capture uses DurationMs":
+    """
+    ## Team D: trace32.spl trace_capture
+
+    After Team D fixes `src/app/debug/remote/protocol/trace32.spl`, the
+    `trace_capture` method must accept a `DurationMs` wrapper instead of a
+    bare `i32`.  This spec WILL FAIL until Team D replaces
+    `duration_ms: i32` with `duration_ms: DurationMs`.
+    """
+
+    it "AC-2: trace_capture accepts DurationMs wrapper (not bare i32)":
+        # Arrange: wrap the duration in the canonical type
+        val duration = DurationMs(value: 100)
+        # Act: call via the typed wrapper — this call will fail to compile
+        # until the signature is updated to accept DurationMs.
+        val client = Trace32Client.connect_default()
+        val result = client.trace_capture(duration_ms: duration)
+        # Assert: result is Ok (or Err, either is fine — just that it compiles)
+        expect(result.is_ok() or result.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Canary 2: backend_shell_tuple — ExitCode in return tuple
+# ============================================================================
+
+describe "AC-3 canary: backend_shell_tuple returns ExitCode":
+    """
+    ## Team D: io_compat.spl backend_shell_tuple
+
+    After Team D fixes `src/compiler/70.backend/backend/io_compat.spl`, the
+    return type `(text, text, i64)` must change so the exit-code slot is
+    `ExitCode` instead of bare `i64`.  This spec WILL FAIL until Team D
+    updates the return tuple type.
+    """
+
+    it "AC-3: backend_shell_tuple exit-code slot is ExitCode wrapper":
+        # Act: call the function
+        val result = backend_shell_tuple("echo hello")
+        val exit_code = result.2
+        # Assert: exit_code has a .value field — only true if it is ExitCode
+        expect(exit_code.value).to_equal(0)
+
+
+# ============================================================================
+# Canary 3: is_valid_handle — Handle wrapper
+# ============================================================================
+
+describe "AC-4 canary: sffi_common.is_valid_handle uses Handle":
+    """
+    ## Team D: sffi_common.spl is_valid_handle
+
+    After Team D fixes `src/app/io/sffi_common.spl`, the function
+    `is_valid_handle` must accept a `Handle` wrapper instead of bare `i64`.
+    This spec WILL FAIL until Team D replaces `handle: i64` with
+    `handle: Handle`.
+    """
+
+    it "AC-4: is_valid_handle accepts Handle wrapper (not bare i64)":
+        # Arrange: wrap an invalid handle sentinel value
+        val h = Handle(value: -1)
+        # Act: call with wrapper type — fails to compile until sig updated
+        val valid = is_valid_handle(handle: h)
+        # Assert: -1 sentinel is not a valid handle
+        expect(valid).to_equal(false)

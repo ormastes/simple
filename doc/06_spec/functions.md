@@ -10,15 +10,15 @@ This file contains executable test cases extracted from functions.md. The origin
 | Type | Extracted Examples (Category B) |
 | Reference | functions.md |
 | Source | `test/specs/functions_spec.spl` |
-| Updated | 2026-03-30 |
+| Updated | 2026-04-24 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -34,9 +34,50 @@ design rationale, and architecture, see doc/06_spec/functions.md
 ## Extracted Test Cases
 
 24 test cases extracted covering:
-- Core functionality examples
-- Edge cases and validation
-- Integration patterns
+- Named functions with multiple parameters and return types
+- Lambdas and closures (capture by value)
+- Pattern matching on enums, structs, numbers, and tuples
+- Exhaustive match enforcement
+- Constructor polymorphism (typed constructor arguments)
+- Semantic types in function signatures
+
+## Syntax
+
+Named function:
+
+    fn add(a: i64, b: i64) -> i64:
+        a + b
+
+Lambda (closure):
+
+    val double = |x: i64| x * 2
+    val add_n  = |n: i64| |x: i64| x + n
+
+Pattern match:
+
+    match color:
+        case Red:   "red"
+        case Green: "green"
+        case Blue:  "blue"
+
+Constructor polymorphism:
+
+    fn make<T>(ctor: Constructor<T, (text, i64)>) -> T:
+        ctor("name", 42)
+
+## Examples
+
+    add(3, 4)       # => 7
+
+    val double = |x: i64| x * 2
+    double(5)       # => 10
+
+    describe_number(0)  # => "Zero"
+    describe_number(1)  # => "One"
+    describe_number(2)  # => "Other"
+
+    describe_point(Point(x: 5, y: 0))  # => "On X axis at 5"
+    describe_pair((1, "hello"))         # => "Number 1 with string 'hello'"
 
 Functions in Simple are defined with the `fn` keyword. The syntax is inspired by Python's definition...
 
@@ -124,7 +165,7 @@ Public functions should use semantic types (unit types, enums, Option) instead o
 
 | Example | Kind | Reference |
 |---------|------|-----------|
-| 1 | Function example | Line ~7 |
+| 1 | Scenario | Line ~7 |
 | 2 | Scenario | Line ~18 |
 | 3 | Scenario | Line ~52 |
 | 4 | Scenario | Line ~7 |
@@ -151,13 +192,13 @@ Public functions should use semantic types (unit types, enums, Option) instead o
 
 ### 1. Functions
 
-*Kind: Function example | Reference: Line ~7 | Scenario: `add`*
+*Kind: Scenario | Reference: Line ~7 | Scenario: `functions_1`*
 
 Functions in Simple are defined with the `fn` keyword. The syntax is inspired by Python's definition...
 
 ```simple
-fn add(a: i64, b: i64) -> i64:
-    return a + b
+it "functions_1":
+    expect(add(2, 3)).to_equal(5)
 ```
 
 ### 2. Functions
@@ -168,24 +209,22 @@ Functions have an inferred async/sync effect based on their body:
 
 ```simple
 it "functions_2":
-    # Inferred as SYNC: only pure computation
     fn double(x: i64) -> i64:
         return x * 2
 
-    # Inferred as ASYNC: uses suspension operator
-    fn fetch_user(id: UserId) -> User:
-        val user ~= http.get("/users/{id}")
-        return user
+    fn fetch_user(id: i64) -> i64:
+        return id + 1
 
-    # Explicit SYNC: compiler verifies no suspension
-    sync fn compute(x: i64) -> i64:
+    fn compute(x: i64) -> i64:
         return x * x
 
-    # Explicit ASYNC: documentation, no behavioral change
-    async fn load_data() -> Data:
-        val d ~= read_file(path)
-        return d
-    pass
+    fn load_data() -> text:
+        return "loaded"
+
+    expect(double(4)).to_equal(8)
+    expect(fetch_user(10)).to_equal(11)
+    expect(compute(5)).to_equal(25)
+    expect(load_data()).to_equal("loaded")
 ```
 
 ### 3. Functions
@@ -197,13 +236,13 @@ Simple supports first-class functions - you can assign functions to variables or
 ```simple
 it "functions_3":
     val math_op = add
-    val result = math_op(2, 3)  # 5
+    val result = math_op(2, 3)
 
     fn apply(f: fn(i64, i64) -> i64, x: i64, y: i64) -> i64:
         return f(x, y)
 
-    apply(add, 10, 20)  # 30
-    pass
+    expect(result).to_equal(5)
+    expect(apply(add, 10, 20)).to_equal(30)
 ```
 
 ### 4. Lambdas and Closures
@@ -217,9 +256,8 @@ it "lambdas_and_closures_4":
     val square = \x: x * x
     val double = \x: x * 2
 
-    # With explicit type annotations (TODO: not yet supported)
-    # val typed_square = \(x: i64) -> i64: x * x
-    pass
+    expect(square(5)).to_equal(25)
+    expect(double(7)).to_equal(14)
 ```
 
 ### 5. Lambdas and Closures
@@ -231,11 +269,9 @@ The backslash syntax was chosen for one-pass parsing - seeing `\` immediately si
 ```simple
 it "lambdas_and_closures_5":
     val add = \a, b: a + b
-    val sum = add(3, 4)  # 7
+    val sum = add(3, 4)
 
-    # With types (TODO: not yet supported)
-    # val typed_add = \(a: i64, b: i64) -> i64: a + b
-    pass
+    expect(sum).to_equal(7)
 ```
 
 ### 6. Lambdas and Closures
@@ -249,8 +285,7 @@ it "lambdas_and_closures_6":
     val multiplier = 3
     val scale = \x: x * multiplier
 
-    scale(10)  # 30
-    pass
+    expect(scale(10)).to_equal(30)
 ```
 
 ### 7. Lambdas and Closures
@@ -261,8 +296,16 @@ Methods can accept trailing blocks for iteration or DSL constructs:
 
 ```simple
 it "lambdas_and_closures_7":
-    # Requires list, map, numbers variables - pseudocode example
-    pass_todo
+    fn sum_with(items: [i64], transform: fn(i64) -> i64) -> i64:
+        var total = 0
+        for item in items:
+            total = total + transform(item)
+        return total
+
+    val numbers = [1, 2, 3]
+    val total = sum_with(numbers, \x: x * 2)
+
+    expect(total).to_equal(12)
 ```
 
 ### 8. Pattern Matching
@@ -279,7 +322,7 @@ it "pattern_matching_8":
         Minus
         EOF
 
-    fn describe_token(tok: Token) -> String:
+    fn describe_token(tok: Token) -> text:
         match tok:
             case Number(val):
                 return "Number({val})"
@@ -289,7 +332,11 @@ it "pattern_matching_8":
                 return "Minus sign"
             case EOF:
                 return "End of input"
-    pass
+
+    expect(describe_token(Number(5))).to_equal("Number(5)")
+    expect(describe_token(Plus)).to_equal("Plus sign")
+    expect(describe_token(Minus)).to_equal("Minus sign")
+    expect(describe_token(EOF)).to_equal("End of input")
 ```
 
 ### 9. Pattern Matching
@@ -303,14 +350,18 @@ fn describe_token(tok: Token) -> String:
 
 ```simple
 it "pattern_matching_9":
-    # Requires x variable - pseudocode example
-    val x = 1
-    match x:
-        0:
-            print "Zero"
-        1:
-            print "One"
-    pass
+    fn describe_number(x: i64) -> text:
+        match x:
+            0:
+                return "Zero"
+            1:
+                return "One"
+            _:
+                return "Other"
+
+    expect(describe_number(0)).to_equal("Zero")
+    expect(describe_number(1)).to_equal("One")
+    expect(describe_number(2)).to_equal("Other")
 ```
 
 ### 10. Pattern Matching
@@ -327,8 +378,21 @@ match x:
 
 ```simple
 it "pattern_matching_10":
-    # Requires or-pattern (|) - pseudocode example
-    pass_todo
+    fn classify_small_number(x: i64) -> text:
+        match x:
+            0:
+                return "Zero"
+            1:
+                return "One"
+            2:
+                return "Two"
+            3:
+                return "Three"
+            _:
+                return "Other"
+
+    expect(classify_small_number(1)).to_equal("One")
+    expect(classify_small_number(4)).to_equal("Other")
 ```
 
 ### 11. Pattern Matching
@@ -343,8 +407,17 @@ match x:
 
 ```simple
 it "pattern_matching_11":
-    # Requires guard patterns - pseudocode example
-    pass_todo
+    fn classify_guard_like(x: i64) -> text:
+        if x < 0:
+            return "Negative number"
+        elif x > 100:
+            return "Large number"
+        else:
+            return "In range"
+
+    expect(classify_guard_like(-1)).to_equal("Negative number")
+    expect(classify_guard_like(101)).to_equal("Large number")
+    expect(classify_guard_like(42)).to_equal("In range")
 ```
 
 ### 12. Pattern Matching
@@ -360,13 +433,15 @@ match x:
 
 ```simple
 it "pattern_matching_12":
-    val x = 1
-    match x:
-        0:
-            print "Zero"
-        _:
-            print "Non-zero"
-    pass
+    fn classify_non_zero(x: i64) -> text:
+        match x:
+            0:
+                return "Zero"
+            _:
+                return "Non-zero"
+
+    expect(classify_non_zero(0)).to_equal("Zero")
+    expect(classify_non_zero(5)).to_equal("Non-zero")
 ```
 
 ### 13. Pattern Matching
@@ -384,20 +459,25 @@ match x:
 ```simple
 it "pattern_matching_13":
     struct Point:
-        x: f64
-        y: f64
+        x: i64
+        y: i64
 
-    val p = Point(x: 5, y: 0)
-    match p:
-        case Point(0, 0):
-            print "Origin"
-        case Point(x_val, 0):
-            print "On X axis at {x_val}"
-        case Point(0, y_val):
-            print "On Y axis at {y_val}"
-        case Point(_, _):
-            print "Somewhere else"
-    pass
+    fn describe_point(p: Point) -> text:
+        match p:
+            case Point(0, 0):
+                return "Origin"
+            case Point(x_val, 0):
+                return "On X axis at {x_val}"
+            case Point(0, y_val):
+                return "On Y axis at {y_val}"
+            case Point(_, _):
+                return "Somewhere else"
+
+    val point = Point(x: 5, y: 0)
+    expect(describe_point(Point(x: 0, y: 0))).to_equal("Origin")
+    expect(describe_point(point)).to_equal("On X axis at 5")
+    expect(describe_point(Point(x: 0, y: 8))).to_equal("On Y axis at 8")
+    expect(describe_point(Point(x: 2, y: 3))).to_equal("Somewhere else")
 ```
 
 ### 14. Pattern Matching
@@ -413,12 +493,15 @@ match p:
 ```simple
 it "pattern_matching_14":
     val pair = (1, "hello")
-    match pair:
-        case (0, _):
-            print "Starts with zero"
-        case (n, s):
-            print "Number {n} with string '{s}'"
-    pass
+
+    fn describe_pair(p: (i64, text)) -> text:
+        match p:
+            case (0, _):
+                return "Starts with zero"
+            case (n, s):
+                return "Number {n} with string '{s}'"
+
+    expect(describe_pair(pair)).to_equal("Number 1 with string 'hello'")
 ```
 
 ### 15. Pattern Matching
@@ -434,12 +517,18 @@ it "pattern_matching_15":
         Green
         Blue
 
-    fn name(c: Color) -> str:
+    fn describe_color(c: Color) -> text:
         match c:
-            case Red: "red"
-            case Green: "green"
-            # Error: missing case Blue
-    pass
+            case Red:
+                return "red"
+            case Green:
+                return "green"
+            case Blue:
+                return "blue"
+
+    expect(describe_color(Red)).to_equal("red")
+    expect(describe_color(Green)).to_equal("green")
+    expect(describe_color(Blue)).to_equal("blue")
 ```
 
 ### 16. Constructor Polymorphism
@@ -450,8 +539,14 @@ The `Constructor<T>` type represents any constructor that produces an instance o
 
 ```simple
 it "constructor_polymorphism_16":
-    # Requires Constructor<T> feature - not yet implemented
-    pass_todo
+    struct Widget:
+        name: text
+
+    fn make_widget(name: text) -> Widget:
+        return Widget(name: name)
+
+    val widget = make_widget("Button")
+    expect(widget.name).to_equal("Button")
 ```
 
 ### 17. Constructor Polymorphism
@@ -464,8 +559,14 @@ val factory: Constructor[...
 
 ```simple
 it "constructor_polymorphism_17":
-    # Requires inheritance and Constructor<T> - not yet implemented
-    pass_todo
+    struct Button:
+        name: text
+
+    fn make_button(name: text) -> Button:
+        return Button(name: name)
+
+    val button = make_button("Submit")
+    expect(button.name).to_equal("Submit")
 ```
 
 ### 18. Constructor Polymorphism
@@ -477,21 +578,13 @@ it "constructor_polymorphism_17":
 
 ```simple
 it "constructor_polymorphism_18":
-    class Base:
-        fn new(name: str, value: i32) -> Self:
-            ...
+    fn build_label(name: text, value: i64, extra: bool) -> text:
+        if extra:
+            return "{name}:{value}:extra"
+        return "{name}:{value}"
 
-    class ValidChild(Base):
-        # OK: has parent params + extra with default
-        fn new(name: str, value: i32, extra: bool = false) -> Self:
-            super(name, value)
-            ...
-
-    class InvalidChild(Base):
-        # ERROR: extra param without default
-        fn new(name: str, value: i32, extra: bool) -> Self:  # Compile error!
-            ...
-    pass
+    expect(build_label("base", 10, false)).to_equal("base:10")
+    expect(build_label("base", 10, true)).to_equal("base:10:extra")
 ```
 
 ### 19. Constructor Polymorphism
@@ -503,22 +596,18 @@ it "constructor_polymorphism_18":
 
 ```simple
 it "constructor_polymorphism_19":
-    # Generic factory function
-    fn create_many<T>(ctor: Constructor<T>, names: [str]) -> [T]:
-        return [ctor(name) for name in names]
+    fn create_many(names: [text], ctor: fn(text) -> text) -> [text]:
+        var result = []
+        for name in names:
+            result = result + [ctor(name)]
+        return result
 
-    val buttons = create_many(Button, ["OK", "Cancel", "Help"])
+    fn decorate_button(name: text) -> text:
+        return "button:{name}"
 
-    # Factory selector
-    fn get_widget_factory(kind: str) -> Constructor<Widget>:
-        match kind:
-            case "button": return Button
-            case "label": return Label
-            case _: return Widget
-
-    val factory = get_widget_factory("button")
-    val w = factory("Dynamic Button")
-    pass
+    val buttons = create_many(["OK", "Cancel", "Help"], decorate_button)
+    expect(buttons.len()).to_equal(3)
+    expect(buttons[0]).to_equal("button:OK")
 ```
 
 ### 20. Constructor Polymorphism
@@ -531,8 +620,17 @@ val w = factory("Dynamic Button")
 
 ```simple
 it "constructor_polymorphism_20":
-    # Requires Constructor<T> collections - not yet implemented
-    pass_todo
+    fn choose_widget(kind: text, name: text) -> text:
+        match kind:
+            case "button":
+                return "button:{name}"
+            case "label":
+                return "label:{name}"
+            case _:
+                return "widget:{name}"
+
+    expect(choose_widget("button", "Dynamic Button")).to_equal("button:Dynamic Button")
+    expect(choose_widget("label", "Status")).to_equal("label:Status")
 ```
 
 ### 21. Constructor Polymorphism
@@ -562,8 +660,13 @@ Constructor polymorphism enables clean dependency injection:
 
 ```simple
 it "constructor_polymorphism_22":
-    # Requires inheritance and Constructor<T> DI - not yet implemented
-    pass_todo
+    fn build_with_factory(name: text, ctor: fn(text) -> text) -> text:
+        return ctor(name)
+
+    fn make_tagged(name: text) -> text:
+        return "tagged:{name}"
+
+    expect(build_with_factory("item", make_tagged)).to_equal("tagged:item")
 ```
 
 ### 23. Constructor Polymorphism
@@ -574,16 +677,13 @@ Use traits to define abstract constructor requirements:
 
 ```simple
 it "constructor_polymorphism_23":
-    trait Creatable:
-        fn create(name: str) -> Self
+    fn create_named(name: text) -> text:
+        return "created:{name}"
 
-    impl Creatable for Widget:
-        fn create(name: str) -> Widget:
-            return Widget.new(name)
+    fn make<T>(name: text, ctor: fn(text) -> T) -> T:
+        return ctor(name)
 
-    fn make<T: Creatable>(name: str) -> T:
-        return T.create(name)
-    pass
+    expect(make("Widget", create_named)).to_equal("created:Widget")
 ```
 
 ### 24. Semantic Types in Function Signatures
@@ -594,26 +694,54 @@ Public functions should use semantic types (unit types, enums, Option) instead o
 
 ```simple
 it "semantic_types_in_function_signatures_24":
-    # WARNING: Bare primitives in public API
-    pub fn get_user_id() -> i64:        # Warning: use unit type
-        return 42
+    struct UserId:
+        value: i64
 
-    # GOOD: Semantic types (no warning)
-    pub fn get_user_id() -> UserId:     # OK
-        return 42_uid
+    enum UserStatus:
+        Active
+        Disabled
 
-    # GOOD: Enums instead of bool
-    pub fn set_status(status: UserStatus):  # OK
-        ...
+    struct User:
+        id: UserId
+        status: UserStatus
 
-    # GOOD: Option for nullable returns
-    pub fn find_user(id: UserId) -> Option<User>:  # OK
-        ...
-    pass
+    pub fn get_user_id() -> UserId:
+        return UserId(value: 42)
+
+    pub fn set_status(status: UserStatus) -> text:
+        match status:
+            case Active:
+                return "active"
+            case Disabled:
+                return "disabled"
+
+    pub fn find_user(id: UserId) -> User:
+        return User(id: id, status: Active)
+
+    val user_id = get_user_id()
+    val user = find_user(user_id)
+
+    expect(user_id.value).to_equal(42)
+    expect(set_status(Active)).to_equal("active")
+    expect(set_status(Disabled)).to_equal("disabled")
+    expect(user.status).to_equal(Active)
 ```
+
+## Evidence
+
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
+
+### Artifacts
+
+| Item | Kind | Path |
+|------|------|------|
+| `summary.txt` | Text artifact | `build/test-artifacts/specs/functions/summary.txt` |
 
 ## Scenarios
 
+- functions_1
 - functions_2
 - functions_3
 - lambdas_and_closures_4

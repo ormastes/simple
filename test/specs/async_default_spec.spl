@@ -27,6 +27,84 @@ control.
 - **Sync when needed:** `sync fn` for synchronous code
 - **Type safety:** Promise types automatically inferred
 
+## Syntax
+
+All functions are async by default — no keyword needed:
+
+    fn fetch_user(id: i64) -> User:   # returns Promise<User>
+        val data ~= db.query(id)
+        User.from(data)
+
+Opt out with `sync` for purely synchronous code:
+
+    sync fn add(a: i64, b: i64) -> i64:
+        a + b
+
+Explicit suspension point with `~=`:
+
+    val result ~= expensive_computation()   # suspends; resumes when done
+
+Promise resolved immediately (no I/O):
+
+    val p = Promise.resolved(42)
+    p.is_ready()   # => true
+    p.get()        # => 42
+
+Chain continuations:
+
+    val doubled = p.map(|v| v * 2)
+    doubled.get()  # => 84
+
+## Examples
+
+    # ExecutionMode shows which mode is active
+    val mode = ExecutionMode.AsyncDefault
+    mode.label()    # => "async-default"
+
+    val sync_mode = ExecutionMode.ExplicitSync
+    sync_mode.label()  # => "sync"
+
+    # Promise lifecycle
+    val pending = Promise.pending()
+    pending.is_ready()   # => false
+
+    val resolved = Promise.resolved(99)
+    resolved.is_ready()  # => true
+    resolved.get()       # => 99
+
+    # Context carries the active execution mode
+    val ctx = AsyncContext.new(ExecutionMode.AsyncDefault)
+    ctx.is_async()   # => true
+
+    val sync_ctx = AsyncContext.new(ExecutionMode.ExplicitSync)
+    sync_ctx.is_async()  # => false
+
+## Key Concepts
+
+**Async by default** — removing the `async` keyword at every function
+declaration reduces boilerplate in codebases where most I/O-bound code is
+async. The rare synchronous function opts in with `sync`.
+
+**Promise<T>** — the return type wrapper for async functions. Equivalent to
+`Future<T>` in Rust or a `Promise` in JavaScript. Resolved values are
+accessed through `.get()`, `~=`, or continuation chaining.
+
+**`~=` at suspension points** — marking await sites explicitly means readers
+can scan for `~=` to find all preemption points, simplifying reasoning about
+race conditions and cancellation.
+
+**Cancellation safety** — each `~=` site is a safe cancellation point.
+Dropping the returned `Promise` cancels the computation at the next
+suspension, allowing clean resource release.
+
+**Sync interop** — `sync fn` functions can be called from both sync and async
+contexts. Async functions cannot be called from sync functions without an
+executor (runtime) to drive them.
+
+**Executor / runtime** — the `simple_runtime::async` module provides a
+work-stealing task executor. It schedules coroutines across available threads
+and handles I/O readiness notifications from the OS.
+
 ## Related Specifications
 
 - **Suspension Operator** - Explicit `~` suspension syntax
