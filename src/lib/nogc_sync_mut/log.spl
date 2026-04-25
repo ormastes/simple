@@ -34,6 +34,28 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
 extern fn rt_file_append_text(path: text, content: text) -> bool
 
+# Phase 5 back-compat shim (log-lib-drivers AC-4): _emit and the legacy
+# fatal/error/warn/info/debug/trace/verbose entry points dispatch through
+# the std.log facade so backends registered via log_register_backend
+# observe these emissions. Public function signatures unchanged.
+use lib.log.{
+    log_dispatch_text, subsys_from_scope,
+    LOG_TRACE as _F_TRACE, LOG_DEBUG as _F_DEBUG, LOG_INFO as _F_INFO,
+    LOG_WARN as _F_WARN, LOG_ERROR as _F_ERROR, LOG_FATAL as _F_FATAL
+}
+
+# Map legacy nogc_sync_mut numeric level (1=FATAL..6=TRACE..7=VERBOSE)
+# to canonical Phase 3 §A (0=TRACE..5=FATAL,6=OFF).
+fn _legacy_to_canonical(legacy: i64) -> i64:
+    if legacy == 1: return _F_FATAL
+    if legacy == 2: return _F_ERROR
+    if legacy == 3: return _F_WARN
+    if legacy == 4: return _F_INFO
+    if legacy == 5: return _F_DEBUG
+    if legacy == 6: return _F_TRACE
+    if legacy == 7: return _F_TRACE   # VERBOSE -> TRACE
+    _F_INFO
+
 # Level constants
 val LOG_OFF = 0
 val LOG_FATAL = 1
@@ -176,36 +198,43 @@ fn is_enabled(level: i64, scope: text) -> bool:
 
 fn fatal(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_FATAL, subsys_from_scope(scope), msg)
     if 1 <= GLOBAL_LOG_LEVEL:
         _emit("[FATAL] [{scope}] {msg}")
 
 fn error(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_ERROR, subsys_from_scope(scope), msg)
     if 2 <= GLOBAL_LOG_LEVEL:
         _emit("[ERROR] [{scope}] {msg}")
 
 fn warn(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_WARN, subsys_from_scope(scope), msg)
     if 3 <= GLOBAL_LOG_LEVEL:
         _emit("[WARN] [{scope}] {msg}")
 
 fn info(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_INFO, subsys_from_scope(scope), msg)
     if 4 <= GLOBAL_LOG_LEVEL:
         _emit("[INFO] [{scope}] {msg}")
 
 fn debug(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_DEBUG, subsys_from_scope(scope), msg)
     if 5 <= GLOBAL_LOG_LEVEL:
         _emit("[DEBUG] [{scope}] {msg}")
 
 fn trace(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_TRACE, subsys_from_scope(scope), msg)
     if 6 <= GLOBAL_LOG_LEVEL:
         _emit("[TRACE] [{scope}] {msg}")
 
 fn verbose(scope: text, msg: text):
     _ensure_initialized()
+    log_dispatch_text(_F_TRACE, subsys_from_scope(scope), msg)
     if 7 <= GLOBAL_LOG_LEVEL:
         _emit("[VERBOSE] [{scope}] {msg}")
 

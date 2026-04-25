@@ -1,21 +1,18 @@
 # ============================================================================
 # std.log - Unified log facade (log-lib-drivers Phase 5)
 #
-# This module is the single entry point for all userland + driver logging.
-# It exposes:
+# Single entry point for all userland + driver logging.
 #
-#   - Level enum locked to Linux/Zephyr/Rust convention:
-#       LOG_TRACE=0, LOG_DEBUG=1, LOG_INFO=2, LOG_WARN=3,
-#       LOG_ERROR=4, LOG_FATAL=5, LOG_OFF=6.
-#   - Per-subsystem level overrides (g_subsys_level table).
-#   - EnvFilter parser: log_init_from_config("net=debug,vfs=warn,*=info").
-#   - 4-slot backend table with fn-pointer ops (no traits, no dyn).
-#   - SPSC lite ring (40-byte LogRecord) for ISR-safe enqueue.
+#   - Levels: LOG_TRACE=0..LOG_OFF=6 (Linux/Zephyr/Rust convention).
+#   - Per-subsystem level overrides + EnvFilter parser
+#     ("net=debug,vfs=warn,*=info").
+#   - 4-slot backend table with kind-tagged ops (no traits, no dyn).
+#   - SPSC lite ring (40-byte LogRecord) for ISR-safe enqueue, built on
+#     K-1 raw-pointer atomic externs (rt_atomic_*_u64/u32/u8).
 #   - Panic-mode flush.
 #   - Back-compat shim: legacy info/warn/error/debug/fatal(scope, msg).
 #
 # Architecture spec: .sstack/log-lib-drivers/state.md sections 3-arch §A-H.
-# Builds on K-1 raw-pointer atomic externs (rt_atomic_*_u64 / u32 / u8).
 # ============================================================================
 
 #![allow(unnamed_duplicate_typed_args)]
@@ -25,11 +22,9 @@
 # Externs - K-1 atomics + raw-pointer memory + stderr fallback
 # ---------------------------------------------------------------------------
 extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(addr: i64)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64)
-extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i64
 extern fn rt_atomic_fetch_add_u64(addr: i64, delta: i64) -> i64
 extern fn rt_atomic_load_u64(addr: i64) -> i64
 extern fn rt_atomic_store_u64(addr: i64, val: i64)
@@ -38,7 +33,6 @@ extern fn rt_atomic_store_u32(addr: i64, val: i64)
 extern fn rt_atomic_store_u8(addr: i64, val: i64)
 extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
-extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_ns() -> i64
 
 # ---------------------------------------------------------------------------
@@ -75,43 +69,38 @@ val SUBSYS_USER_BASE:     i64 = 32
 val MAX_SUBSYS:           i64 = 64
 
 # ---------------------------------------------------------------------------
-# Backend slot table - up to 4 backends, fn-pointer ops (DriverOps idiom)
+# Backend slot table - up to 4 backends; LogBackendOps carries a self_ptr
+# sentinel + kind tag the dispatcher branches on (no traits, no dyn).
 # ---------------------------------------------------------------------------
 val MAX_BACKENDS: i64 = 4
 
-# LogBackendOps is opaque to the spec; the test_backends helper builds it.
-# We model it as a self_ptr (i64 sentinel) plus a kind tag the dispatcher
-# can branch on. For Phase 5 the ONLY backend kind that matters for tests
-# is "ring" (test sink).
 class LogBackendOps:
-    var self_ptr: i64
-    var kind:     i64   # 0=null, 1=ring, 2=console, 3=file, 4=semihost
-    var name:     text
+    self_ptr: i64
+    kind:     i64   # 0=null, 1=ring (test sink), 2=console, 3=file, 4=semihost
+    name:     text
 
-    fn LogBackendOps.new(self_ptr: i64, kind: i64, name: text) -> LogBackendOps:
+    static fn new(self_ptr: i64, kind: i64, name: text) -> LogBackendOps:
         LogBackendOps(self_ptr: self_ptr, kind: kind, name: name)
 
-# Backend slot - active=false => empty slot.
 class _BackendSlot:
-    var active:   bool
-    var self_ptr: i64
-    var kind:     i64
+    active:   bool
+    self_ptr: i64
+    kind:     i64
 
-    fn _BackendSlot.new() -> _BackendSlot:
+    static fn empty() -> _BackendSlot:
         _BackendSlot(active: false, self_ptr: 0, kind: 0)
 
 # Global backend table (4 slots). Index = BackendId.
 var _g_backends: [_BackendSlot] = [
-    _BackendSlot.new(), _BackendSlot.new(),
-    _BackendSlot.new(), _BackendSlot.new()
+    _BackendSlot.empty(), _BackendSlot.empty(),
+    _BackendSlot.empty(), _BackendSlot.empty()
 ]
 
 # ---------------------------------------------------------------------------
-# Global level + per-subsys level table
+# Global level + per-subsys level table (255 = fall through to global)
 # ---------------------------------------------------------------------------
-var _g_global_level: i64 = LOG_INFO       # default INFO
+var _g_global_level: i64 = LOG_INFO
 
-# Per-subsys override; 0xFF (255) means "fall through to global".
 var _g_subsys_level: [i64] = [
     255, 255, 255, 255, 255, 255, 255, 255,
     255, 255, 255, 255, 255, 255, 255, 255,
@@ -124,19 +113,13 @@ var _g_subsys_level: [i64] = [
 ]
 
 fn log_set_level(level: i64):
-    """Set the global minimum level. Records with level < global are dropped
-    (subject to per-subsys override)."""
     _g_global_level = level
 
 fn log_set_subsys_level(subsys: i64, level: i64):
-    """Override level for a specific subsystem. Pass LOG_OFF to silence,
-    or 255 to clear back to global."""
     if subsys >= 0 and subsys < MAX_SUBSYS:
         _g_subsys_level[subsys] = level
 
 fn effective_level(subsys: i64) -> i64:
-    """Return the level threshold actually applied to `subsys`:
-    per-subsys override if set, else global."""
     if subsys >= 0 and subsys < MAX_SUBSYS:
         val ovr = _g_subsys_level[subsys]
         if ovr != 255:
@@ -175,24 +158,14 @@ fn _subsys_id_from_name(name: text) -> i64:
     -1
 
 fn log_init_from_config(cfg: text):
-    """Parse a comma-separated env-filter spec and apply.
-
-    Syntax: "<sub>=<level>,...,*=<global>". Unknown <sub> names are skipped
-    (do not crash). Examples:
-        log_init_from_config("net=debug,vfs=warn,*=info")
-        log_init_from_config("")     # leaves defaults (global=INFO)
-    """
     if cfg.len() == 0:
-        # Reset all per-subsys overrides to fall-through; keep global.
         var i = 0
         while i < MAX_SUBSYS:
             _g_subsys_level[i] = 255
             i = i + 1
         return
-    # Split on ',' then on '='. Use char_at-based parsing to avoid std.text.
-    var token: text = ""
     var key:   text = ""
-    var val:   text = ""
+    var v:     text = ""
     var in_value: bool = false
     val n = cfg.len()
     var i = 0
@@ -202,20 +175,20 @@ fn log_init_from_config(cfg: text):
         if end_token:
             if key.len() > 0:
                 if key == "*":
-                    _g_global_level = _parse_level_name(val)
+                    _g_global_level = _parse_level_name(v)
                 else:
                     val sid = _subsys_id_from_name(key)
                     if sid >= 0:
-                        _g_subsys_level[sid] = _parse_level_name(val)
+                        _g_subsys_level[sid] = _parse_level_name(v)
             key = ""
-            val = ""
+            v = ""
             in_value = false
         else:
             if ch == "=" and not in_value:
                 in_value = true
             else:
                 if in_value:
-                    val = val + ch
+                    v = v + ch
                 else:
                     key = key + ch
         i = i + 1
@@ -224,8 +197,6 @@ fn log_init_from_config(cfg: text):
 # Backend registration / removal
 # ---------------------------------------------------------------------------
 fn log_register_backend(ops: LogBackendOps) -> i64:
-    """Register a backend. Returns slot index (0..MAX_BACKENDS-1) on success,
-    or -1 if no slot is available."""
     var i = 0
     while i < MAX_BACKENDS:
         if not _g_backends[i].active:
@@ -237,7 +208,6 @@ fn log_register_backend(ops: LogBackendOps) -> i64:
     -1
 
 fn log_remove_backend(id: i64) -> bool:
-    """Free a previously-registered backend slot. Idempotent for invalid IDs."""
     if id < 0 or id >= MAX_BACKENDS:
         return false
     if not _g_backends[id].active:
@@ -248,44 +218,39 @@ fn log_remove_backend(id: i64) -> bool:
     true
 
 # ---------------------------------------------------------------------------
-# Test-backend (RingBufferBackend) - in-process sink for spec tests
+# Test backend (RingBufferBackend) - in-process sink for spec tests
 # ---------------------------------------------------------------------------
 class _RingBackendRecord:
-    var subsys: i64
-    var level:  i64
-    var p0:     i64
+    subsys: i64
+    level:  i64
+    p0:     i64
 
-    fn _RingBackendRecord.new(subsys: i64, level: i64, p0: i64) -> _RingBackendRecord:
+    static fn new(subsys: i64, level: i64, p0: i64) -> _RingBackendRecord:
         _RingBackendRecord(subsys: subsys, level: level, p0: p0)
 
 class RingBackend:
-    var capacity: i64
-    var entries:  [_RingBackendRecord]
-    var ops:      LogBackendOps
+    capacity: i64
+    entries:  [_RingBackendRecord]
+    ops:      LogBackendOps
 
-    fn RingBackend.new(capacity: i64) -> RingBackend:
-        val rb = RingBackend(capacity: capacity, entries: [], ops: LogBackendOps.new(0, 1, "ring"))
-        rb.ops.self_ptr = _ring_backend_register(rb)
-        rb
-
-# Global registry mapping self_ptr -> RingBackend (since LogBackendOps stores
-# only an i64 sentinel, the dispatcher needs to look the object back up).
+# Global registry maps the LogBackendOps.self_ptr sentinel back to the
+# RingBackend object (LogBackendOps stores only an i64).
 var _g_ring_registry: [RingBackend] = []
 
-fn _ring_backend_register(rb: RingBackend) -> i64:
+fn ring_backend_new(capacity: i64) -> RingBackend:
+    val rb = RingBackend(
+        capacity: capacity,
+        entries: [],
+        ops: LogBackendOps.new(0, 1, "ring")
+    )
     _g_ring_registry.push(rb)
-    _g_ring_registry.len()  # 1-based id (0 is reserved)
+    rb.ops.self_ptr = _g_ring_registry.len()  # 1-based, 0 reserved
+    rb
 
 fn _ring_backend_lookup(self_ptr: i64) -> RingBackend:
-    val idx = self_ptr - 1
-    _g_ring_registry[idx]
-
-fn ring_backend_new(capacity: i64) -> RingBackend:
-    """Construct an in-RAM RingBufferBackend test sink with given capacity."""
-    RingBackend.new(capacity)
+    _g_ring_registry[self_ptr - 1]
 
 fn ring_backend_clear(rb: RingBackend):
-    """Drop all observed records (does not unregister)."""
     rb.entries = []
 
 fn ring_backend_count(rb: RingBackend) -> i64:
@@ -308,7 +273,7 @@ fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRec
 # ---------------------------------------------------------------------------
 # Lite ring (40-byte LogRecord; offsets locked by Phase 4 advisor)
 # ---------------------------------------------------------------------------
-val RING_CAP_DEFAULT_LOG2: i64 = 10        # 1024 records
+val RING_CAP_DEFAULT_LOG2: i64 = 10
 val RING_CAP_DEFAULT:      i64 = 1024
 val LOG_RECORD_SIZE:       i64 = 40
 
@@ -322,32 +287,30 @@ fn record_offset_subsys() -> i64:     36
 fn record_offset_level() -> i64:      38
 fn record_offset_flags() -> i64:      39
 
-# Ring state - allocated lazily by log_ring_init.
-var _g_ring_buf:      i64 = 0       # base addr of cap*40 bytes
-var _g_ring_capacity: i64 = 0
-var _g_ring_mask:     i64 = 0
-var _g_ring_head_addr: i64 = 0      # AtomicU64* (producer write counter)
-var _g_ring_tail_addr: i64 = 0      # AtomicU64* (consumer read counter)
-var _g_ring_dropped_addr: i64 = 0   # AtomicU64*
+var _g_ring_buf:         i64 = 0
+var _g_ring_capacity:    i64 = 0
+var _g_ring_mask:        i64 = 0
+var _g_ring_head_addr:   i64 = 0
+var _g_ring_tail_addr:   i64 = 0
+var _g_ring_dropped_addr: i64 = 0
 
 fn _ring_alloc_cell() -> i64:
-    """Allocate an 8-byte zero-init atomic cell."""
     val a = rt_alloc(8)
     rt_atomic_store_u64(a, 0)
     a
 
 fn log_ring_init(cap_log2: i64):
-    """Initialize the SPSC lite ring with capacity = 1 << cap_log2.
-    Idempotent: re-initializing resets head/tail/dropped to zero and
-    reuses the existing buffer if cap matches."""
     val cap: i64 = 1 << cap_log2
     if _g_ring_buf == 0 or _g_ring_capacity != cap:
         _g_ring_buf      = rt_alloc(cap * LOG_RECORD_SIZE)
         _g_ring_capacity = cap
         _g_ring_mask     = cap - 1
-        if _g_ring_head_addr    == 0: _g_ring_head_addr    = _ring_alloc_cell()
-        if _g_ring_tail_addr    == 0: _g_ring_tail_addr    = _ring_alloc_cell()
-        if _g_ring_dropped_addr == 0: _g_ring_dropped_addr = _ring_alloc_cell()
+        if _g_ring_head_addr == 0:
+            _g_ring_head_addr = _ring_alloc_cell()
+        if _g_ring_tail_addr == 0:
+            _g_ring_tail_addr = _ring_alloc_cell()
+        if _g_ring_dropped_addr == 0:
+            _g_ring_dropped_addr = _ring_alloc_cell()
     rt_atomic_store_u64(_g_ring_head_addr, 0)
     rt_atomic_store_u64(_g_ring_tail_addr, 0)
     rt_atomic_store_u64(_g_ring_dropped_addr, 0)
@@ -364,9 +327,6 @@ fn log_ring_dropped() -> i64:
     rt_atomic_load_u64(_g_ring_dropped_addr)
 
 fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, flags: i64) -> bool:
-    """Producer: publish one record into the ring.
-    Returns true on success; false means the ring was full (dropped counter
-    incremented)."""
     if _g_ring_buf == 0:
         return false
     val h = rt_atomic_load_u64(_g_ring_head_addr)
@@ -388,7 +348,6 @@ fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, fla
     true
 
 fn log_ring_drain(max: i64) -> i64:
-    """Consumer: drain up to `max` records from the ring. Returns count drained."""
     if _g_ring_buf == 0:
         return 0
     val h = rt_atomic_load_u64(_g_ring_head_addr)
@@ -401,7 +360,6 @@ fn log_ring_drain(max: i64) -> i64:
     drained
 
 fn drain_to_list(max: i64) -> [_RingBackendRecord]:
-    """Test helper: drain the ring and return the records as a list."""
     var out: [_RingBackendRecord] = []
     if _g_ring_buf == 0:
         return out
@@ -426,8 +384,6 @@ fn drain_to_list(max: i64) -> [_RingBackendRecord]:
 var _g_panic_mode: bool = false
 
 fn log_panic_flush():
-    """Switch all backends to sync mode and drain the ring. Subsequent
-    emissions bypass the ring."""
     _g_panic_mode = true
     if _g_ring_buf != 0:
         rt_atomic_store_u64(_g_ring_tail_addr, rt_atomic_load_u64(_g_ring_head_addr))
@@ -436,7 +392,7 @@ fn panic_mode_active() -> bool:
     _g_panic_mode
 
 # ---------------------------------------------------------------------------
-# Allocation probe (Phase 5 stub - real harness-counter is Phase 6)
+# Allocation probe (Phase 5 stub - real harness counter is Phase 6)
 # ---------------------------------------------------------------------------
 var _g_alloc_probe: i64 = 0
 
@@ -454,14 +410,11 @@ fn _dispatch_to_backends(level: i64, subsys: i64, p0: i64):
     while i < MAX_BACKENDS:
         if _g_backends[i].active:
             if _g_backends[i].kind == 1:
-                # Ring backend: append to its captured list.
                 val rb = _ring_backend_lookup(_g_backends[i].self_ptr)
                 rb.entries.push(_RingBackendRecord.new(subsys, level, p0))
-            # Other kinds (console/file/semihost) handled by future stages.
         i = i + 1
 
 fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64):
-    """Handle-based publish path (no allocation, used by lite path)."""
     if not _level_passes(level, subsys):
         return
     if not _g_panic_mode:
@@ -469,7 +422,6 @@ fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i6
     _dispatch_to_backends(level, subsys, p0)
 
 fn log_dispatch_text(level: i64, subsys: i64, msg: text):
-    """Text path (userland). Allocates - hosted-only."""
     if not _level_passes(level, subsys):
         return
     _dispatch_to_backends(level, subsys, 0)
@@ -504,8 +456,6 @@ fn log_fatal(subsys: i64, msg: text):
 # signatures used by package/, cli_util/, test_runner_db/).
 # ---------------------------------------------------------------------------
 fn subsys_from_scope(scope: text) -> i64:
-    """Map a legacy scope string to a canonical subsys id.
-    Unknown scopes fall through to SUBSYS_USER_BASE."""
     if scope == "kern":         return SUBSYS_KERN
     if scope == "vmm":          return SUBSYS_VMM
     if scope == "vfs":          return SUBSYS_VFS
@@ -518,7 +468,6 @@ fn subsys_from_scope(scope: text) -> i64:
     if scope == "driver_net":   return SUBSYS_DRIVER_NET
     SUBSYS_USER_BASE
 
-# Legacy callers (use std.log.{error, warn, info, debug, fatal})
 fn fatal(scope: text, msg: text):
     log_dispatch_text(LOG_FATAL, subsys_from_scope(scope), msg)
 
@@ -537,7 +486,6 @@ fn debug(scope: text, msg: text):
 fn verbose(scope: text, msg: text):
     log_dispatch_text(LOG_TRACE, subsys_from_scope(scope), msg)
 
-# Legacy level helpers (used by parse_level / level_name callers in test_runner)
 fn parse_level(name: text) -> i64:
     _parse_level_name(name)
 
