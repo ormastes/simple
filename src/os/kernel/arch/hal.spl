@@ -15,7 +15,7 @@
 
 use os.kernel.boot.ports.{BootOutputPort}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
-use os.kernel.arch.arch_context.{ArchContext}
+use os.kernel.arch.arch_context.{ArchContext, JmpBuf, ExtendedCtx, BootArgs}
 use os.kernel.memory.pmm.{PhysMemManager}
 
 # x86_64 arch imports
@@ -129,6 +129,86 @@ trait HalContext:
     fn context_save() -> ArchContext
     fn context_restore(ctx: ArchContext)
     fn context_init(entry: u64, stack: u64, arg: u64) -> ArchContext
+    # Reserved for FP/SIMD extended save (Wave 3 may implement per arch).
+    # Default: NotImplemented. Implementing archs override this.
+    fn context_save_extended(buf: ExtendedCtx) -> Result<i32, HalError>:
+        Result.Err(HalError.NotImplemented)
+
+# ============================================================================
+# Hardening / runtime-glue traits — added 2026-04-25 for AC-3 + AC-5.
+# Wave 1 declares signatures only. Per-arch impls land in Wave 3 under
+# arch/<arch>/{entropy,cstart,syscall_entry,canary,barrier,cache}.spl.
+# HalSmp/HalPerCpu are SHAPE-ONLY this round — bodies deferred.
+# ============================================================================
+
+enum HalError:
+    """Generic HAL error class. Per-trait specializations may add variants."""
+    NotImplemented
+    Unsupported
+    InvalidArgument
+    DeviceFault
+    NoEntropy
+    OutOfRange
+
+enum CstartError:
+    """C-runtime startup errors raised from cstart_init / setjmp / longjmp."""
+    NotImplemented
+    BootArgsInvalid
+    StackUnaligned
+    BssZeroFailed
+    EnvSetupFailed
+
+trait HalEntropy:
+    """Best-effort early entropy source for canary seeding and KASLR.
+    Per-arch: x86=RDRAND/RDSEED, arm64=RNDR (probed) else CNTVCT,
+    arm32=CNTVCT+DTB mix, riscv=sbi_get_random else cycle+time+instret."""
+    fn hal_random_seed_u64() -> u64
+
+trait HalCstart:
+    """C-runtime startup — replaces simpleos_crt0.S / simpleos_setjmp.S.
+    Per-arch impls in arch/<arch>/cstart.spl."""
+    fn cstart_init(boot_args: BootArgs) -> Result<i32, CstartError>
+    fn setjmp(buf: JmpBuf) -> i32
+    fn longjmp(buf: JmpBuf, val: i32) -> i32     # noreturn — i32 placeholder
+    fn exit(code: i32) -> i32                     # noreturn — i32 placeholder
+
+trait HalSyscall:
+    """Syscall vector install + dispatch — single cap-check site.
+    Args: syscall number + up to 6 register args (System-V / AAPCS / RV)."""
+    fn install_vector() -> Result<i32, HalError>
+    fn dispatch(no: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+trait HalCanary:
+    """Stack canary seeded from HalEntropy. Replaces 0xDEADBEEF constant."""
+    fn canary_init(seed: u64)
+    fn canary_value() -> u64
+    fn canary_fail() -> i32                       # noreturn — i32 placeholder
+
+trait HalBarrier:
+    """Memory barriers — load/store/full + iomem read/write.
+    Mandatory for ARM/RISC-V; x86 is mostly TSO but iomem still needs MFENCE."""
+    fn load_barrier()
+    fn store_barrier()
+    fn full_barrier()
+    fn iomem_read_barrier()
+    fn iomem_write_barrier()
+
+trait HalCache:
+    """Cache maintenance — sync I-cache after JIT, clean/invalidate D-cache for DMA."""
+    fn sync_icache(start: usize, len: usize)
+    fn dcache_clean(start: usize, len: usize)
+    fn dcache_invalidate(start: usize, len: usize)
+
+trait HalSmp:
+    """Multi-CPU bring-up + IPI. SHAPE ONLY — implementations deferred post-AC-4."""
+    fn cpu_count() -> u32
+    fn cpu_start(idx: u32, entry: u64) -> Result<i32, HalError>
+    fn ipi(target: u32, vec: u8)
+
+trait HalPerCpu:
+    """Per-CPU storage base register. SHAPE ONLY — implementations deferred."""
+    fn percpu_set_base(addr: usize)
+    fn percpu_get_base() -> usize
 
 # ============================================================================
 # Console (4 functions)
