@@ -1,0 +1,63 @@
+"""
+# CLI Wrapper Error Detail Regression Spec
+
+**Bug ID:** B1 (compiler_bugs_for_crypto_2026-04-25.md)
+**Memory:** feedback_simple_run_wrapper_broken.md
+**Category:** Tooling / Error Reporting
+
+Regression guard for the release-binary error wrapper. The release binary
+captures the bootstrap subprocess's stderr and re-emits it; the wrapper
+must route through real stderr (not stdout with a "[STDERR]" prefix).
+
+Acceptance per plan:
+- stderr length > 50 bytes on a parse error
+- stdout length == 0 on a parse error
+- "[STDERR]" literal must NOT appear in stdout (across all error modes)
+"""
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn _write_temp(name: text, body: text) -> text:
+    val path = "build/.b1_test_{name}.spl"
+    val _ = rt_file_write_text(path, body)
+    path
+
+fn _run_simple(script_path: text) -> (text, text, i64):
+    rt_process_run("./bin/simple", [script_path])
+
+describe "CLI wrapper error detail (B1)":
+
+    it "parse error: stderr > 50 bytes, stdout == 0":
+        val script = _write_temp("parse", "fn main():\n    val x = {\n")
+        val (stdout, stderr, code) = _run_simple(script)
+        val _ = rt_file_delete(script)
+        expect(code).to_not_equal(0)
+        expect(stdout.len()).to_equal(0)
+        expect(stderr.len() > 50).to_equal(true)
+
+    it "parse error: '[STDERR]' literal must NOT appear in stdout":
+        val script = _write_temp("parse_no_prefix", "fn main():\n    val x = {\n")
+        val (stdout, _, _) = _run_simple(script)
+        val _ = rt_file_delete(script)
+        expect(stdout.contains("[STDERR]")).to_equal(false)
+
+    it "runtime error: real message reaches stderr":
+        val script = _write_temp("runtime", "fn main():\n    val x = 10\n    val y = 0\n    print x / y\n")
+        val (stdout, stderr, code) = _run_simple(script)
+        val _ = rt_file_delete(script)
+        expect(code).to_not_equal(0)
+        expect(stdout.contains("[STDERR]")).to_equal(false)
+        expect(stderr.len() > 0).to_equal(true)
+
+    it "module-resolve error: stderr carries the message; stdout has no '[STDERR]'":
+        val script = _write_temp("modres", "use does.not.exist.{nope}\nfn main():\n    nope()\n")
+        val (stdout, stderr, code) = _run_simple(script)
+        val _ = rt_file_delete(script)
+        expect(code).to_not_equal(0)
+        expect(stdout.contains("[STDERR]")).to_equal(false)
+        expect(stderr.len() > 0).to_equal(true)
