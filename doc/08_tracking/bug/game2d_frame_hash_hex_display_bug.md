@@ -26,3 +26,21 @@ hex. Display-only bug: the function name promises hex, the output is decimal.
 Replace the formatting call with the `0x{:016x}` (or Simple-equivalent
 `hex_pad_16`) format spec. Add a unit test asserting `frame_hash_hex(0x253edd45a462bc15)`
 returns `"0x253edd45a462bc15"`.
+
+## Resolved 2026-04-25
+
+**Root cause:** `frame_hash_hex` body was `"0x{h}"` — Simple text-interpolation
+emits an `i64` in decimal, not hex.
+
+**Fix:** Added pure-Simple inline `i64_to_hex16(value)` formatter (no extern, no
+runtime call) using divide-and-mod nibble extraction (avoids the Cranelift
+`>>` bug per `feedback_cranelift_shr_bug`). `frame_hash_hex` now returns
+`"0x" + i64_to_hex16(h)` — 16-char zero-padded lowercase hex.
+
+**File:** `src/lib/nogc_sync_mut/game2d/backend/frame_hash.spl` (formatter at
+lines 76–82, helpers at lines 37–73).
+
+**Verification:** `bin/simple test test/system/game2d_golden_spec.spl` →
+**11/11 green**, including the existing assertions
+"fixture contains the pinned FNV-1a hash (0x253edd45a462bc15)" and
+"fixture starts with 0x hex prefix".
