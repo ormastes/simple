@@ -1,43 +1,42 @@
 /*
- * DEPRECATED 2026-04-25: control-flow ported to
- *   src/os/runtime/baremetal/runtime_minimal.spl
- * Wave 3 swaps the build manifest to compile the .spl file. Once Wave 3
- * x86_64 smoke is green, the duplicated symbols (zero_bss, spl_thread_init,
- * spl_init_args, main, __spl_exit, __spl_start_bare) get removed from this
- * file and the residual rt_* primitives stay (Simple has no syntax for
- * the variadic inline-asm primitives below; they remain a C↔Simple FFI
- * surface). See src/os/runtime/baremetal/runtime_minimal.spl header.
+ * Bare-metal residual FFI primitives.
  *
- * Minimal bare-metal runtime glue for Simple-built test images.
+ * The high-level startup control-flow (`__spl_start_bare`, `main`,
+ * `__spl_exit`, `spl_thread_init`, `spl_init_args`) lives in the Simple
+ * port at `src/os/runtime/baremetal/runtime_minimal.spl` (Wave 3,
+ * Blocker B). This file retains only the residual rt_* primitives that
+ * Simple has no syntax for — the per-arch halt asm, BSS zero loop using
+ * linker-defined `__bss_start`/`__bss_end` symbols, MMIO volatile
+ * accessors, port I/O, control-register writes, descriptor-table loads,
+ * and segment-reload trampolines.
  *
- * Provides the symbols expected by the startup assembly without pulling in
- * the hosted runtime or constructor support.
+ * The build manifest at `src/compiler/80.driver/build/baremetal.spl`
+ * compiles BOTH this file and the .spl port (`compile_runtime_support`
+ * + `compile_runtime_support_spl`); the linker resolves the .spl
+ * `extern fn rt_zero_bss / rt_halt_exit` references against the
+ * primitives defined here.
  */
 
-extern long long __simple_main(void);
 extern char __bss_start[];
 extern char __bss_end[];
 
-static void zero_bss(void) {
+/* ========================================================================
+ * Wave 3 Blocker A: FFI primitives mirroring the .spl entry points
+ * in src/os/runtime/baremetal/runtime_minimal.spl.
+ *
+ * `rt_zero_bss`  — zeroes [__bss_start, __bss_end). Linker-defined
+ *                  symbols the .spl layer cannot name directly.
+ * `rt_halt_exit` — per-arch `cli/hlt` (x86) or `wfi` loop (arm/riscv).
+ *                  Simple has no inline-asm syntax for these patterns.
+ * ======================================================================== */
+
+void rt_zero_bss(void) {
     for (char *p = __bss_start; p < __bss_end; p++) {
         *p = 0;
     }
 }
 
-void spl_thread_init(void) {}
-
-void spl_init_args(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-}
-
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    return (int)__simple_main();
-}
-
-void __spl_exit(int status) {
+void rt_halt_exit(int status) {
     (void)status;
 #if defined(__x86_64__) || defined(__i386__)
     __asm__ volatile (
@@ -67,11 +66,6 @@ void __spl_exit(int status) {
     for (;;) {}
 #endif
     __builtin_unreachable();
-}
-
-void __spl_start_bare(void) {
-    zero_bss();
-    __spl_exit(main(0, (char **)0));
 }
 
 /* ========================================================================

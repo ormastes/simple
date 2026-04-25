@@ -270,7 +270,9 @@ impl BaremetalBuilder:
         if not crt0_result.success:
             return crt0_result
 
-        # Step 2: Compile minimal runtime support
+        # Step 2: Compile minimal runtime support — both halves.
+        # 2a: C-side residual FFI primitives (rt_zero_bss / rt_halt_exit /
+        #     rt_mmio_* / rt_port_* / rt_lgdt / etc).
         val runtime_result = self.compile_runtime_support()
         if not runtime_result.success:
             return BuildResult(
@@ -281,11 +283,24 @@ impl BaremetalBuilder:
                 duration_ms: current_time_ms() - start_time
             )
 
+        # 2b: Simple-side startup control-flow (Wave 3, Blocker B):
+        #     __spl_start_bare → rt_zero_bss → main → __spl_exit → rt_halt_exit.
+        val runtime_spl_result = self.compile_runtime_support_spl()
+        if not runtime_spl_result.success:
+            return BuildResult(
+                success: false,
+                exit_code: runtime_spl_result.exit_code,
+                stdout: crt0_result.stdout + "\n" + runtime_result.stdout + "\n" + runtime_spl_result.stdout,
+                stderr: crt0_result.stderr + runtime_result.stderr + runtime_spl_result.stderr,
+                duration_ms: current_time_ms() - start_time
+            )
+
         # Step 3: Compile Simple source files to object files
-        var object_files: [text] = [crt0_result.stdout, runtime_result.stdout]
+        var object_files: [text] = [crt0_result.stdout, runtime_result.stdout, runtime_spl_result.stdout]
         var all_stdout = crt0_result.stdout + "\n"
         all_stdout = all_stdout + runtime_result.stdout + "\n"
-        var all_stderr = crt0_result.stderr + runtime_result.stderr
+        all_stdout = all_stdout + runtime_spl_result.stdout + "\n"
+        var all_stderr = crt0_result.stderr + runtime_result.stderr + runtime_spl_result.stderr
 
         for source_file in source_files:
             val obj_result = self.compile_source(source_file)
@@ -360,6 +375,32 @@ impl BaremetalBuilder:
             BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
         else:
             BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "Runtime support compilation failed: {stderr}", duration_ms: 0)
+
+    # Wave 3 (Blocker B): compile the Simple-side runtime_minimal.spl alongside
+    # the C residual primitives. The .spl provides the high-level startup
+    # control-flow (spl_thread_init, spl_init_args, main, __spl_exit,
+    # __spl_start_bare) that calls into the C-side rt_zero_bss / rt_halt_exit
+    # primitives. The C file (compile_runtime_support above) keeps only the
+    # FFI primitives Simple has no syntax for — Blocker C dedups the legacy
+    # control-flow symbols out of runtime_minimal.c atomically with this swap.
+    fn compile_runtime_support_spl() -> BuildResult:
+        val source_path = "src/os/runtime/baremetal/runtime_minimal.spl"
+        val ir_file = "{self.config.output_dir}/runtime_minimal_spl.ll"
+        val obj_file = "{self.config.output_dir}/runtime_minimal_spl.o"
+        val (llvm_ir, compile_err, compile_exit) = compile_to_llvm_ir_pure(source_path, self.config.target_triple(), true)
+        if compile_exit != 0 or llvm_ir == "":
+            val err = if compile_err != "": compile_err else: "runtime_minimal.spl LLVM IR generation returned no output"
+            return BuildResult(success: false, exit_code: if compile_exit == 0: 1 else: compile_exit, stdout: "", stderr: err, duration_ms: 0)
+
+        if not file_write(ir_file, llvm_ir):
+            return BuildResult(success: false, exit_code: 1, stdout: "", stderr: "Failed to write runtime_minimal.spl LLVM IR: {ir_file}", duration_ms: 0)
+
+        var args = self.llc_args(ir_file, obj_file)
+        val (stdout, stderr, exit_code) = process_run("llc", args)
+        if exit_code == 0:
+            BuildResult(success: true, exit_code: 0, stdout: obj_file, stderr: stderr, duration_ms: 0)
+        else:
+            BuildResult(success: false, exit_code: exit_code, stdout: stdout, stderr: "runtime_minimal.spl object generation failed: {stderr}", duration_ms: 0)
 
     # Compile Simple source to object file
     fn compile_source(source_file: text) -> BuildResult:
