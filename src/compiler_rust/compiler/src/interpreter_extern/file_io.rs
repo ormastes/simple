@@ -285,6 +285,24 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Allocate a zero-filled `[u8]` of the given length in O(len) C-side.
+///
+/// B2 (compiler_bugs_for_crypto_2026-04-25.md): the interpreter's
+/// `[u8].push` loop is quadratic on multi-MiB buffers. Crypto KAT loaders
+/// call `rt_bytes_alloc(n)` instead of building byte buffers via
+/// per-element push, sidestepping interpreter dispatch overhead.
+pub fn rt_bytes_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    let len = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    if len <= 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let arr: Vec<Value> = vec![Value::Int(0); len as usize];
+    Ok(Value::array(arr))
+}
+
 /// Create a byte array from a raw memory pointer
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = match args.first() {
