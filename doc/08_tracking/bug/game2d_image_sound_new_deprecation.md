@@ -35,3 +35,29 @@ static methods can be removed entirely.
 2. If clean (likely — verified for `test/system/` and `examples/game2d/hello/`),
    remove the static methods and update the re-export list in `__init__.spl`.
 3. Update any third-party game examples added in subsequent iterations.
+
+## Resolved 2026-04-25
+
+**Resolution:** documentation-only — no code deletion required.
+
+External-caller audit (post-ship):
+```
+grep -rn 'Image::new\|Sound::new' src test examples doc \
+  | grep -v render/image.spl \
+  | grep -v audio/__init__.spl \
+  | grep -v game2d/__init__.spl \
+  | grep -v doc/08_tracking/bug/
+# → 0 matches
+```
+
+The only remaining call sites are inside the canonical `g.image(path)` and
+`g.sound(path)` convenience helpers in `src/lib/nogc_sync_mut/game2d/__init__.spl`
+(internal implementation) and the static-method bodies themselves. No external
+code references `Image::new` or `Sound::new` directly.
+
+Public surface decision: `g.image(...)` and `g.sound(...)` are the canonical
+user-facing constructors. The `Image::new` / `Sound::new` static methods are
+**retained as the private implementation backing the helpers** — deleting them
+would break the helpers and would not simplify the surface meaningfully (they
+are not promoted in any docs/specs/examples). A docstring note has been added
+to `__init__.spl` flagging the helpers as canonical.
