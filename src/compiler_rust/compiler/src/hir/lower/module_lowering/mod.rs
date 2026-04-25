@@ -16,7 +16,9 @@ mod function;
 mod import;
 mod mock;
 mod module_pass;
+mod nested_def_hoist;
 mod validation;
 
 // Re-export the main entry point
 pub use module_pass::*;
+pub use nested_def_hoist::module_with_hoisted_defs;

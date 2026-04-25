@@ -720,18 +720,25 @@ impl Lowerer {
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
-            // Module-level definitions that should not appear in statement context
-            Node::Function(_)
+            // Type definitions that legitimately appear inside function bodies
+            // in spec/test code (e.g. `class Point:` defined inside an `it`
+            // block). These are hoisted to module scope by
+            // `nested_def_hoist::module_with_hoisted_defs` before HIR lowering
+            // begins, so by the time we reach the body the definition is
+            // already registered. Emit no statement here.
+            Node::Class(_)
             | Node::Struct(_)
-            | Node::Class(_)
             | Node::Enum(_)
             | Node::Trait(_)
             | Node::Impl(_)
-            | Node::InterfaceBinding(_)
             | Node::Mixin(_)
-            | Node::Actor(_)
             | Node::TypeAlias(_)
-            | Node::ClassAlias(_)
+            | Node::ClassAlias(_) => Ok(vec![]),
+
+            // Other module-level definitions that have no in-body lowering.
+            Node::Function(_)
+            | Node::InterfaceBinding(_)
+            | Node::Actor(_)
             | Node::FunctionAlias(_)
             | Node::Extern(_)
             | Node::ExternClass(_)

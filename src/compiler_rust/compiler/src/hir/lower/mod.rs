@@ -16,6 +16,7 @@ pub use deprecation_warning::{DeprecationWarning, DeprecationWarningCollector};
 pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
+pub use module_lowering::module_with_hoisted_defs;
 
 use super::lifetime::LifetimeViolation;
 use super::types::HirModule;

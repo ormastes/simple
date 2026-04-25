@@ -214,6 +214,11 @@ impl CompilerPipeline {
         // Monomorphization: specialize generic functions for concrete types
         let module = monomorphize_module(&module);
 
+        // Hoist nested type definitions to module scope so type-check, lint,
+        // and HIR lowering all see them as if authored at the top level.
+        // Allows `class Foo:` inside an `it` block etc. (R1).
+        let module = crate::hir::module_with_hoisted_defs(&module).unwrap_or(module);
+
         // Run lint checks
         self.run_lint_checks(&module.items, source_file)?;
 
@@ -336,6 +341,9 @@ impl CompilerPipeline {
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
+
+        // 2.5. Hoist nested type definitions to module scope (R1).
+        let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items, None)?;
@@ -465,6 +473,9 @@ impl CompilerPipeline {
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
+
+        // 2.5. Hoist nested type definitions to module scope (R1).
+        let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items, source_path)?;
@@ -607,6 +618,9 @@ impl CompilerPipeline {
         // Monomorphization
         let ast_module = monomorphize_module(&ast_module);
 
+        // Hoist nested type definitions to module scope (R1).
+        let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
+
         // Run lint checks
         self.run_lint_checks(&ast_module.items, None)?;
 
@@ -744,6 +758,9 @@ impl CompilerPipeline {
         } else {
             ast_module
         };
+
+        // Hoist nested type definitions to module scope (R1).
+        let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
         // Bootstrap leniency: when building the first native compiler with a newer
         // Rust toolchain, allow compiling without the full type system so older

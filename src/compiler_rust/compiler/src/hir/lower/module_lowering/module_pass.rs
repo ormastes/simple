@@ -357,6 +357,13 @@ impl Lowerer {
     }
 
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
+        // Hoist nested type definitions (e.g. `class Foo:` defined inside an
+        // SSpec `it` block) to module scope so the rest of the lowering
+        // pipeline registers them as if they were authored at the top level.
+        // See `nested_def_hoist.rs` for the rules and rationale.
+        let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
+        let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+
         self.module.name = ast_module.name.clone();
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
@@ -727,6 +734,10 @@ impl Lowerer {
 
     /// Lower an AST module to HIR and return warnings along with the module
     pub fn lower_module_with_warnings(mut self, ast_module: &Module) -> LowerResult<super::super::LoweringOutput> {
+        // Hoist nested type definitions to module scope (see `lower_module`).
+        let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
+        let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
 
