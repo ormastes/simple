@@ -241,6 +241,19 @@ pub extern "C" fn rt_bdd_format_results() -> i64 {
     total_failed as i64
 }
 
+/// Snapshot the per-describe-block accumulated results without clearing.
+/// Returns a Vec of `(total_examples, failed_examples)` — one entry per
+/// completed describe block.
+///
+/// Used by the test runner (compile / SMF / native modes) to recover
+/// authoritative pass/fail counts directly from the in-process BDD state.
+/// This bypasses stdout-parsing, which is unreliable because
+/// `rt_bdd_describe_end` writes its `"X examples, Y failures"` line via
+/// Rust `println!` — bypassing the Simple-side stdout capture buffer.
+pub fn rt_bdd_snapshot_results() -> Vec<(usize, usize)> {
+    BDD_RESULTS.with(|cell| cell.borrow().clone())
+}
+
 /// Clear all BDD state (called between test files or at startup).
 #[no_mangle]
 pub extern "C" fn rt_bdd_clear_state() {

@@ -933,7 +933,7 @@ pub use monoio_future::{
 pub use bdd_ffi::{
     rt_bdd_after_each, rt_bdd_before_each, rt_bdd_clear_state, rt_bdd_describe_end, rt_bdd_describe_start,
     rt_bdd_expect_eq, rt_bdd_expect_fail, rt_bdd_expect_truthy, rt_bdd_format_results, rt_bdd_has_failure,
-    rt_bdd_it_end, rt_bdd_it_start,
+    rt_bdd_it_end, rt_bdd_it_start, rt_bdd_snapshot_results,
 };
 
 // ============================================================================

@@ -38,7 +38,8 @@ use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection
 use simple_native_loader::default_runtime_provider;
 use simple_runtime::loader::registry::ModuleRegistry;
 use simple_runtime::value::{
-    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop, rt_set_args_vec,
+    rt_bdd_clear_state, rt_bdd_snapshot_results, rt_capture_stderr_start, rt_capture_stderr_stop,
+    rt_capture_stdout_start, rt_capture_stdout_stop, rt_set_args_vec,
 };
 use scenario_artifacts::write_scenario_manifest;
 use crate::exec_core::run_main;
@@ -171,6 +172,44 @@ fn fallback_counts_from_output(
     } else {
         (0, 1, 0)
     }
+}
+
+/// Derive (passed, failed, skipped) counts for in-process compile-mode runs
+/// (SMF, native-in-process). Prefers the authoritative BDD snapshot
+/// (`rt_bdd_snapshot_results`) when present, since `rt_bdd_describe_end` writes
+/// its `"X examples, Y failures"` line via Rust `println!` which bypasses the
+/// Simple-side stdout capture buffer — leaving `parse_test_output` blind in
+/// compile mode and historically producing false-green outer summaries even
+/// when the inner BDD reporter went RED.
+fn derive_counts_from_bdd_snapshot(
+    bdd_snapshot: &[(usize, usize)],
+    individual_results: &[IndividualTestResult],
+    combined_output: &str,
+    exit_code: i32,
+    options: &super::types::TestOptions,
+) -> (usize, usize, usize) {
+    if !bdd_snapshot.is_empty() {
+        let mut total = 0usize;
+        let mut failed = 0usize;
+        for (t, f) in bdd_snapshot.iter() {
+            total += *t;
+            failed += *f;
+        }
+        let passed = total.saturating_sub(failed);
+        // BDD snapshot doesn't track skipped separately; preserve any skipped
+        // count that scenario parsing surfaced from the output.
+        let skipped = individual_results.iter().filter(|r| r.skipped).count();
+        return (passed, failed, skipped);
+    }
+
+    if !individual_results.is_empty() {
+        let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
+        let f = individual_results.iter().filter(|r| !r.passed).count();
+        let s = individual_results.iter().filter(|r| r.skipped).count();
+        return (p, f, s);
+    }
+
+    fallback_counts_from_output(combined_output, exit_code, options)
 }
 
 /// Parse individual test results from BDD output (✓/✗/○ lines)
@@ -1450,6 +1489,9 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
     rt_capture_stdout_start();
     rt_capture_stderr_start();
     rt_set_args_vec(&[]);
+    // Clear in-process BDD state so any leftover counts from a previous test
+    // don't pollute this file's snapshot below.
+    rt_bdd_clear_state();
 
     let provider = default_runtime_provider();
     let registry = ModuleRegistry::new();
@@ -1464,6 +1506,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
             .map_err(|e| format!("SMF load failed ({}): {}", smf_path.display(), e))?;
         run_main(&module)
     })();
+    let bdd_snapshot = rt_bdd_snapshot_results();
     let captured_stdout = rt_capture_stdout_stop();
     let captured_stderr = rt_capture_stderr_stop();
     let wait_result: Result<(i32, String, String), String> =
@@ -1474,14 +1517,8 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
         Ok((exit_code, stdout, stderr)) => {
             let combined_output = format!("{}\n{}", stdout, stderr);
             let individual_results = parse_individual_results(&combined_output);
-            let (passed, failed, skipped) = if !individual_results.is_empty() {
-                let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
-                let f = individual_results.iter().filter(|r| !r.passed).count();
-                let s = individual_results.iter().filter(|r| r.skipped).count();
-                (p, f, s)
-            } else {
-                fallback_counts_from_output(&combined_output, exit_code, options)
-            };
+            let (passed, failed, skipped) =
+                derive_counts_from_bdd_snapshot(&bdd_snapshot, &individual_results, &combined_output, exit_code, options);
 
             let result = TestFileResult {
                 path: path.to_path_buf(),

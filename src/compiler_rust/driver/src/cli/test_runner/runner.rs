@@ -814,7 +814,13 @@ fn execute_test_files(
                 // would silently report them as PASSED (0ms) without running
                 // anything, hiding real regressions. Route system specs through
                 // the real interpreter path instead.
-                if !options.coverage && !options.safe_mode && !is_system_spec {
+                if !options.coverage && !options.safe_mode && !is_system_spec && !spec_has_assertions(path) {
+                    // Static fast-path: only safe for specs that contain *no*
+                    // assertion calls (`expect`, `check`, `check_msg`,
+                    // `assert_*`). Without this guard the runner would
+                    // false-green any spec whose `it` body asserts something
+                    // false — the static analyzer just counts `it` blocks and
+                    // reports them all PASSED without ever running them.
                     let mut static_reg = StaticTestRegistry::new();
                     match static_reg.add_file(path) {
                         Ok(_) => {
@@ -834,7 +840,7 @@ fn execute_test_files(
                                 individual_results: vec![],
                             }
                         }
-                        Err(e) => {
+                        Err(_) => {
                             // Parse error — fall back to interpreter for full error reporting
                             super::execution::run_test_file_with_options(path, options)
                         }
@@ -951,6 +957,46 @@ fn count_skip_marker_cases(path: &Path) -> usize {
         })
         .count();
     count.max(1)
+}
+
+/// Quick textual scan for assertion calls. The interpreter-mode static
+/// fast-path counts `it` blocks without actually executing them, which
+/// false-greens any spec whose `it` body asserts something false. Specs that
+/// contain assertions must take the slow path so `BDD_TEST_RESULTS` records
+/// real pass/fail outcomes.
+fn spec_has_assertions(path: &Path) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for raw in content.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Strip trailing comments to avoid matching tokens that only appear
+        // in commentary.
+        let code = match line.find('#') {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+        if code.contains("expect ")
+            || code.contains("expect(")
+            || code.contains("check(")
+            || code.contains("check_msg(")
+            || code.contains("assert_eq")
+            || code.contains("assert_ne")
+            || code.contains("assert_true")
+            || code.contains("assert_false")
+            || code.contains("assert_nil")
+            || code.contains("assert_not_nil")
+            || code.contains("fail_assertion")
+            || code.contains("fail_test")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Print individual test result
