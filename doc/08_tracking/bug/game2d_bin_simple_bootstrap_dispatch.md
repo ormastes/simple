@@ -48,3 +48,27 @@ post-rebuild that `bin/simple game new --help` exits 0 with usage text from
 
 - `doc/08_tracking/bug/game2d_render_002_gpu_pipeline_arms.md`
 - `.sstack/game2d-framework/state.md` `### 5-implement` Wave-D CLI section
+
+## Deferred 2026-04-25
+
+**Status:** STILL AMBER — bootstrap rebuild attempted and aborted.
+
+`scripts/bootstrap/bootstrap-from-scratch.sh --deploy` failed at the
+`rust-seed-build` step with `rust-lld: error: undefined symbol: rt_cli_run_file`
+referenced from `simple_runtime::value::cli_ffi::rt_cli_run_file`. The recent
+upstream commit `1433559d1d fix(rust-seed): forward rt_cli_run_file to
+native_all under driver-hooks` was intended to address this, but a clean
+rebuild from scratch on x86_64-unknown-linux-gnu still cannot link the symbol
+into `simple-driver`.
+
+**Log:** `build/bootstrap/logs/x86_64-unknown-linux-gnu/rust-seed-build.log`
+
+Per the post-ship sprint hard rule "If bootstrap fails, STOP and report — do
+not commit anything", the rebuild was rolled back and no source diff was
+created for this ticket. The ticket remains amber and should be re-attempted
+after the `rt_cli_run_file` link issue is resolved (likely a missing
+`#[no_mangle]` export wiring in `simple-native-all` or a `cfg` gate in
+`simple-runtime` that excludes the symbol under the bootstrap profile).
+
+Workaround for users: `bin/simple src/app/game/main.spl new <name>` works
+today via the script path.
