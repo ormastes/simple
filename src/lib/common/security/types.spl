@@ -24,12 +24,20 @@ enum SecuritySeverity:
     Critical
 
 ## A single structured audit log entry.
+##
+## Hash-chain fields (`seq`, `prev_hash`, `entry_hash`) are populated by
+## `audit_chain_append` (see `src/lib/common/security/audit_chain.spl`).
+## `AuditEntry.new(...)` leaves them at zero defaults — direct callers of
+## `log_security_event` (non-chained path) will see seq=0 / zero hashes.
 class AuditEntry:
     timestamp_ms: i64
     event: SecurityEvent
     correlation_id: text
     module_path: text
     severity: SecuritySeverity
+    seq: i64                  # NEW — monotonic 1-based; 0 means "not chained"
+    prev_hash: [u8]           # NEW — sha256 of previous entry's entry_hash; 32 bytes
+    entry_hash: [u8]          # NEW — sha256(seq_be || ts_be || sev || event_json || prev_hash)
 
     static fn new(event: SecurityEvent, correlation_id: text, module_path: text) -> AuditEntry:
         AuditEntry(
@@ -37,8 +45,21 @@ class AuditEntry:
             event: event,
             correlation_id: correlation_id,
             module_path: module_path,
-            severity: severity_for_event(event)
+            severity: severity_for_event(event),
+            seq: 0,
+            prev_hash: _zero_hash_32(),
+            entry_hash: _zero_hash_32()
         )
+
+## Returns a 32-byte zero list — used as the genesis prev_hash and as the
+## default for non-chained AuditEntry construction.
+fn _zero_hash_32() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
 
 ## Security context carried through a request/session lifecycle.
 class SecurityContext:
