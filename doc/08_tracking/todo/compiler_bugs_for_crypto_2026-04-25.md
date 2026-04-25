@@ -117,9 +117,79 @@ module-scope `class Foo` spec under `--mode=smf` — both PASS. Crypto KAT loade
 
 **Residual issues (separate items, NOT B3 — won't block crypto KATs):**
 - R1: `class` INSIDE `it` blocks fails HIR lowering — needs HIR change.
-- R2: `skip("reason")` unresolved in compiled mode — `skip` is a Simple language
-  keyword. Fix options all intrusive (rename DSL to `pending()`, context-sensitive
-  parsing, or HIR Node::Skip with trailing expr).
+- ~~R2: `skip("reason")` unresolved in compiled mode — `skip` is a Simple language
+  keyword.~~ **Superseded by R2-broader (see below).** The bug is bigger than
+  the `skip` keyword conflict — the SMF/native compile path links *no*
+  `std.spec` library symbols.
+
+### R2-broader · SMF/native cannot link any `std.spec` library symbol — investigated 2026-04-25
+
+**Repro (each fails identically with `Undefined symbol: <name>` at SMF reloc):**
+
+```spl
+# /tmp/r2_pending.spl
+use std.spec
+describe "x":
+    it "y":
+        pending("reason")        # → Undefined symbol: pending
+```
+
+```bash
+bin/simple test --mode=smf --force-rebuild --clean /tmp/r2_pending.spl
+# 2026-04-25T10:14:28Z ERROR ... Undefined symbol: pending (required by relocation 8)
+# Failed (5ms)
+```
+
+Same failure with `skip("...")` (symbol `skip`), `skip_it "..."` (symbol
+`skip_it`), and `check(true)` (symbol `check`) — all are exported by
+`src/lib/nogc_sync_mut/spec.spl` and re-exported by
+`src/lib/nogc_sync_mut/spec/__init__.spl`, but none reach the SMF.
+
+`describe`/`it`/`expect` "PASS" only because:
+- `--mode=native` runs `pipeline/native_project/stubs.rs` which prints
+  `Generating 234 stub functions for unresolved symbols` and replaces every
+  `std.spec` call with a no-op stub. The "PASSED" is meaningless — the body
+  never executed.
+- `--mode=smf` swallows a runtime `Function not found (invalid UTF-8 name)`
+  inside the bdd shim and the test runner reports PASSED anyway.
+
+**This means R2 cannot be solved by:**
+- (a) renaming `skip` → `pending` in the DSL — `pending` is also unresolved.
+- (b) parser context-sensitivity for `skip(...)` — would parse fine but still
+  fail to link.
+- (c) HIR lowering for `Node::Skip` with trailing expr — same.
+
+The actual fix path is to make the SMF/native pipeline link the `std.spec`
+library functions reached via `use std.spec`, OR to teach the test wrapper
+to inline the small spec-DSL helpers (similar to how
+`test/unit/lib/common/pending_on_spec.spl` already inlines `pending_on` and
+`pending_skip` because — quoting that file — *"the runtime doesn't expose
+custom spec functions from std.spec imports"*). The latter is local to
+`preprocess_sspec_for_smf` in
+`src/compiler_rust/driver/src/cli/test_runner/execution.rs`.
+
+**Latent companion bug (also surfaced during this investigation):**
+
+Two paths report PASSED for tests that actually failed to run:
+
+1. `--mode=native` stub-generation makes calls to undefined library symbols
+   into no-op stubs. The `it` body "executes" but does nothing; matchers
+   never assert. Crypto specs running `--compile` are very likely getting
+   false greens today — anything assertion-driven that touches a stubbed
+   symbol silently passes.
+2. `--mode=smf` describe/it path swallows a "Function not found (invalid
+   UTF-8 name)" runtime error and reports PASSED. Same false-green risk.
+
+These need their own bug entries (separate from R2-broader). For the crypto
+rollout, treat compiled-mode `bin/simple test --compile` results as
+**non-authoritative until R2-broader and the false-green bugs are resolved**;
+run crypto specs in interpreter mode only.
+
+**Acceptance gate #2 of the original R2 ticket** ("skip/pending still work
+in interpreter mode") is locked in by
+`test/unit/compiler/r2_pending_helper_spec.spl`, which uses
+`pending("reason")` and verifies the interpreter BDD path
+(`interpreter_call/bdd.rs:656`).
 
 **Original (stale) description retained for history:**
 
