@@ -72,3 +72,70 @@ after the `rt_cli_run_file` link issue is resolved (likely a missing
 
 Workaround for users: `bin/simple src/app/game/main.spl new <name>` works
 today via the script path.
+
+## Deeper Diagnosis 2026-04-25 (sprint #2)
+
+The prior `1433559d1d` commit was directionally close but addresses the
+**compile-error layer** only, not the link-time failure. Root cause is
+**Cargo feature unification** across the bootstrap build command:
+
+```
+cargo build --profile bootstrap -p simple-driver -p simple-native-all
+```
+
+When both packages are built in a single Cargo invocation, features unify
+across the workspace:
+
+- `simple-native-all`'s `Cargo.toml` declares
+  `simple-runtime = { ..., features = ["driver-hooks"] }`.
+- `simple-driver`'s `Cargo.toml` declares
+  `simple-runtime = { path = "../runtime" }` (no `driver-hooks`).
+- Cargo unifies → `simple-runtime` is built **once with `driver-hooks` ON**
+  for both consumers.
+
+In `src/compiler_rust/runtime/src/value/cli_ffi.rs`, the `rt_cli_run_file`
+implementation is gated:
+- `#[cfg(not(feature = "driver-hooks"))]` → `not_implemented` stub with
+  `#[no_mangle]` (would emit the `rt_cli_run_file` C symbol).
+- `#[cfg(feature = "driver-hooks")]` → wrapper that forwards to
+  `extern "C" { #[link_name = "rt_cli_run_file"] fn rt_cli_run_file_extern(..) }`
+  and exposes itself as a Rust-callable `pub extern "C" fn rt_cli_run_file`
+  WITHOUT `#[no_mangle]` (relies on someone else providing the C symbol).
+
+When unified to `driver-hooks=ON`, the `simple-driver` binary contains the
+**wrapper-only** code; the C symbol `rt_cli_run_file` must come from
+`simple-native-all` (which provides `#[no_mangle] pub extern "C" fn
+rt_cli_run_file`). But `simple-driver` does **not depend on**
+`simple-native-all` — and it cannot, because `simple-native-all` already
+depends on `simple-driver` (cyclic dependency).
+
+`-p simple-native-all` builds the staticlib but **does not link it into
+`simple-driver`'s `simple` binary**. The binary is therefore left with the
+wrapper's `extern { #[link_name = "rt_cli_run_file"] }` declaration and no
+provider — hence `rust-lld: undefined symbol: rt_cli_run_file`.
+
+### Fix options (all non-trivial — DEFERRED)
+
+1. **Restructure crate ownership**: move the `simple` bin out of
+   `simple-driver` into a new top-level crate that depends on both
+   `simple-driver` AND `simple-native-all`, breaking the cycle. ≥ 3 Cargo.tomls
+   + `main.rs` migration + workspace surgery.
+
+2. **Build-script link injection**: have `simple-driver`'s `build.rs` emit
+   `cargo:rustc-link-lib=static=simple_native_all` and
+   `cargo:rustc-link-search=...` to splice the staticlib into the `simple`
+   binary at link time. Fragile (target-triple specific) and still leaves the
+   logical cycle in place.
+
+3. **Feature decoupling**: introduce a separate Cargo feature on
+   `simple-runtime` such that the wrapper-only path is gated independently of
+   what `simple-native-all` opts into. Requires re-auditing the entire
+   `cli_ffi.rs` cfg layout AND every other place where `driver-hooks` is used.
+
+All three blow the per-ticket 5-file STOP guard. Sprint #2 leaves this amber
+with the corrected root-cause documented above. The "missing `#[no_mangle]`"
+guess in the prior amber note is **incorrect** — `simple-native-all` already
+exports the symbol; the wiring problem is at the link/dependency level.
+
+**Status: STILL AMBER (sprint #2).** No source change committed for this
+ticket in sprint #2.
