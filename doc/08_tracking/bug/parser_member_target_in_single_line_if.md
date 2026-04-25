@@ -81,3 +81,37 @@ then rejected because expression context doesn't admit assignment operators.
 Routing the inline body through `parse_simple_statement` (the same path used
 for full-line indented statements) should close the gap without grammar
 ambiguity.
+
+## Resolved 2026-04-25
+
+Fixed in `src/compiler_rust/parser/src/stmt_parsing/control_flow.rs` by
+extending `is_inline_assignment()` to recognize member-target lvalues
+(`ident[.field]+ =/+=/-=/*=//=/%=`) using a save/restore lookahead that
+pushes consumed tokens back to `pending_tokens` (lexer cannot rewind, so the
+push-back is required — see `peek_is_struct_init` for the same pattern).
+Also added `Self_` to the head identifier-like set so `if cond: self.x =
+...` parses too. The detection-only change keeps `parse_item()` as the body
+parser, which already handles member-target assignment statements
+correctly outside the `if`-suffix context.
+
+The self-hosted parser at
+`src/compiler/10.frontend/core/parser_stmts.spl` does not have a
+single-line colon-suffix `if` form (its `parse_if_stmt` always calls
+`parse_block()`), so no parallel edit is needed. Component scope reduces
+to "parser (Rust bootstrap)" only.
+
+Verification:
+- Bug minimal repro `if true: d.x = d.x - 1.0` → parses, runs.
+- Compound member assign `if true: d.x -= 1.0` → parses, runs.
+- Deep chain `if true: o.inner.n -= 1` → parses, runs.
+- Local-scalar `if true: x = 5` / `if true: x -= 1` → unchanged, still passes.
+- Bare-expression form `var x = if 1 < 2: 10 else: 20` → unchanged.
+- Statement form `if true: print("hi")` → unchanged.
+- All 9 game2d specs PASS.
+- `test/feature/usage/control_flow_if_else_spec.spl` (11 tests) PASS.
+- `test/unit/compiler/parser/parser_attribute_spec.spl` (18) PASS.
+- `test/unit/compiler/parser/parser_actor_spec.spl` (16) PASS.
+
+Note: `test/util/game2d_parse_repro{,_b}.spl` track a *different* failure
+(member-name in `class T : g.App` extends), tracked under
+`game2d_impl_block_parse_repair`. They were never repros for this bug.

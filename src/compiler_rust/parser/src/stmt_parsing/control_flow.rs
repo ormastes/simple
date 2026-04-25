@@ -23,12 +23,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Check if the inline body looks like an assignment statement (identifier = expr)
-    /// This allows `if cond: x = value` without requiring an else clause
+    /// This allows `if cond: x = value` without requiring an else clause.
+    /// Also supports member-target chains like `if cond: self.x = value` or
+    /// `if cond: dir.field.sub -= 1` by walking [Dot Identifier]* after the head.
     fn is_inline_assignment(&mut self) -> bool {
-        // Check if current token is an identifier (or keyword used as variable name) followed by =
+        // Check if current token is an identifier (or keyword used as variable name)
+        // that may begin an assignment lvalue.
         let is_ident_like = matches!(
             self.current.kind,
             TokenKind::Identifier { .. }
+                | TokenKind::Self_
                 | TokenKind::Result
                 | TokenKind::Type
                 | TokenKind::Default
@@ -52,20 +56,76 @@ impl<'a> Parser<'a> {
                 | TokenKind::Alias
                 | TokenKind::Bounds
         );
-        if is_ident_like {
-            // Peek ahead to see if next token is = or compound assignment
-            let next = self.peek_next();
-            return matches!(
-                next.kind,
-                TokenKind::Assign
-                    | TokenKind::PlusAssign
-                    | TokenKind::MinusAssign
-                    | TokenKind::StarAssign
-                    | TokenKind::SlashAssign
-                    | TokenKind::PercentAssign
-            );
+        if !is_ident_like {
+            return false;
         }
-        false
+
+        // Fast path: bare `ident =` or `ident OP=`.
+        let next = self.peek_next();
+        if Self::is_assign_op(&next.kind) {
+            return true;
+        }
+        if !matches!(next.kind, TokenKind::Dot) {
+            return false;
+        }
+
+        // Member-target lookahead: walk `[Dot Identifier]+` and check for assign at the end.
+        // Save parser state so we can restore after the lookahead. We must also push
+        // any consumed tokens back to `pending_tokens` because the lexer is stateful
+        // and cannot rewind.
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let mut consumed: Vec<crate::token::Token> = Vec::new();
+
+        // Consume head identifier so subsequent peeks step through `.field` chain.
+        self.advance();
+        consumed.push(self.current.clone());
+
+        let mut found_assign = false;
+        loop {
+            if !self.check(&TokenKind::Dot) {
+                break;
+            }
+            self.advance(); // consume `.`
+            consumed.push(self.current.clone());
+            // Expect a member identifier next
+            let is_member_ident = matches!(self.current.kind, TokenKind::Identifier { .. });
+            if !is_member_ident {
+                break;
+            }
+            self.advance();
+            consumed.push(self.current.clone());
+            if Self::is_assign_op(&self.current.kind) {
+                found_assign = true;
+                break;
+            }
+            // Continue if another `.field` follows; otherwise stop.
+            if !self.check(&TokenKind::Dot) {
+                break;
+            }
+        }
+
+        // Restore parser state — push all consumed tokens back to front of pending queue.
+        for token in consumed.into_iter().rev() {
+            self.pending_tokens.push_front(token);
+        }
+        self.current = saved_current;
+        self.previous = saved_previous;
+
+        found_assign
+    }
+
+    /// True if `kind` is `=` or a compound assignment operator.
+    fn is_assign_op(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Assign
+                | TokenKind::PlusAssign
+                | TokenKind::MinusAssign
+                | TokenKind::StarAssign
+                | TokenKind::SlashAssign
+                | TokenKind::PercentAssign
+        )
     }
 
     /// Check if inline body is a statement (keyword or assignment) that doesn't require else
