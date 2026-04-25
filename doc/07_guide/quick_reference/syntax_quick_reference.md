@@ -272,6 +272,41 @@ s[7:]                               # "World!"
 s[-6:-1]                            # "World"
 ```
 
+### Bitfield Slicing (`int.bits[lo..hi]`)
+
+Read or write a contiguous bit range on an integer using `.bits[lo..hi]`,
+where `lo` is the inclusive low bit and `hi` is the exclusive high bit
+(field width is `hi - lo`).
+
+```simple
+val state = 0xDEADBEEF
+state.bits[24..32]                  # 0xDE  (top byte)
+state.bits[0..8]                    # 0xEF  (low byte)
+state.bits[4..8]                    # 0xE   (4-bit nibble)
+
+var word = 0x12345600
+word.bits[0..8]  = 0xEF             # word == 0x123456EF
+word.bits[24..32] = 0xAB            # word == 0xAB3456EF
+```
+
+Desugars at parse time to plain shift+mask:
+
+| Sugar                          | Lowering                                                      |
+|--------------------------------|---------------------------------------------------------------|
+| `x.bits[lo..hi]`               | `(x >> lo) & ((1 << (hi - lo)) - 1)`                          |
+| `x.bits[lo..hi] = v`           | `x = (x & ~(mask << lo)) \| ((v & mask) << lo)`               |
+
+Notes:
+- The source value of a write is masked to the field width — bits above
+  the field cannot bleed into adjacent fields.
+- Inclusive ranges (`bits[0..=7]`) are accepted and equivalent to
+  `bits[0..8]`.
+- Augmented assignment (`+=`, `~=`, ...) on a bitfield slice is not
+  supported — use the explicit read/write form instead.
+- Pure-Simple equivalents `extract_bits` / `insert_bits` /
+  `get_byte` / `set_byte` live in `std.bitwise_utils` and remain
+  available for cases where a function call is preferable.
+
 ---
 
 ## Comprehensions

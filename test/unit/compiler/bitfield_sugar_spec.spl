@@ -1,0 +1,112 @@
+# bitfield_sugar_spec
+
+"""
+B4-sugar (compiler_bugs_for_crypto_2026-04-25.md) — `int.bits[lo..hi]`
+get/set syntax sugar.
+
+The sugar desugars at parse time to plain shift+mask expressions, so both
+the interpreter and the HIR-lowering paths see only `Binary{Shr/Shl/BitAnd/BitOr}`
+nodes. No new AST or HIR variant.
+
+Read   : `x.bits[lo..hi]`     -> `(x >> lo) & ((1 << (hi - lo)) - 1)`
+Write  : `x.bits[lo..hi] = v` -> `x = (x & ~((mask) << lo)) | ((v & mask) << lo)`
+"""
+
+use std.spec
+
+describe "int.bits[lo..hi] read sugar (B4)":
+
+    it "extracts the low byte of a u32-shaped value":
+        val state = 0x12345678
+        val byte0 = state.bits[0..8]
+        expect(byte0).to_equal(0x78)
+
+    it "extracts the high byte of a u32-shaped value":
+        val state = 0x12345678
+        val byte3 = state.bits[24..32]
+        expect(byte3).to_equal(0x12)
+
+    it "extracts a 4-bit nibble at a non-byte boundary":
+        val n = 0xABCD
+        # bits[4..8] = nibble at position 4 = 0xC
+        expect(n.bits[4..8]).to_equal(0xC)
+
+    it "matches plan repro shape `(state[i] & 0xFF000000) >> 24`":
+        val state = 0xDEADBEEF
+        val via_sugar = state.bits[24..32]
+        val via_manual = (state & 0xFF000000) >> 24
+        expect(via_sugar).to_equal(via_manual)
+
+    it "round-trips with bitwise_utils.extract_bits":
+        # bits[lo..hi] is equivalent to extract_bits(n, lo, hi - lo)
+        val n = 0xCAFEBABE
+        val sugar = n.bits[8..16]
+        # 0xCAFEBABE -> byte at offset 8..16 = 0xBA
+        expect(sugar).to_equal(0xBA)
+
+describe "int.bits[lo..hi] write sugar (B4)":
+
+    it "writes the low byte and leaves higher bytes untouched":
+        var state = 0x12345600
+        state.bits[0..8] = 0xEF
+        expect(state).to_equal(0x123456EF)
+
+    it "writes the high byte and leaves lower bytes untouched":
+        var state = 0x00345678
+        state.bits[24..32] = 0xAB
+        expect(state).to_equal(0xAB345678)
+
+    it "clears the existing field before writing the new value":
+        var state = 0x000000FF
+        state.bits[0..8] = 0x12
+        expect(state).to_equal(0x00000012)
+
+    it "matches plan repro shape `state[i].bits[24..32] = byte`":
+        var word = 0x00BBCCDD
+        word.bits[24..32] = 0xAA
+        expect(word).to_equal(0xAABBCCDD)
+
+    it "masks the source value to the field width":
+        # If the source has bits above the field width, they must be
+        # masked off — they must NOT bleed into adjacent fields.
+        var state = 0
+        state.bits[0..4] = 0xFF   # only the low 4 bits should land
+        expect(state).to_equal(0xF)
+
+describe "int.bits round-trip and aliasing (B4)":
+
+    it "write-then-read returns the written value":
+        var state = 0x12345678
+        state.bits[8..16] = 0xAB
+        expect(state.bits[8..16]).to_equal(0xAB)
+
+    it "two non-overlapping field writes compose":
+        var state = 0
+        state.bits[0..8] = 0xAB
+        state.bits[8..16] = 0xCD
+        expect(state).to_equal(0xCDAB)
+
+    it "writing one field does not disturb a neighbouring field":
+        var state = 0
+        state.bits[0..8] = 0xAB
+        state.bits[16..24] = 0xEF
+        # field at bits 8..16 should still be zero
+        expect(state.bits[8..16]).to_equal(0)
+        expect(state.bits[0..8]).to_equal(0xAB)
+        expect(state.bits[16..24]).to_equal(0xEF)
+
+    it "full-width write replaces the whole value":
+        var state = 0xDEADBEEF
+        state.bits[0..32] = 0xCAFEBABE
+        expect(state.bits[0..32]).to_equal(0xCAFEBABE)
+
+    it "matches plan literal repro `state[i].bits[24..32] = byte`":
+        # The plan's exact repro form: an indexed array element on the LHS.
+        # NOTE: `arr[i].bits[lo..hi] = v` desugars to a write that reads
+        # `arr[i]` twice — once to clear the field, once not. Pure-functional
+        # indices are fine; side-effecting indices would double-evaluate.
+        var arr = [0, 0]
+        arr[0].bits[24..32] = 0xAA
+        arr[1].bits[0..8] = 0xBB
+        expect(arr[0]).to_equal(0xAA000000)
+        expect(arr[1]).to_equal(0xBB)

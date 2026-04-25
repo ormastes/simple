@@ -221,9 +221,36 @@ impl<'a> Parser<'a> {
                             // Regular index access
                             self.validate_bracket_operand(&first, "index expression")?;
                             self.expect(&TokenKind::RBracket)?;
-                            expr = Expr::Index {
+                            // B4: rewrite `x.bits[lo..hi]` to mask+shift at parse time.
+                            // Falls through unchanged for non-`.bits` indices, and is
+                            // skipped when the next token is an assignment operator so
+                            // that `parse_expression_or_assignment` can desugar the
+                            // write side (which needs the original Index/Range shape).
+                            //
+                            // Safe vs `==`: comparison operators are distinct token
+                            // kinds (`Eq`, `NotEq`, ...), so the assignment-token peek
+                            // does not collide with `x.bits[…] == y`.
+                            let raw = Expr::Index {
                                 receiver: Box::new(expr),
                                 index: Box::new(first),
+                            };
+                            expr = if matches!(
+                                self.current.kind,
+                                TokenKind::Assign
+                                    | TokenKind::PlusAssign
+                                    | TokenKind::MinusAssign
+                                    | TokenKind::StarAssign
+                                    | TokenKind::SlashAssign
+                                    | TokenKind::PercentAssign
+                                    | TokenKind::TildeAssign
+                                    | TokenKind::TildePlusAssign
+                                    | TokenKind::TildeMinusAssign
+                                    | TokenKind::TildeStarAssign
+                                    | TokenKind::TildeSlashAssign
+                            ) {
+                                raw
+                            } else {
+                                super::bitfield::maybe_rewrite_bits_read(raw)
                             };
                         }
                     }

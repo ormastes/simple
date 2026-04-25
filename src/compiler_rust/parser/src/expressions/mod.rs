@@ -4,6 +4,7 @@
 //! It implements a Pratt parser (precedence climbing) for binary operators.
 
 mod binary;
+pub(crate) mod bitfield;
 mod core;
 mod helpers;
 mod no_paren;

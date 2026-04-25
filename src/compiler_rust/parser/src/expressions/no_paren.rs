@@ -29,6 +29,23 @@ impl<'a> Parser<'a> {
             let mut value = self.parse_expression()?;
             // Support no-paren calls in assignment: x = double 5
             value = self.parse_with_no_paren_calls(value)?;
+
+            // B4: desugar `x.bits[lo..hi] = v` to `x = (x & ~mask) | ((v & mask) << lo)`.
+            // Only the plain `=` form is rewritten — augmented forms (`+=`, `~=`, ...)
+            // on a bitfield slice are intentionally left as a parse error / fall-through
+            // since their semantics on a synthetic L-value are ambiguous.
+            if op == AssignOp::Assign {
+                if let Some((lvalue, lo, hi)) = super::bitfield::match_bits_write_target(&expr) {
+                    let new_value = super::bitfield::build_bits_write_value(lvalue.clone(), lo, hi, value);
+                    return Ok(Node::Assignment(AssignmentStmt {
+                        span,
+                        target: lvalue,
+                        op,
+                        value: new_value,
+                    }));
+                }
+            }
+
             Ok(Node::Assignment(AssignmentStmt {
                 span,
                 target: expr,
