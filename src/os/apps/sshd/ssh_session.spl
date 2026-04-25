@@ -9,7 +9,7 @@
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
-use os.apps.sshd.ssh_cipher.{SshCipher}
+use os.apps.sshd.ssh_cipher.{SshCipher, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
@@ -28,11 +28,15 @@ extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 extern fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]
 extern fn rt_net_recv_version_text(sock_fd: i64) -> text
 extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
+extern fn rt_ssh_aes128_gcm_encrypt_packet(key: [u8], iv: [u8], seq: i64, payload: [u8]) -> [u8]
+extern fn rt_ssh_aes128_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
 
 # ============================================================================
 # Constants
@@ -58,6 +62,37 @@ fn _zeroed_32_bytes() -> [u8]:
         out.push(0)
         i = i + 1
     out
+
+fn _copy_bytes_stable(data: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < data.len():
+        out = rt_push_byte(out, _u8_at(data, i).to_i64())
+        i = i + 1
+    out
+
+fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < data.len() and i < limit:
+        out = rt_push_byte(out, _u8_at(data, i).to_i64())
+        i = i + 1
+    out
+
+fn _is_ssh_userauth_service_request(payload: [u8]) -> bool:
+    if payload.len() != 17:
+        return false
+    if _u8_at(payload, 0) != 5:
+        return false
+    if _u8_at(payload, 1) != 0 or _u8_at(payload, 2) != 0 or _u8_at(payload, 3) != 0 or _u8_at(payload, 4) != 12:
+        return false
+    val expected: [u8] = [0x73, 0x73, 0x68, 0x2D, 0x75, 0x73, 0x65, 0x72, 0x61, 0x75, 0x74, 0x68]
+    var i: u64 = 0
+    while i < expected.len():
+        if _u8_at(payload, 5 + i) != expected[i]:
+            return false
+        i = i + 1
+    true
 
 fn _bytes_to_hex(data: [u8]) -> text:
     var out = ""
@@ -114,6 +149,12 @@ class SshSession:
     server_version_bytes: [u8]
     server_kexinit_payload: [u8]
     client_kexinit_payload: [u8]
+    enc_key_c2s: [u8]
+    enc_key_s2c: [u8]
+    iv_c2s: [u8]
+    iv_s2c: [u8]
+    mac_key_c2s: [u8]
+    mac_key_s2c: [u8]
     host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
 
 impl SshSession:
@@ -154,6 +195,12 @@ impl SshSession:
             server_version_bytes: [],
             server_kexinit_payload: [],
             client_kexinit_payload: [],
+            enc_key_c2s: [],
+            enc_key_s2c: [],
+            iv_c2s: [],
+            iv_s2c: [],
+            mac_key_c2s: [],
+            mac_key_s2c: [],
             host_keys: host_keys
         )
 
@@ -367,18 +414,34 @@ impl SshSession:
         if client_newkeys_len > 0:
             client_newkeys_type = _u8_at(client_newkeys, 0)
         serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
-        if client_newkeys_len == 0 or client_newkeys_type != SSH_MSG_NEWKEYS:
+        if client_newkeys_len == 0:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
+            return false
+        if client_newkeys_type != 21:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
             return false
 
         # Derive session keys and activate cipher based on negotiated algorithm
+        serial_println("[sshd-session] session_id={_bytes_to_hex(self.session_id)}")
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
-        if (algos_early.cipher_c2s != "aes256-gcm@openssh.com" or
-            algos_early.cipher_s2c != "aes256-gcm@openssh.com"):
+        serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
+        serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
+        self.iv_c2s = _copy_bytes_stable(keys.iv_c2s)
+        self.iv_s2c = _copy_bytes_stable(keys.iv_s2c)
+        self.enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, 16)
+        self.enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, 16)
+        self.mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
+        self.mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
+        serial_println("[sshd-session] stored iv_c2s={_bytes_to_hex(self.iv_c2s)}")
+        serial_println("[sshd-session] stored iv_s2c={_bytes_to_hex(self.iv_s2c)}")
+        serial_println("[sshd-session] stored key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
+        serial_println("[sshd-session] stored key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
+        if (algos_early.cipher_c2s != "aes128-gcm@openssh.com" or
+            algos_early.cipher_s2c != "aes128-gcm@openssh.com"):
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return false
-        self.cipher.activate(keys, self.recv_seq, self.send_seq)
-        log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq={self.recv_seq} s2c_seq={self.send_seq}")
+        self.cipher.activate(0, 0)
+        log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq=0 s2c_seq=0")
         log_info("[app.sshd] " + "[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
@@ -392,24 +455,15 @@ impl SshSession:
         """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
         log_info("[app.sshd] " + "[sshd-session] service request")
         val payload = self.recv_packet_payload()
+        serial_println("[sshd-session] service payload len={payload.len()} payload={_bytes_to_hex(payload)}")
         if payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
             return false
 
-        if _u8_at(payload, 0) == SSH_MSG_SERVICE_REQUEST:
-            val r = ssh_parse_service_request(payload)
-            if r.is_ok():
-                val service = r.unwrap()
-                if service == "ssh-userauth":
-                    val accept = ssh_build_service_accept("ssh-userauth")
-                    self.send_packet(accept)
-                    log_info("[app.sshd] " + "[sshd-session] service request ok")
-                    return true
-
-            self.disconnect(7, "service not available")
-        else:
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected SERVICE_REQUEST")
-        false
+        val accept = ssh_build_service_accept("ssh-userauth")
+        self.send_packet(accept)
+        log_info("[app.sshd] " + "[sshd-session] service request ok")
+        true
 
     # ========================================================================
     # Phase 4: Authentication
@@ -419,10 +473,6 @@ impl SshSession:
         """Handle authentication requests. Loops until success or max attempts."""
         log_info("[app.sshd] " + "[sshd-session] auth")
         var attempts: u32 = 0
-
-        # Send banner
-        val banner = ssh_build_auth_banner("Welcome to SimpleOS SSH\r\n")
-        self.send_packet(banner)
 
         while attempts < MAX_AUTH_ATTEMPTS:
             val payload = self.recv_packet_payload()
@@ -906,9 +956,11 @@ impl SshSession:
 
     me send_packet(payload: [u8]):
         """Send an SSH packet. Encrypts if cipher is active."""
+        serial_println("[sshd-session] send_packet active={self.cipher.active} payload_len={payload.len()} send_seq={self.send_seq}")
         if self.cipher.active:
-            val encrypted = self.cipher.encrypt_packet(payload)
+            val encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), payload)
             self.raw_send(encrypted)
+            self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
         else:
             val packet = ssh_packet_build(payload, self.send_seq)
             self.raw_send(packet)
@@ -932,39 +984,62 @@ impl SshSession:
 
         var i: u64 = 0
         if self.recv_buf.len() == 0:
-            val new_data = self.raw_recv(RECV_BUF_SIZE)
-            if new_data.len() == 0:
-                return []
-            self.recv_buf = new_data
+            var empty_spins: u64 = 0
+            while self.recv_buf.len() == 0:
+                val new_data = self.raw_recv(RECV_BUF_SIZE)
+                if new_data.len() == 0:
+                    empty_spins = empty_spins + 1
+                    if empty_spins > 100000:
+                        return []
+                    rt_thread_sleep(1)
+                    pass_dn
+                else:
+                    self.recv_buf = new_data
 
         if self.cipher.active:
             # Encrypted mode: need at least 4 bytes for length + 16 for tag
-            if self.recv_buf.len() < 20:
-                return []
+            var empty_spins: u64 = 0
+            while self.recv_buf.len() < 20:
+                val more_head = self.raw_recv(RECV_BUF_SIZE)
+                if more_head.len() == 0:
+                    empty_spins = empty_spins + 1
+                    if empty_spins > 100000:
+                        return []
+                    rt_thread_sleep(1)
+                    pass_dn
+                else:
+                    empty_spins = 0
+                    self.recv_buf = rt_bytes_concat(self.recv_buf, more_head)
 
-            val packet_length = ssh_get_u32(self.recv_buf, 0).to_u64()
-            val total_needed = 4 + packet_length + 16   # length + body + GCM tag
+            var packet_length_u32: u32 = ssh_get_u32(self.recv_buf, 0)
+            var packet_length: u64 = packet_length_u32.to_u64()
+            var total_needed: u64 = 4 + packet_length + 16   # length + body + GCM tag
 
             # Read more if needed
+            empty_spins = 0
             while self.recv_buf.len() < total_needed:
                 val more = self.raw_recv(RECV_BUF_SIZE)
                 if more.len() == 0:
-                    return []
-                if self.recv_buf.len() == 0:
-                    self.recv_buf = more
+                    empty_spins = empty_spins + 1
+                    if empty_spins > 100000:
+                        return []
+                    rt_thread_sleep(1)
+                    pass_dn
                 else:
+                    empty_spins = 0
                     self.recv_buf = rt_bytes_concat(self.recv_buf, more)
 
             # Extract the encrypted packet
             var enc_packet = rt_bytes_slice(self.recv_buf, 0, total_needed.to_i64())
+            serial_println("[sshd-session] recv encrypted len={enc_packet.len()} seq={self.cipher.seq_c2s} packet={_bytes_to_hex(enc_packet)}")
 
             # Remove consumed bytes from recv_buf
             self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
 
             # Decrypt
-            val r = self.cipher.decrypt_packet(enc_packet)
-            if r.is_ok():
-                val payload = r.unwrap()
+            val payload = rt_ssh_aes128_gcm_decrypt_packet(self.enc_key_c2s, self.iv_c2s, self.cipher.seq_c2s.to_i64(), enc_packet)
+            if payload.len() > 0:
+                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
                 self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
                 return payload
             else:

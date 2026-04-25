@@ -1,0 +1,123 @@
+# Multi-arch harden: AC-6 — bootstrap-from-scratch.sh --arch=<triple>.
+#
+# Phase 5 adds the --arch dispatch; Phase 7 produces per-arch result
+# files at build/multiarch/<triple>/bootstrap_result.json.
+#
+# Run:
+#   bin/simple test test/os/multiarch/bootstrap_pipeline_spec.spl
+#
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh
+# @cover src/os/qemu_runner.spl
+# @cover doc/04_architecture/simpleos_multiarch_hal.md
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+fn _bootstrap_path(triple: text) -> text:
+    "build/multiarch/" + triple + "/bootstrap_result.json"
+
+describe "AC-6 — x86_64 bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("x86_64"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("x86_64"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "bootable image artifact path is recorded":
+        val r: text = file_read(_bootstrap_path("x86_64"))
+        expect(r.contains("\"image_path\"")).to_equal(true)
+    it "post-deploy smoke is green":
+        val r: text = file_read(_bootstrap_path("x86_64"))
+        expect(r.contains("\"smoke_status\": \"pass\"")).to_equal(true)
+    it "uses Limine boot loader":
+        val r: text = file_read(_bootstrap_path("x86_64"))
+        expect(r.contains("\"loader\": \"limine\"")).to_equal(true)
+
+describe "AC-6 — i686 bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("i686"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("i686"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "post-deploy smoke is green":
+        val r: text = file_read(_bootstrap_path("i686"))
+        expect(r.contains("\"smoke_status\": \"pass\"")).to_equal(true)
+    it "uses Limine boot loader":
+        val r: text = file_read(_bootstrap_path("i686"))
+        expect(r.contains("\"loader\": \"limine\"")).to_equal(true)
+    it "32-bit lane used LLVM backend":
+        val r: text = file_read(_bootstrap_path("i686"))
+        expect(r.contains("\"backend\": \"Llvm\"")).to_equal(true)
+
+describe "AC-6 — aarch64 bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("aarch64"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("aarch64"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "uses U-Boot + DTB":
+        val r: text = file_read(_bootstrap_path("aarch64"))
+        expect(r.contains("\"loader\": \"u-boot\"")).to_equal(true)
+        expect(r.contains("\"dtb\"")).to_equal(true)
+
+describe "AC-6 — armv7 bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("armv7"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("armv7"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "uses U-Boot + DTB":
+        val r: text = file_read(_bootstrap_path("armv7"))
+        expect(r.contains("\"loader\": \"u-boot\"")).to_equal(true)
+    it "32-bit lane used LLVM backend":
+        val r: text = file_read(_bootstrap_path("armv7"))
+        expect(r.contains("\"backend\": \"Llvm\"")).to_equal(true)
+
+describe "AC-6 — riscv64 bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("riscv64"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("riscv64"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "uses OpenSBI":
+        val r: text = file_read(_bootstrap_path("riscv64"))
+        expect(r.contains("\"loader\": \"opensbi\"")).to_equal(true)
+
+describe "AC-6 — riscv32imac bootstrap lane succeeds":
+    it "result file exists":
+        expect(file_exists(_bootstrap_path("riscv32"))).to_equal(true)
+    it "exit code is 0":
+        val r: text = file_read(_bootstrap_path("riscv32"))
+        expect(r.contains("\"exit_code\": 0")).to_equal(true)
+    it "uses OpenSBI":
+        val r: text = file_read(_bootstrap_path("riscv32"))
+        expect(r.contains("\"loader\": \"opensbi\"")).to_equal(true)
+    it "32-bit lane used LLVM backend":
+        val r: text = file_read(_bootstrap_path("riscv32"))
+        expect(r.contains("\"backend\": \"Llvm\"")).to_equal(true)
+
+describe "AC-6 — qemu_runner backend dispatch routes 32-bit to LLVM":
+    """`_os_build_backend_for_target` must return `Backend.Llvm` for the
+    three 32-bit triples (Cranelift can't do i686/RISC-V freestanding)."""
+
+    it "qemu_runner.spl exists":
+        expect(file_exists("src/os/qemu_runner.spl")).to_equal(true)
+
+    it "qemu_runner declares the backend dispatch helper":
+        val body: text = file_read("src/os/qemu_runner.spl")
+        expect(body.contains("_os_build_backend_for_target")).to_equal(true)
+
+    it "qemu_runner mentions Llvm as a backend choice":
+        val body: text = file_read("src/os/qemu_runner.spl")
+        expect(body.contains("Llvm")).to_equal(true)
+
+    it "qemu_runner handles i686 target":
+        val body: text = file_read("src/os/qemu_runner.spl")
+        expect(body.contains("i686")).to_equal(true)
+
+    it "qemu_runner handles armv7 target":
+        val body: text = file_read("src/os/qemu_runner.spl")
+        expect(body.contains("armv7")).to_equal(true)
+
+    it "qemu_runner handles riscv32 target":
+        val body: text = file_read("src/os/qemu_runner.spl")
+        expect(body.contains("riscv32")).to_equal(true)

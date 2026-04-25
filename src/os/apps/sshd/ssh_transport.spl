@@ -38,9 +38,9 @@ val SSH_DISCONNECT_NO_MORE_AUTH_METHODS: u32 = 14
 # Algorithm Names
 # ============================================================================
 
-val KEX_ALGORITHM: text = "curve25519-sha256"
+val KEX_ALGORITHM: text = "curve25519-sha256,kex-strict-s-v00@openssh.com"
 val HOST_KEY_ALGORITHM: text = "rsa-sha2-256,ssh-ed25519"
-val CIPHER_ALGORITHM: text = "aes256-gcm@openssh.com"
+val CIPHER_ALGORITHM: text = "aes128-gcm@openssh.com"
 val MAC_ALGORITHM: text = "none"       # Implicit in GCM
 val COMPRESS_ALGORITHM: text = "none"
 
@@ -145,9 +145,9 @@ fn ssh_build_kexinit() -> [u8]:
     """Build our SSH_MSG_KEXINIT payload.
 
     Advertises our supported algorithms:
-      KEX:       curve25519-sha256
+      KEX:       curve25519-sha256,kex-strict-s-v00@openssh.com
       Host key:  rsa-sha2-256,ssh-ed25519
-      Cipher:    aes256-gcm@openssh.com
+      Cipher:    aes128-gcm@openssh.com
       MAC:       none (implicit in GCM)
       Compress:  none
     """
@@ -356,7 +356,7 @@ fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
     ""
 
 fn _is_aes_gcm(cipher: text) -> bool:
-    cipher == "aes256-gcm@openssh.com"
+    cipher == "aes256-gcm@openssh.com" or cipher == "aes128-gcm@openssh.com"
 
 fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<SshAlgorithms, text>:
     """Choose algorithms from intersection of client and server proposals.
@@ -365,7 +365,14 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     client preference order per RFC 4253 section 7.1.
     """
     var kex: text = ""
-    if _list_contains(client.kex_algorithms, server.kex_algorithms):
+    # Baremetal text split/materialization is still fragile in the live SSH
+    # lane, so match the only real KEX we implement directly instead of
+    # depending on the generic comma-split path when pseudo-algorithms such as
+    # kex-strict-s-v00@openssh.com are present in the server list.
+    if _list_contains(client.kex_algorithms, "curve25519-sha256") and
+       _list_contains(server.kex_algorithms, "curve25519-sha256"):
+        kex = "curve25519-sha256"
+    elif _list_contains(client.kex_algorithms, server.kex_algorithms):
         kex = server.kex_algorithms
     else:
         kex = _first_match(client.kex_algorithms, server.kex_algorithms)

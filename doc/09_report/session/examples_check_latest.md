@@ -1,16 +1,14 @@
 # Examples Check
 
-## examples/browser/test/compat
+## examples/game2d/hello/main.spl
 
-- Total: `10`
-- Ok: `7`
-- Error: `3`
+- Total: `1`
+- Ok: `0`
+- Error: `1`
 - Timeout: `0`
 - Crash: `0`
 
 ### Failures
 
-- `examples/browser/test/compat/compare_render_pair.spl` `error` code=1 failed without diagnostics
-- `examples/browser/test/compat/compat_tools_spec.spl` `error` code=1 2026-04-08T04:15:36.571524Z  WARN ThreadId(01) run_file_interpreted_with_args{path=examples/browser/test/compat/compat_tools_spec.spl}:evaluate_module:load_and_merge_module{path=["std", "spec"]}:load_and_merge_module{path=["matchers"]}: simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 642: Export statement references undefined symbol name=be_true
-- `examples/browser/test/compat/simple_render_html.spl` `error` code=1 2026-04-08T04:15:38.241465Z ERROR ThreadId(01) run_file_interpreted_with_args{path=examples/browser/test/compat/simple_render_html.spl}:evaluate_module:load_and_merge_module{path=["common", "render_scene", "engine2d_executor"]}:load_and_merge_module{path=["std", "gc_async_mut", "gpu", "engine2d", "engine"]}:load_and_merge_module{path=["std", "gpu", "engine2d", "backend_cuda"]}: simple_compiler::interpreter::interpreter_module::module_loader: 500: Failed to parse module path="/Users/ormastes/simple/src/std/gc_async_mut/gpu/engine2d/backend_cuda.spl" error=Unexpected token: expected Colon, found Comma
+- `examples/game2d/hello/main.spl` `error` code=1 error: compile failed (examples/game2d/hello/main.spl): parse: in "/home/ormastes/dev/pub/simple/examples/game2d/hello/main.spl": Unexpected token: expected Newline, found Identifier { name: "g", pattern: Immutable }
 

@@ -10644,6 +10644,110 @@ cleanup:
     return out;
 }
 
+RuntimeValue rt_ssh_aes128_gcm_encrypt_packet(RuntimeValue key_rv, RuntimeValue iv_rv,
+                                              int64_t seq_num_i64, RuntimeValue payload_rv)
+{
+    uint32_t key_len = 0, iv_len = 0, payload_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *iv = _tls_copy_runtime_bytes(iv_rv, &iv_len);
+    uint8_t *payload = _tls_copy_runtime_bytes(payload_rv, &payload_len);
+    RuntimeValue out = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t *body = NULL;
+    uint8_t *wire = NULL;
+
+    if (!key || !iv || (!payload && payload_len != 0) || key_len != 16U || iv_len != 12U) {
+        goto cleanup;
+    }
+
+    uint32_t padding_len = 16U - ((5U + payload_len) % 16U);
+    if (padding_len < 4U) padding_len += 16U;
+    uint32_t packet_length = 1U + payload_len + padding_len;
+    uint32_t body_len = packet_length;
+    uint32_t wire_len = 4U + body_len + 16U;
+
+    body = (uint8_t *)malloc(body_len ? body_len : 1U);
+    wire = (uint8_t *)malloc(wire_len ? wire_len : 1U);
+    if (!body || !wire) goto cleanup;
+
+    body[0] = (uint8_t)padding_len;
+    if (payload_len > 0) memcpy(body + 1U, payload, payload_len);
+    memset(body + 1U + payload_len, 0, padding_len);
+
+    wire[0] = (uint8_t)((packet_length >> 24) & 0xffU);
+    wire[1] = (uint8_t)((packet_length >> 16) & 0xffU);
+    wire[2] = (uint8_t)((packet_length >> 8) & 0xffU);
+    wire[3] = (uint8_t)(packet_length & 0xffU);
+
+    uint8_t nonce[12];
+    memcpy(nonce, iv, 4U);
+    uint64_t counter = 0;
+    for (uint32_t i = 4U; i < 12U; i++) counter = (counter << 8) | (uint64_t)iv[i];
+    counter += (uint64_t)seq_num_i64;
+    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] = (uint8_t)((counter >> (8U * i)) & 0xffU);
+
+    if (_tls_aes128_gcm_encrypt_raw(key, nonce, body, body_len, wire, 4U, wire + 4U, wire + 4U + body_len) != 0) {
+        goto cleanup;
+    }
+
+    out = _tls_runtime_array_from_bytes(wire, wire_len);
+
+cleanup:
+    if (key) free(key);
+    if (iv) free(iv);
+    if (payload) free(payload);
+    if (body) free(body);
+    if (wire) free(wire);
+    return out;
+}
+
+RuntimeValue rt_ssh_aes128_gcm_decrypt_packet(RuntimeValue key_rv, RuntimeValue iv_rv,
+                                              int64_t seq_num_i64, RuntimeValue packet_rv)
+{
+    uint32_t key_len = 0, iv_len = 0, packet_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *iv = _tls_copy_runtime_bytes(iv_rv, &iv_len);
+    uint8_t *packet = _tls_copy_runtime_bytes(packet_rv, &packet_len);
+    RuntimeValue out = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    uint8_t *body = NULL;
+    uint8_t *payload = NULL;
+
+    if (!key || !iv || (!packet && packet_len != 0) || key_len != 16U || iv_len != 12U || packet_len < 20U) {
+        goto cleanup;
+    }
+
+    uint32_t body_len = packet_len - 4U - 16U;
+    uint8_t nonce[12];
+    memcpy(nonce, iv, 4U);
+    uint64_t counter = 0;
+    for (uint32_t i = 4U; i < 12U; i++) counter = (counter << 8) | (uint64_t)iv[i];
+    counter += (uint64_t)seq_num_i64;
+    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] = (uint8_t)((counter >> (8U * i)) & 0xffU);
+
+    body = (uint8_t *)malloc(body_len ? body_len : 1U);
+    if (!body) goto cleanup;
+
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, packet + 4U, body_len, packet, 4U, packet + 4U + body_len, body) != 0) {
+        goto cleanup;
+    }
+    if (body_len < 1U) goto cleanup;
+
+    uint32_t padding_len = (uint32_t)body[0];
+    if (1U + padding_len > body_len) goto cleanup;
+    uint32_t payload_len = body_len - 1U - padding_len;
+    payload = (uint8_t *)malloc(payload_len ? payload_len : 1U);
+    if (!payload && payload_len != 0U) goto cleanup;
+    if (payload_len > 0) memcpy(payload, body + 1U, payload_len);
+    out = _tls_runtime_array_from_bytes(payload, payload_len);
+
+cleanup:
+    if (key) free(key);
+    if (iv) free(iv);
+    if (packet) free(packet);
+    if (body) free(body);
+    if (payload) free(payload);
+    return out;
+}
+
 RuntimeValue rt_tls13_hkdf_expand_label_derived(RuntimeValue secret_rv, RuntimeValue context_rv)
 {
     uint32_t context_len = 0;

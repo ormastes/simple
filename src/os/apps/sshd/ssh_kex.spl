@@ -215,7 +215,7 @@ fn _push_u32_literal(buf: [u8], b0: u8, b1: u8, b2: u8, b3: u8) -> [u8]:
     out
 
 fn _push_curve25519_sha256(buf: [u8]) -> [u8]:
-    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x11)
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x2E)
     out = rt_push_byte(out, 0x63)
     out = rt_push_byte(out, 0x75)
     out = rt_push_byte(out, 0x72)
@@ -233,6 +233,35 @@ fn _push_curve25519_sha256(buf: [u8]) -> [u8]:
     out = rt_push_byte(out, 0x32)
     out = rt_push_byte(out, 0x35)
     out = rt_push_byte(out, 0x36)
+    out = rt_push_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x6B)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x78)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x72)
+    out = rt_push_byte(out, 0x69)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x76)
+    out = rt_push_byte(out, 0x30)
+    out = rt_push_byte(out, 0x30)
+    out = rt_push_byte(out, 0x40)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x2E)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x6D)
     out
 
 fn _push_ssh_ed25519(buf: [u8]) -> [u8]:
@@ -382,9 +411,9 @@ fn _push_aes256_gcm_openssh(buf: [u8]) -> [u8]:
     out = rt_push_byte(out, 0x61)
     out = rt_push_byte(out, 0x65)
     out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x31)
     out = rt_push_byte(out, 0x32)
-    out = rt_push_byte(out, 0x35)
-    out = rt_push_byte(out, 0x36)
+    out = rt_push_byte(out, 0x38)
     out = rt_push_byte(out, 0x2D)
     out = rt_push_byte(out, 0x67)
     out = rt_push_byte(out, 0x63)
@@ -553,56 +582,30 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     var input: [u8] = []
     val shared_secret_mpint = shared_secret
     input = _push_mpint_bytes(input, shared_secret_mpint)
-
-    var i: u64 = 0
-    while i < exchange_hash.len():
-        input.push(exchange_hash[i])
-        i = i + 1
-
-    input.push(letter)
-
-    i = 0
-    while i < session_id.len():
-        input.push(session_id[i])
-        i = i + 1
+    input = _push_bytes(input, exchange_hash)
+    input = rt_push_byte(input, letter.to_i64())
+    input = _push_bytes(input, session_id)
 
     val k1 = _sha256_stable(input)
 
-    var key_material: [u8] = []
-    i = 0
-    while i < k1.len():
-        key_material.push(k1[i])
-        i = i + 1
+    var key_material: [u8] = _push_bytes([], k1)
 
     # If we need more than 32 bytes, extend
-    var prev = k1
     while key_material.len() < needed:
         # next = SHA-256(K || H || K1 || K2 || ...)
         var ext_input: [u8] = []
         ext_input = _push_mpint_bytes(ext_input, shared_secret_mpint)
-
-        i = 0
-        while i < exchange_hash.len():
-            ext_input.push(exchange_hash[i])
-            i = i + 1
-
-        i = 0
-        while i < key_material.len():
-            ext_input.push(key_material[i])
-            i = i + 1
+        ext_input = _push_bytes(ext_input, exchange_hash)
+        ext_input = _push_bytes(ext_input, key_material)
 
         val next = _sha256_stable(ext_input)
-        i = 0
-        while i < next.len():
-            key_material.push(next[i])
-            i = i + 1
-        prev = next
+        key_material = _push_bytes(key_material, next)
 
     # Truncate to needed length
     var result: [u8] = []
-    i = 0
+    var i: u64 = 0
     while i < needed:
-        result.push(key_material[i])
+        result = rt_push_byte(result, _u8_at(key_material, i))
         i = i + 1
     result
 
@@ -748,7 +751,8 @@ fn ssh_build_kexinit_for_host_keys(host_keys: HostKeySet) -> [u8]:
 
     Wire format is identical to ssh_build_kexinit() in ssh_transport.spl
     except the server_host_key_algorithms field reflects the actual key set.
-    Other algorithms are fixed: curve25519-sha256 KEX, aes256-gcm cipher, no MAC, no compression.
+    Other algorithms are fixed: curve25519-sha256,kex-strict-s-v00@openssh.com
+    KEX, aes256-gcm cipher, no MAC, no compression.
     """
     var buf: [u8] = []
 
