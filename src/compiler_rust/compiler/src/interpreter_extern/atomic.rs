@@ -921,3 +921,137 @@ pub fn rt_rwlock_set_fn(args: &[Value]) -> Result<Value, CompileError> {
         Ok(Value::Int(result))
     }
 }
+
+// ============================================================================
+// Raw-Pointer Atomic Operations (K-1, log_lite SPSC ring)
+//
+// These atomics operate on raw memory addresses (typically obtained via
+// `rt_alloc` and stored in a Simple-side mutable). Unlike `rt_atomic_int_*`
+// (which wraps a registry handle), these allow sub-word stores at arbitrary
+// `addr + offset` locations -- required for the LogRecord publish/consume
+// flow where the producer writes seq, ts_ns, etc., into a 40-byte cell and
+// the consumer observes a fully-published record via Acquire load on `head`.
+//
+// Memory ordering follows the Linux/Rust convention:
+//   fetch_add: AcqRel  (synchronizes producer-side publish + consumer-side observe)
+//   load:      Acquire (consumer reads head/tail)
+//   store:     Release (producer publishes head/tail)
+//
+// Caller convention: `addr: i64` is the raw pointer (matches `rt_alloc`,
+// `rt_ptr_read_i64`, etc.). The address must be naturally aligned for the
+// access width (8 for u64, 4 for u32, 1 for u8). Unaligned access on
+// non-x86 hosts is undefined behavior, same as the rest of the rt_ptr_*
+// extern family.
+// ============================================================================
+
+/// Atomic fetch-and-add on a u64 cell. Returns the previous value.
+///
+/// Callable from Simple as: `rt_atomic_fetch_add_u64(addr: i64, delta: i64) -> i64`
+pub fn rt_atomic_fetch_add_u64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_atomic_fetch_add_u64 requires 2 arguments (addr, delta)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let delta = args[1].as_int()? as u64;
+    if addr == 0 {
+        return Ok(Value::Int(0));
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU64) };
+    let old = cell.fetch_add(delta, std::sync::atomic::Ordering::AcqRel);
+    Ok(Value::Int(old as i64))
+}
+
+/// Atomic Acquire load of a u64 cell.
+///
+/// Callable from Simple as: `rt_atomic_load_u64(addr: i64) -> i64`
+pub fn rt_atomic_load_u64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_atomic_load_u64 requires 1 argument (addr)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    if addr == 0 {
+        return Ok(Value::Int(0));
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU64) };
+    let v = cell.load(std::sync::atomic::Ordering::Acquire);
+    Ok(Value::Int(v as i64))
+}
+
+/// Atomic Release store to a u64 cell.
+///
+/// Callable from Simple as: `rt_atomic_store_u64(addr: i64, val: i64)`
+pub fn rt_atomic_store_u64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_atomic_store_u64 requires 2 arguments (addr, val)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let val = args[1].as_int()? as u64;
+    if addr == 0 {
+        return Ok(Value::Nil);
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU64) };
+    cell.store(val, std::sync::atomic::Ordering::Release);
+    Ok(Value::Nil)
+}
+
+/// Atomic Acquire load of a u32 cell.
+///
+/// Callable from Simple as: `rt_atomic_load_u32(addr: i64) -> i64`
+pub fn rt_atomic_load_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_atomic_load_u32 requires 1 argument (addr)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    if addr == 0 {
+        return Ok(Value::Int(0));
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU32) };
+    let v = cell.load(std::sync::atomic::Ordering::Acquire);
+    Ok(Value::Int(v as i64))
+}
+
+/// Atomic Release store to a u32 cell.
+///
+/// Callable from Simple as: `rt_atomic_store_u32(addr: i64, val: i64)`
+pub fn rt_atomic_store_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_atomic_store_u32 requires 2 arguments (addr, val)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let val = args[1].as_int()? as u32;
+    if addr == 0 {
+        return Ok(Value::Nil);
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU32) };
+    cell.store(val, std::sync::atomic::Ordering::Release);
+    Ok(Value::Nil)
+}
+
+/// Atomic Release store to a u8 cell.
+///
+/// Callable from Simple as: `rt_atomic_store_u8(addr: i64, val: i64)`
+pub fn rt_atomic_store_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_atomic_store_u8 requires 2 arguments (addr, val)".to_string(),
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let val = args[1].as_int()? as u8;
+    if addr == 0 {
+        return Ok(Value::Nil);
+    }
+    let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU8) };
+    cell.store(val, std::sync::atomic::Ordering::Release);
+    Ok(Value::Nil)
+}

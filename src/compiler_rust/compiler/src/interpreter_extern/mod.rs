@@ -383,6 +383,14 @@ pub(crate) fn call_extern_function(
         "rt_atomic_fetch_and" => atomic::rt_atomic_fetch_and_fn(&evaluated),
         "rt_atomic_fetch_or" => atomic::rt_atomic_fetch_or_fn(&evaluated),
 
+        // Raw-pointer atomics (K-1, log_lite SPSC ring) -- 6 functions
+        "rt_atomic_fetch_add_u64" => atomic::rt_atomic_fetch_add_u64(&evaluated),
+        "rt_atomic_load_u64" => atomic::rt_atomic_load_u64(&evaluated),
+        "rt_atomic_store_u64" => atomic::rt_atomic_store_u64(&evaluated),
+        "rt_atomic_load_u32" => atomic::rt_atomic_load_u32(&evaluated),
+        "rt_atomic_store_u32" => atomic::rt_atomic_store_u32(&evaluated),
+        "rt_atomic_store_u8" => atomic::rt_atomic_store_u8(&evaluated),
+
         // Mutex (4 functions)
         "rt_mutex_new" => atomic::rt_mutex_new_fn(&evaluated),
         "rt_mutex_lock" => atomic::rt_mutex_lock_fn(&evaluated),
