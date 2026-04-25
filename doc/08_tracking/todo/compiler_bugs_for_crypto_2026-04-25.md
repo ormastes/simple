@@ -292,6 +292,93 @@ Inspect emitted Cranelift IR for `BrTable` vs sequential `BrIf`.
 - Cranelift IR for the test contains a `br_table`.
 - Microbench on 16-arm dispatch: ≤2× cost of a single direct call.
 
+**Status (2026-04-25):** Landed in the **Rust seed** as commit
+`379a08503d` (`feat(mir,codegen): jump-table lowering for dense int match`).
+The Rust seed adds `MirTerminator::Switch`, the `try_collect_int_match` /
+`lower_int_switch` HIR-to-MIR pass, and the Cranelift `br_table` translation.
+`test/unit/compiler/codegen/match_switch_codegen_spec.spl` (7 examples)
+passes through `bin/simple` (Rust seed interpreter mode).
+
+### B5b · Self-hosted compiler has no MIR lowering for `match` (prerequisite)
+
+A follow-on attempt to port B5 to the self-hosted compiler at
+`src/compiler/` revealed the port's premise is empirically wrong:
+**self-hosted MIR has no `MatchCase` lowering at all** — there is no
+nested-If chain to optimize, because there is no chain to begin with.
+
+Empirical evidence (worktree `agent-ac3bca955ef32802a`, 2026-04-25):
+
+- `src/compiler/50.mir/mir_lowering_expr.spl` enumerates 32 explicit
+  `case` arms for `HirExprKind` (lines 50-263). `MatchCase` is not one
+  of them. The `case _:` fallback at line 263 raises
+  `self.error("unsupported MIR expression: {expr.kind}", nil)`.
+- No desugar/rewrite pass elsewhere in `src/compiler/` rewrites
+  `HirExprKind.MatchCase` into nested `If`. Grep across all 15 hits in
+  the self-hosted tree shows only `scan_*` analysis visitors plus the
+  HIR builder itself.
+- The MIR `Switch` machinery is otherwise complete: the
+  `MirTerminator.Switch(value, targets, default)` variant exists
+  (`mir_instructions.spl:451`); `SwitchCase{value:i64, target:BlockId}`
+  exists (`mir_instructions.spl:431`); all backends (x86_64 / aarch64 /
+  riscv32 / riscv64 / wat / lean / mir_to_llvm / c / vhdl /
+  llvm_lib_translate_expr) already destructure
+  `case Switch(value, targets, default)` and read `target.value`,
+  `target.target.id` (i.e. they assume `[SwitchCase]`, not
+  `[(i64, BlockId)]`); the interpreter handles `Switch` at
+  `95.interp/mir_interpreter.spl:681`.
+- **Latent builder bug:** `MirBuilder.terminate_switch` in
+  `mir_data.spl:359` declares `targets: [(i64, BlockId)]` instead of
+  `[SwitchCase]`. There are zero callsites today, so the mismatch is
+  dormant; whoever first calls it will trip a struct-vs-tuple error.
+- No regression: `match` works via `bin/simple` because the binary IS
+  the Rust seed (per `feedback_sspec_compile_pipeline.md`); the
+  self-hosted MIR pipeline is reached only by stack-3 self-compilation,
+  which has no automated test coverage of `match` codegen today
+  (`test/unit/compiler/mir/mir_lowering_new_spec.spl` and
+  `test/unit/compiler/driver/pipeline_mir_spec.spl` are both `skipped`
+  with the comment `"pre-existing test failures - functions/imports
+  not available"`).
+
+**Why this is not a single-PR port.** B5 in the seed was a localized
+optimization layered on top of an existing nested-If lowering. Porting
+it to self-hosted requires first writing the entire `MatchCase` →
+MIR pattern-compilation pipeline that handles all 9 `HirPatternKind`
+variants (`Wildcard`, `Literal`, `Binding`, `Tuple`, `Array`,
+`Struct`, `Enum`, `Or`, `Range`), wiring guard expressions, and
+threading temp locals/result merges. Only after that lands does the
+B5 detector port (`try_collect_int_match` mirror, ≥4 arms / ≤1024
+span) become a small, additive change.
+
+**Recommended sequencing**
+
+1. **Prereq:** implement HIR `MatchCase` → MIR lowering in
+   `src/compiler/50.mir/mir_lowering_stmts.spl` (or a new
+   `mir_lowering_match.spl`). Mirror `lower_if` structure: lower
+   scrutinee once into a temp local, allocate per-arm + merge blocks,
+   threading result. Start with `HirPatternKind.Literal(IntLit)` +
+   `Wildcard` (covers crypto cipher dispatch); error on the other
+   seven kinds with a precise message until follow-up tickets land.
+2. **Fix latent builder bug:** retype
+   `MirBuilder.terminate_switch(targets: [(i64, BlockId)])` to
+   `targets: [SwitchCase]` so it matches the terminator's actual
+   field type and the backends' destructuring.
+3. **Then port B5:** add a `try_collect_int_match` equivalent that
+   peels the freshly-built nested-If chain (or, preferably, peels
+   the original `MatchCase` arms directly since we own the lowering
+   now) and emits `MirTerminator.Switch` when arm count ≥ 4 and key
+   span ≤ 1024. Mirror SWITCH_MIN_ARMS = 4 / SWITCH_MAX_SPAN = 1024
+   from the Rust seed.
+4. **Self-hosted regression test:** add
+   `test/unit/compiler/codegen/match_switch_self_hosted_spec.spl`
+   that exercises a 5-arm dense match through whatever entry point
+   the self-hosted MIR pipeline supports (likely
+   `MirLowering.new(...).lower_module(...)` directly, mirroring the
+   commented-out body of `pipeline_mir_spec.spl`).
+
+Until step 1 lands, the self-hosted port of B5 cannot be done — there
+is no chain to detect. This is filed here so the next agent does not
+re-discover the missing infrastructure.
+
 ---
 
 ## B6 · Constant-time compare must not be branch-folded
