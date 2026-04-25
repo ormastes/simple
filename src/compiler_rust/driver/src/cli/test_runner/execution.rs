@@ -713,6 +713,177 @@ fn emit_scenario_artifacts(path: &Path, result: &TestFileResult) {
     }
 }
 
+/// Inline shim for the small set of `std.spec` helper functions that the
+/// HIR-level BDD recognizer does NOT intercept (it only intercepts
+/// `describe`/`context`/`it`/`test`/`example`/`specify`/`expect`/
+/// `before_each`/`after_each`). Without this shim, calling `pending(...)`,
+/// `skip(...)`, `skip_it(...)`, `check(...)`, or `check_msg(...)` in compile
+/// mode produces an SMF reloc error (`Undefined symbol: <name>`) because the
+/// `std.spec` library is not linked into the test binary.
+///
+/// `pending` / `skip` / `skip_it` print a marker line and increment no
+/// counters — the HIR-built-in `rt_bdd_describe_*` accounting still runs the
+/// surrounding describe block correctly and the test is reported in the
+/// "X examples, Y failures" summary that the test runner parses. `check` /
+/// `check_msg` route to `rt_bdd_expect_truthy` via the HIR `expect` recognizer
+/// so a failing `check(false)` correctly trips the BDD failure state.
+const SSPEC_INLINE_HELPERS: &str = r#"
+# === sspec inline helpers (R2-broader fix; compile-mode only) ===
+fn pending(name: text):
+    print "    {name} ... pending"
+
+fn skip(name: text, reason: text):
+    print "    {name} ... skipped ({reason})"
+
+fn skip_it(name: text, block: fn()):
+    print "    {name} ... skipped (compiled-only)"
+
+fn check(condition: bool):
+    expect condition
+
+fn check_msg(condition: bool, message: text):
+    if not condition:
+        print "    check failed: {message}"
+    expect condition
+
+fn fail_assertion(message: text):
+    print "    assertion failed: {message}"
+    expect false
+
+fn fail_test(message: text):
+    fail_assertion(message)
+
+fn assert_eq(a, b):
+    expect a == b
+
+fn assert_ne(a, b):
+    expect a != b
+
+fn assert_true(value):
+    expect value
+
+fn assert_false(value):
+    expect not value
+
+fn assert_nil(value):
+    expect value == nil
+
+fn assert_not_nil(value):
+    expect value != nil
+
+fn pending_on(name: text, deps: text, block: fn()):
+    it(name, block)
+
+fn pending_skip(name: text, deps: text):
+    print "    {name} ... pending (waiting on: {deps})"
+# === end sspec inline helpers ===
+"#;
+
+/// Rewrite `expect(actual).to_<matcher>(expected)` calls into the equivalent
+/// infix `expect <actual> <op> <expected>` form that the compiler's HIR-level
+/// BDD recognizer (see `stmt_lowering.rs::try_lower_bdd_statement`) lowers
+/// into a real `rt_bdd_expect_*` builtin call.
+///
+/// Background (R2-broader, 2026-04-25):
+///   - In compiled mode, `describe`/`it`/`expect` are intercepted at HIR
+///     lowering and never reach user-defined `fn expect`. The HIR turns
+///     `expect a == b` into `rt_bdd_expect_eq_rv(a, b)` and `expect <expr>`
+///     into `rt_bdd_expect_truthy_rv(<expr>)` — both of which actually
+///     trip BDD failure state at runtime.
+///   - But `expect(actual).to_equal(expected)` lowers to
+///     `rt_bdd_expect_truthy_rv(actual).to_equal(expected)`, which crashes
+///     because the builtin returns nil — and the matcher is never linked.
+///   - Strategy: textually rewrite `expect(a).to_equal(b)` → `expect a == b`
+///     so the HIR fast-path fires correctly.
+///
+/// Only the small set of matchers actually used by crypto KATs is rewritten.
+/// Anything else falls through to the original expression and will emit a
+/// link-time error (better than a silent false-green).
+fn rewrite_method_expect_line(line: &str) -> String {
+    let trimmed_start = line.trim_start();
+    if !trimmed_start.starts_with("expect(") && !trimmed_start.starts_with("expect (") {
+        return line.to_string();
+    }
+    let indent_len = line.len().saturating_sub(trimmed_start.len());
+    let indent = &line[..indent_len];
+    let rest_after_expect = &trimmed_start["expect".len()..];
+    let after_open_paren = rest_after_expect.trim_start();
+    if !after_open_paren.starts_with('(') {
+        return line.to_string();
+    }
+    let inner = &after_open_paren[1..];
+    // Find the matching close paren for the actual-arg expression.
+    let mut depth = 1i32;
+    let mut end = None;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(actual_end) = end else {
+        return line.to_string();
+    };
+    let actual = inner[..actual_end].trim();
+    let after_actual = inner[actual_end + 1..].trim_start();
+    if !after_actual.starts_with('.') {
+        return line.to_string();
+    }
+    let after_dot = &after_actual[1..];
+    // Detect optional `not_().` prefix to invert the comparison.
+    let (negated, after_neg) = if let Some(stripped) = after_dot.strip_prefix("not_()") {
+        let next = stripped.trim_start();
+        if let Some(s2) = next.strip_prefix('.') {
+            (true, s2)
+        } else {
+            return line.to_string();
+        }
+    } else {
+        (false, after_dot)
+    };
+    // Find matcher name (alphanumeric/underscore until '(').
+    let matcher_end = after_neg.find('(').unwrap_or(after_neg.len());
+    let matcher = &after_neg[..matcher_end];
+    if matcher_end == after_neg.len() {
+        return line.to_string();
+    }
+    let matcher_args = &after_neg[matcher_end + 1..];
+    // Strip the closing paren of the matcher call (best-effort: take up to last ')').
+    let arg_str = match matcher_args.rfind(')') {
+        Some(p) => matcher_args[..p].trim().to_string(),
+        None => return line.to_string(),
+    };
+
+    let op_form = match matcher {
+        "to_equal" | "to_be" => Some(if negated { format!("{} != {}", actual, arg_str) } else { format!("{} == {}", actual, arg_str) }),
+        "to_be_nil" => Some(if negated { format!("{} != nil", actual) } else { format!("{} == nil", actual) }),
+        "to_be_truthy" => Some(if negated { format!("not ({})", actual) } else { actual.to_string() }),
+        "to_be_falsy" | "to_be_false" => Some(if negated { actual.to_string() } else { format!("not ({})", actual) }),
+        "to_be_true" => Some(if negated { format!("not ({})", actual) } else { actual.to_string() }),
+        "to_be_greater_than" => Some(if negated { format!("{} <= {}", actual, arg_str) } else { format!("{} > {}", actual, arg_str) }),
+        "to_be_less_than" => Some(if negated { format!("{} >= {}", actual, arg_str) } else { format!("{} < {}", actual, arg_str) }),
+        "to_be_at_least" => Some(if negated { format!("{} < {}", actual, arg_str) } else { format!("{} >= {}", actual, arg_str) }),
+        "to_be_at_most" => Some(if negated { format!("{} > {}", actual, arg_str) } else { format!("{} <= {}", actual, arg_str) }),
+        "to_contain" => Some(if negated { format!("not (({}).contains({}))", actual, arg_str) } else { format!("({}).contains({})", actual, arg_str) }),
+        "to_start_with" => Some(if negated { format!("not (({}).starts_with({}))", actual, arg_str) } else { format!("({}).starts_with({})", actual, arg_str) }),
+        "to_end_with" => Some(if negated { format!("not (({}).ends_with({}))", actual, arg_str) } else { format!("({}).ends_with({})", actual, arg_str) }),
+        "to_have_length" => Some(if negated { format!("({}).len() != {}", actual, arg_str) } else { format!("({}).len() == {}", actual, arg_str) }),
+        "to_be_empty" => Some(if negated { format!("({}).len() != 0", actual) } else { format!("({}).len() == 0", actual) }),
+        _ => None,
+    };
+    match op_form {
+        Some(form) => format!("{indent}expect {form}"),
+        None => line.to_string(),
+    }
+}
+
 fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     let path_str = path.to_string_lossy();
     if !path_str.ends_with("_spec.spl") {
@@ -807,7 +978,15 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     };
 
     for raw_line in content.lines() {
-        let rewritten_line = rewrite_infix_expect_line(raw_line);
+        // First, fold the `expect <a> <op> <b>` infix form (legacy specs use
+        // `expect 1 + 1 == 2`) into the `expect(a).to_equal(b)` form so the
+        // existing wrapper logic stays consistent. Then, immediately fold the
+        // method-form `expect(a).to_equal(b)` BACK to `expect a == b` so the
+        // HIR's BDD recognizer can lower it to a real `rt_bdd_expect_eq_rv`
+        // call (R2-broader: matchers from `std.spec` are not linked in
+        // compile mode, but the rt_bdd_expect_* builtins are).
+        let infix_rewritten = rewrite_infix_expect_line(raw_line);
+        let rewritten_line = rewrite_method_expect_line(&infix_rewritten);
         let line = rewritten_line.as_str();
         let trimmed = line.trim();
 
@@ -856,6 +1035,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
                 || trimmed.starts_with("type ")
                 || trimmed.starts_with("val ")
                 || trimmed.starts_with("let ")
+                || trimmed.starts_with("var ")
                 || trimmed.starts_with("mod "));
 
         if in_top_fn {
@@ -935,26 +1115,24 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         flush_hoisted(&mut hoisted_buf, &mut top_level_parts, hoist_indent);
     }
 
-    // Specs usually rely on the `describe`/`it`/`context`/`skip`/`expect` DSL
-    // being implicitly in scope (interpreter mode makes them builtins). For
-    // compile modes the symbols must be imported explicitly, so inject
-    // `use std.spec` unless the user already imported it.
-    let needs_spec_import = !import_parts
-        .iter()
-        .any(|line| line.trim_start().starts_with("use std.spec"));
-    if needs_spec_import {
-        import_parts.insert(0, "use std.spec".to_string());
-    }
-
-    let wrapper_compat = r#"
-fn expect<T>(actual: T) -> Expectation<T>:
-    Expectation.new(actual)
-"#;
+    // R2-broader (2026-04-25): the SMF/native compile pipeline does NOT link
+    // `std.spec` library symbols into the test binary. Specs that use the
+    // method-form `expect(a).to_equal(b)` previously false-greened because
+    // the matcher class was never linked. Strategy: rely entirely on the
+    // HIR's built-in BDD recognizer (which lowers `describe`/`it`/`expect`
+    // to real `rt_bdd_*` runtime functions linked in every binary) — the
+    // method-form is rewritten to infix `expect a == b` per-line in the
+    // loop above. Strip user `use std.spec` so it doesn't pull in the
+    // unlinkable library; the compiler intercepts the names anyway.
+    import_parts.retain(|line| {
+        let t = line.trim_start();
+        !(t.starts_with("use std.spec") || t.starts_with("import std.spec"))
+    });
 
     let wrapped = format!(
         "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
         import_parts.join("\n"),
-        wrapper_compat,
+        SSPEC_INLINE_HELPERS,
         top_level_parts.join("\n"),
         body_parts.join("\n")
     );
