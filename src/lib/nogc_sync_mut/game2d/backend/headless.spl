@@ -1,0 +1,260 @@
+# std.game2d.backend.headless_backend — Software framebuffer backend (Wave B, AC-5)
+#
+# Pure-Simple software rasterizer. No SDL, no extern. Used for replay /
+# golden-frame tests (`test/system/game2d_golden_spec.spl`,
+# `test/system/game2d_replay_spec.spl`).
+#
+# Diff-on-mismatch contract: when the recorded `frame_hash` differs from
+# the golden fixture, the spec asserts the diff and fails — the diagnostic
+# string carries both hashes for debugging (see `golden_diff` below).
+#
+# Determinism: byte-equal framebuffers across runs for identical scripted
+# inputs. The deterministic time guard ensures no wall-clock leakage.
+#
+# ScriptedInput: replay-test container holding a list of `InputSnapshot`
+# frames; `LoopDriver.run_frames` walks the list and pumps one fixed
+# step per snapshot. See `class ScriptedInput` below.
+
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer, FontId}
+use std.nogc_sync_mut.game2d.backend.trait.{GameBackend, WindowConfig, Window, Event}
+use std.nogc_sync_mut.game2d.backend.frame_hash.{frame_hash}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+use std.nogc_sync_mut.game2d.render.image.{Image, RenderError}
+use std.nogc_sync_mut.game2d.audio.{Sound, AudioError}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+
+
+fn _pack_rgba(c: EngineColor) -> i64:
+    val r = (c.r * 255.0) as i64
+    val g = (c.g * 255.0) as i64
+    val b = (c.b * 255.0) as i64
+    val a = (c.a * 255.0) as i64
+    val r_clamp = if r < 0: 0 else: if r > 255: 255 else: r
+    val g_clamp = if g < 0: 0 else: if g > 255: 255 else: g
+    val b_clamp = if b < 0: 0 else: if b > 255: 255 else: b
+    val a_clamp = if a < 0: 0 else: if a > 255: 255 else: a
+    (a_clamp << 24) | (b_clamp << 16) | (g_clamp << 8) | r_clamp
+
+
+fn _abs(x: i64) -> i64:
+    if x < 0: -x else: x
+
+
+class HeadlessBackend:
+    fb: [i64]
+    width: i64
+    height: i64
+    last_input: InputSnapshot
+
+    static fn create(width: i64, height: i64) -> HeadlessBackend:
+        var fb: [i64] = []
+        var i: i64 = 0
+        val n = width * height
+        while i < n:
+            fb.push(0)
+            i = i + 1
+        HeadlessBackend(
+            fb: fb,
+            width: width,
+            height: height,
+            last_input: InputSnapshot.empty()
+        )
+
+    fn frame_hash(self) -> i64:
+        """Stable FNV-1a hash of the framebuffer. Same input → same hash;
+        any pixel diff produces a different hash (AC-5 golden contract).
+        """
+        frame_hash(self.fb)
+
+    fn golden_diff(self, expected_hash: i64) -> text:
+        """Diagnostic string for diff-on-mismatch. Returns empty on match."""
+        val got = self.frame_hash()
+        if got == expected_hash:
+            ""
+        else:
+            "golden mismatch: expected={expected_hash} got={got}"
+
+    me set_input(self, snap: InputSnapshot):
+        self.last_input = snap
+
+    me clear_buffer(self, color: EngineColor):
+        val packed = _pack_rgba(color)
+        var i: i64 = 0
+        val n = self.fb.len()
+        while i < n:
+            self.fb[i] = packed
+            i = i + 1
+
+    fn _put_pixel(x: i64, y: i64, packed: i64):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        self.fb[y * self.width + x] = packed
+
+    me _draw_rect_filled(self, r: Rect2, c: EngineColor):
+        val packed = _pack_rgba(c)
+        val x0 = r.x as i64
+        val y0 = r.y as i64
+        val x1 = (r.x + r.width) as i64
+        val y1 = (r.y + r.height) as i64
+        var y = y0
+        while y < y1:
+            var x = x0
+            while x < x1:
+                self._put_pixel(x, y, packed)
+                x = x + 1
+            y = y + 1
+
+    me _draw_rect_outlined(self, r: Rect2, c: EngineColor):
+        val packed = _pack_rgba(c)
+        val x0 = r.x as i64
+        val y0 = r.y as i64
+        val x1 = (r.x + r.width) as i64 - 1
+        val y1 = (r.y + r.height) as i64 - 1
+        var x = x0
+        while x <= x1:
+            self._put_pixel(x, y0, packed)
+            self._put_pixel(x, y1, packed)
+            x = x + 1
+        var y = y0
+        while y <= y1:
+            self._put_pixel(x0, y, packed)
+            self._put_pixel(x1, y, packed)
+            y = y + 1
+
+    me _draw_line_bresenham(self, x0i: i64, y0i: i64, x1i: i64, y1i: i64, c: EngineColor):
+        val packed = _pack_rgba(c)
+        var x = x0i
+        var y = y0i
+        val dx = _abs(x1i - x0i)
+        val dy = _abs(y1i - y0i)
+        val sx = if x0i < x1i: 1 else: -1
+        val sy = if y0i < y1i: 1 else: -1
+        var err = dx - dy
+        var guard: i64 = 0
+        while guard < 100000:
+            self._put_pixel(x, y, packed)
+            if x == x1i and y == y1i:
+                return
+            val e2 = 2 * err
+            if e2 > -dy:
+                err = err - dy
+                x = x + sx
+            if e2 < dx:
+                err = err + dx
+                y = y + sy
+            guard = guard + 1
+
+    me _draw_circle_outlined(self, cx: i64, cy: i64, r: i64, c: EngineColor):
+        val packed = _pack_rgba(c)
+        var x = r
+        var y: i64 = 0
+        var err: i64 = 0
+        while x >= y:
+            self._put_pixel(cx + x, cy + y, packed)
+            self._put_pixel(cx + y, cy + x, packed)
+            self._put_pixel(cx - y, cy + x, packed)
+            self._put_pixel(cx - x, cy + y, packed)
+            self._put_pixel(cx - x, cy - y, packed)
+            self._put_pixel(cx - y, cy - x, packed)
+            self._put_pixel(cx + y, cy - x, packed)
+            self._put_pixel(cx + x, cy - y, packed)
+            y = y + 1
+            err = err + 1 + 2 * y
+            if 2 * (err - x) + 1 > 0:
+                x = x - 1
+                err = err + 1 - 2 * x
+
+    me _draw_circle_filled(self, cx: i64, cy: i64, r: i64, c: EngineColor):
+        val packed = _pack_rgba(c)
+        var dy = -r
+        while dy <= r:
+            var dx = -r
+            while dx <= r:
+                if dx * dx + dy * dy <= r * r:
+                    self._put_pixel(cx + dx, cy + dy, packed)
+                dx = dx + 1
+            dy = dy + 1
+
+    me execute_commands(self, cmds: RenderCommandBuffer):
+        """Software-rasterize a RenderCommandBuffer into the framebuffer."""
+        var i: i64 = 0
+        val n = cmds.len()
+        while i < n:
+            val cmd = cmds.commands[i]
+            match cmd:
+                case Clear(color):
+                    self.clear_buffer(color)
+                case DrawRect(rect, color, _):
+                    self._draw_rect_filled(rect, color)
+                case DrawRectOutlined(rect, color, _):
+                    self._draw_rect_outlined(rect, color)
+                case DrawCircle(cx, cy, radius, color, _):
+                    self._draw_circle_filled(cx as i64, cy as i64, radius as i64, color)
+                case DrawCircleOutlined(cx, cy, radius, color, _):
+                    self._draw_circle_outlined(cx as i64, cy as i64, radius as i64, color)
+                case DrawLine(x1, y1, x2, y2, _, color, _):
+                    self._draw_line_bresenham(x1 as i64, y1 as i64, x2 as i64, y2 as i64, color)
+                case DrawSprite(_, _, dst, tint, _):
+                    self._draw_rect_filled(dst, tint)
+                case DrawText(_, content, pos, color, _):
+                    val w = content.len() * 8
+                    val r = Rect2(x: pos.x, y: pos.y, width: w * 1.0, height: 8.0)
+                    self._draw_rect_filled(r, color)
+                case _:
+                    pass_do_nothing
+            i = i + 1
+
+
+# GameBackend impl — composition (NOT inheritance).
+impl HeadlessBackend: GameBackend
+    fn create_window(self, cfg: WindowConfig) -> Window:
+        Window(raw: 0, width: cfg.width, height: cfg.height)
+
+    fn poll_events(self, out: [Event]) -> i64:
+        0  # headless never produces native events
+
+    fn begin_frame(self) -> Canvas:
+        Canvas.create(self.width, self.height)
+
+    fn end_frame(self):
+        pass_do_nothing
+
+    fn execute_commands(self, cmds: RenderCommandBuffer):
+        self.execute_commands(cmds)
+
+    fn load_image(self, path: text) -> Result<Image, RenderError>:
+        Image.new(path)
+
+    fn load_sound(self, path: text) -> Result<Sound, AudioError>:
+        Sound.new(path)
+
+    fn shutdown(self):
+        pass_do_nothing
+
+    fn current_input(self) -> InputSnapshot:
+        self.last_input
+
+
+# ScriptedInput — replay-test driver container.
+# Holds a list of `InputSnapshot` frames; the LoopDriver walks the list
+# and pumps one fixed step per frame. Backed by deterministic playback —
+# two runs with the same scripted frames produce byte-equal framebuffers.
+class ScriptedInput:
+    frames: [InputSnapshot]
+    cursor: i64
+
+    static fn new(frames: [InputSnapshot]) -> ScriptedInput:
+        ScriptedInput(frames: frames, cursor: 0)
+
+    fn next(self) -> InputSnapshot:
+        if self.cursor >= (self.frames.len() as i64):
+            return InputSnapshot::empty()
+        val s = self.frames[self.cursor as i32]
+        self.cursor = self.cursor + 1
+        s
+
+    fn len(self) -> i64:
+        self.frames.len() as i64

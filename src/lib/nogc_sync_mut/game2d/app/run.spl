@@ -1,0 +1,64 @@
+# std.game2d.app.run — `g.run(...)` entry point (Wave C, AC-1)
+#
+# Two overloads:
+#   - `fn run(app: App, config: GameConfig)` — explicit config object.
+#   - `fn run(app: App, title: text, w: i32, h: i32)` — convenience.
+#
+# Backend choice: `SdlBackend` by default; if env `SIMPLE_GAME_HEADLESS=1`
+# is set, the loop runs against `HeadlessBackend` (no window/GPU). The
+# config's `runtime.deterministic` flag arms the time-guard before
+# the first frame. `app.load()` runs once, then frames pump until the
+# backend reports a close event.
+
+use std.nogc_sync_mut.game2d.app.app.{App}
+use std.nogc_sync_mut.game2d.app.config.{GameConfig, WindowConfig, RuntimeConfig}
+use std.nogc_sync_mut.game2d.backend.trait.{GameBackend}
+use std.nogc_sync_mut.game2d.backend.sdl_backend.{SdlBackend}
+use std.nogc_sync_mut.game2d.backend.headless.{HeadlessBackend}
+use std.nogc_sync_mut.game2d.loop.driver.{LoopDriver}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+use std.nogc_sync_mut.game2d.time.det_guard as time
+
+extern fn rt_env_get(key: text) -> text
+
+
+fn _is_headless() -> bool:
+    val v = rt_env_get("SIMPLE_GAME_HEADLESS")
+    v == "1"
+
+
+fn run(app: App, config: GameConfig):
+    """Boot the game loop with an explicit GameConfig.
+
+    Wires the deterministic guard, picks the backend, calls app.load(),
+    and pumps the LoopDriver until the backend signals shutdown.
+    """
+    if config.runtime.deterministic:
+        time::set_deterministic_mode(true)
+    val driver = LoopDriver::new(config.runtime.fixed_step_hz as i32)
+    var snapshot = InputSnapshot::empty()
+    if _is_headless():
+        var backend = HeadlessBackend::new(
+            config.window.width as i64,
+            config.window.height as i64
+        )
+        time::enter_callback(0)
+        app.load()
+        time::leave_callback()
+        # Tier-0: single-frame headless boot — full event loop wired in C2 demo.
+        driver.step(app, backend, snapshot, 16_666_667)
+    else:
+        var backend = SdlBackend::new()
+        time::enter_callback(0)
+        app.load()
+        time::leave_callback()
+        driver.step(app, backend, snapshot, 16_666_667)
+
+
+fn run(app: App, title: text, w: i32, h: i32):
+    """Convenience overload: bare title/size with default 60Hz, no det mode."""
+    var cfg = GameConfig.default()
+    cfg.title = title
+    cfg.window.width = w as i64
+    cfg.window.height = h as i64
+    run(app, cfg)
