@@ -22,6 +22,17 @@ pub enum Terminator {
         else_block: BlockId,
     },
 
+    /// Multi-way switch on an integer discriminant.
+    /// B5 (compiler_bugs_for_crypto_2026-04-25.md): emitted by the MIR lowerer
+    /// when a `match` on integer constants is dense enough that Cranelift can
+    /// produce a `br_table` (jump table) instead of a linear `brif` chain.
+    /// Sparse matches still fall back to nested Branches.
+    Switch {
+        discriminant: VReg,
+        cases: Vec<(i64, BlockId)>,
+        default: BlockId,
+    },
+
     /// Unreachable (after infinite loop, etc.)
     Unreachable,
 }
@@ -34,7 +45,10 @@ impl Terminator {
 
     /// Check if this terminator transfers control to another block
     pub fn is_branching(&self) -> bool {
-        matches!(self, Terminator::Jump(_) | Terminator::Branch { .. })
+        matches!(
+            self,
+            Terminator::Jump(_) | Terminator::Branch { .. } | Terminator::Switch { .. }
+        )
     }
 
     /// Registers used by this terminator.
@@ -44,6 +58,7 @@ impl Terminator {
             Terminator::Return(None) => vec![],
             Terminator::Jump(_) => vec![],
             Terminator::Branch { cond, .. } => vec![*cond],
+            Terminator::Switch { discriminant, .. } => vec![*discriminant],
             Terminator::Unreachable => vec![],
         }
     }
@@ -56,6 +71,11 @@ impl Terminator {
             Terminator::Branch {
                 then_block, else_block, ..
             } => vec![*then_block, *else_block],
+            Terminator::Switch { cases, default, .. } => {
+                let mut out: Vec<BlockId> = cases.iter().map(|(_, b)| *b).collect();
+                out.push(*default);
+                out
+            }
             Terminator::Unreachable => vec![],
         }
     }

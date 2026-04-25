@@ -83,6 +83,18 @@ pub(crate) fn remap_terminator(term: Terminator, map: &HashMap<BlockId, BlockId>
             then_block: map.get(&then_block).copied().unwrap_or(then_block),
             else_block: map.get(&else_block).copied().unwrap_or(else_block),
         }),
+        Terminator::Switch {
+            discriminant,
+            cases,
+            default,
+        } => Some(Terminator::Switch {
+            discriminant,
+            cases: cases
+                .into_iter()
+                .map(|(k, b)| (k, map.get(&b).copied().unwrap_or(b)))
+                .collect(),
+            default: map.get(&default).copied().unwrap_or(default),
+        }),
         Terminator::Return(v) => Some(Terminator::Return(v)),
         Terminator::Unreachable => None,
     }

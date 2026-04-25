@@ -2457,6 +2457,19 @@ fn emit_ptx_terminator(out: &mut String, term: &Terminator, is_kernel: bool, _bl
             out.push_str(&format!("    @%p{} bra BB{};\n", cond.0, then_block.0));
             out.push_str(&format!("    bra BB{};\n", else_block.0));
         }
+        Terminator::Switch { discriminant, cases, default } => {
+            // PTX has no direct jump-table primitive in our emit path; fall
+            // back to a chain of compare-and-branches. Switch terminator is
+            // primarily a Cranelift-host optimization (B5).
+            for (k, target) in cases {
+                out.push_str(&format!(
+                    "    setp.eq.s64 %p_sw, %rd{}, {};\n",
+                    discriminant.0, k
+                ));
+                out.push_str(&format!("    @%p_sw bra BB{};\n", target.0));
+            }
+            out.push_str(&format!("    bra BB{};\n", default.0));
+        }
         Terminator::Unreachable => {
             out.push_str("    // unreachable\n");
             out.push_str("    trap;\n");

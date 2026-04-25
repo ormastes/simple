@@ -527,6 +527,16 @@ impl BytecodeCompiler {
                 self.record_jump_fixup(*else_block);
             }
 
+            Terminator::Switch { .. } => {
+                // B5: Switch terminator is currently only emitted on the
+                // Cranelift backend. The bytecode VM has no jump-table opcode;
+                // if you see this, the MIR lowerer's switch-detection guard
+                // missed a target gating check.
+                return Err(CompileError::UnsupportedInstruction(
+                    "Switch terminator not supported by bytecode backend".to_string(),
+                ));
+            }
+
             Terminator::Unreachable => {
                 // Emit a trap or return nil
                 self.encoder.emit_opcode(opcodes::RET_VOID);

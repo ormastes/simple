@@ -801,6 +801,26 @@ pub fn compile_function_body<M: Module>(
                 builder.ins().brif(cond_val, then_bl, &[], else_bl, &[]);
             }
 
+            Terminator::Switch { discriminant, cases, default } => {
+                // B5: lower MIR Switch to Cranelift's Switch builder, which
+                // emits br_table for dense integer dispatches.
+                let disc_val = vreg_values.get(discriminant).copied().unwrap_or_else(|| {
+                    if let Some(&var) = vreg_vars.get(discriminant) {
+                        builder.use_var(var)
+                    } else {
+                        builder.ins().iconst(types::I64, 0)
+                    }
+                });
+                let default_bl = *blocks.get(default).unwrap();
+                let mut switch = cranelift_frontend::Switch::new();
+                for (k, target) in cases {
+                    let target_bl = *blocks.get(target).unwrap();
+                    // Cranelift Switch entries are unsigned u128; cast i64 keys.
+                    switch.set_entry(*k as u128, target_bl);
+                }
+                switch.emit(&mut builder, disc_val, default_bl);
+            }
+
             Terminator::Unreachable => {
                 builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
             }
