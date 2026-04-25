@@ -229,7 +229,15 @@ fi
 
 if [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
   echo "Building Rust seed compiler + runtime library..."
-  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver -p simple-native-all ${llvm_features}
+  # Split into two cargo invocations to defeat feature unification:
+  # `simple-native-all` enables `driver-hooks` on `simple-runtime`, which gates
+  # out the `not(driver-hooks)` `#[no_mangle]` def of rt_cli_run_file. Building
+  # both packages in a single `cargo build -p A -p B` call unifies features,
+  # leaving the `simple-driver` bin with an undefined `rt_cli_run_file` symbol
+  # (the C symbol is provided by `simple-native-all`, which the seed bin does
+  # not link). Separate invocations keep simple-runtime's feature set per-bin.
+  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver ${llvm_features}
+  run_logged rust-native-all-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all ${llvm_features}
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
