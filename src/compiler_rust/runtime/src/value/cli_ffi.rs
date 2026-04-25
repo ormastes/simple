@@ -258,6 +258,34 @@ pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_
     not_implemented("rt_cli_run_file")
 }
 
+// Under `driver-hooks`, `simple-native-all` provides the real `#[no_mangle]`
+// `rt_cli_run_file` C symbol. We still need a Rust-callable identifier in
+// `simple_runtime::value` so static_provider can take its address. Declare the
+// extern symbol and re-expose it via a thin wrapper (no `#[no_mangle]`, so it
+// does not collide with the native_all definition at link time).
+#[cfg(feature = "driver-hooks")]
+extern "C" {
+    #[link_name = "rt_cli_run_file"]
+    fn rt_cli_run_file_extern(
+        path: RuntimeValue,
+        args: RuntimeValue,
+        gc_log: u8,
+        gc_off: u8,
+    ) -> i64;
+}
+
+#[cfg(feature = "driver-hooks")]
+pub extern "C" fn rt_cli_run_file(
+    path: RuntimeValue,
+    args: RuntimeValue,
+    gc_log: u8,
+    gc_off: u8,
+) -> i64 {
+    // SAFETY: forwards to the externally-linked C ABI symbol provided by
+    // `simple-native-all` when the `driver-hooks` feature is on.
+    unsafe { rt_cli_run_file_extern(path, args, gc_log, gc_off) }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_cli_watch_file(_path: RuntimeValue) -> i64 {
     not_implemented("rt_cli_watch_file")
