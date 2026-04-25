@@ -285,6 +285,18 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Identity function the optimizer must not see through.
+///
+/// B6 (compiler_bugs_for_crypto_2026-04-25.md): Cranelift can't fold or
+/// branch-eliminate through an external call, so wrapping a value in
+/// `rt_black_box(x)` keeps it opaque. Used by constant-time crypto code
+/// (e.g., `ct_eq` final compare, ML-KEM rejection sampling, Curve25519
+/// conditional swap) to prevent the compiler from rewriting an
+/// XOR-accumulate loop into an early-exit branch on `diff != 0`.
+pub fn rt_black_box(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(args.first().cloned().unwrap_or(Value::Nil))
+}
+
 /// Allocate a zero-filled `[u8]` of the given length in O(len) C-side.
 ///
 /// B2 (compiler_bugs_for_crypto_2026-04-25.md): the interpreter's

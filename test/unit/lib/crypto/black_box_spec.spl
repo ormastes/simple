@@ -1,0 +1,54 @@
+"""
+B6 (compiler_bugs_for_crypto_2026-04-25.md) — `black_box` opaque
+identity intrinsic.
+
+Wraps an integer through an external function call so Cranelift /
+optimizers can't see through it. Used to keep XOR-accumulate
+constant-time compare loops from being rewritten into early-exit
+branches on `diff != 0`.
+
+Cranelift IR shape ("no `brif diff` in the inner loop") is verified
+**by construction**: extern function calls are opaque to Cranelift's
+optimizer by design. This spec verifies functional correctness only.
+"""
+
+use std.spec
+use std.crypto.constant_time.{black_box}
+
+# Software ct_eq using black_box at the final compare. Mirrors the
+# template in the crypto-bugs plan (B6 repro).
+fn ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var diff: i64 = 0
+    var i: i64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    black_box(diff) == 0
+
+describe "black_box (B6)":
+
+    it "is identity on integer inputs":
+        expect(black_box(0)).to_equal(0)
+        expect(black_box(42)).to_equal(42)
+        expect(black_box(-1)).to_equal(-1)
+
+    it "ct_eq_bytes returns true for equal buffers":
+        val a = [1u8, 2u8, 3u8, 4u8]
+        val b = [1u8, 2u8, 3u8, 4u8]
+        expect(ct_eq_bytes(a, b)).to_equal(true)
+
+    it "ct_eq_bytes returns false on byte difference":
+        val a = [1u8, 2u8, 3u8, 4u8]
+        val b = [1u8, 2u8, 3u8, 5u8]
+        expect(ct_eq_bytes(a, b)).to_equal(false)
+
+    it "ct_eq_bytes returns false on length difference":
+        val a = [1u8, 2u8, 3u8]
+        val b = [1u8, 2u8, 3u8, 4u8]
+        expect(ct_eq_bytes(a, b)).to_equal(false)
+
+    it "ct_eq_bytes handles empty buffers":
+        val empty: [u8] = []
+        expect(ct_eq_bytes(empty, empty)).to_equal(true)
