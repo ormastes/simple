@@ -381,6 +381,81 @@ re-discover the missing infrastructure.
 
 ---
 
+## B5b · `MatchCase` → MIR in the self-hosted compiler
+
+**Status: Phase 1 DONE (2026-04-25). Phase 2 deferred — see list below.**
+
+The Rust seed (B5) detects dense integer matches after the HIR `LetIn { ... If
+chain }` desugaring and emits `MirTerminator.Switch`. The self-hosted MIR
+lowerer in `src/compiler/50.mir/mir_lowering_expr.spl` did NOT handle the
+`HirExprKind.MatchCase` variant at all — every `match` expression fell through
+to the generic `case _:` arm, hit `self.error("unsupported MIR expression: ...")`,
+and downstream the release self-hosted binary crashed (`malloc_consolidate:
+invalid chunk size`) instead of producing a clean diagnostic.
+
+A dormant signature bug in `MirBuilder.terminate_switch` also blocked any
+caller: it declared `targets: [(i64, BlockId)]` but
+`MirTerminator.Switch` expects `[SwitchCase]`. Zero callers existed when the
+bug was discovered, so it was inert.
+
+### Phase 1 (this work)
+
+- `src/compiler/50.mir/mir_data.spl` — corrected
+  `MirBuilder.terminate_switch` signature to `targets: [SwitchCase]`.
+- `src/compiler/50.mir/mir_lowering_expr.spl` — added
+  `case MatchCase(scrutinee, arms):` in `lower_expr` plus three helpers:
+  - `lower_match_case` — gates Phase 1 patterns; rejects everything else
+    with a clear `B5b Phase 2 not yet implemented: pattern kind X` diagnostic.
+  - `should_emit_switch` — same heuristic as the Rust seed
+    (`SWITCH_MIN_ARMS = 4`, `SWITCH_MAX_SPAN = 1024`).
+  - `emit_switch_dispatch` / `emit_if_chain_dispatch` — dense path emits
+    `MirTerminator.Switch`; sparse path emits a chained `If` cascade. Both
+    use a temp-then-merge pattern matching `lower_if`. Scrutinee is
+    evaluated once into a temp to avoid duplicating side effects.
+- `test/unit/compiler/codegen/match_switch_self_hosted_spec.spl` — new
+  regression spec covering dense / sparse / wide-span / TLS-shape arms.
+
+Phase 1 accepts ONLY:
+
+- `HirPatternKind.Wildcard` (as the default arm)
+- `HirPatternKind.Literal(IntLit n)` (constant-int arms)
+
+A wildcard default arm is required (no exhaustiveness analysis in Phase 1).
+
+### Phase 2 (DEFERRED — pending in this same B5b ticket)
+
+The full pattern-compilation pipeline is genuinely multi-day; the user
+explicitly accepted the partial scope. Phase 2 will add lowering for:
+
+- `HirPatternKind.Binding(symbol, mutable)` — bind the scrutinee to a name.
+- `HirPatternKind.Literal(non-IntLit)` — bool / string / float literal arms.
+- `HirPatternKind.Tuple(elements)` — destructured tuple arms.
+- `HirPatternKind.Array(elements, rest)` — fixed-length and rest patterns.
+- `HirPatternKind.Struct(type_, fields)` — record destructuring.
+- `HirPatternKind.Enum(type_, variant, payload)` — discriminant test +
+  payload destructuring (Tuple / Struct payload variants).
+- `HirPatternKind.Or(patterns)` — multiple patterns sharing one body.
+- `HirPatternKind.Range(start, end, inclusive)` — range tests.
+- Match-arm guards (`HirMatchArm.has_guard / .guard`) — combine
+  pattern-test + guard before branching to the arm body.
+- Result type merging across arms with non-uniform body types
+  (Phase 1 hard-codes `MirType.i64()` for the result temp).
+- Exhaustiveness handling for matches without a wildcard arm
+  (currently rejected with a Phase 2 diagnostic).
+
+### Acceptance gates met for Phase 1
+
+- 5-arm dense int match dispatches correctly (every arm + wildcard).
+- Sparse (2-arm) and wide-span (>1024) matches still work via the
+  if-chain fallback.
+- Other pattern kinds emit `B5b Phase 2 not yet implemented: pattern kind X`
+  rather than the cryptic `unsupported MIR expression`.
+- `MirBuilder.terminate_switch` signature uses `[SwitchCase]`.
+- Regression spec at
+  `test/unit/compiler/codegen/match_switch_self_hosted_spec.spl`.
+
+---
+
 ## B6 · Constant-time compare must not be branch-folded
 
 **Repro**

@@ -1,0 +1,100 @@
+"""
+B5b — self-hosted compiler MIR lowering of `MatchCase`.
+
+Verifies the self-hosted (Simple-written) MIR lowerer in
+`src/compiler/50.mir/mir_lowering_expr.spl` correctly lowers
+integer-literal `match` expressions to:
+
+  - `MirTerminator.Switch` for dense (>=4 arms, span <= 1024) cases
+    so backends emit a jump table.
+  - Nested `If` chain for sparse / smaller cases.
+
+Phase 1 scope (this spec):
+  - Wildcard default arm
+  - Literal(IntLit n) arms
+
+Phase 2 (NOT in scope; documented in
+`doc/08_tracking/todo/compiler_bugs_for_crypto_2026-04-25.md` §B5b):
+  - Other HirPatternKind variants (Binding, Tuple, Array, Struct,
+    Enum, Or, Range, non-IntLit Literal)
+  - Match-arm guards
+  - Result type merging across non-uniform arm bodies
+
+The companion sibling spec `match_switch_codegen_spec.spl` already
+covers the Rust-seed B5 path; this spec exercises the same shapes
+through the self-hosted release binary so the deliberate-fail probe
+is a real signal of self-hosted MIR-lowering correctness.
+"""
+
+use std.spec
+
+# Dense int dispatch (5 arms, span = 4) -> should hit Switch path.
+fn dense_dispatch(id: i64) -> i64:
+    match id:
+        case 0: 100
+        case 1: 200
+        case 2: 300
+        case 3: 400
+        case 4: 500
+        case _: -1
+
+# Sparse / non-dense (2 arms below SWITCH_MIN_ARMS=4) -> If chain path.
+fn sparse_dispatch(id: i64) -> i64:
+    match id:
+        case 7: 99
+        case _: 0
+
+# Wide-span (3 arms, span > 1024 = 2000) -> If chain path.
+fn wide_span_dispatch(id: i64) -> i64:
+    match id:
+        case 0: 1
+        case 1000: 2
+        case 2000: 3
+        case _: 0
+
+# Realistic 7-arm cipher dispatcher shape (mirrors TLS suite use-case).
+fn cipher_lookup(suite: i64) -> i64:
+    match suite:
+        case 0xC02F: 1
+        case 0xC030: 2
+        case 0xCCA8: 3
+        case 0x1301: 4
+        case 0x1302: 5
+        case 0x1303: 6
+        case 0x1304: 7
+        case _: 0
+
+describe "B5b · self-hosted MatchCase MIR lowering":
+
+    it "dense dispatch hits each arm correctly":
+        expect(dense_dispatch(0)).to_equal(100)
+        expect(dense_dispatch(1)).to_equal(200)
+        expect(dense_dispatch(2)).to_equal(300)
+        expect(dense_dispatch(3)).to_equal(400)
+        expect(dense_dispatch(4)).to_equal(500)
+
+    it "dense dispatch wildcard returns -1 for out-of-range":
+        expect(dense_dispatch(5)).to_equal(-1)
+        expect(dense_dispatch(-1)).to_equal(-1)
+        expect(dense_dispatch(1000)).to_equal(-1)
+
+    it "sparse dispatch (2 arms) still works via if-chain fallback":
+        expect(sparse_dispatch(7)).to_equal(99)
+        expect(sparse_dispatch(8)).to_equal(0)
+        expect(sparse_dispatch(0)).to_equal(0)
+
+    it "wide-span dispatch (span > 1024) still works via if-chain fallback":
+        expect(wide_span_dispatch(0)).to_equal(1)
+        expect(wide_span_dispatch(1000)).to_equal(2)
+        expect(wide_span_dispatch(2000)).to_equal(3)
+        expect(wide_span_dispatch(500)).to_equal(0)
+
+    it "TLS-shape cipher dispatcher returns correct id per arm":
+        expect(cipher_lookup(0xC02F)).to_equal(1)
+        expect(cipher_lookup(0xC030)).to_equal(2)
+        expect(cipher_lookup(0xCCA8)).to_equal(3)
+        expect(cipher_lookup(0x1301)).to_equal(4)
+        expect(cipher_lookup(0x1302)).to_equal(5)
+        expect(cipher_lookup(0x1303)).to_equal(6)
+        expect(cipher_lookup(0x1304)).to_equal(7)
+        expect(cipher_lookup(0x9999)).to_equal(0)

@@ -260,10 +260,318 @@ impl MirLowering:
                 self.builder = b
                 result
 
+            # B5b Phase 1: lower MatchCase on integer-literal patterns to
+            # MirTerminator.Switch (dense >=4 arms, span <= 1024) or to a
+            # nested If chain (sparse / smaller). Other pattern kinds and
+            # guards are explicitly rejected as Phase 2.
+            case MatchCase(scrutinee, arms):
+                self.lower_match_case(scrutinee, arms)
+
             case _:
 
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
+
+    # ========================================================================
+    # B5b Phase 1 — MatchCase lowering (integer-literal patterns only)
+    # ========================================================================
+
+    me lower_match_case(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
+        """Lower a `match` expression on integer-literal patterns.
+
+        Phase 1 supports:
+          - HirPatternKind.Wildcard            (default arm)
+          - HirPatternKind.Literal(IntLit n)   (constant int arm)
+
+        Anything else (Binding, Tuple, Array, Struct, Enum, Or, Range,
+        non-IntLit Literal, or any guard) yields a clear diagnostic so users
+        get a real error instead of `unsupported MIR expression`.
+
+        Dense int matches (>=4 cases, key-span <= 1024) emit
+        MirTerminator.Switch so the backend can produce a jump table; sparse
+        / smaller matches fall back to a chained If terminator. The
+        scrutinee is evaluated once into a temp to avoid duplicating side
+        effects.
+        """
+        # Phase 1 gate: every arm must be (Wildcard | Literal(IntLit)) with
+        # no guard. If anything else is present, emit a Phase 2 diagnostic
+        # naming the offending kind and bail out with a unit temp.
+        var int_cases: [(i64, HirBlock)] = []
+        var default_body: HirBlock? = nil
+        var idx = 0
+        while idx < arms.len():
+            val arm = arms[idx]
+            if arm.has_guard:
+                self.error(
+                    "B5b Phase 2 not yet implemented: match arm guard",
+                    Some(arm.span)
+                )
+                var b_err = self.builder
+                val err_temp = b_err.new_temp(MirType.unit())
+                self.builder = b_err
+                return err_temp
+            match arm.pattern.kind:
+                case Wildcard:
+                    if default_body.?:
+                        self.error(
+                            "B5b: match has multiple wildcard arms",
+                            Some(arm.span)
+                        )
+                        var b_err2 = self.builder
+                        val err_temp2 = b_err2.new_temp(MirType.unit())
+                        self.builder = b_err2
+                        return err_temp2
+                    default_body = Some(arm.body)
+                case Literal(lit_expr):
+                    match lit_expr.kind:
+                        case IntLit(n, _):
+                            int_cases = int_cases.push((n, arm.body))
+                        case _:
+                            self.error(
+                                "B5b Phase 2 not yet implemented: pattern kind Literal(non-IntLit)",
+                                Some(arm.pattern.span)
+                            )
+                            var b_err3 = self.builder
+                            val err_temp3 = b_err3.new_temp(MirType.unit())
+                            self.builder = b_err3
+                            return err_temp3
+                case Binding(_, _):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Binding",
+                        Some(arm.pattern.span)
+                    )
+                    var b_b = self.builder
+                    val t_b = b_b.new_temp(MirType.unit())
+                    self.builder = b_b
+                    return t_b
+                case Tuple(_):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Tuple",
+                        Some(arm.pattern.span)
+                    )
+                    var b_t = self.builder
+                    val t_t = b_t.new_temp(MirType.unit())
+                    self.builder = b_t
+                    return t_t
+                case Array(_, _):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Array",
+                        Some(arm.pattern.span)
+                    )
+                    var b_a = self.builder
+                    val t_a = b_a.new_temp(MirType.unit())
+                    self.builder = b_a
+                    return t_a
+                case Struct(_, _):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Struct",
+                        Some(arm.pattern.span)
+                    )
+                    var b_s = self.builder
+                    val t_s = b_s.new_temp(MirType.unit())
+                    self.builder = b_s
+                    return t_s
+                case Enum(_, _, _):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Enum",
+                        Some(arm.pattern.span)
+                    )
+                    var b_e = self.builder
+                    val t_e = b_e.new_temp(MirType.unit())
+                    self.builder = b_e
+                    return t_e
+                case Or(_):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Or",
+                        Some(arm.pattern.span)
+                    )
+                    var b_o = self.builder
+                    val t_o = b_o.new_temp(MirType.unit())
+                    self.builder = b_o
+                    return t_o
+                case Range(_, _, _):
+                    self.error(
+                        "B5b Phase 2 not yet implemented: pattern kind Range",
+                        Some(arm.pattern.span)
+                    )
+                    var b_r = self.builder
+                    val t_r = b_r.new_temp(MirType.unit())
+                    self.builder = b_r
+                    return t_r
+                case Error:
+                    self.error(
+                        "B5b: match arm has Error pattern (parser/HIR error)",
+                        Some(arm.pattern.span)
+                    )
+                    var b_x = self.builder
+                    val t_x = b_x.new_temp(MirType.unit())
+                    self.builder = b_x
+                    return t_x
+            idx = idx + 1
+
+        # Phase 1 also requires a wildcard default arm; without one we'd
+        # need exhaustiveness analysis (Phase 2). Reject cleanly.
+        if not default_body.?:
+            self.error(
+                "B5b Phase 2 not yet implemented: match without wildcard default arm",
+                nil
+            )
+            var b_nd = self.builder
+            val t_nd = b_nd.new_temp(MirType.unit())
+            self.builder = b_nd
+            return t_nd
+
+        # Evaluate scrutinee once into a temp.
+        val scrut_local = self.lower_expr(scrutinee)
+
+        # Decide dense vs sparse. Same heuristic as Rust seed:
+        #   arms >= 4 and (max - min) <= 1024  =>  Switch
+        #   otherwise                          =>  If chain
+        val use_switch = self.should_emit_switch(int_cases)
+
+        if use_switch:
+            self.emit_switch_dispatch(scrut_local, int_cases, default_body.unwrap())
+        else:
+            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body.unwrap())
+
+    me should_emit_switch(int_cases: [(i64, HirBlock)]) -> bool:
+        """Heuristic: dense int matches go to Switch (jump table), sparse
+        / small matches stay as If chains. Mirrors the Rust-seed B5
+        constants SWITCH_MIN_ARMS=4 and SWITCH_MAX_SPAN=1024."""
+        if int_cases.len() < 4:
+            return false
+        var lo = int_cases[0].0
+        var hi = int_cases[0].0
+        var i = 1
+        while i < int_cases.len():
+            val k = int_cases[i].0
+            if k < lo:
+                lo = k
+            if k > hi:
+                hi = k
+            i = i + 1
+        val span = hi - lo
+        span >= 0 and span <= 1024
+
+    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock) -> LocalId:
+        """Emit a MirTerminator.Switch for a dense int match. Each arm
+        lowers into its own block, stores its result into a shared temp,
+        and jumps to a merge block. Mirrors lower_if's
+        temp-then-merge pattern."""
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("match_merge"))
+        val default_block = b.new_block(Some("match_default"))
+
+        # Allocate one block per arm and build SwitchCase entries.
+        var case_blocks: [(BlockId, HirBlock)] = []
+        var sw_cases: [SwitchCase] = []
+        var i = 0
+        while i < int_cases.len():
+            val key = int_cases[i].0
+            val body = int_cases[i].1
+            val arm_block = b.new_block(Some("match_arm"))
+            case_blocks = case_blocks.push((arm_block, body))
+            sw_cases = sw_cases.push(SwitchCase(value: key, target: arm_block))
+            i = i + 1
+
+        # Seal the current block with the Switch terminator.
+        b.terminate_switch(mir_operand_copy(scrut_local), sw_cases, default_block)
+        self.builder = b
+
+        # Lower each arm body into its block.
+        var ci = 0
+        while ci < case_blocks.len():
+            val arm_block = case_blocks[ci].0
+            val arm_body = case_blocks[ci].1
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val arm_result = self.lower_block(arm_body)
+            var b_arm2 = self.builder
+            if arm_result.?:
+                b_arm2.emit_copy(result, arm_result.unwrap())
+            b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+            ci = ci + 1
+
+        # Default arm.
+        var b_d = self.builder
+        b_d.switch_to_block(default_block)
+        self.builder = b_d
+        val def_result = self.lower_block(default_body)
+        var b_d2 = self.builder
+        if def_result.?:
+            b_d2.emit_copy(result, def_result.unwrap())
+        b_d2.terminate_goto(merge_block)
+        self.builder = b_d2
+
+        # Merge block.
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        self.builder = b_m
+
+        result
+
+    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock) -> LocalId:
+        """Emit a nested If chain for sparse / small int matches.
+        Cheaper than a jump table when arms < 4 or key span > 1024."""
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("match_merge"))
+        self.builder = b
+
+        var i = 0
+        while i < int_cases.len():
+            val key = int_cases[i].0
+            val body = int_cases[i].1
+
+            # Build `scrut == key` into a bool local.
+            var b_cmp = self.builder
+            val key_local = b_cmp.emit_const_int(key)
+            val cmp_local = b_cmp.emit_binop(
+                MirBinOp.Eq,
+                mir_operand_copy(scrut_local),
+                mir_operand_copy(key_local),
+                MirType.bool()
+            )
+            val arm_block = b_cmp.new_block(Some("match_arm"))
+            val next_block = b_cmp.new_block(Some("match_next"))
+            b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
+            self.builder = b_cmp
+
+            # Arm body block.
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val arm_result = self.lower_block(body)
+            var b_arm2 = self.builder
+            if arm_result.?:
+                b_arm2.emit_copy(result, arm_result.unwrap())
+            b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+
+            # Continue cascading into next_block.
+            var b_n = self.builder
+            b_n.switch_to_block(next_block)
+            self.builder = b_n
+
+            i = i + 1
+
+        # After all cases, current block is the cascade tail = default.
+        val def_result = self.lower_block(default_body)
+        var b_def = self.builder
+        if def_result.?:
+            b_def.emit_copy(result, def_result.unwrap())
+        b_def.terminate_goto(merge_block)
+        self.builder = b_def
+
+        # Merge block.
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        self.builder = b_m
+
+        result
 
     me try_lower_bitfield_get(base: HirExpr, base_local: LocalId, field_name: text) -> LocalId?:
         """Lower bitfield field reads before generic struct field access."""
