@@ -44,3 +44,32 @@ text and outlined shapes are no-ops on the live path.
 
 The headless contract is the source of truth — copy parameter handling from
 `SoftwareRenderer.execute_*` arms.
+
+## Partial Resolution 2026-04-25
+
+**Status:** PARTIAL — software pipeline rect+circle outlined arms implemented;
+GPU pipeline + DrawText still amber.
+
+**Implemented (`engine/render/pipeline.spl`):**
+- `DrawRectOutlined` — both `_process_command` and
+  `_process_command_with_textures` arms now call new
+  `_rasterize_rect_outlined()` helper, which emits 4 `_rasterize_line` calls
+  (top/right/bottom/left) at width=1.0.
+- `DrawCircleOutlined` — both arms now call new `_rasterize_circle_outlined()`
+  helper, a Bresenham midpoint-circle algorithm plotting 8 octants per
+  iteration via `set_pixel`. Pure integer arithmetic, no `>>` ops.
+
+**Deferred (still amber):**
+- `DrawText` arm in software pipeline (lines 160 + 353) — needs glyph atlas
+  / wiring to `engine/render/text.spl::render_text_to_buffer`.
+  Out-of-scope: would require reading and integrating an existing 5x7 stub or
+  vendoring a font.
+- `gpu_pipeline.spl` arms for `DrawRectOutlined` / `DrawCircleOutlined` /
+  `DrawText` — all three need GPU vertex-buffer construction + line-topology
+  passes, which the existing GPU pipeline does not yet emit. Per sprint scope
+  rule "Acceptable to leave the GPU arms as TODO and only implement the
+  `gpu_pipeline.spl` arms that map to existing primitives", deferred entirely.
+
+**Verification:** All 9 game2d specs remain 122/122 green. `canvas_api_spec`
+(14/14) exercises the methods that emit these commands; `golden_spec` (11/11)
+exercises the headless rasterization path that the new helpers feed.

@@ -151,19 +151,11 @@ impl SoftwareRenderer:
                     vertices: self.stats.vertices + vertices.len()
                 )
             case DrawRectOutlined(rect, color, z_order):
-                # TODO(GAME-RENDER-002): software outlined rect rasterizer.
-                # Stubbed as filled rect to keep compile passing without behavior change.
-                val xi = _f64_to_i64(rect.x)
-                val yi = _f64_to_i64(rect.y)
-                val wi = _f64_to_i64(rect.width)
-                val hi = _f64_to_i64(rect.height)
-                self.fill_rect_pixels(xi, yi, wi, hi, color)
+                # Emit 4 line draws (top, right, bottom, left).
+                self._rasterize_rect_outlined(rect.x, rect.y, rect.width, rect.height, color)
             case DrawCircleOutlined(cx, cy, radius, color, z_order):
-                # TODO(GAME-RENDER-002): software outlined circle rasterizer.
-                val xi = _f64_to_i64(cx - radius)
-                val yi = _f64_to_i64(cy - radius)
-                val di = _f64_to_i64(radius * 2.0)
-                self.fill_rect_pixels(xi, yi, di, di, color)
+                # Bresenham midpoint outlined circle.
+                self._rasterize_circle_outlined(cx, cy, radius, color)
             case DrawText(font, content, pos, color, z_order):
                 # TODO(GAME-RENDER-002): wire to engine/render/text.spl render_text_to_buffer.
                 # No-op stub so software pipeline compiles.
@@ -352,18 +344,11 @@ impl SoftwareRenderer:
                     vertices: self.stats.vertices + vertices.len()
                 )
             case DrawRectOutlined(rect, color, z_order):
-                # TODO(GAME-RENDER-002): software outlined rect rasterizer.
-                val xi = _f64_to_i64(rect.x)
-                val yi = _f64_to_i64(rect.y)
-                val wi = _f64_to_i64(rect.width)
-                val hi = _f64_to_i64(rect.height)
-                self.fill_rect_pixels(xi, yi, wi, hi, color)
+                # Emit 4 line draws (top, right, bottom, left).
+                self._rasterize_rect_outlined(rect.x, rect.y, rect.width, rect.height, color)
             case DrawCircleOutlined(cx, cy, radius, color, z_order):
-                # TODO(GAME-RENDER-002): software outlined circle rasterizer.
-                val xi = _f64_to_i64(cx - radius)
-                val yi = _f64_to_i64(cy - radius)
-                val di = _f64_to_i64(radius * 2.0)
-                self.fill_rect_pixels(xi, yi, di, di, color)
+                # Bresenham midpoint outlined circle.
+                self._rasterize_circle_outlined(cx, cy, radius, color)
             case DrawText(font, content, pos, color, z_order):
                 # TODO(GAME-RENDER-002): wire to render_text_to_buffer.
                 pass_do_nothing
@@ -428,6 +413,58 @@ impl SoftwareRenderer:
                     self.set_pixel(px, py, color)
                 px = px + 1
             py = py + 1
+
+    # ========================================================================
+    # Internal: outlined rect / circle rasterizers (GAME-RENDER-002)
+    # ========================================================================
+
+    me _rasterize_rect_outlined(x: f64, y: f64, w: f64, h: f64, color: EngineColor):
+        """Outline a rect with 4 line draws (top, right, bottom, left).
+
+        Uses width=1.0 for a single-pixel outline.
+        """
+        val x2 = x + w
+        val y2 = y + h
+        # top
+        self._rasterize_line(x, y, x2, y, 1.0, color)
+        # right
+        self._rasterize_line(x2, y, x2, y2, 1.0, color)
+        # bottom
+        self._rasterize_line(x, y2, x2, y2, 1.0, color)
+        # left
+        self._rasterize_line(x, y, x, y2, 1.0, color)
+
+    me _rasterize_circle_outlined(cx: f64, cy: f64, radius: f64, color: EngineColor):
+        """Bresenham midpoint outlined circle.
+
+        Plots 8 octants per iteration. Stops when y > x (octants meet).
+        Operates in integer pixel space.
+        """
+        val cxi = _f64_to_i64(cx)
+        val cyi = _f64_to_i64(cy)
+        val r = _f64_to_i64(radius)
+        if r <= 0:
+            self.set_pixel(cxi, cyi, color)
+            return
+        var x: i64 = r
+        var y: i64 = 0
+        # Decision parameter: d = 1 - r (Bresenham midpoint).
+        var d: i64 = 1 - r
+        while y <= x:
+            self.set_pixel(cxi + x, cyi + y, color)
+            self.set_pixel(cxi - x, cyi + y, color)
+            self.set_pixel(cxi + x, cyi - y, color)
+            self.set_pixel(cxi - x, cyi - y, color)
+            self.set_pixel(cxi + y, cyi + x, color)
+            self.set_pixel(cxi - y, cyi + x, color)
+            self.set_pixel(cxi + y, cyi - x, color)
+            self.set_pixel(cxi - y, cyi - x, color)
+            y = y + 1
+            if d < 0:
+                d = d + 2 * y + 1
+            else:
+                x = x - 1
+                d = d + 2 * (y - x) + 1
 
     # ========================================================================
     # Internal: line rasterizer (Bresenham-style via rect approximation)
