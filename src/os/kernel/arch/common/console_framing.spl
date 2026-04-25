@@ -1,0 +1,122 @@
+# Console Framing — generic byte-stream framing for any UART backend.
+#
+# Per-arch console.spl files implement raw byte-write; this module layers
+# generic framing on top: line termination (CR-LF normalization), simple
+# ANSI-CSI strip for log capture, and best-effort UTF-8 boundary protection
+# so split writes don't corrupt multi-byte glyphs.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+#
+# No per-arch imports — callers pass a write_byte closure shape.
+
+# CR (0x0D), LF (0x0A), ESC (0x1B)
+val CR_BYTE: u8 = 0x0D
+val LF_BYTE: u8 = 0x0A
+val ESC_BYTE: u8 = 0x1B
+val CSI_FINAL_LO: u8 = 0x40
+val CSI_FINAL_HI: u8 = 0x7E
+
+# UTF-8 continuation byte mask: 0b10xxxxxx
+fn _is_utf8_cont(b: u8) -> bool:
+    (b & 0xC0) == 0x80
+
+# Returns true if `b` starts a multi-byte UTF-8 sequence.
+fn _is_utf8_lead(b: u8) -> bool:
+    (b & 0xC0) == 0xC0
+
+# Length of a UTF-8 codepoint that starts with `b`.
+# Returns 1 for ASCII, 2..4 for multibyte lead, 0 for an invalid byte.
+fn utf8_codepoint_len(b: u8) -> u32:
+    if b < 0x80:
+        return 1
+    if (b & 0xE0) == 0xC0:
+        return 2
+    if (b & 0xF0) == 0xE0:
+        return 3
+    if (b & 0xF8) == 0xF0:
+        return 4
+    0
+
+# Generic line-terminator normalization: a bare LF becomes CRLF.
+# Returns the byte sequence to emit for a single source byte `b`.
+# Output buffer is filled with at most 2 bytes; returns the count.
+fn normalize_lineend_byte(b: u8, out: [u8; 2]) -> u32:
+    if b == LF_BYTE:
+        out[0] = CR_BYTE
+        out[1] = LF_BYTE
+        return 2
+    out[0] = b
+    out[1] = 0
+    1
+
+# Frame state — tracks whether we're currently inside an ANSI CSI sequence.
+# Created per-stream; not thread-safe.
+@repr("C")
+struct AnsiStripState:
+    """Tracks position inside an ANSI escape sequence so we can strip it."""
+    in_escape: bool
+    in_csi: bool
+
+fn ansi_strip_state_new() -> AnsiStripState:
+    AnsiStripState(in_escape: false, in_csi: false)
+
+# Feed one byte to the strip state. Returns true iff the byte should be
+# emitted to the underlying stream (i.e. it is NOT part of a CSI run).
+fn ansi_strip_should_emit(state: AnsiStripState, b: u8) -> bool:
+    if state.in_csi:
+        # CSI ends on a final byte 0x40..0x7E
+        if b >= CSI_FINAL_LO and b <= CSI_FINAL_HI:
+            state.in_csi = false
+            state.in_escape = false
+        return false
+    if state.in_escape:
+        if b == 0x5B:    # '['
+            state.in_csi = true
+            return false
+        # ESC followed by any other byte: a 2-byte escape (e.g. ESC c reset).
+        # Drop it.
+        state.in_escape = false
+        return false
+    if b == ESC_BYTE:
+        state.in_escape = true
+        return false
+    true
+
+# UTF-8 boundary protection — the caller writes byte-by-byte; this state
+# remembers how many continuation bytes are still expected for the current
+# codepoint so a flush at the wrong boundary can be deferred.
+@repr("C")
+struct Utf8BoundaryState:
+    """Remaining continuation bytes expected for the in-flight codepoint."""
+    remaining: u32
+
+fn utf8_boundary_new() -> Utf8BoundaryState:
+    Utf8BoundaryState(remaining: 0)
+
+# Returns true iff `b` completes (or is) a full codepoint after this byte.
+# Safe-flush points are exactly the bytes for which this returns true.
+fn utf8_boundary_feed(state: Utf8BoundaryState, b: u8) -> bool:
+    if state.remaining > 0:
+        if _is_utf8_cont(b):
+            state.remaining = state.remaining - 1
+            return state.remaining == 0
+        # Bad continuation — reset and treat byte as a new codepoint start.
+        state.remaining = 0
+    val len: u32 = utf8_codepoint_len(b)
+    if len <= 1:
+        # ASCII or invalid lead — always a boundary.
+        return true
+    state.remaining = len - 1
+    state.remaining == 0
+
+# Convenience: process a buffer of bytes through ANSI strip + line-end
+# normalization, calling `emit(byte)` for each surviving byte. Caller-side
+# closures aren't yet ergonomic in Simple — this module exposes the state
+# objects so callers can drive a per-byte loop themselves.
+#
+# The shape contract:
+#   for each byte `b` in input:
+#       if ansi_strip_should_emit(strip, b):
+#           var out: [u8; 2] = [0u8, 0u8]
+#           val n: u32 = normalize_lineend_byte(b, out)
+#           # emit out[0..n] to the underlying console

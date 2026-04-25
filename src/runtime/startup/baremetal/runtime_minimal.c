@@ -1,4 +1,13 @@
 /*
+ * DEPRECATED 2026-04-25: control-flow ported to
+ *   src/os/runtime/baremetal/runtime_minimal.spl
+ * Wave 3 swaps the build manifest to compile the .spl file. Once Wave 3
+ * x86_64 smoke is green, the duplicated symbols (zero_bss, spl_thread_init,
+ * spl_init_args, main, __spl_exit, __spl_start_bare) get removed from this
+ * file and the residual rt_* primitives stay (Simple has no syntax for
+ * the variadic inline-asm primitives below; they remain a C↔Simple FFI
+ * surface). See src/os/runtime/baremetal/runtime_minimal.spl header.
+ *
  * Minimal bare-metal runtime glue for Simple-built test images.
  *
  * Provides the symbols expected by the startup assembly without pulling in

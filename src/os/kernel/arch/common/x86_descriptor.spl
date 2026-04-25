@@ -1,0 +1,124 @@
+# x86 Descriptor — GDT/IDT/TSS descriptor builders shared between
+# x86_64 and x86_32. Layouts diverge in two places:
+#   - x86_64 uses 16-byte GDT entries for system descriptors (TSS) and
+#     16-byte IDT gates; user-mode segment descriptors stay 8 bytes.
+#   - x86_32 uses 8-byte everywhere.
+# The flag-bit positions for type/dpl/present/granularity are identical.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# ---- GDT / IDT type-bits (shared positions) ----
+val SEG_TYPE_CODE_RX:  u8 = 0xA      # code, exec/read
+val SEG_TYPE_DATA_RW:  u8 = 0x2      # data, read/write
+val SEG_TYPE_TSS_AVAIL_64: u8 = 0x9
+val SEG_TYPE_TSS_AVAIL_32: u8 = 0x9
+val SEG_TYPE_INT_GATE_64:  u8 = 0xE
+val SEG_TYPE_TRAP_GATE_64: u8 = 0xF
+
+val SEG_PRESENT:    u8 = 0x80
+val SEG_DPL_KERNEL: u8 = 0x00
+val SEG_DPL_USER:   u8 = 0x60
+val SEG_S_CODE_DATA: u8 = 0x10        # S=1 for code/data, =0 for system
+
+val GRAN_4K:       u8 = 0x80          # G bit
+val GRAN_LONG:     u8 = 0x20          # L bit (x86_64 long-mode)
+val GRAN_DB_32:    u8 = 0x40          # D/B bit (32-bit default)
+
+# 8-byte GDT entry (used by both x86_64 user-segs and all x86_32).
+@repr("C")
+struct GdtEntry8:
+    """8-byte segment descriptor (legacy 32-bit / x86_64 user code/data)."""
+    limit_low: u16
+    base_low:  u16
+    base_mid:  u8
+    access:    u8     # type|S|DPL|P
+    granularity: u8   # limit_high(4) | flags(4)
+    base_high: u8
+
+# 16-byte GDT entry (x86_64 system descriptors — TSS, LDT).
+@repr("C")
+struct GdtEntry16:
+    """16-byte system descriptor (x86_64 TSS / LDT)."""
+    limit_low: u16
+    base_low:  u16
+    base_mid:  u8
+    access:    u8
+    granularity: u8
+    base_high: u8
+    base_upper: u32
+    reserved:  u32
+
+# IDT gate (16 bytes on x86_64, 8 bytes on x86_32). We always use the
+# 16-byte form; x86_32 callers ignore the upper 8 bytes.
+@repr("C")
+struct IdtGate:
+    """x86_64 IDT gate descriptor (16 bytes); x86_32 ignores upper half."""
+    offset_low:  u16
+    selector:    u16
+    ist:         u8
+    type_attr:   u8
+    offset_mid:  u16
+    offset_high: u32
+    reserved:    u32
+
+# Build an 8-byte GDT entry from base/limit/access/granularity.
+fn gdt8_make(base: u32, limit: u32, access: u8, gran: u8) -> GdtEntry8:
+    val limit_high_nibble: u8 = ((limit >> 16) & 0x0F) as u8
+    val gran_byte: u8 = limit_high_nibble | (gran & 0xF0)
+    GdtEntry8(
+        limit_low: (limit & 0xFFFF) as u16,
+        base_low:  (base & 0xFFFF) as u16,
+        base_mid:  ((base >> 16) & 0xFF) as u8,
+        access:    access,
+        granularity: gran_byte,
+        base_high: ((base >> 24) & 0xFF) as u8,
+    )
+
+# Build a 16-byte system descriptor (TSS).
+fn gdt16_make_tss(base: u64, limit: u32, access: u8) -> GdtEntry16:
+    GdtEntry16(
+        limit_low: (limit & 0xFFFF) as u16,
+        base_low:  (base & 0xFFFF) as u16,
+        base_mid:  ((base >> 16) & 0xFF) as u8,
+        access:    access,
+        granularity: ((limit >> 16) & 0x0F) as u8,
+        base_high: ((base >> 24) & 0xFF) as u8,
+        base_upper: ((base >> 32) & 0xFFFFFFFF) as u32,
+        reserved:  0,
+    )
+
+# Build a long-mode IDT gate.
+fn idt64_make_gate(handler: u64, selector: u16, ist: u8, type_dpl: u8) -> IdtGate:
+    IdtGate(
+        offset_low:  (handler & 0xFFFF) as u16,
+        selector:    selector,
+        ist:         ist & 0x7,
+        type_attr:   type_dpl,
+        offset_mid:  ((handler >> 16) & 0xFFFF) as u16,
+        offset_high: ((handler >> 32) & 0xFFFFFFFF) as u32,
+        reserved:    0,
+    )
+
+# GDT/IDT pseudo-descriptor (lgdt/lidt argument).
+@repr("C")
+@pack(2)
+struct DescriptorRegister:
+    """Pseudo-descriptor loaded by LGDT / LIDT."""
+    limit: u16
+    base:  u64
+
+fn descriptor_register_make(base: u64, limit: u16) -> DescriptorRegister:
+    DescriptorRegister(limit: limit, base: base)
+
+# Common selector index helpers.
+val SEL_KERNEL_CODE_64: u16 = 0x08
+val SEL_KERNEL_DATA_64: u16 = 0x10
+val SEL_USER_CODE_64:   u16 = 0x18 | 0x3
+val SEL_USER_DATA_64:   u16 = 0x20 | 0x3
+val SEL_TSS_64:         u16 = 0x28
+
+val SEL_KERNEL_CODE_32: u16 = 0x08
+val SEL_KERNEL_DATA_32: u16 = 0x10
+val SEL_USER_CODE_32:   u16 = 0x18 | 0x3
+val SEL_USER_DATA_32:   u16 = 0x20 | 0x3
+val SEL_TSS_32:         u16 = 0x28
