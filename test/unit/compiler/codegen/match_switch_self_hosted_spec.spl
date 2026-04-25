@@ -9,16 +9,25 @@ integer-literal `match` expressions to:
     so backends emit a jump table.
   - Nested `If` chain for sparse / smaller cases.
 
-Phase 1 scope (this spec):
+Phase 1 scope:
   - Wildcard default arm
   - Literal(IntLit n) arms
 
-Phase 2 (NOT in scope; documented in
+Phase 2a scope (added in this spec):
+  - Binding pattern (`case x:`) — irrefutable default that also binds
+    the scrutinee to a local symbol
+  - Or pattern with all-IntLit alternatives (`case 1 | 2 | 3:`) —
+    each alternative becomes its own dispatch entry pointing at the
+    shared arm body
+
+Phase 2b (still NOT in scope; documented in
 `doc/08_tracking/todo/compiler_bugs_for_crypto_2026-04-25.md` §B5b):
-  - Other HirPatternKind variants (Binding, Tuple, Array, Struct,
-    Enum, Or, Range, non-IntLit Literal)
+  - Tuple, Array, Struct, Enum, Range patterns
+  - Or with non-IntLit alternatives
+  - Non-IntLit Literal (Bool/Char/String)
   - Match-arm guards
   - Result type merging across non-uniform arm bodies
+  - Exhaustiveness for matches without wildcard/binding default
 
 The companion sibling spec `match_switch_codegen_spec.spl` already
 covers the Rust-seed B5 path; this spec exercises the same shapes
@@ -64,6 +73,36 @@ fn cipher_lookup(suite: i64) -> i64:
         case 0x1304: 7
         case _: 0
 
+# Phase 2a — Binding pattern: irrefutable default arm binds scrutinee
+# to a local symbol referenced inside the arm body.
+fn binding_default(x: i64) -> i64:
+    match x:
+        case 1: 100
+        case 2: 200
+        case y: y + 1000
+
+# Phase 2a — Binding pattern alone (no int_cases) — the default arm
+# is the only arm and references the bound symbol.
+fn binding_only(x: i64) -> i64:
+    match x:
+        case n: n * 2
+
+# Phase 2a — Or pattern with all-IntLit alternatives. The dense
+# case (5 distinct alternatives across 2 arms + 3 literal arms,
+# total >=4 keys span <= 1024) should still hit Switch path.
+fn or_dense(id: i64) -> i64:
+    match id:
+        case 1 | 2 | 3: 10
+        case 4: 20
+        case 5: 30
+        case _: 0
+
+# Phase 2a — Or pattern in sparse layout (if-chain path).
+fn or_sparse(id: i64) -> i64:
+    match id:
+        case 7 | 11: 99
+        case _: 0
+
 describe "B5b · self-hosted MatchCase MIR lowering":
 
     it "dense dispatch hits each arm correctly":
@@ -98,3 +137,32 @@ describe "B5b · self-hosted MatchCase MIR lowering":
         expect(cipher_lookup(0x1303)).to_equal(6)
         expect(cipher_lookup(0x1304)).to_equal(7)
         expect(cipher_lookup(0x9999)).to_equal(0)
+
+    it "Phase 2a binding pattern: int arms route to int branches":
+        expect(binding_default(1)).to_equal(100)
+        expect(binding_default(2)).to_equal(200)
+
+    it "Phase 2a binding pattern: default arm uses bound symbol":
+        expect(binding_default(5)).to_equal(1005)
+        expect(binding_default(-3)).to_equal(997)
+        expect(binding_default(0)).to_equal(1000)
+
+    it "Phase 2a binding-only match (default arm is sole arm)":
+        expect(binding_only(0)).to_equal(0)
+        expect(binding_only(7)).to_equal(14)
+        expect(binding_only(-4)).to_equal(-8)
+
+    it "Phase 2a Or-of-IntLit dense routes through Switch":
+        expect(or_dense(1)).to_equal(10)
+        expect(or_dense(2)).to_equal(10)
+        expect(or_dense(3)).to_equal(10)
+        expect(or_dense(4)).to_equal(20)
+        expect(or_dense(5)).to_equal(30)
+        expect(or_dense(0)).to_equal(0)
+        expect(or_dense(99)).to_equal(0)
+
+    it "Phase 2a Or-of-IntLit sparse routes through if-chain":
+        expect(or_sparse(7)).to_equal(99)
+        expect(or_sparse(11)).to_equal(99)
+        expect(or_sparse(8)).to_equal(0)
+        expect(or_sparse(0)).to_equal(0)

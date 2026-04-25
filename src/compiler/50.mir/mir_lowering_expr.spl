@@ -283,9 +283,18 @@ impl MirLowering:
           - HirPatternKind.Wildcard            (default arm)
           - HirPatternKind.Literal(IntLit n)   (constant int arm)
 
-        Anything else (Binding, Tuple, Array, Struct, Enum, Or, Range,
-        non-IntLit Literal, or any guard) yields a clear diagnostic so users
-        get a real error instead of `unsupported MIR expression`.
+        Phase 2a (this revision) additionally supports:
+          - HirPatternKind.Binding(symbol, _)  (irrefutable default arm
+            that also binds the scrutinee to a local symbol; mutability
+            flag is irrelevant at MIR-lowering time and is ignored here)
+          - HirPatternKind.Or(patterns) when every alternative is
+            Literal(IntLit n) (each alternative becomes its own
+            int_cases entry pointing at the shared arm body)
+
+        Anything else (Tuple, Array, Struct, Enum, Range, non-IntLit
+        Literal, Or with non-IntLit alternatives, or any guard) yields a
+        clear diagnostic so users get a real error instead of
+        `unsupported MIR expression`.
 
         Dense int matches (>=4 cases, key-span <= 1024) emit
         MirTerminator.Switch so the backend can produce a jump table; sparse
@@ -293,11 +302,13 @@ impl MirLowering:
         scrutinee is evaluated once into a temp to avoid duplicating side
         effects.
         """
-        # Phase 1 gate: every arm must be (Wildcard | Literal(IntLit)) with
-        # no guard. If anything else is present, emit a Phase 2 diagnostic
-        # naming the offending kind and bail out with a unit temp.
+        # Phase 1+2a gate: every arm must be (Wildcard | Binding |
+        # Literal(IntLit) | Or(of IntLit)) with no guard. If anything else
+        # is present, emit a Phase 2 diagnostic naming the offending kind
+        # and bail out with a unit temp.
         var int_cases: [(i64, HirBlock)] = []
         var default_body: HirBlock? = nil
+        var default_binding: SymbolId? = nil
         var idx = 0
         while idx < arms.len():
             val arm = arms[idx]
@@ -335,15 +346,50 @@ impl MirLowering:
                             val err_temp3 = b_err3.new_temp(MirType.unit())
                             self.builder = b_err3
                             return err_temp3
-                case Binding(_, _):
-                    self.error(
-                        "B5b Phase 2 not yet implemented: pattern kind Binding",
-                        Some(arm.pattern.span)
-                    )
-                    var b_b = self.builder
-                    val t_b = b_b.new_temp(MirType.unit())
-                    self.builder = b_b
-                    return t_b
+                case Binding(symbol, _):
+                    # Phase 2a: irrefutable binding pattern acts like a
+                    # wildcard default but also binds the scrutinee to a
+                    # local symbol. Mutability flag is ignored at MIR
+                    # level (it only matters for borrow-check).
+                    if default_body.?:
+                        self.error(
+                            "B5b: match has multiple wildcard/binding default arms",
+                            Some(arm.span)
+                        )
+                        var b_dup = self.builder
+                        val t_dup = b_dup.new_temp(MirType.unit())
+                        self.builder = b_dup
+                        return t_dup
+                    default_body = Some(arm.body)
+                    default_binding = Some(symbol)
+                case Or(sub_patterns):
+                    # Phase 2a: Or-of-IntLit alternatives expand into one
+                    # int_cases entry per alternative, all pointing at the
+                    # same shared arm body. Any non-IntLit sub-pattern
+                    # falls through to the Phase 2 diagnostic below.
+                    var or_ok = true
+                    var oi = 0
+                    while oi < sub_patterns.len() and or_ok:
+                        val sp = sub_patterns[oi]
+                        match sp.kind:
+                            case Literal(sp_lit):
+                                match sp_lit.kind:
+                                    case IntLit(sn, _):
+                                        int_cases = int_cases.push((sn, arm.body))
+                                    case _:
+                                        or_ok = false
+                            case _:
+                                or_ok = false
+                        oi = oi + 1
+                    if not or_ok:
+                        self.error(
+                            "B5b Phase 2 not yet implemented: pattern kind Or with non-IntLit alternatives",
+                            Some(arm.pattern.span)
+                        )
+                        var b_o2 = self.builder
+                        val t_o2 = b_o2.new_temp(MirType.unit())
+                        self.builder = b_o2
+                        return t_o2
                 case Tuple(_):
                     self.error(
                         "B5b Phase 2 not yet implemented: pattern kind Tuple",
@@ -380,15 +426,6 @@ impl MirLowering:
                     val t_e = b_e.new_temp(MirType.unit())
                     self.builder = b_e
                     return t_e
-                case Or(_):
-                    self.error(
-                        "B5b Phase 2 not yet implemented: pattern kind Or",
-                        Some(arm.pattern.span)
-                    )
-                    var b_o = self.builder
-                    val t_o = b_o.new_temp(MirType.unit())
-                    self.builder = b_o
-                    return t_o
                 case Range(_, _, _):
                     self.error(
                         "B5b Phase 2 not yet implemented: pattern kind Range",
@@ -430,9 +467,9 @@ impl MirLowering:
         val use_switch = self.should_emit_switch(int_cases)
 
         if use_switch:
-            self.emit_switch_dispatch(scrut_local, int_cases, default_body.unwrap())
+            self.emit_switch_dispatch(scrut_local, int_cases, default_body.unwrap(), default_binding)
         else:
-            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body.unwrap())
+            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body.unwrap(), default_binding)
 
     me should_emit_switch(int_cases: [(i64, HirBlock)]) -> bool:
         """Heuristic: dense int matches go to Switch (jump table), sparse
@@ -453,7 +490,7 @@ impl MirLowering:
         val span = hi - lo
         span >= 0 and span <= 1024
 
-    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock) -> LocalId:
+    me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
         """Emit a MirTerminator.Switch for a dense int match. Each arm
         lowers into its own block, stores its result into a shared temp,
         and jumps to a merge block. Mirrors lower_if's
@@ -495,10 +532,14 @@ impl MirLowering:
             self.builder = b_arm2
             ci = ci + 1
 
-        # Default arm.
+        # Default arm. If the default arm came from a Binding pattern,
+        # map the binding's symbol to the scrutinee local before lowering
+        # the body so references inside the arm body resolve.
         var b_d = self.builder
         b_d.switch_to_block(default_block)
         self.builder = b_d
+        if default_binding.?:
+            self.local_map[default_binding.unwrap()] = scrut_local
         val def_result = self.lower_block(default_body)
         var b_d2 = self.builder
         if def_result.?:
@@ -513,7 +554,7 @@ impl MirLowering:
 
         result
 
-    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock) -> LocalId:
+    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?) -> LocalId:
         """Emit a nested If chain for sparse / small int matches.
         Cheaper than a jump table when arms < 4 or key span > 1024."""
         var b = self.builder
@@ -559,6 +600,10 @@ impl MirLowering:
             i = i + 1
 
         # After all cases, current block is the cascade tail = default.
+        # If the default arm came from a Binding pattern, map the
+        # binding's symbol to the scrutinee local before lowering.
+        if default_binding.?:
+            self.local_map[default_binding.unwrap()] = scrut_local
         val def_result = self.lower_block(default_body)
         var b_def = self.builder
         if def_result.?:
