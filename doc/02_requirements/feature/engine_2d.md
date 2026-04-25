@@ -159,3 +159,26 @@ A minimal platformer demo (`examples/engine_2d_demo/main.spl`) demonstrates engi
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`
+
+## std.game2d Game Framework Layer (2026-04-25)
+
+A LÖVE-style game framework `std.game2d` ships layered over the existing `engine/` library.
+
+**Scope shipped:** Tier 0 (tiny: `App` trait + `Canvas` + `g.run`) and Tier 1 (asset-typed `Image`/`Sound`/`Font` handles) plus the entry of Tier 2 (`game.sdn` + `assets.sdn` SDN loaders with `GAME-ASSET-001/002/014` diagnostics). Headless backend with FNV-1a `frame_hash` for deterministic-replay/golden-frame tests, snapshot-based input, fixed-step deterministic loop with runtime `GAME-DET-001` guard, `bin/simple game new|run|test|inspect` CLI.
+
+**Deferred (out of scope this iteration):** Tier 2 full `scene.sdn` entity tree, Tier 3 ECS, Tier 4 editor, animation, tilemap, audio mixer beyond `play(Sound)`, UI widgets, Vulkan/WebGPU backends, packaging, profiler, hot reload, compile-time `#[deterministic]` lint rule.
+
+**Acceptance Criteria final verdicts** (full text in `.sstack/game2d-framework/state.md` `### 1-dev`):
+
+- AC-1 App trait + `g.run` + 25-line demo — **PASS**
+- AC-2 Canvas API + math re-exports — **PASS**
+- AC-3 Snapshot-based input — **PASS**
+- AC-4 Fixed-step + determinism runtime guard — **PASS**
+- AC-5 Headless replay + golden-frame — **PARTIAL** (synthetic 4×4 hash; real-demo pin blocked by `impl X: Trait` parse + interpreter bulk-buffer limit; see follow-up tickets 3 + 4)
+- AC-6 SDN `game.sdn` + `assets.sdn` + diagnostics — **PASS**
+- AC-7 `bin/simple game` subcommand — **PASS**
+- AC-8 `<800` LOC files, no inheritance, generics with `<>`, reuse engine primitives — **PASS**
+
+Spec totals: 9 specs / 122 it-blocks all green; engine_2d 6/6 + primitives 3/3 regression clean.
+
+**Related bug filed during pipeline:** `doc/08_tracking/bug/parser_member_target_in_single_line_if.md` (single-line-if member-target assignment — workaround in demo).

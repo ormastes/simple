@@ -245,3 +245,57 @@ An `enum Component2D` with variants (Sprite, Camera, TileMap, Physics) is exhaus
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`
+
+## std.game2d Detail Design (2026-04-25)
+
+Detail design for the `std.game2d` framework layer landed alongside Phase 5 of the `game2d-framework` SStack pipeline. Full design: `.sstack/game2d-framework/state.md` `### 3-arch` and `### 5-implement`.
+
+### Per-frame loop protocol (`game2d/loop/driver.spl`)
+
+`LoopDriver` enforces a 4-phase protocol per wall-clock tick (mirrors `engine/core/time.spl::Clock.consume_fixed_steps()`):
+
+1. **Input freeze.** `backend.poll_input()` returns a fresh `InputSnapshot` (or, in replay mode, the next entry from `ScriptedInput.frames`). The snapshot is the only input view exposed to user code for the rest of the frame — no direct OS calls.
+2. **fixed_update accumulator.** `consume_fixed_steps(wall_dt_ns)` drains an internal `accumulator_ns` by `fixed_step_ns` (default 60 Hz → 16_666_666 ns) and calls `app.fixed_update(step)` once per drained slice. Step count is deterministic given the same wall-time series — the replay spec asserts 100 ms → 6 steps and 0 ms → 0 steps.
+3. **update.** `app.update(wall_dt_seconds)` runs once per tick with the residual non-fixed wall delta — for animation interpolation and per-frame logic.
+4. **draw.** `app.draw(canvas)` runs against a fresh `Canvas` builder. `Canvas` accumulates into a `RenderCommandBuffer`; backend `present(fb, w, h)` flushes via `SoftwareRenderer.render_frame(cmds)` for headless or via SDL2 path for windowed.
+
+Module-level `run_frames(driver, app, backend, snapshots, frame_dt_ns)` is the AC-5 replay/golden harness — it loops the same 4 phases against scripted snapshots and a fixed wall-delta.
+
+### Canvas → RenderCommand → backend pipeline
+
+`Canvas` (`game2d/render/canvas.spl`) is a thin builder over `engine/render/command.spl::RenderCommandBuffer`. Each AC-2 method appends one `RenderCommand`:
+
+| Canvas method | RenderCommand variant |
+|---|---|
+| `clear(color)` | `Clear { color }` |
+| `draw(image, pos)` / `draw(image, transform)` | `DrawSprite { tex, transform, tint }` |
+| `rect(Stroke, r, c)` | `DrawRectOutlined { rect, color }` (new) |
+| `rect(Fill, r, c)` | `DrawRect { rect, color }` |
+| `circle(Stroke, c, r, col)` | `DrawCircleOutlined { center, radius, color }` (new) |
+| `circle(Fill, c, r, col)` | `DrawCircle { center, radius, color }` |
+| `line(a, b, c)` | (delegated to existing `DrawTriangles`/line primitive) |
+| `text(s, pos, c)` | `DrawText { string, x, y, style, color, z }` (new) |
+
+The three new variants — `DrawText`, `DrawRectOutlined`, `DrawCircleOutlined` — are added in this iteration's edit to `engine/render/command.spl`. Headless `SoftwareRenderer` paints them; live GPU/SDL pipeline arms are TODO-tagged `GAME-RENDER-002` (see follow-up ticket).
+
+Transparent-color short-circuit (`color.a == 0` → no append) and null-Image guard (`GAME-RENDER-001` panic) live in `Canvas`.
+
+### Determinism guard bracket pattern
+
+`game2d/time/det_guard.spl` exposes a thread-local `deterministic_mode` flag plus an enter/leave bracket invoked by `LoopDriver` around every `App` callback:
+
+```
+enter_callback()    # sets in_callback = true
+try:
+    app.update(dt)
+finally:
+    leave_callback()    # sets in_callback = false
+```
+
+`g.time.now()` and `g.random.rand()` panic with `GAME-DET-001` if `deterministic_mode == true && in_callback == false` — guaranteeing wall-time / unseeded-RNG reads only happen inside an `App` callback's deterministic bracket. Raw `std.io.time.*` reads outside `g.*` bypass the guard intentionally — a compile-time lint rule (GAME-DET-LINT-001, deferred — see ticket `game2d_det_lint_rule.md`) would close that gap.
+
+### Migration shim for `gc_async_mut/game2d/sprite.spl`
+
+`src/lib/gc_async_mut/game2d/sprite.spl` carries an `@deprecated` header pointing to `std.game2d.render.image::Image`. Phase 6 left it in place because internal callers in `gc_async_mut/game2d/{batch,camera}.spl` (the GC-arena sprite batcher) still import it. Phase 8 amber-list ticket `game2d_image_sound_new_deprecation.md` tracks removal once those callers migrate; ticket `game2d_render_002_gpu_pipeline_arms.md` covers the live-render path that those callers ultimately need.
+
+For per-AC implementation file lists and rationale, see state file `### 5-implement` Wave A/B/C subsections.
