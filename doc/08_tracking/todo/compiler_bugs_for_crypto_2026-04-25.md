@@ -106,7 +106,22 @@ recurring complaint after crypto lands)
 
 ---
 
-## B3 · SSpec `--mode=smf` / `--compile` wrapper places class defs in `fn main()`
+## B3 · SSpec `--mode=smf` wrapper class hoisting — VERIFIED FIXED 2026-04-25
+
+**Status:** Already landed 2026-04-17 in `preprocess_sspec_for_smf`
+(`src/compiler_rust/driver/src/cli/test_runner/execution.rs`). Module-scope
+`class`/`impl`/`enum`/`trait`/`type`/`val`/`let`/`mod` are now hoisted; `use std.spec`
+is auto-injected. Verified by running `test/smoke/compile_smoke_spec.spl` and a
+module-scope `class Foo` spec under `--mode=smf` — both PASS. Crypto KAT loaders
+(module-scope class definitions) are unblocked.
+
+**Residual issues (separate items, NOT B3 — won't block crypto KATs):**
+- R1: `class` INSIDE `it` blocks fails HIR lowering — needs HIR change.
+- R2: `skip("reason")` unresolved in compiled mode — `skip` is a Simple language
+  keyword. Fix options all intrusive (rename DSL to `pending()`, context-sensitive
+  parsing, or HIR Node::Skip with trailing expr).
+
+**Original (stale) description retained for history:**
 
 **Memory:** `feedback_sspec_compile_pipeline.md`.
 
