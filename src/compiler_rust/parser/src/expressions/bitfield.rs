@@ -7,6 +7,16 @@
 //! Read form  : `x.bits[lo..hi]`        →  `(x >> lo) & mask`
 //! Write form : `x.bits[lo..hi] = v`    →  `x = (x & ~mask) | ((v & mask) << lo)`
 //!
+//! Augmented assigns (Phase 2): `x.bits[lo..hi] += v` desugars to the same
+//! plain-`=` shape but with the new field value computed as
+//!     `((x >> lo) & mask) <op> v`
+//! before being masked/shifted back. Supported ops are the arithmetic
+//! augmented assigns the language already defines on integers: `+=`, `-=`,
+//! `*=`, `/=`, `%=`. Bitwise augmented assigns (`&=`, `|=`, `^=`) and
+//! suspend forms (`~=`, `~+=`, ...) are NOT supported because the language
+//! has no token for the bitwise variants and the suspend semantics on a
+//! synthetic L-value are ambiguous.
+//!
 //! `mask` is `(1 << (hi - lo)) - 1` and is built either as a constant fold
 //! (when `lo` and `hi` are integer literals) or as a runtime expression
 //! using shift/sub on integer literals so the field width can be dynamic.
@@ -15,7 +25,7 @@
 //! `Slice` is a `FieldAccess` whose field name is anything other than
 //! `bits`, the rewrite does nothing — normal Slice lowering is used.
 
-use crate::ast::{BinOp, Expr, RangeBound, UnaryOp};
+use crate::ast::{AssignOp, BinOp, Expr, RangeBound, UnaryOp};
 
 /// If `expr` is `x.bits[lo..hi]`, rewrite it into a mask+shift read
 /// expression. Otherwise return `expr` unchanged.
@@ -92,6 +102,50 @@ pub fn build_bits_write_value(target_lvalue: Expr, lo: Expr, hi: Expr, value: Ex
     let masked_value = bit_and(value, mask);
     let shifted_value = shl(masked_value, lo);
     bit_or(cleared, shifted_value)
+}
+
+/// Map a supported augmented `AssignOp` to its underlying `BinOp`.
+///
+/// Only arithmetic augmented assigns are supported on bitfield slices —
+/// the language has no `&=`/`|=`/`^=` tokens, and the `~=` family carries
+/// suspend semantics that don't compose with a synthetic L-value.
+pub fn augmented_assign_binop(op: AssignOp) -> Option<BinOp> {
+    match op {
+        AssignOp::AddAssign => Some(BinOp::Add),
+        AssignOp::SubAssign => Some(BinOp::Sub),
+        AssignOp::MulAssign => Some(BinOp::Mul),
+        AssignOp::DivAssign => Some(BinOp::Div),
+        AssignOp::ModAssign => Some(BinOp::Mod),
+        _ => None,
+    }
+}
+
+/// Build the value expression for `x.bits[lo..hi] <op>= v`:
+///     `(x & ~mask_at_lo) | (((((x >> lo) & mask) <op> v) & mask) << lo)`
+///
+/// The inner `& mask` after the binary op clamps the post-op value back to
+/// the field width so a `+=` carry into bit `hi` does not bleed into the
+/// next field.
+///
+/// Note: `target_lvalue` is duplicated three times into the value
+/// expression (clear-side, read-side, plus the assignment LHS in the
+/// caller), so a side-effecting target (e.g., `arr[next()].bits[…]`)
+/// would observe the side effect multiple times. That case is explicitly
+/// deferred — see the file-level comment in `bitfield.rs` and the
+/// task-tracking doc.
+pub fn build_bits_augmented_value(
+    target_lvalue: Expr,
+    lo: Expr,
+    hi: Expr,
+    binop: BinOp,
+    rhs: Expr,
+) -> Expr {
+    // Compute the post-op field value: `((target >> lo) & mask) <op> rhs`.
+    let current_field = build_bits_read(target_lvalue.clone(), lo.clone(), hi.clone());
+    let new_field = bin(binop, current_field, rhs);
+    // Reuse the plain-write builder; it re-applies `& mask` (truncating
+    // any overflow above the field) and shifts back into position.
+    build_bits_write_value(target_lvalue, lo, hi, new_field)
 }
 
 // ---- internal builders ------------------------------------------------------

@@ -287,6 +287,15 @@ state.bits[4..8]                    # 0xE   (4-bit nibble)
 var word = 0x12345600
 word.bits[0..8]  = 0xEF             # word == 0x123456EF
 word.bits[24..32] = 0xAB            # word == 0xAB3456EF
+
+# Augmented assigns (Phase 2) — arithmetic only:
+var counter = 0
+counter.bits[0..8] = 0x10
+counter.bits[0..8] += 5             # counter.bits[0..8] == 0x15
+counter.bits[0..8] -= 1             # 0x14
+counter.bits[0..8] *= 2             # 0x28
+counter.bits[0..8] /= 4             # 0x0A
+counter.bits[0..8] %= 3             # 0x01
 ```
 
 Desugars at parse time to plain shift+mask:
@@ -295,14 +304,24 @@ Desugars at parse time to plain shift+mask:
 |--------------------------------|---------------------------------------------------------------|
 | `x.bits[lo..hi]`               | `(x >> lo) & ((1 << (hi - lo)) - 1)`                          |
 | `x.bits[lo..hi] = v`           | `x = (x & ~(mask << lo)) \| ((v & mask) << lo)`               |
+| `x.bits[lo..hi] <op>= v`       | `x = clear \| ((((x >> lo) & mask) <op> v) & mask) << lo`     |
 
 Notes:
 - The source value of a write is masked to the field width — bits above
-  the field cannot bleed into adjacent fields.
+  the field cannot bleed into adjacent fields. The same final `& mask`
+  applies to augmented forms, so e.g. `+= 1` on a saturated field wraps
+  the field to 0 without disturbing the next field up.
 - Inclusive ranges (`bits[0..=7]`) are accepted and equivalent to
   `bits[0..8]`.
-- Augmented assignment (`+=`, `~=`, ...) on a bitfield slice is not
-  supported — use the explicit read/write form instead.
+- Supported augmented ops are `+=`, `-=`, `*=`, `/=`, `%=` — the same
+  set the language already defines on integers. Bitwise augmented forms
+  (`&=`, `|=`, `^=`) are NOT supported — the language has no token for
+  them. Suspend forms (`~=`, `~+=`, ...) on a bitfield slice are
+  intentionally rejected since their semantics on a synthetic L-value
+  are ambiguous.
+- Side-effecting receivers (e.g. `arr[next()].bits[…]` with a mutating
+  `next()`) are an explicitly deferred limitation — the rewrite reads
+  the receiver multiple times. Use a temp variable in those cases.
 - Pure-Simple equivalents `extract_bits` / `insert_bits` /
   `get_byte` / `set_byte` live in `std.bitwise_utils` and remain
   available for cases where a function call is preferable.

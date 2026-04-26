@@ -110,3 +110,68 @@ describe "int.bits round-trip and aliasing (B4)":
         arr[1].bits[0..8] = 0xBB
         expect(arr[0]).to_equal(0xAA000000)
         expect(arr[1]).to_equal(0xBB)
+
+describe "int.bits augmented assigns (B4-sugar Phase 2)":
+    # Phase 2 ships arithmetic augmented assigns on `x.bits[lo..hi]`:
+    # `+=`, `-=`, `*=`, `/=`, `%=`. The desugar reads the current field,
+    # applies the op against the RHS, masks the result back to the field
+    # width (so e.g. `+=` carry doesn't bleed into the next field), and
+    # writes it back via the Phase 1 write builder.
+    #
+    # Bitwise augmented assigns (`&=`, `|=`, `^=`) are NOT supported —
+    # the language has no token for them. Suspend forms (`~=`, `~+=`)
+    # are intentionally rejected since their semantics on a synthetic
+    # L-value are ambiguous.
+    #
+    # Side-effecting receivers (e.g. `arr[next()].bits[…] += v`) remain
+    # explicitly deferred — the desugar evaluates the target three times.
+
+    it "supports += on a single bitfield slice":
+        var state = 0x12340000
+        state.bits[16..24] = 0x10
+        state.bits[16..24] += 0x05
+        expect(state.bits[16..24]).to_equal(0x15)
+        # Higher field untouched
+        expect(state.bits[24..32]).to_equal(0x12)
+
+    it "supports -= on a bitfield slice":
+        var state = 0
+        state.bits[0..8] = 0x20
+        state.bits[0..8] -= 0x07
+        expect(state.bits[0..8]).to_equal(0x19)
+
+    it "supports *= on a bitfield slice":
+        var state = 0
+        state.bits[8..16] = 3
+        state.bits[8..16] *= 7
+        expect(state.bits[8..16]).to_equal(21)
+
+    it "supports /= on a bitfield slice":
+        var state = 0
+        state.bits[0..16] = 100
+        state.bits[0..16] /= 4
+        expect(state.bits[0..16]).to_equal(25)
+
+    it "supports %= on a bitfield slice":
+        var state = 0
+        state.bits[0..16] = 100
+        state.bits[0..16] %= 7
+        expect(state.bits[0..16]).to_equal(2)
+
+    it "masks += carry so it does not bleed into adjacent fields":
+        # Field is 4 bits wide, holds 0xF; += 1 wraps the field to 0
+        # WITHOUT setting the next bit up.
+        var state = 0
+        state.bits[0..4] = 0xF
+        state.bits[4..8] = 0x3   # neighbour we want to leave alone
+        state.bits[0..4] += 1
+        expect(state.bits[0..4]).to_equal(0)
+        expect(state.bits[4..8]).to_equal(0x3)
+
+    it "augmented op on indexed lvalue still works (pure index)":
+        # Same pure-index caveat as Phase 1 plain `=`; documented above.
+        var arr = [0, 0]
+        arr[0].bits[0..8] = 0x10
+        arr[0].bits[0..8] += 0x05
+        expect(arr[0].bits[0..8]).to_equal(0x15)
+        expect(arr[1]).to_equal(0)

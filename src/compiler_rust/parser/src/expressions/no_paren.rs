@@ -31,8 +31,12 @@ impl<'a> Parser<'a> {
             value = self.parse_with_no_paren_calls(value)?;
 
             // B4: desugar `x.bits[lo..hi] = v` to `x = (x & ~mask) | ((v & mask) << lo)`.
-            // Only the plain `=` form is rewritten — augmented forms (`+=`, `~=`, ...)
-            // on a bitfield slice are intentionally left as a parse error / fall-through
+            // Phase 2 also desugars arithmetic augmented assigns
+            // (`+=`, `-=`, `*=`, `/=`, `%=`) into the same plain-`=` shape with
+            // the new field value computed from a read of the current field.
+            // Bitwise augmented assigns (`&=`, `|=`, `^=`) are not supported —
+            // the language has no token for them. Suspend forms (`~=`, `~+=`,
+            // ...) on a bitfield slice are intentionally left as a fall-through
             // since their semantics on a synthetic L-value are ambiguous.
             if op == AssignOp::Assign {
                 if let Some((lvalue, lo, hi)) = super::bitfield::match_bits_write_target(&expr) {
@@ -41,6 +45,22 @@ impl<'a> Parser<'a> {
                         span,
                         target: lvalue,
                         op,
+                        value: new_value,
+                    }));
+                }
+            } else if let Some(binop) = super::bitfield::augmented_assign_binop(op) {
+                if let Some((lvalue, lo, hi)) = super::bitfield::match_bits_write_target(&expr) {
+                    let new_value = super::bitfield::build_bits_augmented_value(
+                        lvalue.clone(),
+                        lo,
+                        hi,
+                        binop,
+                        value,
+                    );
+                    return Ok(Node::Assignment(AssignmentStmt {
+                        span,
+                        target: lvalue,
+                        op: AssignOp::Assign,
                         value: new_value,
                     }));
                 }
