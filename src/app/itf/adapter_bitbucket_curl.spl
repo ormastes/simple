@@ -1,0 +1,654 @@
+# ITF CLI — Bitbucket Cloud REST 2.0 Adapter (curl shellout)
+#
+# Runtime path until the pure-Simple http_client transport extern lands
+# (issue #11). Shells out to `curl` for each REST call. Mirrors the public
+# tuple-return shape (bool, T, raw_text) of `adapter_bitbucket.spl` so the
+# orchestrator (`cmd_bb.spl`) can dispatch curl-vs-pure transparently.
+#
+# Reference endpoints (per /doc/01_research/local/spipe_infra/bitbucket_rest_2026.md):
+#   POST   /repositories/{ws}/{repo}/pullrequests
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}/comments
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/comments
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/approve
+#   DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/merge
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}/statuses
+#
+# Subprocess invocation mirrors `adapter_minio_mc.spl` (process_run + curl).
+# curl write-out for HTTP status follows the MinIO health-probe pattern.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.common.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize}
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+#
+# We intentionally do NOT import from adapter_bitbucket.spl because that file
+# imports `std.nogc_sync_mut.http_client` which has no transport extern yet
+# (issue #11) — the import fails at module load. This adapter therefore
+# carries its own (small) body-builder + ready-to-merge eval helpers. The
+# JSON shapes match adapter_bitbucket.spl byte-for-byte.
+
+val BBC_API_BASE = "https://api.bitbucket.org/2.0"
+val BB_OP_GENERAL = "general"
+val BB_OP_MERGE = "merge"
+
+
+# ============================================================================
+# Body builders (mirror adapter_bitbucket.spl's bb_build_*)
+# ============================================================================
+
+fn _bbc_lbrace() -> text:
+    "{"
+
+
+fn _bbc_rbrace() -> text:
+    "}"
+
+
+fn _bbc_json_str(s: text) -> text:
+    """Encode a text value as a JSON string literal, escaping per RFC 8259.
+
+    Avoids chained .replace() calls, which the interpreter does not support.
+    """
+    val s1 = s.replace("\\", "\\\\")
+    val s2 = s1.replace("\"", "\\\"")
+    val s3 = s2.replace("\n", "\\n")
+    val s4 = s3.replace("\r", "\\r")
+    val s5 = s4.replace("\t", "\\t")
+    "\"" + s5 + "\""
+
+
+fn bb_build_create_pr_body(title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> text:
+    """Build JSON body for POST /pullrequests."""
+    var parts: [text] = []
+    parts = parts + ["\"title\": " + _bbc_json_str(title)]
+    parts = parts + ["\"source\": " + _bbc_lbrace() + "\"branch\": " + _bbc_lbrace() + "\"name\": " + _bbc_json_str(source_branch) + _bbc_rbrace() + _bbc_rbrace()]
+    if dest_branch != "":
+        parts = parts + ["\"destination\": " + _bbc_lbrace() + "\"branch\": " + _bbc_lbrace() + "\"name\": " + _bbc_json_str(dest_branch) + _bbc_rbrace() + _bbc_rbrace()]
+    if reviewers.len() > 0:
+        var rs: [text] = []
+        for uuid in reviewers:
+            rs = rs + [_bbc_lbrace() + "\"uuid\": " + _bbc_json_str(uuid) + _bbc_rbrace()]
+        parts = parts + ["\"reviewers\": [" + rs.join(", ") + "]"]
+    _bbc_lbrace() + parts.join(", ") + _bbc_rbrace()
+
+
+fn bb_build_comment_body(content: text, inline_path: text, inline_from: i64, inline_to: i64) -> text:
+    """Build JSON body for POST .../comments."""
+    val content_obj = "\"content\": " + _bbc_lbrace() + "\"raw\": " + _bbc_json_str(content) + ", \"markup\": \"markdown\"" + _bbc_rbrace()
+    if inline_path == "":
+        return _bbc_lbrace() + content_obj + _bbc_rbrace()
+    val from_val = if inline_from < 0: "null" else: inline_from.to_string()
+    val to_val = if inline_to < 0: "null" else: inline_to.to_string()
+    val inline_obj = "\"inline\": " + _bbc_lbrace() + "\"path\": " + _bbc_json_str(inline_path) + ", \"from\": " + from_val + ", \"to\": " + to_val + _bbc_rbrace()
+    _bbc_lbrace() + content_obj + ", " + inline_obj + _bbc_rbrace()
+
+
+fn bb_build_merge_body(strategy: text, close_source_branch: bool, message: text) -> text:
+    """Build JSON body for POST .../merge."""
+    var parts: [text] = []
+    parts = parts + ["\"type\": \"pullrequest\""]
+    parts = parts + ["\"merge_strategy\": " + _bbc_json_str(strategy)]
+    val close_str = if close_source_branch: "true" else: "false"
+    parts = parts + ["\"close_source_branch\": " + close_str]
+    if message != "":
+        parts = parts + ["\"message\": " + _bbc_json_str(message)]
+    _bbc_lbrace() + parts.join(", ") + _bbc_rbrace()
+
+
+# ============================================================================
+# Data structures (mirror adapter_bitbucket.spl shapes — separate type names
+# to avoid colliding with the pure adapter's classes when both are imported).
+# ============================================================================
+
+class BbcPr:
+    id: i64
+    title: text
+    state: text
+    source_branch: text
+    dest_branch: text
+    author: text
+    web_url: text
+    merge_commit: text
+
+
+class BbcComment:
+    id: i64
+    author: text
+    content: text
+    inline_path: text
+    inline_to: i64
+
+
+class BbcStatus:
+    key: text
+    state: text
+    name: text
+    url: text
+
+
+class BbCurlClient:
+    """curl-shellout Bitbucket Cloud REST 2.0 client.
+
+    Holds workspace, repo, and Repository Access Token. base_url defaults
+    to api.bitbucket.org/2.0. curl_path defaults to "curl".
+    """
+    base_url: text
+    workspace: text
+    repo: text
+    token: text
+    curl_path: text
+
+    static fn create(workspace: text, repo: text, token: text) -> BbCurlClient:
+        BbCurlClient(base_url: BBC_API_BASE, workspace: workspace, repo: repo, token: token, curl_path: "curl")
+
+    fn auth_header() -> text:
+        bbc_auth_header(self.token)
+
+    fn is_configured() -> bool:
+        self.token != "" and self.workspace != "" and self.repo != ""
+
+
+# ============================================================================
+# Auth header
+# ============================================================================
+
+fn bbc_auth_header(token: text) -> text:
+    """Build Authorization header value for Bitbucket Cloud REST 2.0.
+
+    Repository Access Token (Bearer). Returns "" if no token configured.
+    """
+    if token == "":
+        return ""
+    "Bearer " + token
+
+
+# ============================================================================
+# URL builders (pure)
+# ============================================================================
+
+fn bbc_pr_collection_url(client: BbCurlClient) -> text:
+    client.base_url + "/repositories/" + client.workspace + "/" + client.repo + "/pullrequests"
+
+
+fn bbc_pr_url(client: BbCurlClient, pr_id: i64) -> text:
+    bbc_pr_collection_url(client) + "/" + pr_id.to_string()
+
+
+fn bbc_pr_sub_url(client: BbCurlClient, pr_id: i64, sub: text) -> text:
+    bbc_pr_url(client, pr_id) + "/" + sub
+
+
+# ============================================================================
+# argv builders (pure — covered by unit tests)
+# ============================================================================
+#
+# curl `-w` value: newline + percent + brace-http_code-brace. The literal is
+# built via char concatenation in `_bbc_curl_writeout()` to dodge Simple's
+# brace-name interpolation, which fires even when the brace is escaped in
+# some contexts (especially after a leading `\n`).
+
+fn _bbc_curl_writeout() -> text:
+    """Build the curl write-out string (newline then percent-brace-http_code-brace).
+    Built char-by-char to avoid triggering Simple's brace interpolation.
+    """
+    val pct = "%"
+    val lb = "{"
+    val rb = "}"
+    "\n" + pct + lb + "http_code" + rb
+
+fn _argv_curl_get(url: text, auth: text) -> [text]:
+    """Build curl argv for an authenticated GET that prints body + trailing http_code."""
+    var args: [text] = ["-s", "-S", "-X", "GET"]
+    if auth != "":
+        args = args + ["-H", "Authorization: " + auth]
+    args = args + ["-H", "Accept: application/json"]
+    args = args + ["-w", _bbc_curl_writeout()]
+    args + [url]
+
+
+fn _argv_curl_post(url: text, auth: text, body: text) -> [text]:
+    """Build curl argv for an authenticated POST.
+
+    If body is empty, omit `-d` entirely (some curl versions force
+    Content-Length: 0 with `-d ""`, which is a footgun for endpoints like
+    POST .../approve that expect a request with no body at all).
+    """
+    var args: [text] = ["-s", "-S", "-X", "POST"]
+    if auth != "":
+        args = args + ["-H", "Authorization: " + auth]
+    args = args + ["-H", "Accept: application/json"]
+    args = args + ["-H", "Content-Type: application/json"]
+    args = args + ["-w", _bbc_curl_writeout()]
+    if body != "":
+        args = args + ["-d", body]
+    args + [url]
+
+
+fn _argv_curl_delete(url: text, auth: text) -> [text]:
+    """Build curl argv for an authenticated DELETE (no body)."""
+    var args: [text] = ["-s", "-S", "-X", "DELETE"]
+    if auth != "":
+        args = args + ["-H", "Authorization: " + auth]
+    args = args + ["-H", "Accept: application/json"]
+    args = args + ["-w", _bbc_curl_writeout()]
+    args + [url]
+
+
+# ============================================================================
+# Response parsing
+# ============================================================================
+
+fn _bbc_parse_status_tail(stdout: text) -> (i64, text):
+    """Split curl write-out output (body, then trailing newline + status code) into (status, body).
+
+    The HTTP status code is the LAST line; everything before that final
+    newline is the response body (which itself may contain newlines).
+    Returns (0, stdout) if the trailing line is not a parseable integer.
+    """
+    val s = stdout
+    if s == "":
+        return (0, "")
+    # Find last newline.
+    var i: i64 = s.len() - 1
+    var nl: i64 = -1
+    while i >= 0:
+        if s[i] == "\n":
+            nl = i
+            break
+        i = i - 1
+    if nl < 0:
+        # No newline — entire stdout might be the status (e.g. empty body).
+        val tail = s.trim()
+        return (_bbc_parse_int_or_zero(tail), "")
+    val body = s[0:nl]
+    val tail = s[nl + 1:s.len()].trim()
+    val status = _bbc_parse_int_or_zero(tail)
+    if status == 0:
+        # Couldn't parse; treat whole stdout as body for diagnostics.
+        return (0, stdout)
+    (status, body)
+
+
+fn _bbc_parse_int_or_zero(s: text) -> i64:
+    """Parse a non-negative integer from `s`, returning 0 on any non-digit."""
+    if s.len() == 0:
+        return 0
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch < "0" or ch > "9":
+            return 0
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    n
+
+
+# ============================================================================
+# Status → label mapping (matches the spirit of bb_map_http_error in the
+# pure adapter). Returned in the `raw` slot on failure so callers can
+# pattern-match the same label whether they hit the pure or curl path.
+# ============================================================================
+
+fn _bbc_status_label(status: i64, body: text, op: text) -> text:
+    """Map an HTTP status code to a stable diagnostic label."""
+    if status == 401:
+        return "blocked-auth: unauthorized (HTTP 401)"
+    if status == 403:
+        if op == BB_OP_MERGE:
+            return "blocked: branch policy or merge restriction (HTTP 403): " + body
+        return "blocked-auth: forbidden (HTTP 403): " + body
+    if status == 404:
+        return "not_found (HTTP 404)"
+    if status == 409:
+        return "blocked-conflict: PR is not mergeable (HTTP 409): " + body
+    if status == 429:
+        return "rate_limited (HTTP 429): retry after server-specified interval"
+    if status == 0:
+        return "network_error: curl invocation failed: " + body
+    "api_error (HTTP " + status.to_string() + "): " + body
+
+
+# ============================================================================
+# Subprocess + status helper
+# ============================================================================
+
+fn _run_curl(client: BbCurlClient, argv: [text]) -> (i64, text, text):
+    """Invoke `curl <argv>`. Returns (status, body, stderr).
+
+    status == 0 indicates curl process error (exit != 0 or unparseable code).
+    """
+    val (stdout, stderr, code) = process_run(client.curl_path, argv)
+    if code != 0:
+        return (0, "", stderr)
+    val (status, body) = _bbc_parse_status_tail(stdout)
+    (status, body, stderr)
+
+
+# ============================================================================
+# JSON parsing helpers (local copies — pure adapter's `_bb_*` are private).
+# ============================================================================
+
+fn _bbc_str(obj: any, key: text) -> text:
+    if obj == nil:
+        return ""
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _bbc_int(obj: any, key: text) -> i64:
+    if obj == nil:
+        return 0
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return 0
+    val s = json_serialize(v)
+    var n: i64 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+    n
+
+
+fn _bbc_parse_pr(obj: any) -> BbcPr:
+    val empty = BbcPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if obj == nil:
+        return empty
+    val id = _bbc_int(obj, "id")
+    val title = _bbc_str(obj, "title")
+    val state = _bbc_str(obj, "state")
+    var source_branch = ""
+    val source = json_object_get(obj, "source")
+    if source != nil:
+        val br = json_object_get(source, "branch")
+        if br != nil:
+            source_branch = _bbc_str(br, "name")
+    var dest_branch = ""
+    val dest = json_object_get(obj, "destination")
+    if dest != nil:
+        val br = json_object_get(dest, "branch")
+        if br != nil:
+            dest_branch = _bbc_str(br, "name")
+    var author = ""
+    val author_obj = json_object_get(obj, "author")
+    if author_obj != nil:
+        author = _bbc_str(author_obj, "display_name")
+    var web_url = ""
+    val links = json_object_get(obj, "links")
+    if links != nil:
+        val html = json_object_get(links, "html")
+        if html != nil:
+            web_url = _bbc_str(html, "href")
+    var merge_commit = ""
+    val mc = json_object_get(obj, "merge_commit")
+    if mc != nil:
+        merge_commit = _bbc_str(mc, "hash")
+    BbcPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit)
+
+
+fn _bbc_parse_comment(obj: any) -> BbcComment:
+    val empty = BbcComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
+    if obj == nil:
+        return empty
+    val id = _bbc_int(obj, "id")
+    var author = ""
+    val user = json_object_get(obj, "user")
+    if user != nil:
+        author = _bbc_str(user, "display_name")
+    var content = ""
+    val content_obj = json_object_get(obj, "content")
+    if content_obj != nil:
+        content = _bbc_str(content_obj, "raw")
+    var inline_path = ""
+    var inline_to: i64 = -1
+    val inline = json_object_get(obj, "inline")
+    if inline != nil:
+        inline_path = _bbc_str(inline, "path")
+        val to_val = json_object_get(inline, "to")
+        if to_val != nil:
+            inline_to = _bbc_int(inline, "to")
+    BbcComment(id: id, author: author, content: content, inline_path: inline_path, inline_to: inline_to)
+
+
+fn _bbc_parse_status(obj: any) -> BbcStatus:
+    if obj == nil:
+        return BbcStatus(key: "", state: "", name: "", url: "")
+    BbcStatus(
+        key: _bbc_str(obj, "key"),
+        state: _bbc_str(obj, "state"),
+        name: _bbc_str(obj, "name"),
+        url: _bbc_str(obj, "url")
+    )
+
+
+fn _bbc_values(parsed: any) -> [any]:
+    if parsed == nil:
+        return []
+    val values = json_object_get(parsed, "values")
+    if values == nil:
+        return []
+    val n = json_array_length(values)
+    var out: [any] = []
+    var i: i64 = 0
+    while i < n:
+        out = out + [json_array_get(values, i)]
+        i = i + 1
+    out
+
+
+# ============================================================================
+# Public API — same tuple-return shape as adapter_bitbucket.spl.
+# ============================================================================
+
+fn bbc_create_pr(client: BbCurlClient, title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> (bool, BbcPr, text):
+    """POST /repositories/{ws}/{repo}/pullrequests."""
+    val empty = BbcPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_collection_url(client)
+    val body = bb_build_create_pr_body(title, source_branch, dest_branch, reviewers)
+    val argv = _argv_curl_post(url, client.auth_header(), body)
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200 and status != 201:
+        return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bbc_parse_pr(parsed), resp_body)
+
+
+fn bbc_get_pr(client: BbCurlClient, pr_id: i64) -> (bool, BbcPr, text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}."""
+    val empty = BbcPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_url(client, pr_id)
+    val argv = _argv_curl_get(url, client.auth_header())
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200:
+        return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bbc_parse_pr(parsed), resp_body)
+
+
+fn bbc_list_pr_comments(client: BbCurlClient, pr_id: i64) -> (bool, [BbcComment], text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}/comments."""
+    if not client.is_configured():
+        return (false, [], "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_sub_url(client, pr_id, "comments")
+    val argv = _argv_curl_get(url, client.auth_header())
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200:
+        return (false, [], _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bbc_values(parsed)
+    var out: [BbcComment] = []
+    for v in raw:
+        out = out + [_bbc_parse_comment(v)]
+    (true, out, resp_body)
+
+
+fn bbc_post_pr_comment(client: BbCurlClient, pr_id: i64, content: text, inline_path: text, inline_from: i64, inline_to: i64) -> (bool, BbcComment, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/comments.
+
+    inline_path == "" → general comment. Otherwise inline at (from, to);
+    inline_from < 0 / inline_to < 0 are encoded as JSON null.
+    """
+    val empty = BbcComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_sub_url(client, pr_id, "comments")
+    val body = bb_build_comment_body(content, inline_path, inline_from, inline_to)
+    val argv = _argv_curl_post(url, client.auth_header(), body)
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200 and status != 201:
+        return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bbc_parse_comment(parsed), resp_body)
+
+
+fn bbc_approve_pr(client: BbCurlClient, pr_id: i64) -> (bool, text, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/approve (no body)."""
+    if not client.is_configured():
+        return (false, "", "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_sub_url(client, pr_id, "approve")
+    val argv = _argv_curl_post(url, client.auth_header(), "")
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200 and status != 201:
+        return (false, "", _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    (true, "approved", resp_body)
+
+
+fn bbc_unapprove_pr(client: BbCurlClient, pr_id: i64) -> (bool, text, text):
+    """DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve."""
+    if not client.is_configured():
+        return (false, "", "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_sub_url(client, pr_id, "approve")
+    val argv = _argv_curl_delete(url, client.auth_header())
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200 and status != 204:
+        return (false, "", _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    (true, "unapproved", resp_body)
+
+
+fn bbc_merge_pr(client: BbCurlClient, pr_id: i64, strategy: text, close_source_branch: bool) -> (bool, BbcPr, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/merge."""
+    val empty = BbcPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: client not configured (workspace/repo/token)")
+    if strategy != "merge_commit" and strategy != "squash" and strategy != "fast_forward":
+        return (false, empty, "invalid merge strategy: " + strategy)
+    val url = bbc_pr_sub_url(client, pr_id, "merge")
+    val body = bb_build_merge_body(strategy, close_source_branch, "")
+    val argv = _argv_curl_post(url, client.auth_header(), body)
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200 and status != 202:
+        return (false, empty, _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_MERGE))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bbc_parse_pr(parsed), resp_body)
+
+
+fn bbc_get_pr_statuses(client: BbCurlClient, pr_id: i64) -> (bool, [BbcStatus], text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}/statuses."""
+    if not client.is_configured():
+        return (false, [], "blocked-auth: client not configured (workspace/repo/token)")
+    val url = bbc_pr_sub_url(client, pr_id, "statuses")
+    val argv = _argv_curl_get(url, client.auth_header())
+    val (status, resp_body, stderr) = _run_curl(client, argv)
+    if status != 200:
+        return (false, [], _bbc_status_label(status, if resp_body != "": resp_body else: stderr, BB_OP_GENERAL))
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bbc_values(parsed)
+    var out: [BbcStatus] = []
+    for v in raw:
+        out = out + [_bbc_parse_status(v)]
+    (true, out, resp_body)
+
+
+fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
+    """Pure helper mirroring adapter_bitbucket.spl's evaluator.
+
+    Ready iff:
+      1. PR state == "OPEN"
+      2. participants[role=REVIEWER, approved=true].count >= 1
+      3. all statuses[*].state == "SUCCESSFUL"
+    """
+    if pr_parsed == nil:
+        return (false, "missing PR data")
+    val state = _bbc_str(pr_parsed, "state")
+    if state != "OPEN":
+        return (false, "PR state is " + state + ", expected OPEN")
+    val participants = json_object_get(pr_parsed, "participants")
+    if participants == nil:
+        return (false, "no participants in PR")
+    val pn = json_array_length(participants)
+    var approved_reviewers: i64 = 0
+    var i: i64 = 0
+    while i < pn:
+        val p = json_array_get(participants, i)
+        val role = _bbc_str(p, "role")
+        if role == "REVIEWER":
+            val approved_obj = json_object_get(p, "approved")
+            if approved_obj != nil:
+                val s = json_serialize(approved_obj)
+                if s == "true":
+                    approved_reviewers = approved_reviewers + 1
+        i = i + 1
+    if approved_reviewers < 1:
+        return (false, "no approved reviewers (need >= 1)")
+    val values = _bbc_values(statuses_parsed)
+    if values.len() == 0:
+        return (false, "no commit statuses found")
+    for v in values:
+        val st = _bbc_str(v, "state")
+        if st != "SUCCESSFUL":
+            val key = _bbc_str(v, "key")
+            return (false, "status " + key + " is " + st + ", expected SUCCESSFUL")
+    (true, "ready: " + approved_reviewers.to_string() + " approval(s) + all statuses SUCCESSFUL")
+
+
+fn bbc_check_ready_to_merge(client: BbCurlClient, pr_id: i64) -> (bool, text):
+    """Compose: GET PR + GET statuses, then evaluate ready-to-merge.
+
+    Uses local bb_eval_ready_to_merge with semantics matching adapter_bitbucket.spl
+    (state==OPEN, >=1 approved REVIEWER, all statuses SUCCESSFUL).
+    """
+    if not client.is_configured():
+        return (false, "blocked-auth: client not configured (workspace/repo/token)")
+    val pr_url = bbc_pr_url(client, pr_id)
+    val pr_argv = _argv_curl_get(pr_url, client.auth_header())
+    val (pr_status, pr_body, pr_stderr) = _run_curl(client, pr_argv)
+    if pr_status != 200:
+        return (false, "GET PR failed: " + _bbc_status_label(pr_status, if pr_body != "": pr_body else: pr_stderr, BB_OP_GENERAL))
+    val pr_parsed = json_parse(pr_body)
+    if pr_parsed == nil:
+        return (false, "invalid PR JSON")
+    val st_url = bbc_pr_sub_url(client, pr_id, "statuses")
+    val st_argv = _argv_curl_get(st_url, client.auth_header())
+    val (st_status, st_body, st_stderr) = _run_curl(client, st_argv)
+    if st_status != 200:
+        return (false, "GET statuses failed: " + _bbc_status_label(st_status, if st_body != "": st_body else: st_stderr, BB_OP_GENERAL))
+    val st_parsed = json_parse(st_body)
+    if st_parsed == nil:
+        return (false, "invalid statuses JSON")
+    bb_eval_ready_to_merge(pr_parsed, st_parsed)

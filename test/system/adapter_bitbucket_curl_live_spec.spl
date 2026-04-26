@@ -1,0 +1,114 @@
+# Bitbucket curl-shellout Adapter — Live Smoke Test
+#
+# READ-ONLY smoke test against a real Bitbucket Cloud workspace/repo/PR.
+# Requires four environment variables; if ANY is unset the spec emits a
+# single "skipped (no creds)" passing test and exits without making
+# network calls.
+#
+#   BB_WORKSPACE   — Bitbucket workspace ID (e.g. "acme")
+#   BB_REPO        — Bitbucket repo slug   (e.g. "widgets")
+#   BB_TOKEN       — Repository Access Token (Bearer)
+#   BB_TEST_PR_ID  — integer PR id in the target repo (read-only smoke)
+#
+# Calls (read-only): bbc_get_pr, bbc_list_pr_comments, bbc_get_pr_statuses,
+# bbc_check_ready_to_merge.  NEVER calls create / merge / approve / unapprove
+# / post_comment in this live spec.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.itf.adapter_bitbucket_curl.{
+    BbCurlClient,
+    bbc_get_pr,
+    bbc_list_pr_comments,
+    bbc_get_pr_statuses,
+    bbc_check_ready_to_merge
+}
+
+
+fn _safe_env(key: text) -> text:
+    """Wrap env_get so a nil return becomes empty text."""
+    val v = env_get(key)
+    if v == nil:
+        return ""
+    v
+
+
+fn _parse_pr_id(s: text) -> i64:
+    if s == nil or s.len() == 0:
+        return 0
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch < "0" or ch > "9":
+            return 0
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    n
+
+
+val BB_WS = _safe_env("BB_WORKSPACE")
+val BB_RP = _safe_env("BB_REPO")
+val BB_TK = _safe_env("BB_TOKEN")
+val BB_PR = _safe_env("BB_TEST_PR_ID")
+val BB_PR_ID = _parse_pr_id(BB_PR)
+
+
+# Conditional registration: skip-only branch when creds missing, else live smoke.
+if BB_WS == "" or BB_RP == "" or BB_TK == "" or BB_PR_ID == 0:
+    describe("adapter_bitbucket_curl — live (skipped)", fn():
+        it("skipped (no creds: set BB_WORKSPACE/BB_REPO/BB_TOKEN/BB_TEST_PR_ID)", fn():
+            expect(true).to_equal(true)
+        )
+    )
+else:
+    describe("adapter_bitbucket_curl — live read-only smoke", fn():
+        it("get_pr returns success and id matches", fn():
+            val client = BbCurlClient(
+                base_url: "https://api.bitbucket.org/2.0",
+                workspace: BB_WS,
+                repo: BB_RP,
+                token: BB_TK,
+                curl_path: "curl"
+            )
+            val (ok, pr, _raw) = bbc_get_pr(client, BB_PR_ID)
+            expect(ok).to_equal(true)
+            expect(pr.id).to_equal(BB_PR_ID)
+        )
+
+        it("list_pr_comments succeeds", fn():
+            val client = BbCurlClient(
+                base_url: "https://api.bitbucket.org/2.0",
+                workspace: BB_WS,
+                repo: BB_RP,
+                token: BB_TK,
+                curl_path: "curl"
+            )
+            val (ok, _comments, _raw) = bbc_list_pr_comments(client, BB_PR_ID)
+            expect(ok).to_equal(true)
+        )
+
+        it("get_pr_statuses succeeds", fn():
+            val client = BbCurlClient(
+                base_url: "https://api.bitbucket.org/2.0",
+                workspace: BB_WS,
+                repo: BB_RP,
+                token: BB_TK,
+                curl_path: "curl"
+            )
+            val (ok, _statuses, _raw) = bbc_get_pr_statuses(client, BB_PR_ID)
+            expect(ok).to_equal(true)
+        )
+
+        it("check_ready_to_merge returns a (bool, reason) without crashing", fn():
+            val client = BbCurlClient(
+                base_url: "https://api.bitbucket.org/2.0",
+                workspace: BB_WS,
+                repo: BB_RP,
+                token: BB_TK,
+                curl_path: "curl"
+            )
+            val (_ready, reason) = bbc_check_ready_to_merge(client, BB_PR_ID)
+            expect(reason.len() > 0).to_equal(true)
+        )
+    )
