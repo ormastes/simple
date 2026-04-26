@@ -428,6 +428,10 @@ pub(crate) fn call_extern_function(
         // Base64 encoding/decoding
         "rt_base64_encode" => crypto::rt_base64_encode(&evaluated),
         "rt_base64_decode" => crypto::rt_base64_decode(&evaluated),
+        // Constant-time text compare (must dispatch here so Value::Str args
+        // aren't routed through dynamic_ffi, which marshals strings as
+        // C-pointers and silently breaks the runtime's RuntimeValue inputs).
+        "rt_constant_time_compare" => crypto::rt_constant_time_compare(&evaluated),
 
         // Signature sign / verify (RFC 8332 RSA + RFC 5656 ECDSA-P256).
         // These must be dispatched here (not via dynamic_ffi) because the

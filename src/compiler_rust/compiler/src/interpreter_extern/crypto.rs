@@ -158,3 +158,43 @@ pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
         Err(_) => Ok(Value::Nil),
     }
 }
+
+/// Constant-time text comparison for the interpreter.
+///
+/// Mirrors the byte-level semantics of the compiled runtime
+/// (`crypto_compare.rs::rt_constant_time_compare`):
+///   * length mismatch -> 0 (not equal)
+///   * both empty       -> 1 (equal)
+///   * otherwise        -> XOR-accumulate over bytes; 1 if accumulator is 0
+///
+/// The interpreter dispatch is not perf- or side-channel-critical (B6
+/// commentary in `constant_time.spl` targets the Cranelift compiled
+/// path); this implementation simply matches behaviour.
+///
+/// Without this case, the unknown-extern fallthrough sends each `Value::Str`
+/// argument through `dynamic_ffi::value_to_i64`, which leaks a C-string
+/// pointer. The runtime then reinterprets those bits as packed
+/// `RuntimeValue`s, `rt_string_data` returns null, and the function
+/// returns 0 unconditionally — making `constant_time_compare(a, a)`
+/// return false for every input.
+pub fn rt_constant_time_compare(args: &[Value]) -> Result<Value, CompileError> {
+    let a = match args.first() {
+        Some(Value::Str(s)) => s.as_bytes(),
+        _ => return Ok(Value::Int(0)),
+    };
+    let b = match args.get(1) {
+        Some(Value::Str(s)) => s.as_bytes(),
+        _ => return Ok(Value::Int(0)),
+    };
+    if a.len() != b.len() {
+        return Ok(Value::Int(0));
+    }
+    if a.is_empty() {
+        return Ok(Value::Int(1));
+    }
+    let mut acc: u8 = 0;
+    for i in 0..a.len() {
+        acc |= a[i] ^ b[i];
+    }
+    Ok(Value::Int(if acc == 0 { 1 } else { 0 }))
+}
