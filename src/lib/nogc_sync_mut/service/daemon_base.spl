@@ -1,0 +1,50 @@
+"""
+# Service Base — DaemonBase Capsule
+
+Orchestrates: PID file + UDS server + request loop + signal handler.
+Wraps daemon_sdk lock primitives (try_acquire_daemon_lock, is_pid_alive,
+release_daemon_lock) for the singleton-enforcement aspect.
+Does NOT reuse DaemonRunner.run_loop — the file-based IPC polling is
+incompatible with UDS event-driven accept.
+
+Public API:
+  daemon_base_new(config: DaemonConfig) -> DaemonBase
+  daemon_base_start(base: DaemonBase) -> bool
+  daemon_base_stop(base: DaemonBase)
+  daemon_base_is_running(base: DaemonBase) -> bool
+"""
+
+use std.io_runtime
+use std.service.lifecycle
+use std.service.signal_handlers
+use std.daemon_sdk.lock.{try_acquire_daemon_lock, release_daemon_lock, is_pid_alive}
+
+extern fn rt_getpid() -> i64
+
+struct DaemonBase:
+    config: DaemonConfig
+    shutdown_flag: ShutdownFlag
+    lock_pid: i64
+
+fn daemon_base_new(config: DaemonConfig) -> DaemonBase:
+    DaemonBase(
+        config: config,
+        shutdown_flag: shutdown_flag_new(config.pid_path),
+        lock_pid: -1i64
+    )
+
+fn daemon_base_start(base: DaemonBase) -> bool:
+    val pid = try_acquire_daemon_lock(base.config.pid_path)
+    if pid <= 0i64:
+        return false
+    base.lock_pid = pid
+    true
+
+fn daemon_base_stop(base: DaemonBase):
+    request_shutdown(base.shutdown_flag)
+    if base.lock_pid > 0i64:
+        release_daemon_lock(base.lock_pid, base.config.pid_path)
+        base.lock_pid = -1i64
+
+fn daemon_base_is_running(base: DaemonBase) -> bool:
+    base.lock_pid > 0i64

@@ -1,0 +1,94 @@
+# @cover src/lib/nogc_sync_mut/service/lease_manager.spl 0%
+# @feature SJ-LEASE-001
+"""
+# Lease Grant Specification
+
+**Feature IDs:** SJ-LEASE-001
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft — FAILING until Phase-5 I-B implements lease_manager module
+
+## Overview
+
+Tests lease grant semantics: exclusive blocks exclusive, shared coexists
+with shared, exclusive blocks shared.
+
+Covers AC-2 (serializes mutating verbs), AC-3 (lease-based lock), D-5 (BUSY contract), D-6.
+"""
+
+use std.spec
+use std.io_runtime
+
+use std.service.lease_manager
+
+describe "Lease grant — exclusive vs exclusive (AC-2, AC-3, D-5)":
+    """
+    ## Exclusive Lease Blocking
+
+    Only one exclusive lease may be held at a time.
+    A second exclusive request while one is held must receive BUSY.
+    """
+
+    it "first exclusive lease is granted immediately":
+        val mgr = lease_manager_new()
+        val got = try_acquire_exclusive(mgr, 111i64, 120000i64)
+        expect(got.ok).to_equal(true)
+        expect(got.lease_id.starts_with("lease-")).to_equal(true)
+
+    it "second exclusive request while exclusive held receives BUSY":
+        val mgr = lease_manager_new()
+        val _first = try_acquire_exclusive(mgr, 111i64, 120000i64)
+        val second = try_acquire_exclusive(mgr, 222i64, 120000i64)
+        expect(second.ok).to_equal(false)
+        expect(second.busy_message.starts_with("ERROR[BUSY]:")).to_equal(true)
+
+    it "BUSY response includes lease_id, holder_pid, and iso8601 expires_at":
+        val mgr = lease_manager_new()
+        val first = try_acquire_exclusive(mgr, 111i64, 120000i64)
+        val second = try_acquire_exclusive(mgr, 222i64, 120000i64)
+        expect(second.busy_message.contains(first.lease_id)).to_equal(true)
+        expect(second.busy_message.contains("pid 111")).to_equal(true)
+        expect(second.busy_message.contains("epoch+")).to_equal(true)
+
+    it "after exclusive lease is released, next exclusive is granted":
+        val mgr = lease_manager_new()
+        val first = try_acquire_exclusive(mgr, 111i64, 120000i64)
+        expect(release_lease(mgr, first.lease_id)).to_equal(true)
+        expect(try_acquire_exclusive(mgr, 222i64, 120000i64).ok).to_equal(true)
+
+describe "Lease grant — shared vs shared (AC-3)":
+    """
+    ## Shared Lease Coexistence
+
+    Multiple shared (read) leases may be held concurrently.
+    Read-bypass-lane verbs acquire shared leases (5 s TTL).
+    """
+
+    it "two shared leases are both granted concurrently":
+        val mgr = lease_manager_new()
+        expect(try_acquire_shared(mgr, 111i64, 5000i64).ok).to_equal(true)
+        expect(try_acquire_shared(mgr, 222i64, 5000i64).ok).to_equal(true)
+        expect(shared_lease_count(mgr)).to_equal(2i64)
+
+    it "shared lease has 5-second TTL by default":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_shared(mgr, 111i64, 5000i64)
+        expect(mgr.shared_leases[0i64].ttl_us / 1000i64).to_equal(5000i64)
+
+describe "Lease grant — exclusive blocks shared (AC-3)":
+    """
+    ## Exclusive Blocks Shared
+
+    An exclusive lease must block new shared leases from being granted.
+    This prevents concurrent reads during a mutating operation.
+    """
+
+    it "shared request while exclusive held receives BUSY":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_exclusive(mgr, 111i64, 120000i64)
+        expect(try_acquire_shared(mgr, 222i64, 5000i64).ok).to_equal(false)
+
+    it "exclusive request while shared leases held receives BUSY":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_shared(mgr, 111i64, 5000i64)
+        expect(try_acquire_exclusive(mgr, 222i64, 120000i64).ok).to_equal(false)

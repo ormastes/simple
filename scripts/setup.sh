@@ -294,6 +294,8 @@ if [ "${dry_run}" -eq 1 ]; then
     fi
   fi
   echo "  bin/simple.cmd                  (copied from scripts/setup/bin_scripts/ when present)"
+  echo "  bin/sj                         (copied from scripts/setup/bin_scripts/ when present)"
+  echo "  bin/sj.cmd                     (copied from scripts/setup/bin_scripts/ when present)"
   echo "  bin/codex_chrome_devtools_mcp.js (copied from scripts/setup/bin_scripts/)"
   echo "  bin/codex_stitch_mcp.js          (copied from scripts/setup/bin_scripts/)"
   echo "  bin/mcp_stdio_proxy.spl          (copied from scripts/setup/bin_scripts/)"
@@ -875,6 +877,8 @@ if [ -d "${bin_scripts_template_dir}" ]; then
   for bin_script_name in \
       simple \
       simple.cmd \
+      sj \
+      sj.cmd \
       codex_chrome_devtools_mcp.js \
       codex_stitch_mcp.js \
       mcp_stdio_proxy.spl \

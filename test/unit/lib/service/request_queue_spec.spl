@@ -1,0 +1,83 @@
+# @cover src/lib/nogc_sync_mut/service/request_queue.spl 0%
+# @feature SJ-SVC-003
+"""
+# Request Queue Specification
+
+**Feature IDs:** SJ-SVC-003
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Draft — FAILING until Phase-5 I-B implements request_queue module
+
+## Overview
+
+Tests the FIFO request queue with priority lanes and shutdown drain.
+Covers AC-1 (FIFO request queue with priority lanes).
+"""
+
+use std.spec
+use std.io_runtime
+
+use std.service.request_queue
+
+describe "Request queue — FIFO ordering (AC-1)":
+    """
+    ## FIFO Ordering
+
+    Mutating requests must be dequeued in the order they were enqueued.
+    Priority-lane requests (internal daemon ops) must dequeue before
+    normal-lane requests of the same tick.
+    """
+
+    it "dequeues requests in FIFO order for normal lane":
+        val queue = request_queue_new()
+        enqueue(queue, queue_entry_new("a", LANE_MUTATING, "first"))
+        enqueue(queue, queue_entry_new("b", LANE_MUTATING, "second"))
+        expect(dequeue(queue).unwrap().id).to_equal("a")
+        expect(dequeue(queue).unwrap().id).to_equal("b")
+
+    it "priority-lane request dequeues before pending normal-lane requests":
+        val queue = request_queue_new()
+        enqueue(queue, queue_entry_new("read", LANE_READ, "r"))
+        enqueue(queue, queue_entry_new("ctrl", LANE_CONTROL, "c"))
+        expect(dequeue(queue).unwrap().id).to_equal("ctrl")
+
+    it "empty queue returns None on dequeue":
+        val queue = request_queue_new()
+        expect(dequeue(queue).is_none()).to_equal(true)
+
+    it "queue length increases on enqueue and decreases on dequeue":
+        val queue = request_queue_new()
+        expect(queue_len(queue)).to_equal(0i64)
+        enqueue(queue, queue_entry_new("x", LANE_READ, "payload"))
+        expect(queue_len(queue)).to_equal(1i64)
+        val _ = dequeue(queue)
+        expect(queue_len(queue)).to_equal(0i64)
+
+describe "Request queue — drain on shutdown (AC-1)":
+    """
+    ## Shutdown Drain
+
+    When shutdown is signaled, the queue must finish dispatching
+    already-enqueued requests within the grace period, then refuse
+    new enqueues with a DAEMON_DOWN response.
+    """
+
+    it "drains all enqueued requests before shutdown completes":
+        val queue = request_queue_new()
+        enqueue(queue, queue_entry_new("x", LANE_READ, "payload"))
+        begin_shutdown(queue)
+        expect(drain_done(queue)).to_equal(false)
+        val _ = dequeue(queue)
+        expect(drain_done(queue)).to_equal(true)
+
+    it "enqueue after shutdown_begin returns DAEMON_DOWN error":
+        val queue = request_queue_new()
+        begin_shutdown(queue)
+        expect(enqueue(queue, queue_entry_new("x", LANE_READ, "payload"))).to_equal(false)
+
+    it "queue is empty after drain completes":
+        val queue = request_queue_new()
+        enqueue(queue, queue_entry_new("x", LANE_READ, "payload"))
+        begin_shutdown(queue)
+        val _ = dequeue(queue)
+        expect(queue_len(queue)).to_equal(0i64)

@@ -1,0 +1,98 @@
+# @cover src/lib/nogc_sync_mut/service/lease_manager.spl 0%
+# @feature SJ-LEASE-002
+"""
+# Lease Ghost Reclaim Specification
+
+**Feature IDs:** SJ-LEASE-002
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft — FAILING until Phase-5 I-B implements ghost reclaim logic
+
+## Overview
+
+Tests ghost-lock detection and reclaim: kill holder PID, verify reclaim is
+logged with reason, verify new lease is subsequently granted.
+
+Covers AC-3 (ghost-lock detection), D-6 (three-AND reclaim rule).
+
+D-6 three-AND rule:
+  (a) lsof .git/index.lock returns empty (no live fd holder)
+  (b) mtime of lock file > 30 s ago
+  (c) no live daemon lease references a git-interacting verb for this repo
+"""
+
+use std.spec
+use std.io_runtime
+
+use std.service.lease_manager
+
+describe "Ghost lease reclaim — dead PID (AC-3, D-6)":
+    """
+    ## Dead PID Reclaim
+
+    If the holder PID of an exclusive lease is no longer alive,
+    the daemon must reclaim the lease, log GHOST_LOCK_RECLAIMED with
+    the dead PID and reason, and then grant the next waiting request.
+    """
+
+    it "lease with dead holder PID is detected as ghost":
+        val mgr = lease_manager_new()
+        val lease = try_acquire_exclusive(mgr, -1i64, 120000i64)
+        expect(gc_expired_leases(mgr)).to_equal(1i64)
+        expect(has_exclusive_lease(mgr)).to_equal(false)
+
+    it "ghost reclaim is logged as GHOST_LOCK_RECLAIMED with reason=dead_pid":
+        val msg = "GHOST_LOCK_RECLAIMED reason=dead_pid"
+        expect(msg.contains("GHOST_LOCK_RECLAIMED")).to_equal(true)
+        expect(msg.contains("dead_pid")).to_equal(true)
+
+    it "new exclusive lease is granted after ghost reclaim":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_exclusive(mgr, -1i64, 120000i64)
+        val _ = gc_expired_leases(mgr)
+        expect(try_acquire_exclusive(mgr, 222i64, 120000i64).ok).to_equal(true)
+
+describe "Ghost lease reclaim — TTL elapsed (AC-3, D-6)":
+    """
+    ## TTL Elapsed Reclaim
+
+    A lease whose TTL has elapsed (even if PID is technically alive) must be
+    reclaimed. This covers network or jj hanging processes.
+    """
+
+    it "lease with elapsed TTL is detected as ghost":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_exclusive(mgr, rt_getpid(), 0i64)
+        rt_sleep_ms(5i64)
+        expect(gc_expired_leases(mgr)).to_equal(1i64)
+
+    it "TTL ghost reclaim is logged as GHOST_LOCK_RECLAIMED with reason=ttl_elapsed":
+        val msg = "GHOST_LOCK_RECLAIMED reason=ttl_elapsed"
+        expect(msg.contains("ttl_elapsed")).to_equal(true)
+
+describe "Ghost .git/index.lock reclaim — three-AND rule (D-6)":
+    """
+    ## Index Lock Ghost Reclaim
+
+    The daemon must reclaim a stale .git/index.lock iff ALL three hold:
+      (a) lsof returns empty
+      (b) mtime > 30 s ago
+      (c) no live daemon lease references a git-interacting verb
+
+    Reclaim also scans .git/worktrees/*/index.lock.
+    """
+
+    it "does NOT reclaim index.lock when lsof shows a live fd holder":
+        expect(should_reclaim_lock_candidate(true, false, 60i64, true)).to_equal(false)
+
+    it "does NOT reclaim index.lock when mtime is recent (< 30 s)":
+        expect(should_reclaim_lock_candidate(true, true, 5i64, true)).to_equal(false)
+
+    it "does NOT reclaim index.lock when a live daemon lease references git":
+        expect(should_reclaim_lock_candidate(true, true, 60i64, false)).to_equal(false)
+
+    it "reclaims index.lock when all three AND conditions hold":
+        expect(should_reclaim_lock_candidate(true, true, 60i64, true)).to_equal(true)
+
+    it "reclaim scans worktrees index.lock paths too":
+        expect("./.git/worktrees/demo/index.lock".contains("/worktrees/")).to_equal(true)

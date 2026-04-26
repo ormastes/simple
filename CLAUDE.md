@@ -31,7 +31,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
 ## Critical Rules
-- **jj** for VCS — `jj commit -m "msg"` / push: `jj bookmark set main -r @- && jj git push --bookmark main`
+- **jj** for VCS — commit: `jj commit -m "msg"` / preferred wrapper flow: `sj bookmark set main -r @- && sj git push --bookmark main`
 - **NEVER create branches** — work directly on `main`
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`

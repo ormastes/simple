@@ -18,9 +18,8 @@ fn main():
     val git_cmd = args[0]
     val cmd_args = if args.len() > 1: args[1:] else: []
 
-    print "NOTE: This project uses jj (Jujutsu) instead of git."
-    print "      Please use 'jj' commands directly next time."
-    print "      Translating 'git {git_cmd}' -> jj equivalent..."
+    print "NOTE: This project now routes repository workflows through sj."
+    print "      Translating 'git {git_cmd}' -> sj equivalent..."
     print ""
 
     val exit_code = translate_git_command(git_cmd, cmd_args)
@@ -30,55 +29,55 @@ fn translate_git_command(cmd: text, args: [text]) -> i64:
     """Translate git command to jj equivalent and execute it"""
     match cmd:
         "status":
-            run_jj(["status"] + args)
+            run_sj(["git", "status"] + args)
 
         "diff":
-            run_jj(["diff"] + args)
+            run_sj(["git", "diff"] + args)
 
         "log":
-            run_jj(["log"] + args)
+            run_sj(["git", "log"] + args)
 
         "add":
             print "Note: jj auto-tracks files, no need to add"
-            run_jj(["status"])
+            run_sj(["git", "status"])
 
         "commit":
             handle_commit(args)
 
         "push":
-            run_jj(["git", "push"] + args)
+            run_sj(["git", "push"] + args)
 
         "pull", "fetch":
-            run_jj(["git", "fetch"] + args)
+            run_sj(["raw", "jj", "git", "fetch"] + args)
 
         "checkout":
-            run_jj(["edit"] + args)
+            run_sj(["git", "checkout"] + args)
 
         "branch":
-            run_jj(["bookmark"] + args)
+            run_sj(["raw", "jj", "bookmark"] + args)
 
         "stash":
             print "Note: jj doesn't need stash - changes are always preserved"
-            run_jj(["status"])
+            run_sj(["git", "stash"] + args)
 
         "init":
-            run_jj(["git", "init"] + args)
+            run_sj(["raw", "jj", "git", "init"] + args)
 
         "clone":
-            run_jj(["git", "clone"] + args)
+            run_sj(["raw", "jj", "git", "clone"] + args)
 
         "show":
-            run_jj(["show"] + args)
+            run_sj(["raw", "jj", "show"] + args)
 
         "reset":
             print "Note: use 'jj restore' or 'jj abandon' instead of git reset"
-            run_jj(["status"])
+            run_sj(["git", "reset"] + args)
 
         _:
             print "Unknown git command: {cmd}"
-            print "Use jj directly. Common commands:"
-            print "  jj status, jj diff, jj log, jj commit, jj describe"
-            print "  jj git push, jj git fetch, jj edit, jj new"
+            print "Use sj directly. Common commands:"
+            print "  sj git status, sj git diff, sj git log, sj git commit -m ..."
+            print "  sj git push --bookmark main, sj raw jj git fetch, sj git checkout <rev>"
             1
 
 fn handle_commit(args: [text]) -> i64:
@@ -92,13 +91,24 @@ fn handle_commit(args: [text]) -> i64:
             # Combine message args
             val message_parts = args[1:]
             val message = message_parts.join(" ")
-            return run_jj(["commit", "-m", message])
+            return run_sj(["git", "commit", "-m", message])
         else:
             print "Error: -m requires a message"
             return 1
 
     # Pass through other args
-    run_jj(["commit"] + args)
+    run_sj(["git", "commit"] + args)
+
+fn run_sj(args: [text]) -> i64:
+    val (stdout, stderr, code) = process_run("bin/simple", ["run", "src/app/sj/main.spl"] + args)
+
+    if stdout.len() > 0:
+        print stdout
+
+    if stderr.len() > 0:
+        print stderr
+
+    code
 
 fn run_jj(args: [text]) -> i64:
     """Run jj command and return exit code"""
@@ -118,18 +128,18 @@ fn show_usage():
     print ""
     print "Usage: git_wrapper <git-command> [args...]"
     print ""
-    print "This wrapper translates git commands to jj (Jujutsu) equivalents."
-    print "Consider using jj directly instead:"
+    print "This wrapper translates git commands to sj equivalents."
+    print "Consider using sj directly instead:"
     print ""
     print "Common translations:"
-    print "  git status        -> jj status"
-    print "  git diff          -> jj diff"
-    print "  git log           -> jj log"
-    print "  git add           -> (auto-tracked, use jj status)"
-    print "  git commit -m ... -> jj commit -m ..."
-    print "  git push          -> jj git push"
-    print "  git pull/fetch    -> jj git fetch"
-    print "  git checkout      -> jj edit"
-    print "  git branch        -> jj bookmark"
-    print "  git stash         -> (not needed, changes preserved)"
-    print "  git reset         -> jj restore / jj abandon"
+    print "  git status        -> sj git status"
+    print "  git diff          -> sj git diff"
+    print "  git log           -> sj git log"
+    print "  git add           -> (auto-tracked, use sj git status)"
+    print "  git commit -m ... -> sj git commit -m ..."
+    print "  git push          -> sj git push --bookmark <name>"
+    print "  git pull/fetch    -> sj raw jj git fetch / sj git pull"
+    print "  git checkout      -> sj git checkout"
+    print "  git branch        -> sj raw jj bookmark"
+    print "  git stash         -> sj git stash (forbidden with guidance)"
+    print "  git reset         -> sj git reset"

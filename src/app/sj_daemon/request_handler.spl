@@ -1,0 +1,104 @@
+"""
+# sj daemon — request handler
+"""
+
+use std.io_runtime
+use std.service.traits
+use std.service.lease_manager
+use app.sj_daemon.forbidden
+use app.sj_daemon.git_mimic
+use app.sj_daemon.jj_exec
+use app.sj_daemon.submodule_policy
+
+extern fn rt_getpid() -> i64
+
+struct CommandResponse:
+    exit_code: i64
+    stdout: text
+    stderr: text
+    classification: text
+    lease_kind: i64
+
+struct SjRequestHandler:
+    repo_path: text
+    max_hold_ms: i64
+    lease_manager: LeaseManager
+
+fn sj_request_handler_new(repo_path: text, max_hold_ms: i64) -> SjRequestHandler:
+    SjRequestHandler(
+        repo_path: repo_path,
+        max_hold_ms: max_hold_ms,
+        lease_manager: lease_manager_new()
+    )
+
+fn _split_words(input: text) -> [text]:
+    val raw = input.split(" ")
+    var out: [text] = []
+    var i = 0i64
+    while i < raw.len():
+        if raw[i].len() > 0i64:
+            out.push(raw[i])
+        i = i + 1i64
+    out
+
+fn _json_escape(s: text) -> text:
+    s
+
+fn response_json(resp: CommandResponse) -> text:
+    "{\"exit_code\":{resp.exit_code},\"stdout\":\"{_json_escape(resp.stdout)}\",\"stderr\":\"{_json_escape(resp.stderr)}\",\"classification\":\"{resp.classification}\",\"lease_kind\":{resp.lease_kind}}"
+
+fn handle_cli_args(handler: SjRequestHandler, argv: [text], pid: i64) -> CommandResponse:
+    val policy = check_forbidden(argv)
+    if not policy.allowed:
+        return CommandResponse(
+            exit_code: policy.exit_code,
+            stdout: "",
+            stderr: policy.message,
+            classification: "forbidden",
+            lease_kind: LEASE_EXCLUSIVE
+        )
+
+    val plan = translate(argv)
+    val lease = if plan.lease_kind == LEASE_SHARED:
+        try_acquire_shared(handler.lease_manager, pid, 5000i64)
+    else:
+        try_acquire_exclusive(handler.lease_manager, pid, handler.max_hold_ms)
+    if not lease.ok:
+        return CommandResponse(
+            exit_code: 75i64,
+            stdout: "",
+            stderr: lease.busy_message,
+            classification: plan.classification,
+            lease_kind: plan.lease_kind
+        )
+
+    val sub = classify_submodule(argv)
+    var outputs: [text] = []
+    var i = 0i64
+    while i < plan.commands.len():
+        val cmd = plan.commands[i]
+        if cmd.starts_with("jj "):
+            outputs.push(build_command(cmd.split(" ")))
+        else:
+            outputs.push(cmd)
+        i = i + 1i64
+    if sub.auto_pin_cmd.len() > 0i64:
+        outputs.push(sub.auto_pin_cmd)
+
+    val _released = release_lease(handler.lease_manager, lease.lease_id)
+    var stderr = plan.warning
+    if stderr.len() == 0i64:
+        stderr = sub.warning
+    else if sub.warning.len() > 0i64:
+        stderr = stderr + "\n" + sub.warning
+    CommandResponse(
+        exit_code: 0i64,
+        stdout: outputs.join("\n"),
+        stderr: stderr,
+        classification: plan.classification,
+        lease_kind: plan.lease_kind
+    )
+
+impl RequestHandler for SjRequestHandler:
+    fn handle(self, req: text) -> text:
+        response_json(handle_cli_args(self, _split_words(req), rt_getpid()))

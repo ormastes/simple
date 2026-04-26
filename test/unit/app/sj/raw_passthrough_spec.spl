@@ -1,0 +1,65 @@
+# @cover src/app/sj/translator.spl 0%
+# @feature SJ-TRANS-003
+"""
+# Raw Passthrough Specification
+
+**Feature IDs:** SJ-TRANS-003
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Draft — FAILING until Phase-5 I-C implements translator module
+
+## Overview
+
+Tests raw_passthrough: verbs jj has no equivalent for are serialized through
+the daemon's lease system but invoke raw `git` directly.
+
+Representative cases (3-6 per recipe item 2):
+  sj git lfs ls-files   → raw git lfs ls-files (shared lease)
+  sj git clean -fd      → raw git clean -fd (exclusive lease, with warning)
+  sj git submodule status → raw git submodule status (shared lease)
+
+Covers AC-4, R-D raw_passthrough rows.
+"""
+
+use std.spec
+use std.io_runtime
+
+# FAILING import until Phase-5 I-C delivers translator module.
+# app.sj.translator does not exist yet — resolver rejects with semantic error.
+use app.sj.translator
+
+describe "Raw passthrough — classification (AC-4, R-D)":
+    """
+    ## Raw Passthrough Classification
+
+    Raw-passthrough verbs must be identified as raw_passthrough in the
+    string table, not silently treated as direct_jj or forbidden.
+    The constructed command must invoke `git`, not `jj`.
+    """
+
+    it "sj git lfs ls-files classifies as raw_passthrough":
+        expect(translate(["git", "lfs", "ls-files"]).classification).to_equal("raw_passthrough")
+
+    it "sj git lfs ls-files produces a git (not jj) invocation":
+        expect(translate(["git", "lfs", "ls-files"]).commands[0i64]).to_equal("git lfs ls-files")
+
+    it "sj git clean -fd classifies as raw_passthrough with exclusive lease":
+        val plan = translate(["git", "clean", "-fd"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.lease_kind).to_equal(0i64)
+
+    it "sj git clean -fd produces a warning before executing":
+        expect(translate(["git", "clean", "-fd"]).warning.starts_with("WARN[RAW]:")).to_equal(true)
+
+    it "sj git submodule status classifies as raw_passthrough with shared lease":
+        val plan = translate(["git", "submodule", "status"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.lease_kind).to_equal(1i64)
+
+    it "raw passthrough is still serialized through the daemon lease (not bypassed)":
+        expect(translate(["git", "clean", "-fd"]).lease_kind).to_equal(0i64)
+
+    it "unknown git verb falls through to raw_passthrough with exclusive lease":
+        val plan = translate(["git", "mystery", "--flag"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.commands[0i64]).to_equal("git mystery --flag")

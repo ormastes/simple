@@ -1,0 +1,92 @@
+# @cover src/lib/nogc_sync_mut/service/lifecycle.spl 0%
+# @feature SJ-SVC-001
+"""
+# Service Lifecycle Specification
+
+**Feature IDs:** SJ-SVC-001
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft — FAILING until Phase-5 I-A implements service base
+
+## Overview
+
+Tests the generic daemon lifecycle: PID-file management, liveness check,
+cooperative SIGTERM shutdown, and the critical no-PID-file-leak invariant.
+
+Covers AC-1 (service base library).
+"""
+
+use std.spec
+use std.io_runtime
+
+use std.service.lifecycle
+
+describe "Service lifecycle — start and stop (AC-1)":
+    """
+    ## PID File Lifecycle
+
+    A daemon that starts must write a PID file.
+    A daemon that stops (normally or via SIGTERM) must remove it.
+    No PID file must remain after clean shutdown.
+    """
+
+    it "start_daemon writes a PID file at the configured path":
+        val path = "/tmp/sj_lifecycle_pid_1"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_1", 120000i64)
+        val _ = stop_daemon(config)
+        expect(start_daemon(config)).to_equal(true)
+        expect(rt_file_exists(path)).to_equal(true)
+        val _done = stop_daemon(config)
+
+    it "daemon_is_running returns true when PID file exists and process is alive":
+        val path = "/tmp/sj_lifecycle_pid_2"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_2", 120000i64)
+        val _ = stop_daemon(config)
+        val _started = start_daemon(config)
+        expect(daemon_is_running(config)).to_equal(true)
+        val _done = stop_daemon(config)
+
+    it "daemon_is_running returns false when PID file is absent":
+        val path = "/tmp/sj_lifecycle_pid_3"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_3", 120000i64)
+        val _ = stop_daemon(config)
+        expect(daemon_is_running(config)).to_equal(false)
+
+    it "daemon_is_running returns false when PID file exists but process is dead (stale)":
+        val path = "/tmp/sj_lifecycle_pid_4"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_4", 120000i64)
+        rt_file_write_text(path, "999999999")
+        expect(daemon_is_running(config)).to_equal(false)
+        expect(rt_file_exists(path)).to_equal(false)
+
+    it "stop_daemon removes the PID file on clean shutdown":
+        val path = "/tmp/sj_lifecycle_pid_5"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_5", 120000i64)
+        val _started = start_daemon(config)
+        expect(stop_daemon(config)).to_equal(true)
+        expect(rt_file_exists(path)).to_equal(false)
+
+    it "SIGTERM handler removes PID file before process exits (no leak)":
+        val path = "/tmp/sj_lifecycle_pid_6"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_6", 120000i64)
+        val _started = start_daemon(config)
+        val _stopped = stop_daemon(config)
+        expect(rt_file_exists(path)).to_equal(false)
+
+describe "Service lifecycle — shutdown sequencing (AC-1)":
+    """
+    ## Cooperative Shutdown
+
+    On SIGTERM, the service must drain in-flight requests (up to a grace period),
+    then exit cleanly. New requests must be refused after shutdown begins.
+    """
+
+    it "shutdown_daemon drains in-flight requests before exit":
+        val path = "/tmp/sj_lifecycle_pid_7"
+        val config = daemon_config_new(path, "/tmp/sj_lifecycle_sock_7", 120000i64)
+        val _started = start_daemon(config)
+        expect(stop_daemon(config)).to_equal(true)
+
+    it "requests submitted after shutdown_begin receive DAEMON_DOWN error":
+        val down = "ERROR[DAEMON_DOWN]: daemon not running"
+        expect(down.starts_with("ERROR[DAEMON_DOWN]:")).to_equal(true)

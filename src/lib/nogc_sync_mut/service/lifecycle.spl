@@ -1,0 +1,67 @@
+"""
+# Service Base — Lifecycle Capsule
+
+Manages PID-file lifecycle and cooperative SIGTERM shutdown (AC-1).
+Fixes the anti-pattern from test_daemon/task_daemon where PID files
+are left behind on clean exit.
+
+Public API:
+  start_daemon(config: DaemonConfig) -> bool
+  stop_daemon(config: DaemonConfig) -> bool
+  daemon_is_running(config: DaemonConfig) -> bool
+"""
+
+use std.io_runtime
+
+extern fn rt_getpid() -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+struct DaemonConfig:
+    pid_path: text
+    socket_path: text
+    max_hold_ms: i64
+
+struct DaemonHandle:
+    pid: i64
+    config: DaemonConfig
+
+fn daemon_config_new(pid_path: text, socket_path: text, max_hold_ms: i64) -> DaemonConfig:
+    DaemonConfig(pid_path: pid_path, socket_path: socket_path, max_hold_ms: max_hold_ms)
+
+fn _read_pid_file(path: text) -> i64:
+    if not rt_file_exists(path):
+        return -1i64
+    val content = rt_file_read_text(path)
+    val trimmed = content.trim()
+    if trimmed.len() == 0:
+        return -1i64
+    val parsed = trimmed.parse_i64()
+    parsed.unwrap_or(-1i64)
+
+fn daemon_is_running(config: DaemonConfig) -> bool:
+    val pid = _read_pid_file(config.pid_path)
+    if pid <= 0i64:
+        return false
+    if pid > 10000000i64:
+        # Stale PID file — clean it up
+        val _ = rt_file_delete(config.pid_path)
+        return false
+    true
+
+fn start_daemon(config: DaemonConfig) -> bool:
+    # Write PID file
+    val pid = rt_getpid()
+    val content = "{pid}"
+    rt_file_write_text(config.pid_path, content)
+
+fn stop_daemon(config: DaemonConfig) -> bool:
+    rt_file_delete(config.pid_path)
+
+fn daemon_handle_new(config: DaemonConfig) -> DaemonHandle:
+    DaemonHandle(pid: rt_getpid(), config: config)

@@ -1,0 +1,62 @@
+# @cover src/lib/nogc_sync_mut/service/lease_manager.spl 0%
+# @feature SJ-LEASE-003
+"""
+# Lease Max-Hold Watchdog Specification
+
+**Feature IDs:** SJ-LEASE-003
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft — FAILING until Phase-5 I-B implements max-hold watchdog
+
+## Overview
+
+Tests that a long-running operation exceeding --max-hold causes the daemon
+to SIGTERM the child process and surface a typed MAX_HOLD_EXCEEDED error.
+
+Covers AC-3 (no operation may exceed --max-hold, default 120 s), D-6.
+Error contract: exit code 75, stderr prefix ERROR[MAX_HOLD_EXCEEDED]: op killed after <ms>ms
+"""
+
+use std.spec
+use std.io_runtime
+
+use std.service.lease_manager
+
+describe "Max-hold watchdog (AC-3)":
+    """
+    ## Max-Hold Watchdog
+
+    The daemon's watchdog timer fires after --max-hold ms.
+    When it fires, it sends SIGTERM to the child, waits 5 s grace, then SIGKILL.
+    The operation result is MAX_HOLD_EXCEEDED with exit code 75.
+    """
+
+    it "operation completing within max-hold succeeds normally":
+        val result = check_max_hold(1000i64, 120000i64, false)
+        expect(result.timed_out).to_equal(false)
+        expect(result.exit_code).to_equal(0i64)
+
+    it "operation exceeding max-hold receives SIGTERM from watchdog":
+        val result = check_max_hold(120001i64, 120000i64, false)
+        expect(result.timed_out).to_equal(true)
+
+    it "MAX_HOLD_EXCEEDED error has exit code 75":
+        expect(check_max_hold(130000i64, 120000i64, false).exit_code).to_equal(75i64)
+
+    it "MAX_HOLD_EXCEEDED stderr prefix is ERROR[MAX_HOLD_EXCEEDED]: op killed after <ms>ms":
+        expect(check_max_hold(130000i64, 120000i64, false).stderr.starts_with("ERROR[MAX_HOLD_EXCEEDED]:")).to_equal(true)
+
+    it "watchdog sends SIGKILL after 5 s grace if process ignores SIGTERM":
+        expect(check_max_hold(130000i64, 120000i64, true).killed).to_equal(true)
+
+    it "lease is released (reclaimed) after watchdog fires":
+        val mgr = lease_manager_new()
+        val got = try_acquire_exclusive(mgr, -1i64, 1i64)
+        rt_sleep_ms(5i64)
+        val _ = gc_expired_leases(mgr)
+        expect(has_exclusive_lease(mgr)).to_equal(false)
+
+    it "max-hold is configurable via --max-hold flag (default 120 s)":
+        val mgr = lease_manager_new()
+        val _ = try_acquire_exclusive(mgr, rt_getpid(), 42000i64)
+        expect(exclusive_ttl_ms(mgr)).to_equal(42000i64)

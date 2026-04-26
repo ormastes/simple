@@ -1,0 +1,89 @@
+# @cover src/app/sj/policy.spl 0%
+# @feature SJ-SUBMOD-001
+"""
+# Submodule Policy Specification
+
+**Feature IDs:** SJ-SUBMOD-001
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft — FAILING until Phase-5 I-C implements submodule policy (D-8)
+
+## Overview
+
+Tests D-8 submodule policy:
+  - sj git submodule add runs under exclusive lease
+  - Accept-with-warn: WARN[SUBMODULE] emitted to stderr before operation
+  - Auto-pin: git commit --no-verify to lock the 160000 gitlink
+    before jj re-snapshots it back to a 040000 tree
+
+Background: jj re-snapshots 160000 gitlinks back to 040000 trees on every
+command (feedback_jj_submodule_gitlinks.md). The auto-pin commits the
+gitlink immediately so jj sees it as a known committed state.
+
+Covers AC-4, D-8, feedback_jj_submodule_gitlinks.md.
+"""
+
+use std.spec
+use std.io_runtime
+
+# FAILING import until Phase-5 I-C delivers policy module with submodule support.
+# app.sj.policy does not exist yet — resolver rejects with semantic error.
+use app.sj.policy
+
+describe "Submodule add — lease and warning (D-8)":
+    """
+    ## Exclusive Lease + WARN
+
+    sj git submodule add must acquire an exclusive lease (like any mutating op),
+    then emit WARN[SUBMODULE] to stderr before running the raw git command.
+    Exit code must be 0 if the operation succeeds (warning is not an error).
+    """
+
+    it "sj git submodule add acquires an exclusive lease":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).lease_kind).to_equal(0i64)
+
+    it "sj git submodule add emits WARN[SUBMODULE] to stderr before running":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).warning.starts_with("WARN[SUBMODULE]:")).to_equal(true)
+
+    it "WARN[SUBMODULE] does not cause non-zero exit code":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).warning.len()).to_be_greater_than(0i64)
+
+describe "Submodule add — auto-pin (D-8, feedback_jj_submodule_gitlinks)":
+    """
+    ## Auto-Pin via git commit --no-verify
+
+    After sj git submodule add succeeds, the daemon must immediately run
+      git commit --no-verify -m 'chore: pin submodule <path>'
+    to commit the 160000 gitlink before jj re-snapshots it to 040000.
+    This prevents the gitlink flip documented in feedback_jj_submodule_gitlinks.md.
+    """
+
+    it "after submodule add, auto-pin git commit --no-verify is executed":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).auto_pin_cmd.contains("git commit --no-verify")).to_equal(true)
+
+    it "auto-pin commit message includes the submodule path":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).auto_pin_cmd.contains("deps/lib")).to_equal(true)
+
+    it "auto-pin uses --no-verify to bypass hooks that may fail on 160000 gitlinks":
+        expect(classify_submodule(["git", "submodule", "add", "url", "deps/lib"]).auto_pin_cmd.contains("--no-verify")).to_equal(true)
+
+    it "auto-pin runs within the same exclusive lease as the submodule add":
+        val plan = classify_submodule(["git", "submodule", "add", "url", "deps/lib"])
+        expect(plan.lease_kind).to_equal(0i64)
+        expect(plan.auto_pin_cmd.len()).to_be_greater_than(0i64)
+
+describe "Submodule read operations — shared lease, no auto-pin (D-8 negative)":
+    """
+    ## Read Submodule Commands Are Not Mutating
+
+    sj git submodule status uses a shared lease and does NOT trigger auto-pin.
+    """
+
+    it "sj git submodule status uses shared lease (not exclusive)":
+        expect(classify_submodule(["git", "submodule", "status"]).lease_kind).to_equal(1i64)
+
+    it "sj git submodule status does NOT emit WARN[SUBMODULE]":
+        expect(classify_submodule(["git", "submodule", "status"]).warning).to_equal("")
+
+    it "sj git submodule status does NOT trigger auto-pin":
+        expect(classify_submodule(["git", "submodule", "status"]).auto_pin_cmd).to_equal("")

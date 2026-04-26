@@ -1,11 +1,14 @@
 # JJ Sync - Full sync workflow with file count safety
 #
-# Implements: jj git fetch && jj rebase -d main@origin && jj bookmark set main -r @- && jj git push --bookmark main
+# Implements: sj raw jj git fetch && sj raw jj rebase -d main@origin && sj bookmark set main -r @- && sj git push --bookmark main
 # With file count safety guard: checks file count before/after rebase to detect unexpected file reduction.
 #
 # Usage: use app.jj.sync.{jj_sync, SyncResult}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_sj(args: [text]) -> (text, text, i64):
+    rt_process_run("bin/simple", ["run", "src/app/sj/main.spl"] + args)
 
 # Result of a sync step
 struct StepResult:
@@ -40,7 +43,7 @@ struct SyncResult:
 
 fn count_tracked_files() -> i64:
     """Count the number of files tracked by jj"""
-    val (stdout, _stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "file", "list"])
+    val (stdout, _stderr, code) = run_sj(["raw", "jj", "file", "list"])
     if code != 0:
         return -1
     var count = 0
@@ -50,9 +53,9 @@ fn count_tracked_files() -> i64:
             count = count + 1
     count
 
-fn run_step(step_name: text, jj_args: [text]) -> StepResult:
+fn run_step(step_name: text, sj_args: [text]) -> StepResult:
     """Run a single sync step and return result"""
-    val (stdout, stderr, code) = rt_process_run("jj", jj_args)
+    val (stdout, stderr, code) = run_sj(sj_args)
     val output = if stdout != "": stdout else: stderr
     StepResult(
         step_name: step_name,
@@ -66,11 +69,11 @@ fn jj_sync(push: bool) -> SyncResult:
 
     Steps:
     1. Count files before sync
-    2. jj git fetch
-    3. jj rebase -d main@origin
+    2. sj raw jj git fetch
+    3. sj raw jj rebase -d main@origin
     4. Count files after rebase (safety check)
-    5. jj bookmark set main -r @-
-    6. jj git push --bookmark main (if push=true)
+    5. sj bookmark set main -r @-
+    6. sj git push --bookmark main (if push=true)
     """
     var steps: [StepResult] = []
     var file_count_warning = false
@@ -95,8 +98,8 @@ fn jj_sync(push: bool) -> SyncResult:
         success: true, output: "", exit_code: 0
     ))
 
-    # Step 2: jj git fetch
-    val fetch_result = run_step("jj git fetch", ["--no-pager", "--color", "never", "git", "fetch"])
+    # Step 2: sj raw jj git fetch
+    val fetch_result = run_step("sj raw jj git fetch", ["raw", "jj", "git", "fetch"])
     steps.push(fetch_result)
     if not fetch_result.success:
         return SyncResult(
@@ -105,15 +108,15 @@ fn jj_sync(push: bool) -> SyncResult:
             file_count_warning: false, warning_message: ""
         )
 
-    # Step 3: jj rebase -d main@origin
-    val rebase_result = run_step("jj rebase -d main@origin", ["--no-pager", "--color", "never", "rebase", "-d", "main@origin"])
+    # Step 3: sj raw jj rebase -d main@origin
+    val rebase_result = run_step("sj raw jj rebase -d main@origin", ["raw", "jj", "rebase", "-d", "main@origin"])
     steps.push(rebase_result)
     if not rebase_result.success:
         # Rebase can fail if already up-to-date or conflicts; warn but continue
         if rebase_result.output.contains("Nothing changed"):
             # Already up to date, that's fine
             steps[steps.len() - 1] = StepResult(
-                step_name: "jj rebase -d main@origin (already up-to-date)",
+                step_name: "sj raw jj rebase -d main@origin (already up-to-date)",
                 success: true,
                 output: rebase_result.output,
                 exit_code: 0
@@ -140,10 +143,10 @@ fn jj_sync(push: bool) -> SyncResult:
             val pct = (reduction * 100) / count_before
             if pct > 20:
                 file_count_warning = true
-                warning_message = "File count dropped by {pct}% ({count_before} -> {count_after}, lost {reduction} files). This may indicate a destructive rebase. Review with 'jj diff --stat' before pushing."
+                warning_message = "File count dropped by {pct}% ({count_before} -> {count_after}, lost {reduction} files). This may indicate a destructive rebase. Review with 'sj raw jj diff --stat' before pushing."
             elif reduction > 50:
                 file_count_warning = true
-                warning_message = "Lost {reduction} files after rebase ({count_before} -> {count_after}). Review with 'jj diff --stat' before pushing."
+                warning_message = "Lost {reduction} files after rebase ({count_before} -> {count_after}). Review with 'sj raw jj diff --stat' before pushing."
 
     if file_count_warning:
         steps.push(StepResult(
@@ -158,14 +161,14 @@ fn jj_sync(push: bool) -> SyncResult:
             file_count_warning: true, warning_message: warning_message
         )
 
-    # Step 5: jj bookmark set main -r @-
-    val bookmark_result = run_step("jj bookmark set main -r @-", ["--no-pager", "--color", "never", "bookmark", "set", "main", "-r", "@-"])
+    # Step 5: sj bookmark set main -r @-
+    val bookmark_result = run_step("sj bookmark set main -r @-", ["bookmark", "set", "main", "-r", "@-"])
     steps.push(bookmark_result)
     if not bookmark_result.success:
         # Non-fatal: bookmark might not exist or might already be set
         if not bookmark_result.output.contains("error"):
             steps[steps.len() - 1] = StepResult(
-                step_name: "jj bookmark set main -r @- (warning)",
+                step_name: "sj bookmark set main -r @- (warning)",
                 success: true,
                 output: bookmark_result.output,
                 exit_code: 0
@@ -173,7 +176,7 @@ fn jj_sync(push: bool) -> SyncResult:
 
     # Step 6: jj git push (if requested)
     if push:
-        val push_result = run_step("jj git push --bookmark main", ["--no-pager", "--color", "never", "git", "push", "--bookmark", "main"])
+        val push_result = run_step("sj git push --bookmark main", ["git", "push", "--bookmark", "main"])
         steps.push(push_result)
         if not push_result.success:
             return SyncResult(

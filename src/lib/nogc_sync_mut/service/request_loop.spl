@@ -1,0 +1,40 @@
+"""
+# Service Base — Request Loop Capsule
+
+Reads newline-delimited JSON requests from client fds, dispatches to a
+RequestHandler, writes JSON responses (AC-1).
+"""
+
+use std.io_runtime
+use std.service.uds_server
+use std.service.request_queue
+use std.service.signal_handlers
+
+extern fn rt_unix_socket_recv(fd: i64, max_len: i64) -> [u8]
+extern fn rt_unix_socket_send(fd: i64, data: [u8]) -> i64
+extern fn rt_sleep_ms(ms: i64)
+
+val MAX_REQUEST_BYTES: i64 = 65536i64
+
+fn _bytes_to_text(bytes: [u8]) -> text:
+    # Convert [u8] to text via interpreter built-in
+    val s = ""
+    var i = 0i64
+    while i < bytes.len():
+        s = s + bytes[i].to_char()
+        i = i + 1i64
+    s
+
+fn process_one_request(client_fd: i64, handler: fn(text) -> text) -> bool:
+    val bytes = rt_unix_socket_recv(client_fd, MAX_REQUEST_BYTES)
+    if bytes.len() == 0i64:
+        # EOF — client disconnected
+        return false
+    if bytes.len() == 1i64 and bytes[0i64] == 255i64:
+        # Error sentinel
+        return false
+    val request = _bytes_to_text(bytes)
+    val response = handler(request)
+    val resp_bytes = response.to_bytes()
+    val _ = rt_unix_socket_send(client_fd, resp_bytes)
+    true
