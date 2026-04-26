@@ -319,26 +319,106 @@ pub extern "C" fn rt_bdd_it_start_rv(name_rv: i64) {
     });
 }
 
+/// Render a RuntimeValue as a human-readable string for failure messages.
+///
+/// Unlike `rv_to_string` (which only handles String heap objects), this
+/// also unwraps tagged ints / floats / bools / nil so failure messages
+/// show meaningful values instead of raw 64-bit slot bits.
+unsafe fn rv_to_display(value: i64) -> String {
+    let rv = RuntimeValue(value as u64);
+    if rv.is_nil() {
+        return "nil".to_string();
+    }
+    if rv.is_bool() {
+        return if rv.as_bool() { "true".to_string() } else { "false".to_string() };
+    }
+    if rv.is_int() {
+        return rv.as_int().to_string();
+    }
+    if rv.is_float() {
+        return rv.as_float().to_string();
+    }
+    if rv.is_heap() {
+        let ptr = rv.as_heap_ptr();
+        const MIN_HEAP_ADDR: usize = 0x100000;
+        if !ptr.is_null() && (ptr as usize) >= MIN_HEAP_ADDR {
+            if (*ptr).object_type == crate::value::heap::HeapObjectType::String {
+                let str_ptr = ptr as *const super::collections::RuntimeString;
+                return (*str_ptr).as_str().to_string();
+            }
+        }
+        // Likely a raw untagged integer or invalid pointer — fall through.
+    }
+    // Native codegen integers arrive untagged; print the raw signed value
+    // so the message stays readable.
+    format!("{}", value)
+}
+
 /// expect_eq accepting RuntimeValues directly.
+///
+/// Uses semantic equality (`rt_native_eq`) — same logic as the
+/// compiler's native `==` operator — so it correctly handles:
+/// - identical raw bits (fast path: ints, same-pointer strings, bools, nil)
+/// - heap-tagged strings allocated at distinct addresses (content compare)
+/// - native-codegen raw untagged integers
+///
+/// Previously used `RuntimeValue`'s derived `PartialEq`, which only
+/// compares raw u64 slot bits — that false-failed on
+/// `expect "ok" == "ok"` because two `rt_string_new` calls return distinct
+/// heap pointers.
 #[no_mangle]
 pub extern "C" fn rt_bdd_expect_eq_rv(actual: i64, expected: i64) {
-    let actual_rv = RuntimeValue(actual as u64);
-    let expected_rv = RuntimeValue(expected as u64);
-    // Compare as RuntimeValues
-    if actual_rv != expected_rv {
-        let msg = format!("Expected {} to equal {}", actual, expected);
+    let equal = crate::value::ffi::equality::rt_native_eq(actual, expected) == 1;
+    if !equal {
+        let actual_str = unsafe { rv_to_display(actual) };
+        let expected_str = unsafe { rv_to_display(expected) };
+        let msg = format!("Expected {} to equal {}", actual_str, expected_str);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
         BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
     }
 }
 
 /// expect_truthy accepting a RuntimeValue.
+///
+/// A value is truthy when it is not nil and not bool-false and not the
+/// integer 0. This mirrors the interpreter's `is_truthy` semantics and
+/// correctly handles native-codegen results, where:
+/// - bool comparisons may arrive as raw 0/1 (untagged i64) — tag bits of
+///   raw `1` happen to match TAG_HEAP, so the previous `as_bool()`-only
+///   check rejected real bool-true comparison results.
+/// - tagged `RuntimeValue::TRUE` / `RuntimeValue::FALSE` arrive when the
+///   SMF wrapper passes a literal `true` / `false`.
+/// - tagged ints (`RuntimeValue::from_int`) arrive when the spec inlines
+///   helper bodies.
 #[no_mangle]
 pub extern "C" fn rt_bdd_expect_truthy_rv(value: i64) {
     let rv = RuntimeValue(value as u64);
-    let is_truthy = !rv.is_nil() && rv.as_bool();
+    // Tagged-bool path: respect explicit false.
+    let is_truthy = if rv.is_bool() {
+        rv.as_bool()
+    } else if rv.is_nil() {
+        false
+    } else if rv.is_int() {
+        rv.as_int() != 0
+    } else if rv.is_heap() {
+        // Heap-tagged: real heap pointers are above MIN_HEAP_ADDR. Raw
+        // untagged ints (native codegen) like `1` look like TAG_HEAP with
+        // a near-zero pointer — treat any non-zero raw value as truthy.
+        const MIN_HEAP_ADDR: usize = 0x100000;
+        let ptr = rv.as_heap_ptr();
+        if !ptr.is_null() && (ptr as usize) >= MIN_HEAP_ADDR {
+            true
+        } else {
+            // Treat as raw untagged value: non-zero is truthy.
+            value != 0
+        }
+    } else {
+        // Floats / specials other than nil/bool: anything non-zero is truthy.
+        value != 0
+    };
     if !is_truthy {
-        let msg = format!("Expected value to be truthy, got {:?}", rv);
+        let display = unsafe { rv_to_display(value) };
+        let msg = format!("Expected value to be truthy, got {}", display);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
         BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
     }
