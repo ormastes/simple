@@ -1,18 +1,19 @@
 # SHA-512 implementation produces wrong digest
 
 Date: 2026-04-26
+Status: **Fixed 2026-04-26**
 Source: discovered while fixing crypto_reference_spec `method get not found` failures
 Spec: `test/unit/lib/crypto/crypto_reference_spec.spl`
 
 ## Symptoms
 
-`std.crypto.sha512.sha512_bytes([])` returns
+`std.crypto.sha512.sha512_bytes([])` returned
 `6fac5aa1e616d70854d0d5b7cb8caf5f8c49b69c24b88403dd6b0985dff59c3b32dbb6e350c0f4d2a1243894bacf9cf43e4ed52ffb23cb66aa927414d5e10302`
 
 Expected (FIPS 180-4):
 `cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e`
 
-Cascades to: `hmac_sha512`, `pbkdf2_sha512` — all produce wrong bytes.
+Cascaded to: `hmac_sha512`, `pbkdf2_sha512` — all produced wrong bytes.
 
 ## Reproduce
 
@@ -25,20 +26,45 @@ fn main():
     print(bytes_to_hex(r))
 ```
 
-## Spec test that fails
+## Spec test that failed
 
 `test/unit/lib/crypto/crypto_reference_spec.spl :: PBKDF2 reference vectors :: matches PBKDF2-HMAC-SHA512 reference vector`
 
-Reaches the assertion stage and produces an incorrect digest, not a symbol-resolution error.
+Reached the assertion stage and produced an incorrect digest, not a
+symbol-resolution error.
 
-## Likely location
+## Root cause
 
-`src/lib/common/crypto/sha512.spl` — possibly initial-hash constants, K constants,
-sigma functions, or 64-bit big-endian byte assembly. SHA-256 (`sha256_bytes`) appears
-correct (PBKDF2-HMAC-SHA256 test passes against the published vector).
+`src/lib/common/crypto/types.spl` — `rotr64` and `shr64` used Simple's bare
+`>>` operator on `i64`, which is **arithmetic** (sign-extending). Empirical
+verification: `0x8000000000000000 >> 1` yields `-4611686018427387904`
+(=`0xC000000000000000`), not the expected `0x4000000000000000`.
 
-## Out of scope for the spec-fix worktree
+For SHA-512, both the round constants `K[0..79]` and several initial hash
+values `H[0..7]` have bit 63 set, so the message-schedule σ-functions
+(`σ0`, `σ1`) and round Σ-functions (`Σ0`, `Σ1`) silently smeared sign bits
+into upper positions on every right shift / right rotate, corrupting every
+digest from the first compression step onward.
 
-Detected after fixing `text.get` -> slice in `crypto/types.spl` and adding
-`use` resolution in `pbkdf2.spl` and `hmac.spl`. The algorithmic correction
-should land in its own change.
+The 32-bit siblings (`rotr32`, `shr32`) were correct because they explicitly
+masked with `0xFFFFFFFF`; the asymmetry was the smoking gun.
+
+## Fix
+
+`src/lib/common/crypto/types.spl`: rewrote `rotr64` and `shr64` to perform
+one logical shift (clear the sign bit propagated by `>>` after a shift of
+1) and then complete the remaining `n - 1` shifts arithmetically — all of
+which are now non-negative and therefore behave logically. `n == 0` is
+guarded explicitly. SHA-512 sigma rotations use n in {1, 6, 7, 8, 14, 18,
+19, 28, 34, 39, 41, 61}; none reach 64, so `x << (64 - n)` in `rotr64`
+stays well-defined.
+
+## Verification
+
+- `sha512_bytes([])` → matches FIPS 180-4 KAT (`cf83e1357eefb8bd...da3e`).
+- `sha512_bytes([0x61, 0x62, 0x63])` ("abc") → matches FIPS 180-4
+  Appendix C.1 (`ddaf35a193617aba...f23a`).
+- 56-byte FIPS Appendix C.2 vector matches.
+- `crypto_reference_spec :: PBKDF2-HMAC-SHA512 reference vector` → PASS.
+- Deliberate-fail probe: reverting only the shift fix re-broke the
+  PBKDF2-HMAC-SHA512 vector; restoring re-greened it.
