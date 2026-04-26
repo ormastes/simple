@@ -16,7 +16,6 @@ use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
 use os.apps.shell.shell_app.{ShellApp}
 use std.format.{format_hex}
-use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
@@ -114,6 +113,9 @@ fn _ed25519_public_key_from_seed(seed: [u8]?) -> [u8]:
         return []
     pk
 
+fn log_info(_msg: text):
+    pass_dn
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -155,6 +157,7 @@ class SshSession:
     iv_s2c: [u8]
     mac_key_c2s: [u8]
     mac_key_s2c: [u8]
+    negotiated_cipher: text
     host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
 
 impl SshSession:
@@ -201,6 +204,7 @@ impl SshSession:
             iv_s2c: [],
             mac_key_c2s: [],
             mac_key_s2c: [],
+            negotiated_cipher: "",
             host_keys: host_keys
         )
 
@@ -428,18 +432,24 @@ impl SshSession:
         serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
         self.iv_c2s = _copy_bytes_stable(keys.iv_c2s)
         self.iv_s2c = _copy_bytes_stable(keys.iv_s2c)
-        self.enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, 16)
-        self.enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, 16)
+        var enc_key_len: u64 = 0
+        if algos_early.cipher_c2s == "aes256-gcm@openssh.com" and algos_early.cipher_s2c == "aes256-gcm@openssh.com":
+            enc_key_len = 32
+            self.negotiated_cipher = "aes256-gcm@openssh.com"
+        elif algos_early.cipher_c2s == "aes128-gcm@openssh.com" and algos_early.cipher_s2c == "aes128-gcm@openssh.com":
+            enc_key_len = 16
+            self.negotiated_cipher = "aes128-gcm@openssh.com"
+        else:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
+            return false
+        self.enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, enc_key_len)
+        self.enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, enc_key_len)
         self.mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
         self.mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
         serial_println("[sshd-session] stored iv_c2s={_bytes_to_hex(self.iv_c2s)}")
         serial_println("[sshd-session] stored iv_s2c={_bytes_to_hex(self.iv_s2c)}")
         serial_println("[sshd-session] stored key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
         serial_println("[sshd-session] stored key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
-        if (algos_early.cipher_c2s != "aes128-gcm@openssh.com" or
-            algos_early.cipher_s2c != "aes128-gcm@openssh.com"):
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
-            return false
         self.cipher.activate(0, 0)
         log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq=0 s2c_seq=0")
         log_info("[app.sshd] " + "[sshd-session] kex ok")
@@ -1001,7 +1011,11 @@ impl SshSession:
         """Send an SSH packet. Encrypts if cipher is active."""
         serial_println("[sshd-session] send_packet active={self.cipher.active} payload_len={payload.len()} send_seq={self.send_seq}")
         if self.cipher.active:
-            val encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), payload)
+            var encrypted: [u8] = []
+            if self.negotiated_cipher == "aes256-gcm@openssh.com":
+                encrypted = ssh_encrypt_packet_aes_gcm(payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
+            else:
+                encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), payload)
             self.raw_send(encrypted)
             self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
         else:
@@ -1080,13 +1094,22 @@ impl SshSession:
             self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
 
             # Decrypt
-            val payload = rt_ssh_aes128_gcm_decrypt_packet(self.enc_key_c2s, self.iv_c2s, self.cipher.seq_c2s.to_i64(), enc_packet)
-            if payload.len() > 0:
-                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
-                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                return payload
+            if self.negotiated_cipher == "aes256-gcm@openssh.com":
+                val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
+                if decrypted.is_ok():
+                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                    return decrypted.unwrap()
+                else:
+                    return []
             else:
-                return []
+                val payload = rt_ssh_aes128_gcm_decrypt_packet(self.enc_key_c2s, self.iv_c2s, self.cipher.seq_c2s.to_i64(), enc_packet)
+                if payload.len() > 0:
+                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                    return payload
+                else:
+                    return []
 
         else:
             return []

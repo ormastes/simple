@@ -9,6 +9,8 @@ use socket2::Socket;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -341,6 +343,12 @@ include!("net_udp.rs");
 // HTTP FFI functions (extracted to net_http.rs)
 // ============================================================================
 include!("net_http.rs");
+
+// ============================================================================
+// Unix-domain socket FFI functions (extracted to net_uds.rs)
+// Added 2026-04-26 for jj-wrapper-daemon (D-4 / SJ-UDS-001)
+// ============================================================================
+include!("net_uds.rs");
 
 // ============================================================================
 // Registry Cleanup (for test isolation)

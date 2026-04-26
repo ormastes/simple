@@ -1,0 +1,405 @@
+# adapter_minio_mc.spl
+#
+# ITF CLI - MinIO adapter (delegates to `mc` CLI).
+#
+# Shells out to `mc <command>` with the `--json` global flag for structured
+# output. This is the recommended path for users with `mc` installed; the
+# pure-Simple `adapter_minio.spl` (SigV4 + REST) is the no-`mc` fallback.
+#
+# Reference: https://min.io/docs/minio/linux/reference/minio-mc.html
+#
+# Subprocess invocation mirrors `adapter_jira.spl`'s `_run_acli` (process_run).
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.common.json.{json_parse, json_object_get, json_serialize, json_get_type}
+
+
+class McClient:
+    """Configuration for `mc` CLI invocations."""
+    alias_name: text
+    mc_path: text
+
+    static fn default(alias: text) -> McClient:
+        McClient(alias_name: alias, mc_path: "mc")
+
+
+class McEntry:
+    """Single line from `mc ls --json`."""
+    key: text
+    type: text
+    size: i64
+    last_modified: text
+    etag: text
+
+
+class McStat:
+    """Result from `mc stat --json` for a single object/bucket."""
+    name: text
+    type: text
+    size: i64
+    last_modified: text
+    etag: text
+    metadata: text
+
+
+class McServerInfo:
+    """Subset of `mc admin info --json` cluster info."""
+    mode: text
+    version: text
+    region: text
+    deployment_id: text
+
+
+# ---------------------------------------------------------------------------
+# argv builders (pure functions, exposed for unit tests)
+# ---------------------------------------------------------------------------
+
+fn _argv_alias_set(alias: text, url: text, access_key: text, secret_key: text) -> [text]:
+    """Build argv for `mc --json alias set ALIAS URL ACCESSKEY SECRETKEY`.
+
+    Reference: mc-alias-set syntax: `mc [GLOBALFLAGS] alias set ALIAS URL ACCESSKEY SECRETKEY`.
+    """
+    ["--json", "alias", "set", alias, url, access_key, secret_key]
+
+
+fn _argv_alias_remove(alias: text) -> [text]:
+    """Build argv for `mc --json alias remove ALIAS`."""
+    ["--json", "alias", "remove", alias]
+
+
+fn _argv_alias_list() -> [text]:
+    """Build argv for `mc --json alias list`."""
+    ["--json", "alias", "list"]
+
+
+fn _qualify_path(alias: text, path: text) -> text:
+    """Prefix a bucket-relative path with `<alias>/`. Strips a leading slash."""
+    var p = path
+    if p.starts_with("/"):
+        p = p[1:p.len()]
+    "{alias}/{p}"
+
+
+fn _argv_ls(alias: text, path: text, recursive: bool) -> [text]:
+    """Build argv for `mc --json ls [-r] ALIAS/path`.
+
+    Reference: mc-ls syntax with `--recursive` (alias `-r`).
+    """
+    var args: [text] = ["--json", "ls"]
+    if recursive:
+        args = args + ["--recursive"]
+    args + [_qualify_path(alias, path)]
+
+
+fn _argv_stat(alias: text, path: text) -> [text]:
+    """Build argv for `mc --json stat ALIAS/path`."""
+    ["--json", "stat", _qualify_path(alias, path)]
+
+
+fn _argv_cp_get(alias: text, remote_path: text, local_path: text) -> [text]:
+    """Build argv for `mc --json cp ALIAS/remote LOCAL` (download)."""
+    ["--json", "cp", _qualify_path(alias, remote_path), local_path]
+
+
+fn _argv_cp_put(alias: text, local_path: text, remote_path: text) -> [text]:
+    """Build argv for `mc --json cp LOCAL ALIAS/remote` (upload)."""
+    ["--json", "cp", local_path, _qualify_path(alias, remote_path)]
+
+
+fn _format_expire(seconds: i64) -> text:
+    """Format a duration in seconds as mc's `##h##m##s` expire string.
+
+    Reference: mc-share-download `--expire` accepts `##h##m##s` format.
+    """
+    if seconds <= 0:
+        return "0s"
+    var s = seconds
+    val h = s / 3600
+    s = s - h * 3600
+    val m = s / 60
+    s = s - m * 60
+    var out = ""
+    if h > 0:
+        out = out + "{h}h"
+    if m > 0:
+        out = out + "{m}m"
+    if s > 0 or out == "":
+        out = out + "{s}s"
+    out
+
+
+fn _argv_share_download(alias: text, path: text, expiry_seconds: i64) -> [text]:
+    """Build argv for `mc --json share download --expire=<NhMmSs> ALIAS/path`."""
+    val expire = _format_expire(expiry_seconds)
+    ["--json", "share", "download", "--expire", expire, _qualify_path(alias, path)]
+
+
+fn _argv_admin_info(alias: text) -> [text]:
+    """Build argv for `mc --json admin info ALIAS`."""
+    ["--json", "admin", "info", alias]
+
+
+fn _argv_health(url: text) -> [text]:
+    """Build argv for `curl -s -o /dev/null -w "%{http_code}" <url>/minio/health/ready`."""
+    var u = url
+    if u.ends_with("/"):
+        u = u[0:u.len() - 1]
+    ["-s", "-o", "/dev/null", "-w", "%{http_code}", "{u}/minio/health/ready"]
+
+
+# ---------------------------------------------------------------------------
+# JSON parsing helpers
+# ---------------------------------------------------------------------------
+
+fn _mc_str(obj: any, key: text) -> text:
+    """Extract a string field from a mc JSON object, stripping quotes."""
+    if obj == nil:
+        return ""
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _mc_i64(obj: any, key: text) -> i64:
+    """Extract an integer field from a mc JSON object."""
+    if obj == nil:
+        return 0
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return 0
+    val s = json_serialize(v).trim()
+    var n: i64 = 0
+    var i = 0
+    var sign: i64 = 1
+    if s.len() > 0 and s[0] == "-":
+        sign = -1
+        i = 1
+    while i < s.len():
+        val ch = s[i]
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    n * sign
+
+
+fn _parse_ndjson_lines(stdout: text) -> [any]:
+    """Split mc's NDJSON stdout into one parsed object per non-empty line.
+
+    Reference: mc `--json` global flag emits JSON Lines (jsonlines.org).
+    """
+    var out: [any] = []
+    for line in stdout.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            val parsed = json_parse(trimmed)
+            if parsed != nil:
+                out = out + [parsed]
+    out
+
+
+fn _entry_from_obj(obj: any) -> McEntry:
+    """Map a `mc ls --json` line object to McEntry."""
+    McEntry(
+        key: _mc_str(obj, "key"),
+        type: _mc_str(obj, "type"),
+        size: _mc_i64(obj, "size"),
+        last_modified: _mc_str(obj, "lastModified"),
+        etag: _mc_str(obj, "etag")
+    )
+
+
+fn _stat_from_obj(obj: any) -> McStat:
+    """Map a `mc stat --json` line object to McStat."""
+    McStat(
+        name: _mc_str(obj, "name"),
+        type: _mc_str(obj, "type"),
+        size: _mc_i64(obj, "size"),
+        last_modified: _mc_str(obj, "lastModified"),
+        etag: _mc_str(obj, "etag"),
+        metadata: ""
+    )
+
+
+fn _server_info_from_obj(obj: any) -> McServerInfo:
+    """Map `mc admin info --json` top object to McServerInfo (best-effort)."""
+    val info = json_object_get(obj, "info")
+    val src = if info != nil: info else: obj
+    McServerInfo(
+        mode: _mc_str(src, "mode"),
+        version: _mc_str(src, "version"),
+        region: _mc_str(src, "region"),
+        deployment_id: _mc_str(src, "deploymentID")
+    )
+
+
+fn _share_url_from_obj(obj: any) -> text:
+    """Extract presigned URL from `mc share download --json` line.
+
+    `mc share download --json` emits an object with a `share` field per line.
+    """
+    val s = _mc_str(obj, "share")
+    if s != "":
+        return s
+    _mc_str(obj, "url")
+
+
+# ---------------------------------------------------------------------------
+# Status mapping
+# ---------------------------------------------------------------------------
+
+fn _mc_success(code: i64) -> bool:
+    """`mc` exit code 0 = success; 1 = generic; 2 = invalid args."""
+    code == 0
+
+
+# ---------------------------------------------------------------------------
+# Public functions: each runs the `mc` subprocess and returns
+# (success, parsed: T, raw_json|raw_text: text)
+# ---------------------------------------------------------------------------
+
+fn mc_alias_set(client: McClient, alias: text, url: text, access_key: text, secret_key: text) -> (bool, text):
+    """Register or update an alias.
+
+    Returns: (success, raw_text).
+    Reference: `mc alias set ALIAS URL ACCESSKEY SECRETKEY`.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_alias_set(alias, url, access_key, secret_key))
+    val combined = if stdout != "": stdout else: stderr
+    (_mc_success(code), combined)
+
+
+fn mc_alias_remove(client: McClient, alias: text) -> (bool, text):
+    """Remove an alias from the local mc configuration.
+
+    Returns: (success, raw_text).
+    Reference: `mc alias remove ALIAS`.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_alias_remove(alias))
+    val combined = if stdout != "": stdout else: stderr
+    (_mc_success(code), combined)
+
+
+fn mc_alias_list(client: McClient) -> (bool, [text], text):
+    """List configured aliases.
+
+    Returns: (success, alias_names, raw_json).
+    Reference: `mc alias list` emits one JSON line per alias.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_alias_list())
+    if not _mc_success(code):
+        return (false, [], stderr)
+    val lines = _parse_ndjson_lines(stdout)
+    var names: [text] = []
+    for obj in lines:
+        val a = _mc_str(obj, "alias")
+        if a != "":
+            names = names + [a]
+    (true, names, stdout)
+
+
+fn mc_ls(client: McClient, path: text, recursive: bool) -> (bool, [McEntry], text):
+    """List bucket / prefix contents.
+
+    `path` is bucket-relative (e.g. `"firmware-images/zynq/"`); the alias is
+    prefixed automatically.
+
+    Returns: (success, entries, raw_json).
+    Reference: `mc --json ls [-r] ALIAS/path` emits NDJSON.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_ls(client.alias_name, path, recursive))
+    if not _mc_success(code):
+        return (false, [], stderr)
+    val lines = _parse_ndjson_lines(stdout)
+    var entries: [McEntry] = []
+    for obj in lines:
+        val status = _mc_str(obj, "status")
+        if status == "error":
+            return (false, [], stdout)
+        entries = entries + [_entry_from_obj(obj)]
+    (true, entries, stdout)
+
+
+fn mc_stat(client: McClient, path: text) -> (bool, McStat, text):
+    """Display object/bucket metadata.
+
+    Returns: (success, info, raw_json).
+    Reference: `mc --json stat ALIAS/path`.
+    """
+    val empty = McStat(name: "", type: "", size: 0, last_modified: "", etag: "", metadata: "")
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_stat(client.alias_name, path))
+    if not _mc_success(code):
+        return (false, empty, stderr)
+    val lines = _parse_ndjson_lines(stdout)
+    if lines.len() == 0:
+        return (false, empty, "no JSON output from mc stat")
+    (true, _stat_from_obj(lines[0]), stdout)
+
+
+fn mc_get(client: McClient, remote_path: text, local_path: text) -> (bool, text):
+    """Download a remote object to the local filesystem.
+
+    Returns: (success, raw_text).
+    Reference: `mc --json cp ALIAS/remote LOCAL`.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_cp_get(client.alias_name, remote_path, local_path))
+    val combined = if stdout != "": stdout else: stderr
+    (_mc_success(code), combined)
+
+
+fn mc_put(client: McClient, local_path: text, remote_path: text) -> (bool, text):
+    """Upload a local file to the remote bucket.
+
+    Returns: (success, raw_text).
+    Reference: `mc --json cp LOCAL ALIAS/remote`.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_cp_put(client.alias_name, local_path, remote_path))
+    val combined = if stdout != "": stdout else: stderr
+    (_mc_success(code), combined)
+
+
+fn mc_share_download(client: McClient, path: text, expiry_seconds: i64) -> (bool, text, text):
+    """Generate a presigned download URL.
+
+    Returns: (success, presigned_url, raw_json).
+    Reference: `mc --json share download --expire=<##h##m##s> ALIAS/path`.
+    `--expire` defaults to `168h` (7 days) if not specified.
+    """
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_share_download(client.alias_name, path, expiry_seconds))
+    if not _mc_success(code):
+        return (false, "", stderr)
+    val lines = _parse_ndjson_lines(stdout)
+    if lines.len() == 0:
+        return (false, "", "no JSON output from mc share download")
+    val url = _share_url_from_obj(lines[0])
+    (true, url, stdout)
+
+
+fn mc_admin_info(client: McClient) -> (bool, McServerInfo, text):
+    """Display server info (best-effort; requires admin credentials).
+
+    Returns: (success, info, raw_json).
+    Reference: `mc --json admin info ALIAS`.
+    """
+    val empty = McServerInfo(mode: "", version: "", region: "", deployment_id: "")
+    val (stdout, stderr, code) = process_run(client.mc_path, _argv_admin_info(client.alias_name))
+    if not _mc_success(code):
+        return (false, empty, stderr)
+    val lines = _parse_ndjson_lines(stdout)
+    if lines.len() == 0:
+        return (false, empty, "no JSON output from mc admin info")
+    (true, _server_info_from_obj(lines[0]), stdout)
+
+
+fn mc_health_ready(url: text) -> bool:
+    """Probe the MinIO `/minio/health/ready` endpoint via curl.
+
+    Returns true iff curl reports HTTP 200. No `mc` dependency.
+    """
+    val (stdout, _stderr, code) = process_run("curl", _argv_health(url))
+    if code != 0:
+        return false
+    stdout.trim() == "200"

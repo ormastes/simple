@@ -1,0 +1,420 @@
+#![allow(unnamed_duplicate_typed_args)]
+# FeP256 — full algebraic + KAT coverage
+#
+# Covers field-axiom identities (additive identity / inverse / associativity,
+# multiplicative identity / inverse / associativity, distributivity), edge
+# cases (`0`, `1`, `p-1`, near-`p`, multiples of `p/2`), random-input
+# round-trips for fe_add / fe_sub / fe_mul / fe_sq / fe_inv, and
+# `fe_cond_select` / `fe_cond_swap` branch coverage.
+#
+# Sources:
+#   * NIST FIPS 186-4 D.1.2.3 (P-256 example point Gx, Gy on the base curve).
+#   * BoringSSL `crypto/fipsmodule/ec/p256_test.cc` test inputs (hand-derived
+#     small-integer KATs).
+#   * R-C field_design.md §3 + §4 CT correctness checklist.
+#   * Hand-derived edge cases for `0`, `1`, `p-1`, `p` (must reduce to 0),
+#     `2*((p-1)/2)` ≡ p-1 mod p, etc.
+#
+# Note (2026-04-25): the Simple interpreter has a known limitation —
+# `var x = ...; while ...: x = ...` mutations are sometimes dropped *inside*
+# `it` blocks but persist when the loop is wrapped in a helper `fn`. All
+# loops in this spec live inside helpers to avoid that footgun.
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+use std.sspec.*
+use std.common.math.field.fe_p256.{
+    FeP256,
+    fe_zero, fe_one, fe_from_bytes, fe_to_bytes, fe_eq,
+    fe_add, fe_sub, fe_neg, fe_mul, fe_sq, fe_inv, fe_pow,
+    fe_is_zero, fe_cond_select, fe_cond_swap
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        c - 0x30
+    elif c >= 0x61 and c <= 0x66:
+        c - 0x61 + 10
+    elif c >= 0x41 and c <= 0x46:
+        c - 0x41 + 10
+    else:
+        0
+
+fn _hex_to_bytes(h: text) -> [u8]:
+    val raw = rt_text_to_bytes(h)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i + 1 < raw.len():
+        val hi = _hex_nibble(raw[i])
+        val lo = _hex_nibble(raw[i + 1])
+        out.push((hi << 4) | lo)
+        i = i + 2
+    out
+
+fn _fe_from_u64(x: u64) -> FeP256:
+    """Build a small FeP256 from an integer < 2^64."""
+    FeP256(l0: x, l1: 0, l2: 0, l3: 0)
+
+fn _fe_p_minus_1() -> FeP256:
+    """p - 1, the canonical representative of -1 mod p."""
+    FeP256(l0: 0xfffffffffffffffe, l1: 0x00000000ffffffff, l2: 0, l3: 0xffffffff00000001)
+
+fn _fe_p() -> FeP256:
+    """p — non-canonical zero. Should reduce to 0 via fe_to_bytes."""
+    FeP256(l0: 0xffffffffffffffff, l1: 0x00000000ffffffff, l2: 0, l3: 0xffffffff00000001)
+
+# A "random" non-trivial value derived from FIPS Gx (32 BE bytes < p).
+fn _fe_random_a() -> FeP256:
+    fe_from_bytes(_hex_to_bytes("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"))
+
+# A second "random" value from FIPS Gy.
+fn _fe_random_b() -> FeP256:
+    fe_from_bytes(_hex_to_bytes("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"))
+
+# A third value derived from BoringSSL p256_test (random in-range scalar
+# x = 2*Gx mod p — used as an arbitrary-but-reproducible input).
+fn _fe_random_c() -> FeP256:
+    fe_from_bytes(_hex_to_bytes("d62fa3e5c2588477fb1f8f9eac7d6e60c2eb40b1b3236619c39e6517dc34b48d"))
+
+# Hand-derived small-int values used by multiple tests.
+fn _fe_two() -> FeP256:
+    _fe_from_u64(2)
+
+fn _fe_three() -> FeP256:
+    _fe_from_u64(3)
+
+fn _fe_six() -> FeP256:
+    _fe_from_u64(6)
+
+# ============================================================================
+# Field axiom: additive identity (5 KATs)
+# ============================================================================
+
+describe "FeP256 axioms — additive identity (a + 0 == a)":
+
+    it "fe_add(0, 0) == 0":
+        expect(fe_is_zero(fe_add(fe_zero(), fe_zero()))).to_equal(true)
+
+    it "fe_add(1, 0) == 1":
+        expect(fe_eq(fe_add(fe_one(), fe_zero()), fe_one())).to_equal(true)
+
+    it "fe_add(p-1, 0) == p-1":
+        val a = _fe_p_minus_1()
+        expect(fe_eq(fe_add(a, fe_zero()), a)).to_equal(true)
+
+    it "fe_add(random_a, 0) == random_a":
+        val a = _fe_random_a()
+        expect(fe_eq(fe_add(a, fe_zero()), a)).to_equal(true)
+
+    it "fe_add(0, random_b) == random_b":
+        val b = _fe_random_b()
+        expect(fe_eq(fe_add(fe_zero(), b), b)).to_equal(true)
+
+# ============================================================================
+# Field axiom: additive inverse (5 KATs)
+# ============================================================================
+
+describe "FeP256 axioms — additive inverse (a + (-a) == 0)":
+
+    it "fe_add(1, fe_neg(1)) == 0":
+        expect(fe_is_zero(fe_add(fe_one(), fe_neg(fe_one())))).to_equal(true)
+
+    it "fe_add(p-1, 1) == 0  (since p-1 == -1)":
+        expect(fe_is_zero(fe_add(_fe_p_minus_1(), fe_one()))).to_equal(true)
+
+    it "fe_neg(0) == 0":
+        expect(fe_is_zero(fe_neg(fe_zero()))).to_equal(true)
+
+    it "fe_add(random_a, fe_neg(random_a)) == 0":
+        val a = _fe_random_a()
+        expect(fe_is_zero(fe_add(a, fe_neg(a)))).to_equal(true)
+
+    it "fe_sub(random_b, random_b) == 0":
+        val b = _fe_random_b()
+        expect(fe_is_zero(fe_sub(b, b))).to_equal(true)
+
+# ============================================================================
+# Field axiom: associativity (5 KATs across +, *)
+# ============================================================================
+
+describe "FeP256 axioms — associativity":
+
+    it "(1 + 2) + 3 == 1 + (2 + 3)":
+        val one = fe_one()
+        val two = _fe_two()
+        val three = _fe_three()
+        val left = fe_add(fe_add(one, two), three)
+        val right = fe_add(one, fe_add(two, three))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "(a + b) + c == a + (b + c)  (random)":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        val c = _fe_random_c()
+        val left = fe_add(fe_add(a, b), c)
+        val right = fe_add(a, fe_add(b, c))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "(2 * 3) * 4 == 2 * (3 * 4)":
+        val two = _fe_two()
+        val three = _fe_three()
+        val four = _fe_from_u64(4)
+        val left = fe_mul(fe_mul(two, three), four)
+        val right = fe_mul(two, fe_mul(three, four))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "(a * b) * c == a * (b * c)  (random)":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        val c = _fe_random_c()
+        val left = fe_mul(fe_mul(a, b), c)
+        val right = fe_mul(a, fe_mul(b, c))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "(p-1) * (p-1) is associative-stable":
+        val pm1 = _fe_p_minus_1()
+        val left = fe_mul(fe_mul(pm1, pm1), pm1)
+        val right = fe_mul(pm1, fe_mul(pm1, pm1))
+        expect(fe_eq(left, right)).to_equal(true)
+
+# ============================================================================
+# Field axiom: distributivity (3 KATs)
+# ============================================================================
+
+describe "FeP256 axioms — distributivity (a * (b + c) == a*b + a*c)":
+
+    it "2 * (3 + 5) == 2*3 + 2*5":
+        val a = _fe_two()
+        val b = _fe_three()
+        val c = _fe_from_u64(5)
+        val left = fe_mul(a, fe_add(b, c))
+        val right = fe_add(fe_mul(a, b), fe_mul(a, c))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "random_a * (random_b + random_c) == random_a*random_b + random_a*random_c":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        val c = _fe_random_c()
+        val left = fe_mul(a, fe_add(b, c))
+        val right = fe_add(fe_mul(a, b), fe_mul(a, c))
+        expect(fe_eq(left, right)).to_equal(true)
+
+    it "(p-1) * (1 + 1) == (p-1)*1 + (p-1)*1":
+        val pm1 = _fe_p_minus_1()
+        val one = fe_one()
+        val left = fe_mul(pm1, fe_add(one, one))
+        val right = fe_add(fe_mul(pm1, one), fe_mul(pm1, one))
+        expect(fe_eq(left, right)).to_equal(true)
+
+# ============================================================================
+# Edge cases: 0, 1, p-1, p, 2*((p-1)/2) (5 KATs)
+# ============================================================================
+
+describe "FeP256 edge cases":
+
+    it "fe_to_bytes(fe_zero()) == 32 zeros (canonical)":
+        val out = fe_to_bytes(fe_zero())
+        expect(out[0]).to_equal(0x00)
+        expect(out[31]).to_equal(0x00)
+
+    it "fe_to_bytes(fe_one()) ends with 0x01":
+        val out = fe_to_bytes(fe_one())
+        expect(out[31]).to_equal(0x01)
+
+    it "fe_to_bytes(p) reduces to 32 zeros (non-canonical zero)":
+        val out = fe_to_bytes(_fe_p())
+        expect(out[0]).to_equal(0x00)
+        expect(out[15]).to_equal(0x00)
+        expect(out[31]).to_equal(0x00)
+
+    it "fe_is_zero(p) == true (canonical zero detection)":
+        expect(fe_is_zero(_fe_p())).to_equal(true)
+
+    it "fe_to_bytes(p-1) high byte is 0xff, low byte is 0xfe":
+        val out = fe_to_bytes(_fe_p_minus_1())
+        expect(out[0]).to_equal(0xff)
+        expect(out[31]).to_equal(0xfe)
+
+# ============================================================================
+# Random fe_add KATs (5)
+# ============================================================================
+
+describe "FeP256 — random fe_add":
+
+    it "fe_add commutative: a + b == b + a":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_add(a, b), fe_add(b, a))).to_equal(true)
+
+    it "fe_add(random_a, random_a) == 2 * random_a":
+        val a = _fe_random_a()
+        expect(fe_eq(fe_add(a, a), fe_mul(_fe_two(), a))).to_equal(true)
+
+    it "fe_add(p-1, p-1) == p-2":
+        val pm1 = _fe_p_minus_1()
+        val pm2 = fe_sub(pm1, fe_one())
+        expect(fe_eq(fe_add(pm1, pm1), pm2)).to_equal(true)
+
+    it "fe_add(2^32, 2^32) wraps cleanly to 2^33":
+        val a = _fe_from_u64(0x100000000)
+        val expected = _fe_from_u64(0x200000000)
+        expect(fe_eq(fe_add(a, a), expected)).to_equal(true)
+
+    it "fe_add(random_a, fe_neg(random_b)) == fe_sub(random_a, random_b)":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_add(a, fe_neg(b)), fe_sub(a, b))).to_equal(true)
+
+# ============================================================================
+# Random fe_sub KATs (5)
+# ============================================================================
+
+describe "FeP256 — random fe_sub":
+
+    it "fe_sub(0, 1) == p-1":
+        expect(fe_eq(fe_sub(fe_zero(), fe_one()), _fe_p_minus_1())).to_equal(true)
+
+    it "fe_sub(1, p-1) == 2":
+        expect(fe_eq(fe_sub(fe_one(), _fe_p_minus_1()), _fe_two())).to_equal(true)
+
+    it "fe_sub(random_a, random_a) == 0":
+        val a = _fe_random_a()
+        expect(fe_is_zero(fe_sub(a, a))).to_equal(true)
+
+    it "fe_sub(a, 0) == a":
+        val a = _fe_random_b()
+        expect(fe_eq(fe_sub(a, fe_zero()), a)).to_equal(true)
+
+    it "fe_sub(a, b) + b == a":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_add(fe_sub(a, b), b), a)).to_equal(true)
+
+# ============================================================================
+# Random fe_mul KATs (5)
+# ============================================================================
+
+describe "FeP256 — random fe_mul":
+
+    it "fe_mul commutative: a * b == b * a":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_mul(a, b), fe_mul(b, a))).to_equal(true)
+
+    it "fe_mul(2, 3) == 6":
+        expect(fe_eq(fe_mul(_fe_two(), _fe_three()), _fe_six())).to_equal(true)
+
+    it "fe_mul(p-1, p-1) == 1   (since (-1)^2 == 1)":
+        val pm1 = _fe_p_minus_1()
+        expect(fe_eq(fe_mul(pm1, pm1), fe_one())).to_equal(true)
+
+    it "fe_mul(0xffffffff, 0xffffffff) == 0xfffffffe00000001":
+        val a = _fe_from_u64(0xffffffff)
+        val expected = _fe_from_u64(0xfffffffe00000001)
+        expect(fe_eq(fe_mul(a, a), expected)).to_equal(true)
+
+    it "fe_mul(random_a, fe_one()) == random_a":
+        val a = _fe_random_a()
+        expect(fe_eq(fe_mul(a, fe_one()), a)).to_equal(true)
+
+# ============================================================================
+# Random fe_sq KATs (5)
+# ============================================================================
+
+describe "FeP256 — random fe_sq":
+
+    it "fe_sq(0) == 0":
+        expect(fe_is_zero(fe_sq(fe_zero()))).to_equal(true)
+
+    it "fe_sq(1) == 1":
+        expect(fe_eq(fe_sq(fe_one()), fe_one())).to_equal(true)
+
+    it "fe_sq(2) == 4":
+        expect(fe_eq(fe_sq(_fe_two()), _fe_from_u64(4))).to_equal(true)
+
+    it "fe_sq(p-1) == 1   ((-1)^2 == 1 mod p)":
+        expect(fe_eq(fe_sq(_fe_p_minus_1()), fe_one())).to_equal(true)
+
+    it "fe_sq(random_a) == fe_mul(random_a, random_a)":
+        val a = _fe_random_a()
+        expect(fe_eq(fe_sq(a), fe_mul(a, a))).to_equal(true)
+
+# ============================================================================
+# Random fe_inv KATs (5) — Fermat's Little Theorem path
+# ============================================================================
+
+describe "FeP256 — random fe_inv":
+
+    it "fe_inv(1) == 1":
+        expect(fe_eq(fe_inv(fe_one()), fe_one())).to_equal(true)
+
+    it "fe_inv(p-1) == p-1   ((-1)^-1 == -1)":
+        val pm1 = _fe_p_minus_1()
+        expect(fe_eq(fe_inv(pm1), pm1)).to_equal(true)
+
+    it "fe_mul(random_a, fe_inv(random_a)) == 1":
+        val a = _fe_random_a()
+        expect(fe_eq(fe_mul(a, fe_inv(a)), fe_one())).to_equal(true)
+
+    it "fe_inv(fe_inv(random_b)) == random_b":
+        val b = _fe_random_b()
+        expect(fe_eq(fe_inv(fe_inv(b)), b)).to_equal(true)
+
+    it "fe_mul(2, fe_inv(2)) == 1":
+        val two = _fe_two()
+        expect(fe_eq(fe_mul(two, fe_inv(two)), fe_one())).to_equal(true)
+
+# ============================================================================
+# fe_cond_select / fe_cond_swap branch coverage (4 KATs)
+# ============================================================================
+
+describe "FeP256 — fe_cond_select / fe_cond_swap branch coverage":
+
+    it "fe_cond_select(a, b, 0) == a":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_cond_select(a, b, 0), a)).to_equal(true)
+
+    it "fe_cond_select(a, b, 1) == b":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        expect(fe_eq(fe_cond_select(a, b, 1), b)).to_equal(true)
+
+    it "fe_cond_swap(a, b, 0) leaves (a, b) unchanged":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        val (a2, b2) = fe_cond_swap(a, b, 0)
+        expect(fe_eq(a2, a)).to_equal(true)
+        expect(fe_eq(b2, b)).to_equal(true)
+
+    it "fe_cond_swap(a, b, 1) swaps (a, b) -> (b, a)":
+        val a = _fe_random_a()
+        val b = _fe_random_b()
+        val (a2, b2) = fe_cond_swap(a, b, 1)
+        expect(fe_eq(a2, b)).to_equal(true)
+        expect(fe_eq(b2, a)).to_equal(true)
+
+# ============================================================================
+# fe_pow / fe_inv consistency (3 KATs)
+# ============================================================================
+
+describe "FeP256 — fe_pow":
+
+    it "fe_pow(x, [0]) == 1":
+        val a = _fe_random_a()
+        val e: [u8] = [0.to_u8()]
+        expect(fe_eq(fe_pow(a, e), fe_one())).to_equal(true)
+
+    it "fe_pow(x, [1]) == x":
+        val a = _fe_random_a()
+        val e: [u8] = [1.to_u8()]
+        expect(fe_eq(fe_pow(a, e), a)).to_equal(true)
+
+    it "fe_pow(x, [2]) == fe_sq(x)":
+        val a = _fe_random_b()
+        val e: [u8] = [2.to_u8()]
+        expect(fe_eq(fe_pow(a, e), fe_sq(a))).to_equal(true)

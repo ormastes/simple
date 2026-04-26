@@ -1,5 +1,6 @@
 # ITF CLI — `itf minio {ls,get,put,stat,presign,health}` subcommands.
 
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
 use app.itf.adapter_minio.{
     MinioConfig, BucketInfo, ObjectInfo, GetObjectResult, HeadObjectResult,
     load_minio_config, check_minio_auth,
@@ -127,7 +128,12 @@ fn _minio_get(args: [text]) -> i64:
 
 
 fn _minio_put(args: [text]) -> i64:
-    """`itf minio put <bucket> <key> --file PATH [--content-type CT]`"""
+    """`itf minio put <bucket> <key> --file PATH [--content-type CT]`
+
+    Routes to `minio_put_text` for text bodies (any --file content read as UTF-8 text)
+    up to 64 MiB. Binary bodies fall through to `minio_put_object` which returns a
+    clear "needs raw-bytes FFI" error (issue #10 follow-up).
+    """
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
@@ -142,6 +148,16 @@ fn _minio_put(args: [text]) -> i64:
     if file_path == "":
         print_error("--file PATH is required")
         return 1
+    # Try text path first — works for JSON/XML/plain bodies up to 64 MiB.
+    val content = file_read_text(file_path)
+    if content != nil:
+        val (ok, _etag, raw) = minio_put_text(cfg, bucket, key, content, ct)
+        if not ok:
+            print_error(raw)
+            return 1
+        print_success("uploaded {bucket}/{key} ({content.len()} bytes, text path)")
+        return 0
+    # Fallthrough — binary path (currently surfaces a clear error).
     val (ok, etag, raw) = minio_put_object(cfg, bucket, key, file_path)
     if not ok:
         print_error(raw)

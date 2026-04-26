@@ -113,23 +113,45 @@ impl ChannelTable:
 
         local_id
 
+    me seed_open(local_id: u32, channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32):
+        """Seed a known-open channel without touching the C-side table."""
+        var idx = self._find_local_index(local_id)
+        val seeded = SshChannel(
+            local_id: local_id,
+            remote_id: remote_id,
+            channel_type: channel_type,
+            state: ChannelState.Open,
+            local_window: DEFAULT_WINDOW_SIZE,
+            remote_window: remote_window,
+            local_max_packet: DEFAULT_MAX_PACKET,
+            remote_max_packet: remote_max_packet,
+            pty_requested: false,
+            shell_requested: false,
+            env_vars: []
+        )
+        if idx >= 0:
+            self.channels[idx as u64] = seeded
+        else:
+            self.channels.push(seeded)
+        if self.next_id <= local_id:
+            self.next_id = local_id + 1
+
     me close(local_id: u32):
         """Mark a channel as closed. Delegates to C-side."""
-        rt_ssh_ch_close(local_id.to_i64())
-        # Also update Simple-side array
-        var i: u64 = 0
-        while i < self.channels.len():
-            var ch: SshChannel = self.channels[i]
-            var ch_lid: u32 = ch.local_id
-            if ch_lid == local_id:
-                self.channels[i].state = ChannelState.Closed
-                return
-            i = i + 1
+        if local_id != 0:
+            rt_ssh_ch_close(local_id.to_i64())
+        val idx = self._find_local_index(local_id)
+        if idx >= 0:
+            self.channels[idx as u64].state = ChannelState.Closed
 
     fn find(local_id: u32) -> SshChannel?:
         """Find a channel by local ID. Returns nil if not found.
         Queries C-side table and constructs a fresh SshChannel struct
         to work around Cranelift array-of-structs codegen bug."""
+        if local_id == 0:
+            val idx = self._find_local_index(local_id)
+            if idx >= 0:
+                return self.channels[idx as u64]
         var found: i64 = rt_ssh_ch_find(local_id.to_i64())
         if found == 0:
             return nil
@@ -158,21 +180,25 @@ impl ChannelTable:
 
     me adjust_window(local_id: u32, bytes: u32):
         """Increase local receive window by bytes. Delegates to C-side."""
-        rt_ssh_ch_adjust_window(local_id.to_i64(), bytes.to_i64())
-        # Also update Simple-side array
-        var i: u64 = 0
-        while i < self.channels.len():
-            var ch: SshChannel = self.channels[i]
-            var ch_lid: u32 = ch.local_id
-            if ch_lid == local_id:
-                var new_window: u32 = self.channels[i].local_window + bytes
-                self.channels[i].local_window = new_window
-                return
-            i = i + 1
+        if local_id != 0:
+            rt_ssh_ch_adjust_window(local_id.to_i64(), bytes.to_i64())
+        val idx = self._find_local_index(local_id)
+        if idx >= 0:
+            var new_window: u32 = self.channels[idx as u64].local_window + bytes
+            self.channels[idx as u64].local_window = new_window
 
     me consume_remote_window(local_id: u32, bytes: u32) -> bool:
         """Consume bytes from the remote send window. Returns false if insufficient.
         Delegates to C-side table."""
+        if local_id == 0:
+            val idx = self._find_local_index(local_id)
+            if idx < 0:
+                return false
+            var rw = self.channels[idx as u64].remote_window
+            if rw < bytes:
+                return false
+            self.channels[idx as u64].remote_window = rw - bytes
+            return true
         var result: i64 = rt_ssh_ch_consume_window(local_id.to_i64(), bytes.to_i64())
         if result == 1:
             # Also update Simple-side array
@@ -192,18 +218,13 @@ impl ChannelTable:
 
     me consume_local_window(local_id: u32, bytes: u32) -> bool:
         """Consume bytes from the local receive window. Returns false if insufficient."""
-        var i: u64 = 0
-        while i < self.channels.len():
-            var ch: SshChannel = self.channels[i]
-            var ch_lid: u32 = ch.local_id
-            if ch_lid == local_id:
-                var lw: u32 = self.channels[i].local_window
-                if lw < bytes:
-                    return false
-                var new_lw: u32 = lw - bytes
-                self.channels[i].local_window = new_lw
-                return true
-            i = i + 1
+        val idx = self._find_local_index(local_id)
+        if idx >= 0:
+            var lw = self.channels[idx as u64].local_window
+            if lw < bytes:
+                return false
+            self.channels[idx as u64].local_window = lw - bytes
+            return true
         false
 
     me remove_closed():
@@ -219,6 +240,14 @@ impl ChannelTable:
                     new_channels.push(ch)
             i = i + 1
         self.channels = new_channels
+
+    fn _find_local_index(local_id: u32) -> i64:
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                return i.to_i64()
+            i = i + 1
+        -1
 
 # ============================================================================
 # Message Parsing

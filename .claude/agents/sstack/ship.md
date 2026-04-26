@@ -24,10 +24,13 @@
    - Key files added/modified
    - Test results summary
 4. Commit all changes: `jj commit -m "<type>(<scope>): <description>"`
-5. Push to remote:
+5. Push to remote and trigger PR creation + review:
    ```
    jj bookmark set main -r @-
    jj git push --bookmark main
+
+   # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
+   /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
 6. Generate completion report at `doc/09_report/<feature>_complete_<date>.md`:
    - Feature summary (from Phase 1 intake)

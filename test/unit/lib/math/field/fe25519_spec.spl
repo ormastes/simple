@@ -1,0 +1,247 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Fe25519 — field-arithmetic KAT (RFC 7748 inputs)
+#
+# This is a **field-level** test. The full X25519 scalar-mult KAT
+# (RFC 7748 §5.2) lives in `test/system/x25519_*` and runs through the curve
+# layer; that layer ports separately. Here we exercise only the GF(2^255-19)
+# operations using RFC 7748's 32-byte test values as concrete inputs:
+#
+#   * the X25519 base u-coord byte 9 (= 0x09 with 31 trailing zeros)
+#   * Alice/Bob private scalars from RFC 7748 §6.1
+#
+# Identities checked:
+#   1. round-trip: fe_to_bytes(fe_from_bytes(b)) == b   (after high-bit mask)
+#   2. fe_zero / fe_one are canonical
+#   3. fe_add / fe_sub / fe_neg are inverses
+#   4. fe_mul commutativity, fe_one identity, fe_zero absorbing
+#   5. fe_sq matches fe_mul(x, x)
+#   6. fe_invert(x) * x == fe_one() for x != 0
+#   7. fe_pow(x, [2,0,0,...]) (squaring via exponent) matches fe_sq(x)
+#   8. fe_eq self-equality and inequality
+#   9. fe_cond_select picks the right operand for take_b in {0,1}
+#  10. fe_cond_swap is its own inverse when swap=1, identity when swap=0
+
+use std.sspec.*
+use std.common.math.field.fe25519.{
+    Fe25519,
+    fe_zero, fe_one, fe_add, fe_sub, fe_neg, fe_mul, fe_sq,
+    fe_from_bytes, fe_to_bytes, fe_invert, fe_inv, fe_pow,
+    fe_eq, fe_is_zero, fe_cond_select, fe_cond_swap
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        c - 0x30
+    elif c >= 0x61 and c <= 0x66:
+        c - 0x61 + 10
+    elif c >= 0x41 and c <= 0x46:
+        c - 0x41 + 10
+    else:
+        0
+
+fn _hex_to_bytes(h: text) -> [u8]:
+    val raw = rt_text_to_bytes(h)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i + 1 < raw.len():
+        val hi = _hex_nibble(raw[i])
+        val lo = _hex_nibble(raw[i + 1])
+        out.push((hi << 4) | lo)
+        i = i + 2
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# Base u-coordinate (u = 9), 32 bytes little-endian.
+fn _base_u_bytes() -> [u8]:
+    _hex_to_bytes("0900000000000000000000000000000000000000000000000000000000000000")
+
+# RFC 7748 §6.1 Alice private scalar (clamp not applied — we use raw bytes
+# as a generic 32-byte field element).
+fn _alice_priv_bytes() -> [u8]:
+    _hex_to_bytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+
+# RFC 7748 §6.1 Bob private scalar (raw bytes).
+fn _bob_priv_bytes() -> [u8]:
+    _hex_to_bytes("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+
+# Mask the high bit (bit 255) — this is what `fe_from_bytes` does, so the
+# round-trip needs the input already masked to compare equal.
+fn _mask_high_bit(b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    if out.len() == 32:
+        out[31] = out[31] & 0x7F
+    out
+
+describe "Fe25519 — RFC 7748 byte-edge round-trip":
+
+    it "decodes then re-encodes the X25519 base u-coord (u=9)":
+        val b = _mask_high_bit(_base_u_bytes())
+        val fe = fe_from_bytes(b)
+        val out = fe_to_bytes(fe)
+        expect(_bytes_eq(out, b)).to_equal(true)
+
+    it "decodes then re-encodes Alice's RFC 7748 §6.1 private scalar":
+        val b = _mask_high_bit(_alice_priv_bytes())
+        val fe = fe_from_bytes(b)
+        val out = fe_to_bytes(fe)
+        expect(_bytes_eq(out, b)).to_equal(true)
+
+    it "decodes then re-encodes Bob's RFC 7748 §6.1 private scalar":
+        val b = _mask_high_bit(_bob_priv_bytes())
+        val fe = fe_from_bytes(b)
+        val out = fe_to_bytes(fe)
+        expect(_bytes_eq(out, b)).to_equal(true)
+
+describe "Fe25519 — constants":
+
+    it "fe_zero encodes to all zero bytes":
+        val out = fe_to_bytes(fe_zero())
+        var ok = true
+        var i: u64 = 0
+        while i < 32:
+            if out[i] != 0x00:
+                ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
+
+    it "fe_one encodes to byte 0x01 followed by 31 zeros":
+        val out = fe_to_bytes(fe_one())
+        expect(out[0]).to_equal(0x01)
+        var ok = true
+        var i: u64 = 1
+        while i < 32:
+            if out[i] != 0x00:
+                ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
+
+    it "fe_is_zero(zero) is true; fe_is_zero(one) is false":
+        expect(fe_is_zero(fe_zero())).to_equal(true)
+        expect(fe_is_zero(fe_one())).to_equal(false)
+
+describe "Fe25519 — additive structure":
+
+    it "fe_add(a, fe_zero()) == a":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val r = fe_add(a, fe_zero())
+        expect(fe_eq(r, a)).to_equal(true)
+
+    it "fe_sub(a, a) == fe_zero()":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val r = fe_sub(a, a)
+        expect(fe_is_zero(r)).to_equal(true)
+
+    it "fe_neg(a) + a == fe_zero()":
+        val a = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val r = fe_add(fe_neg(a), a)
+        expect(fe_is_zero(r)).to_equal(true)
+
+describe "Fe25519 — multiplicative structure":
+
+    it "fe_mul is commutative":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val b = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val ab = fe_mul(a, b)
+        val ba = fe_mul(b, a)
+        expect(fe_eq(ab, ba)).to_equal(true)
+
+    it "fe_mul(x, fe_one()) == x":
+        val x = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val r = fe_mul(x, fe_one())
+        expect(fe_eq(r, x)).to_equal(true)
+
+    it "fe_mul(x, fe_zero()) == fe_zero()":
+        val x = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val r = fe_mul(x, fe_zero())
+        expect(fe_is_zero(r)).to_equal(true)
+
+    it "fe_sq(x) == fe_mul(x, x)":
+        val x = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val s1 = fe_sq(x)
+        val s2 = fe_mul(x, x)
+        expect(fe_eq(s1, s2)).to_equal(true)
+
+describe "Fe25519 — inversion (Fermat's Little Theorem)":
+
+    it "fe_invert(x) * x == fe_one() for the X25519 base u":
+        val x = fe_from_bytes(_mask_high_bit(_base_u_bytes()))
+        val xi = fe_invert(x)
+        val r = fe_mul(xi, x)
+        expect(fe_eq(r, fe_one())).to_equal(true)
+
+    it "fe_invert(x) * x == fe_one() for Alice's scalar":
+        val x = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val xi = fe_inv(x)
+        val r = fe_mul(xi, x)
+        expect(fe_eq(r, fe_one())).to_equal(true)
+
+    it "fe_invert(x) * x == fe_one() for Bob's scalar":
+        val x = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val xi = fe_invert(x)
+        val r = fe_mul(xi, x)
+        expect(fe_eq(r, fe_one())).to_equal(true)
+
+describe "Fe25519 — generic exponentiation":
+
+    it "fe_pow(x, [2]) equals fe_sq(x)":
+        val x = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val pow_e = [0x02.to_u8()]
+        val r = fe_pow(x, pow_e)
+        val s = fe_sq(x)
+        expect(fe_eq(r, s)).to_equal(true)
+
+    it "fe_pow(x, [1]) equals x":
+        val x = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val pow_e = [0x01.to_u8()]
+        val r = fe_pow(x, pow_e)
+        expect(fe_eq(r, x)).to_equal(true)
+
+describe "Fe25519 — constant-time selectors":
+
+    it "fe_cond_select(a, b, 0) == a":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val b = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val r = fe_cond_select(a, b, 0)
+        expect(fe_eq(r, a)).to_equal(true)
+
+    it "fe_cond_select(a, b, 1) == b":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val b = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val r = fe_cond_select(a, b, 1)
+        expect(fe_eq(r, b)).to_equal(true)
+
+    it "fe_cond_swap with swap=1 is fe_cond_swap with swap=0 reversed":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val b = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        val (a0, b0) = fe_cond_swap(a, b, 0)
+        val (a1, b1) = fe_cond_swap(a, b, 1)
+        expect(fe_eq(a0, a)).to_equal(true)
+        expect(fe_eq(b0, b)).to_equal(true)
+        expect(fe_eq(a1, b)).to_equal(true)
+        expect(fe_eq(b1, a)).to_equal(true)
+
+describe "Fe25519 — equality":
+
+    it "fe_eq is reflexive":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        expect(fe_eq(a, a)).to_equal(true)
+
+    it "fe_eq returns false for distinct inputs":
+        val a = fe_from_bytes(_mask_high_bit(_alice_priv_bytes()))
+        val b = fe_from_bytes(_mask_high_bit(_bob_priv_bytes()))
+        expect(fe_eq(a, b)).to_equal(false)

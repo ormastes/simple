@@ -1,0 +1,114 @@
+#![allow(unnamed_duplicate_typed_args)]
+# FeP256 skeleton — byte-edge smoke tests
+#
+# Per R-C field_design.md §3 + Risk #1, the pure-Simple P-256 field is NEW
+# code. I-4 landed the type + byte-edge ops (`fe_zero`, `fe_one`,
+# `fe_from_bytes`, `fe_to_bytes`, `fe_eq`); P-1 + W-4 implemented full
+# Solinas-reduction arithmetic (fe_add, fe_sub, fe_neg, fe_mul, fe_sq,
+# fe_inv, fe_pow, fe_is_zero, fe_cond_select, fe_cond_swap) — see
+# `src/lib/common/math/field/fe_p256.spl`. There are now **0 panic stubs**.
+#
+# Full algebraic / KAT coverage lives in `fe_p256_full_spec.spl`. This file
+# is kept as a small smoke check on the byte-edge surface only.
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+use std.sspec.*
+use std.common.math.field.fe_p256.{
+    FeP256,
+    fe_zero, fe_one, fe_from_bytes, fe_to_bytes, fe_eq
+}
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        c - 0x30
+    elif c >= 0x61 and c <= 0x66:
+        c - 0x61 + 10
+    elif c >= 0x41 and c <= 0x46:
+        c - 0x41 + 10
+    else:
+        0
+
+fn _hex_to_bytes(h: text) -> [u8]:
+    val raw = rt_text_to_bytes(h)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i + 1 < raw.len():
+        val hi = _hex_nibble(raw[i])
+        val lo = _hex_nibble(raw[i + 1])
+        out.push((hi << 4) | lo)
+        i = i + 2
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# An arbitrary 32-byte big-endian value strictly < p (FIPS 186-4 P-256
+# example point Gx — public x-coordinate of the base generator).
+fn _gx_bytes() -> [u8]:
+    _hex_to_bytes("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
+
+# A second arbitrary value strictly < p (Gy — base point y-coordinate).
+fn _gy_bytes() -> [u8]:
+    _hex_to_bytes("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
+
+describe "FeP256 — skeleton constants":
+
+    it "fe_zero encodes to 32 zero bytes":
+        val out = fe_to_bytes(fe_zero())
+        var ok = true
+        var i: u64 = 0
+        while i < 32:
+            if out[i] != 0x00:
+                ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
+
+    it "fe_one encodes to 31 zeros followed by 0x01 (big-endian)":
+        val out = fe_to_bytes(fe_one())
+        var ok = true
+        var i: u64 = 0
+        while i < 31:
+            if out[i] != 0x00:
+                ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
+        expect(out[31]).to_equal(0x01)
+
+describe "FeP256 — skeleton byte round-trip":
+
+    it "Gx round-trips through fe_from_bytes / fe_to_bytes":
+        val b = _gx_bytes()
+        val fe = fe_from_bytes(b)
+        val out = fe_to_bytes(fe)
+        expect(_bytes_eq(out, b)).to_equal(true)
+
+    it "Gy round-trips through fe_from_bytes / fe_to_bytes":
+        val b = _gy_bytes()
+        val fe = fe_from_bytes(b)
+        val out = fe_to_bytes(fe)
+        expect(_bytes_eq(out, b)).to_equal(true)
+
+describe "FeP256 — skeleton equality":
+
+    it "fe_eq is reflexive on a decoded point":
+        val a = fe_from_bytes(_gx_bytes())
+        expect(fe_eq(a, a)).to_equal(true)
+
+    it "fe_eq returns false for Gx vs Gy":
+        val a = fe_from_bytes(_gx_bytes())
+        val b = fe_from_bytes(_gy_bytes())
+        expect(fe_eq(a, b)).to_equal(false)
+
+# Algebraic / KAT coverage for fe_add / fe_sub / fe_neg / fe_mul / fe_sq /
+# fe_inv / fe_pow / fe_is_zero / fe_cond_select / fe_cond_swap moved to
+# `fe_p256_full_spec.spl`. There are no `it.skip` placeholders left here —
+# every op listed in field_trait.spl has a real implementation in
+# `src/lib/common/math/field/fe_p256.spl` (0 panic call-sites).
