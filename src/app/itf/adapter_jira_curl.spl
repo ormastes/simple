@@ -1,0 +1,432 @@
+# ITF CLI - Jira Adapter (curl shell-out fallback)
+#
+# Direct REST calls to Jira Cloud via `curl` subprocess. This is the
+# dependency-free fallback when:
+#   * `acli` is unavailable (install URLs were 404 on 2026-04-26 - issue #10)
+#   * pure-Simple `http_client` lacks a transport extern (issue #11)
+#
+# Auth: HTTP Basic with base64(email:api_token), per Atlassian Cloud REST docs.
+# Reference: https://developer.atlassian.com/cloud/jira/platform/rest/v3/
+#
+# JQL search NOTE: the task brief said POST /rest/api/3/search, but the
+# Atlassian docs (verified 2026-04-26 via WebFetch) show that endpoint and
+# the GET counterpart are "currently being removed". The enhanced
+# replacement is POST /rest/api/3/search/jql with nextPageToken pagination.
+# We target the new endpoint here so the adapter survives the deprecation.
+#
+# Subprocess invocation mirrors `adapter_minio_mc.spl`'s _argv_health pattern.
+# We append `-w "\n%\{http_code\}"` so the trailing line of stdout is the
+# numeric HTTP status; everything before that line is the JSON body.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.common.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.common.base_encoding.base64.{base64_encode}
+use std.common.base_encoding.utilities.{text_to_bytes}
+use app.itf.adapter_jira.{JiraIssue}
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+class JiraClient:
+    base_url: text       # e.g. "https://yourorg.atlassian.net" (no trailing slash)
+    email: text
+    api_token: text
+    curl_path: text      # default "curl"
+
+    fn auth_header() -> text:
+        """Build Basic auth header value: `Basic <base64(email:api_token)>`."""
+        if self.email == "" or self.api_token == "":
+            return ""
+        val credentials = "{self.email}:{self.api_token}"
+        val bytes = text_to_bytes(credentials)
+        val encoded = base64_encode(bytes)
+        "Basic {encoded}"
+
+
+fn _normalize_base(url: text) -> text:
+    """Strip trailing slash from the base URL."""
+    if url.ends_with("/"):
+        return url[0:url.len() - 1]
+    url
+
+
+# ---------------------------------------------------------------------------
+# argv builders (pure functions, exposed for unit tests)
+# ---------------------------------------------------------------------------
+
+fn _build_curl_argv_get(auth: text, url: text) -> [text]:
+    """Build argv for an authenticated GET that appends the HTTP status code."""
+    [
+        "-s", "-S",
+        "-H", "Authorization: {auth}",
+        "-H", "Accept: application/json",
+        "-w", "\n%\{http_code\}",
+        url,
+    ]
+
+
+fn _build_curl_argv_post(auth: text, url: text, body: text) -> [text]:
+    """Build argv for an authenticated POST with JSON body."""
+    [
+        "-s", "-S",
+        "-X", "POST",
+        "-H", "Authorization: {auth}",
+        "-H", "Accept: application/json",
+        "-H", "Content-Type: application/json",
+        "-d", body,
+        "-w", "\n%\{http_code\}",
+        url,
+    ]
+
+
+fn _build_curl_argv_download(auth: text, url: text, dest_path: text) -> [text]:
+    """Build argv for an authenticated GET that follows redirects to a file."""
+    [
+        "-s", "-S",
+        "-L",
+        "-H", "Authorization: {auth}",
+        "-H", "Accept: application/octet-stream",
+        "-o", dest_path,
+        "-w", "%\{http_code\}",
+        url,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Response splitting (body + trailing http_code line)
+# ---------------------------------------------------------------------------
+
+fn _split_response(stdout: text) -> (text, i64):
+    """Split curl stdout into (body, http_code).
+
+    The `-w "\n%{http_code}"` suffix puts the status code on its own
+    trailing line. We find the last newline and parse what follows.
+    Returns (whole_stdout, 0) if no newline (e.g. transport error).
+    """
+    if stdout == "":
+        return ("", 0)
+    # Find the last newline
+    var idx = stdout.len() - 1
+    var found = -1
+    while idx >= 0:
+        if stdout[idx] == "\n":
+            found = idx
+            break
+        idx = idx - 1
+    if found < 0:
+        # Maybe the whole stdout IS the status (download path uses "%{http_code}" without newline)
+        val trimmed = stdout.trim()
+        val code = _parse_status(trimmed)
+        if code > 0:
+            return ("", code)
+        return (stdout, 0)
+    val body = stdout[0:found]
+    val tail = stdout[found + 1:stdout.len()].trim()
+    val code = _parse_status(tail)
+    (body, code)
+
+
+fn _parse_status(s: text) -> i64:
+    """Parse a 3-digit HTTP status code; return 0 on failure."""
+    val t = s.trim()
+    if t.len() < 3:
+        return 0
+    var i = 0
+    var n: i64 = 0
+    val zero = "0".to_i64()
+    val nine = "9".to_i64()
+    while i < t.len():
+        val ch = t[i]
+        val cv = ch.to_i64()
+        if cv < zero or cv > nine:
+            return 0
+        n = n * 10 + (cv - zero)
+        i = i + 1
+    n
+
+
+# ---------------------------------------------------------------------------
+# HTTP status -> error text mapping
+# ---------------------------------------------------------------------------
+
+fn _status_message(code: i64, body: text) -> text:
+    """Map an HTTP status code to a short error description."""
+    if code == 401 or code == 403:
+        return "authentication required (HTTP {code})"
+    if code == 404:
+        return "not found (HTTP {code})"
+    if code == 429:
+        return "rate limited (HTTP {code})"
+    if code >= 500:
+        return "server error (HTTP {code}): {body}"
+    if code == 0:
+        return "transport error: {body}"
+    "API error (HTTP {code}): {body}"
+
+
+fn _status_ok(code: i64) -> bool:
+    code >= 200 and code < 300
+
+
+# ---------------------------------------------------------------------------
+# JSON helpers
+# ---------------------------------------------------------------------------
+
+fn _jstr(obj: any, key: text) -> text:
+    """Safely extract a string field from a JSON object."""
+    if obj == nil:
+        return ""
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
+    if s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s
+
+
+fn _parse_jira_issue(obj: any) -> JiraIssue:
+    """Parse a Jira issue from a JSON object (REST v3 shape)."""
+    val key = _jstr(obj, "key")
+    val fields = json_object_get(obj, "fields")
+    val source = if fields != nil: fields else: obj
+
+    val summary = _jstr(source, "summary")
+    val description = _jstr(source, "description")
+    val priority_obj = json_object_get(source, "priority")
+    val priority = if priority_obj != nil: _jstr(priority_obj, "name") else: ""
+    val status_obj = json_object_get(source, "status")
+    val status = if status_obj != nil: _jstr(status_obj, "name") else: ""
+    val type_obj = json_object_get(source, "issuetype")
+    val issue_type = if type_obj != nil: _jstr(type_obj, "name") else: ""
+    val assignee_obj = json_object_get(source, "assignee")
+    val assignee = if assignee_obj != nil: _jstr(assignee_obj, "displayName") else: ""
+
+    JiraIssue(
+        key: key,
+        summary: summary,
+        status: status,
+        assignee: assignee,
+        issue_type: issue_type,
+        priority: priority,
+        description: description,
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON-string escaping for payloads (basic: ", \, control chars)
+# ---------------------------------------------------------------------------
+
+fn _json_escape(s: text) -> text:
+    """Escape a string for embedding in a JSON string literal."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val c = s[i]
+        if c == "\\":
+            out = out + "\\\\"
+        else if c == "\"":
+            out = out + "\\\""
+        else if c == "\n":
+            out = out + "\\n"
+        else if c == "\r":
+            out = out + "\\r"
+        else if c == "\t":
+            out = out + "\\t"
+        else:
+            out = out + c
+        i = i + 1
+    out
+
+
+# ---------------------------------------------------------------------------
+# Atlassian Document Format (ADF) helpers
+# ---------------------------------------------------------------------------
+
+fn _adf_doc(plain: text) -> text:
+    """Wrap a plain-text string in a minimal ADF document.
+
+    Per Atlassian REST v3 docs, the description field is an ADF object:
+      \{"type":"doc","version":1,"content":[
+        \{"type":"paragraph","content":[\{"type":"text","text":"..."\}]\}]\}
+    """
+    val esc = _json_escape(plain)
+    "\{\"type\":\"doc\",\"version\":1,\"content\":[\{\"type\":\"paragraph\",\"content\":[\{\"type\":\"text\",\"text\":\"{esc}\"\}]\}]\}"
+
+
+# ---------------------------------------------------------------------------
+# Public API: each runs curl and returns (success, parsed_T, raw_text).
+# ---------------------------------------------------------------------------
+
+fn jira_curl_view_issue(client: JiraClient, issue_key: text) -> (bool, JiraIssue, text):
+    """View a single Jira issue via GET /rest/api/3/issue/\{key\}.
+
+    Returns: (success, issue, raw_body).
+    """
+    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "")
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, empty, "missing email or api_token")
+
+    val base = _normalize_base(client.base_url)
+    val fields = "summary,status,issuetype,priority,assignee,description"
+    val url = "{base}/rest/api/3/issue/{issue_key}?fields={fields}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_get(auth, url))
+
+    if exit_code != 0:
+        return (false, empty, "curl exit {exit_code}: {stderr}")
+
+    val (body, code) = _split_response(stdout)
+    if not _status_ok(code):
+        return (false, empty, _status_message(code, body))
+
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON from Jira")
+
+    (true, _parse_jira_issue(parsed), body)
+
+
+fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> (bool, [JiraIssue], text):
+    """Search via POST /rest/api/3/search/jql (the enhanced replacement
+    for the deprecated GET /rest/api/2/search; see file header note).
+
+    Returns: (success, issues, raw_body).
+    """
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, [], "missing email or api_token")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/search/jql"
+
+    # Build JSON body. fields "*all" means everything; empty string means default.
+    val esc_jql = _json_escape(jql)
+    var body = "\{\"jql\":\"{esc_jql}\",\"maxResults\":{limit}"
+    if fields != "":
+        # Split comma-separated fields into a JSON array.
+        val parts = fields.split(",")
+        var arr = "["
+        var i = 0
+        while i < parts.len():
+            val f = parts[i].trim()
+            if f != "":
+                if i > 0:
+                    arr = arr + ","
+                arr = arr + "\"{_json_escape(f)}\""
+            i = i + 1
+        arr = arr + "]"
+        body = body + ",\"fields\":{arr}"
+    body = body + "\}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+
+    if exit_code != 0:
+        return (false, [], "curl exit {exit_code}: {stderr}")
+
+    val (resp_body, code) = _split_response(stdout)
+    if not _status_ok(code):
+        return (false, [], _status_message(code, resp_body))
+
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, [], "invalid JSON from Jira")
+
+    var issues: [JiraIssue] = []
+    val issues_arr = json_object_get(parsed, "issues")
+    if issues_arr != nil and json_get_type(issues_arr) == "array":
+        val n = json_array_length(issues_arr)
+        var i = 0
+        while i < n:
+            val item = json_array_get(issues_arr, i)
+            issues = issues + [_parse_jira_issue(item)]
+            i = i + 1
+
+    (true, issues, resp_body)
+
+
+fn jira_curl_create_issue(
+    client: JiraClient,
+    project_key: text,
+    issue_type: text,
+    summary: text,
+    description: text,
+) -> (bool, JiraIssue, text):
+    """Create a new issue via POST /rest/api/3/issue.
+
+    Description is wrapped in a minimal ADF document. Returns the freshly
+    created issue (key + echoed summary; full fields require a follow-up GET).
+    Returns: (success, issue, raw_body).
+    """
+    val empty = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "")
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, empty, "missing email or api_token")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/issue"
+
+    val esc_project = _json_escape(project_key)
+    val esc_type = _json_escape(issue_type)
+    val esc_summary = _json_escape(summary)
+    val adf = _adf_doc(description)
+
+    val body = "\{\"fields\":\{\"project\":\{\"key\":\"{esc_project}\"\},\"issuetype\":\{\"name\":\"{esc_type}\"\},\"summary\":\"{esc_summary}\",\"description\":{adf}\}\}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+
+    if exit_code != 0:
+        return (false, empty, "curl exit {exit_code}: {stderr}")
+
+    val (resp_body, code) = _split_response(stdout)
+    if not _status_ok(code):
+        return (false, empty, _status_message(code, resp_body))
+
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON from Jira")
+
+    val key = _jstr(parsed, "key")
+    val created = JiraIssue(
+        key: key,
+        summary: summary,
+        status: "",
+        assignee: "",
+        issue_type: issue_type,
+        priority: "",
+        description: description,
+    )
+    (true, created, resp_body)
+
+
+fn jira_curl_get_attachment(client: JiraClient, attachment_id: text, dest_path: text) -> (bool, text):
+    """Download an attachment via GET /rest/api/3/attachment/content/\{id\}.
+
+    The endpoint returns a 302 redirect to the actual content URL; curl `-L`
+    follows it.  Returns: (success, raw_text). raw_text is the http_code on
+    success, or stderr on failure.
+    """
+    val auth = client.auth_header()
+    if auth == "":
+        return (false, "missing email or api_token")
+
+    val base = _normalize_base(client.base_url)
+    val url = "{base}/rest/api/3/attachment/content/{attachment_id}"
+
+    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_download(auth, url, dest_path))
+
+    if exit_code != 0:
+        return (false, "curl exit {exit_code}: {stderr}")
+
+    # Download path writes only "%{http_code}" (no leading newline) to stdout.
+    val code = _parse_status(stdout.trim())
+    if not _status_ok(code):
+        return (false, _status_message(code, stderr))
+    (true, "{code}")
