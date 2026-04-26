@@ -83,7 +83,7 @@ Create `.vscode/settings.json`:
 
   "files.associations": {
     "*.spl": "simple",
-    "*.sspec": "simple"
+    "*.spipe": "simple"
   }
 }
 ```
@@ -314,7 +314,7 @@ Create `~/.config/nvim/ftdetect/simple.vim`:
 
 ```vim
 au BufRead,BufNewFile *.spl set filetype=simple
-au BufRead,BufNewFile *.sspec set filetype=simple
+au BufRead,BufNewFile *.spipe set filetype=simple
 ```
 
 Or in Lua (`~/.config/nvim/lua/filetype.lua`):
@@ -323,7 +323,7 @@ Or in Lua (`~/.config/nvim/lua/filetype.lua`):
 vim.filetype.add({
   extension = {
     spl = 'simple',
-    sspec = 'simple',
+    spipe = 'simple',
   },
 })
 ```

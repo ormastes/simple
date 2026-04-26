@@ -1,7 +1,7 @@
 # Type Inference: Simple → Lean4 Workflow
 
 **Date:** 2026-01-30
-**Purpose:** Generate Lean4 verification from Simple implementation with intensive SSpec testing
+**Purpose:** Generate Lean4 verification from Simple implementation with intensive SPipe testing
 
 ## Overview
 
@@ -9,7 +9,7 @@ This document describes the proper workflow for implementing and verifying type 
 
 1. **Implement in Simple** → Type checker in Simple language
 2. **Generate Lean4** → Automatic generation from Simple code
-3. **Run SSpec Tests** → Intensive tests with coverage measurement
+3. **Run SPipe Tests** → Intensive tests with coverage measurement
 4. **Verify Lean4** → Run Lean proof checker on generated code
 
 ## Architecture
@@ -61,7 +61,7 @@ This document describes the proper workflow for implementing and verifying type 
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ INTENSIVE SSPEC TESTS                                       │
+│ INTENSIVE SPIPE TESTS                                       │
 ├─────────────────────────────────────────────────────────────┤
 │ test/lib/std/type_checker/type_inference_spec.spl          │
 │                                                             │
@@ -128,10 +128,10 @@ lake build
 # All theorems verified
 ```
 
-### Step 3: Run SSpec Tests with Coverage
+### Step 3: Run SPipe Tests with Coverage
 
 ```bash
-# Run intensive SSpec tests with coverage measurement
+# Run intensive SPipe tests with coverage measurement
 cd 
 
 simple test \
@@ -187,7 +187,7 @@ simple gen-lean compare \
 | `src/lib/std/src/type_checker/type_inference.spl` | `src/verification/type_inference_compile/src/TypeInference.lean` | Main type inference logic |
 | `lean{} blocks` in .spl | `theorem` statements in .lean | Embedded theorems |
 | `requires`/`ensures` contracts | Proof obligations | Generated from function contracts |
-| SSpec tests | Lean property tests | Executable specifications |
+| SPipe tests | Lean property tests | Executable specifications |
 
 ## Lean Generation Rules
 
@@ -258,7 +258,7 @@ theorem dyntrait_unify (name1 name2 : String) :
 | Branch Coverage | 100% | Every if/match branch taken |
 | Path Coverage | 95%+ | All reasonable execution paths tested |
 
-### Coverage Directive in SSpec
+### Coverage Directive in SPipe
 
 ```simple
 # At end of test file
@@ -370,7 +370,7 @@ simple test test/lib/std/type_checker/type_inference_spec.spl \
 1. **Implement missing Simple features** (if any)
 2. **Run generation**: `simple gen-lean generate ...`
 3. **Verify Lean build**: `cd src/verification/... && lake build`
-4. **Run SSpec tests**: `simple test ... --coverage`
+4. **Run SPipe tests**: `simple test ... --coverage`
 5. **Achieve 100% coverage**
 6. **Fill in proof sorrys** (optional, for full verification)
 7. **Document any axioms** used in proofs
@@ -387,7 +387,7 @@ simple test test/lib/std/type_checker/type_inference_spec.spl \
 - ✅ Single source: Simple implementation
 - ✅ Automatic Lean generation
 - ✅ Guaranteed synchronization
-- ✅ 60+ SSpec tests with 100% coverage
+- ✅ 60+ SPipe tests with 100% coverage
 - ✅ Contracts generate theorems
 - ✅ Embedded Lean blocks for custom proofs
 

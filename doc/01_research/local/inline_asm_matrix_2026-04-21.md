@@ -9,7 +9,7 @@ sources, and boot/runtime files for `asm(...)`, `asm:`, `asm "..."`,
 
 ## Existing Test Surface
 
-Primary asm SSpec files:
+Primary asm SPipe files:
 
 - `test/unit/compiler/native/inline_asm_spec.spl`
 - `test/unit/compiler/native/inline_asm_constraints_spec.spl`
@@ -110,4 +110,4 @@ conversion order is:
 - Operand-bearing `asm {}` is not implemented.
 - Operand-bound asm in Rust HIR lowering is currently skipped.
 - Pure parser accepts raw braced asm strings but not structured operands.
-- Existing broad SSpec tests mostly check strings, so they can mask parser/lowering/codegen gaps.
+- Existing broad SPipe tests mostly check strings, so they can mask parser/lowering/codegen gaps.

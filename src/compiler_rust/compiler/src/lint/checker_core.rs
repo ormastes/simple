@@ -358,10 +358,10 @@ impl LintChecker {
             // Check for print in test spec files
             if source_file.to_string_lossy().ends_with("_spec.spl") {
                 self.check_print_in_test_spec(items);
-                // SSpec-specific lints
-                self.check_sspec_print_based_tests(items);
-                self.check_sspec_minimal_docstrings(&source_file);
-                self.check_sspec_manual_assertions(items);
+                // SPipe-specific lints
+                self.check_spipe_print_based_tests(items);
+                self.check_spipe_minimal_docstrings(&source_file);
+                self.check_spipe_manual_assertions(items);
             }
 
             self.check_source_backed_quality_patterns(&source_file);

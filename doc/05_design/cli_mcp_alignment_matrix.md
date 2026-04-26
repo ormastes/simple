@@ -89,7 +89,7 @@ These workflows have meaningful implementations on both surfaces.
 | Feature gen | `simple feature-gen` | Feature doc generation |
 | Task gen | `simple task-gen` | Task generation |
 | Spec gen | `simple spec-gen` | Test generation |
-| SSpec docgen | `simple sspec-docgen` | SSpec documentation |
+| SPipe docgen | `simple spipe-docgen` | SPipe documentation |
 | Feature doc | `simple feature-doc` | Feature documentation |
 | TODO scan | `simple todo-scan` | TODO tracking |
 | Stats | `simple stats` | Project statistics |

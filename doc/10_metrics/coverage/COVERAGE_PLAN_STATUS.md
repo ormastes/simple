@@ -130,14 +130,14 @@ simple spl-coverage dump > .coverage/allocator_iteration_1.sdn
 
 ## Test Writing Standards
 
-### Template (from `.claude/templates/sspec_template.spl`)
+### Template (from `.claude/templates/spipe_template.spl`)
 
 ```simple
 # Feature: Memory Allocation
 # Test coverage for src/lib/allocator.spl
 
 use std.allocator.*
-use std.test.sspec.*
+use std.test.spipe.*
 
 describe "ComponentName":
     context "when specific condition":
@@ -219,7 +219,7 @@ describe "ComponentName":
 - **Plan Document:** (this was created from the plan provided by user)
 - **Methodology:** Proven formatter approach (doc/09_report/coverage_session_2026-02-03.md)
 - **Coverage Architecture:** doc/05_design/coverage_architecture.md
-- **SSpec Template:** .claude/templates/sspec_template.spl
+- **SPipe Template:** .claude/templates/spipe_template.spl
 - **Coding Standards:** /coding skill
 
 ---

@@ -37,7 +37,7 @@ mod tests {
 cargo test -p simple-compiler note_sdn
 ```
 
-### Simple SSpec Tests
+### Simple SPipe Tests
 
 Located in `test/lib/std/unit/compiler/note_sdn_spec.spl`:
 
@@ -387,7 +387,7 @@ assert!(sdn.contains("# END_NOTE\n"));
 ## Test Checklist
 
 - [ ] Rust unit tests pass
-- [ ] Simple SSpec tests pass
+- [ ] Simple SPipe tests pass
 - [ ] Empty metadata test passes
 - [ ] Instantiation entry test passes
 - [ ] Dependency edge test passes
@@ -449,7 +449,7 @@ cargo test -p simple-compiler
 | Test Suite | Status | Notes |
 |------------|--------|-------|
 | Rust unit tests | ⚠️ Blocked | Pre-existing compilation errors in other files |
-| Simple SSpec tests | ✅ Ready | 13 test cases written |
+| Simple SPipe tests | ✅ Ready | 13 test cases written |
 | Integration tests | ⏳ Pending | Requires Phase 2 (loader) |
 | Performance tests | ⏳ Pending | Can be run after fixing compilation errors |
 

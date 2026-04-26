@@ -1,7 +1,7 @@
 <!-- llm-process-gen: managed source=codex_system_test_skill source_sha256=a161ad153f36670c5f69aaf3795e64cafdb5aec217ad3c2a692f7b549dbc0157 content_sha256=a161ad153f36670c5f69aaf3795e64cafdb5aec217ad3c2a692f7b549dbc0157 -->
 ---
 name: system_test
-description: "Codex system test design skill (Codex-specific strength). SSpec BDD test generation with built-in matchers only. REQ-NNN to test traceability. Test plan creation."
+description: "Codex system test design skill (Codex-specific strength). SPipe BDD test generation with built-in matchers only. REQ-NNN to test traceability. Test plan creation."
 ---
 
 # System Test Design — Codex (Codex-Specific Strength)
@@ -29,7 +29,7 @@ Codex excels at systematic test generation with full requirement traceability. U
 - Identify testable behaviors per requirement
 - Map edge cases and error paths
 
-## Phase 2: SSpec BDD Test Generation
+## Phase 2: SPipe BDD Test Generation
 
 Generate test specs using **built-in matchers only**.
 
@@ -52,10 +52,10 @@ Generate test specs using **built-in matchers only**.
 - `to_raise()` — not available; test error returns via `Result<T, E>`
 - Custom matchers — not supported
 
-### SSpec Template
+### SPipe Template
 
 ```simple
-use std.spec.SSpec
+use std.spec.SPipe
 
 describe "<Feature Name>":
     describe "REQ-001: <requirement title>":

@@ -130,7 +130,7 @@ cat doc/test/phase_1_3_coverage_analysis.md
 
 ### Step 2: Create Test File (if needed)
 
-**Template:** `.claude/templates/sspec_template.spl`
+**Template:** `.claude/templates/spipe_template.spl`
 
 ```simple
 """
@@ -156,7 +156,7 @@ Brief description of what this component does.
 File: `/path/to/implementation.spl`
 """
 
-use std.test.sspec.*
+use std.test.spipe.*
 use component.module.*
 
 describe "Component Name":
@@ -423,10 +423,10 @@ it "modifies state correctly":
 ## Resources
 
 **Templates:**
-- `.claude/templates/sspec_template.spl` - Test file template
+- `.claude/templates/spipe_template.spl` - Test file template
 
 **Documentation:**
-- `doc/07_guide/sspec_complete_example.md` - SSpec framework guide
+- `doc/07_guide/spipe_complete_example.md` - SPipe framework guide
 - `doc/test/phase_1_3_coverage_analysis.md` - Current coverage analysis
 - `doc/test/test_db.sdn` - Test execution database
 

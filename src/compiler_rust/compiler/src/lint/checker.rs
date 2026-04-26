@@ -11,8 +11,8 @@ mod checker_annotations;
 #[path = "checker_types.rs"]
 mod checker_types;
 
-#[path = "checker_sspec.rs"]
-mod checker_sspec;
+#[path = "checker_spipe.rs"]
+mod checker_spipe;
 
 #[path = "checker_args.rs"]
 mod checker_args;

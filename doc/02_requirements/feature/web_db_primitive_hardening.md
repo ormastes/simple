@@ -14,4 +14,4 @@ System tests must exercise production `SdnDatabase`, `SdnTable`, `SdnRow`, and `
 Primitive feature tests must remain part of the hardening gate and continue to verify primitive usage and public primitive API lint behavior.
 
 ## REQ-005: Verification Gate
-Targeted interpreted tests must pass. Native SSpec failures caused by the wrapper/harness must be reported separately from feature failures.
+Targeted interpreted tests must pass. Native SPipe failures caused by the wrapper/harness must be reported separately from feature failures.

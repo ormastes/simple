@@ -14,4 +14,4 @@ Findings:
 Implementation scope:
 - Add `examples/nvfs/src/core/constants.spl`.
 - Replace spostgre local ordinal declarations with imports.
-- Add SSpec system coverage for exported ordinals and tier-cache/shim class usage.
+- Add SPipe system coverage for exported ordinals and tier-cache/shim class usage.

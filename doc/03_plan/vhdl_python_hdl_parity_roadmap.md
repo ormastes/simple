@@ -17,7 +17,7 @@ Status values:
   must fail before VHDL emission.
 - Blocked: cannot start until a named dependency is complete.
 
-Deferred SSpec coverage remains listed by
+Deferred SPipe coverage remains listed by
 `bin/simple test --only-skipped --list-skip-features --pending` where present.
 The support matrix distinguishes those milestone-out-of-scope items from the
 completed lanes below.

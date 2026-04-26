@@ -14,7 +14,7 @@ covering all shared components, backend implementations, and cross-backend consi
 **Test Files Created**: 4 specification files
 **Total Test Cases**: 250+ tests
 **Coverage Areas**: Type mapping, literals, expressions, differential testing, factory pattern
-**Test Framework**: Simple SSpec (BDD-style)
+**Test Framework**: Simple SPipe (BDD-style)
 
 ---
 
@@ -558,6 +558,6 @@ Created comprehensive test suite covering all aspects of the shared backend arch
 
 **Status**: Complete
 **Ready For**: Implementation Phase
-**Test Framework**: Simple SSpec (BDD)
+**Test Framework**: Simple SPipe (BDD)
 **Total Test Code**: 2,845 lines
 **Expected Benefits**: 50% code reduction with high confidence

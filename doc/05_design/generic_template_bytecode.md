@@ -589,7 +589,7 @@ fn test_link_time_instantiation() {
 }
 ```
 
-### System Tests (SSpec)
+### System Tests (SPipe)
 
 See `test/lib/std/features/generic_bytecode_spec.spl` for comprehensive BDD tests.
 
@@ -669,7 +669,7 @@ pub struct SpecializationCache {
 - `simple/compiler/monomorphize/deferred.spl`
 
 **Tests**:
-- `test/lib/std/features/generic_bytecode_spec.spl` - SSpec tests
+- `test/lib/std/features/generic_bytecode_spec.spl` - SPipe tests
 
 ### Related Documents
 

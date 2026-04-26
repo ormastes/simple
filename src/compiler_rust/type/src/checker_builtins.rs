@@ -257,7 +257,7 @@ impl TypeChecker {
         // Use remaining vars for reserved names
         let _ = (var12, var13);
 
-        // BDD/SSpec testing functions
+        // BDD/SPipe testing functions
         self.env.insert("describe".to_string(), generic_fn.clone());
         self.env.insert("context".to_string(), generic_fn.clone());
         self.env.insert("it".to_string(), generic_fn.clone());

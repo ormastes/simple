@@ -17,5 +17,5 @@ Keep the OS build lane on `--entry-closure` and make the generated native-build 
 
 ## Regression Surface
 
-- Unit SSpec: `test/unit/os/qemu_runner_spec.spl`
-- System SSpec: `test/system/simpleos_native_build_entry_closure_spec.spl`
+- Unit SPipe: `test/unit/os/qemu_runner_spec.spl`
+- System SPipe: `test/system/simpleos_native_build_entry_closure_spec.spl`

@@ -40,7 +40,7 @@
 - **Severity:** Low
 
 ### L6: Tests Run in Interpreter Mode Only
-- **Description:** All 196 SSpec tests verify file loading in interpreter mode. The `it` block bodies do not execute.
+- **Description:** All 196 SPipe tests verify file loading in interpreter mode. The `it` block bodies do not execute.
 - **Impact:** Logic correctness is verified by structure, not by runtime assertion.
 - **Workaround:** Compile and run tests for full assertion execution.
 - **Severity:** Medium

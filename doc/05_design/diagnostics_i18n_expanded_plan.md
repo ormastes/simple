@@ -25,7 +25,7 @@ After analyzing Rust's ~500 error codes, we've identified **84 new error codes**
 
 **Next**:
 - 📋 Add 84 new error codes (E0013-E0016, E1019-E1080, etc.)
-- 📋 Create SSpec tests for all new errors
+- 📋 Create SPipe tests for all new errors
 - 📋 Extend catalogs with Korean translations
 - 📋 Document feature requirements
 
@@ -213,10 +213,10 @@ cargo test -p simple_i18n
 
 ---
 
-## Phase 1C: SSpec Test Creation (NEW)
+## Phase 1C: SPipe Test Creation (NEW)
 
 ### Goal
-Create comprehensive SSpec test files for all 84 new error codes.
+Create comprehensive SPipe test files for all 84 new error codes.
 
 ### Test File Organization
 
@@ -244,7 +244,7 @@ test/features/errors/
     └── e4005_type_not_ffi_safe.spl
 ```
 
-### SSpec Test Template
+### SPipe Test Template
 
 ```simple
 # test/features/errors/semantic/e1020_argument_count_mismatch.spl
@@ -287,16 +287,16 @@ Scenario: Korean language
   Then I should see error E1020: "함수는 2개의 인수를 기대하지만 1개가 제공되었습니다"
 ```
 
-### Task: Generate All SSpec Tests
+### Task: Generate All SPipe Tests
 
 **Estimated Effort**: 10-12 hours (84 tests × 8 minutes each)
 
 **Approach**: Generate basic tests automatically, then enhance manually.
 
-**Tool**: Create SSpec test generator script:
+**Tool**: Create SPipe test generator script:
 
 ```bash
-./tools/generate_sspec_tests.sh E1020 "Argument Count Mismatch"
+./tools/generate_spipe_tests.sh E1020 "Argument Count Mismatch"
 ```
 
 Generates template with:
@@ -357,9 +357,9 @@ These errors can be implemented **immediately** without new features:
 - Days 3-5: Create Korean translations (84 codes)
 - Day 5: Test compilation, validate
 
-### Phase 1C: SSpec Test Creation (2 weeks)
-- Week 1: Create 40 SSpec tests (high-priority errors)
-- Week 2: Create 44 SSpec tests (remaining errors)
+### Phase 1C: SPipe Test Creation (2 weeks)
+- Week 1: Create 40 SPipe tests (high-priority errors)
+- Week 2: Create 44 SPipe tests (remaining errors)
 - Throughout: Manual testing and refinement
 
 ### Phase 2: Compiler Integration (3-4 weeks)
@@ -389,7 +389,7 @@ These errors can be implemented **immediately** without new features:
 
 ### Phase 1C Success
 
-- [ ] All 84 SSpec tests created
+- [ ] All 84 SPipe tests created
 - [ ] Tests cover positive and negative cases
 - [ ] Korean language variants included
 - [ ] Tests pass (or properly marked as pending)
@@ -402,7 +402,7 @@ These errors can be implemented **immediately** without new features:
 - [ ] ~38 codes integrated in compiler
 - [ ] ~17 codes marked as needing features
 - [ ] ~29 codes implemented after features complete
-- [ ] Comprehensive SSpec test suite
+- [ ] Comprehensive SPipe test suite
 - [ ] Feature roadmap documented
 
 ---
@@ -415,12 +415,12 @@ These errors can be implemented **immediately** without new features:
 3. Test compilation
 
 **Following Week**:
-1. Start Phase 1C: Generate SSpec test templates
+1. Start Phase 1C: Generate SPipe test templates
 2. Begin creating comprehensive tests
 3. Document test patterns
 
 **Month 1**:
-1. Complete all SSpec tests
+1. Complete all SPipe tests
 2. Begin Phase 2 compiler integration
 3. Implement module privacy feature
 
@@ -443,4 +443,4 @@ This expansion brings Simple's error system to a professional, comprehensive sta
 ---
 
 **Document Status**: Planning Complete
-**Next Document**: SSpec test suite generation plan
+**Next Document**: SPipe test suite generation plan

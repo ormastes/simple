@@ -3,7 +3,7 @@
 
 ## Overview
 
-Target-Based Mutability Defaults - SSpec Tests
+Target-Based Mutability Defaults - SPipe Tests
 Decision #9: --target=embedded makes arrays immutable by default
 
 Category: Collections

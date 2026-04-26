@@ -11,7 +11,7 @@ Check scope: current changes (default), specific file, or --all for full project
 
 Phase 1: Scope Detection — identify spec files, source files, doc files in scope.
 
-Phase 2: SSpec Tests — every it block has real assertions (not pass_todo, not expect(true).to_equal(true)).
+Phase 2: SPipe Tests — every it block has real assertions (not pass_todo, not expect(true).to_equal(true)).
 
 Phase 3: Implementation — no stub functions, no hardcoded returns, complete error handling.
 

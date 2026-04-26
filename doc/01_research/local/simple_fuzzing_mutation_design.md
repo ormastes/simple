@@ -140,7 +140,7 @@ pub fn text(min_len: i32 = 0, max_len: i32 = 100) -> TextGen:
 pub fn list<T>(item_gen: Generator<T>, min_len: i32 = 0, max_len: i32 = 20) -> ListGen<T>:
     ListGen(item_gen: item_gen, min_len: min_len, max_len: max_len)
 
-# Integration with SSpec
+# Integration with SPipe
 pub fn fuzz_spec<T>(
     name: text,
     property: fn(T) -> bool,
@@ -568,7 +568,7 @@ simple/std_lib/src/testing/
 - [ ] Implement core generators (int, text, list)
 - [ ] Add `fuzz()` function with basic shrinking
 - [ ] Write specs: `test/unit/testing/fuzz_spec.spl`
-- [ ] Add SSpec integration: `fuzz_spec()`
+- [ ] Add SPipe integration: `fuzz_spec()`
 - [ ] Document in `doc/07_guide/fuzzing.md`
 
 ### Phase 2: Mutation Testing (Week 3-4)
@@ -588,7 +588,7 @@ simple/std_lib/src/testing/
 ### Phase 4: Documentation (Week 6)
 - [ ] Tutorial: `doc/07_guide/property_based_testing.md`
 - [ ] Tutorial: `doc/07_guide/mutation_testing.md`
-- [ ] Add examples to SSpec template
+- [ ] Add examples to SPipe template
 - [ ] Update `CLAUDE.md` with new tools
 
 ## 5. Dependencies

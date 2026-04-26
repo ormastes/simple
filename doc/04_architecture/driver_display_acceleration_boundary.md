@@ -9,7 +9,7 @@ Feature: FR-DRIVER-0011.
 - `src/os/drivers/virtio/virtio_gpu.spl` owns VirtIO-GPU device state and DMA
   transfer behavior.
 - `src/os/drivers/gpu/display_boundary.spl` provides a small policy surface for
-  display-service selection and SSpec coverage.
+  display-service selection and SPipe coverage.
 
 ## Policy
 

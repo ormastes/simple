@@ -27,7 +27,7 @@ QEMU/baremetal tests are expensive: boot times range from 2-60 seconds per VM. C
 | BootRunner | `qemu/boot_runner.spl` | High-level boot test API with serial capture |
 | TestHarness | `baremetal/common/test_harness.spl` | In-guest test infrastructure |
 | ExecutionConfig | `execution/mod.spl` | Three modes: Local, QEMU-GDB, x86_64-QEMU |
-| SSpec | Built-in runtime | BDD framework with `describe`/`it`/`given`/`context_def` |
+| SPipe | Built-in runtime | BDD framework with `describe`/`it`/`given`/`context_def` |
 
 ### Current Session Lifecycle
 
@@ -279,9 +279,9 @@ Suite End:
     10. Shutdown all VMs in pool
 ```
 
-### 5.4 SSpec Integration
+### 5.4 SPipe Integration
 
-Extend current SSpec with session-aware hooks:
+Extend current SPipe with session-aware hooks:
 
 ```simple
 # New hooks (additions to existing framework)
@@ -379,7 +379,7 @@ Additional optimizations stackable:
 - QMP integration for snapshot/restore
 - Extend `QemuTestSession` to use broker
 
-### Phase 2: SSpec Integration
+### Phase 2: SPipe Integration
 - `before_suite`/`after_suite` hooks
 - `before_group`/`after_group` hooks
 - Group-level context passing (`set_group_context`/`get_group_context`)

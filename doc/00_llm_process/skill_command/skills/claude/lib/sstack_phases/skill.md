@@ -104,7 +104,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 
 **Actions:**
 1. Read architecture and ACs from state file
-2. Create SSpec test file(s) following `/sspec` conventions
+2. Create SPipe test file(s) following `/spipe` conventions
 3. Write `describe`/`it` blocks covering every AC
 4. Include edge cases and error paths
 5. Tests should be runnable but FAILING (red phase of TDD)
@@ -113,7 +113,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 **Exit Criteria:**
 - At least one `.spl` spec file created in `test/`
 - Every AC has at least one corresponding `it` block
-- Spec file(s) follow SSpec format (describe/it/expect with built-in matchers only)
+- Spec file(s) follow SPipe format (describe/it/expect with built-in matchers only)
 - Tests reference implementation files that will be created in Phase 5
 - Coverage markers present
 

@@ -56,7 +56,7 @@ Top path buckets from the 2026-04-04 audit:
 - clean broad legacy buckets such as `test/feature/usage`, `test/unit/lib`, and `test/system/compiler`
 - add mutation-style hardening to high-value suites after the placeholder baseline is lower
 - 2026-04-21: cleaned 14 OS unit specs under `test/unit/os` by replacing legacy
-  `assert`, boolean-wrapper, and tautological SSpec assertions with concrete
+  `assert`, boolean-wrapper, and tautological SPipe assertions with concrete
   value, nil, and range matchers; the edited OS unit set is clean under
   `simple verify quality`.
 

@@ -30,7 +30,7 @@ Identify:
 - **Source files** (`.spl`) changed or referenced
 - **Doc files** in `doc/02_requirements/feature/`, `doc/02_requirements/nfr/`, `doc/05_design/`, `doc/04_architecture/`
 
-### Phase 2 — SSpec System Test Verification
+### Phase 2 — SPipe System Test Verification
 
 For each `*_spec.spl` in scope:
 
@@ -147,7 +147,7 @@ After all phases, produce a summary table:
 
 Phase                    | Pass | Fail | Warn |
 -------------------------|------|------|------|
-SSpec Tests              |   12 |    2 |    1 |
+SPipe Tests              |   12 |    2 |    1 |
 Implementation           |   28 |    1 |    3 |
 Feature Requirements     |    8 |    1 |    0 |
 NFR                      |    4 |    0 |    2 |

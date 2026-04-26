@@ -2141,7 +2141,7 @@ pub fn __rt_hashmap_new(_args: &[Value]) -> Result<Value, CompileError> {
 
 | Test Suite | Count | File |
 |-----------|-------|------|
-| SSpec (Simple language, end-to-end) | 90 | `test/lib/std/unit/concurrency/concurrent_providers_spec.spl` |
+| SPipe (Simple language, end-to-end) | 90 | `test/lib/std/unit/concurrency/concurrent_providers_spec.spl` |
 | Rust integration (native providers) | 44 | `rust/compiler/tests/concurrent_providers_test.rs` |
 
 ### Not Yet Implemented

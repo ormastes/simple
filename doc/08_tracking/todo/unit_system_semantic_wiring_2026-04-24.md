@@ -38,8 +38,8 @@ After the registry wires up:
 - `test/unit/lib/unit/unit_composite_spec.spl` — flip pending → real assertions
 - `test/system/unit_system_integration_spec.spl` — should pass without stubs
 
-### 6. SSpec interpreter-mode limitation (separate)
-AC-3 and AC-4 remain "pending" because SSpec's interpreter mode can't execute `it`-block bodies. This is a known architectural limit (see memory: `feedback_interpreter_test_limits`). Compiled-mode spec execution would unpend 29 tests.
+### 6. SPipe interpreter-mode limitation (separate)
+AC-3 and AC-4 remain "pending" because SPipe's interpreter mode can't execute `it`-block bodies. This is a known architectural limit (see memory: `feedback_interpreter_test_limits`). Compiled-mode spec execution would unpend 29 tests.
 
 ## Estimated effort
 

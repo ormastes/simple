@@ -200,22 +200,22 @@ pub fn generate_documentation(result: &TestRunResult) -> Result<(), Box<dyn std:
     generate_html_doc(&docs_dir, result)?;
     generate_markdown_doc(&docs_dir, result)?;
 
-    // Generate BDD-style documentation from sspec files
-    generate_sspec_documentation(result, &docs_dir)?;
+    // Generate BDD-style documentation from spipe files
+    generate_spipe_documentation(result, &docs_dir)?;
 
     Ok(())
 }
 
-/// Generate BDD documentation from sspec test files
-fn generate_sspec_documentation(
+/// Generate BDD documentation from spipe test files
+fn generate_spipe_documentation(
     result: &TestRunResult,
     docs_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use super::sspec_docgen;
+    use super::spipe_docgen;
     use std::path::PathBuf;
 
-    // Find all sspec files from test results
-    let sspec_files: Vec<PathBuf> = result
+    // Find all spipe files from test results
+    let spipe_files: Vec<PathBuf> = result
         .files
         .iter()
         .map(|f| f.path.clone())
@@ -227,13 +227,13 @@ fn generate_sspec_documentation(
         })
         .collect();
 
-    if sspec_files.is_empty() {
+    if spipe_files.is_empty() {
         return Ok(());
     }
 
     // Generate documentation in doc/06_spec/
     let spec_dir = docs_dir.join("spec");
-    sspec_docgen::generate_sspec_docs(&sspec_files, &spec_dir)?;
+    spipe_docgen::generate_spipe_docs(&spipe_files, &spec_dir)?;
 
     Ok(())
 }

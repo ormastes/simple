@@ -16,7 +16,7 @@ Keep the format documentation but rewrite the example so it no longer matches th
 
 Collapsed the two literal examples into one placeholder line using `<TODO|FIXME>`. This preserves the documented shape while preventing the example from being indexed as actionable work.
 
-While verifying the touched spec, current SSpec lint also flagged legacy `expect expr == value` assertions as empty examples. Converted those assertions to matcher form so the file now passes lint.
+While verifying the touched spec, current SPipe lint also flagged legacy `expect expr == value` assertions as empty examples. Converted those assertions to matcher form so the file now passes lint.
 
 ## Verification
 

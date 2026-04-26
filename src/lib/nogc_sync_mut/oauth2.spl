@@ -1,0 +1,282 @@
+# OAuth2 client-credentials helper + token cache.
+#
+# Microsoft-Identity v2.0 token endpoint (login.microsoftonline.com),
+# but generic enough for any OAuth2 client-credentials flow.
+#
+# Token cache uses SDN format. Writes are atomic (tmp + rename) and
+# the file mode is set to 0600. Cache is consulted first; a 60-second
+# safety margin is applied before expiry so we re-mint before the
+# Bearer JWT actually rolls.
+#
+# This file does NOT depend on aws_sigv4.spl — they are separate concerns.
+
+use std.nogc_sync_mut.http_client.{http_post, response_get_status_code, response_get_body}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename, file_delete}
+use std.nogc_sync_mut.file_system.permissions.{file_set_mode}
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.io.time_ops.{current_time_unix}
+use std.common.json.{json_parse, json_object_get, json_serialize}
+
+
+# Safety margin (seconds) subtracted from access-token expiry before we
+# treat a cached token as still valid.
+val OAUTH2_EXPIRY_SAFETY_MARGIN: i64 = 60
+
+# File mode for the token cache file (owner read/write only).
+val OAUTH2_CACHE_FILE_MODE: i64 = 0o600
+
+
+# ============================================================================
+# Token endpoint
+# ============================================================================
+
+fn oauth2_client_credentials_token(tenant_id: text, client_id: text, client_secret: text, scope: text) -> (bool, text, i64):
+    """Request an OAuth2 access token via the client-credentials grant.
+
+    POSTs application/x-www-form-urlencoded to
+    https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token. No refresh
+    token is issued; the caller is expected to cache the access token until
+    expiry and re-request before it rolls.
+
+    Returns: (success, access_token, expires_at_unix). On failure,
+    access_token is empty and expires_at_unix is 0.
+    """
+    if tenant_id == "" or client_id == "" or client_secret == "" or scope == "":
+        return (false, "", 0)
+
+    val url = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    val body = "grant_type=client_credentials&client_id={_url_form_encode(client_id)}&client_secret={_url_form_encode(client_secret)}&scope={_url_form_encode(scope)}"
+
+    val now = current_time_unix()
+    val response = http_post(url, body)
+    val status = response_get_status_code(response)
+    val resp_body = response_get_body(response)
+
+    if status < 200 or status >= 300:
+        return (false, "", 0)
+
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, "", 0)
+
+    val tok = _json_text_field(parsed, "access_token")
+    if tok == "":
+        return (false, "", 0)
+
+    val expires_in = _json_int_field(parsed, "expires_in")
+    val expires_at = if expires_in > 0: now + expires_in else: now + 3600
+
+    (true, tok, expires_at)
+
+
+# ============================================================================
+# Token cache (SDN, atomic-write, 0600)
+# ============================================================================
+
+fn oauth2_token_cache_load(path: text) -> (text, i64):
+    """Load a cached token from an SDN file.
+
+    Returns (cached_token, cached_expires_at_unix) or ("", 0) if absent or
+    malformed. No expiry check is performed here — the caller decides
+    whether the cached value is still fresh enough.
+    """
+    if path == "" or not file_exists(path):
+        return ("", 0)
+
+    val content = file_read_text(path)
+    if content == nil or content == "":
+        return ("", 0)
+
+    var token = ""
+    var expires_at: i64 = 0
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.starts_with("access_token:"):
+            token = _strip_sdn_value(trimmed.split(":", 2)[1])
+        else if trimmed.starts_with("expires_at:"):
+            val raw = _strip_sdn_value(trimmed.split(":", 2)[1])
+            expires_at = _parse_i64(raw)
+
+    (token, expires_at)
+
+
+fn oauth2_token_cache_save(path: text, token: text, expires_at: i64) -> bool:
+    """Atomically write a token cache file with mode 0600.
+
+    Strategy: write temp file (siblings the target with `.tmp` suffix),
+    chmod 0600 BEFORE rename so there is never a window where the file
+    is world-readable, then rename over the target. On failure the temp
+    file is removed.
+    """
+    if path == "":
+        return false
+
+    val tmp_path = "{path}.tmp"
+    val payload = "# itf outlook token cache (auto-managed; do not edit)\n" +
+                  "access_token: \"{_escape_sdn_value(token)}\"\n" +
+                  "expires_at: {expires_at}\n"
+
+    if not file_write_text(tmp_path, payload):
+        return false
+
+    # 0600 BEFORE rename so there is no world-readable window.
+    if not file_set_mode(tmp_path, OAUTH2_CACHE_FILE_MODE):
+        file_delete(tmp_path)
+        return false
+
+    if not file_rename(tmp_path, path):
+        file_delete(tmp_path)
+        return false
+
+    true
+
+
+# ============================================================================
+# Public top-level: cache-first acquisition
+# ============================================================================
+
+fn oauth2_get_token_with_secret(tenant_id: text, client_id: text, client_secret: text, scope: text, cache_path: text) -> (bool, text):
+    """Acquire an access token, consulting the cache first.
+
+    A cached token is reused if `now + OAUTH2_EXPIRY_SAFETY_MARGIN <
+    cached_expires_at`. Otherwise a fresh token is minted via the
+    client-credentials grant and persisted to the cache.
+
+    Test-friendly form: secret is passed directly (no env lookup).
+    Returns: (success, access_token).
+    """
+    val now = current_time_unix()
+    if cache_path != "":
+        val (cached_tok, cached_exp) = oauth2_token_cache_load(cache_path)
+        if cached_tok != "" and cached_exp > now + OAUTH2_EXPIRY_SAFETY_MARGIN:
+            return (true, cached_tok)
+
+    val (ok, tok, exp) = oauth2_client_credentials_token(tenant_id, client_id, client_secret, scope)
+    if not ok:
+        return (false, "")
+
+    if cache_path != "":
+        # Best-effort cache write — token is still usable on cache failure.
+        oauth2_token_cache_save(cache_path, tok, exp)
+
+    (true, tok)
+
+
+fn oauth2_get_token(tenant_id: text, client_id: text, secret_env_var: text, scope: text, cache_path: text) -> (bool, text):
+    """Cache-first token acquisition; resolves the secret from an env var.
+
+    The secret is read from `env_get(secret_env_var)` to avoid passing
+    application secrets on the command line or storing them inline in
+    config files. If the env var is unset/empty this returns (false, "").
+
+    Returns: (success, access_token).
+    """
+    if secret_env_var == "":
+        return (false, "")
+
+    val secret = env_get(secret_env_var)
+    if secret == "":
+        return (false, "")
+
+    oauth2_get_token_with_secret(tenant_id, client_id, secret, scope, cache_path)
+
+
+# ============================================================================
+# Throttle helper (used by adapters that depend on this module)
+# ============================================================================
+
+fn oauth2_parse_retry_after(value: text) -> i64:
+    """Parse a `Retry-After` header value as integer seconds.
+
+    Graph emits seconds-form (RFC 7231 §7.1.3); HTTP-date form is rare
+    here and treated as 0. Returns 0 on parse failure or empty input.
+    """
+    if value == "" or value == nil:
+        return 0
+    val trimmed = value.trim()
+    var n: i64 = 0
+    var any = false
+    for ch in trimmed:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any = true
+        else:
+            return if any: n else: 0
+    n
+
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _url_form_encode(s: text) -> text:
+    """Percent-encode a value for application/x-www-form-urlencoded bodies."""
+    var out: [text] = []
+    var i = 0
+    val len = s.length()
+    while i < len:
+        val ch = s.char_at(i)
+        val code = s.char_code_at(i)
+        val is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val is_digit = code >= 48 and code <= 57
+        val is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
+        if is_unreserved:
+            out.push(ch)
+        else:
+            var hex = code.to_string(16).upper()
+            if hex.length() == 1:
+                hex = "0" + hex
+            out.push("%" + hex)
+        i = i + 1
+    out.join("")
+
+
+fn _strip_sdn_value(raw: text) -> text:
+    """Strip surrounding whitespace and optional double-quote wrapping."""
+    val s = raw.trim()
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _escape_sdn_value(s: text) -> text:
+    """Escape backslash and double-quote for SDN double-quoted strings."""
+    s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+
+fn _parse_i64(s: text) -> i64:
+    val trimmed = s.trim()
+    var n: i64 = 0
+    var any = false
+    for ch in trimmed:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any = true
+        else if any:
+            return n
+    if any: n else: 0
+
+
+fn _json_text_field(obj: any, key: text) -> text:
+    if obj == nil:
+        return ""
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return ""
+    val s = json_serialize(value)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _json_int_field(obj: any, key: text) -> i64:
+    if obj == nil:
+        return 0
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return 0
+    _parse_i64(json_serialize(value))

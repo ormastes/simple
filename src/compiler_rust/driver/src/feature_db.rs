@@ -189,12 +189,12 @@ struct PendingAttrs {
     ignore: bool,
 }
 
-pub fn parse_sspec_file(path: &Path) -> Result<Vec<SspecItem>, String> {
+pub fn parse_spipe_file(path: &Path) -> Result<Vec<SspecItem>, String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    Ok(parse_sspec_metadata(&content))
+    Ok(parse_spipe_metadata(&content))
 }
 
-pub fn parse_sspec_metadata(content: &str) -> Vec<SspecItem> {
+pub fn parse_spipe_metadata(content: &str) -> Vec<SspecItem> {
     let lines: Vec<&str> = content.lines().collect();
     let mut items = Vec::new();
     let mut pending = PendingAttrs::default();
@@ -337,7 +337,7 @@ fn extract_description(doc_block: &str) -> String {
     doc_block.lines().next().unwrap_or("").trim().to_string()
 }
 
-pub fn update_feature_db_from_sspec(db_path: &Path, specs: &[PathBuf], failed_specs: &[PathBuf]) -> Result<(), String> {
+pub fn update_feature_db_from_spipe(db_path: &Path, specs: &[PathBuf], failed_specs: &[PathBuf]) -> Result<(), String> {
     let mut db = load_feature_db(db_path).unwrap_or_else(|_| FeatureDb::new());
     let failed_set: BTreeMap<String, bool> = failed_specs
         .iter()
@@ -346,7 +346,7 @@ pub fn update_feature_db_from_sspec(db_path: &Path, specs: &[PathBuf], failed_sp
     let mut seen_ids: BTreeMap<String, String> = BTreeMap::new();
 
     for path in specs {
-        let items = parse_sspec_file(path)?;
+        let items = parse_spipe_file(path)?;
         for item in items {
             if !item.modes.any_supported() {
                 return Err(format!("feature {} has no supported run modes", item.id));
@@ -360,7 +360,7 @@ pub fn update_feature_db_from_sspec(db_path: &Path, specs: &[PathBuf], failed_sp
                 ));
             }
             let failed = failed_set.contains_key(&path.display().to_string());
-            db.upsert_from_sspec(&item, path, failed);
+            db.upsert_from_spipe(&item, path, failed);
         }
     }
 
@@ -384,7 +384,7 @@ impl FeatureDb {
         Self::default()
     }
 
-    pub fn upsert_from_sspec(&mut self, item: &SspecItem, path: &Path, failed: bool) {
+    pub fn upsert_from_spipe(&mut self, item: &SspecItem, path: &Path, failed: bool) {
         let derived_category = derive_category_from_path(path);
         let entry = self.records.entry(item.id.clone()).or_insert_with(|| FeatureRecord {
             id: item.id.clone(),

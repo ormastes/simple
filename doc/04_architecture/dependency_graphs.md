@@ -178,4 +178,4 @@ simple/app/depgraph/
 ### Tests
 
 Specification tests in `simple/std_lib/test/unit/tooling/depgraph_spec.spl` define
-the expected behavior using BDD-style sspec syntax.
+the expected behavior using BDD-style spipe syntax.

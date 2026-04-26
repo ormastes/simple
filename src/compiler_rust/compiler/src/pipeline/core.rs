@@ -37,7 +37,7 @@ pub struct CompilerPipeline {
     pub(super) verification_violations: Vec<VerificationViolation>,
     /// Enable coverage instrumentation (#674)
     pub(super) coverage_enabled: bool,
-    /// Enable test mode (activates SSpec DSL parsing)
+    /// Enable test mode (activates SPipe DSL parsing)
     pub(super) test_mode: bool,
 }
 
@@ -296,9 +296,9 @@ impl CompilerPipeline {
         Ok(())
     }
 
-    /// Enable test mode (activates SSpec DSL parsing)
+    /// Enable test mode (activates SPipe DSL parsing)
     ///
-    /// When enabled, the parser recognizes SSpec DSL keywords like
+    /// When enabled, the parser recognizes SPipe DSL keywords like
     /// `describe`, `it`, `context`, etc. at the top level.
     pub fn set_test_mode(&mut self, enabled: bool) {
         self.test_mode = enabled;

@@ -13,7 +13,7 @@ use super::commands::arg_parsing::FixFlags;
 use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
-    "STUB001", "STUB003", "SSPEC001", "SSPEC002", "SSPEC003", "SSPEC004", "SSPEC005", "SSPEC006", "UI001", "UI002",
+    "STUB001", "STUB003", "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "UI001", "UI002",
     "UI003",
 ];
 
@@ -80,15 +80,15 @@ fn make_quality_diag(
         .with_help(help.into())
 }
 
-fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic> {
+fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic> {
     if !is_test_like_path(path) {
         return Vec::new();
     }
 
-    let allow_placeholder = file_allows_lint(source, "sspec_placeholder_tests");
-    let allow_print_skip = file_allows_lint(source, "sspec_no_print_based_tests");
-    let allow_empty = file_allows_lint(source, "sspec_empty_examples");
-    let allow_boolean_wrapper = file_allows_lint(source, "sspec_boolean_wrapper_assertions");
+    let allow_placeholder = file_allows_lint(source, "spipe_placeholder_tests");
+    let allow_print_skip = file_allows_lint(source, "spipe_no_print_based_tests");
+    let allow_empty = file_allows_lint(source, "spipe_empty_examples");
+    let allow_boolean_wrapper = file_allows_lint(source, "spipe_boolean_wrapper_assertions");
 
     let lines: Vec<&str> = source.lines().collect();
     let mut diagnostics = Vec::new();
@@ -107,7 +107,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         if tautology && !allow_placeholder {
             diagnostics.push(
                 Diagnostic::error("Tautological assertion in spec/example")
-                    .with_code("SSPEC001")
+                    .with_code("SPIPE001")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
                     .with_help("Assert returned data, state, or capability outcome instead of a literal boolean"),
@@ -123,7 +123,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         if pass_helper && !allow_placeholder {
             diagnostics.push(
                 Diagnostic::error("Placeholder pass helper in spec/example")
-                    .with_code("SSPEC002")
+                    .with_code("SPIPE002")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
                     .with_help("Use skip: for unsupported environments, or assert a real result"),
@@ -141,7 +141,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         if is_match_arm && has_match_placeholder && !allow_placeholder {
             diagnostics.push(
                 Diagnostic::error("Placeholder success/failure arm in match-based spec assertion")
-                    .with_code("SSPEC003")
+                    .with_code("SPIPE003")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
                     .with_help("Assert concrete fields from Ok/Err, or use skip: before the match"),
@@ -155,7 +155,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         if print_skip && !allow_print_skip {
             diagnostics.push(
                 Diagnostic::error("Print-based skip placeholder in spec/example")
-                    .with_code("SSPEC004")
+                    .with_code("SPIPE004")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
                     .with_help("Use skip: for sanctioned environment skips instead of print-and-return"),
@@ -176,7 +176,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         if boolean_wrapper && !allow_boolean_wrapper {
             diagnostics.push(
                 Diagnostic::error("Boolean-wrapper assertion in spec/example")
-                    .with_code("SSPEC006")
+                    .with_code("SPIPE006")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
                     .with_help("Assert the underlying value or capability result instead of expect(<comparison>).to_equal(true/false)"),
@@ -230,16 +230,16 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
 
         if statements.is_empty() && !allow_empty {
             diagnostics.push(
-                Diagnostic::error("SSpec example has no body")
-                    .with_code("SSPEC005")
+                Diagnostic::error("SPipe example has no body")
+                    .with_code("SPIPE005")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, i), "")
                     .with_help("Add a real assertion or use skip: for a sanctioned skip"),
             );
         } else if !has_real_assertion && !has_skip && !allow_empty {
             diagnostics.push(
-                Diagnostic::error("SSpec example has no real assertion or sanctioned skip")
-                    .with_code("SSPEC005")
+                Diagnostic::error("SPipe example has no real assertion or sanctioned skip")
+                    .with_code("SPIPE005")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, i), "")
                     .with_help("Assert a concrete result, or use skip: when the environment legitimately cannot run the example"),
@@ -632,7 +632,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
 }
 
 fn collect_extra_quality_diagnostics(path: &Path, source: &str, items: &[Node]) -> Vec<Diagnostic> {
-    let mut diagnostics = collect_sspec_quality_diagnostics(path, source);
+    let mut diagnostics = collect_spipe_quality_diagnostics(path, source);
     diagnostics.extend(collect_stub_diagnostics(path, items));
     diagnostics.extend(collect_ui_typed_api_diagnostics(path, source));
     diagnostics

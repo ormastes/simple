@@ -38,7 +38,7 @@
 ---
 
 ### Test Agent
-**Expertise:** SSpec framework, test coverage, edge case detection
+**Expertise:** SPipe framework, test coverage, edge case detection
 **Responsibilities:**
 - Unit test suites
 - Integration tests

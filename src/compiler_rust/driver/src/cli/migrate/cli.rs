@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{generics, print, sspec};
+use super::{generics, print, spipe};
 
 /// Run migration command
 pub fn run_migrate(args: &[String]) -> i32 {
@@ -42,7 +42,7 @@ pub fn run_migrate(args: &[String]) -> i32 {
 
             print::migrate_print_syntax(&path, dry_run)
         }
-        "--fix-sspec-docstrings" => {
+        "--fix-spipe-docstrings" => {
             // Check for --dry-run flag
             let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
 
@@ -54,7 +54,7 @@ pub fn run_migrate(args: &[String]) -> i32 {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            sspec::migrate_sspec_docstrings(&path, dry_run)
+            spipe::migrate_spipe_docstrings(&path, dry_run)
         }
         _ => {
             eprintln!("error: unknown migration subcommand: {}", subcommand);
@@ -70,7 +70,7 @@ fn print_migrate_help() {
     println!("Usage:");
     println!("  simple migrate --fix-generics [OPTIONS] [path]");
     println!("  simple migrate --fix-print [OPTIONS] [path]");
-    println!("  simple migrate --fix-sspec-docstrings [OPTIONS] [path]");
+    println!("  simple migrate --fix-spipe-docstrings [OPTIONS] [path]");
     println!();
     println!("Migrations:");
     println!("  --fix-generics <path>    Convert [] generic syntax to <>");
@@ -84,7 +84,7 @@ fn print_migrate_help() {
     println!("                           eprint() → eprint_raw()");
     println!("                           Processes all .spl files in path");
     println!();
-    println!("  --fix-sspec-docstrings   Convert print-based SSpec tests to docstrings");
+    println!("  --fix-spipe-docstrings   Convert print-based SPipe tests to docstrings");
     println!("           <path>          Converts: print('describe...')");
     println!("                           To: describe \"...\":");
     println!("                                   \"\"\"Documentation\"\"\"");
@@ -100,6 +100,6 @@ fn print_migrate_help() {
     println!("  simple migrate --fix-generics --dry-run src/");
     println!("  simple migrate --fix-print src/std/");
     println!("  simple migrate --fix-print --dry-run .");
-    println!("  simple migrate --fix-sspec-docstrings src/std/test/features/");
-    println!("  simple migrate --fix-sspec-docstrings --dry-run tests/");
+    println!("  simple migrate --fix-spipe-docstrings src/std/test/features/");
+    println!("  simple migrate --fix-spipe-docstrings --dry-run tests/");
 }

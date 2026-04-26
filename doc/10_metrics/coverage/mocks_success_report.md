@@ -145,13 +145,13 @@ Reallocation edge cases (NEW TESTS):
 
 ## Remaining Issues (Minor)
 
-### Missing SSpec Matchers (Easy to Fix)
+### Missing SPipe Matchers (Easy to Fix)
 
-1. **to_not_equal** - Not defined in SSpec
+1. **to_not_equal** - Not defined in SPipe
    - Used in: 1 test
    - Fix: Remove or use `to_equal` with negation
 
-2. **to_be_less_than** - Not defined in SSpec
+2. **to_be_less_than** - Not defined in SPipe
    - Used in: 1 test
    - Fix: Use custom assertion or remove
 

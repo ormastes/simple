@@ -39,7 +39,7 @@ tooling, tests, and docs. Raw asm payload must not require string quotes.
      comments, semicolon/comma terminators, empty blocks, and quoted compatibility.
    - Pure Simple parser unit tests for raw payload preservation.
    - Tree-sitter tests for `asm_block`, `asm_content`, volatility, and injection query.
-   - SSpec matrix across `x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`,
+   - SPipe matrix across `x86_32`, `x86_64`, `arm32`, `arm64`, `riscv32`,
      `riscv64` and interpreter/loader/compiler modes.
 
 5. Docs
@@ -52,4 +52,4 @@ tooling, tests, and docs. Raw asm payload must not require string quotes.
 - No docs or active tests describe quoted braced asm as canonical.
 - Raw asm payload with `#0` survives parser and Tree-sitter capture.
 - Old parenthesized asm compiles/parses without warning.
-- Targeted parser, Tree-sitter, and SSpec tests pass.
+- Targeted parser, Tree-sitter, and SPipe tests pass.

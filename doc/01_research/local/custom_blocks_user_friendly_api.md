@@ -713,6 +713,6 @@ val component = macro_block("component", \payload:
 1. Implement `compiler.blocks.easy` module
 2. Implement `compiler.blocks.builder` module
 3. Implement `compiler.blocks.utils` module
-4. Write SSpec tests for all APIs
+4. Write SPipe tests for all APIs
 5. Migrate built-in blocks to new API as examples
 6. Update documentation and tutorials

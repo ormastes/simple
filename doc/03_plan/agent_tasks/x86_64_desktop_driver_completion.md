@@ -36,7 +36,7 @@ Use Feature Option B and NFR Option 2 unless the user selects a different requir
 
 ## P2: Verification And Rollout
 
-- Add SSpec coverage for capability summaries and false-claim rejection.
+- Add SPipe coverage for capability summaries and false-claim rejection.
 - Add QEMU live acceptance with `x64-desktop-uefi`: boot, mount disk, draw desktop, handle input shortcut, launch process-backed app, network smoke, and `TEST PASSED`.
 - Run touched-file stub scan and the x86_64 desktop QEMU scenario before marking complete.
 

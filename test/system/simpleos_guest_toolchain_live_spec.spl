@@ -2,15 +2,18 @@
 
 use std.spec.*
 
-use os.qemu_runner.{get_ssh_live_target, scenario_x64_ssh, ensure_scenario_media, build_os_with_backend}
+use os.qemu_runner.{get_ssh_live_target, QemuScenario, ensure_scenario_media, build_os_with_backend}
+use os.kernel.arch.arch_context.{Architecture}
 use test.qemu.os.common.qemu_os_harness.{
-    can_run_target, spawn_guest_with_qmp_scenario,
-    stop_guest, wait_for_serial_marker, read_serial_log}
+    allocate_live_host_port, can_run_target, spawn_guest_with_qmp_scenario,
+    stop_guest, wait_for_serial_marker, read_serial_log, read_qemu_stderr_log}
 use std.nogc_sync_mut.ffi.io.{dir_create_all}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 fn command_exists(name: text) -> bool:
     val (_out, _err, code) = rt_process_run_timeout("/bin/sh", ["-c", "command -v " + name + " >/dev/null 2>&1"], 5000)
@@ -30,19 +33,42 @@ fn ssh_command(port: i64, remote_cmd: text) -> text:
         "-p {port} root@127.0.0.1 " +
         "'" + remote_cmd.replace("'", "'\"'\"'") + "'"
 
+fn _scenario_x64_ssh_on_port(port: i64) -> QemuScenario:
+    QemuScenario(
+        name: "x64-ssh-toolchain-{port}",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "2G",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-drive", "file=build/os/simpleos_disk.img,if=none,id=nvm,format=raw",
+            "-device", "nvme,serial=deadbeef,drive=nvm",
+            "-netdev", "user,id=n0,hostfwd=tcp::{port}-:22",
+            "-device", "virtio-net-pci,netdev=n0"
+        ],
+        gui_mode: false,
+        description: "x86_64 full-stack with SSH toolchain lane (host:{port} -> guest:22)"
+    )
+
 fn run_remote(port: i64, remote_cmd: text) -> (text, text, i32):
     rt_process_run_timeout("/bin/sh", ["-c", ssh_command(port, remote_cmd)], 60000)
 
-fn assert_remote_ok(port: i64, remote_cmd: text, needle: text):
+fn remote_ok_error(port: i64, remote_cmd: text, needle: text) -> text?:
     val (out, err, code) = run_remote(port, remote_cmd)
     if code != 0:
-        fail("remote command failed: {remote_cmd}\nstdout:\n{out}\nstderr:\n{err}")
-    expect((out + err).contains(needle)).to_equal(true)
+        return Some("remote command failed: {remote_cmd}\nstdout:\n{out}\nstderr:\n{err}")
+    if not (out + err).contains(needle):
+        return Some("remote command missing expected output: {needle}\ncommand: {remote_cmd}\nstdout:\n{out}\nstderr:\n{err}")
+    nil
 
-fn assert_remote_failure(port: i64, remote_cmd: text, expected_err: text):
+fn remote_failure_error(port: i64, remote_cmd: text, expected_err: text) -> text?:
     val (out, err, code) = run_remote(port, remote_cmd)
-    expect(code == 0).to_equal(false)
-    expect((out + err).contains(expected_err)).to_equal(true)
+    if code == 0:
+        return Some("remote command unexpectedly succeeded: {remote_cmd}\nstdout:\n{out}\nstderr:\n{err}")
+    if not (out + err).contains(expected_err):
+        return Some("remote failure missing expected marker: {expected_err}\ncommand: {remote_cmd}\nstdout:\n{out}\nstderr:\n{err}")
+    nil
 
 describe "SimpleOS guest toolchain live lane":
 
@@ -52,7 +78,12 @@ describe "SimpleOS guest toolchain live lane":
             expect(live_guest_toolchain_enabled()).to_equal(false)
         else:
             val target = get_ssh_live_target()
-            val scenario = scenario_x64_ssh()
+            val port_result = allocate_live_host_port(33000)
+            expect(port_result.is_ok()).to_equal(true)
+            if port_result.is_err():
+                return
+            val host_port = port_result.unwrap()
+            val scenario = _scenario_x64_ssh_on_port(host_port)
             val built = build_os_with_backend(target, "llvm")
             if not built:
                 print "[simpleos_guest_toolchain_live_spec] live guest build blocked before boot; see [build] stderr tail above for the current named blocker"
@@ -64,32 +95,38 @@ describe "SimpleOS guest toolchain live lane":
                     val media_ready = ensure_scenario_media(scenario)
                     expect(media_ready).to_equal(true)
                     if media_ready:
-                        val qmp_socket = "/tmp/simpleos_guest_toolchain_live.sock"
-                        val serial_log = "build/os/simpleos_guest_toolchain_live.log"
-                        val host_port = 2222
+                        val run_token = "toolchain_{rt_getpid()}_{rt_time_now_unix_micros()}"
+                        val qmp_socket = "/tmp/simpleos_guest_toolchain_live_{run_token}.sock"
+                        val serial_log = "build/os/simpleos_guest_toolchain_live_{run_token}.log"
                         dir_create_all("build/os")
 
                         match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
                             Ok(handle):
                                 val ready = wait_for_serial_marker(handle, "[sshd] SSH daemon listening on port 22", 30000)
+                                val boot_serial = read_serial_log(handle)
+                                val boot_stderr = read_qemu_stderr_log(handle)
                                 if not ready:
-                                    val serial = read_serial_log(handle)
-                                    rt_file_write_text("build/os/simpleos_guest_toolchain_live_failure.log", serial)
-                                expect(ready).to_equal(true)
-
+                                    rt_file_write_text("build/os/simpleos_guest_toolchain_live_failure.log", boot_serial)
+                                    rt_file_write_text("build/os/simpleos_guest_toolchain_live_failure.stderr.log", boot_stderr)
+                                var remote_error: text? = nil
+                                var final_serial = boot_serial
                                 if ready:
-                                    assert_remote_ok(host_port, "clang --version", "clang version")
-                                    assert_remote_ok(host_port, "clang --print-target-triple", "x86_64-simpleos")
-                                    assert_remote_ok(host_port,
+                                    remote_error = remote_ok_error(host_port, "clang --version", "clang version")
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port, "clang --print-target-triple", "x86_64-simpleos")
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port,
                                         "cat >/tmp/hello.c <<'EOF'\nint main(void) { return 0; }\nEOF\n" +
                                         "clang --target=x86_64-simpleos --sysroot=/usr -c /tmp/hello.c -o /tmp/hello.o && " +
                                         "test -f /tmp/hello.o && echo OBJECT_OK",
                                         "OBJECT_OK")
-                                    assert_remote_ok(host_port,
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port,
                                         "ld.lld -T /usr/share/simpleos/simpleos.ld /usr/lib/crt0.o /tmp/hello.o -L /usr/lib -lsimpleos_c -o /tmp/hello.elf && " +
                                         "test -f /tmp/hello.elf && echo LINK_OK",
                                         "LINK_OK")
-                                    assert_remote_ok(host_port,
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port,
                                         "mkdir -p /tmp/cmake-smoke && " +
                                         "cat >/tmp/cmake-smoke/CMakeLists.txt <<'EOF'\ncmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello hello.c)\nEOF\n" +
                                         "cat >/tmp/cmake-smoke/hello.c <<'EOF'\nint main(void) { return 0; }\nEOF\n" +
@@ -97,16 +134,28 @@ describe "SimpleOS guest toolchain live lane":
                                         "ninja -C /tmp/cmake-build >/tmp/ninja.log 2>&1 && " +
                                         "test -f /tmp/cmake-build/hello && echo CMAKE_NINJA_OK",
                                         "CMAKE_NINJA_OK")
-                                    assert_remote_ok(host_port, "rustc --print target-list", "x86_64-unknown-simpleos")
-                                    assert_remote_ok(host_port, "rustc --print sysroot", "/usr")
-                                    assert_remote_ok(host_port, "rustc --print simpleos-wrapper-status", "status=report-and-gate")
-                                    assert_remote_failure(host_port,
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port, "rustc --print target-list", "x86_64-unknown-simpleos")
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port, "rustc --print sysroot", "/usr")
+                                    if remote_error == nil:
+                                        remote_error = remote_ok_error(host_port, "rustc --print simpleos-wrapper-status", "status=report-and-gate")
+                                    if remote_error == nil:
+                                        remote_error = remote_failure_error(host_port,
                                         "cat >/tmp/main.rs <<'EOF'\nfn main() {}\nEOF\nrustc /tmp/main.rs",
                                         "status=report-and-gate")
-                                    assert_remote_failure(host_port, "cargo build", "status=report-and-gate")
-
-                                    val serial = read_serial_log(handle)
-                                    expect(serial.contains("[boot]")).to_equal(true)
-                                expect(stop_guest(handle)).to_equal(true)
+                                    if remote_error == nil:
+                                        remote_error = remote_failure_error(host_port, "cargo build", "status=report-and-gate")
+                                    final_serial = read_serial_log(handle)
+                                    if remote_error != nil:
+                                        rt_file_write_text("build/os/simpleos_guest_toolchain_live_failure.log", final_serial)
+                                        rt_file_write_text("build/os/simpleos_guest_toolchain_live_failure.stderr.log", boot_stderr)
+                                val stopped = stop_guest(handle)
+                                expect(stopped).to_equal(true)
+                                expect(ready).to_equal(true)
+                                if ready:
+                                    if val err = remote_error:
+                                        fail(err)
+                                    expect(final_serial.contains("[boot]")).to_equal(true)
                             Err(err):
                                 fail("failed to spawn guest: {err}")

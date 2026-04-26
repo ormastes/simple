@@ -16,7 +16,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 ## Distinctive Features
 
 - **Self-hosted staged toolchain**: real source layers for frontend, type analysis, borrow checking, backend, driver, interpreter, and loader live in-tree.
-- **Verification-native workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
+- **Verification-native workflow**: SPipe BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
 - **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
 - **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
 - **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (query/LSP hover, VSCode highlighting/preview, Neovim inline Unicode preview with conceal). The autograd path is complete for the promoted torch-backed C/LLVM scope.
@@ -29,8 +29,8 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 ## Feature Status Highlights
 
 Implemented and safe to advertise:
-- SSpec, SDoctest, coverage, traceability checks, and generated spec docs
-- SSpec mock policy: system-test mock ban, HAL-only and custom pattern modes
+- SPipe, SDoctest, coverage, traceability checks, and generated spec docs
+- SPipe mock policy: system-test mock ban, HAL-only and custom pattern modes
 - Self-hosted staged compiler, interpreter, and loader architecture
 - MDSOC manifests and architecture-focused project structure
 - Parser-friendly macros with validation and hygiene

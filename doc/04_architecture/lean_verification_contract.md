@@ -37,7 +37,7 @@ All agents and implementation phases work against this contract. Public document
 | Refinement types | Separate gated subset, too broad |
 | Automatic proof synthesis | Research-grade, not productizable yet |
 | Full dependent typing | Language-level change beyond verification |
-| Replacing SSpec with proofs | Different concern (testing vs verification) |
+| Replacing SPipe with proofs | Different concern (testing vs verification) |
 
 ### 1.3 Classification Definitions
 

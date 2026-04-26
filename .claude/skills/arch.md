@@ -14,8 +14,8 @@
 
 ## Phase 2: System Test Design
 
-1. Generate SSpec BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
-2. Follow SSpec rules:
+1. Generate SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+2. Follow SPipe rules:
    - `describe`, `it`, `expect` built-in (no import)
    - One assertion concept per test
    - Clear names: `it "adds two positive numbers":` not `it "works":`
@@ -26,7 +26,7 @@
 
 ## Quality Check
 
-1. Verify SSpec quality (target: A grade) — real assertions, edge cases, full REQ coverage
+1. Verify SPipe quality (target: A grade) — real assertions, edge cases, full REQ coverage
 2. Ask user: "Should architecture change?"
 3. If yes, loop back
 

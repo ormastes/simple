@@ -136,18 +136,18 @@ pub fn set_active(active: bool):
     }
 
     #[test]
-    fn test_sspec_placeholder_tautology_detected() {
+    fn test_spipe_placeholder_tautology_detected() {
         let code = r#"
 describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecPlaceholderTests));
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipePlaceholderTests));
     }
 
     #[test]
-    fn test_sspec_print_skip_detected() {
+    fn test_spipe_print_skip_detected() {
         let code = r#"
 describe "demo":
     it "prints skip":
@@ -155,22 +155,22 @@ describe "demo":
         return
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecNoPrintBasedTests));
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeNoPrintBasedTests));
     }
 
     #[test]
-    fn test_sspec_empty_example_detected() {
+    fn test_spipe_empty_example_detected() {
         let code = r#"
 describe "demo":
     it "just calls helper":
         run_check()
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecEmptyExamples));
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeEmptyExamples));
     }
 
     #[test]
-    fn test_sspec_boolean_wrapper_detected() {
+    fn test_spipe_boolean_wrapper_detected() {
         let code = r#"
 describe "demo":
     it "wraps comparison":
@@ -179,7 +179,7 @@ describe "demo":
         let diagnostics = check_code_in_file("demo_spec.spl", code);
         assert!(diagnostics
             .iter()
-            .any(|d| d.lint == LintName::SSpecBooleanWrapperAssertions));
+            .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
     }
 
     #[test]
@@ -225,15 +225,15 @@ fn classify(x: i64):
     }
 
     #[test]
-    fn test_allow_suppresses_sspec_placeholder_tests() {
+    fn test_allow_suppresses_spipe_placeholder_tests() {
         let code = r#"
-#[allow(sspec_placeholder_tests)]
+#[allow(spipe_placeholder_tests)]
 describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics.iter().all(|d| d.lint != LintName::SSpecPlaceholderTests));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::SPipePlaceholderTests));
     }
 
     #[test]

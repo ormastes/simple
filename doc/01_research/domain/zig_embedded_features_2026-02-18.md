@@ -681,7 +681,7 @@ build-provenance:
 
 ### 8.1 Current Status
 
-Simple has SSpec (`src/lib/spec.spl`) for BDD-style tests in separate `_spec.spl` files. There are NO inline test blocks in production code. There is no `debug{}` block concept.
+Simple has SPipe (`src/lib/spec.spl`) for BDD-style tests in separate `_spec.spl` files. There are NO inline test blocks in production code. There is no `debug{}` block concept.
 
 ### 8.2 Zig Approach
 
@@ -717,7 +717,7 @@ test "add overflow":
 
 **Compile-out:** `test {}` blocks are parsed but excluded from non-test builds (`bin/simple build` vs `bin/simple test`). In embedded builds, test blocks are excluded by default (`--no-std` implies `--no-tests`).
 
-**Relation to SSpec:** Inline `test {}` is a lightweight supplement. SSpec remains for integration/BDD tests. Inline tests are for unit tests that live next to the code. The SSpec runner could discover and run both.
+**Relation to SPipe:** Inline `test {}` is a lightweight supplement. SPipe remains for integration/BDD tests. Inline tests are for unit tests that live next to the code. The SPipe runner could discover and run both.
 
 #### 8.3.2 `debug{}` Blocks
 
@@ -778,7 +778,7 @@ But `@test` and `@debug` look less clean than keywords. For embedded where test 
 | `test "name":` block: parser recognizes, stores as TEST_DECL | LOW |
 | `debug:` block: parser recognizes, stores as DEBUG_DECL | LOW |
 | Build mode flag: `--test` / `--debug` include/exclude TEST_DECL / DEBUG_DECL | LOW |
-| SSpec runner: discover and run inline test blocks | MEDIUM |
+| SPipe runner: discover and run inline test blocks | MEDIUM |
 | Test block isolation: each `test {}` runs in fresh scope | MEDIUM |
 
 **Total: LOW-MEDIUM effort, HIGH embedded ROI** (removes test code from ROM).

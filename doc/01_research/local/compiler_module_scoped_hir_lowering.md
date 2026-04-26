@@ -23,5 +23,5 @@ This gives each module its own symbol table while preserving access to all parse
 
 ## Regression Surface
 
-- System SSpec: `test/system/compiler_module_scoped_hir_lowering_spec.spl`
-- Existing import resolver SSpec: `test/unit/compiler/hir/resolve_import_symbols_spec.spl`
+- System SPipe: `test/system/compiler_module_scoped_hir_lowering_spec.spl`
+- Existing import resolver SPipe: `test/unit/compiler/hir/resolve_import_symbols_spec.spl`

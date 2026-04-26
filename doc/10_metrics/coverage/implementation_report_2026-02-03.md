@@ -155,7 +155,7 @@ The proven formatter approach (78 tests → 85% coverage) was successfully appli
 
 ### Checklist ✅
 
-- ✅ All tests follow SSpec BDD style
+- ✅ All tests follow SPipe BDD style
 - ✅ Clear, descriptive test names
 - ✅ Each test targets specific branch
 - ✅ Explicit assertions (no implicit expectations)
@@ -305,7 +305,7 @@ self.offset >= self.capacity  # True/False branches
    - Prioritization helped focus on high-value tests
    - Documentation scaled the effort effectively
 
-2. **SSpec Framework**
+2. **SPipe Framework**
    - BDD style makes tests readable
    - Nested contexts organize test structure
    - Clear expectations reduce ambiguity
@@ -342,7 +342,7 @@ self.offset >= self.capacity  # True/False branches
 
 - ✅ **Coverage infrastructure unclear** → Now fully understood
 - ✅ **Methodology unproven** → Successfully applied
-- ✅ **Test framework unknown** → SSpec works excellently
+- ✅ **Test framework unknown** → SPipe works excellently
 - ✅ **Pattern unclear** → Established and documented
 
 ### Active Risks

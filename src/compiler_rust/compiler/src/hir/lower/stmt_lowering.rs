@@ -532,7 +532,7 @@ impl Lowerer {
             }
 
             Node::Expression(expr) => {
-                // Intercept BDD/SSpec calls at statement level so we can emit
+                // Intercept BDD/SPipe calls at statement level so we can emit
                 // start/body/end sequences (describe, it, expect, etc.)
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
                     return Ok(stmts);
@@ -572,7 +572,7 @@ impl Lowerer {
             }
 
             // Import statements are resolved at the module level (module_pass.rs).
-            // When they appear inside a function body (e.g. SSpec test files wrapped
+            // When they appear inside a function body (e.g. SPipe test files wrapped
             // into main), they are a no-op at code generation time.
             Node::UseStmt(_)
             | Node::MultiUse(_)
@@ -1245,7 +1245,7 @@ impl Lowerer {
         Ok(stmts)
     }
 
-    /// Try to lower a BDD/SSpec call expression as a statement sequence.
+    /// Try to lower a BDD/SPipe call expression as a statement sequence.
     /// Returns Some(stmts) if the expression is a BDD call, None otherwise.
     ///
     /// Handles: describe, context, it, test, expect, before_each, after_each

@@ -20,4 +20,4 @@ Feature request: `FR-STORAGE-0002` in `doc/08_tracking/feature_request/nvfs_requ
 
 ## Regression Surface
 
-- System SSpec: `test/system/storage_fat32_positional_cursor_spec.spl`
+- System SPipe: `test/system/storage_fat32_positional_cursor_spec.spl`

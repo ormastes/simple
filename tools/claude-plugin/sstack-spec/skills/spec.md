@@ -4,7 +4,7 @@
 
 ## What This Skill Does
 
-Writes failing BDD specs BEFORE any implementation code exists (test-first / Superpowers pattern). Creates SSpec test files at `test/` paths and appends an AC coverage matrix to the state file.
+Writes failing BDD specs BEFORE any implementation code exists (test-first / Superpowers pattern). Creates SPipe test files at `test/` paths and appends an AC coverage matrix to the state file.
 
 ## When to Use
 
@@ -15,13 +15,13 @@ Writes failing BDD specs BEFORE any implementation code exists (test-first / Sup
 ## Workflow
 
 1. Read `.sstack/<feature>/state.md` — extract acceptance criteria, requirements, and architecture
-2. For every AC-N, write at least one SSpec `it` block that would verify it
+2. For every AC-N, write at least one SPipe `it` block that would verify it
 3. Create spec files at `test/` paths mirroring the architecture's module paths
-4. Use ONLY built-in SSpec matchers (see below)
+4. Use ONLY built-in SPipe matchers (see below)
 5. Every spec MUST fail right now — the code does not exist yet
 6. Append the spec file list and coverage matrix to the state file
 
-## SSpec Matchers (ONLY these)
+## SPipe Matchers (ONLY these)
 
 ```simple
 expect(actual).to_equal(expected)
@@ -37,7 +37,7 @@ expect(actual).to_be_less_than(n)
 Do NOT use: `to_be_true`, `to_be_false`, `to_raise`, `to_match`, or any custom matchers.
 Use `to_equal(true)` and `to_equal(false)` instead.
 
-## SSpec File Structure
+## SPipe File Structure
 
 ```simple
 use std.spec

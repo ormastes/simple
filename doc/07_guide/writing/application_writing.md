@@ -133,4 +133,4 @@ fn load_config() -> AppConfig:
 - [design_writing.md](design_writing.md) - Design with diagrams
 - [architecture_writing.md](architecture_writing.md) - Architecture patterns
 - [../coding_style.md](../coding_style.md) - Coding conventions
-- [../test/sspec_writing.md](../test/sspec_writing.md) - Test writing
+- [../test/spipe_writing.md](../test/spipe_writing.md) - Test writing

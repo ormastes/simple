@@ -1,6 +1,6 @@
 # note.sdn BDD Test Summary
 
-**Approach:** Behavior-Driven Development with SSpec
+**Approach:** Behavior-Driven Development with SPipe
 **Status:** ✅ Complete
 **Total Test Cases:** 60+ scenarios
 
@@ -524,4 +524,4 @@ The note.sdn BDD test suite provides **comprehensive coverage** of Phase 1 funct
 
 **Created:** 2026-01-28
 **Phase:** 1 (Complete)
-**Approach:** BDD with SSpec
+**Approach:** BDD with SPipe

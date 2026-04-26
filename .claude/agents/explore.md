@@ -28,7 +28,7 @@ src/
   lib/          # Libraries
     database/   # Database (bug, test, feature DBs)
   std/          # Standard library
-    spec.spl    # SSpec test framework
+    spec.spl    # SPipe test framework
     text.spl  # String utilities
     math.spl    # Math functions
     path.spl    # Path utilities
@@ -76,7 +76,7 @@ Source (.spl) -> Lexer -> Tokens -> Parser -> AST -> HIR -> MIR -> Codegen/Inter
 | Test runner | `src/app/test_runner_new/` |
 | MCP server | `src/app/mcp/main.spl` |
 | JJ MCP server | `src/app/mcp_jj/main.spl` |
-| SSpec framework | `src/lib/spec.spl` |
+| SPipe framework | `src/lib/spec.spl` |
 | I/O module | `src/app/io/mod.spl` |
 | Database | `src/lib/database/` |
 | Build system | `src/app/build/` |

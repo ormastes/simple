@@ -198,7 +198,7 @@ ownership other than the helper-inference hard-error boundary.
 
 ## Python-HDL Parity Backlog
 
-Deferred and migrated SSpec coverage is surfaced by
+Deferred and migrated SPipe coverage is surfaced by
 `bin/simple test --only-skipped --list-skip-features --pending` where present.
 The remaining tracked gaps are milestone-out-of-scope broad HLS work:
 float IP lowering, pointers, unconstrained memories, unsupported MIR instructions,

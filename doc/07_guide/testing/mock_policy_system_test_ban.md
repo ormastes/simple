@@ -94,7 +94,7 @@ describe "SPI Driver Integration":
 
 Mock mode can be set at the `ExampleGroup` (describe/context) level, and it **inherits downward** through the group hierarchy.
 
-### Per-Group (compiled mode with SSpec executor)
+### Per-Group (compiled mode with SPipe executor)
 
 ```simple
 use std.spec.{describe, it, expect}
@@ -160,7 +160,7 @@ MockPolicy.check_allowed("app.service.user")  # panics if not allowed
 
 2. **Rust-side pattern gate** (`check_mock_use_from(module_path!())`): Called via FFI by the executor and compiled-mode runtime. Uses the **real caller module path** (compile-time `module_path!()` macro), so HalOnly/Custom patterns can't be spoofed. Enforces all four modes.
 
-The SSpec executor (`spec/runner/executor.spl`) synchronizes **both** layers before each test by calling both the Simple-side functions (`mock_policy_disable()`) and the Rust FFI functions (`__mock_policy_disable()`).
+The SPipe executor (`spec/runner/executor.spl`) synchronizes **both** layers before each test by calling both the Simple-side functions (`mock_policy_disable()`) and the Rust FFI functions (`__mock_policy_disable()`).
 
 ### Group Inheritance
 
@@ -229,4 +229,4 @@ mock_policy_init_with_patterns(["*.hal.*", "*.io.*", "*.driver.*"])
 | `src/compiler_rust/lib/std/src/spec/runner/executor.spl` | Per-test policy initialization |
 | `src/compiler_rust/compiler/src/mock_helper/mock_policy.rs` | Rust-side atomic policy enforcement |
 | `src/compiler_rust/compiler/src/interpreter_extern/mock_policy.rs` | FFI bridges for Simple code |
-| `test/unit/lib/nogc_sync_mut/mock_policy_spec.spl` | SSpec tests for mock ban |
+| `test/unit/lib/nogc_sync_mut/mock_policy_spec.spl` | SPipe tests for mock ban |

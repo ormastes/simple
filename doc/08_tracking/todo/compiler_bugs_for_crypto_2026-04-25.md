@@ -106,9 +106,9 @@ recurring complaint after crypto lands)
 
 ---
 
-## B3 · SSpec `--mode=smf` wrapper class hoisting — VERIFIED FIXED 2026-04-25
+## B3 · SPipe `--mode=smf` wrapper class hoisting — VERIFIED FIXED 2026-04-25
 
-**Status:** Already landed 2026-04-17 in `preprocess_sspec_for_smf`
+**Status:** Already landed 2026-04-17 in `preprocess_spipe_for_smf`
 (`src/compiler_rust/driver/src/cli/test_runner/execution.rs`). Module-scope
 `class`/`impl`/`enum`/`trait`/`type`/`val`/`let`/`mod` are now hoisted; `use std.spec`
 is auto-injected. Verified by running `test/smoke/compile_smoke_spec.spl` and a
@@ -165,7 +165,7 @@ to inline the small spec-DSL helpers (similar to how
 `test/unit/lib/common/pending_on_spec.spl` already inlines `pending_on` and
 `pending_skip` because — quoting that file — *"the runtime doesn't expose
 custom spec functions from std.spec imports"*). The latter is local to
-`preprocess_sspec_for_smf` in
+`preprocess_spipe_for_smf` in
 `src/compiler_rust/driver/src/cli/test_runner/execution.rs`.
 
 **Latent companion bug (also surfaced during this investigation):**
@@ -193,7 +193,7 @@ in interpreter mode") is locked in by
 
 **Original (stale) description retained for history:**
 
-**Memory:** `feedback_sspec_compile_pipeline.md`.
+**Memory:** `feedback_spipe_compile_pipeline.md`.
 
 **Repro**
 
@@ -331,7 +331,7 @@ Empirical evidence (worktree `agent-ac3bca955ef32802a`, 2026-04-25):
   `[SwitchCase]`. There are zero callsites today, so the mismatch is
   dormant; whoever first calls it will trip a struct-vs-tuple error.
 - No regression: `match` works via `bin/simple` because the binary IS
-  the Rust seed (per `feedback_sspec_compile_pipeline.md`); the
+  the Rust seed (per `feedback_spipe_compile_pipeline.md`); the
   self-hosted MIR pipeline is reached only by stack-3 self-compilation,
   which has no automated test coverage of `match` codegen today
   (`test/unit/compiler/mir/mir_lowering_new_spec.spl` and
@@ -551,7 +551,7 @@ each speculative item below either becomes a real bug entry under
 ## Sequencing
 
 ```
-B1 (error detail) ──► B3 (sspec compile) ──► crypto KAT can run compiled
+B1 (error detail) ──► B3 (spipe compile) ──► crypto KAT can run compiled
                   └──► B2 (interpreter perf) — independent track, parallel
 B4 (bitfield sugar) — start before §2 (AES T-tables, SHA round)
 B5 (match jump table) — needed by §5.2 cipher dispatcher

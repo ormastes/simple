@@ -2,7 +2,7 @@
 //
 // HIR rejects type definitions (`class`, `struct`, `enum`, `impl`, `trait`,
 // `type` alias, `mixin`, `bitfield`) appearing as statements inside a function
-// body — see `stmt_lowering.rs`. Specs in the SSpec DSL frequently define
+// body — see `stmt_lowering.rs`. Specs in the SPipe DSL frequently define
 // helper classes inside `it`/`describe` lambda blocks, e.g.:
 //
 //     describe "X":
@@ -19,7 +19,7 @@
 //
 // This pass walks the AST before any HIR pass runs and lifts every nested
 // type definition up to module scope, matching the line-based hoisting that
-// `preprocess_sspec_for_smf` does for `*_spec.spl` files. The walker handles
+// `preprocess_spipe_for_smf` does for `*_spec.spl` files. The walker handles
 // arbitrary nesting depth, including BDD-style `it`/`describe` blocks
 // (`Expr::Call` with a `Lambda { body: DoBlock(..) }` argument).
 //

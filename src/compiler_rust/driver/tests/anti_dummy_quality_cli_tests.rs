@@ -24,7 +24,7 @@ fn lint_flags_boolean_wrapper_assertion() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("lint").arg(&spec);
 
-    cmd.assert().failure().stdout(contains("SSPEC006"));
+    cmd.assert().failure().stdout(contains("SPIPE006"));
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn verify_quality_fails_on_placeholder_test() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("verify").arg("quality").arg(&spec);
 
-    cmd.assert().failure().stdout(contains("SSPEC002"));
+    cmd.assert().failure().stdout(contains("SPIPE002"));
 }
 
 #[test]

@@ -321,9 +321,9 @@ pub fn rt_cli_run_spec_gen(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_spec_gen")
 }
 
-/// Run sspec-docgen command
-pub fn rt_cli_run_sspec_docgen(_args: &[Value]) -> Result<Value, CompileError> {
-    interpreter_not_supported("rt_cli_run_sspec_docgen")
+/// Run spipe-docgen command
+pub fn rt_cli_run_spipe_docgen(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_cli_run_spipe_docgen")
 }
 
 /// Run todo-scan command

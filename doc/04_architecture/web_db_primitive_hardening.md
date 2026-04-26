@@ -11,4 +11,4 @@ This hardening keeps existing module boundaries. Web backpressure remains in `ap
 - Primitive verification stays as a gate over existing compiler/usage specs.
 
 ## Risks
-- Native SSpec wrapper failures around `expect` are a test harness concern and should not be hidden by placeholder specs.
+- Native SPipe wrapper failures around `expect` are a test harness concern and should not be hidden by placeholder specs.

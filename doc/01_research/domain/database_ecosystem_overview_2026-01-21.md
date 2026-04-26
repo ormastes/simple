@@ -492,7 +492,7 @@ Quick status checks:
 
 ### Skills
 - `.claude/skills/todo.md` - TODO format and workflow
-- `.claude/skills/sspec.md` - Feature testing workflow
+- `.claude/skills/spipe.md` - Feature testing workflow
 - `.claude/skills/test.md` - Test writing guidance
 
 ---

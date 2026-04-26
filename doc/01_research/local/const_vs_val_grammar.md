@@ -302,7 +302,7 @@ fn transfer(x: iso T) -> Unit   # Isolated (transferable ownership)
 - **Lexer:** `src/parser/src/lexer/identifiers.rs`
 - **Type parser:** `src/parser/src/parser_types.rs`
 - **Const parser:** `src/parser/src/stmt_parsing/var_decl.rs`
-- **SSpec tests:**
+- **SPipe tests:**
   - `simple/std_lib/test/features/syntax/const_vs_val_spec.spl`
   - `simple/std_lib/test/features/bugs/pointer_const_parsing_bug_spec.spl`
 

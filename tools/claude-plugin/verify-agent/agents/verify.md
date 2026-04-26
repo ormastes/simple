@@ -31,7 +31,7 @@ This agent requires the `simple-mcp` server to be running and available:
 ## Workflow
 
 1. **Scope** — Detect what needs verification (changed files, specific feature, or full project)
-2. **Test** — Run SSpec tests, check assertion quality, verify requirement coverage
+2. **Test** — Run SPipe tests, check assertion quality, verify requirement coverage
 3. **Implement** — Scan for stubs, dummies, incomplete error handling
 4. **Requirements** — Trace REQ-NNN to implementations, check BDD scenario coverage
 5. **NFR** — Verify non-functional requirements (performance, security, reliability)

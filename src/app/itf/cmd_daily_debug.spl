@@ -1,0 +1,248 @@
+# ITF CLI — daily-debug command driver
+#
+# Implements the 7-step daily-debug pipeline used by
+# `/spipe_loop --daily-debug` and `/company_bug_report ingest`.
+#
+# Pure-Simple driver. Cross-agent dependencies are marked with
+# `# PENDING-INTEGRATION:` blocks; the file compiles standalone via the
+# `outlook_available` feature flag.
+
+use std.nogc_sync_mut.env.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists}
+use std.nogc_sync_mut.io.{regex_find_all, RegexMatch}
+use std.common.pure.runtime.{time_now_unix}
+use app.itf.flags.{_extract_flag, _has_flag}
+use app.itf.output.{print_error, print_info, print_success}
+
+# PENDING-INTEGRATION: outlook adapter import
+# TODO: when Agent A/B lands `src/app/itf/adapter_outlook.spl`, replace the
+# `outlook_available = false` flag with:
+#   use app.itf.adapter_outlook.{outlook_list_messages, OutlookMessage}
+# and remove the stub branch in `_fetch_inbox`.
+val outlook_available: bool = false
+
+# PENDING-INTEGRATION: main.spl wiring
+# TODO: when the orchestrator lands, register `daily-debug` as a top-level
+# subcommand in `src/app/itf/main.spl` so `bin/itf daily-debug` reaches
+# `run_daily_debug` directly. For now this fn is callable from
+# `cmd_daily_debug_spec.spl` and from `/spipe_loop --daily-debug`.
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
+
+class DailyMessage:
+    """One inbox message after extraction."""
+    subject: text
+    body: text
+    received_iso: text
+    jira_keys: [text]
+    minio_urls: [text]
+
+class TriagedArtifact:
+    """One MinIO URL classified by extension."""
+    url: text
+    kind: text   # "fw" | "dump" | "note" | "unknown"
+
+# ---------------------------------------------------------------------------
+# Public extractors (factored module-level so unit tests can import them)
+# ---------------------------------------------------------------------------
+
+fn extract_jira_keys(body: text) -> [text]:
+    """Return all Jira-key matches like `ABC-123` from a message body."""
+    val matches = regex_find_all("[A-Z][A-Z0-9]+-[0-9]+", body)
+    var out: [text] = []
+    for m in matches:
+        out.push(m.text)
+    out
+
+fn extract_minio_urls(body: text) -> [text]:
+    """Return all http(s) URLs from a message body (MinIO heuristic).
+
+    The heuristic matches `https?://host/path/...`; downstream callers filter
+    by host/bucket if they want stricter MinIO-only URLs.
+    """
+    val matches = regex_find_all("https?://[^/[:space:]]+/[^/[:space:]]+/[^[:space:]]+", body)
+    var out: [text] = []
+    for m in matches:
+        out.push(m.text)
+    out
+
+fn triage_kind(url: text) -> text:
+    """Classify a URL by its extension into fw / dump / note / unknown."""
+    val lower = url.to_lower()
+    if lower.ends_with(".bin") or lower.ends_with(".elf") or lower.ends_with(".hex"):
+        return "fw"
+    if lower.ends_with(".dmp") or lower.ends_with(".core") or lower.ends_with(".crash"):
+        return "dump"
+    if lower.ends_with(".log") or lower.ends_with(".txt") or lower.ends_with(".md"):
+        return "note"
+    "unknown"
+
+fn triage_all(urls: [text]) -> [TriagedArtifact]:
+    """Apply `triage_kind` to a batch of URLs."""
+    var out: [TriagedArtifact] = []
+    for u in urls:
+        out.push(TriagedArtifact(url: u, kind: triage_kind(u)))
+    out
+
+# ---------------------------------------------------------------------------
+# Watermark (pure functions for easy testing)
+# ---------------------------------------------------------------------------
+
+fn watermark_path() -> text:
+    """Resolve `~/.config/itf/spipe_daily.sdn`."""
+    val home = env_get("HOME")
+    val base = if home != "": home else: env_get("USERPROFILE")
+    "{base}/.config/itf/spipe_daily.sdn"
+
+fn parse_watermark(content: text) -> text:
+    """Parse `last_run: <iso>` out of an SDN watermark file. Empty if absent."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("#") or trimmed == "":
+            pass_dn
+        else if trimmed.starts_with("last_run:"):
+            val v = trimmed.split(":", 2)[1].trim()
+            if v.starts_with("\"") and v.ends_with("\""):
+                return v[1:v.len() - 1]
+            return v
+    ""
+
+fn render_watermark(iso_now: text) -> text:
+    """Render an SDN watermark file body for the given ISO timestamp."""
+    "# ITF SPipe daily-debug watermark (do not share)\nlast_run: \"{iso_now}\"\n"
+
+fn load_watermark() -> text:
+    """Read the watermark or return a default of (now - 24h) ISO timestamp."""
+    val path = watermark_path()
+    if not file_exists(path):
+        return _iso_minus_24h()
+    val content = file_read_text(path)
+    if content == nil:
+        return _iso_minus_24h()
+    val parsed = parse_watermark(content)
+    if parsed == "":
+        return _iso_minus_24h()
+    parsed
+
+fn save_watermark_atomic(iso_now: text) -> bool:
+    """Atomic save: write to `<path>.tmp`, then rename with mode 0600.
+
+    Returns true on success. Caller must gate with `not dry_run`.
+    """
+    val path = watermark_path()
+    val tmp = "{path}.tmp"
+    val body = render_watermark(iso_now)
+    if not file_write_text(tmp, body):
+        return false
+    # TODO: chmod 0600 + rename via fs syscall once
+    # `std.nogc_sync_mut.file_system.file_ops` exposes `file_rename` and
+    # `file_chmod` (issue #10 follow-up). For now: best-effort overwrite.
+    file_write_text(path, body)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _iso_minus_24h() -> text:
+    """Return ISO 8601 timestamp 24 hours before now (UTC, second precision)."""
+    val secs = time_now_unix() - 86400
+    "{secs}"   # TODO: format as RFC3339; for now a unix-seconds string is parseable.
+
+fn _iso_now() -> text:
+    """Return ISO 8601 timestamp for now (UTC, second precision)."""
+    val secs = time_now_unix()
+    "{secs}"   # TODO: format as RFC3339 once a date formatter lands.
+
+fn _today_yyyy_mm_dd() -> text:
+    """Best-effort YYYY-MM-DD for the daily digest filename."""
+    # TODO: use a real calendar formatter; unix-seconds bucket suffices for
+    # the per-day digest until a date library lands.
+    val secs = time_now_unix()
+    val day = secs / 86400
+    "day-{day}"
+
+fn _digest_path() -> text:
+    """Resolve `doc/08_tracking/debug/<YYYY-MM-DD>.md`."""
+    "doc/08_tracking/debug/{_today_yyyy_mm_dd()}.md"
+
+fn _fetch_inbox(_since_iso: text) -> [DailyMessage]:
+    """Fetch inbox messages received since the watermark.
+
+    PENDING-INTEGRATION: this delegates to `outlook_list_messages` once the
+    adapter lands. Until then, `outlook_available = false` returns an empty
+    list so the rest of the pipeline is exercised by tests.
+    """
+    if not outlook_available:
+        return []
+    # TODO: replace with real adapter call:
+    #   val raw = outlook_list_messages("Inbox", "receivedDateTime ge {_since_iso}")
+    #   return raw.map(...)
+    []
+
+fn _render_digest(messages: [DailyMessage], artifacts: [TriagedArtifact]) -> text:
+    """Render the per-day markdown digest body."""
+    var s = "# Daily Debug Digest — {_today_yyyy_mm_dd()}\n\n"
+    s = s + "## Summary\n\n"
+    s = s + "| Metric | Value |\n|--------|-------|\n"
+    s = s + "| Messages scanned | {messages.len()} |\n"
+    s = s + "| Artifacts triaged | {artifacts.len()} |\n\n"
+    s = s + "## Per-bug Sections\n\n"
+    for m in messages:
+        s = s + "### {m.subject}\n\n"
+        s = s + "- Received: {m.received_iso}\n"
+        s = s + "- Jira keys: {m.jira_keys.join(\", \")}\n"
+        s = s + "- MinIO URLs: {m.minio_urls.len()}\n\n"
+    s
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+fn run_daily_debug(args: [text]) -> i64:
+    """Run the 7-step daily-debug pipeline. Returns process exit code.
+
+    Flags:
+      --quiet     suppress step 7 (notify)
+      --dry-run   plan only; no file writes, no watermark save, no notify
+    """
+    val quiet = _has_flag(args, "--quiet")
+    val dry_run = _has_flag(args, "--dry-run")
+
+    # 1. Load watermark
+    val since = load_watermark()
+    print_info("daily-debug: since={since} dry_run={dry_run} quiet={quiet}")
+
+    # 2. List inbox since watermark
+    val messages = _fetch_inbox(since)
+
+    # 3+4. Already done per-message at fetch time; aggregate artifacts here.
+    var all_urls: [text] = []
+    for m in messages:
+        for u in m.minio_urls:
+            all_urls.push(u)
+    val artifacts = triage_all(all_urls)
+
+    # 5. Write daily digest (gated on dry-run)
+    val digest = _render_digest(messages, artifacts)
+    if not dry_run:
+        if not file_write_text(_digest_path(), digest):
+            print_error("failed to write daily digest")
+            return 1
+    else:
+        print_info("dry-run: would write {_digest_path()} ({digest.len()} bytes)")
+
+    # 6. Save watermark atomically (gated on dry-run)
+    val now = _iso_now()
+    if not dry_run:
+        if not save_watermark_atomic(now):
+            print_error("failed to save watermark")
+            return 1
+
+    # 7. Notify (gated on quiet+dry-run)
+    if not quiet and not dry_run:
+        print_success("daily-debug: {messages.len()} msgs, {artifacts.len()} artifacts")
+
+    0

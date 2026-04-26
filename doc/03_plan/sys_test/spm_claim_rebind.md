@@ -2,7 +2,7 @@
 
 Feature: FR-SPM-0003.
 
-## SSpec
+## SPipe
 
 `test/system/spm_claim_rebind_spec.spl`
 

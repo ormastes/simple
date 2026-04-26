@@ -76,7 +76,7 @@ Largest family. Primary systems-programming library.
 | `ui_test/` | UI testing |
 | `unsafe/` | Unsafe operations |
 | `web_ui/` | Web UI |
-| Root `.spl` files | allocator, array, atomic, binary_io, conf, db_atomic, debug, dig, fs, fuzz, gc, glob, io, io_runtime, lazy_val, log, net, path, perf, platform, process_limits, process_monitor, rc, resource_tracker, runtime_value, runtime_wrappers, simd, spec, sspec, timing |
+| Root `.spl` files | allocator, array, atomic, binary_io, conf, db_atomic, debug, dig, fs, fuzz, gc, glob, io, io_runtime, lazy_val, log, net, path, perf, platform, process_limits, process_monitor, rc, resource_tracker, runtime_value, runtime_wrappers, simd, spec, spipe, timing |
 
 ### 1.3 `nogc_async_mut` (181 files, 13 sub-modules)
 
@@ -163,7 +163,7 @@ Modules that exist in multiple families, showing intentional specialization:
 | **Sorting** | `algorithm_utils` | -- | -- | -- | `sort/` (in-place) |
 | **Logging** | -- | `log` | -- | -- | `log/` (bare-metal) |
 | **Path** | -- | `path` | -- | -- | `path/` (semihost) |
-| **Testing** | -- | `spec/`, `sspec` | -- | -- | -- |
+| **Testing** | -- | `spec/`, `spipe` | -- | -- | -- |
 | **Networking** | -- | `net/`, `tcp/`, `tls/`, `http*/`, `websocket/`, `dns/`, `smtp/`, `mqtt/`, `kafka/`, `stomp/` | `http_server/` (async) | -- | -- |
 | **ML/Torch** | -- | `torch/` | `ml/`, `torch/`, `llm/` | `torch/` | -- |
 | **MCP** | -- | `mcp/`, `mcp_sdk/` | `mcp/` | -- | -- |

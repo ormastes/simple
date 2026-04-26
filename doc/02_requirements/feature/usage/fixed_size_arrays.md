@@ -3,7 +3,7 @@
 
 ## Overview
 
-Fixed-Size Arrays - Comprehensive SSpec Tests
+Fixed-Size Arrays - Comprehensive SPipe Tests
 Decision #8: [T; N] syntax with runtime size checking
 
 Category: Collections

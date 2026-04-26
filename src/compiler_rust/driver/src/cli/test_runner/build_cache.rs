@@ -102,7 +102,7 @@ impl BuildCache {
 
         let mut pipeline = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler pipeline: {}", e))?;
 
-        // Enable test mode to activate SSpec DSL parsing
+        // Enable test mode to activate SPipe DSL parsing
         pipeline.set_test_mode(true);
 
         pipeline

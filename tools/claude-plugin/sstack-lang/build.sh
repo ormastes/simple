@@ -42,7 +42,7 @@ fi
 
 # 4. Verify skill files exist
 SKILLS_DIR="$SCRIPT_DIR/skills"
-for f in "$SKILLS_DIR/sspec_loop.md"; do
+for f in "$SKILLS_DIR/spipe_loop.md"; do
     if [ ! -f "$f" ]; then
         echo "ERROR: Referenced skill not found: $f"
         exit 1
@@ -69,7 +69,7 @@ mkdir -p "$DIST_DIR"
 tar -czf "$DIST_DIR/$PACKAGE_NAME.tar.gz" \
     -C "$SCRIPT_DIR" \
     .claude-plugin/plugin.json \
-    skills/sspec_loop.md \
+    skills/spipe_loop.md \
     agents/simple.md \
     agents/c_cpp.md \
     agents/rust.md \

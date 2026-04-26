@@ -17,5 +17,5 @@ For named imports, register the imported symbol under `item.alias` when `item.ha
 
 ## Regression Surface
 
-- Unit SSpec: `test/unit/compiler/hir/resolve_import_symbols_spec.spl`
-- System SSpec: `test/system/compiler_import_alias_resolution_spec.spl`
+- Unit SPipe: `test/unit/compiler/hir/resolve_import_symbols_spec.spl`
+- System SPipe: `test/system/compiler_import_alias_resolution_spec.spl`

@@ -426,8 +426,8 @@ pub extern "C" fn rt_cli_run_spec_gen(args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_sspec_docgen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_binary("sspec-docgen", args)
+pub extern "C" fn rt_cli_run_spipe_docgen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_binary("spipe-docgen", args)
 }
 
 #[no_mangle]

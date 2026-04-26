@@ -1,12 +1,12 @@
 # Testing Guide
 
-Complete guide to testing in Simple: the SSpec BDD framework, matchers, mocking, fixtures, context sharing, test database, platform organization, and test policy.
+Complete guide to testing in Simple: the SPipe BDD framework, matchers, mocking, fixtures, context sharing, test database, platform organization, and test policy.
 
 ---
 
 ## Table of Contents
 
-1. [SSpec Framework](#sspec-framework)
+1. [SPipe Framework](#spipe-framework)
 2. [BDD DSL Syntax](#bdd-dsl-syntax)
 3. [Matchers Reference](#matchers-reference)
 4. [Hooks](#hooks)
@@ -27,14 +27,14 @@ Complete guide to testing in Simple: the SSpec BDD framework, matchers, mocking,
 
 ---
 
-## SSpec Framework
+## SPipe Framework
 
-SSpec is a BDD (Behavior-Driven Development) testing framework for Simple, inspired by RSpec. It combines executable tests with embedded markdown documentation via triple-quoted strings.
+SPipe is a BDD (Behavior-Driven Development) testing framework for Simple, inspired by RSpec. It combines executable tests with embedded markdown documentation via triple-quoted strings.
 
 ### Quick Start
 
 ```simple
-use std.sspec.*
+use std.spipe.*
 
 describe "Calculator":
     context "addition":
@@ -129,14 +129,14 @@ describe "Feature":
         nil
 ```
 
-### SSpec Document Format
+### SPipe Document Format
 
-Embed markdown documentation in test files using triple-quoted strings. The `simple sspec-docgen` command extracts these blocks and generates markdown documentation in `doc/spec/`.
+Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/spec/`.
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
-If those fields are omitted, `sspec-docgen` will also auto-discover evidence under the standard screenshot tree `doc/spec/image/<spec-relative-path>/` when files already exist there.
+If those fields are omitted, `spipe-docgen` will also auto-discover evidence under the standard screenshot tree `doc/spec/image/<spec-relative-path>/` when files already exist there.
 The generated Evidence section now renders a compact category summary plus per-category tables with item name, evidence kind, and path. For non-image evidence, prefer `build/test-artifacts/<spec-relative-path>/` so logs, ANSI captures, JSON summaries, and text artifacts can be discovered automatically too.
-For CI/publication, use `simple sspec-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `build/test-artifacts/`.
+For CI/publication, use `simple spipe-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `build/test-artifacts/`.
 
 ```simple
 """
@@ -745,7 +745,7 @@ For screenshot-backed UI verification, the test runner writes captures to `doc/s
 Both the **web backend** (`ui.web`) and the **TUI web proxy** (`ui.tui_web`) expose a shared Test API over HTTP on localhost. Both use the same `handle_test_request` handler from `app.ui.test_api`, ensuring protocol-level parity. The TUI web proxy renders the TUI Screen buffer as terminal-emulator-style HTML (`<pre>` with ANSI colors mapped to CSS spans).
 
 ```
-System Test (SSpec)
+System Test (SPipe)
   └─ UITestClient.connect(port)
        └─ HTTP requests ─→ Web Backend (port 8080)
                          ─→ TUI Web Proxy (port 8081)

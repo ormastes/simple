@@ -27,7 +27,7 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 
 ## Critical Rules
 
-- NEVER write spec.md files -- write `*_spec.spl` instead (executable SSpec tests)
+- NEVER write spec.md files -- write `*_spec.spl` instead (executable SPipe tests)
 - Specifications live in `test/` as executable BDD tests
 - Research goes in `doc/01_research/`, NOT mixed with specs
 - Use SDN for config/data, not JSON/YAML
@@ -75,9 +75,9 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 - Clear, concise, active voice, present tense
 - Working code examples (minimal, complete, commented)
 - Semantic heading hierarchy, relative links for cross-refs
-- `bin/simple doc-gen` to generate API docs from SSpec
+- `bin/simple doc-gen` to generate API docs from SPipe
 
 ## See Also
 
-- `/sspec` for BDD test writing
+- `/spipe` for BDD test writing
 - `doc/FILE.md` for document relationship model

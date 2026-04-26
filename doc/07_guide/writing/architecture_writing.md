@@ -7,7 +7,7 @@ Design-first development: skeleton types, verification, diagram generation.
 ## Workflow: Skeleton -> Verify -> Test -> Diagram
 
 ```
-Skeleton Types  -->  Lean Verify  -->  SSpec Tests  -->  Diagram Generation
+Skeleton Types  -->  Lean Verify  -->  SPipe Tests  -->  Diagram Generation
 (struct/class)      (gen-lean)        (@architectural)   (--diagram-all)
 ```
 
@@ -129,5 +129,5 @@ flowchart TD
 ## See Also
 
 - [design_writing.md](design_writing.md) - Draft->Test->Generate diagram workflow
-- [../test/sspec_writing.md](../test/sspec_writing.md) - Test writing guide
+- [../test/spipe_writing.md](../test/spipe_writing.md) - Test writing guide
 - [../coding_style.md](../coding_style.md) - Coding conventions

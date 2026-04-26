@@ -2,20 +2,20 @@
 
 **Date:** 2026-01-30
 **Version:** 0.4.0 Planning
-**Strategy:** Write SSpec tests first, then port Rust → Simple with verification
+**Strategy:** Write SPipe tests first, then port Rust → Simple with verification
 
 ---
 
 ## Core Principle: Test-First Migration
 
-**Every Rust function/module gets SSpec tests BEFORE porting to Simple**
+**Every Rust function/module gets SPipe tests BEFORE porting to Simple**
 
 ```
 1. Analyze Rust code → Extract behavior
-2. Write comprehensive SSpec tests (100% coverage goal)
+2. Write comprehensive SPipe tests (100% coverage goal)
 3. Run tests against Rust implementation (baseline)
 4. Port to Simple (interpreter + SMF + native)
-5. Run same SSpec tests → Verify parity
+5. Run same SPipe tests → Verify parity
 6. Only after 100% pass: Replace Rust with Simple
 ```
 
@@ -94,9 +94,9 @@ simple compile spec.spl -o spec --native
 #### 1.1 SDN Parser (Week 1)
 **Rust:** `src/rust/sdn/` (~2,000 lines)
 **Simple:** Already exists in `src/app/sdn/` (partial)
-**Status:** Complete Simple version, add SSpec tests
+**Status:** Complete Simple version, add SPipe tests
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/sdn_parser_spec.spl
 
@@ -141,7 +141,7 @@ feature "SDN Parser - Table Format":
 **Rust:** `src/rust/dependency_tracker/` (~1,500 lines)
 **Purpose:** Module resolution, visibility, dependency graphs
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/dependency_resolution_spec.spl
 
@@ -180,7 +180,7 @@ feature "Visibility Rules":
 **Rust:** `src/rust/diagnostics/` (~1,000 lines)
 **Purpose:** Error/warning messages, i18n
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/diagnostics_spec.spl
 
@@ -220,7 +220,7 @@ feature "I18n Support":
 **Rust:** `src/rust/pkg/` (~3,000 lines)
 **Purpose:** Manifest parsing, dependency resolution, caching
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/package_manager_spec.spl
 
@@ -275,7 +275,7 @@ feature "Cache Management":
 **Rust:** Various modules in `src/rust/driver/`
 **Purpose:** Build orchestration, incremental compilation
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/build_system_spec.spl
 
@@ -307,7 +307,7 @@ feature "Parallel Build":
 **Simple:** Already exists in `src/app/lsp/` (partial)
 **Purpose:** IDE integration
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/lsp_spec.spl
 
@@ -351,7 +351,7 @@ feature "Hover":
 **Rust:** `src/rust/dap/` (~3,000 lines)
 **Simple:** Already exists in `src/app/dap/` (partial)
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/dap_spec.spl
 
@@ -373,7 +373,7 @@ feature "DAP Protocol":
 **Rust:** Parts of `src/rust/compiler/` (formatter, lint)
 **Simple:** Already exists in `src/app/formatter/`, `src/app/lint/`
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/formatter_spec.spl
 
@@ -404,7 +404,7 @@ feature "Code Formatting":
 **Rust:** `src/rust/compiler/src/type_check/` (complex)
 **Simple:** Already exists in `simple/compiler/type_infer.spl` (partial)
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/type_inference_spec.spl
 
@@ -450,7 +450,7 @@ feature "Type Errors":
 **Rust:** Type constraint solver
 **Simple:** Exists in type_infer.spl
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/constraint_solver_spec.spl
 
@@ -477,7 +477,7 @@ feature "Constraint Solving":
 **Rust:** `src/rust/compiler/src/mir/` (optimization passes)
 **Simple:** Already exists in `simple/compiler/mir.spl` (basic)
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/mir_optimization_spec.spl
 
@@ -506,7 +506,7 @@ feature "Inlining":
 **Rust:** `src/rust/compiler/src/interpreter/` (complex)
 **Simple:** Could port to Simple (self-interpreting!)
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/interpreter_spec.spl
 
@@ -546,7 +546,7 @@ feature "Functions":
 **Rust:** `src/rust/runtime/src/async_runtime/`
 **Strategy:** Keep Rust async runtime, add Simple bindings
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/async_spec.spl
 
@@ -577,7 +577,7 @@ feature "Async Executor":
 **Rust:** Pattern matching exhaustiveness checker
 **Simple:** Exists in compiler
 
-**SSpec Test Plan:**
+**SPipe Test Plan:**
 ```spl
 # simple/std_lib/test/features/pattern_matching_spec.spl
 
@@ -612,7 +612,7 @@ feature "Exhaustiveness Checking":
 
 1. **Keep thin Rust FFI wrapper** (src/rust/ffi_bridge/)
 2. **Expose as extern functions** to Simple
-3. **Write SSpec tests** for the FFI boundary
+3. **Write SPipe tests** for the FFI boundary
 
 #### Example: String Interning (lasso)
 
@@ -655,7 +655,7 @@ class StringInterner:
         rt_resolve_string(id)
 ```
 
-**SSpec Test:**
+**SPipe Test:**
 ```spl
 # simple/std_lib/test/features/string_interner_spec.spl
 
@@ -685,11 +685,11 @@ feature "String Interning":
 
 ---
 
-## SSpec Test Coverage Targets
+## SPipe Test Coverage Targets
 
 ### Per-Module Coverage Goals
 
-| Module | Rust Lines | SSpec Tests | Coverage Target |
+| Module | Rust Lines | SPipe Tests | Coverage Target |
 |--------|-----------|-------------|-----------------|
 | SDN parser | 2,000 | 200+ scenarios | 100% branches |
 | Dependency tracker | 1,500 | 150+ scenarios | 100% graph paths |
@@ -701,7 +701,7 @@ feature "String Interning":
 | MIR optimizer | 3,000 | 200+ scenarios | 100% passes |
 | Interpreter | 10,000 | 500+ scenarios | 95% (complex) |
 
-**Total:** ~1,000-2,000 SSpec test scenarios
+**Total:** ~1,000-2,000 SPipe test scenarios
 
 ---
 
@@ -716,13 +716,13 @@ feature "String Interning":
 1. Read Rust source (src/rust/X/)
 2. Extract all public functions/types
 3. Document behavior in markdown
-4. Design SSpec test structure
+4. Design SPipe test structure
 5. Identify edge cases from Rust tests
 ```
 
-#### Day 3-5: Write SSpec Tests
+#### Day 3-5: Write SPipe Tests
 ```bash
-6. Write SSpec feature files
+6. Write SPipe feature files
 7. Run against Rust (baseline)
 8. Ensure 100% pass rate
 9. Add missing edge cases
@@ -733,7 +733,7 @@ feature "String Interning":
 ```bash
 11. Create simple/X/ module structure
 12. Implement functions one-by-one
-13. Run SSpec after each function
+13. Run SPipe after each function
 14. Fix until tests pass
 15. Test in all 3 modes (interpreter, SMF, native)
 ```
@@ -761,7 +761,7 @@ feature "String Interning":
 
 ### Test Execution Matrix
 
-**Every SSpec test runs in 3 modes:**
+**Every SPipe test runs in 3 modes:**
 
 ```bash
 # Mode 1: Interpreter (fast feedback)
@@ -861,7 +861,7 @@ feature "Advanced Metaprogramming":
 
 **Module X is ready to replace Rust when:**
 
-- [ ] 100% SSpec test coverage of Rust functionality
+- [ ] 100% SPipe test coverage of Rust functionality
 - [ ] All tests pass in interpreter mode
 - [ ] All tests pass in SMF mode
 - [ ] All tests pass in native mode (or documented limitations)
@@ -892,7 +892,7 @@ feature "Advanced Metaprogramming":
 
 **Type Inference (complex algorithms):**
 - Risk: Bugs cause silent incorrect compilation
-- Mitigation: Extensive SSpec tests, cross-check with Rust
+- Mitigation: Extensive SPipe tests, cross-check with Rust
 - Test: 500+ type inference scenarios
 - Acceptance: Zero type soundness bugs
 
@@ -918,7 +918,7 @@ feature "Advanced Metaprogramming":
 
 ### v0.4.0 (6 months)
 
-| Phase | Weeks | Modules | SSpec Tests |
+| Phase | Weeks | Modules | SPipe Tests |
 |-------|-------|---------|-------------|
 | **Phase 1** | 1-6 | SDN, deps, diagnostics | 450+ scenarios |
 | **Phase 2** | 7-13 | Package mgr, build | 500+ scenarios |
@@ -938,7 +938,7 @@ feature "Advanced Metaprogramming":
 
 ### Code Artifacts
 
-1. **SSpec Test Suite** - 3,000+ scenarios
+1. **SPipe Test Suite** - 3,000+ scenarios
    - `simple/std_lib/test/features/X_spec.spl` for each module
    - 100% coverage of ported functionality
    - Runs in all 3 modes
@@ -988,7 +988,7 @@ feature "Advanced Metaprogramming":
 
 ### Strategy Summary
 
-1. **Write SSpec tests FIRST** - 100% coverage before porting
+1. **Write SPipe tests FIRST** - 100% coverage before porting
 2. **Port incrementally** - Module by module, verify each
 3. **Test in 3 modes** - Interpreter, SMF, native
 4. **Keep FFI bridges** - Don't rewrite downloaded libraries

@@ -113,8 +113,8 @@ if (y := compute()):           # Syntax error (use val instead)
 - ✅ Seed compiler support (C-based bootstrap compiler)
 
 ### Testing
-- ✅ SSpec tests (`test/feature/pass_variants_spec.spl`)
-- ✅ SSpec tests (`test/feature/walrus_operator_spec.spl`)
+- ✅ SPipe tests (`test/feature/pass_variants_spec.spl`)
+- ✅ SPipe tests (`test/feature/walrus_operator_spec.spl`)
 - ⏳ Cross-platform seed tests (pending runtime rebuild)
 
 ### Documentation

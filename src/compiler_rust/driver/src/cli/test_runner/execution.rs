@@ -766,8 +766,8 @@ fn emit_scenario_artifacts(path: &Path, result: &TestFileResult) {
 /// "X examples, Y failures" summary that the test runner parses. `check` /
 /// `check_msg` route to `rt_bdd_expect_truthy` via the HIR `expect` recognizer
 /// so a failing `check(false)` correctly trips the BDD failure state.
-const SSPEC_INLINE_HELPERS: &str = r#"
-# === sspec inline helpers (R2-broader fix; compile-mode only) ===
+const SPIPE_INLINE_HELPERS: &str = r#"
+# === spipe inline helpers (R2-broader fix; compile-mode only) ===
 fn pending(name: text):
     print "    {name} ... pending"
 
@@ -815,7 +815,7 @@ fn pending_on(name: text, deps: text, block: fn()):
 
 fn pending_skip(name: text, deps: text):
     print "    {name} ... pending (waiting on: {deps})"
-# === end sspec inline helpers ===
+# === end spipe inline helpers ===
 "#;
 
 /// Rewrite `expect(actual).to_<matcher>(expected)` calls into the equivalent
@@ -923,7 +923,7 @@ fn rewrite_method_expect_line(line: &str) -> String {
     }
 }
 
-fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
+fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let path_str = path.to_string_lossy();
     if !path_str.ends_with("_spec.spl") {
         return Ok(path.to_path_buf());
@@ -1168,14 +1168,14 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         !(t.starts_with("use std.spec") || t.starts_with("import std.spec"))
     });
 
-    // R2-broader Phase 2 (2026-04-26): only inline `SSPEC_INLINE_HELPERS`
+    // R2-broader Phase 2 (2026-04-26): only inline `SPIPE_INLINE_HELPERS`
     // when the spec actually calls one of those helpers. The helpers
     // contain bare `expect <expr>` references inside their `fn` bodies,
     // and the HIR BDD recognizer only intercepts `expect` patterns at the
     // top level of an `it` block — so unconditionally including the
     // helpers caused `Undefined symbol: expect (required by relocation N)`
     // SMF link failures for any spec that didn't otherwise need them.
-    const SSPEC_HELPER_NAMES: &[&str] = &[
+    const SPIPE_HELPER_NAMES: &[&str] = &[
         "pending",
         "skip",
         "skip_it",
@@ -1194,14 +1194,14 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     ];
     let body_joined = body_parts.join("\n");
     let top_joined = top_level_parts.join("\n");
-    let helpers_used = SSPEC_HELPER_NAMES.iter().any(|name| {
+    let helpers_used = SPIPE_HELPER_NAMES.iter().any(|name| {
         let needle = format!("{}(", name);
         body_joined.contains(&needle) || top_joined.contains(&needle)
     });
-    let helpers_section = if helpers_used { SSPEC_INLINE_HELPERS } else { "" };
+    let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
     let wrapped = format!(
-        "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
+        "#![allow(spipe_empty_examples)]\n#![allow(spipe_boolean_wrapper_assertions)]\n@allow(spipe_empty_examples)\n@allow(spipe_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
         import_parts.join("\n"),
         helpers_section,
         top_joined,
@@ -1214,7 +1214,7 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
     let tmp_path = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!(".sspec_wrapped_entry_{}", file_name));
+        .join(format!(".spipe_wrapped_entry_{}", file_name));
     fs::write(&tmp_path, wrapped).map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
     Ok(tmp_path)
 }
@@ -1410,7 +1410,7 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
 /// execute the resulting artifact directly.
 pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
-    let source_path = match preprocess_sspec_for_smf(path) {
+    let source_path = match preprocess_spipe_for_smf(path) {
         Ok(path) => path,
         Err(err) => {
             return TestFileResult {
@@ -1609,7 +1609,7 @@ pub fn run_test_file_native_mode(
 ) -> TestFileResult {
     let start = Instant::now();
 
-    let source_path = match preprocess_sspec_for_smf(path) {
+    let source_path = match preprocess_spipe_for_smf(path) {
         Ok(p) => p,
         Err(err) => {
             return TestFileResult {
@@ -1884,12 +1884,12 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocess_sspec_hoists_top_level_externs_out_of_main() {
+    fn test_preprocess_spipe_hoists_top_level_externs_out_of_main() {
         let tempdir = tempdir().expect("tempdir");
         let spec_path = tempdir.path().join("extern_hoist_spec.spl");
         fs::write(
             &spec_path,
-            r#"use std.sspec.*
+            r#"use std.spipe.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -1900,7 +1900,7 @@ describe "extern hoist":
         )
         .expect("write spec");
 
-        let wrapped = preprocess_sspec_for_smf(&spec_path).expect("preprocess");
+        let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
         let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
 
         let main_idx = wrapped_source.find("fn main():").expect("main");
@@ -1912,12 +1912,12 @@ describe "extern hoist":
     }
 
     #[test]
-    fn test_preprocess_sspec_rewrites_infix_expect_matchers() {
+    fn test_preprocess_spipe_rewrites_infix_expect_matchers() {
         let tempdir = tempdir().expect("tempdir");
         let spec_path = tempdir.path().join("infix_expect_spec.spl");
         fs::write(
             &spec_path,
-            r#"use std.sspec.*
+            r#"use std.spipe.*
 
 describe "infix":
     it "rewrites":
@@ -1927,7 +1927,7 @@ describe "infix":
         )
         .expect("write spec");
 
-        let wrapped = preprocess_sspec_for_smf(&spec_path).expect("preprocess");
+        let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
         let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
 
         assert!(wrapped_source.contains("expect(value).to_equal(1)"));

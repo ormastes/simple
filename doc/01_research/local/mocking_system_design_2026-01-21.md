@@ -26,7 +26,7 @@ This document presents research and design for a simple, easy-to-use mocking sys
 | Mock API Spec | Designed | `doc/06_spec/testing/mock.md` |
 | Rust Fluent API | Implemented | `src/rust/util/simple_mock_helper/` |
 | Mock Policy System | Implemented | `simple_mock_helper::mock_policy` |
-| SSpec Framework | Production-ready | `src/lib/std/src/spec/` |
+| SPipe Framework | Production-ready | `src/lib/std/src/spec/` |
 | Mock Types (Simple) | NOT implemented | Placeholder only |
 
 ### 1.2 Existing Rust Mock Helper Features
@@ -315,7 +315,7 @@ api.verify(:call)
    .times(Times.AtLeast(1))
 ```
 
-### 4.5 Integration with SSpec
+### 4.5 Integration with SPipe
 
 ```simple
 describe "UserService":
@@ -366,7 +366,7 @@ describe "Cache Integration":
 ### 4.7 Auto-Reset Between Tests
 
 ```simple
-# Automatic in SSpec - mocks reset after each test
+# Automatic in SPipe - mocks reset after each test
 describe "Service":
     given :mock: mock Dependency
 
@@ -388,7 +388,7 @@ describe "Service":
 - [ ] `when()` stubbing method
 - [ ] `returns()` and `raises()` behaviors
 - [ ] Mock policy runtime checks
-- [ ] Basic integration with SSpec `given`
+- [ ] Basic integration with SPipe `given`
 
 ### Phase 2: Verification
 - [ ] `verify()` method
@@ -524,7 +524,7 @@ describe "SqlUserRepository":
 2. **Separate `Spy<T>`** - For recording calls to real objects
 3. **Fluent API** - `when().with().returns()` pattern
 4. **Policy-based prevention** - Runtime checks prevent mock leaks
-5. **SSpec integration** - Works with existing `given`/`let` fixture system
+5. **SPipe integration** - Works with existing `given`/`let` fixture system
 6. **Auto-reset** - Mocks automatically reset between tests
 
 ### Mock Prevention Strategy
@@ -543,7 +543,7 @@ describe "SqlUserRepository":
 1. Review this design with team
 2. Implement Phase 1 (Foundation)
 3. Write comprehensive test suite
-4. Document in SSpec guide
+4. Document in SPipe guide
 
 ---
 

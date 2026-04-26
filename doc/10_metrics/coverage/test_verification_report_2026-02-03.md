@@ -289,7 +289,7 @@ fn test_arena_allocation() {
 
 ### What Works ✅
 
-- Test infrastructure (SSpec framework)
+- Test infrastructure (SPipe framework)
 - Test writing methodology
 - Branch identification process
 - Documentation approach

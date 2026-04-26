@@ -9,4 +9,4 @@ Relevant code:
 - `src/lib/nogc_async_mut/http_server/static_file.spl` emits large static files as `HttpResponseData.body_file`.
 - `src/lib/nogc_async_mut/http_server/worker.spl` stores `net_capabilities` and `net_backend_summary` at worker creation, converts unsupported `body_file` responses through `worker_static_file_fallback_response`, and chains `submit_sendfile` only after a header send completes on the `sendfile` route.
 
-Conclusion: the implementation exists. The missing work was traceability and SSpec coverage proving sendfile is capability-gated, zero-copy-only backends do not take a nonexistent file-to-socket path, and portable backends keep the read-plus-send fallback.
+Conclusion: the implementation exists. The missing work was traceability and SPipe coverage proving sendfile is capability-gated, zero-copy-only backends do not take a nonexistent file-to-socket path, and portable backends keep the read-plus-send fallback.

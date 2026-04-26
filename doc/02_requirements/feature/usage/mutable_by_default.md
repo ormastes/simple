@@ -3,7 +3,7 @@
 
 ## Overview
 
-Mutable Collections by Default - Comprehensive SSpec Tests
+Mutable Collections by Default - Comprehensive SPipe Tests
 Decision #3: Collections are mutable by default (like Python, JS, Java)
 
 Category: Collections

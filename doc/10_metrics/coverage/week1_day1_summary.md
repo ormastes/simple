@@ -119,7 +119,7 @@
 
 ## Test Quality Checklist
 
-✅ All tests follow SSpec BDD style (`describe`/`context`/`it`)
+✅ All tests follow SPipe BDD style (`describe`/`context`/`it`)
 ✅ Clear test names describe expected behavior
 ✅ Each test targets a specific branch or edge case
 ✅ Tests use explicit assertions (`expect ... to_be_true/false/equal`)
@@ -183,7 +183,7 @@
 2. **Existing test suite provides good foundation** - 55 tests already cover many paths
 3. **Edge cases require explicit tests** - Exact fit, overflow by 1, alignment boundaries
 4. **Documentation scales the effort** - Clear analysis enables systematic coverage
-5. **SSpec framework is effective** - BDD style makes intent clear
+5. **SPipe framework is effective** - BDD style makes intent clear
 
 ---
 
@@ -219,7 +219,7 @@
 
 ### Risks Retired
 - ✅ Coverage infrastructure understood
-- ✅ Test framework (SSpec) works well
+- ✅ Test framework (SPipe) works well
 - ✅ Pattern established (repeatable for other modules)
 
 ---

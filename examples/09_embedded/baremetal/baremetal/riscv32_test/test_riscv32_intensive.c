@@ -13,7 +13,7 @@
  * - Timer/clock reading via semihosting
  */
 
-#include "sspec_baremetal.h"
+#include "spipe_baremetal.h"
 #include <stdint.h>
 
 /* Read mcycle CSR (RV32: read hi-lo-hi to avoid tearing) */
@@ -555,7 +555,7 @@ int main(void) {
     /* ================================================================
      * Summary
      * ================================================================ */
-    sspec_summary();
+    spipe_summary();
 
-    return sspec_exit_code();
+    return spipe_exit_code();
 }

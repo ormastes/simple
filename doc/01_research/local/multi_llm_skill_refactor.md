@@ -35,14 +35,14 @@ Step 1: research_claude  (Claude)  — Local + domain research, MCP+LSP agents
 Step 2: research_codex   (Codex)   — Forked parallel research, requirement selection
 Step 3: design_gemini    (Gemini)  — UI/UX design (TUI + GUI mockups)
 Step 4: design_codex     (Codex)   — Architecture + system test design
-Step 5: design_claude    (Claude)  — SSpec quality + detail design refinement
+Step 5: design_claude    (Claude)  — SPipe quality + detail design refinement
 ```
 
 ### 2.3 Model Strengths
 
 | Model | Strengths |
 |-------|-----------|
-| **Claude Code** | Deep code analysis, agent orchestration, SSpec quality, complex impl, debugging |
+| **Claude Code** | Deep code analysis, agent orchestration, SPipe quality, complex impl, debugging |
 | **Gemini CLI** | UI/UX design, visual prototyping, browser automation, creative mockups |
 | **Codex CLI** | Architecture patterns, MDSOC, verification, parallel forked research |
 
@@ -93,7 +93,7 @@ Every model needs these for self-sufficiency in solo mode:
 | Skill | Purpose |
 |-------|---------|
 | `/coding` | Simple language rules, syntax, runtime limits |
-| `/sspec` | SSpec BDD framework — matchers, hooks, structure |
+| `/spipe` | SPipe BDD framework — matchers, hooks, structure |
 | `/test` | Test writing, methodology, container testing |
 | `/debug` | Debugging, tracing, fault detection |
 | `/architecture` | Compiler pipeline, module structure |

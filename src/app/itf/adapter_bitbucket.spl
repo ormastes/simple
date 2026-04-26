@@ -1,0 +1,625 @@
+# ITF CLI — Bitbucket Cloud REST 2.0 Adapter
+#
+# Direct HTTP calls to Bitbucket Cloud REST API 2.0 (api.bitbucket.org/2.0).
+# Auth: Repository Access Token via HTTP Bearer.
+#       App Passwords are deprecated as of 2026 — do not use.
+#
+# Endpoints supported (per /doc/01_research/local/spipe_infra/bitbucket_rest_2026.md):
+#   POST   /repositories/{ws}/{repo}/pullrequests
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}/comments
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/comments
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/approve
+#   DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve
+#   POST   /repositories/{ws}/{repo}/pullrequests/{id}/merge
+#   GET    /repositories/{ws}/{repo}/pullrequests/{id}/statuses
+#
+# All public endpoint functions return (success: bool, parsed: T, raw_json: text)
+# matching the jira_view_issue / jira_search shape.
+
+use std.common.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+use std.nogc_sync_mut.http_client.{http_get, http_post, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_get_header}
+use app.itf.config.{ItfConfig, load_auth_token}
+use app.itf.errors.{ItfError, ITF_ERR_AUTH, ITF_ERR_NOT_FOUND, ITF_ERR_API, ITF_ERR_CONFLICT, ITF_ERR_NETWORK}
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val BB_API_BASE = "https://api.bitbucket.org/2.0"
+val BB_OP_GENERAL = "general"
+val BB_OP_MERGE = "merge"
+
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+class BbPr:
+    id: i64
+    title: text
+    state: text
+    source_branch: text
+    dest_branch: text
+    author: text
+    web_url: text
+    merge_commit: text
+
+
+class BbComment:
+    id: i64
+    author: text
+    content: text
+    inline_path: text
+    inline_to: i64
+
+
+class BbStatus:
+    key: text
+    state: text
+    name: text
+    url: text
+
+
+class BbClient:
+    """Bitbucket Cloud REST 2.0 client.
+
+    Holds the Repository Access Token (Bearer) and base URL.
+    Per the arch doc (FooClient with config + auth_header()).
+    """
+    token: text
+    base_url: text
+
+    static fn from_token(token: text) -> BbClient:
+        BbClient(token: token, base_url: BB_API_BASE)
+
+    static fn from_env() -> BbClient:
+        BbClient(token: load_auth_token("bitbucket"), base_url: BB_API_BASE)
+
+    fn auth_header() -> text:
+        bb_auth_header(self.token)
+
+    fn is_configured() -> bool:
+        self.token != ""
+
+
+# ============================================================================
+# Auth header builder (in-file; auth.spl is owned by orchestrator)
+# ============================================================================
+
+fn bb_auth_header(token: text) -> text:
+    """Build Authorization header value for Bitbucket Cloud REST 2.0.
+
+    Repository Access Token (Bearer). App Passwords are deprecated 2026.
+    Returns "" if no token configured.
+    """
+    if token == "":
+        return ""
+    "Bearer " + token
+
+
+# ============================================================================
+# URL builders (pure — covered by unit tests)
+# ============================================================================
+
+fn bb_pr_collection_url(ws: text, repo: text) -> text:
+    """Build URL for the PR collection of a repo."""
+    BB_API_BASE + "/repositories/" + ws + "/" + repo + "/pullrequests"
+
+
+fn bb_pr_url(ws: text, repo: text, pr_id: i64) -> text:
+    """Build URL for an individual PR resource."""
+    bb_pr_collection_url(ws, repo) + "/" + pr_id.to_string()
+
+
+fn bb_pr_sub_url(ws: text, repo: text, pr_id: i64, sub: text) -> text:
+    """Build URL for a sub-resource of a PR (comments, approve, merge, statuses)."""
+    bb_pr_url(ws, repo, pr_id) + "/" + sub
+
+
+# ============================================================================
+# JSON body builders (pure — covered by unit tests)
+# ============================================================================
+#
+# We build JSON via string concatenation rather than interpolation, mirroring
+# adapter_confluence/adapter_outlook patterns. This keeps literal `{` / `}`
+# bytes outside of Simple string-interpolation parsing.
+
+fn _bb_lbrace() -> text:
+    "{"
+
+
+fn _bb_rbrace() -> text:
+    "}"
+
+
+fn _bb_json_str(s: text) -> text:
+    """Encode a text value as a JSON string literal, escaping per RFC 8259."""
+    val escaped = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    "\"" + escaped + "\""
+
+
+fn bb_build_create_pr_body(title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> text:
+    """Build the JSON body for POST /pullrequests.
+
+    reviewers contains UUIDs (Bitbucket deprecated usernames in April 2019).
+    """
+    var parts: [text] = []
+    parts = parts + ["\"title\": " + _bb_json_str(title)]
+    parts = parts + ["\"source\": " + _bb_lbrace() + "\"branch\": " + _bb_lbrace() + "\"name\": " + _bb_json_str(source_branch) + _bb_rbrace() + _bb_rbrace()]
+    if dest_branch != "":
+        parts = parts + ["\"destination\": " + _bb_lbrace() + "\"branch\": " + _bb_lbrace() + "\"name\": " + _bb_json_str(dest_branch) + _bb_rbrace() + _bb_rbrace()]
+    if reviewers.len() > 0:
+        var rs: [text] = []
+        for uuid in reviewers:
+            rs = rs + [_bb_lbrace() + "\"uuid\": " + _bb_json_str(uuid) + _bb_rbrace()]
+        parts = parts + ["\"reviewers\": [" + rs.join(", ") + "]"]
+    _bb_lbrace() + parts.join(", ") + _bb_rbrace()
+
+
+fn bb_build_comment_body(content: text, inline_path: text, inline_from: i64, inline_to: i64) -> text:
+    """Build the JSON body for POST .../comments.
+
+    If inline_path is empty, builds a general comment.
+    Otherwise builds an inline comment anchored at (inline_from, inline_to).
+    inline_from < 0 (or inline_to < 0) is encoded as JSON null.
+    """
+    val content_obj = "\"content\": " + _bb_lbrace() + "\"raw\": " + _bb_json_str(content) + ", \"markup\": \"markdown\"" + _bb_rbrace()
+    if inline_path == "":
+        return _bb_lbrace() + content_obj + _bb_rbrace()
+    val from_val = if inline_from < 0: "null" else: inline_from.to_string()
+    val to_val = if inline_to < 0: "null" else: inline_to.to_string()
+    val inline_obj = "\"inline\": " + _bb_lbrace() + "\"path\": " + _bb_json_str(inline_path) + ", \"from\": " + from_val + ", \"to\": " + to_val + _bb_rbrace()
+    _bb_lbrace() + content_obj + ", " + inline_obj + _bb_rbrace()
+
+
+fn bb_build_merge_body(strategy: text, close_source_branch: bool, message: text) -> text:
+    """Build the JSON body for POST .../merge.
+
+    strategy: 'merge_commit' | 'squash' | 'fast_forward'
+    """
+    var parts: [text] = []
+    parts = parts + ["\"type\": \"pullrequest\""]
+    parts = parts + ["\"merge_strategy\": " + _bb_json_str(strategy)]
+    val close_str = if close_source_branch: "true" else: "false"
+    parts = parts + ["\"close_source_branch\": " + close_str]
+    if message != "":
+        parts = parts + ["\"message\": " + _bb_json_str(message)]
+    _bb_lbrace() + parts.join(", ") + _bb_rbrace()
+
+
+# ============================================================================
+# Error mapping (pure — covered by unit tests)
+# ============================================================================
+
+fn bb_map_http_error(status: i64, body: text, op: text) -> ItfError:
+    """Map a Bitbucket HTTP response to ItfError.
+
+    op disambiguates 403:
+      - op == BB_OP_MERGE  → blocked-policy (branch restriction / merge policy)
+      - op == BB_OP_GENERAL → blocked-auth (insufficient scope or token revoked)
+    """
+    if status == 401:
+        return ItfError(kind: ITF_ERR_AUTH, message: "blocked-auth: unauthorized (HTTP 401)", status_code: 401, trace_id: "")
+    if status == 403:
+        if op == BB_OP_MERGE:
+            return ItfError(kind: ITF_ERR_API, message: "blocked: branch policy or merge restriction (HTTP 403): " + body, status_code: 403, trace_id: "")
+        return ItfError(kind: ITF_ERR_AUTH, message: "blocked-auth: forbidden (HTTP 403): " + body, status_code: 403, trace_id: "")
+    if status == 404:
+        return ItfError(kind: ITF_ERR_NOT_FOUND, message: "not found (HTTP 404)", status_code: 404, trace_id: "")
+    if status == 409:
+        return ItfError(kind: ITF_ERR_CONFLICT, message: "blocked-conflict: PR is not mergeable (HTTP 409): " + body, status_code: 409, trace_id: "")
+    if status == 429:
+        return ItfError(kind: ITF_ERR_NETWORK, message: "rate limited (HTTP 429): retry after server-specified interval", status_code: 429, trace_id: "")
+    ItfError(kind: ITF_ERR_API, message: body, status_code: status, trace_id: "")
+
+
+fn bb_should_retry(status: i64, retry_after_header: text) -> (bool, i64):
+    """For 429: return (true, seconds_to_wait) parsed from Retry-After.
+
+    Returns (false, 0) for any non-429 status.
+    """
+    if status != 429:
+        return (false, 0)
+    if retry_after_header == "":
+        return (true, 1)
+    var n: i64 = 0
+    for ch in retry_after_header:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+    if n <= 0:
+        return (true, 1)
+    (true, n)
+
+
+# ============================================================================
+# Internal HTTP helpers
+# ============================================================================
+#
+# TODO(spipe-infra): the underlying std.nogc_sync_mut.http_client module exposes
+# request-builder fns (http_get/http_post/http_delete) and `mock_http_execute`,
+# but no real network send. Both adapter_confluence.spl and adapter_outlook.spl
+# share the same gap: headers built by `_bb_headers(client)` are computed but
+# never attached, and `http_get(url)` returns the request tuple unchanged.
+# Real network I/O (with auth header attach + Retry-After honoring) lands when
+# Agent A's http_client send-path work is complete (tracking issue #10).
+# Until then, these wrappers serve as the seam unit tests target via fixtures.
+
+fn _bb_headers(client: BbClient) -> list:
+    """Build standard request headers for Bitbucket REST calls."""
+    val auth = client.auth_header()
+    var headers = create_headers()
+    headers = add_header(headers, "Content-Type", "application/json")
+    headers = add_header(headers, "Accept", "application/json")
+    if auth != "":
+        headers = add_header(headers, "Authorization", auth)
+    headers
+
+
+fn _bb_get(client: BbClient, url: text) -> (i64, text, text):
+    """Authenticated GET. Returns (status, body, retry_after)."""
+    val response = http_get(url)
+    val status = response_get_status_code(response)
+    val body = response_get_body(response)
+    val retry = response_get_header(response, "Retry-After")
+    val retry_text = if retry == nil: "" else: retry
+    (status, body, retry_text)
+
+
+fn _bb_post(client: BbClient, url: text, payload: text) -> (i64, text, text):
+    """Authenticated POST. Returns (status, body, retry_after)."""
+    val response = http_post(url, payload)
+    val status = response_get_status_code(response)
+    val body = response_get_body(response)
+    val retry = response_get_header(response, "Retry-After")
+    val retry_text = if retry == nil: "" else: retry
+    (status, body, retry_text)
+
+
+fn _bb_delete(client: BbClient, url: text) -> (i64, text, text):
+    """Authenticated DELETE. Returns (status, body, retry_after)."""
+    val response = http_delete(url)
+    val status = response_get_status_code(response)
+    val body = response_get_body(response)
+    val retry = response_get_header(response, "Retry-After")
+    val retry_text = if retry == nil: "" else: retry
+    (status, body, retry_text)
+
+
+# ============================================================================
+# Parsing helpers
+# ============================================================================
+
+fn _bb_str(obj: any, key: text) -> text:
+    """Safely extract a string field from JSON object."""
+    if obj == nil:
+        return ""
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return ""
+    val s = json_serialize(value)
+    if s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s
+
+
+fn _bb_int(obj: any, key: text) -> i64:
+    """Safely extract an integer field from JSON object."""
+    if obj == nil:
+        return 0
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return 0
+    val s = json_serialize(value)
+    var result: i64 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i64() - "0".to_i64())
+    result
+
+
+fn _bb_parse_pr(obj: any) -> BbPr:
+    """Parse a Bitbucket PR JSON object."""
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if obj == nil:
+        return empty
+    val id = _bb_int(obj, "id")
+    val title = _bb_str(obj, "title")
+    val state = _bb_str(obj, "state")
+    var source_branch = ""
+    val source = json_object_get(obj, "source")
+    if source != nil:
+        val br = json_object_get(source, "branch")
+        if br != nil:
+            source_branch = _bb_str(br, "name")
+    var dest_branch = ""
+    val dest = json_object_get(obj, "destination")
+    if dest != nil:
+        val br = json_object_get(dest, "branch")
+        if br != nil:
+            dest_branch = _bb_str(br, "name")
+    var author = ""
+    val author_obj = json_object_get(obj, "author")
+    if author_obj != nil:
+        author = _bb_str(author_obj, "display_name")
+    var web_url = ""
+    val links = json_object_get(obj, "links")
+    if links != nil:
+        val html = json_object_get(links, "html")
+        if html != nil:
+            web_url = _bb_str(html, "href")
+    var merge_commit = ""
+    val mc = json_object_get(obj, "merge_commit")
+    if mc != nil:
+        merge_commit = _bb_str(mc, "hash")
+    BbPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit)
+
+
+fn _bb_parse_comment(obj: any) -> BbComment:
+    """Parse a Bitbucket PR comment JSON object."""
+    val empty = BbComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
+    if obj == nil:
+        return empty
+    val id = _bb_int(obj, "id")
+    var author = ""
+    val user = json_object_get(obj, "user")
+    if user != nil:
+        author = _bb_str(user, "display_name")
+    var content = ""
+    val content_obj = json_object_get(obj, "content")
+    if content_obj != nil:
+        content = _bb_str(content_obj, "raw")
+    var inline_path = ""
+    var inline_to: i64 = -1
+    val inline = json_object_get(obj, "inline")
+    if inline != nil:
+        inline_path = _bb_str(inline, "path")
+        val to_val = json_object_get(inline, "to")
+        if to_val != nil:
+            inline_to = _bb_int(inline, "to")
+    BbComment(id: id, author: author, content: content, inline_path: inline_path, inline_to: inline_to)
+
+
+fn _bb_parse_status(obj: any) -> BbStatus:
+    """Parse a Bitbucket commit-status JSON object."""
+    val empty = BbStatus(key: "", state: "", name: "", url: "")
+    if obj == nil:
+        return empty
+    BbStatus(
+        key: _bb_str(obj, "key"),
+        state: _bb_str(obj, "state"),
+        name: _bb_str(obj, "name"),
+        url: _bb_str(obj, "url")
+    )
+
+
+fn _bb_parse_values_array(parsed: any) -> [any]:
+    """Bitbucket paginated responses wrap entries in {'values': [...]}.
+
+    Returns the inner array as a list of raw JSON nodes, or [] on miss.
+    """
+    if parsed == nil:
+        return []
+    val values = json_object_get(parsed, "values")
+    if values == nil:
+        return []
+    val n = json_array_length(values)
+    var out: [any] = []
+    var i: i64 = 0
+    while i < n:
+        out = out + [json_array_get(values, i)]
+        i = i + 1
+    out
+
+
+# ============================================================================
+# Ready-to-merge logic (pure — covered by unit tests)
+# ============================================================================
+
+fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
+    """Pure helper: given parsed PR JSON + parsed statuses JSON, decide ready.
+
+    Ready iff:
+      1. PR state == "OPEN"
+      2. participants[role=REVIEWER, approved=true].count >= 1
+      3. all statuses[*].state == "SUCCESSFUL"
+    """
+    if pr_parsed == nil:
+        return (false, "missing PR data")
+    val state = _bb_str(pr_parsed, "state")
+    if state != "OPEN":
+        return (false, "PR state is " + state + ", expected OPEN")
+    val participants = json_object_get(pr_parsed, "participants")
+    if participants == nil:
+        return (false, "no participants in PR")
+    val pn = json_array_length(participants)
+    var approved_reviewers: i64 = 0
+    var i: i64 = 0
+    while i < pn:
+        val p = json_array_get(participants, i)
+        val role = _bb_str(p, "role")
+        if role == "REVIEWER":
+            val approved_obj = json_object_get(p, "approved")
+            if approved_obj != nil:
+                val s = json_serialize(approved_obj)
+                if s == "true":
+                    approved_reviewers = approved_reviewers + 1
+        i = i + 1
+    if approved_reviewers < 1:
+        return (false, "no approved reviewers (need >= 1)")
+    val values = _bb_parse_values_array(statuses_parsed)
+    if values.len() == 0:
+        return (false, "no commit statuses found")
+    for v in values:
+        val st = _bb_str(v, "state")
+        if st != "SUCCESSFUL":
+            val key = _bb_str(v, "key")
+            return (false, "status " + key + " is " + st + ", expected SUCCESSFUL")
+    (true, "ready: " + approved_reviewers.to_string() + " approval(s) + all statuses SUCCESSFUL")
+
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn bb_create_pr(client: BbClient, ws: text, repo: text, title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> (bool, BbPr, text):
+    """POST /repositories/{ws}/{repo}/pullrequests."""
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_collection_url(ws, repo)
+    val payload = bb_build_create_pr_body(title, source_branch, dest_branch, reviewers)
+    val (status, body, _retry) = _bb_post(client, url, payload)
+    if status != 200 and status != 201:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, empty, err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bb_parse_pr(parsed), body)
+
+
+fn bb_get_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, BbPr, text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}."""
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_url(ws, repo, pr_id)
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, empty, err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bb_parse_pr(parsed), body)
+
+
+fn bb_list_pr_comments(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, [BbComment], text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}/comments."""
+    if not client.is_configured():
+        return (false, [], "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_sub_url(ws, repo, pr_id, "comments")
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, [], err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bb_parse_values_array(parsed)
+    var out: [BbComment] = []
+    for v in raw:
+        out = out + [_bb_parse_comment(v)]
+    (true, out, body)
+
+
+fn bb_post_pr_comment(client: BbClient, ws: text, repo: text, pr_id: i64, content: text, inline_path: text, inline_from: i64, inline_to: i64) -> (bool, BbComment, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/comments.
+
+    inline_path == "" → general comment. Otherwise inline at (from, to).
+    Pass -1 for either inline_from / inline_to to encode JSON null.
+    """
+    val empty = BbComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_sub_url(ws, repo, pr_id, "comments")
+    val payload = bb_build_comment_body(content, inline_path, inline_from, inline_to)
+    val (status, body, _retry) = _bb_post(client, url, payload)
+    if status != 200 and status != 201:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, empty, err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bb_parse_comment(parsed), body)
+
+
+fn bb_approve_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, text, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/approve."""
+    if not client.is_configured():
+        return (false, "", "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_sub_url(ws, repo, pr_id, "approve")
+    val (status, body, _retry) = _bb_post(client, url, "")
+    if status != 200 and status != 201:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, "", err.display())
+    (true, "approved", body)
+
+
+fn bb_unapprove_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, text, text):
+    """DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve."""
+    if not client.is_configured():
+        return (false, "", "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_sub_url(ws, repo, pr_id, "approve")
+    val (status, body, _retry) = _bb_delete(client, url)
+    if status != 200 and status != 204:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, "", err.display())
+    (true, "unapproved", body)
+
+
+fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: text, close_source_branch: bool) -> (bool, BbPr, text):
+    """POST /repositories/{ws}/{repo}/pullrequests/{id}/merge.
+
+    strategy must be 'merge_commit' | 'squash' | 'fast_forward'.
+    """
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: no Bitbucket token configured")
+    if strategy != "merge_commit" and strategy != "squash" and strategy != "fast_forward":
+        return (false, empty, "invalid merge strategy: " + strategy)
+    val url = bb_pr_sub_url(ws, repo, pr_id, "merge")
+    val payload = bb_build_merge_body(strategy, close_source_branch, "")
+    val (status, body, _retry) = _bb_post(client, url, payload)
+    if status != 200 and status != 202:
+        val err = bb_map_http_error(status, body, BB_OP_MERGE)
+        return (false, empty, err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _bb_parse_pr(parsed), body)
+
+
+fn bb_get_pr_statuses(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, [BbStatus], text):
+    """GET /repositories/{ws}/{repo}/pullrequests/{id}/statuses."""
+    if not client.is_configured():
+        return (false, [], "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_sub_url(ws, repo, pr_id, "statuses")
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, [], err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bb_parse_values_array(parsed)
+    var out: [BbStatus] = []
+    for v in raw:
+        out = out + [_bb_parse_status(v)]
+    (true, out, body)
+
+
+fn bb_check_ready_to_merge(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, text):
+    """Compose: GET PR + GET statuses, then evaluate ready-to-merge.
+
+    Returns (ready, reason).
+    """
+    if not client.is_configured():
+        return (false, "blocked-auth: no Bitbucket token configured")
+    val pr_url = bb_pr_url(ws, repo, pr_id)
+    val (pr_status, pr_body, _r1) = _bb_get(client, pr_url)
+    if pr_status != 200:
+        return (false, "GET PR failed: HTTP " + pr_status.to_string())
+    val pr_parsed = json_parse(pr_body)
+    if pr_parsed == nil:
+        return (false, "invalid PR JSON")
+    val statuses_url = bb_pr_sub_url(ws, repo, pr_id, "statuses")
+    val (st_status, st_body, _r2) = _bb_get(client, statuses_url)
+    if st_status != 200:
+        return (false, "GET statuses failed: HTTP " + st_status.to_string())
+    val st_parsed = json_parse(st_body)
+    if st_parsed == nil:
+        return (false, "invalid statuses JSON")
+    bb_eval_ready_to_merge(pr_parsed, st_parsed)

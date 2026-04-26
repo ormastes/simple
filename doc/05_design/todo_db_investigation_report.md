@@ -27,7 +27,7 @@ Generated docs for 67 features
 ```
 
 **Key Features:**
-- ✅ Auto-updates from SSpec test execution
+- ✅ Auto-updates from SPipe test execution
 - ✅ Tracks 67 features across 15 categories
 - ✅ 96 complete (61% implementation coverage)
 - ✅ Multiple execution modes (interpreter, jit, smf_cranelift, smf_llvm)
@@ -105,7 +105,7 @@ src/runtime/src/value/ffi/contracts.rs: 1
 src/compiler/src/lint/types.rs: 18 (mostly documentation examples)
 src/compiler/src/lint/checker.rs: 9
 src/compiler/src/lint/mod.rs: 26 (mostly test cases)
-src/driver/src/cli/migrate_sspec.rs: 1
+src/driver/src/cli/migrate_spipe.rs: 1
 ```
 
 ## Comparison of Systems
@@ -114,7 +114,7 @@ src/driver/src/cli/migrate_sspec.rs: 1
 |--------|-----------|---------|-------------------|
 | **Database** | `doc/02_requirements/feature/feature_db.sdn` | `doc/task/task_db.sdn` | `doc/todo/todo_db.sdn` |
 | **Module** | `feature_db.rs` (623 lines) | `task_db.rs` (232 lines) | `todo_db.rs` (est. 400-500 lines) |
-| **Update** | Auto (from SSpec tests) | Manual | Auto (from source scan) |
+| **Update** | Auto (from SPipe tests) | Manual | Auto (from source scan) |
 | **Complexity** | High (9 fields, modes) | Low (7 fields) | Medium (11 fields) |
 | **CLI** | `feature-gen` | `task-gen` | `todo-scan`, `todo-gen` |
 | **Output** | Multiple category files | Single task.md | Single TODO.md |

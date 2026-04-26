@@ -507,7 +507,7 @@ Deliverables:
 - [ ] Ghost purity checking
 - [ ] `invariant:` syntax in loops
 - [ ] Loop invariant Lean emission
-- [ ] SSpec tests for both features
+- [ ] SPipe tests for both features
 
 ### Sprint 2: Verification Statements
 **Duration:** 1-2 weeks
@@ -565,7 +565,7 @@ Deliverables:
 1. **Adoption:** 20% of `@verify` functions use ghost code or invariants
 2. **Proof completion:** 50% reduction in `sorry` theorems
 3. **Build time:** <10% regression with incremental verification
-4. **Documentation:** 100% SSpec coverage for new features
+4. **Documentation:** 100% SPipe coverage for new features
 
 ---
 

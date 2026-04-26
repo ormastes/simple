@@ -16,8 +16,8 @@ pub struct MixinWorld {
     parse_result: Option<Result<simple_parser::ast::Module, String>>,
     /// Temp file path for test
     temp_file: Option<PathBuf>,
-    /// Parsed sspec metadata
-    sspec_items: Option<Vec<simple_driver::feature_db::SspecItem>>,
+    /// Parsed spipe metadata
+    spipe_items: Option<Vec<simple_driver::feature_db::SspecItem>>,
     /// Feature docs output directory
     feature_docs_dir: Option<PathBuf>,
     /// Feature.md content
@@ -43,8 +43,8 @@ async fn given_file_with_content(world: &mut MixinWorld, filename: String, step:
     world.temp_file = Some(file_path);
 }
 
-#[given("a sspec source with id annotations:")]
-async fn given_sspec_source_with_ids(world: &mut MixinWorld, step: &cucumber::gherkin::Step) {
+#[given("a spipe source with id annotations:")]
+async fn given_spipe_source_with_ids(world: &mut MixinWorld, step: &cucumber::gherkin::Step) {
     let content = step.docstring.as_ref().expect("No docstring provided").to_string();
     world.source_code = content;
 }
@@ -114,10 +114,10 @@ async fn when_parse_file(world: &mut MixinWorld) {
     world.parse_result = Some(parser.parse().map_err(|e| format!("{:?}", e)));
 }
 
-#[when("I extract sspec ids")]
-async fn when_extract_sspec_ids(world: &mut MixinWorld) {
-    let items = simple_driver::feature_db::parse_sspec_metadata(&world.source_code);
-    world.sspec_items = Some(items);
+#[when("I extract spipe ids")]
+async fn when_extract_spipe_ids(world: &mut MixinWorld) {
+    let items = simple_driver::feature_db::parse_spipe_metadata(&world.source_code);
+    world.spipe_items = Some(items);
 }
 
 #[when("I generate feature docs")]
@@ -147,9 +147,9 @@ async fn then_parsing_succeeds(world: &mut MixinWorld) {
     assert!(result.is_ok(), "Parsing failed: {:?}", result);
 }
 
-#[then(regex = r#"^the sspec ids should include "([^"]+)"$"#)]
-async fn then_sspec_ids_include(world: &mut MixinWorld, expected: String) {
-    let items = world.sspec_items.as_ref().expect("No sspec items");
+#[then(regex = r#"^the spipe ids should include "([^"]+)"$"#)]
+async fn then_spipe_ids_include(world: &mut MixinWorld, expected: String) {
+    let items = world.spipe_items.as_ref().expect("No spipe items");
     let has_id = items.iter().any(|item| item.id == expected);
     assert!(has_id, "Expected id '{}' not found", expected);
 }
@@ -689,7 +689,7 @@ async fn main() {
 
     MixinWorld::cucumber()
         .with_default_cli()
-        .run("specs/features/sspec_feature_id.feature")
+        .run("specs/features/spipe_feature_id.feature")
         .await;
 
     MixinWorld::cucumber()

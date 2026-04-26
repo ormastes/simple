@@ -511,7 +511,7 @@ Linux loop mount is the fallback.
 `x64-nvme-fat32` is the focused filesystem contract lane. It binds to
 `examples/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
 `build/os/fat32-x86_64.img` so the guest can assert on `HELLO.TXT`,
-`NUMBERS.TXT`, and `HELLO.SPL`. The SSpec wrapper for filesystem variants is:
+`NUMBERS.TXT`, and `HELLO.SPL`. The SPipe wrapper for filesystem variants is:
 
 ```bash
 bin/simple test test/system/os_filesystem_variants_spec.spl

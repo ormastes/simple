@@ -16,11 +16,11 @@
 | `t32_mcp/job_tools.spl` | F1 | Tool handlers: t32_job_list, t32_job_get, t32_job_cancel, t32_job_result |
 | `t32_mcp/snapshot_store.spl` | F2 | T32WindowSnapshot, T32SnapshotStore, T32DiffEntry, diff engine |
 | `t32_mcp/cmm_validator.spl` | F4 | Blocking-pattern detection, severity classification, rewrite suggestions |
-| `test/examples/t32_mcp/job_manager_spec.spl` | F1 | SSpec tests for job lifecycle |
-| `test/examples/t32_mcp/snapshot_store_spec.spl` | F2 | SSpec tests for snapshot/diff |
-| `test/examples/t32_mcp/cmm_validator_spec.spl` | F4 | SSpec tests for CMM validation |
-| `test/examples/t32_mcp/gap_tools_spec.spl` | F3 | SSpec tests for session_info, action_list, status_snapshot |
-| `test/examples/t32_mcp/impl_fixes_spec.spl` | F5 | SSpec tests for dict lookup, retry, SDN error, timeouts |
+| `test/examples/t32_mcp/job_manager_spec.spl` | F1 | SPipe tests for job lifecycle |
+| `test/examples/t32_mcp/snapshot_store_spec.spl` | F2 | SPipe tests for snapshot/diff |
+| `test/examples/t32_mcp/cmm_validator_spec.spl` | F4 | SPipe tests for CMM validation |
+| `test/examples/t32_mcp/gap_tools_spec.spl` | F3 | SPipe tests for session_info, action_list, status_snapshot |
+| `test/examples/t32_mcp/impl_fixes_spec.spl` | F5 | SPipe tests for dict lookup, retry, SDN error, timeouts |
 
 ### Modified Files
 

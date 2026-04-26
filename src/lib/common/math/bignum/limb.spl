@@ -1,0 +1,109 @@
+# Bignum limb primitives — base 2^30 little-endian on [i64].
+#
+# This file holds the lowest layer of the pure-Simple bignum scaffold:
+# constants, single-limb helpers, and the 30x30 -> 60-bit limb multiply.
+# Everything above (BigNat / Fixed) builds on these primitives.
+#
+# Limb shape: [i64] with each limb in [0, 2^30 - 1]. A 30 x 30-bit product
+# fits in i64 (60 bits with 4 bits of carry headroom), so we never need a
+# `mul_hi` libcall — this sidesteps H-3 (the 64-bit `__umulh` libcall on
+# bare-metal targets) and matches the convention already used by
+# `rsa_fallback._bi_*` and the `rsa/types.spl` `bigint_*` family.
+#
+# Why base 2^30 (not 2^32 or 2^26)?
+#   - 2^32 forces a `mul_hi` libcall on every limb mul (H-3 again) and
+#     bites RSA-4096 quadratic growth via H-5.
+#   - 2^26 doubles the limb count for RSA-4096 to 158 with no codegen win.
+#   - 30 bits leaves 4 bits of carry headroom in i64 — a textbook
+#     "schoolbook product fits before normalisation" shape.
+#
+# CT note: every helper here is straight-line on its limb-shape inputs;
+# control flow does not branch on limb values (only on `borrow == 0/1`,
+# which is wrapped through `rt_black_box` at the Fixed-layer call sites).
+
+# ----------------------------------------------------------------------
+# Externs
+# ----------------------------------------------------------------------
+# Identity function the optimizer must not see through (B6 closed,
+# 2026-04-25). The only runtime extern used by the bignum scaffold.
+extern fn rt_black_box(x: i64) -> i64
+
+
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+# Limb representation constants.
+val LIMB_BITS: i64 = 30
+val LIMB_BASE: i64 = 1073741824         # 2^30
+val LIMB_MASK: i64 = 1073741823         # 2^30 - 1
+
+# Common Fixed widths (number of base-2^30 limbs needed to hold an
+# N-bit value, computed as ceil(N/30)). These show up at the call site
+# of every Fixed<N>-shaped operation; they are public, compile-time
+# values, *not* derived from secret bits.
+val FIXED_256: i64 = 9                  # ceil(256/30)
+val FIXED_512: i64 = 18                 # ceil(512/30)
+val FIXED_2048: i64 = 69                # ceil(2048/30)
+val FIXED_4096: i64 = 137               # ceil(4096/30)
+
+
+# ----------------------------------------------------------------------
+# Single-limb helpers
+# ----------------------------------------------------------------------
+fn limb_low(x: i64) -> i64:
+    # Low LIMB_BITS of x (i.e. x mod 2^30). Branch-free.
+    x & LIMB_MASK
+
+fn limb_high(x: i64) -> i64:
+    # High portion of x above LIMB_BITS (i.e. x / 2^30 for nonnegative x).
+    # Right shift is arithmetic on i64; callers always pass nonnegative
+    # values (sums or products of nonnegative limbs), so the sign-extending
+    # behaviour is irrelevant in practice.
+    x >> LIMB_BITS
+
+fn limb_mul(a: i64, b: i64) -> [i64]:
+    # 30 x 30 -> 60-bit multiply, returned as [low, high] limbs.
+    # Both inputs assumed in [0, LIMB_MASK]; product fits in i64 with
+    # 4 bits of headroom. No `mul_hi` libcall needed — this is the
+    # whole point of the 30-bit limb choice.
+    val product = a * b
+    val lo = product & LIMB_MASK
+    val hi = product >> LIMB_BITS
+    [lo, hi]
+
+fn add_limbs(a: i64, b: i64, carry_in: i64) -> [i64]:
+    # Single-limb add with carry. Inputs in [0, LIMB_MASK]; carry_in in
+    # [0, 1]. Returns [sum_limb, carry_out] where carry_out is 0 or 1.
+    # Branch-free: `sum` is at most 2 * LIMB_MASK + 1 = 2^31 - 1, well
+    # below the i64 sign boundary.
+    val sum = a + b + carry_in
+    val limb = sum & LIMB_MASK
+    val carry_out = sum >> LIMB_BITS
+    [limb, carry_out]
+
+fn sub_limbs(a: i64, b: i64, borrow_in: i64) -> [i64]:
+    # Single-limb subtract with borrow. Inputs in [0, LIMB_MASK];
+    # borrow_in in [0, 1]. Returns [diff_limb, borrow_out].
+    # We keep a single conditional here (rather than a mask) because the
+    # caller wraps `borrow_out` through `rt_black_box` before feeding it
+    # into any select/cond_swap, breaking the branch from the Fixed
+    # CT trace.
+    val diff = a - b - borrow_in
+    var limb = diff
+    var borrow_out = 0
+    if diff < 0:
+        limb = diff + LIMB_BASE
+        borrow_out = 1
+    [limb, borrow_out]
+
+fn mul_add_limb(a: i64, b: i64, c: i64, carry_in: i64) -> [i64]:
+    # Compute a*b + c + carry_in as [low, high] limb pair.
+    # Used by schoolbook multiply (`bn_mul`, `mul_fixed`): each output
+    # column accumulates one product plus the running carry plus the
+    # previously-stored partial. All terms in [0, LIMB_MASK]; the worst
+    # case is LIMB_MASK^2 + 2*LIMB_MASK = (2^30 - 1)^2 + 2*(2^30 - 1)
+    # which still fits in 60 bits.
+    val acc = a * b + c + carry_in
+    val lo = acc & LIMB_MASK
+    val hi = acc >> LIMB_BITS
+    [lo, hi]

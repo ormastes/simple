@@ -22,18 +22,22 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 class QemuGuestHandle:
     pid: i64
     qmp_socket: text
     serial_log: text
+    stderr_log: text
     qemu_bin: text
 
-    static fn create(pid: i64, qmp_socket: text, serial_log: text, qemu_bin: text) -> QemuGuestHandle:
+    static fn create(pid: i64, qmp_socket: text, serial_log: text, stderr_log: text, qemu_bin: text) -> QemuGuestHandle:
         QemuGuestHandle(
             pid: pid,
             qmp_socket: qmp_socket,
             serial_log: serial_log,
+            stderr_log: stderr_log,
             qemu_bin: qemu_bin
         )
 
@@ -163,24 +167,39 @@ fn _spawn_guest_with_qmp_extras(
     serial_log: text,
     scenario_extras: [text]
 ) -> Result<QemuGuestHandle, text>:
+    val stderr_log = serial_log + ".stderr"
+    val host_port = _extract_hostfwd_port(target.qemu_extra, scenario_extras)
+    if host_port > 0:
+        match cleanup_stale_guest_resources(host_port, qmp_socket, serial_log, stderr_log):
+            Ok(()): pass_dn
+            Err(err): return Err(err)
     if rt_file_exists(qmp_socket):
         rt_file_delete(qmp_socket)
     if rt_file_exists(serial_log):
         rt_file_delete(serial_log)
+    if rt_file_exists(stderr_log):
+        rt_file_delete(stderr_log)
 
     val target_with_extras = _target_with_merged_extras(target, scenario_extras)
     val target_with_qmp = _target_with_qmp(target_with_extras, qmp_socket)
     val cmd_parts = build_qemu_command(target_with_qmp)
     val qemu_bin = cmd_parts[0]
     val qemu_args = _args_with_serial_file(cmd_parts.slice(1), serial_log)
-    val pid = rt_process_spawn_async(qemu_bin, qemu_args)
+    var shell_parts: [text] = [qemu_bin]
+    var arg_idx = 0
+    while arg_idx < qemu_args.len():
+        shell_parts.push(qemu_args[arg_idx])
+        arg_idx = arg_idx + 1
+    val shell_cmd = _shell_command(shell_parts)
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", "exec {shell_cmd} 2> {_shell_quote(stderr_log)}"])
     if pid <= 0:
         return Err("failed to spawn {qemu_bin}")
     if not wait_for_qmp_socket(qmp_socket, 10000):
         rt_process_kill(pid)
         rt_process_wait(pid, 2000)
-        return Err("QMP socket did not appear at {qmp_socket}")
-    Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, qemu_bin))
+        val stderr_tail = _tail_lines(read_qemu_stderr_log_path(stderr_log), 40)
+        return Err("QMP socket did not appear at {qmp_socket}\nqemu stderr:\n{stderr_tail}")
+    Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, stderr_log, qemu_bin))
 
 fn _target_with_merged_extras(target: OsTarget, scenario_extras: [text]) -> OsTarget:
     """Return a target whose qemu_extra = target.qemu_extra ++ scenario_extras.
@@ -228,6 +247,14 @@ fn read_serial_log(handle: QemuGuestHandle) -> text:
         return ""
     rt_file_read_text(handle.serial_log) ?? ""
 
+fn read_qemu_stderr_log(handle: QemuGuestHandle) -> text:
+    read_qemu_stderr_log_path(handle.stderr_log)
+
+fn read_qemu_stderr_log_path(path: text) -> text:
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path) ?? ""
+
 fn stop_guest(handle: QemuGuestHandle) -> bool:
     var stopped = true
     if handle.pid > 0 and rt_process_is_running(handle.pid):
@@ -237,7 +264,80 @@ fn stop_guest(handle: QemuGuestHandle) -> bool:
         rt_file_delete(handle.qmp_socket)
     if rt_file_exists(handle.serial_log):
         rt_file_delete(handle.serial_log)
+    if rt_file_exists(handle.stderr_log):
+        rt_file_delete(handle.stderr_log)
     stopped
+
+fn allocate_live_host_port(base_port: i64) -> Result<i64, text>:
+    val pid = rt_getpid()
+    val micros = rt_time_now_unix_micros()
+    var attempt = 0
+    while attempt < 256:
+        val candidate = base_port + ((pid + (micros / 1000) + attempt) % 1000)
+        if candidate != 2222 and not _port_is_busy(candidate):
+            return Ok(candidate)
+        attempt = attempt + 1
+    Err("no free host port found near {base_port}")
+
+fn cleanup_stale_guest_resources(host_port: i64, qmp_socket: text, serial_log: text, stderr_log: text) -> Result<(), text>:
+    val cleanup_cmd =
+        "pkill -f " + _shell_quote("hostfwd=tcp::{host_port}-:22") + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(qmp_socket) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(serial_log) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(stderr_log) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(" -p {host_port} root@127.0.0.1") + " >/dev/null 2>&1 || true"
+    rt_process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
+    rt_thread_sleep(300)
+    if rt_file_exists(qmp_socket):
+        rt_file_delete(qmp_socket)
+    if rt_file_exists(serial_log):
+        rt_file_delete(serial_log)
+    if rt_file_exists(stderr_log):
+        rt_file_delete(stderr_log)
+    if _port_is_busy(host_port):
+        return Err("host port {host_port} remained busy after stale cleanup")
+    Ok(())
+
+fn _port_is_busy(port: i64) -> bool:
+    val cmd =
+        "if command -v ss >/dev/null 2>&1; then " +
+        "ss -ltnH | awk '{print $4}' | grep -Eq '(^|:){port}$'; " +
+        "else netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:){port}$'; fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn _extract_hostfwd_port(target_extras: [text], scenario_extras: [text]) -> i64:
+    var port: i64 = _extract_hostfwd_port_from_args(target_extras)
+    if port > 0:
+        return port
+    port = _extract_hostfwd_port_from_args(scenario_extras)
+    return port
+
+fn _extract_hostfwd_port_from_args(args: [text]) -> i64:
+    var idx = 0
+    while idx < args.len():
+        val arg = args[idx]
+        val pos = arg.index_of("hostfwd=tcp::", 0) ?? -1
+        if pos >= 0:
+            val start = pos + 14
+            val end = arg.index_of("-:22", start) ?? -1
+            if end > start:
+                return arg.slice(start as u64, end as u64).to_i64()
+        idx = idx + 1
+    -1
+
+fn _tail_lines(data: text, max_lines: i64) -> text:
+    if max_lines <= 0:
+        return ""
+    var idx = data.len().to_i64() - 1
+    var seen = 0
+    while idx >= 0:
+        if data.char_at(idx as u64) == "\n":
+            seen = seen + 1
+            if seen >= max_lines:
+                return data.slice((idx + 1) as u64, data.len())
+        idx = idx - 1
+    data
 
 fn _args_with_serial_file(args: [text], serial_log: text) -> [text]:
     var rewritten: [text] = []

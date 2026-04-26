@@ -27,7 +27,7 @@ User-facing guides for the Simple programming language. For specifications see `
 
 | Guide | Description |
 |-------|-------------|
-| [testing/testing.md](testing/testing.md) | SSpec framework, matchers, mocking, helpers |
+| [testing/testing.md](testing/testing.md) | SPipe framework, matchers, mocking, helpers |
 | [testing/coverage.md](testing/coverage.md) | Source coverage, doc coverage |
 | [testing/container_testing.md](testing/container_testing.md) | Container-based isolated testing |
 | [testing/benchmarking.md](testing/benchmarking.md) | Performance benchmarking |

@@ -24,7 +24,7 @@ bin/simple lint file.spl --fix      # Lint with auto-fix
 
 ## Test Documentation (CRITICAL)
 
-Use docstring markdown in SSpec tests — NO `println()` for documentation:
+Use docstring markdown in SPipe tests — NO `println()` for documentation:
 
 ```simple
 describe "Feature":

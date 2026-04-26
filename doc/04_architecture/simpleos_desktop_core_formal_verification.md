@@ -78,7 +78,7 @@ All verification artifacts must classify evidence exactly as one of:
 Rules:
 
 - `proved` is reserved for machine-checked proof obligations in the repo’s formal pipeline
-- `spec-checked` is reserved for executable repo specs such as SSpec-style OS feature specs
+- `spec-checked` is reserved for executable repo specs such as SPipe-style OS feature specs
 - `system-tested` is reserved for QEMU/runtime evidence
 - `assumed` is mandatory wherever the proof model stops
 

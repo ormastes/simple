@@ -155,8 +155,8 @@ Hunt-list (expect to hit during implementation; open a bug entry per instance):
 - **`match` on algorithm ID numeric constants** — if the compiler falls
   through to an if/elif chain rather than a jump table, file a codegen
   improvement with a 16-arm test case.
-- **SSpec `--mode=smf` / `--compile` wrapper** — already flagged in memory
-  (`feedback_sspec_compile_pipeline.md`); re-verify after each crypto module
+- **SPipe `--mode=smf` / `--compile` wrapper** — already flagged in memory
+  (`feedback_spipe_compile_pipeline.md`); re-verify after each crypto module
   lands, since it directly blocks release-mode crypto tests.
 - **`extern fn` additions → bootstrap rebuild** — if a new `rt_*` is added
   in §5 or §6, follow the deploy flow from `feedback_extern_bootstrap_rebuild.md`

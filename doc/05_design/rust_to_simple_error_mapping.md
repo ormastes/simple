@@ -481,7 +481,7 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 **Priority**: Medium
 **Estimated Effort**: 2-3 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/pattern_exhaustiveness.spl
 Feature: Pattern Matching Exhaustiveness
@@ -503,7 +503,7 @@ Scenario: Non-exhaustive match detected
 **Priority**: Medium
 **Estimated Effort**: 2-4 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/advanced_patterns.spl
 Feature: Advanced Pattern Matching
@@ -534,7 +534,7 @@ Scenario: Range patterns
 **Priority**: High
 **Estimated Effort**: 3-4 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/associated_types.spl
 Feature: Associated Types in Traits
@@ -567,7 +567,7 @@ Scenario: Missing associated type
 **Priority**: Low
 **Estimated Effort**: 4-6 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/generators.spl
 Feature: Generator Functions
@@ -597,7 +597,7 @@ Scenario: Yield outside generator
 **Priority**: Medium
 **Estimated Effort**: 2-3 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/closure_capture.spl
 Feature: Closure Variable Capture
@@ -629,7 +629,7 @@ Scenario: Valid capture
 **Priority**: High
 **Estimated Effort**: 2-3 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/visibility.spl
 Feature: Module Privacy
@@ -666,7 +666,7 @@ Scenario: Access private field
 **Priority**: High (core language feature)
 **Estimated Effort**: 4-6 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/capabilities.spl
 Feature: Reference Capabilities
@@ -697,7 +697,7 @@ Scenario: Isolation violation
 **Priority**: Medium
 **Estimated Effort**: 3-4 weeks
 
-**SSpec Test**:
+**SPipe Test**:
 ```simple
 # test/features/const_evaluation.spl
 Feature: Constant Evaluation
@@ -774,6 +774,6 @@ This would cover ~32% of Rust's error space while maintaining Simple's design ph
 
 **Next Steps**:
 1. ✅ Update implementation plan with new error codes
-2. ✅ Create SSpec tests for new errors
+2. ✅ Create SPipe tests for new errors
 3. ✅ Prioritize feature implementations
 4. ✅ Begin systematic implementation

@@ -358,7 +358,7 @@ impl Lowerer {
 
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
-        // SSpec `it` block) to module scope so the rest of the lowering
+        // SPipe `it` block) to module scope so the rest of the lowering
         // pipeline registers them as if they were authored at the top level.
         // See `nested_def_hoist.rs` for the rules and rationale.
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);

@@ -3,7 +3,7 @@
 
 ## Overview
 
-Fixed-Size Array Edge Cases - Comprehensive SSpec Tests
+Fixed-Size Array Edge Cases - Comprehensive SPipe Tests
 
 Category: Collections
 Status: Implemented (Part 2/2)

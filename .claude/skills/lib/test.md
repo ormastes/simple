@@ -38,7 +38,7 @@ scripts/ci-test.sh                                         # CI-style
 
 ## Coverage Target Annotations
 
-System tests (`test/system/`) **MUST** have `# @cover` at the top. See `/sspec` skill for format.
+System tests (`test/system/`) **MUST** have `# @cover` at the top. See `/spipe` skill for format.
 Bypass temporarily: `--no-cover-check`
 
 ## Writing BDD Tests
@@ -98,5 +98,5 @@ Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/hand
 
 ## See Also
 
-- `/sspec` skill, `.claude/templates/sspec_template.spl`
+- `/spipe` skill, `.claude/templates/spipe_template.spl`
 - `doc/07_guide/testing/testing.md`

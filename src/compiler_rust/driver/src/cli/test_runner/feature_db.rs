@@ -11,7 +11,7 @@ pub fn update_feature_database(test_files: &[PathBuf], results: &mut [TestFileRe
     debug_log!(DebugLevel::Basic, "FeatureDB", "Updating feature database");
 
     let feature_db_path = PathBuf::from("doc/feature/feature_db.sdn");
-    let sspec_files: Vec<PathBuf> = test_files
+    let spipe_files: Vec<PathBuf> = test_files
         .iter()
         .filter(|path| {
             path.file_name()
@@ -25,8 +25,8 @@ pub fn update_feature_database(test_files: &[PathBuf], results: &mut [TestFileRe
     debug_log!(
         DebugLevel::Detailed,
         "FeatureDB",
-        "  Found {} SSpec files",
-        sspec_files.len()
+        "  Found {} SPipe files",
+        spipe_files.len()
     );
 
     let failed_specs: Vec<PathBuf> = results
@@ -42,7 +42,7 @@ pub fn update_feature_database(test_files: &[PathBuf], results: &mut [TestFileRe
         failed_specs.len()
     );
 
-    if let Err(e) = crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs) {
+    if let Err(e) = crate::feature_db::update_feature_db_from_spipe(&feature_db_path, &spipe_files, &failed_specs) {
         debug_log!(
             DebugLevel::Basic,
             "FeatureDB",

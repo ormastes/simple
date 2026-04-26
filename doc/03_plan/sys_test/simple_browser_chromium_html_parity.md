@@ -2,7 +2,7 @@
 
 Feature: `simple_browser_chromium_html_parity`
 
-SSpec coverage:
+SPipe coverage:
 
 - `test/sys/wm_compare/html_compat_spec.spl` checks manifest contents, fixture resolution, Chromium golden loading, and viewport mismatch diagnostics.
 - `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` checks `BrowserRenderer.render_html_to_pixels` and `SimpleWebRenderer` return non-empty buffers.

@@ -35,7 +35,7 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 | 1 | dev | Developer Lead | `.claude/agents/sstack/dev.md` | (inline) |
 | 2 | research | Analyst | `.claude/agents/sstack/research.md` | `/research` + `/research_codex` |
 | 3 | arch | Architect | `.claude/agents/sstack/arch.md` | `/design` + `/gemini_ui_design` |
-| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` | `/sspec` |
+| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` | `/spipe` |
 | 5 | implement | Engineer | `.claude/agents/sstack/implement.md` | `/coding` |
 | 6 | refactor | Tech Lead | `.claude/agents/sstack/refactor.md` | `/refactor` |
 | 7 | verify | QA | `.claude/agents/sstack/verify.md` | `/verify` |
@@ -81,7 +81,7 @@ The pipeline **never blocks** on missing providers. Every phase is self-sufficie
 3. Claude runs `/design` for quality review and final architecture
 4. If Gemini/Codex unavailable: Claude handles all design solo, note in state file
 
-**Phases 4-8:** Claude-native skills only (`/sspec`, `/coding`, `/refactor`, `/verify`, `/sync`). No external provider dependency.
+**Phases 4-8:** Claude-native skills only (`/spipe`, `/coding`, `/refactor`, `/verify`, `/sync`). No external provider dependency.
 
 ## Orchestrator Procedure
 
@@ -241,7 +241,7 @@ When spawning Phase 5 (implement) or Phase 6 (refactor), include:
 SStack agents invoke existing skills per phase:
 - Phase 2 (research): `/research` + `/research_codex` (if Codex available)
 - Phase 3 (arch): `/design` + `/gemini_ui_design` (if Gemini available)
-- Phase 4 (spec): `/sspec` for test structure
+- Phase 4 (spec): `/spipe` for test structure
 - Phase 5 (implement): `/coding` rules
 - Phase 6 (refactor): `/refactor` checklist
 - Phase 7 (verify): `/verify` checklist
@@ -252,7 +252,7 @@ SStack agents invoke existing skills per phase:
 | Workflow | Relationship |
 |----------|-------------|
 | `/dev` | Alias for `/sstack` — same 8 phases, same pipeline |
-| `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/sspec`, `/verify`) |
+| `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/spipe`, `/verify`) |
 | `/research` | Standalone research skill — used within sstack Phase 2, also runs independently |
 | `/research_codex` | Codex cooperative research — used within sstack Phase 2 when Codex available |
 | `/gemini_ui_design` | Gemini UI design — used within sstack Phase 3 when Gemini available |

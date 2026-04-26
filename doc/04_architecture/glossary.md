@@ -237,8 +237,8 @@ Integrates cooperative workflow: Phases 2-3 delegate to Codex/Gemini when availa
 `/dev` is an alias for `/sstack`. Same 8 phases, same state file, same quality gates, same cooperative workflow.
 No separate phase definitions — just a thin redirect.
 
-## SSpec
-SSpec is the BDD (Behavior-Driven Development) test framework for Simple.
+## SPipe
+SPipe is the BDD (Behavior-Driven Development) test framework for Simple.
 Uses `describe`/`it`/`expect` blocks with built-in matchers. Integrated into sstack Phase 4 (spec-first, before implementation).
 Coverage markers: `# @cover src/path/to/impl.spl <pct>%`.
 

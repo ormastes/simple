@@ -76,8 +76,8 @@ pub fn print_help() {
     eprintln!("  simple llm-process-gen generate         Regenerate unchanged managed LLM process files");
     eprintln!();
     eprintln!("Documentation Generation:");
-    eprintln!("  simple sspec-docgen <files...>           Generate docs from SSpec test files");
-    eprintln!("  simple sspec-docgen <files...> -o <dir>  Output to specific directory");
+    eprintln!("  simple spipe-docgen <files...>           Generate docs from SPipe test files");
+    eprintln!("  simple spipe-docgen <files...> -o <dir>  Output to specific directory");
     eprintln!("  simple ffi-gen <file.spl> [options]      Generate FFI wrappers from @Lib extern declarations");
     eprintln!();
     eprintln!("WASM App Packaging:");

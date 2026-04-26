@@ -145,5 +145,5 @@ Output: { classification: "safe", findings: [] }
 
 - Existing T32 MCP server: `examples/10_tooling/trace32_tools/t32_mcp/`
 - Existing CMM validator: `examples/10_tooling/trace32_tools/cmm_lsp/`
-- SSpec framework: `src/lib/nogc_sync_mut/spec/`
+- SPipe framework: `src/lib/nogc_sync_mut/spec/`
 - MCP helpers: `src/lib/common/mcp_helpers/`

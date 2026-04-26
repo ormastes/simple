@@ -34,4 +34,4 @@ bin/simple verify quality /tmp/simple_verify_quality_bad_spec.spl
 Observed:
 
 - Clean spec exited `0` and printed `Verify quality passed`.
-- Placeholder spec exited `1` and reported `SSPEC005`.
+- Placeholder spec exited `1` and reported `SPIPE005`.

@@ -278,7 +278,7 @@ test result: ok. 8 passed; 0 failed
 
 | Feature | Feature DB | Task DB | TODO Parser |
 |---------|-----------|---------|-------------|
-| **Source** | SSpec tests | Manual | Source code |
+| **Source** | SPipe tests | Manual | Source code |
 | **Languages** | Simple only | N/A | **Rust + Simple** |
 | **Auto-update** | Yes | No | Yes (planned) |
 | **Validation** | Runtime | N/A | **Parse-time** |

@@ -34,7 +34,7 @@
 //!   * cli/repl                          -> src/app/repl, app.io.cli_ops.cli_run_repl
 //!   * cli/llm_tools (mcp/diff/ctx)      -> src/app/mcp, src/app/diff, src/app/context
 //!   * cli/doc_gen (todo/feature/task)   -> src/app/todo_gen, src/app/feature_gen,
-//!                                           src/app/task_gen, src/app/sspec_docgen
+//!                                           src/app/task_gen, src/app/spipe_docgen
 //!   * cli/help + version                -> src/app/cli/main.spl (inline)
 //!
 //! NEW PEER ADDED THIS SLICE:
@@ -82,7 +82,7 @@ use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
-use simple_driver::cli::sspec_docgen;
+use simple_driver::cli::spipe_docgen;
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
 
 // Import our new command modules
@@ -542,12 +542,12 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &[],
     },
     CommandEntry {
-        name: "sspec-docgen",
+        name: "spipe-docgen",
         // Keep Rust as the canonical entrypoint until direct file execution
         // supports the file-level attributes used across the stdlib/app tree.
         app_path: "",
-        rust_handler: Handler::Args(run_sspec_docgen_rust),
-        env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
+        rust_handler: Handler::Args(run_spipe_docgen_rust),
+        env_override: "SIMPLE_SPIPE_DOCGEN_RUST",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -1181,8 +1181,8 @@ fn handle_file_execution(
     }
 }
 
-/// Current Rust sspec-docgen implementation.
-fn run_sspec_docgen_rust(args: &[String]) -> i32 {
+/// Current Rust spipe-docgen implementation.
+fn run_spipe_docgen_rust(args: &[String]) -> i32 {
     // Parse arguments
     let mut output_dir = PathBuf::from("doc/06_spec");
     let mut spec_files: Vec<PathBuf> = Vec::new();
@@ -1197,12 +1197,12 @@ fn run_sspec_docgen_rust(args: &[String]) -> i32 {
                 continue;
             }
         } else if arg == "--help" || arg == "-h" {
-            println!("SSpec Documentation Generator");
+            println!("SPipe Documentation Generator");
             println!();
-            println!("Usage: simple sspec-docgen <spec_file>... [--output <dir>]");
+            println!("Usage: simple spipe-docgen <spec_file>... [--output <dir>]");
             println!();
             println!("Arguments:");
-            println!("  <spec_file>...    One or more sspec files (*_spec.spl)");
+            println!("  <spec_file>...    One or more spipe files (*_spec.spl)");
             println!();
             println!("Options:");
             println!("  --output <dir>    Output directory (default: doc/06_spec)");
@@ -1218,12 +1218,12 @@ fn run_sspec_docgen_rust(args: &[String]) -> i32 {
     if spec_files.is_empty() {
         eprintln!("error: No spec files provided");
         eprintln!();
-        eprintln!("Usage: simple sspec-docgen <spec_file>... [--output <dir>]");
+        eprintln!("Usage: simple spipe-docgen <spec_file>... [--output <dir>]");
         return 1;
     }
 
-    // Call the sspec_docgen module
-    match sspec_docgen::generate_sspec_docs(&spec_files, &output_dir) {
+    // Call the spipe_docgen module
+    match spipe_docgen::generate_spipe_docs(&spec_files, &output_dir) {
         Ok(stats) => {
             println!(
                 "\n✓ Generated {} docs ({} complete, {} stubs)",

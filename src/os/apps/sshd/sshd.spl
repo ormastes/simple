@@ -135,29 +135,29 @@ impl SshDaemon:
         # Ed25519 is now validated in the dedicated SSH self-test lane.
         # Run the same gate in the live daemon so startup failures stay
         # aligned with the validated crypto baseline.
-        log_info("[app.sshd] " + "[sshd] Running Ed25519 self-test in live lane")
+        serial_writeln("[sshd] Running Ed25519 self-test in live lane")
         val r_self_test = ed25519_self_test()
         if r_self_test.is_err():
             return Err("Ed25519 self-test failed in live lane")
-        log_info("[app.sshd] " + "[sshd] Ed25519 self-test: PASS")
+        serial_writeln("[sshd] Ed25519 self-test: PASS")
 
         # Generate host keypair (Ed25519)
         # Uses C-side Ed25519 implementation via extern fn wrappers,
         # which avoids the baremetal Cranelift codegen bugs with pure Simple
         # extended-coordinate point arithmetic.
         var seed = random_bytes(32)
-        log_info("[app.sshd] " + "[sshd] Seed: {seed.len()} bytes")
+        serial_writeln("[sshd] Seed bytes={seed.len()}")
         val keypair = ed25519_keypair_from_seed(seed)
         self.host_private_key = keypair.0   # 32-byte seed
         self.host_public_key = keypair.1    # 32-byte Ed25519 public key
-        log_info("[app.sshd] " + "[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
+        serial_writeln("[sshd] Host keys ready")
 
         # The x64-ssh live lane uses the C-backed TCP runtime directly.
         # Bypass the netstack IPC shim here so SSH can come up before the
         # higher-level service loop exists in this boot profile.
         val fd = decode_net_runtime_i32(rt_net_socket(1))
         if fd < 0:
-            log_info("[app.sshd] " + "[sshd] rt_net_socket failed: {fd}")
+            serial_writeln("[sshd] rt_net_socket failed")
             return Err("failed to create socket: {fd}")
         self.listen_fd = fd
 
@@ -175,8 +175,7 @@ impl SshDaemon:
             self.listen_fd = -1
             return Err("failed to listen: {listen_result}")
 
-        log_info("[app.sshd] " + "[sshd] SSH daemon listening on port {self.port}")
-        log_info("[app.sshd] " + "[sshd] SSH daemon listening on port {self.port}")
+        serial_writeln("[sshd] SSH daemon listening on port 22")
         self.running = true
         self.accept_loop()
         Ok(true)
@@ -204,13 +203,13 @@ impl SshDaemon:
             rt_net_close(client_fd as i64)
             return
 
-        log_info("[app.sshd] " + "[sshd] handle_connection fd={client_fd}")
+        serial_writeln("[sshd] handle_connection")
 
         # Guard: host keys must have been generated in start()
         var priv_len: u64 = self.host_private_key.len()
         var pub_len: u64 = self.host_public_key.len()
         if priv_len < 1 or pub_len < 1:
-            log_info("[app.sshd] " + "[sshd] FATAL: host keys not initialized (priv={priv_len} pub={pub_len})")
+            serial_writeln("[sshd] FATAL: host keys not initialized")
             rt_net_close(client_fd as i64)
             return
 

@@ -11,7 +11,7 @@ use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_
 use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
 use os.apps.sshd.ssh_cipher.{SshCipher, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
-use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
+use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
 use os.apps.shell.shell_app.{ShellApp}
@@ -648,6 +648,19 @@ impl SshSession:
 
     me _handle_channel_open(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_OPEN."""
+        serial_println("[sshd-session] handle_channel_open len={payload.len()}")
+        if _is_session_channel_open_payload(payload):
+            serial_println("[sshd-session] channel open=session (live fast path)")
+            val remote_id: u32 = 0
+            val local_id: u32 = 0
+            self.channels.seed_open(local_id, ChannelType.Session, remote_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+            val confirm = ssh_build_channel_open_confirmation(
+                remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+            )
+            serial_println("[sshd-session] channel open confirm len={confirm.len()}")
+            self.send_packet(confirm)
+            return
+
         val r = ssh_parse_channel_open(payload)
         if r.is_err():
             return
@@ -667,7 +680,7 @@ impl SshSession:
             )
             self.send_packet(confirm)
         else:
-            val fail = ssh_build_channel_open_confirmation(remote_id, 0, 0, 0)
+            val fail = ssh_build_channel_open_failure(remote_id, 3, "unknown channel type")
             self.send_packet(fail)
 
     me _handle_channel_data(payload: [u8]):
@@ -778,6 +791,7 @@ impl SshSession:
             self._handle_shell_request(recipient, ch.remote_id, want_reply)
 
         elif req_type == "exec":
+            serial_println("[sshd-session] channel request=exec want_reply={want_reply}")
             self._handle_exec_request(payload, off, recipient, ch.remote_id, want_reply)
 
         elif req_type == "subsystem":
@@ -878,7 +892,7 @@ impl SshSession:
                 val pty = r_pty.unwrap()
                 self.pty = pty
 
-        self._ensure_shell_started()
+        self._ensure_shell_started(true)
         self._forward_shell_output()
 
     me _handle_exec_request(payload: [u8], off: u64, local_id: u32, remote_id: u32, want_reply: bool):
@@ -891,6 +905,9 @@ impl SshSession:
                 self.send_packet(fail)
             return
 
+        val command = r_command.unwrap().value
+        serial_println("[sshd-session] exec command={command}")
+
         var i: u64 = 0
         while i < self.channels.channels.len():
             if self.channels.channels[i].local_id == local_id:
@@ -901,20 +918,46 @@ impl SshSession:
             val success = ssh_build_channel_success(remote_id)
             self.send_packet(success)
 
-        self._ensure_shell_started()
+        if command.trim() == "true":
+            self._finish_exec_request(local_id, remote_id, 0, [])
+            return
+
+        self._ensure_shell_started(false)
         if val shell = self.shell:
-            val command = r_command.unwrap().value
             if not shell.feed_remote_input("{command}\n"):
                 self.state = SessionState.Closed
+                return
             self._forward_shell_output()
 
-    me _ensure_shell_started():
+    me _ensure_shell_started(show_prompt: bool):
         """Create the shared SSH shell instance once per authenticated session."""
         if self.shell != nil:
             return
         var shell = ShellApp.new()
-        shell.show_prompt()
+        if show_prompt:
+            shell.show_prompt()
         self.shell = shell
+
+    me _finish_exec_request(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
+        if output.len() > 0 and self.channels.consume_remote_window(local_id, output.len().to_u32()):
+            val data_msg = ssh_build_channel_data(remote_id, output)
+            self.send_packet(data_msg)
+        self._send_channel_exit_status(remote_id, exit_status)
+        self.send_packet(ssh_build_channel_eof(remote_id))
+        self.send_packet(ssh_build_channel_close(remote_id))
+        self.channels.close(local_id)
+        self.channels.remove_closed()
+        if self.channels.channels.len() == 0:
+            self.state = SessionState.Closed
+
+    me _send_channel_exit_status(remote_id: u32, exit_status: u32):
+        var payload: [u8] = []
+        ssh_put_byte(payload, SSH_MSG_CHANNEL_REQUEST)
+        ssh_put_u32(payload, remote_id)
+        ssh_put_text(payload, "exit-status")
+        ssh_put_bool(payload, false)
+        ssh_put_u32(payload, exit_status)
+        self.send_packet(payload)
 
     me _forward_shell_output():
         """Drain shell terminal output to the active SSH session channel."""

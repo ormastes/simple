@@ -122,7 +122,7 @@ All files exceeding the 800-line limit, sorted by size descending:
 | `src/app/build/bootstrap_pipeline.spl` | 785 | T6 |
 | `src/compiler/80.driver/build/bootstrap_pipeline.spl` | 785 | T4 |
 | `src/compiler/30.types/dim_constraints.spl` | 779 | T2 |
-| `src/app/sspec_docgen/main.spl` | 769 | T6 |
+| `src/app/spipe_docgen/main.spl` | 769 | T6 |
 
 ---
 

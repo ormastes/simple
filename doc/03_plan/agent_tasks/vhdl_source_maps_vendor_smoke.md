@@ -82,7 +82,7 @@ Candidate environment gates:
 - Vendor synthesis smoke runs for at least one available profile and reports
   source-map-linked failures.
 
-## Pending SSpec Coverage
+## Pending SPipe Coverage
 
 Pending coverage lives in
 `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` until implementation

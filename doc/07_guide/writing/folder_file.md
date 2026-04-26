@@ -245,7 +245,7 @@ bin/
 
 | Pattern | Meaning | Example |
 |---------|---------|---------|
-| `*_spec.spl` | Test file (SSpec) | `array_spec.spl` |
+| `*_spec.spl` | Test file (SPipe) | `array_spec.spl` |
 | `*_utils.spl` | Utility functions | `string_utils.spl` |
 | `mod.spl` | Module entry point | `src/lib/mod.spl` |
 | `main.spl` | Application entry | `src/app/cli/main.spl` |

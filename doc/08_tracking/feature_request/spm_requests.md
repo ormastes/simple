@@ -92,7 +92,7 @@ Parent feature ship commits on `origin/main`:
 - **Notes:** Depends on FR-SPM-0001 only insofar as the id-path bytes already
   flow through `_copy_in_bytes`; that path works for small id-paths in the
   identity-mapped case today. Implemented by threading `caller.id` into case
-  110 and exposing `spm_priv_check_for_task` for direct SSpec coverage. Test:
+  110 and exposing `spm_priv_check_for_task` for direct SPipe coverage. Test:
   `test/system/spm_priv_check_task_mirror_spec.spl`. Research and plan:
   `doc/01_research/local/spm_priv_check_task_mirror.md`,
   `doc/03_plan/sys_test/spm_priv_check_task_mirror.md`.

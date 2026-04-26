@@ -531,7 +531,7 @@ or `Rejected` (one-line reason).
 - **Notes:** "VGA DMA" is intentionally not promised here; legacy VGA/BGA is
   framebuffer/MMIO. DMA belongs to VirtIO-GPU or later native GPU drivers.
   Implemented display boundary helpers in
-  `src/os/drivers/gpu/display_boundary.spl`; SSpec coverage is
+  `src/os/drivers/gpu/display_boundary.spl`; SPipe coverage is
   `test/system/driver_display_acceleration_boundary_spec.spl`. Research and
   test plan:
   `doc/01_research/local/driver_display_acceleration_boundary.md`,

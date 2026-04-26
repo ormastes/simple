@@ -27,7 +27,7 @@
 - Generator-based random input generation
 - Shrinking to minimal failing cases
 - Configurable iterations and timeouts
-- Integration with SSpec test framework
+- Integration with SPipe test framework
 
 ### 1.2 Existing Implementation
 
@@ -62,7 +62,7 @@ pub fn thorough_check<T>(property: fn(T) -> bool, generator: impl Generator<T>) 
 | Shrinking | ✅ Automatic | ✅ Automatic | ✅ Advanced (reduce) | ✅ Automatic |
 | Stateful testing | ❌ Not yet | ✅ monadic | ✅ StateMachine | ✅ prop_state_machine |
 | Regression DB | ❌ Not yet | ❌ No | ✅ .hypothesis dir | ❌ No |
-| Integration | ✅ SSpec | - | ✅ pytest | ✅ cargo test |
+| Integration | ✅ SPipe | - | ✅ pytest | ✅ cargo test |
 
 ### 1.4 Example Usage
 
@@ -404,7 +404,7 @@ pub fn compare(
         results[name] = benchmark(name, func, config)
     results
 
-# Integration with SSpec
+# Integration with SPipe
 pub fn bench_spec(
     name: text,
     func: fn(),
@@ -540,7 +540,7 @@ describe "Performance regressions":
 - [ ] Add summary formatting
 - [ ] Generate JSON output
 
-**Phase 3: SSpec integration (2 days)**
+**Phase 3: SPipe integration (2 days)**
 - [ ] Implement `bench_spec()`
 - [ ] Add regression detection
 - [ ] Write example specs

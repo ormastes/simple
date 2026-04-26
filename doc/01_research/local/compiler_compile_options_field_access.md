@@ -17,5 +17,5 @@ Close `FR-COMPILER-001` by adding system coverage that explicitly imports the dr
 
 ## Regression Surface
 
-- System SSpec: `test/system/compiler_compile_options_field_access_spec.spl`
+- System SPipe: `test/system/compiler_compile_options_field_access_spec.spl`
 - Related resolver coverage: `test/unit/compiler/hir/resolve_import_symbols_spec.spl`

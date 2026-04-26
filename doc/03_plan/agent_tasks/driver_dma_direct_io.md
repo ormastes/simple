@@ -4,7 +4,7 @@ Feature: FR-DRIVER-0010.
 
 ## Completed Work Split
 
-- Explorer: locate existing fs-driver, DMA, NVMe, VirtIO-BLK, and SSpec
+- Explorer: locate existing fs-driver, DMA, NVMe, VirtIO-BLK, and SPipe
   patterns.
 - Codex implementation: add common direct-I/O request/result model, NVMe and
   VirtIO SharedDmaBuffer adapter methods, system spec, and tracker updates.

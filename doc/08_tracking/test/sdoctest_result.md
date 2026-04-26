@@ -107,7 +107,7 @@
 | doc/dashboard/tables/duplication.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/dashboard/tables/features.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/dashboard/tables/plans.sdn | 0 | 0 | 0 | 0 | 0ms |
-| doc/dashboard/tables/sspec_tests.sdn | 0 | 0 | 0 | 0 | 0ms |
+| doc/dashboard/tables/spipe_tests.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/dashboard/tables/test_status.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/dashboard/tables/todos.sdn | 0 | 0 | 0 | 0 | 0ms |
 | doc/dashboard/tables/vcs_state.sdn | 0 | 0 | 0 | 0 | 0ms |
@@ -552,12 +552,12 @@
 | doc/07_guide/smoke_testing.md | 19 | 19 | 0 | 0 | 108ms |
 | doc/07_guide/source_coverage.md | 17 | 17 | 0 | 0 | 96ms |
 | doc/07_guide/sqp.md | 4 | 4 | 0 | 0 | 16ms |
-| doc/07_guide/sspec_assertion_conversion.md | 36 | 36 | 0 | 0 | 187ms |
-| doc/07_guide/sspec_bulk_migration_workflow.md | 7 | 7 | 0 | 0 | 32ms |
-| doc/07_guide/sspec_complete_example.md | 13 | 13 | 0 | 0 | 55ms |
-| doc/07_guide/sspec_guide.md | 22 | 22 | 0 | 0 | 128ms |
-| doc/07_guide/sspec.md | 26 | 26 | 0 | 0 | 153ms |
-| doc/07_guide/sspec_writing.md | 25 | 25 | 0 | 0 | 113ms |
+| doc/07_guide/spipe_assertion_conversion.md | 36 | 36 | 0 | 0 | 187ms |
+| doc/07_guide/spipe_bulk_migration_workflow.md | 7 | 7 | 0 | 0 | 32ms |
+| doc/07_guide/spipe_complete_example.md | 13 | 13 | 0 | 0 | 55ms |
+| doc/07_guide/spipe_guide.md | 22 | 22 | 0 | 0 | 128ms |
+| doc/07_guide/spipe.md | 26 | 26 | 0 | 0 | 153ms |
+| doc/07_guide/spipe_writing.md | 25 | 25 | 0 | 0 | 113ms |
 | doc/07_guide/standard_architecture.md | 33 | 33 | 0 | 0 | 154ms |
 | doc/07_guide/stats_command_guide.md | 0 | 0 | 0 | 0 | 0ms |
 | doc/07_guide/string_core_usage.md | 19 | 19 | 0 | 0 | 109ms |
@@ -812,7 +812,7 @@
 | examples/09_embedded/baremetal/baremetal/riscv32.ld | 0 | 0 | 0 | 0 | 0ms |
 | examples/09_embedded/baremetal/baremetal/riscv32_test/riscv32_test.ld | 0 | 0 | 0 | 0 | 0ms |
 | examples/09_embedded/baremetal/baremetal/riscv32_test/semihost.h | 0 | 0 | 0 | 0 | 0ms |
-| examples/09_embedded/baremetal/baremetal/riscv32_test/sspec_baremetal.h | 0 | 0 | 0 | 0 | 0ms |
+| examples/09_embedded/baremetal/baremetal/riscv32_test/spipe_baremetal.h | 0 | 0 | 0 | 0 | 0ms |
 | examples/09_embedded/baremetal/baremetal/riscv32_test/startup.S | 0 | 0 | 0 | 0 | 0ms |
 | examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.c | 0 | 0 | 0 | 0 | 0ms |
 | examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf | 0 | 0 | 0 | 0 | 0ms |
@@ -916,7 +916,7 @@
 | .claude/skills/release.md | 0 | 0 | 0 | 0 | 0ms |
 | .claude/skills/research.md | 0 | 0 | 0 | 0 | 0ms |
 | .claude/skills/sffi.md | 11 | 11 | 0 | 0 | 56ms |
-| .claude/skills/sspec.md | 11 | 11 | 0 | 0 | 49ms |
+| .claude/skills/spipe.md | 11 | 11 | 0 | 0 | 49ms |
 | .claude/skills/stdlib.md | 9 | 9 | 0 | 0 | 45ms |
 | .claude/skills/test.md | 1 | 1 | 0 | 0 | 5ms |
 | .claude/skills/todo.md | 3 | 3 | 0 | 0 | 15ms |

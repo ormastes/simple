@@ -1,0 +1,242 @@
+# ITF CLI — `itf minio {ls,get,put,stat,presign,health}` subcommands.
+
+use app.itf.adapter_minio.{
+    MinioConfig, BucketInfo, ObjectInfo, GetObjectResult, HeadObjectResult,
+    load_minio_config, check_minio_auth,
+    minio_list_buckets, minio_list_objects, minio_get_object, minio_head_object,
+    minio_put_text, minio_put_object, minio_presign_get, minio_health_live,
+    minio_download
+}
+use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json}
+
+
+fn handle_minio(args: [text]) -> i64:
+    """Dispatch `itf minio` subcommands."""
+    if args.len() == 0:
+        _print_minio_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "ls":
+            _minio_ls(action_args)
+        "get":
+            _minio_get(action_args)
+        "put":
+            _minio_put(action_args)
+        "stat":
+            _minio_stat(action_args)
+        "presign":
+            _minio_presign(action_args)
+        "health":
+            _minio_health(action_args)
+        "-h" | "--help" | "help":
+            _print_minio_help()
+            0
+        _:
+            print_error("unknown minio command: {action}")
+            _print_minio_help()
+            1
+
+
+fn _require_auth(cfg: MinioConfig) -> bool:
+    if not check_minio_auth(cfg):
+        print_error("MinIO auth not configured. Set [minio] section in ~/.config/itf/auth.sdn")
+        return false
+    true
+
+
+fn _parse_int(s: text, default_val: i64) -> i64:
+    var n: i64 = 0
+    var i = 0
+    var any = false
+    while i < s.len():
+        val c = s.char_code_at(i)
+        if c >= 48 and c <= 57:
+            n = n * 10 + (c - 48)
+            any = true
+        i = i + 1
+    if any: n else: default_val
+
+
+fn _minio_ls(args: [text]) -> i64:
+    """`itf minio ls [bucket [--prefix P]]`"""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() == 0:
+        val (ok, buckets, raw) = minio_list_buckets(cfg)
+        if not ok:
+            print_error(raw)
+            return 1
+        if wants_json(args):
+            print format_json_output(raw, args)
+            return 0
+        print_table_header(["NAME", "CREATED"])
+        for b in buckets:
+            print_table_row([b.name, b.creation_date])
+        return 0
+    val bucket = pos[0]
+    val prefix = _extract_flag(args, "--prefix", "")
+    val (ok, objects, raw) = minio_list_objects(cfg, bucket, prefix)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print_table_header(["KEY", "SIZE", "MODIFIED"])
+    for o in objects:
+        print_table_row([o.key, "{o.size}", o.last_modified])
+    0
+
+
+fn _minio_get(args: [text]) -> i64:
+    """`itf minio get <bucket> <key> [--out PATH] [--range R]`"""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: itf minio get <bucket> <key> [--out PATH] [--range R]")
+        return 1
+    val bucket = pos[0]
+    val key = pos[1]
+    val out_path = _extract_flag(args, "--out", "")
+    val range_h = _extract_flag(args, "--range", "")
+    if out_path != "":
+        val (ok, bytes, err) = minio_download(cfg, bucket, key, out_path, 3600)
+        if not ok:
+            print_error(err)
+            return 1
+        print_success("wrote {bytes} bytes to {out_path}")
+        return 0
+    val (ok, result, raw) = minio_get_object(cfg, bucket, key, range_h)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print result.body
+    0
+
+
+fn _minio_put(args: [text]) -> i64:
+    """`itf minio put <bucket> <key> --file PATH [--content-type CT]`"""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: itf minio put <bucket> <key> --file PATH [--content-type CT]")
+        return 1
+    val bucket = pos[0]
+    val key = pos[1]
+    val file_path = _extract_flag(args, "--file", "")
+    val ct = _extract_flag(args, "--content-type", "")
+    if file_path == "":
+        print_error("--file PATH is required")
+        return 1
+    val (ok, etag, raw) = minio_put_object(cfg, bucket, key, file_path)
+    if not ok:
+        print_error(raw)
+        return 1
+    print_success("uploaded {bucket}/{key} (etag {etag})")
+    0
+
+
+fn _minio_stat(args: [text]) -> i64:
+    """`itf minio stat <bucket> <key>`"""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: itf minio stat <bucket> <key>")
+        return 1
+    val (ok, head, raw) = minio_head_object(cfg, pos[0], pos[1])
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print_info("Size", "{head.content_length}")
+    print_info("ETag", head.etag)
+    print_info("Last-Modified", head.last_modified)
+    0
+
+
+fn _minio_presign(args: [text]) -> i64:
+    """`itf minio presign <bucket> <key> [--expires SECONDS]`"""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: itf minio presign <bucket> <key> [--expires SECONDS]")
+        return 1
+    val expires = _parse_int(_extract_flag(args, "--expires", "86400"), 86400)
+    val (ok, url, err) = minio_presign_get(cfg, pos[0], pos[1], expires)
+    if not ok:
+        print_error(err)
+        return 1
+    print url
+    0
+
+
+fn _minio_health(args: [text]) -> i64:
+    """`itf minio health`"""
+    val cfg = load_minio_config()
+    if cfg.url == "":
+        print_error("MinIO URL not configured")
+        return 1
+    val (ok, alive, raw) = minio_health_live(cfg)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print "{{\"alive\":{alive},\"status\":\"{raw}\"}}"
+        return 0
+    if alive:
+        print_success("alive ({raw})")
+        return 0
+    print_error("not alive ({raw})")
+    1
+
+
+fn _print_minio_help():
+    """Print itf minio help text."""
+    print "itf minio — S3-compatible object storage (MinIO)"
+    print ""
+    print "Usage: itf minio <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  ls [bucket [--prefix P]]    List buckets, or objects under a bucket"
+    print "  get <bucket> <key>          Fetch object body or stream to --out PATH"
+    print "  put <bucket> <key>          Upload --file PATH (text/JSON/XML; binary blocked)"
+    print "  stat <bucket> <key>         HEAD object (size/etag/last-modified)"
+    print "  presign <bucket> <key>      Generate a presigned GET URL (--expires SECONDS, max 604800)"
+    print "  health                      Probe /minio/health/live"
+    print ""
+    print "Flags:"
+    print "  --json            Output as JSON"
+    print "  --out PATH        For `get`: stream body to a local file (presigned download)"
+    print "  --range R         For `get`: HTTP Range header value (e.g. bytes=0-1023)"
+    print "  --prefix P        For `ls`: filter objects under the given key prefix"
+    print "  --expires N       For `presign`: URL validity in seconds (default 86400)"
+    print "  --file PATH       For `put`: local file to upload"
+    print "  --content-type CT For `put`: response Content-Type (default application/octet-stream)"
+    print ""
+    print "Config: ~/.config/itf/auth.sdn"
+    print "  [minio]"
+    print "  url = https://minio.example.com:9000"
+    print "  region = us-east-1"
+    print "  access_key = AKIA..."
+    print "  secret_key = ..."
+    print "  tls_skip_verify = false"

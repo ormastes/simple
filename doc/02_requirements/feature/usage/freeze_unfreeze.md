@@ -3,7 +3,7 @@
 
 ## Overview
 
-Freeze and Unfreeze - Comprehensive SSpec Tests
+Freeze and Unfreeze - Comprehensive SPipe Tests
 Testing freeze() function for creating immutable collections
 
 Category: Collections

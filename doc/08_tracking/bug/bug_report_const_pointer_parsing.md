@@ -161,7 +161,7 @@ $ grep -r "\*const" simple/std_lib/src --include="*.spl" | wc -l
 
 ## Test Coverage
 
-### SSpec Tests Created
+### SPipe Tests Created
 1. **Grammar specification:** `simple/std_lib/test/features/syntax/const_vs_val_spec.spl`
    - Documents `const` vs `val` vs pointer types
    - Shows relationship between keywords
@@ -226,8 +226,8 @@ See: `doc/01_research/parser_error_improvements.md` for implementation details.
 - **Bug report:** `simple/bug_report_const_pointer_parsing.md` (this file)
 - **Grammar research:** `doc/01_research/const_vs_val_grammar.md`
 - **Error improvements:** `doc/01_research/parser_error_improvements.md`
-- **SSpec grammar test:** `simple/std_lib/test/features/syntax/const_vs_val_spec.spl`
-- **SSpec bug test:** `simple/std_lib/test/features/bugs/pointer_const_parsing_bug_spec.spl`
+- **SPipe grammar test:** `simple/std_lib/test/features/syntax/const_vs_val_spec.spl`
+- **SPipe bug test:** `simple/std_lib/test/features/bugs/pointer_const_parsing_bug_spec.spl`
 
 ### Related Issues
 - User report: "val x : u64 = 42 cause error" - type annotations not supported in `val` (separate issue, documented)
@@ -239,7 +239,7 @@ See: `doc/01_research/parser_error_improvements.md` for implementation details.
 - [ ] Modify `parser_types.rs:89-95` to check for `const`/`mut` after `*`
 - [ ] Update AST/HIR/MIR to handle new pointer kinds
 - [ ] Add better error message with context and help
-- [ ] Enable SSpec tests in `pointer_const_parsing_bug_spec.spl`
+- [ ] Enable SPipe tests in `pointer_const_parsing_bug_spec.spl`
 - [ ] Verify all 98+ stdlib usages parse correctly
 - [ ] Run regression tests (const declarations, val declarations, borrows)
 - [ ] Update language grammar documentation

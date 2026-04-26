@@ -63,7 +63,7 @@ These rules apply to all contributors. Overrides require an ADR (see `doc/adr/`)
 |-------|----------|---------|
 | Unit | Yes | Business logic validation |
 | Integration | Yes | Module boundary testing |
-| BDD (SSpec) | Yes | User behavior scenarios |
+| BDD (SPipe) | Yes | User behavior scenarios |
 | System | Yes | Full pipeline tests |
 
 ### 3.2 Rules
@@ -136,7 +136,7 @@ Every `*_spec.spl` file must have:
 | CI gates | Build failures, test failures |
 | Linter (`bin/simple build lint`) | Code style violations |
 | Code review | Architecture violations |
-| `sspec-docgen` warnings | Missing doc links |
+| `spipe-docgen` warnings | Missing doc links |
 | `traceability-check` | Missing source/test/doc trace links |
 | Release checklist | Pre-release quality gates |
 

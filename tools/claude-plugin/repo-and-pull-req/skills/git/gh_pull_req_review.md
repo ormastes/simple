@@ -1,7 +1,19 @@
 # GitHub Pull Request Review Skill
 
-Single-pass autonomous PR review. Checks PR status, processes review comments,
-fixes code or replies, auto-rebases when all resolved.
+Autonomous PR review. Checks PR status, processes review comments,
+fixes code or replies, then branches by `--level`:
+
+- **L1** (default): post review, opportunistic auto-rebase + merge if
+  PR is **already** APPROVED at check time. Single-pass, no polling.
+  This is the existing behavior — preserved verbatim.
+- **L2**: post review, run Codex-first bot reviewer, bot-approves via
+  `gh pr review --approve`, polls checks, merges via
+  `gh pr merge --squash`.
+- **L3**: post review, wait for **human** APPROVED review (do NOT
+  bot-approve), poll checks, merge.
+
+`--level` is read from env `CLI_LEVEL` (set by the dispatcher) or
+defaults to `1`. Older state files with no `level` key default to `1`.
 
 ## Prerequisites
 
@@ -95,13 +107,16 @@ echo "File count: ${FILE_COUNT}"
 jj git push --bookmark "${BRANCH}"
 ```
 
-### Step 5 — Check Resolution and Auto-Rebase
+### Step 5 — Per-Level Branching
+
+Read `LEVEL="${CLI_LEVEL:-1}"`. Re-check status after processing:
 
 ```bash
-# Re-check status after processing
-UPDATED_STATUS=$(gh pr view "${PR_NUMBER}" --json reviewDecision,reviews)
+UPDATED_STATUS=$(gh pr view "${PR_NUMBER}" --json reviewDecision,reviews,statusCheckRollup)
 DECISION=$(echo "$UPDATED_STATUS" | jq -r .reviewDecision)
 ```
+
+#### L1 — Post review only + opportunistic merge (current behavior)
 
 If `DECISION == "APPROVED"` and all comments addressed:
 
@@ -116,9 +131,73 @@ FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 # Push rebased branch
 jj git push --bookmark "${BRANCH}"
 
-# Optionally auto-merge (ask user first in single-pass mode)
-# gh pr merge "${PR_NUMBER}" --rebase --delete-branch
+# Auto-merge (single-pass)
+gh pr merge "${PR_NUMBER}" --rebase --delete-branch
 ```
+
+L1 deviates from the arch doc table (which lists L1 as comments-only)
+to preserve the existing single-pass merge-on-APPROVED behavior. No
+polling, no bot-approve, no checks-wait.
+
+#### L2 — Bot-approve via `gh pr review --approve` + poll-merge
+
+1. Invoke `agents/review_loop_codex_first.md` to get
+   `verdict ∈ {approve, request-changes, comment}` plus `approver` and
+   `verdict_source`. Persist these in state JSON.
+2. If `verdict == approve`:
+   ```bash
+   gh pr review "${PR_NUMBER}" --approve --body "Bot approval (${APPROVER}/${VERDICT_SOURCE})"
+   APPROVE_RC=$?
+   ```
+   Capture HTTP status (use `gh api --include` if needed). On
+   401/403/409: see *Failure Modes* in `agents/review_loop.md` —
+   set `status=blocked-*`, post one comment, **cancel schedule, exit**.
+3. Poll checks:
+   ```bash
+   CHECKS=$(gh pr checks "${PR_NUMBER}" --json bucket --jq '[.[] | .bucket] | unique')
+   # All "pass" → green; any "fail" → failing; any "pending" → still running
+   ```
+4. If `bot_approved && checks_passing && !merge_attempted`:
+   ```bash
+   gh pr merge "${PR_NUMBER}" --squash --delete-branch
+   MERGE_RC=$?
+   ```
+   On 403/409/401: blocked, see *Failure Modes*. On success:
+   `status=merged`.
+
+#### L3 — Post review only + poll for human approval + merge
+
+1. Post review comments only. Do NOT bot-approve.
+2. Poll for human APPROVED review:
+   ```bash
+   HUMAN_APPROVED_COUNT=$(gh pr view "${PR_NUMBER}" --json reviews \
+     --jq '[.reviews[] | select(.state=="APPROVED")] | length')
+   if [ "$HUMAN_APPROVED_COUNT" -gt 0 ]; then
+     HUMAN_APPROVED=true
+   fi
+   ```
+3. Poll checks (same query as L2).
+4. If `human_approved && checks_passing && !merge_attempted`:
+   ```bash
+   gh pr merge "${PR_NUMBER}" --squash --delete-branch
+   ```
+   Failure handling identical to L2.
+
+### Step 5b — Failure-Mode Capture (L2/L3 only)
+
+For each `gh pr review --approve` and `gh pr merge` call, classify
+the exit:
+
+| Exit / HTTP | State field        | Action                                  |
+|-------------|--------------------|-----------------------------------------|
+| 0 (success) | proceed            | Continue                                |
+| 403         | `blocked`          | Post one comment ("Bot lacks permission"), cancel schedule, exit |
+| 409         | `blocked-conflict` | Post one comment ("Merge conflict — manual rebase needed"), cancel schedule, exit |
+| 401         | `blocked-auth`     | Post one comment ("Bot token invalid — re-run setup"), cancel schedule, exit |
+| other ≠ 0   | continue cycle     | Log and retry next cycle                |
+
+The bot must NEVER tight-loop on auth/policy errors. Once `blocked*`,
+the schedule is cancelled and the human must restart manually.
 
 ### Step 6 — Report
 

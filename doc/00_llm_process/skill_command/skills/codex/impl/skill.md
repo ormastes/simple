@@ -36,7 +36,7 @@ Skip if exist, otherwise do inline. See `research` skill for details.
 Skip if exist. See `design` skill for details.
 
 ### Phases 6-7: System Test + Doc Consistency
-- Write SSpec BDD tests from design
+- Write SPipe BDD tests from design
 - Verify doc cross-references are intact
 - Built-in matchers only (see `design` skill for list)
 

@@ -15,7 +15,7 @@ This document proposes a TODO database management system similar to the existing
 ✅ **Feature Database System** - Working correctly
 - Database: `doc/02_requirements/feature/feature_db.sdn`
 - Code: `src/driver/src/feature_db.rs`
-- Auto-updates from SSpec test execution
+- Auto-updates from SPipe test execution
 - Generates `doc/02_requirements/feature/feature.md` and category files
 - Command: `simple feature-gen`
 - Status: **67 features tracked successfully**
@@ -86,7 +86,7 @@ src/runtime/src/value/ffi/contracts.rs: 1
 src/compiler/src/lint/types.rs: 18 (mostly examples in docs)
 src/compiler/src/lint/checker.rs: 9 (mostly in code)
 src/compiler/src/lint/mod.rs: 26 (mostly in tests)
-src/driver/src/cli/migrate_sspec.rs: 1
+src/driver/src/cli/migrate_spipe.rs: 1
 ```
 
 ## 2. Proposed TODO Database System

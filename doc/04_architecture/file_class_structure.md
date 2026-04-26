@@ -137,7 +137,7 @@
 | `diff/utilities.spl` | 710 | Algorithms | `Differ` | Myers diff algorithm |
 | `stats_utils.spl` | 700 | Math | - | Mean, median, stddev, correlation |
 | `src/tensor.spl` | 697 | ML | `Tensor` | N-dimensional arrays for ML |
-| `spec.spl` | 694 | Testing | `ExpectHelper` | SSpec BDD framework |
+| `spec.spl` | 694 | Testing | `ExpectHelper` | SPipe BDD framework |
 | `comparator_utils.spl` | 693 | Collections | - | Custom comparators |
 | `binary_io.spl` | 690 | I/O | `BinaryReader`, `BinaryWriter` | Binary file I/O |
 | `allocator.spl` | 683 | Memory | `Allocator`, `ArenaAllocator` | Custom memory allocators |
@@ -160,7 +160,7 @@
 | **Serialization** | ~35 | ~14,000 | JSON, CBOR, YAML, XML, Protobuf, Avro, MessagePack |
 | **Cryptography** | ~40 | ~12,000 | AES, RSA, bcrypt, scrypt, JWT, TLS, hashing |
 | **Math/ML** | ~30 | ~17,000 | Linear algebra, FFT, tensors, optimization |
-| **Testing** | ~18 | ~6,000 | SSpec, mocking, benchmarking, property testing |
+| **Testing** | ~18 | ~6,000 | SPipe, mocking, benchmarking, property testing |
 | **Utilities** | ~220 | ~45,000 | String, array, text, validation, encoding |
 | **I/O** | ~30 | ~10,000 | File, binary, async I/O, streams |
 | **Concurrency** | ~25 | ~8,000 | Threads, actors, channels, locks |
@@ -203,7 +203,7 @@
 - Includes: `arch_check.spl`, `check_capsule.spl`, test commands
 
 **2. Test Runner (`test_runner_new/` - 51 files, 12,368 lines)**
-- SSpec test execution
+- SPipe test execution
 - SDoctest (executable docs)
 - Test report generation
 
@@ -467,7 +467,7 @@ fn select_inst(mir: MirInst) -> MachInst:
 #### 7. Testing Framework (scattered)
 
 **Files involved:**
-- `src/lib/spec.spl` (694 lines) - SSpec BDD framework
+- `src/lib/spec.spl` (694 lines) - SPipe BDD framework
 - `src/app/test_runner_new/test_runner_main.spl` (704 lines)
 - `src/app/test_runner_new/test_runner_execute.spl` (624 lines)
 - `src/lib/src/testing/mocking_advanced.spl` (724 lines)

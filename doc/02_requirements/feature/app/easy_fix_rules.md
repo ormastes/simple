@@ -19,8 +19,8 @@ code snippets, edge cases, and round-trip verification.
 | 1 | print_in_test_spec | Likely |
 | 2 | unnamed_duplicate_typed_args | Uncertain |
 | 3 | resource_leak | Uncertain |
-| 4 | sspec_missing_docstrings | Safe |
-| 5 | sspec_manual_assertions | Likely |
+| 4 | spipe_missing_docstrings | Safe |
+| 5 | spipe_manual_assertions | Likely |
 | 6 | non_exhaustive_match | Safe |
 | 7 | typo_suggestion (Levenshtein) | Likely |
 | 8 | parser_contextual_keyword | Safe |
@@ -132,9 +132,9 @@ code snippets, edge cases, and round-trip verification.
 - handles empty file
 - has Uncertain confidence
 
-### Rule: sspec_missing_docstrings
+### Rule: spipe_missing_docstrings
 
-## sspec_missing_docstrings
+## spipe_missing_docstrings
 
     Detects describe/context blocks without docstrings and adds templates.
 
@@ -160,9 +160,9 @@ code snippets, edge cases, and round-trip verification.
 - handles empty file
 - has Safe confidence
 
-### Rule: sspec_manual_assertions
+### Rule: spipe_manual_assertions
 
-## sspec_manual_assertions
+## spipe_manual_assertions
 
     Detects `if cond: fail()` patterns and suggests `expect()`.
 

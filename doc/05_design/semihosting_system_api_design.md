@@ -685,7 +685,7 @@ semi_print2(0x0042, count, total.to_bits())
 
 ### 8.4 Phase 4: Testing & Documentation (8h)
 
-1. **SSpec tests** (4h)
+1. **SPipe tests** (4h)
    - Compile-time interning tests
    - Host reader tests
 

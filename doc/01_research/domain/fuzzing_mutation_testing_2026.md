@@ -383,7 +383,7 @@ jobs:
 ### 6.3 Lessons for Simple
 
 - Start with **lexer + parser** (highest ROI)
-- Use **corpus seeding** from SSpec examples
+- Use **corpus seeding** from SPipe examples
 - **Grammar-based fuzzing** for type checker
 - **Mutation testing** for critical algorithms (GC, borrow checker)
 
@@ -449,7 +449,7 @@ jobs:
 - [ ] Add `arbitrary` derives to AST
 - [ ] Implement `Arbitrary` for complex nodes
 - [ ] Create grammar-based fuzz targets
-- [ ] Seed corpus from SSpec examples
+- [ ] Seed corpus from SPipe examples
 
 ### 8.4 Phase 4: CI Integration (Week 5)
 - [ ] Add nightly fuzzing job

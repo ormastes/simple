@@ -245,7 +245,7 @@ and simulation all succeed.
   compiler version.
 - Unsupported constructs are rejected before any partial artifact is returned.
 
-## Pending SSpec Coverage
+## Pending SPipe Coverage
 
 Pending coverage lives in
 `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` until implementation

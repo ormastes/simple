@@ -48,12 +48,12 @@ Deep analysis using the arena-based AST. Runs during compilation.
 | STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
 | STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
-| SSPEC001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
-| SSPEC002 | Test Quality | ERROR | Placeholder pass helper (`pass_todo`, `pass_do_nothing`, `pass_dn`) in spec/example |
-| SSPEC003 | Test Quality | ERROR | Placeholder match-arm success/failure assertion in spec/example |
-| SSPEC004 | Test Quality | ERROR | Print-based skip placeholder in spec/example |
-| SSPEC005 | Test Quality | ERROR | Example has no real assertion or sanctioned skip |
-| SSPEC006 | Test Quality | ERROR | Boolean-wrapper assertion such as `expect(a != b).to_equal(true)` |
+| SPIPE001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
+| SPIPE002 | Test Quality | ERROR | Placeholder pass helper (`pass_todo`, `pass_do_nothing`, `pass_dn`) in spec/example |
+| SPIPE003 | Test Quality | ERROR | Placeholder match-arm success/failure assertion in spec/example |
+| SPIPE004 | Test Quality | ERROR | Print-based skip placeholder in spec/example |
+| SPIPE005 | Test Quality | ERROR | Example has no real assertion or sanctioned skip |
+| SPIPE006 | Test Quality | ERROR | Boolean-wrapper assertion such as `expect(a != b).to_equal(true)` |
 
 ### 2. Text-Scanning EasyFix Rules (`src/compiler/90.tools/fix/`)
 
@@ -64,8 +64,8 @@ Line-by-line text analysis with machine-applicable fixes.
 | L:print_in_test_spec | Likely | Replace `print()` with `expect()` in test specs |
 | L:unnamed_duplicate_typed_args | Uncertain | Add names for duplicate-typed params |
 | L:resource_leak | Uncertain | Wrap resource in `with` block |
-| L:sspec_missing_docstrings | Safe | Add template docstring to describe/context |
-| L:sspec_manual_assertions | Likely | Replace manual `if/fail` with `expect()` |
+| L:spipe_missing_docstrings | Safe | Add template docstring to describe/context |
+| L:spipe_manual_assertions | Likely | Replace manual `if/fail` with `expect()` |
 | L:non_exhaustive_match | Safe | Add missing match arms with `todo()` |
 | E:typo_suggestion | Likely | Fix misspelled identifiers |
 | E:parser_contextual_keyword | Likely | Fix contextual keyword syntax |
@@ -79,8 +79,8 @@ Line-by-line text analysis with machine-applicable fixes.
 | L:init_boundary_violation | Uncertain | Import bypasses `__init__.spl` boundary |
 | L:bypass_with_code_files | Uncertain | `#[bypass]` in `__init__.spl` with sibling code |
 | L:bare_bool | Uncertain | Bare `bool` parameter — suggest enum |
-| L:sspec_no_print_based_tests | Certain | Print-based BDD framework in `_spec.spl` |
-| L:sspec_minimal_docstrings | Likely | Test file has too few docstrings |
+| L:spipe_no_print_based_tests | Certain | Print-based BDD framework in `_spec.spl` |
+| L:spipe_minimal_docstrings | Likely | Test file has too few docstrings |
 
 ### 3. Semantic Linter Tool (`src/compiler/90.tools/lint/main.spl`)
 
@@ -97,7 +97,7 @@ Combined pattern-based + EasyFix pipeline with severity control.
 | TODO (T) | T001-T004 | TODO/FIXME format compliance |
 | Import (I) | I001-I003 | Unfold declarations, missing __init__.spl |
 | Stub (STUB) | STUB001-STUB003 | Trivial/dummy implementations |
-| SSpec quality (SSPEC) | SSPEC001-SSPEC006 | Tautology and placeholder-success checks in test/spec files |
+| SPipe quality (SPIPE) | SPIPE001-SPIPE006 | Tautology and placeholder-success checks in test/spec files |
 | Arguments (ARG) | ARG001-ARG002 | Too many function parameters |
 
 ---
@@ -233,12 +233,12 @@ case _("why catch-all is correct"):
 
 ---
 
-## SSpec Placeholder Quality Lints (SSPEC001-SSPEC006)
+## SPipe Placeholder Quality Lints (SPIPE001-SPIPE006)
 
 These lints only apply to test/spec files and are deny-by-default. Their job is
 to stop fake success signals from being counted as proof.
 
-### SSPEC001: Tautological Literal Assertion (ERROR)
+### SPIPE001: Tautological Literal Assertion (ERROR)
 
 Fires on literal-success assertions such as:
 
@@ -249,7 +249,7 @@ expect(false).to_equal(false)
 
 Use a real assertion against returned data, state, or capability status instead.
 
-### SSPEC002: Placeholder Pass Helper In Example (ERROR)
+### SPIPE002: Placeholder Pass Helper In Example (ERROR)
 
 Fires when a spec/example body contains:
 
@@ -262,7 +262,7 @@ pass_dn
 For environment/tooling gaps, use `skip:` or assert an explicit `skip:` /
 `blocked:` capability result.
 
-### SSPEC003: Placeholder Match-Arm Success (ERROR)
+### SPIPE003: Placeholder Match-Arm Success (ERROR)
 
 Fires on match-arm placeholders such as:
 
@@ -273,7 +273,7 @@ case Err(_): pass_do_nothing
 
 Match arms must assert concrete fields or messages, not a literal-success stand-in.
 
-### SSPEC004: Print-Based Skip Placeholder (ERROR)
+### SPIPE004: Print-Based Skip Placeholder (ERROR)
 
 Fires on print-and-return skip placeholders such as:
 
@@ -285,7 +285,7 @@ it "prints skip and returns":
 
 Use `skip:` for sanctioned environment skips instead of pretending the example passed.
 
-### SSPEC005: No Real Assertion Or Sanctioned Skip (ERROR)
+### SPIPE005: No Real Assertion Or Sanctioned Skip (ERROR)
 
 Fires when an `it` or `slow_it` body has no real assertion and no sanctioned `skip:`.
 
@@ -296,7 +296,7 @@ it "just calls helper":
 
 Examples must either assert a concrete result or use `skip:` when the environment legitimately cannot execute them.
 
-### SSPEC006: Boolean-Wrapper Assertion (ERROR)
+### SPIPE006: Boolean-Wrapper Assertion (ERROR)
 
 Fires when a spec wraps a comparison inside `expect(...)` and then compares that
 boolean to `true` or `false`.
@@ -378,13 +378,13 @@ wildcard_match = "allow"
 | `bare_bool` | warn | Boolean parameters (suggest enum) |
 | `print_in_test_spec` | warn | `print()` in test specs |
 | `todo_format` | warn | TODO/FIXME format compliance |
-| `sspec_no_print_based_tests` | **deny** | Print-based BDD tests |
-| `sspec_missing_docstrings` | warn | Missing docstrings in describe/context |
-| `sspec_minimal_docstrings` | warn | Too few docstrings in test files |
-| `sspec_manual_assertions` | warn | Manual pass/fail instead of expect() |
-| `sspec_placeholder_tests` | **deny** | Tautology / pass-helper placeholder assertions |
-| `sspec_empty_examples` | **deny** | `it`/`slow_it` with no real assertion or skip |
-| `sspec_boolean_wrapper_assertions` | **deny** | `expect(<comparison>).to_equal(true/false)` |
+| `spipe_no_print_based_tests` | **deny** | Print-based BDD tests |
+| `spipe_missing_docstrings` | warn | Missing docstrings in describe/context |
+| `spipe_minimal_docstrings` | warn | Too few docstrings in test files |
+| `spipe_manual_assertions` | warn | Manual pass/fail instead of expect() |
+| `spipe_placeholder_tests` | **deny** | Tautology / pass-helper placeholder assertions |
+| `spipe_empty_examples` | **deny** | `it`/`slow_it` with no real assertion or skip |
+| `spipe_boolean_wrapper_assertions` | **deny** | `expect(<comparison>).to_equal(true/false)` |
 | `unnamed_duplicate_typed_args` | warn | Same-typed params without names |
 | `resource_leak` | warn | Unclosed resources |
 | `wildcard_match` | allow | Wildcard `_` in match |

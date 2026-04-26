@@ -8,7 +8,7 @@ This directory contains the SDN (Simple Data Notation) database files for the da
 doc/dashboard/
 ├── tables/              # Current state tables
 │   ├── features.sdn
-│   ├── sspec_tests.sdn
+│   ├── spipe_tests.sdn
 │   ├── todos.sdn
 │   ├── coverage.sdn
 │   ├── duplication.sdn
@@ -32,10 +32,10 @@ Tracks language features and their implementation status across different execut
 features |id, category, name, status, test_coverage, last_updated|
 ```
 
-### sspec_tests.sdn
-Tracks SSpec BDD test files and their execution results.
+### spipe_tests.sdn
+Tracks SPipe BDD test files and their execution results.
 ```
-sspec_tests |id, file, title, category, difficulty, status, total_tests, passed, failed, duration_ms, has_docs, last_run|
+spipe_tests |id, file, title, category, difficulty, status, total_tests, passed, failed, duration_ms, has_docs, last_run|
 ```
 
 ### todos.sdn
@@ -102,7 +102,7 @@ simple dashboard collect --mode=full
 ### View CLI Dashboard
 ```bash
 simple dashboard              # Summary view
-simple dashboard sspec        # SSpec details
+simple dashboard spipe        # SPipe details
 simple dashboard todos        # TODO breakdown
 simple dashboard coverage     # Coverage details
 ```

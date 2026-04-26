@@ -3,7 +3,7 @@
 
 ## Overview
 
-Type Annotation Conversion - SSpec Tests
+Type Annotation Conversion - SPipe Tests
 Decision #7: val arr: ArrayList = [1, 2, 3] should auto-convert
 
 Category: Collections

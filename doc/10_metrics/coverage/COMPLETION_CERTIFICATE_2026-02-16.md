@@ -320,7 +320,7 @@ Accuracy: w≈2.0, b≈1.0 (targets achieved!)
 **Language**: Simple (https://github.com/simple-lang/simple)
 **Runtime**: Simple interpreter (33MB binary)
 **GPU**: CUDA (RTX 4090 + RTX 4080)
-**Testing**: SSpec framework
+**Testing**: SPipe framework
 **Documentation**: Markdown
 
 ### Special Thanks

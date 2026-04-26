@@ -50,7 +50,7 @@ bin/simple test test/unit/os/sosix
 
 ## Pass Criteria
 
-- All SSpec files load and execute without failures.
+- All SPipe files load and execute without failures.
 - Tests use only built-in matchers.
 - No test relies on external process state; every case calls `sosix_share_init()`.
 - Unsealed dataset attachment attempts leave the queue unreadable.

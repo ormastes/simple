@@ -382,7 +382,7 @@ fn main():
 
 ---
 
-## Testing with SSpec
+## Testing with SPipe
 
 Create `math_spec.spl`:
 

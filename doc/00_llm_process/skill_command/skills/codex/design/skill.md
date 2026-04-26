@@ -1,7 +1,7 @@
 <!-- llm-process-gen: managed source=codex_design_skill source_sha256=afdc7a9b578cf6054efdecd94448ad67b8cf879d88d9ebd69f44167a547f4aa3 content_sha256=afdc7a9b578cf6054efdecd94448ad67b8cf879d88d9ebd69f44167a547f4aa3 -->
 ---
 name: design
-description: "Codex design skill (Step 4 in cooperative pipeline). Architecture evaluation, pattern selection, MDSOC application, system test design with SSpec BDD. Self-sufficient — does UI design if Gemini step was skipped, does research if missing."
+description: "Codex design skill (Step 4 in cooperative pipeline). Architecture evaluation, pattern selection, MDSOC application, system test design with SPipe BDD. Self-sufficient — does UI design if Gemini step was skipped, does research if missing."
 ---
 
 # Design — Codex (Cooperative Step 4)
@@ -48,7 +48,7 @@ Output: `doc/04_architecture/<feature>.md`
 
 ## Phase 3: System Test Design
 
-- SSpec BDD tests with **built-in matchers only**
+- SPipe BDD tests with **built-in matchers only**
 - Every REQ-NNN must have at least one test
 - Include edge cases and error paths
 
@@ -72,10 +72,10 @@ to_be_less_than(val)      # Numeric comparison
 - Use `to_equal(true)` not `to_be_true()`
 - Use `to_equal(false)` not `to_be_false()`
 
-### SSpec Test Template
+### SPipe Test Template
 
 ```simple
-use std.spec.SSpec
+use std.spec.SPipe
 
 describe "<Feature>":
     describe "REQ-001: <requirement name>":
@@ -101,7 +101,7 @@ describe "<Feature>":
 ## Phase 5: Quality Check
 
 - Verify every REQ-NNN has test coverage
-- Check SSpec quality: real assertions, edge cases, error paths
+- Check SPipe quality: real assertions, edge cases, error paths
 - Verify architecture alignment with MDSOC rules
 - Ask user if architecture/design needs changes
 

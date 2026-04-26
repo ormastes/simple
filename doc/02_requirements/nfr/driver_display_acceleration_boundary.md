@@ -8,5 +8,5 @@ Feature: FR-DRIVER-0011.
   service selection and system tests.
 - NFR-DRV-DISPLAY-002: Display capability summaries must avoid ambiguous terms
   such as VGA DMA.
-- NFR-DRV-DISPLAY-003: SSpec coverage must include both fallback framebuffer and
+- NFR-DRV-DISPLAY-003: SPipe coverage must include both fallback framebuffer and
   initialized VirtIO-GPU DMA summaries.

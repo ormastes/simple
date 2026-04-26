@@ -71,7 +71,7 @@ qemu-system-x86_64 -kernel hello_x86.elf -nographic -no-reboot
 qemu-system-riscv32 -M virt -kernel hello_riscv32.elf -nographic -semihosting
 ```
 
-### 3. Run SSpec Tests
+### 3. Run SPipe Tests
 
 ```bash
 bin/simple test test/feature/baremetal/hello_riscv32_semihost_spec.spl
@@ -293,7 +293,7 @@ qemu-system-riscv32 -M virt -kernel hello.elf \
 
 ---
 
-## SSpec Testing with Semihosting
+## SPipe Testing with Semihosting
 
 ### SemihostExecutor API
 
@@ -321,7 +321,7 @@ class SemihostResult:
 ### Test Example
 
 ```simple
-use std.sspec.{describe, it, expect}
+use std.spipe.{describe, it, expect}
 use std.execution.semihost_capture.{SemihostExecutor}
 
 describe "RISC-V 32 Semihosting":
@@ -578,4 +578,4 @@ riscv64-unknown-elf-ld prog.o -o prog.elf -Ttext=0x80000000
 
 - Backend overview: `doc/07_guide/backend/backends.md`
 - GPU programming: `doc/07_guide/backend/gpu_programming.md`
-- SSpec framework: See `/sspec` skill
+- SPipe framework: See `/spipe` skill

@@ -27,19 +27,19 @@ Ensure active `simple-mcp` provides a protocol surface and response format compa
 
 **Given** known missing methods are not implemented yet  
 **When** protocol coverage is reviewed  
-**Then** each missing method is explicitly tracked in docs and SSpec matrix tests
+**Then** each missing method is explicitly tracked in docs and SPipe matrix tests
 
 ### Scenario: Response Format Gap Visibility
 
 **Given** known response-shape mismatches exist  
 **When** format compatibility is reviewed  
-**Then** each mismatch is explicitly tracked in docs and SSpec matrix tests
+**Then** each mismatch is explicitly tracked in docs and SPipe matrix tests
 
 ## Acceptance Criteria
 
-- [ ] Feature inventory (all current MCP tools) is documented and mirrored in SSpec matrix.
-- [ ] Gap inventory (methods + response format) is documented and mirrored in SSpec matrix.
-- [ ] Closure plan phases are documented and mirrored in SSpec matrix.
+- [ ] Feature inventory (all current MCP tools) is documented and mirrored in SPipe matrix.
+- [ ] Gap inventory (methods + response format) is documented and mirrored in SPipe matrix.
+- [ ] Closure plan phases are documented and mirrored in SPipe matrix.
 - [ ] Design document includes current implementation path and explicit protocol deltas.
 
 ## Out of Scope

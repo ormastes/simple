@@ -386,7 +386,7 @@ g_mount_table.mount(Path(raw: "/sqlite"), DriverInstance.Sqlite(sqlite_drv), Mou
 
 ### Step 6: Tests to write
 
-Write tests in `test/` using SSpec. Cover:
+Write tests in `test/` using SPipe. Cover:
 
 1. **Lifecycle**: `mount` succeeds; double-`mount` returns an error or is idempotent; `unmount` with open handles returns `FsError.Busy`.
 2. **Round-trip I/O**: `open` → `write` → `close` → `open` → `read` returns the same bytes.
@@ -485,5 +485,5 @@ For a new filesystem:
 | `src/lib/nogc_sync_mut/fs_driver/mount_table.spl` | `MountTable`, `MountEntry`, `MountId` |
 | `src/lib/nogc_sync_mut/fs_driver/ramfs.spl` | `RamFsDriver` — complete reference implementation |
 | `src/os/services/vfs/vfs_init.spl` | `g_vfs_*` consumer helpers + boot init |
-| `test/system/os_filesystem_variants_spec.spl` | SSpec system matrix for FAT32 and NVFS variants |
+| `test/system/os_filesystem_variants_spec.spl` | SPipe system matrix for FAT32 and NVFS variants |
 | `doc/05_design/fs_driver_interface.md` | Design rationale (§2 trait, §3 dispatch, §4 extensions, §5 caps) |

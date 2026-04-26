@@ -159,7 +159,7 @@ resolve_qemu_path(arch)
 
 ### With Test Framework
 
-Tests use the SSpec framework:
+Tests use the SPipe framework:
 ```simple
 use std.spec
 use src.lib.qemu.boot_runner.{run_x86_boot_test}

@@ -645,12 +645,12 @@ class ResourceManager:
 - ⏳ Needed: Resource/prompt integration tests
 
 ### 10.2 LSP Testing
-- SSpec tests for each LSP feature
+- SPipe tests for each LSP feature
 - Integration tests with sample Simple projects
 - Performance benchmarks
 
 ### 10.3 DAP Testing
-- SSpec tests for debugging workflows
+- SPipe tests for debugging workflows
 - Sample programs with known breakpoint behavior
 - Edge case testing (errors, infinite loops)
 

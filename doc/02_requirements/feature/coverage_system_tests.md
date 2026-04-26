@@ -7,7 +7,7 @@
 
 ## Scope
 
-Define requirements for comprehensive SSpec test coverage of the 8 source files
+Define requirements for comprehensive SPipe test coverage of the 8 source files
 that compose the coverage measurement subsystem.
 
 ## Source Files Under Test
@@ -30,7 +30,7 @@ that compose the coverage measurement subsystem.
 ### REQ-COV-001: Struct/Class Construction Tests
 
 Every public `struct` or `class` exported by the 8 source files listed above
-must have at least one SSpec test that exercises its constructor. The test must
+must have at least one SPipe test that exercises its constructor. The test must
 verify that all fields are initialized to their documented defaults or to
 explicitly provided values.
 
@@ -69,7 +69,7 @@ can fully pass:
    line/branch/function stats from the raw coverage text format.
 
 **Acceptance:** Each stub is replaced with a working implementation that passes
-its corresponding SSpec tests without `pass_todo`.
+its corresponding SPipe tests without `pass_todo`.
 
 ### REQ-COV-005: Tests as Living Documentation
 

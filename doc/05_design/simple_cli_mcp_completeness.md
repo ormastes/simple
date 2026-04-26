@@ -70,7 +70,7 @@ fn canonical_inventory() -> [CommandEntry]:
 | Class | Count | Commands |
 |-------|-------|----------|
 | Implemented | 11 | `-h`, `-v`, `-c`, `compile`, `targets`, `linkers`, `lex`, `lint`, `fmt`, `fix`, `check` |
-| Delegated | 24 | `test`, `duplicate-check`, `grammar-doc`, `query`, `spec-coverage`, `feature-gen`, `task-gen`, `spec-gen`, `sspec-docgen`, `feature-doc`, `todo-scan`, `todo-gen`, `wrapper-gen`, `desugar`, `dashboard`, `office`, `add`, `remove`, `install`, `update`, `list`, `tree`, `cache`, `env` |
+| Delegated | 24 | `test`, `duplicate-check`, `grammar-doc`, `query`, `spec-coverage`, `feature-gen`, `task-gen`, `spec-gen`, `spipe-docgen`, `feature-doc`, `todo-scan`, `todo-gen`, `wrapper-gen`, `desugar`, `dashboard`, `office`, `add`, `remove`, `install`, `update`, `list`, `tree`, `cache`, `env` |
 | Built-in | 5 | `build`, `init`, `stats`, `leak-check`, `run` |
 | Wrapper | 1 | `mcp` |
 | Experimental | 5 | `verify`, `migrate`, `constr`, `replay`, `gen-lean` |

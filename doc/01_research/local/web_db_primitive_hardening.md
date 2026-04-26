@@ -6,7 +6,7 @@
 - `app.ui.web` uses `BoundedChannel` for event/render backpressure. Its `close()` was a no-op, and `test/app/ui.web/backpressure_test.spl` documented that sends after close still succeeded.
 - Database production APIs are under `src/lib/nogc_sync_mut/database/` and re-exported through `std.database.*`. Existing system/unit DB specs included placeholders or local stubs, so they did not prove production persistence.
 - Primitive coverage already exists in `test/feature/usage/primitive_types_spec.spl`, `test/integration/app/primitive_api_lint_spec.spl`, and `test/shared/core/primitives_spec.spl`; interpreted checks pass.
-- Native SSpec execution remains a broader harness risk for some specs because native wrappers can fail before assertions with unresolved `expect`.
+- Native SPipe execution remains a broader harness risk for some specs because native wrappers can fail before assertions with unresolved `expect`.
 
 ## Implementation Notes
 - Favor focused production fixes over broad rewrites.

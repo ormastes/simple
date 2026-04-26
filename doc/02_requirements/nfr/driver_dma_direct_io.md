@@ -11,5 +11,5 @@ Feature: FR-DRIVER-0010.
 - NFR-003: No hidden heap-copy fallback occurs unless the returned status says
   `bounce-buffered`.
 - NFR-004: Cache synchronization remains explicit at the DMA boundary.
-- NFR-005: Focused SSpec coverage must exercise aligned I/O, unaligned
+- NFR-005: Focused SPipe coverage must exercise aligned I/O, unaligned
   rejection/bounce, timeout, cleanup, and benchmark reporting.

@@ -102,7 +102,7 @@ make check
 # Full validation (includes coverage and duplication check)
 make check-full
 
-# Run all tests (Rust + Simple/SSpec)
+# Run all tests (Rust + Simple/SPipe)
 make test-all
 
 # Build Rust runtime
@@ -383,19 +383,19 @@ See the `/debug` skill for complete debugging guide.
 
 ## Documentation Writing
 
-### SSpec Tests (Executable Specs)
+### SPipe Tests (Executable Specs)
 
 Use the template for new specs:
 
 ```bash
 # Copy template
-cp .claude/templates/sspec_template.spl test/path/to/new_spec.spl
+cp .claude/templates/spipe_template.spl test/path/to/new_spec.spl
 
 # See complete example
-cat doc/07_guide/sspec_complete_example.md
+cat doc/07_guide/spipe_complete_example.md
 
 # Or use skill
-# /sspec
+# /spipe
 ```
 
 **Key features:**
@@ -410,7 +410,7 @@ cat doc/07_guide/sspec_complete_example.md
 | Research | `doc/01_research/` | Investigation, exploration |
 | Design | `doc/05_design/` | Architecture decisions |
 | Guides | `doc/07_guide/` | User tutorials |
-| Specs | `test/**/*_spec.spl` | Executable SSpec tests |
+| Specs | `test/**/*_spec.spl` | Executable SPipe tests |
 
 See the `/doc` skill for complete documentation guide.
 
@@ -452,8 +452,8 @@ Invoke with `/<skill-name>` for detailed guidance:
 | Skill | Purpose |
 |-------|---------|
 | `versioning` | Jujutsu (jj) workflow |
-| `test` | Test writing (Rust & SSpec) |
-| `sspec` | SSpec BDD framework |
+| `test` | Test writing (Rust & SPipe) |
+| `spipe` | SPipe BDD framework |
 | `coding` | Coding standards |
 | `design` | Design patterns, APIs |
 | `architecture` | Compiler architecture |
@@ -469,7 +469,7 @@ Skills located in `.claude/skills/`.
 ## Getting Help
 
 - **Syntax reference:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
-- **SSpec template:** `.claude/templates/sspec_template.spl`
+- **SPipe template:** `.claude/templates/spipe_template.spl`
 - **Project instructions:** `CLAUDE.md`
 - **Bug reports:** `doc/bug_report.md`
 - **Feature requests:** `doc/improve_request.md`

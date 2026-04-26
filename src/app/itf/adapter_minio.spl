@@ -1,0 +1,635 @@
+# MinIO / S3-compatible adapter — pure Simple, raw HTTP + SigV4.
+#
+# Path-style addressing only; UNSIGNED-PAYLOAD for HTTPS PUTs; SHA256("") for
+# GET/HEAD; precomputed body hash for small XML POSTs. Default region us-east-1.
+# Returns (success: bool, parsed: T, raw_text: text) per ITF adapter pattern.
+
+use std.common.crypto.types.{rotr32}
+use std.nogc_sync_mut.env.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
+use std.nogc_sync_mut.io.http_ffi.{rt_http_request, rt_http_download}
+use std.nogc_sync_mut.aws_sigv4.{
+    SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
+    SigV4Header, SigV4QueryParam,
+    sigv4_sha256_hex, sigv4_uri_encode, sigv4_canonical_query,
+    sigv4_authorization_header, sigv4_presign_get_url,
+    parse_s3_error, S3ErrorInfo
+}
+use app.itf.errors.{ItfError}
+
+
+val MINIO_DEFAULT_REGION = "us-east-1"
+val MINIO_SERVICE = "s3"
+val MINIO_MAX_PRESIGN_EXPIRES = 604800  # 7 days
+val MINIO_MULTIPART_THRESHOLD = 67108864  # 64 MiB
+val MINIO_MAX_LIST_PAGES = 1000  # safety cap on pagination loops
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+class MinioConfig:
+    url: text                  # e.g. "https://minio.corp:9000" — no trailing slash
+    region: text
+    access_key: text
+    secret_key: text
+    tls_skip_verify: bool
+
+    static fn default() -> MinioConfig:
+        MinioConfig(url: "", region: MINIO_DEFAULT_REGION, access_key: "", secret_key: "", tls_skip_verify: false)
+
+
+fn _strip_quotes(s: text) -> text:
+    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s
+
+fn _parse_minio_section(content: text) -> MinioConfig:
+    """Parse a `[minio]` SDN section into MinioConfig.
+
+    Accepts both flat `[minio] key = value` and indented `minio:` styles.
+    """
+    var cfg = MinioConfig.default()
+    val lines = content.split("\n")
+    var in_section = false
+    for raw in lines:
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            pass_dn
+        else if line.starts_with("[") and line.ends_with("]"):
+            in_section = (line == "[minio]")
+        else if line.ends_with(":") and not line.contains(" "):
+            in_section = (line == "minio:")
+        else if in_section and line.contains("="):
+            val parts = line.split("=", 2)
+            val k = parts[0].trim()
+            val v = _strip_quotes(parts[1].trim())
+            if k == "url":
+                cfg = MinioConfig(url: v, region: cfg.region, access_key: cfg.access_key, secret_key: cfg.secret_key, tls_skip_verify: cfg.tls_skip_verify)
+            else if k == "region":
+                cfg = MinioConfig(url: cfg.url, region: v, access_key: cfg.access_key, secret_key: cfg.secret_key, tls_skip_verify: cfg.tls_skip_verify)
+            else if k == "access_key":
+                cfg = MinioConfig(url: cfg.url, region: cfg.region, access_key: v, secret_key: cfg.secret_key, tls_skip_verify: cfg.tls_skip_verify)
+            else if k == "secret_key":
+                cfg = MinioConfig(url: cfg.url, region: cfg.region, access_key: cfg.access_key, secret_key: v, tls_skip_verify: cfg.tls_skip_verify)
+            else if k == "tls_skip_verify":
+                cfg = MinioConfig(url: cfg.url, region: cfg.region, access_key: cfg.access_key, secret_key: cfg.secret_key, tls_skip_verify: (v == "true"))
+    cfg
+
+
+fn load_minio_config() -> MinioConfig:
+    """Load `[minio]` section from ~/.config/itf/auth.sdn if present."""
+    val home = env_get("HOME")
+    if home == "":
+        return MinioConfig.default()
+    val path = "{home}/.config/itf/auth.sdn"
+    if not file_exists(path):
+        return MinioConfig.default()
+    val content = file_read_text(path)
+    if content == nil:
+        return MinioConfig.default()
+    val cfg = _parse_minio_section(content)
+    if cfg.tls_skip_verify:
+        # Memory note: rt_http_client doesn't expose a TLS-verify knob (2026-04-26).
+        # We log the warning; effective enforcement requires runtime FFI follow-up.
+        print "[WARN] MinIO TLS verify disabled — not safe for production"
+    cfg
+
+
+fn check_minio_auth(cfg: MinioConfig) -> bool:
+    cfg.url != "" and cfg.access_key != "" and cfg.secret_key != ""
+
+
+# ---------------------------------------------------------------------------
+# Datetime — minimal UTC ISO 8601 from rt_time_now (epoch seconds)
+# ---------------------------------------------------------------------------
+
+extern fn rt_time_now() -> i64
+
+fn _pad2(n: i64) -> text:
+    if n < 10: "0{n}" else: "{n}"
+
+fn _is_leap(y: i64) -> bool:
+    (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+
+fn _days_in_month(y: i64, m: i64) -> i64:
+    if m == 2:
+        return if _is_leap(y): 29 else: 28
+    if m == 4 or m == 6 or m == 9 or m == 11:
+        return 30
+    31
+
+fn epoch_to_amz_datetime(epoch: i64) -> text:
+    """Format epoch seconds as YYYYMMDDTHHMMSSZ (UTC)."""
+    var days = epoch / 86400
+    var rem = epoch - (days * 86400)
+    val hour = rem / 3600
+    rem = rem - (hour * 3600)
+    val minute = rem / 60
+    val second = rem - (minute * 60)
+
+    var year = 1970
+    while true:
+        val yd = if _is_leap(year): 366 else: 365
+        if days >= yd:
+            days = days - yd
+            year = year + 1
+        else:
+            break
+    var month = 1
+    while month <= 12:
+        val md = _days_in_month(year, month)
+        if days >= md:
+            days = days - md
+            month = month + 1
+        else:
+            break
+    val day = days + 1
+    "{year}{_pad2(month)}{_pad2(day)}T{_pad2(hour)}{_pad2(minute)}{_pad2(second)}Z"
+
+
+fn _amz_datetime_now() -> text:
+    epoch_to_amz_datetime(rt_time_now())
+
+
+# ---------------------------------------------------------------------------
+# URL + host helpers
+# ---------------------------------------------------------------------------
+
+fn _host_from_url(url: text) -> text:
+    """Extract host[:port] from a URL like https://host:port[/path]."""
+    var rest = url
+    val scheme_end = rest.find("://").unwrap_or(-1)
+    if scheme_end >= 0:
+        rest = rest[scheme_end + 3:]
+    val slash = rest.find("/").unwrap_or(-1)
+    if slash >= 0:
+        return rest[0:slash]
+    rest
+
+fn _build_object_path(bucket: text, key: text) -> text:
+    """Build a path-style canonical URI for a bucket/key (each segment encoded)."""
+    if bucket == "":
+        return "/" + sigv4_uri_encode(key, false)
+    if key == "":
+        return "/" + bucket
+    "/" + bucket + "/" + sigv4_uri_encode(key, false)
+
+
+# ---------------------------------------------------------------------------
+# Signed-request execution
+# ---------------------------------------------------------------------------
+
+class S3Response:
+    status: i64
+    body: text
+    error: text  # transport-level error (empty on success/4xx/5xx)
+
+
+fn _signed_get(
+    cfg: MinioConfig,
+    canonical_uri: text,
+    query_params: [SigV4QueryParam]
+) -> S3Response:
+    """Issue a signed GET to {url}{path}?{query}; UNSIGNED-PAYLOAD if no query else empty body hash."""
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val canonical_query = sigv4_canonical_query(query_params)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var headers: [SigV4Header] = []
+    headers = headers + [SigV4Header(name: "host", value: host)]
+    headers = headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    headers = headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "GET", canonical_uri, canonical_query, headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var ffi_headers: [text] = []
+    ffi_headers = ffi_headers + ["Host: {host}"]
+    ffi_headers = ffi_headers + ["x-amz-content-sha256: {payload_hash}"]
+    ffi_headers = ffi_headers + ["x-amz-date: {amz_dt}"]
+    ffi_headers = ffi_headers + ["Authorization: {auth}"]
+
+    val full_url = if canonical_query == "":
+        "{cfg.url}{canonical_uri}"
+    else:
+        "{cfg.url}{canonical_uri}?{canonical_query}"
+    val (status, body, err) = rt_http_request("GET", full_url, ffi_headers, "")
+    S3Response(status: status, body: body, error: err)
+
+
+# ---------------------------------------------------------------------------
+# Error mapping
+# ---------------------------------------------------------------------------
+
+class MinioErrorMap:
+    kind: text     # "ok" | "auth" | "not_found" | "conflict" | "unavailable" | "network" | "other"
+    message: text  # human-readable, possibly enriched with <Error><Code>
+
+
+fn map_s3_error(status: i64, body: text, transport_err: text) -> MinioErrorMap:
+    """Categorize an S3/MinIO response.
+
+    Maps: 200..299 → ok; 401/403 → auth; 404 → not_found; 409 → conflict;
+    5xx → unavailable; transport error → network. Enriches message with
+    <Error><Code> if present in the XML body.
+    """
+    if transport_err != "":
+        return MinioErrorMap(kind: "network", message: transport_err)
+    if status >= 200 and status < 300:
+        return MinioErrorMap(kind: "ok", message: "")
+    val info = parse_s3_error(body)
+    val code_part = if info.code != "": "[{info.code}] " else: ""
+    val msg_part = if info.message != "": info.message else: body
+    val full_msg = "{code_part}{msg_part}"
+    if status == 401 or status == 403:
+        return MinioErrorMap(kind: "auth", message: full_msg)
+    if status == 404:
+        return MinioErrorMap(kind: "not_found", message: full_msg)
+    if status == 409:
+        return MinioErrorMap(kind: "conflict", message: full_msg)
+    if status == 503 or status == 502 or status == 504:
+        return MinioErrorMap(kind: "unavailable", message: full_msg)
+    MinioErrorMap(kind: "other", message: "HTTP {status}: {full_msg}")
+
+
+# ---------------------------------------------------------------------------
+# Tiny XML extractor — small subset suitable for ListBuckets/ListObjects
+# ---------------------------------------------------------------------------
+
+fn _xml_first_inner(body: text, tag: text, start: i64) -> (text, i64):
+    """Return (inner_text, end_index_after_close) or ("", -1) if not found."""
+    val open = "<" + tag + ">"
+    val close = "</" + tag + ">"
+    val from = if start < 0: 0 else: start
+    val rest = body[from:]
+    val a = rest.find(open).unwrap_or(-1)
+    if a < 0:
+        return ("", -1)
+    val abs_a = from + a
+    val rest2 = body[abs_a + open.len():]
+    val b = rest2.find(close).unwrap_or(-1)
+    if b < 0:
+        return ("", -1)
+    val inner = rest2[0:b]
+    val end = abs_a + open.len() + b + close.len()
+    (inner, end)
+
+fn _xml_first(body: text, tag: text) -> text:
+    val (s, _) = _xml_first_inner(body, tag, 0)
+    s
+
+fn _xml_extract_all_inner(body: text, parent_tag: text, child_tag: text) -> [text]:
+    """Return inner text of every <child_tag> within the first <parent_tag> block."""
+    var out: [text] = []
+    val open_p = "<" + parent_tag + ">"
+    val close_p = "</" + parent_tag + ">"
+    val a = body.find(open_p).unwrap_or(-1)
+    if a < 0:
+        return out
+    val rest = body[a + open_p.len():]
+    val end = rest.find(close_p).unwrap_or(-1)
+    if end < 0:
+        return out
+    var scope = rest[0:end]
+    var pos = 0
+    while true:
+        val (inner, np) = _xml_first_inner(scope, child_tag, pos)
+        if np < 0:
+            break
+        out = out + [inner]
+        pos = np
+    out
+
+
+# ---------------------------------------------------------------------------
+# ListBuckets
+# ---------------------------------------------------------------------------
+
+class BucketInfo:
+    name: text
+    creation_date: text
+
+
+fn _parse_list_buckets_xml(body: text) -> [BucketInfo]:
+    """Parse <ListAllMyBucketsResult> XML.
+
+    Walks <Buckets><Bucket>...</Bucket>...</Buckets>, extracting Name+CreationDate.
+    """
+    var out: [BucketInfo] = []
+    val buckets_open = "<Buckets>"
+    val buckets_close = "</Buckets>"
+    val a = body.find(buckets_open).unwrap_or(-1)
+    if a < 0:
+        return out
+    val rest = body[a + buckets_open.len():]
+    val end = rest.find(buckets_close).unwrap_or(-1)
+    if end < 0:
+        return out
+    var scope = rest[0:end]
+    var pos = 0
+    while true:
+        val (inner, np) = _xml_first_inner(scope, "Bucket", pos)
+        if np < 0:
+            break
+        val name = _xml_first(inner, "Name")
+        val cd = _xml_first(inner, "CreationDate")
+        out = out + [BucketInfo(name: name, creation_date: cd)]
+        pos = np
+    out
+
+
+fn minio_list_buckets(cfg: MinioConfig) -> (bool, [BucketInfo], text):
+    """List all buckets visible to the configured credentials."""
+    val resp = _signed_get(cfg, "/", [])
+    val mapped = map_s3_error(resp.status, resp.body, resp.error)
+    if mapped.kind != "ok":
+        return (false, [], mapped.message)
+    (true, _parse_list_buckets_xml(resp.body), resp.body)
+
+
+# ---------------------------------------------------------------------------
+# ListObjectsV2 + pagination
+# ---------------------------------------------------------------------------
+
+class ObjectInfo:
+    key: text
+    size: i64
+    last_modified: text
+    etag: text
+
+
+class ListObjectsResult:
+    objects: [ObjectInfo]
+    is_truncated: bool
+    next_continuation_token: text
+
+
+fn _parse_size(s: text) -> i64:
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_code_at(i)
+        if ch >= 48 and ch <= 57:
+            n = n * 10 + (ch - 48)
+        i = i + 1
+    n
+
+
+fn _parse_list_objects_xml(body: text) -> ListObjectsResult:
+    """Parse <ListBucketResult> XML — extracts Contents[], IsTruncated, NextContinuationToken."""
+    var objs: [ObjectInfo] = []
+    var pos = 0
+    while true:
+        val (inner, np) = _xml_first_inner(body, "Contents", pos)
+        if np < 0:
+            break
+        val key = _xml_first(inner, "Key")
+        val size = _parse_size(_xml_first(inner, "Size"))
+        val lm = _xml_first(inner, "LastModified")
+        val etag = _xml_first(inner, "ETag")
+        objs = objs + [ObjectInfo(key: key, size: size, last_modified: lm, etag: etag)]
+        pos = np
+    val is_trunc_text = _xml_first(body, "IsTruncated")
+    val token = _xml_first(body, "NextContinuationToken")
+    ListObjectsResult(objects: objs, is_truncated: (is_trunc_text == "true"), next_continuation_token: token)
+
+
+fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [ObjectInfo], text):
+    """List all objects under `bucket` matching `prefix`, paginating until exhausted."""
+    var all: [ObjectInfo] = []
+    var token = ""
+    var pages = 0
+    var raw_last = ""
+    while pages < MINIO_MAX_LIST_PAGES:
+        var params: [SigV4QueryParam] = []
+        params = params + [SigV4QueryParam(name: "list-type", value: "2")]
+        if prefix != "":
+            params = params + [SigV4QueryParam(name: "prefix", value: prefix)]
+        if token != "":
+            params = params + [SigV4QueryParam(name: "continuation-token", value: token)]
+        val resp = _signed_get(cfg, "/" + bucket, params)
+        val mapped = map_s3_error(resp.status, resp.body, resp.error)
+        if mapped.kind != "ok":
+            return (false, all, mapped.message)
+        raw_last = resp.body
+        val page = _parse_list_objects_xml(resp.body)
+        for obj in page.objects:
+            all = all + [obj]
+        if not page.is_truncated:
+            return (true, all, raw_last)
+        if page.next_continuation_token == "":
+            return (true, all, raw_last)
+        token = page.next_continuation_token
+        pages = pages + 1
+    (false, all, "list_objects: exceeded {MINIO_MAX_LIST_PAGES} pages — possible server loop")
+
+
+# ---------------------------------------------------------------------------
+# GetObject (text body) and streaming download (binary)
+# ---------------------------------------------------------------------------
+
+class GetObjectResult:
+    body: text          # text body for small/text objects
+    content_length: i64 # always populated; -1 if unknown
+    etag: text
+
+
+fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
+    """GET /{bucket}/{key} — small/text bodies. For large/binary, use minio_download."""
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+    if range_header != "":
+        sig_headers = sig_headers + [SigV4Header(name: "range", value: range_header)]
+
+    val auth = sigv4_authorization_header(
+        "GET", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var ffi: [text] = []
+    ffi = ffi + ["Host: {host}"]
+    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
+    ffi = ffi + ["x-amz-date: {amz_dt}"]
+    if range_header != "":
+        ffi = ffi + ["Range: {range_header}"]
+    ffi = ffi + ["Authorization: {auth}"]
+
+    val (status, body, err) = rt_http_request("GET", "{cfg.url}{canonical_uri}", ffi, "")
+    val mapped = map_s3_error(status, body, err)
+    val empty = GetObjectResult(body: "", content_length: -1, etag: "")
+    if mapped.kind != "ok":
+        return (false, empty, mapped.message)
+    (true, GetObjectResult(body: body, content_length: body.len(), etag: ""), body)
+
+
+fn minio_download(cfg: MinioConfig, bucket: text, key: text, dest_path: text, expires: i64) -> (bool, i64, text):
+    """Streaming binary download via presigned URL → local file.
+
+    Uses the presign mechanism to embed auth in the URL, then rt_http_download
+    streams to disk. Returns (ok, bytes_written, error_message).
+    """
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val use_expires = if expires <= 0 or expires > MINIO_MAX_PRESIGN_EXPIRES: 3600 else: expires
+    val url = sigv4_presign_get_url(cfg.url, host, bucket, key, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt, use_expires)
+    val (status, bytes, err) = rt_http_download(url, dest_path)
+    if err != "":
+        return (false, 0, err)
+    if status < 200 or status >= 300:
+        return (false, bytes, "HTTP {status}")
+    (true, bytes, "")
+
+
+# ---------------------------------------------------------------------------
+# HeadObject
+# ---------------------------------------------------------------------------
+
+class HeadObjectResult:
+    content_length: i64
+    last_modified: text
+    etag: text
+
+
+fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadObjectResult, text):
+    """HEAD /{bucket}/{key} — response body is empty; status code is the success indicator.
+
+    NOTE: rt_http_request returns body only — header parsing is not exposed here.
+    The result fields are best-effort: content_length comes from the GET path
+    when available; for HEAD via this FFI we surface the status only.
+    """
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "HEAD", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var ffi: [text] = []
+    ffi = ffi + ["Host: {host}"]
+    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
+    ffi = ffi + ["x-amz-date: {amz_dt}"]
+    ffi = ffi + ["Authorization: {auth}"]
+
+    val (status, body, err) = rt_http_request("HEAD", "{cfg.url}{canonical_uri}", ffi, "")
+    val mapped = map_s3_error(status, body, err)
+    val empty = HeadObjectResult(content_length: -1, last_modified: "", etag: "")
+    if mapped.kind != "ok":
+        return (false, empty, mapped.message)
+    # TODO(issue #10 follow-up): rt_http_request doesn't expose response headers;
+    # to populate Content-Length / ETag / Last-Modified we need a richer FFI or
+    # a one-byte ranged GET fallback. Surface success only for now.
+    (true, empty, body)
+
+
+# ---------------------------------------------------------------------------
+# PutObject
+#
+# IMPORTANT LIMITATION (recorded per issue #10 follow-up):
+#   `rt_http_request` takes `body: text`, which is UTF-8. Binary PUTs (e.g. FW
+#   images) cannot round-trip through `text` losslessly. We therefore expose
+#   `minio_put_text` for text/JSON/XML bodies (≤64 MiB) and reject binary PUTs
+#   with a clear error. Multipart upload + binary streaming PUT require a new
+#   `rt_http_request_bytes`/`rt_http_upload_raw` FFI — see TODO below.
+# ---------------------------------------------------------------------------
+
+fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content_type: text) -> (bool, text, text):
+    """PUT /{bucket}/{key} for text bodies (JSON/XML/plain). Body must be ≤ 64 MiB.
+
+    Returns (success, etag_or_empty, raw_response_body_or_error).
+    """
+    if body.len() > MINIO_MULTIPART_THRESHOLD:
+        return (false, "", "minio_put_text: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes — multipart not yet implemented (issue #10 follow-up)")
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    # For known text bodies we precompute the SHA256 (small enough).
+    val payload_hash = sigv4_sha256_hex(body)
+    val ct = if content_type == "": "application/octet-stream" else: content_type
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.len()}")]
+    sig_headers = sig_headers + [SigV4Header(name: "content-type", value: ct)]
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "PUT", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var ffi: [text] = []
+    ffi = ffi + ["Host: {host}"]
+    ffi = ffi + ["Content-Type: {ct}"]
+    ffi = ffi + ["Content-Length: {body.len()}"]
+    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
+    ffi = ffi + ["x-amz-date: {amz_dt}"]
+    ffi = ffi + ["Authorization: {auth}"]
+
+    val (status, resp_body, err) = rt_http_request("PUT", "{cfg.url}{canonical_uri}", ffi, body)
+    val mapped = map_s3_error(status, resp_body, err)
+    if mapped.kind != "ok":
+        return (false, "", mapped.message)
+    (true, "", resp_body)
+
+
+fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
+    """PUT a local file as an object.
+
+    BLOCKER (issue #10 follow-up): the existing `rt_http_request`/`rt_http_upload`
+    FFI does not support raw-bytes PUT bodies — `rt_http_request` body is `text`
+    (UTF-8) and `rt_http_upload` is multipart/form-data. Until a `rt_http_put_file`
+    or `rt_http_request_bytes` FFI lands, this returns a clear error rather than
+    silently corrupting binary uploads. Small text files can use `minio_put_text`.
+    """
+    if not file_exists(local_path):
+        return (false, "", "local file not found: {local_path}")
+    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP FFI (issue #10 follow-up). Use minio_put_text for ≤64 MiB text bodies.")
+
+
+# ---------------------------------------------------------------------------
+# Presign GET (client-side, no network)
+# ---------------------------------------------------------------------------
+
+fn minio_presign_get(cfg: MinioConfig, bucket: text, key: text, expires: i64) -> (bool, text, text):
+    """Generate a presigned GET URL for an object. expires capped at 7 days."""
+    if expires <= 0:
+        return (false, "", "expires must be > 0")
+    if expires > MINIO_MAX_PRESIGN_EXPIRES:
+        return (false, "", "expires must be ≤ {MINIO_MAX_PRESIGN_EXPIRES} (7 days)")
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val url = sigv4_presign_get_url(cfg.url, host, bucket, key, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt, expires)
+    (true, url, url)
+
+
+# ---------------------------------------------------------------------------
+# Health (no auth)
+# ---------------------------------------------------------------------------
+
+fn minio_health_live(cfg: MinioConfig) -> (bool, bool, text):
+    """GET /minio/health/live — no auth required. Returns (ok, alive, raw)."""
+    val (status, body, err) = rt_http_request("GET", "{cfg.url}/minio/health/live", [], "")
+    if err != "":
+        return (false, false, err)
+    (true, status == 200, "HTTP {status}")

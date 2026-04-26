@@ -281,6 +281,6 @@ find src/lib/nogc_async_mut/gpu/ -name '*.spl' | wc -l      # 5
 find src/lib/nogc_async_mut/cuda/ -name '*.spl' | wc -l     # 3
 find src/lib/nogc_async_mut/ml/ -name '*.spl' | wc -l       # 4
 
-# GC pattern SSpec tests
+# GC pattern SPipe tests
 find test/unit/lib/gc_async_mut/ -name 'gc_*_spec.spl' | wc -l  # 6
 ```

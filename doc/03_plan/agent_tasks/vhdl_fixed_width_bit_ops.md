@@ -6,7 +6,7 @@ Owner: Worker B
 
 Status: Pending
 
-Scope: docs and pending SSpec coverage for Python-HDL-compatible fixed-width
+Scope: docs and pending SPipe coverage for Python-HDL-compatible fixed-width
 bit operation semantics. This task does not implement compiler lowering.
 
 ## Goal

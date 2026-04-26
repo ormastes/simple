@@ -71,7 +71,7 @@ Per CLAUDE.md "MDSOC+ by default" and the 1-dev state's MDSOC+ placement, spostg
 | Depends on spostgre | Why |
 |---|---|
 | `src/app/spostgre` (symlink) | CLI binary |
-| `test/` specs | Phase 4 SSpec harness |
+| `test/` specs | Phase 4 SPipe harness |
 
 **No circular dependencies.** Verified: NVFS has no dependency on spostgre; ECS has no dependency on spostgre; `spostgre_if` has no dependency on the `engine` impl (traits-only).
 
@@ -643,7 +643,7 @@ Six primary FR candidates from research (§11.7) map thus:
 - MVCC (no HOT yet — updates are delete+insert).
 - Redo-only recovery.
 - CLI: `spostgre init`, `spostgre wal-replay`, `spostgre catalog-dump`.
-- SSpec: crash-injection tests at each crash-point matrix row.
+- SPipe: crash-injection tests at each crash-point matrix row.
 
 **Acceptance:**
 - Insert 1 M rows, crash, replay: zero row loss, zero phantom rows.

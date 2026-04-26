@@ -14,4 +14,4 @@ This preserves first-write-wins inside a single module but prevents symbols from
 
 ## Test Strategy
 
-Add a system SSpec that lowers a module defining `CompileOptions`, then lowers a separate consumer that explicitly imports `b.CompileOptions`. The consumer must resolve to `b`, proving prior module symbols did not leak.
+Add a system SPipe that lowers a module defining `CompileOptions`, then lowers a separate consumer that explicitly imports `b.CompileOptions`. The consumer must resolve to `b`, proving prior module symbols did not leak.

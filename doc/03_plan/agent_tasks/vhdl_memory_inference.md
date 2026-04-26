@@ -81,7 +81,7 @@ and diagnostics to identify the originating Simple declaration.
 - Optional vendor synthesis smoke confirms memory inference or skips with a
   clear unavailable-tool reason.
 
-## Pending SSpec Coverage
+## Pending SPipe Coverage
 
 Pending coverage lives in
 `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` until implementation

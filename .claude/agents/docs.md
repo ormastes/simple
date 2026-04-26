@@ -1,7 +1,7 @@
 # Docs Agent - Documentation Writing
 
 **Use when:** Writing research docs, design docs, requirement docs, feature specs, guides, reports, updating TODO tracking.
-**Skills:** `/doc`, `/todo`, `/rule`, `/sspec`, `/design`, `/research`
+**Skills:** `/doc`, `/todo`, `/rule`, `/spipe`, `/design`, `/research`
 
 ## Documentation Types
 
@@ -16,7 +16,7 @@
 | ADR | `doc/04_architecture/adr/` | Architecture Decision Records (major decisions) |
 | Guide | `doc/07_guide/` | User-facing tutorials, runbooks, how-to |
 | Report | `doc/09_report/` | Session summaries, completion reports |
-| BDD Tests | `test/*_spec.spl` | Executable feature specs (SSpec) |
+| BDD Tests | `test/*_spec.spl` | Executable feature specs (SPipe) |
 
 ## Document Relationship Model
 
@@ -29,7 +29,7 @@ RULES → enforced by CI + review
 
 ## Critical Rules
 
-- Specifications MUST be SSpec test files (`*_spec.spl`), not markdown
+- Specifications MUST be SPipe test files (`*_spec.spl`), not markdown
 - Research goes in `doc/01_research/`, NOT mixed with specs
 - Reports use format: `doc/09_report/<topic>_<date>.md`
 - DO NOT add reports to git unless requested

@@ -782,7 +782,7 @@ go(scope) \s: while not s.is_done(): work()
 | Add `Receiver<T>` wrapper | `std_lib/src/concurrency/channels.spl` | 1 day |
 | Add `typed_channel<T>()` | `std_lib/src/concurrency/channels.spl` | 0.5 day |
 | Document WaitGroup = Latch | `doc/07_guide/concurrency.md` | 0.5 day |
-| Create SSpec tests | `std_lib/test/features/` | 1 day |
+| Create SPipe tests | `std_lib/test/features/` | 1 day |
 
 ### Phase 2: Syntax (P2 - Medium Effort) ✅ COMPLETE
 
@@ -808,7 +808,7 @@ go(scope) \s: while not s.is_done(): work()
 | Add `Expr::Go` AST variant | `src/parser/src/ast/nodes/core.rs` | ✅ Done |
 | Lower to HIR ActorSpawn | `src/compiler/src/hir/lower/expr/control.rs` | ✅ Done |
 | Add parser tests | `src/parser/tests/expression_tests.rs` | ✅ Done (6 tests) |
-| Create lambda SSpec | `simple/std_lib/test/features/language/lambda_spec.spl` | ✅ Done (9 tests) |
+| Create lambda SPipe | `simple/std_lib/test/features/language/lambda_spec.spl` | ✅ Done (9 tests) |
 
 **Key Implementation Details:**
 - **Simplified Syntax:** Removed `|capture|` pipe notation in favor of param-based discrimination
@@ -838,7 +838,7 @@ go(scope) \s: while not s.is_done(): work()
 
 ---
 
-## SSpec Test Files
+## SPipe Test Files
 
 Feature specifications to create:
 

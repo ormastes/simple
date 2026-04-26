@@ -10,4 +10,4 @@ The implementation is the import-resolution fix in `FR-COMPILER-002`: the HIR im
 
 ## Test Strategy
 
-Add a compiled system SSpec that imports `CompileOptions` from `compiler.common.driver_core_types`, calls `CompileOptions.default()`, and reads the driver-only fields named in the request.
+Add a compiled system SPipe that imports `CompileOptions` from `compiler.common.driver_core_types`, calls `CompileOptions.default()`, and reads the driver-only fields named in the request.

@@ -245,7 +245,7 @@ val sdn_text = note.to_sdn()
 - Tests: empty metadata, entry creation, SDN serialization, escaping
 
 **Simple:**
-- `test/lib/std/unit/compiler/note_sdn_spec.spl` contains SSpec tests
+- `test/lib/std/unit/compiler/note_sdn_spec.spl` contains SPipe tests
 - 13 test cases covering all functionality
 - Tests: metadata creation, entry addition, SDN format, escaping
 
@@ -331,7 +331,7 @@ cargo test -p simple-compiler note_sdn
 
 **Goals:**
 - Port all functionality to Simple language
-- Add comprehensive SSpec tests
+- Add comprehensive SPipe tests
 
 ## Key Design Decisions
 

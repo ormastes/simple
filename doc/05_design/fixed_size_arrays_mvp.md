@@ -181,7 +181,7 @@ fn test_fixed_size_rejects_mutations() {
 ```
 
 ### Integration Tests
-Run the SSpec tests:
+Run the SPipe tests:
 - `fixed_size_arrays_spec.spl` (28 tests)
 - `fixed_size_edge_cases_spec.spl` (15 tests)
 
@@ -222,7 +222,7 @@ Later can add:
 5. ✅ Add method dispatch (2-3 hours)
 6. ✅ Update display/debug (30 min)
 7. ✅ Write unit tests (1 hour)
-8. ✅ Test with SSpec (1 hour)
+8. ✅ Test with SPipe (1 hour)
 
 **Total**: 6-8 hours for MVP
 

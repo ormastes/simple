@@ -10,7 +10,7 @@ Statistical performance measurement and test optimization for Simple.
 2. [Configuration](#configuration)
 3. [Understanding Results](#understanding-results)
 4. [Comparison Mode](#comparison-mode)
-5. [Integration with SSpec](#integration-with-sspec)
+5. [Integration with SPipe](#integration-with-spipe)
 6. [Optimization Patterns](#optimization-patterns)
 7. [CI/CD Integration](#cicd-integration)
 8. [API Reference](#api-reference)
@@ -147,7 +147,7 @@ print "Fastest: {fastest_name}"
 
 ---
 
-## Integration with SSpec
+## Integration with SPipe
 
 ### Performance Test
 

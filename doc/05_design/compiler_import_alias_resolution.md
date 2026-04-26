@@ -16,8 +16,8 @@ Glob imports are unchanged because they have no per-item alias.
 
 ## Test Strategy
 
-Add a unit SSpec on the import resolver that parses two modules exporting
+Add a unit SPipe on the import resolver that parses two modules exporting
 `CompileOptions`, imports both under distinct aliases, and asserts each alias
-resolves to the expected defining module. Add a compiled system SSpec for the
+resolves to the expected defining module. Add a compiled system SPipe for the
 pure local-name selection helper used by the resolver, because the full synthetic
 symbol-table fixture currently trips an unrelated compiled `SymbolTable` issue.

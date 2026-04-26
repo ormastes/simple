@@ -215,7 +215,7 @@ ERROR parse_single_type: Parser bug: *const/*mut not implemented. \
 
 ## Testing Error Messages
 
-Create SSpec tests for error messages:
+Create SPipe tests for error messages:
 
 ```simple
 # simple/std_lib/test/features/parser/error_messages_spec.spl
@@ -250,7 +250,7 @@ Better error messages reduce user frustration and support burden. Implement alon
 - [ ] Add contextual help messages for common errors
 - [ ] Improve logging with tracing spans
 - [ ] Add debug logging for parser state at key decision points
-- [ ] Create SSpec tests for error message quality
+- [ ] Create SPipe tests for error message quality
 - [ ] Document error message conventions
 
 ## References

@@ -653,7 +653,7 @@ fn is_loss_block(expr: Expr) -> bool:
     - `re{}` - Regular expressions
 
 11. **Documentation and tests**
-    - SSpec tests for each block type
+    - SPipe tests for each block type
     - User documentation
 
 ---
@@ -743,7 +743,7 @@ MathBlockDef implements all 3 levels:
 
 ### 10.6 Test Coverage
 
-5 intensive SSpec test files in `test/compiler/blocks/`:
+5 intensive SPipe test files in `test/compiler/blocks/`:
 
 | File | Tests | Coverage |
 |------|-------|---------|

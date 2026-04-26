@@ -159,30 +159,30 @@ fn test_context_no_args() {
 // ============================================================================
 
 #[test]
-fn test_sspec_docgen_help_dispatches_to_simple() {
-    let (code, stdout, _stderr) = run_simple(&["sspec-docgen", "--help"]);
+fn test_spipe_docgen_help_dispatches_to_simple() {
+    let (code, stdout, _stderr) = run_simple(&["spipe-docgen", "--help"]);
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("SSpec Documentation Generator"),
-        "sspec-docgen --help should produce output, got: {}",
+        stdout.contains("SPipe Documentation Generator"),
+        "spipe-docgen --help should produce output, got: {}",
         &stdout[..stdout.len().min(200)]
     );
 }
 
 #[test]
-fn test_sspec_docgen_rust_fallback_via_env() {
+fn test_spipe_docgen_rust_fallback_via_env() {
     let (code, stdout, _stderr) =
-        run_simple_with_env(&["sspec-docgen", "--help"], "SIMPLE_SSPEC_DOCGEN_RUST", "1");
+        run_simple_with_env(&["spipe-docgen", "--help"], "SIMPLE_SPIPE_DOCGEN_RUST", "1");
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("SSpec Documentation Generator"),
+        stdout.contains("SPipe Documentation Generator"),
         "Rust fallback should show help"
     );
 }
 
 #[test]
-fn test_sspec_docgen_no_files() {
-    let (_code, stdout, stderr) = run_simple(&["sspec-docgen"]);
+fn test_spipe_docgen_no_files() {
+    let (_code, stdout, stderr) = run_simple(&["spipe-docgen"]);
     let output = format!("{}{}", stdout, stderr);
     // Should show usage or error about missing files
     assert!(!output.is_empty(), "no files should produce usage/error");
@@ -428,11 +428,11 @@ fn test_coverage_from_tmp_directory() {
 }
 
 #[test]
-fn test_sspec_docgen_from_tmp_directory() {
+fn test_spipe_docgen_from_tmp_directory() {
     let tmp = std::env::temp_dir();
-    let (code, stdout, _stderr) = run_simple_from_dir(&["sspec-docgen", "--help"], &tmp);
+    let (code, stdout, _stderr) = run_simple_from_dir(&["spipe-docgen", "--help"], &tmp);
     assert_eq!(code, 0);
-    assert!(!stdout.is_empty(), "sspec-docgen from /tmp should work");
+    assert!(!stdout.is_empty(), "spipe-docgen from /tmp should work");
 }
 
 // ============================================================================
@@ -514,7 +514,7 @@ fn test_test_command_watch_flag_routes_to_rust() {
 #[test]
 fn test_all_dispatched_commands_respond() {
     let commands = vec![
-        "dashboard", "context", "sspec-docgen", "coverage",
+        "dashboard", "context", "spipe-docgen", "coverage",
         "verify", "depgraph", "fmt", "lint",
     ];
     for cmd in commands {
@@ -542,7 +542,7 @@ fn test_all_rust_fallbacks_respond() {
     let commands_and_guards = vec![
         ("dashboard", "SIMPLE_DASHBOARD_RUST"),
         ("context", "SIMPLE_CONTEXT_RUST"),
-        ("sspec-docgen", "SIMPLE_SSPEC_DOCGEN_RUST"),
+        ("spipe-docgen", "SIMPLE_SPIPE_DOCGEN_RUST"),
         ("verify", "SIMPLE_VERIFY_RUST"),
         ("fmt", "SIMPLE_FMT_RUST"),
         ("lint", "SIMPLE_LINT_RUST"),

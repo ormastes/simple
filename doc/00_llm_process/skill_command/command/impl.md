@@ -73,7 +73,7 @@ review-team:    explore -> docs          (sequential)
 4. UI design (if applicable): `doc/05_design/<feature>_tui.md`, `_gui.md`
 
 ### Phase 6-7: System Test + Doc Consistency
-1. Create `test/system/<feature>_spec.spl` (SSpec BDD, fail-first). See `/sspec`
+1. Create `test/system/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
    - **REQUIRED:** Add `# @cover src/path/to/impl.spl <pct>%` pointing to last-layer component
 2. Cross-ref: bidirectional links, consistent terminology, REQ-ID tracing
 

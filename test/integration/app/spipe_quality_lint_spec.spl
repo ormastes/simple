@@ -1,0 +1,126 @@
+use compiler.tools.lint.main.{Linter}
+
+fn count_lint(source: text, code: text) -> i64:
+    var linter = Linter.new()
+    val results = linter.lint_source("sample_spec.spl", source)
+    var count = 0
+    for result in results:
+        if result.lint.code == code:
+            count = count + 1
+    count
+
+fn count_lint_for_path(path: text, source: text, code: text) -> i64:
+    var linter = Linter.new()
+    val results = linter.lint_source(path, source)
+    var count = 0
+    for result in results:
+        if result.lint.code == code:
+            count = count + 1
+    count
+
+fn total_spipe_quality_lints(source: text) -> i64:
+    var linter = Linter.new()
+    val results = linter.lint_source("sample_spec.spl", source)
+    var count = 0
+    for result in results:
+        if result.lint.code == "SPIPE001" or result.lint.code == "SPIPE002" or result.lint.code == "SPIPE003" or result.lint.code == "SPIPE004" or result.lint.code == "SPIPE005" or result.lint.code == "SPIPE006":
+            count = count + 1
+    count
+
+describe "spipe placeholder quality lint":
+    it "flags tautological literal assertions":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"uses fake success\":\n" +
+            "        expect(true).to_equal(true)\n"
+
+        expect(count_lint(source, "SPIPE001")).to_equal(1)
+
+    it "flags placeholder pass helpers inside examples":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"uses pass helper\":\n" +
+            "        pass_todo\n"
+
+        expect(count_lint(source, "SPIPE002")).to_equal(1)
+
+    it "flags placeholder pass helpers with rationale arguments inside examples":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"uses pass helper call\":\n" +
+            "        pass_todo(\"blocked until driver smoke exists\")\n"
+
+        expect(count_lint(source, "SPIPE002")).to_equal(1)
+
+    it "flags placeholder match-arm success assertions":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"uses fake ok arm\":\n" +
+            "        match run_check():\n" +
+            "            case Ok(_): expect(true).to_equal(true)\n" +
+            "            case Err(e): expect(e).to_equal(\"boom\")\n"
+
+        expect(count_lint(source, "SPIPE003")).to_equal(1)
+
+    it "flags print based skip placeholders":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"prints skip and returns\":\n" +
+            "        print \"[skip] env unavailable\"\n" +
+            "        return\n"
+
+        expect(count_lint(source, "SPIPE004")).to_equal(1)
+
+    it "flags examples with no real assertion":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"just calls helper\":\n" +
+            "        run_check()\n"
+
+        expect(count_lint(source, "SPIPE005")).to_equal(1)
+
+    it "flags examples with empty bodies":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"empty\":\n"
+
+        expect(count_lint(source, "SPIPE005")).to_equal(1)
+
+    it "flags boolean-wrapper assertions":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"wraps comparison\":\n" +
+            "        expect(code != 0).to_equal(true)\n"
+
+        expect(count_lint(source, "SPIPE006")).to_equal(1)
+
+    it "flags pass_todo in production code":
+        val source =
+            "fn not_done(port: i64) -> i64:\n" +
+            "    pass_todo(\"implement driver\")\n"
+
+        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)
+
+    it "flags bare pass_todo in production code":
+        val source =
+            "fn not_done(port: i64) -> i64:\n" +
+            "    pass_todo\n"
+
+        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)
+
+    it "allows sanctioned skip syntax":
+        val source =
+            "describe \"demo\":\n" +
+            "    it \"skips honestly\":\n" +
+            "        skip:\n"
+
+        expect(total_spipe_quality_lints(source)).to_equal(0)
+
+    it "respects allow on spipe_placeholder_tests":
+        val source =
+            "@allow(spipe_placeholder_tests)\n" +
+            "describe \"demo\":\n" +
+            "    it \"permits migration file\":\n" +
+            "        expect(true).to_equal(true)\n"
+
+        expect(total_spipe_quality_lints(source)).to_equal(0)

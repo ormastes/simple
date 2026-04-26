@@ -84,7 +84,7 @@ The first implementation must add precise diagnostics for:
   function or procedure.
 - A call graph cycle among helpers selected for subprogram emission.
 
-## Pending SSpec Coverage
+## Pending SPipe Coverage
 
 Pending coverage lives in
 `test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip` until the

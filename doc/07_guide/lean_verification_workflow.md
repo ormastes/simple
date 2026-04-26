@@ -332,7 +332,7 @@ The reporting system distinguishes between:
 | Refinement types | Separate gated subset, too broad for this milestone |
 | Automatic proof synthesis | Research-grade, not productizable yet |
 | Full dependent typing | Language-level change beyond the verification subset |
-| Replacing SSpec with proofs | Different concern (testing vs verification) |
+| Replacing SPipe with proofs | Different concern (testing vs verification) |
 
 ### Current Restrictions
 

@@ -85,7 +85,7 @@ If multiple LLMs participate in research:
 | GUI design | `doc/05_design/<feature>_gui.md` |
 | Architecture | `doc/04_architecture/<feature>.md` |
 | System test plan | `doc/03_plan/sys_test/<feature>.md` |
-| SSpec tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| SPipe tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent task breakdown | `doc/03_plan/agent_tasks/<feature>.md` |
 
@@ -101,7 +101,7 @@ If multiple LLMs participate in research:
 - Reference `src/compiler/85.mdsoc/` for MDSOC examples
 
 **2.3 System Test Design**
-- SSpec BDD tests with real assertions
+- SPipe BDD tests with real assertions
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
 
@@ -110,7 +110,7 @@ If multiple LLMs participate in research:
 - Agent task breakdown for implementation
 
 **2.5 Quality Check**
-- Verify SSpec quality (target: A grade)
+- Verify SPipe quality (target: A grade)
 - Ask user: "Should architecture or design change?"
 
 ### Tools by LLM
@@ -134,7 +134,7 @@ If multiple LLMs participate in research:
 
 | LLM | Design Strength |
 |-----|----------------|
-| **Claude** | Detail design, SSpec quality verification, requirement tracing |
+| **Claude** | Detail design, SPipe quality verification, requirement tracing |
 | **Codex** | Architecture patterns, MDSOC, system test generation |
 | **Gemini** | UI/UX design (TUI + GUI mockups), visual prototyping |
 
@@ -215,7 +215,7 @@ If multiple LLMs participate in research:
 
 | Phase | What | Fail Condition |
 |-------|------|---------------|
-| **SSpec Tests** | Every `it` block has real assertions | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
+| **SPipe Tests** | Every `it` block has real assertions | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
 | **Implementation** | All functions fully implemented | Stub functions, hardcoded returns, TODO-only bodies |
 | **Feature Requirements** | Every REQ-NNN traced to code + test | Missing implementation or test coverage |
 | **NFR** | Performance, reliability, security, observability | Targets without verification mechanism |
@@ -318,7 +318,7 @@ If multiple LLMs participate in research:
 
 | Skill | File | Purpose |
 |-------|------|---------|
-| `/sspec` | `.claude/skills/sspec.md` | SSpec BDD framework |
+| `/spipe` | `.claude/skills/spipe.md` | SPipe BDD framework |
 | `/test` | `.claude/skills/test.md` | Test writing, container testing |
 | `/debug` | `.claude/skills/debug.md` | Debugging, tracing |
 | `/architecture` | `.claude/skills/architecture.md` | Compiler pipeline, modules |
@@ -351,7 +351,7 @@ If multiple LLMs participate in research:
 |-------|------|---------|
 | `$architecture` | `.codex/skills/architecture/SKILL.md` | MDSOC, ADR writing |
 | `$mdsoc` | `.codex/skills/mdsoc-architecture-writing/SKILL.md` | MDSOC architecture docs |
-| `$system_test` | `.codex/skills/system_test/SKILL.md` | SSpec system test design |
+| `$system_test` | `.codex/skills/system_test/SKILL.md` | SPipe system test design |
 
 ### Invocation Syntax
 
@@ -393,7 +393,7 @@ Before starting any phase, check if prerequisite artifacts exist:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research + user selection |
 | UI design | `doc/05_design/<feature>_tui.md` | Create mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design it yourself |
-| System tests | `doc/06_spec/.../<feature>_spec.spl` | Create SSpec tests yourself |
+| System tests | `doc/06_spec/.../<feature>_spec.spl` | Create SPipe tests yourself |
 | Detail design | `doc/05_design/<feature>.md` | Create it yourself |
 | Implementation | `src/**/<feature>.spl` | Implement it yourself |
 | Verification | Verify report shows PASS | Run verify yourself |
@@ -430,7 +430,7 @@ doc/
     <feature>_tui.md              # Phase 2: TUI mockups
     <feature>_gui.md              # Phase 2: GUI mockups
   06_spec/
-    app/<app>/feature/<feature>_spec.spl  # Phase 2: SSpec system tests
+    app/<app>/feature/<feature>_spec.spl  # Phase 2: SPipe system tests
   07_guide/
     <feature>.md                  # Phase 3: user guide (if needed)
   08_tracking/

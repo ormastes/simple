@@ -13,7 +13,7 @@ Cover `FR-COMPILER-002`: same-named imported structs from different modules must
 - `imported_symbol_local_name("CompileOptions", true, "DriverOptions")` returns `DriverOptions`.
 - `imported_symbol_local_name("CompileOptions", true, "BackendOptions")` returns `BackendOptions`.
 - `imported_symbol_local_name("CompileOptions", false, "")` returns `CompileOptions`.
-- The unit resolver SSpec covers the full two-module alias registration path.
+- The unit resolver SPipe covers the full two-module alias registration path.
 
 ## Verification Command
 

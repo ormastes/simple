@@ -115,5 +115,5 @@ classDiagram
 ## See Also
 
 - [architecture_writing.md](architecture_writing.md) - Skeleton-first architecture
-- [../test/sspec_writing.md](../test/sspec_writing.md) - Test writing guide
+- [../test/spipe_writing.md](../test/spipe_writing.md) - Test writing guide
 - [../coding_style.md](../coding_style.md) - Coding conventions

@@ -93,7 +93,7 @@ and `mir_data.spl` + `mir_lowering.spl` (1,526 lines total).
 - **spec_coverage/** - Spec coverage tracking
 - **coverage/** - Code coverage
 - **feature_gen/** - Feature tracking
-- **sspec_docgen/** - SSpec documentation generator
+- **spipe_docgen/** - SPipe documentation generator
 
 #### Code Intelligence
 - **fix/** - Auto-fix rules

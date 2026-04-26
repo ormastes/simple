@@ -60,7 +60,7 @@ db.save()
 | Path | `src/lib/path.spl` | Path utilities (13 functions) |
 | Array | `src/lib/array.spl` | Collection methods |
 | Platform | `src/lib/platform/mod.spl` | Cross-platform support |
-| Spec | `src/lib/spec.spl` | SSpec test framework |
+| Spec | `src/lib/spec.spl` | SPipe test framework |
 
 ## SFFI Patterns
 
