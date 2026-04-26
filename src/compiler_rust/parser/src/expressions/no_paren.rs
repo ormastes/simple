@@ -40,6 +40,21 @@ impl<'a> Parser<'a> {
             // since their semantics on a synthetic L-value are ambiguous.
             if op == AssignOp::Assign {
                 if let Some((lvalue, lo, hi)) = super::bitfield::match_bits_write_target(&expr) {
+                    // Phase 3 (2026-04-25): reject side-effecting receivers
+                    // up front — the desugar duplicates the lvalue, so a
+                    // call/method on the lvalue spine would double-evaluate
+                    // its side effect. Full single-eval temp binding is
+                    // deferred; diagnose-only is the Phase 3 contract.
+                    if !super::bitfield::is_pure_lvalue(&lvalue) {
+                        return Err(ParseError::syntax_error_with_span(
+                            "bitfield assignment with side-effecting receiver/index \
+                             — bind to a temp first (e.g. `var t = arr[next()]; \
+                             t.bits[lo..hi] = v; arr[idx] = t`). The desugar \
+                             duplicates the lvalue, so calls on the lvalue \
+                             spine would re-execute their side effects.",
+                            span,
+                        ));
+                    }
                     let new_value = super::bitfield::build_bits_write_value(lvalue.clone(), lo, hi, value);
                     return Ok(Node::Assignment(AssignmentStmt {
                         span,
@@ -50,6 +65,15 @@ impl<'a> Parser<'a> {
                 }
             } else if let Some(binop) = super::bitfield::augmented_assign_binop(op) {
                 if let Some((lvalue, lo, hi)) = super::bitfield::match_bits_write_target(&expr) {
+                    if !super::bitfield::is_pure_lvalue(&lvalue) {
+                        return Err(ParseError::syntax_error_with_span(
+                            "bitfield augmented assignment with side-effecting \
+                             receiver/index — bind to a temp first. The desugar \
+                             duplicates the lvalue three times, so calls on the \
+                             lvalue spine would re-execute their side effects.",
+                            span,
+                        ));
+                    }
                     let new_value = super::bitfield::build_bits_augmented_value(
                         lvalue.clone(),
                         lo,

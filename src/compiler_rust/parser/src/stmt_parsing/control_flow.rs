@@ -1078,6 +1078,16 @@ impl<'a> Parser<'a> {
     /// Parse defer/errdefer body: either a plain expression or an assignment.
     /// Handles `defer expr` and `defer target = value` uniformly.
     /// Assignment form is wrapped as a single-statement Block.
+    ///
+    /// B4-sugar Phase 3 (2026-04-25): single-line `defer x.bits[lo..hi] = v`
+    /// now runs the same bitfield write desugar that
+    /// `parse_expression_or_assignment` applies for top-level statements.
+    /// Previously this path constructed an `AssignmentStmt` directly and
+    /// bypassed the rewrite, leaving `Index { receiver: FieldAccess
+    /// { field: "bits" }, ... }` in the AST — which downstream lowering
+    /// cannot handle. The block form `defer:\n    x.bits[…] = v` already
+    /// worked because `parse_block` dispatches through
+    /// `parse_expression_or_assignment`.
     fn parse_defer_body(&mut self) -> Result<DeferBody, ParseError> {
         let expr = self.parse_expression()?;
 
@@ -1086,10 +1096,37 @@ impl<'a> Parser<'a> {
             let assign_span = self.current.span;
             self.advance(); // consume '='
             let value = self.parse_expression()?;
+
+            // B4-sugar Phase 3: desugar `defer x.bits[lo..hi] = v` here too.
+            // Side-effect guard mirrors the no_paren wrapper.
+            let (target, value) = if let Some((lvalue, lo, hi)) =
+                crate::expressions::bitfield::match_bits_write_target(&expr)
+            {
+                if !crate::expressions::bitfield::is_pure_lvalue(&lvalue) {
+                    return Err(ParseError::syntax_error_with_span(
+                        "bitfield assignment with side-effecting receiver/index \
+                         in defer body — bind to a temp first. The desugar \
+                         duplicates the lvalue, so calls on the lvalue spine \
+                         would re-execute their side effects.",
+                        assign_span,
+                    ));
+                }
+                let new_value =
+                    crate::expressions::bitfield::build_bits_write_value(
+                        lvalue.clone(),
+                        lo,
+                        hi,
+                        value,
+                    );
+                (lvalue, new_value)
+            } else {
+                (expr, value)
+            };
+
             // Wrap as a Block containing one assignment Node
             let assign_node = Node::Assignment(AssignmentStmt {
                 span: assign_span,
-                target: expr,
+                target,
                 op: AssignOp::Assign,
                 value,
             });

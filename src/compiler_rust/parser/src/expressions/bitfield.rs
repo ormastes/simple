@@ -24,6 +24,16 @@
 //! The receiver must be syntactically `x.bits[lo..hi]`. If the receiver of
 //! `Slice` is a `FieldAccess` whose field name is anything other than
 //! `bits`, the rewrite does nothing — normal Slice lowering is used.
+//!
+//! Phase 3 (2026-04-25):
+//!   * Defer-body single-line writes (`defer x.bits[lo..hi] = v`) now run
+//!     the same desugar as top-level statements; previously
+//!     `parse_defer_body` constructed `Assignment` directly and bypassed
+//!     the rewrite.
+//!   * Side-effect guard: callers must reject impure write targets via
+//!     `is_pure_lvalue`. Full single-eval temp-binding for impure targets
+//!     is still deferred — it requires multi-statement lowering that the
+//!     parse-time AST rewrite cannot synthesise on its own.
 
 use crate::ast::{AssignOp, BinOp, Expr, RangeBound, UnaryOp};
 
@@ -82,15 +92,76 @@ fn try_match_bits_index(expr: &Expr) -> Option<(Expr, Expr, Expr)> {
     Some(((**inner).clone(), lo, hi_excl))
 }
 
+/// Phase 3 (side-effect guard): predicate that the bitfield write target is
+/// safe to duplicate — i.e. it has no side-effecting subexpressions on the
+/// l-value spine.
+///
+/// `build_bits_write_value` and `build_bits_augmented_value` duplicate the
+/// target l-value 2-3 times into the desugared expression. If the target
+/// contains a `Call`/`MethodCall`/`KernelLaunch` anywhere on its spine (or
+/// uses one of those as an `Index` index), each duplicate would re-execute
+/// the side effect. Phase 3 ships diagnose-only: callers that detect an
+/// impure target via this helper should reject the assignment with a clear
+/// error rather than silently emit incorrect code. Full single-eval temp
+/// binding is deferred — it requires multi-statement lowering that the
+/// parse-time AST rewrite cannot synthesise on its own.
+///
+/// "Pure" here means: `Identifier`, `Path`, recursive `FieldAccess` on a
+/// pure receiver, recursive `TupleIndex` on a pure receiver, or recursive
+/// `Index` on a pure receiver with a literal/identifier/path index. Range
+/// expressions on the index spine are also accepted because the bitfield
+/// `lo..hi` literally lives there. Anything else (calls, arithmetic on the
+/// l-value spine, etc.) is treated as impure.
+pub fn is_pure_lvalue(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::Path(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::Index { receiver, index } => {
+            is_pure_lvalue(receiver) && is_pure_index(index)
+        }
+        _ => false,
+    }
+}
+
+/// Helper: an `Index` index is "pure" if it is itself a leaf l-value-shaped
+/// expression with no calls. Integer/float literals are obviously fine; an
+/// `Identifier` (loop variable, etc.) is fine because reading a binding has
+/// no observable side effect; a nested pure l-value is fine. Range
+/// sub-expressions are accepted because that's exactly the `lo..hi` shape
+/// we're matching at the bitfield slice itself.
+fn is_pure_index(expr: &Expr) -> bool {
+    match expr {
+        Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::TypedInteger(..)
+        | Expr::TypedFloat(..)
+        | Expr::Bool(_)
+        | Expr::Nil
+        | Expr::Identifier(_)
+        | Expr::Path(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::Index { receiver, index } => {
+            is_pure_lvalue(receiver) && is_pure_index(index)
+        }
+        Expr::Range { start, end, .. } => {
+            start.as_ref().map_or(true, |s| is_pure_index(s))
+                && end.as_ref().map_or(true, |e| is_pure_index(e))
+        }
+        _ => false,
+    }
+}
+
 /// Build the value expression for `x.bits[lo..hi] = v`:
 ///     `(x & ~mask_at_lo) | ((v & mask) << lo)`
 /// where `mask = (1 << (hi - lo)) - 1` and `mask_at_lo = mask << lo`.
 ///
 /// Note: `target_lvalue` is duplicated into the value expression and so is
-/// evaluated twice. Indices like `arr[i]` are pure in practice for the
-/// crypto contexts that motivate B4. A side-effecting index expression
-/// (e.g., `arr[next()]`) would observe the side effect twice; if that ever
-/// becomes a concern, materialise the lvalue into a temp before rewriting.
+/// evaluated twice. Callers MUST guard with `is_pure_lvalue` first — Phase 3
+/// (2026-04-25) added a diagnose-only check at the parse-time wrapper so
+/// side-effecting receivers (`arr[next()].bits[…]`) are rejected up front.
+/// Full single-eval temp binding is deferred — see the file-level comment.
 pub fn build_bits_write_value(target_lvalue: Expr, lo: Expr, hi: Expr, value: Expr) -> Expr {
     let width = sub(hi, lo.clone());
     let mask = sub(shl(int_lit(1), width), int_lit(1));

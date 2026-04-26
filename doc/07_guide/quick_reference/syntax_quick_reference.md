@@ -320,8 +320,25 @@ Notes:
   intentionally rejected since their semantics on a synthetic L-value
   are ambiguous.
 - Side-effecting receivers (e.g. `arr[next()].bits[…]` with a mutating
-  `next()`) are an explicitly deferred limitation — the rewrite reads
-  the receiver multiple times. Use a temp variable in those cases.
+  `next()`) are rejected at parse time as of B4-sugar Phase 3
+  (2026-04-25) with a "bind to a temp first" diagnostic — the rewrite
+  duplicates the lvalue 2-3 times, so calls on the lvalue spine would
+  re-execute their side effects. Workaround:
+
+  ```simple
+  var t = arr[next()]
+  t.bits[lo..hi] = v
+  arr[idx] = t
+  ```
+
+  Full single-eval temp binding inside the desugar is deferred (it
+  needs multi-statement lowering the parse-time AST rewrite cannot
+  synthesise on its own).
+- `defer x.bits[lo..hi] = v` (single-line defer) and the equivalent
+  block form `defer:\n    x.bits[lo..hi] = v` both desugar correctly
+  as of B4-sugar Phase 3. Single-line defer bodies only support plain
+  `=` (consistent with `parse_defer_body` itself); for augmented
+  forms inside defer use the block form.
 - Pure-Simple equivalents `extract_bits` / `insert_bits` /
   `get_byte` / `set_byte` live in `std.bitwise_utils` and remain
   available for cases where a function call is preferable.
