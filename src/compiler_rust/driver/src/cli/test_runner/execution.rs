@@ -1168,12 +1168,44 @@ fn preprocess_sspec_for_smf(path: &Path) -> Result<PathBuf, String> {
         !(t.starts_with("use std.spec") || t.starts_with("import std.spec"))
     });
 
+    // R2-broader Phase 2 (2026-04-26): only inline `SSPEC_INLINE_HELPERS`
+    // when the spec actually calls one of those helpers. The helpers
+    // contain bare `expect <expr>` references inside their `fn` bodies,
+    // and the HIR BDD recognizer only intercepts `expect` patterns at the
+    // top level of an `it` block — so unconditionally including the
+    // helpers caused `Undefined symbol: expect (required by relocation N)`
+    // SMF link failures for any spec that didn't otherwise need them.
+    const SSPEC_HELPER_NAMES: &[&str] = &[
+        "pending",
+        "skip",
+        "skip_it",
+        "check",
+        "check_msg",
+        "fail_assertion",
+        "fail_test",
+        "assert_eq",
+        "assert_ne",
+        "assert_true",
+        "assert_false",
+        "assert_nil",
+        "assert_not_nil",
+        "pending_on",
+        "pending_skip",
+    ];
+    let body_joined = body_parts.join("\n");
+    let top_joined = top_level_parts.join("\n");
+    let helpers_used = SSPEC_HELPER_NAMES.iter().any(|name| {
+        let needle = format!("{}(", name);
+        body_joined.contains(&needle) || top_joined.contains(&needle)
+    });
+    let helpers_section = if helpers_used { SSPEC_INLINE_HELPERS } else { "" };
+
     let wrapped = format!(
         "#![allow(sspec_empty_examples)]\n#![allow(sspec_boolean_wrapper_assertions)]\n@allow(sspec_empty_examples)\n@allow(sspec_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
         import_parts.join("\n"),
-        SSPEC_INLINE_HELPERS,
-        top_level_parts.join("\n"),
-        body_parts.join("\n")
+        helpers_section,
+        top_joined,
+        body_joined
     );
     let file_name = path
         .file_name()
