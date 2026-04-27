@@ -1,10 +1,10 @@
 #![allow(unnamed_duplicate_typed_args)]
 use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_env_get(name: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -16,7 +16,7 @@ extern fn rt_path_join(a: text, b: text) -> text
 # execution of the full driver helper path is still unstable in interpreter mode.
 
 fn interpret_file(path: text) -> CompileResult:
-    val simple_bin = _find_simple_binary()
+    val simple_bin = find_simple_binary()
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
     val combined = _clean_child_output(stdout, stderr)
     if _looks_like_driver_failure(combined):
@@ -58,40 +58,6 @@ fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, 
 
     CompileResult.Success(nil)
 
-fn _find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "":
-        return env_bin
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return "src/compiler_rust/target/bootstrap/simple"
-    val os_env = rt_env_get("OS") ?? ""
-    if os_env.contains("Windows"):
-        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
-            return "src/compiler_rust/target/release/simple.exe"
-        if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
-            return "src/compiler_rust/target/bootstrap/simple.exe"
-        if rt_file_exists("bin/simple.exe"):
-            return "bin/simple.exe"
-        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
-            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
-        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
-            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
-    if rt_file_exists("bin/simple"):
-        return "bin/simple"
-    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
-        return "bin/release/aarch64-apple-darwin-macho/simple"
-    if rt_file_exists("bin/release/macos-arm64/simple"):
-        return "bin/release/macos-arm64/simple"
-    if rt_file_exists("bin/release/darwin-aarch64/simple"):
-        return "bin/release/darwin-aarch64/simple"
-    if rt_file_exists("bin/release/macos-x86_64/simple"):
-        return "bin/release/macos-x86_64/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
-    "bin/simple"
-
 fn _ensure_output_dir(path: text) -> bool:
     if rt_dir_create(path, true):
         return true
@@ -99,18 +65,14 @@ fn _ensure_output_dir(path: text) -> bool:
     exit_code == 0
 
 fn _clean_child_output(stdout: text, stderr: text) -> text:
-    val combined = if stderr.trim() != "":
-        stdout + "\n" + stderr
-    else:
-        stdout
-
-    val lines = combined.split("\n")
+    val base = clean_child_output(stdout, stderr)
+    val lines = base.split("\n")
     var kept: [text] = []
     var i = 0
     while i < lines.len():
-        val line = lines[i].trim()
-        if line != "" and line != "__SIMPLE_DRIVER_OK__":
-            kept.push(line)
+        val line = lines[i]
+        if line != "__SIMPLE_DRIVER_OK__":
+            kept = kept.push(line)
         i = i + 1
     kept.join("\n")
 
