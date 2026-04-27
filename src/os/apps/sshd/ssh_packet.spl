@@ -15,11 +15,8 @@
 # Constants
 # ============================================================================
 
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_string_to_byte_array(s: text) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 val SSH_MAX_PACKET: u64 = 35000   # Max packet size per RFC 4253
 val SSH_MIN_PADDING: u8 = 4       # Minimum 4 bytes of random padding
@@ -84,9 +81,7 @@ fn ssh_put_string(buf: [u8], data: [u8]):
 
 fn ssh_put_text(buf: [u8], s: text):
     """Append SSH string from text: uint32 length + UTF-8 bytes."""
-    var bytes: [u8] = rt_string_to_byte_array(s)
-    if bytes.len() == 0 and s.len() > 0:
-        bytes = ssh_ascii_text_to_bytes(s)
+    var bytes: [u8] = ssh_ascii_text_to_bytes(s)
     ssh_put_string(buf, bytes)
 
 fn ssh_ascii_byte_to_text(byte: u8) -> text:
@@ -129,7 +124,7 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
     var start: u64 = offset + 4
     if start + str_len > data.len():
         return Err("ssh_get_string: truncated data")
-    var result: [u8] = rt_array_new_with_cap(str_len.to_i64())
+    var result: [u8] = []
     var i: u64 = 0
     while i < str_len:
         result.push(_u8_at(data, start + i))
@@ -232,19 +227,7 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
     if avail < total:
         return Err("ssh_packet_read: incomplete packet")
 
-    # Read padding_length byte
-    var padding_length: u64 = _u8_at(data, offset + 4).to_u64()
-
-    if padding_length + 1 > packet_length:
-        return Err("ssh_packet_read: padding exceeds packet")
-    var payload_length: u64 = packet_length - padding_length - 1
-
-    var payload: [u8] = rt_array_new_with_cap(payload_length.to_i64())
-    var i: u64 = 0
-    while i < payload_length:
-        payload.push(_u8_at(data, offset + 5 + i))
-        i = i + 1
-
+    val payload = ssh_packet_parse_payload(data, offset, packet_length)?
     Ok(SshPacketResult(packet: SshPacket(payload: payload, sequence: 0), consumed: total))
 
 # ============================================================================
@@ -252,45 +235,71 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
 # ============================================================================
 
 fn ssh_packet_build(payload: [u8], sequence: u32) -> [u8]:
+    ssh_packet_build_with_block_size(payload, sequence, 8)
+
+fn ssh_packet_build_with_block_size(payload: [u8], sequence: u32, block_size: u64) -> [u8]:
     """Build an SSH packet from payload. No encryption/MAC.
 
     Padding: total of (4 + 1 + payload_len + padding_len) must be
     a multiple of 8 (minimum block size). Padding >= 4 bytes.
     """
-    var block_size: u64 = 8
     var payload_len: u64 = payload.len()
 
     # Calculate minimum padding
     # packet_length = 1 + payload_len + padding_len
     # (4 + packet_length) must be a multiple of block_size
     # i.e. (5 + payload_len + padding_len) % block_size == 0
-    var padding_len: u64 = block_size - ((5 + payload_len) % block_size)
-    if padding_len < 4:
-        padding_len = padding_len + block_size
+    var padding_len: u64 = 4
+    while ((5 + payload_len + padding_len) % block_size) != 0:
+        padding_len = padding_len + 1
 
     var packet_length: u64 = 1 + payload_len + padding_len
 
     var buf: [u8] = []
 
     # 4-byte length (big-endian)
-    ssh_put_u32(buf, packet_length.to_u32())
+    buf.push(((packet_length >> 24) & 0xFF).to_u8())
+    buf.push(((packet_length >> 16) & 0xFF).to_u8())
+    buf.push(((packet_length >> 8) & 0xFF).to_u8())
+    buf.push((packet_length & 0xFF).to_u8())
 
     # 1-byte padding_length
-    buf = rt_push_byte(buf, padding_len.to_i64())
+    buf.push(padding_len.to_u8())
 
     # Payload
     var i: u64 = 0
     while i < payload_len:
-        buf = rt_push_byte(buf, _u8_at(payload, i).to_u64().to_i64())
+        buf.push(_u8_at(payload, i))
         i = i + 1
 
     # Zero-fill padding (deterministic — random_bytes may FAULT on baremetal)
     i = 0
     while i < padding_len:
-        buf = rt_push_byte(buf, 0)
+        buf.push(0)
         i = i + 1
 
     buf
+
+fn ssh_packet_parse_payload(data: [u8], offset: u64, packet_length: u64) -> Result<[u8], text>:
+    if offset + 5 > data.len():
+        return Err("ssh_packet_read: incomplete packet")
+
+    var padding_length: u64 = _u8_at(data, offset + 4).to_u64()
+    if padding_length + 1 > packet_length:
+        return Err("ssh_packet_read: padding exceeds packet")
+
+    var payload_length: u64 = packet_length - padding_length - 1
+    var packet_end: u64 = offset + 4 + packet_length
+    if packet_end > data.len():
+        return Err("ssh_packet_read: incomplete packet")
+
+    var payload: [u8] = []
+    var i: u64 = 0
+    while i < payload_length:
+        payload.push(_u8_at(data, offset + 5 + i))
+        i = i + 1
+
+    Ok(payload)
 
 fn ssh_packet_build_encrypted(payload: [u8], sequence: u32, key: [u8], iv: [u8], mac_key: [u8]) -> [u8]:
     """Build encrypted SSH packet with AES-256-GCM.

@@ -1,5 +1,9 @@
-use os.apps.sshd.sshd.{SshDaemon, sshd_decode_net_runtime_i32_for_test}
+use os.apps.sshd.sshd.{sshd_decode_net_runtime_i32_for_test, sshd_build_host_keys_for_session_for_test}
 use os.apps.sshd.ssh_kex.{host_key_set_advertised_algorithms}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+fn _ecdsa_p256_pkcs8_der() -> [u8]:
+    hex_to_bytes("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
 
 describe "sshd direct runtime integer decoding":
     it "untags positive file descriptors returned by the baremetal net runtime":
@@ -12,24 +16,18 @@ describe "sshd direct runtime integer decoding":
 
 describe "sshd host key selection":
     it "keeps Ed25519 advertised when an RSA host key is configured":
-        var daemon = SshDaemon.new(22)
-        daemon.host_private_key = [1, 2, 3, 4]
-        daemon.host_public_key = [5, 6, 7, 8]
-        daemon.set_host_rsa_key([9, 10, 11, 12])
-        daemon.set_host_rsa_public_blob([13, 14, 15, 16])
-        val host_keys = daemon.build_host_keys_for_session()
+        val host_keys = sshd_build_host_keys_for_session_for_test(true, [1, 2, 3, 4], [9, 10, 11, 12], [13, 14, 15, 16], nil)
         expect(host_keys.ed25519_seed != nil).to_equal(true)
         expect(host_keys.rsa_pkcs8 != nil).to_equal(true)
         expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,rsa-sha2-256,rsa-sha2-512")
 
     it "can advertise RSA only for live lanes that disable Ed25519":
-        var daemon = SshDaemon.new(22)
-        daemon.host_private_key = [1, 2, 3, 4]
-        daemon.host_public_key = [5, 6, 7, 8]
-        daemon.set_host_rsa_key([9, 10, 11, 12])
-        daemon.set_host_rsa_public_blob([13, 14, 15, 16])
-        daemon.set_advertise_ed25519_host_key(false)
-        val host_keys = daemon.build_host_keys_for_session()
+        val host_keys = sshd_build_host_keys_for_session_for_test(false, [1, 2, 3, 4], [9, 10, 11, 12], [13, 14, 15, 16], nil)
         expect(host_keys.ed25519_seed == nil).to_equal(true)
         expect(host_keys.rsa_pkcs8 != nil).to_equal(true)
         expect(host_key_set_advertised_algorithms(host_keys)).to_equal("rsa-sha2-256,rsa-sha2-512")
+
+    it "includes ECDSA in live host key selection when configured":
+        val host_keys = sshd_build_host_keys_for_session_for_test(true, [1, 2, 3, 4], nil, nil, _ecdsa_p256_pkcs8_der())
+        expect(host_keys.ecdsa_p256_pkcs8 != nil).to_equal(true)
+        expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,ecdsa-sha2-nistp256")

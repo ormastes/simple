@@ -463,7 +463,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_read_hello_smf", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_sector_bytes", &[], &[I64]),
     RuntimeFuncSpec::new("rt_array_get_byte_raw", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_new_with_cap", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_len_u32", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_byte_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_u16_le", &[I64, I64], &[I64]),
@@ -1137,6 +1136,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]),   // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]),   // () -> RuntimeValue (tuple of i32, i32)
+    RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
     // =========================================================================
     // File I/O Metadata Operations
     // =========================================================================

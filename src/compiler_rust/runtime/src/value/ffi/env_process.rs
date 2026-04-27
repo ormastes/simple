@@ -34,6 +34,25 @@ fn configure_timeout_child_process_group(command: &mut std::process::Command) {
 #[cfg(not(unix))]
 fn configure_timeout_child_process_group(_command: &mut std::process::Command) {}
 
+const SSH_USERAUTH_PASSWORD_ONLY_FAILURE_PAYLOAD: &[u8; 14] = &[
+    51, 0x00, 0x00, 0x00, 0x08, b'p', b'a', b's', b's', b'w', b'o', b'r', b'd', 0x00,
+];
+
+unsafe fn runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
+    use crate::value::collections::{rt_array_new, rt_array_push};
+
+    let array = rt_array_new(bytes.len() as u64);
+    for &byte in bytes {
+        assert!(rt_array_push(array, RuntimeValue::from_i64(byte as i64)));
+    }
+    array
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_ssh_userauth_password_only_failure_payload() -> RuntimeValue {
+    runtime_byte_array(SSH_USERAUTH_PASSWORD_ONLY_FAILURE_PAYLOAD)
+}
+
 // ============================================================================
 // Code Coverage & Instrumentation Probes
 // ============================================================================

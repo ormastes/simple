@@ -661,7 +661,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // TLS / X25519 helpers used by the baremetal SSH guest lane
     "rt_tls13_x25519_public_key",
     "rt_tls13_x25519_shared_secret",
-    "rt_array_new_with_cap",
+    "rt_ssh_userauth_password_only_failure_payload",
 ];
 
 #[cfg(test)]
