@@ -1,0 +1,146 @@
+#!/bin/sh
+# build_clang_static_simpleos.shs — Configure (and optionally build) a
+# statically-linked clang targeting x86_64-unknown-simpleos.
+#
+# Default behaviour: print the cmake configure command and exit (dry-run).
+# Pass --run to actually invoke cmake + ninja.
+#
+# Env vars (all optional):
+#   LLVM_SRC    default: $HOME/llvm-project
+#   LLVM_BUILD  default: build/os/clang_static  (relative to repo root)
+#   JOBS        default: $(nproc)
+#
+# Requires the ormastes/llvm-project:simpleos fork.
+# Size budget: target static clang binary <= 300 MB.
+
+set -eu
+
+# ---------------------------------------------------------------------------
+# Resolve paths
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+LLVM_BUILD="${LLVM_BUILD:-$REPO_ROOT/build/os/clang_static}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+
+CACHE_FILE="$LLVM_SRC/clang/cmake/caches/SimpleOSStatic.cmake"
+
+# ---------------------------------------------------------------------------
+# Parse flags
+# ---------------------------------------------------------------------------
+RUN_BUILD=0
+for arg in "$@"; do
+    case "$arg" in
+        --run)      RUN_BUILD=1 ;;
+        --dry-run)  RUN_BUILD=0 ;;
+        --help|-h)
+            echo "Usage: $0 [--run | --dry-run]"
+            echo "  --dry-run  (default) Print cmake command; do not execute."
+            echo "  --run      Configure with cmake and build with ninja."
+            exit 0
+            ;;
+        *)
+            echo "error: unknown flag '$arg'" >&2
+            echo "  Run '$0 --help' for usage." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Validate LLVM source
+# ---------------------------------------------------------------------------
+if [ ! -d "$LLVM_SRC" ]; then
+    echo "error: LLVM_SRC='$LLVM_SRC' does not exist." >&2
+    echo "  Clone: git clone -b simpleos https://github.com/ormastes/llvm-project" >&2
+    exit 2
+fi
+
+branch="$(git -C "$LLVM_SRC" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+if [ "$branch" != "simpleos" ]; then
+    echo "warning: LLVM_SRC is on branch '$branch', expected 'simpleos'." >&2
+fi
+
+if [ ! -f "$CACHE_FILE" ]; then
+    echo "error: cache file not found: $CACHE_FILE" >&2
+    exit 3
+fi
+
+# ---------------------------------------------------------------------------
+# Validate host tools
+# ---------------------------------------------------------------------------
+MISSING=""
+for tool in cmake ninja; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        MISSING="$MISSING $tool"
+    fi
+done
+if [ -n "$MISSING" ]; then
+    echo "error: missing host tools:$MISSING" >&2
+    echo "  Install with: sudo apt-get install -y cmake ninja-build" >&2
+    exit 4
+fi
+
+# ---------------------------------------------------------------------------
+# Build the cmake configure command
+# ---------------------------------------------------------------------------
+# Note: LLVM_TABLEGEN / CLANG_TABLEGEN are NOT pre-staged here.
+# Run build_llvm_simpleos_cross.shs first to produce host tblgen binaries,
+# then point LLVM_TABLEGEN / CLANG_TABLEGEN to them via env if needed.
+
+CMAKE_CMD="cmake -S $LLVM_SRC/llvm \\
+    -B $LLVM_BUILD \\
+    -G Ninja \\
+    -C $CACHE_FILE"
+
+NINJA_CMD="ninja -C $LLVM_BUILD -j$JOBS clang lld"
+RENAME_CMD="cp $LLVM_BUILD/bin/clang $LLVM_BUILD/bin/clang_static"
+
+# ---------------------------------------------------------------------------
+# Execute or print
+# ---------------------------------------------------------------------------
+echo "==> SimpleOS static clang build"
+echo "    LLVM_SRC  : $LLVM_SRC  (branch: $branch)"
+echo "    LLVM_BUILD: $LLVM_BUILD"
+echo "    CACHE     : $CACHE_FILE"
+echo "    JOBS      : $JOBS"
+echo ""
+
+if [ "$RUN_BUILD" = "0" ]; then
+    echo "[dry-run] cmake configure command:"
+    echo "  $CMAKE_CMD"
+    echo ""
+    echo "[dry-run] build command:"
+    echo "  $NINJA_CMD"
+    echo ""
+    echo "[dry-run] rename clang -> clang_static:"
+    echo "  $RENAME_CMD"
+    echo ""
+    echo "Run '$0 --run' to actually configure and build."
+else
+    echo "==> Configuring..."
+    mkdir -p "$LLVM_BUILD"
+    eval "$CMAKE_CMD"
+    echo ""
+    echo "==> Building clang + lld (this takes 30-60 min)..."
+    eval "$NINJA_CMD"
+    echo ""
+    echo "==> Copying clang -> clang_static..."
+    eval "$RENAME_CMD"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary / size budget
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> Output: $LLVM_BUILD/bin/clang_static"
+echo "    Size budget: target <= 300 MB (static ELF, -Os, ThinLTO)"
+if [ "$RUN_BUILD" = "1" ] && [ -f "$LLVM_BUILD/bin/clang_static" ]; then
+    SIZE_BYTES="$(wc -c < "$LLVM_BUILD/bin/clang_static")"
+    SIZE_MB="$((SIZE_BYTES / 1048576))"
+    echo "    Actual size: ${SIZE_MB} MB"
+    if [ "$SIZE_MB" -gt 300 ]; then
+        echo "warning: binary exceeds 300 MB budget — consider additional stripping." >&2
+    fi
+fi
