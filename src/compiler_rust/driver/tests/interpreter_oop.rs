@@ -288,10 +288,10 @@ main = out[0]
 }
 
 #[test]
-fn interpreter_int_to_char_method_after_numeric_cast() {
+fn interpreter_int_chr_method_after_numeric_cast() {
     let code = r#"
 let code = 65 as u8
-let out = code.to_char()
+let out = code.chr()
 main = if out == "A": 42 else: 0
 "#;
     let result = run_code(code, &[], "").unwrap();

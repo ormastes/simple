@@ -419,6 +419,10 @@ fn eval_method_call(eid: i64) -> i64:
     if kind == VAL_TEXT:
         return eval_text_method(receiver, method_name, arg_eids)
 
+    # Int methods
+    if kind == VAL_INT:
+        return eval_int_method(receiver, method_name, arg_eids)
+
     # Struct methods — look up Type__method in function table
     if kind == VAL_STRUCT:
         val type_name = val_get_struct_name(receiver)
@@ -432,15 +436,18 @@ fn eval_method_call(eid: i64) -> i64:
                 val av = eval_expr(aeid)
                 if eval_had_error: return -1
                 arg_values.push(av)
-            return eval_method_with_args(decl_id, arg_values)
+            return eval_method_with_args(decl_id, arg_values, arg_eids)
 
     eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
     -1
 
-fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
+fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64]) -> i64:
     val d_node = decl_get(decl_id)
     val param_names = d_node.param_names
     val body_stmts = d_node.body_stmts
+
+    var write_back_names: [text] = []
+    var write_back_values: [i64] = []
 
     env_push_scope()
     # Bind self + params
@@ -463,7 +470,26 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
         eval_returning = false
         eval_return_value = -1
 
+    var arg_i: i64 = 0
+    while arg_i < arg_eids.len():
+        val param_i = arg_i + 1
+        if param_i < param_names.len():
+            val arg_eid = arg_eids[arg_i]
+            if expr_get_tag(arg_eid) == EXPR_IDENT:
+                val current_val = env_lookup(param_names[param_i])
+                val current_kind = val_get_kind(current_val)
+                if current_kind == VAL_ARRAY or current_kind == VAL_STRUCT:
+                    write_back_names.push(expr_get(arg_eid).s_val)
+                    write_back_values.push(current_val)
+        arg_i = arg_i + 1
+
     env_pop_scope()
+
+    var wb_i: i64 = 0
+    while wb_i < write_back_names.len():
+        env_assign(write_back_names[wb_i], write_back_values[wb_i])
+        wb_i = wb_i + 1
+
     last_val
 
 # ===== Array Methods =====
@@ -480,7 +506,8 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if eval_had_error: return -1
             var new_elems = elements
             new_elems.push(new_elem)
-            return val_make_array(new_elems)
+            val_arrays[receiver] = new_elems
+            return receiver
         return receiver
 
     if method_name == "contains":
@@ -493,6 +520,23 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
         return val_make_bool(false)
 
     eval_set_error("no method '" + method_name + "' on array")
+    -1
+
+# ===== Int Methods =====
+
+fn eval_int_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val n = val_get_int(receiver)
+
+    if method_name == "chr":
+        if arg_eids.len() > 0:
+            eval_set_error("chr() takes no arguments")
+            return -1
+        if n < 0 or n > 0x10FFFF:
+            eval_set_error("type mismatch: " + n.to_string() + " is not a valid Unicode code point")
+            return -1
+        return val_make_text(n.chr())
+
+    eval_set_error("no method '" + method_name + "' on int")
     -1
 
 # ===== Text Methods =====

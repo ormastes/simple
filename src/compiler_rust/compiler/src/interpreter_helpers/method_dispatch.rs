@@ -337,17 +337,6 @@ pub(crate) fn call_method_on_value(
         // Int methods
         Value::Int(n) => match method {
             "abs" => return Ok(Value::Int(n.abs())),
-            "to_char" => {
-                if (0..=0x10FFFF).contains(n) {
-                    if let Some(c) = char::from_u32(*n as u32) {
-                        return Ok(Value::Str(c.to_string()));
-                    }
-                }
-                return Err(CompileError::semantic(format!(
-                    "type mismatch: {} is not a valid Unicode code point",
-                    n
-                )));
-            }
             "to_string" | "to_text" => return Ok(Value::Str(n.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
             "to_f32" => return Ok(Value::Float(*n as f32 as f64)),
