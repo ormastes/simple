@@ -21,6 +21,15 @@ use compiler.shb.shb_string_table.{ShbStringReader}
 
 val LE = ByteOrder.LittleEndian
 
+# --- Lazy section cursor (returned by ShbReader._open_section) ---
+# valid=false means: skip this section and return [] (either reader is invalid,
+# or section_offsets[section_id] == 0 meaning the section is absent).
+
+class _SectionCursor:
+    reader: BinaryReader
+    count: i64
+    valid: bool
+
 # --- Reader class ---
 
 class ShbReader:
@@ -93,15 +102,27 @@ class ShbReader:
 
     # --- Lazy section readers ---
 
-    fn read_functions() -> [ShbFnEntry]:
+    # Open a section for reading: validate, look up offset, position the reader,
+    # decode the count prefix. Returns a cursor; callers MUST check `cur.valid`
+    # before using `cur.reader`/`cur.count` (returns invalid cursor on either
+    # `self.valid == false` or `section_offsets[section_id] == 0`).
+    fn _open_section(section_id: i64) -> _SectionCursor:
         if self.valid == false:
-            return []
-        val offset = self.section_offsets[SHB_SECTION_FUNCTIONS]
+            return _SectionCursor(reader: BinaryReader.new(self.data), count: 0, valid: false)
+        val offset = self.section_offsets[section_id]
         if offset == 0:
-            return []
+            return _SectionCursor(reader: BinaryReader.new(self.data), count: 0, valid: false)
         var r = BinaryReader.new(self.data)
         r.seek(offset)
         val count = r.read_u32(LE) ?? 0
+        _SectionCursor(reader: r, count: count, valid: true)
+
+    fn read_functions() -> [ShbFnEntry]:
+        val cur = self._open_section(SHB_SECTION_FUNCTIONS)
+        if not cur.valid:
+            return []
+        var r = cur.reader
+        val count = cur.count
         var fns: [ShbFnEntry] = []
         var i = 0
         while i < count:
@@ -129,14 +150,11 @@ class ShbReader:
         fns
 
     fn read_structs() -> [ShbStructEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_STRUCTS)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_STRUCTS]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var structs: [ShbStructEntry] = []
         var i = 0
         while i < count:
@@ -164,14 +182,11 @@ class ShbReader:
         structs
 
     fn read_classes() -> [ShbClassEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_CLASSES)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_CLASSES]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var classes: [ShbClassEntry] = []
         var i = 0
         while i < count:
@@ -207,14 +222,11 @@ class ShbReader:
         classes
 
     fn read_enums() -> [ShbEnumEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_ENUMS)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_ENUMS]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var enums: [ShbEnumEntry] = []
         var i = 0
         while i < count:
@@ -236,14 +248,11 @@ class ShbReader:
         enums
 
     fn read_traits() -> [ShbTraitEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_TRAITS)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_TRAITS]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var traits: [ShbTraitEntry] = []
         var i = 0
         while i < count:
@@ -265,14 +274,11 @@ class ShbReader:
         traits
 
     fn read_reexports() -> [ShbReexportEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_REEXPORTS)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_REEXPORTS]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var reexports: [ShbReexportEntry] = []
         var i = 0
         while i < count:
@@ -286,14 +292,11 @@ class ShbReader:
         reexports
 
     fn read_type_layouts() -> [ShbTypeLayoutEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_TYPE_LAYOUTS)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_TYPE_LAYOUTS]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var layouts: [ShbTypeLayoutEntry] = []
         var i = 0
         while i < count:
@@ -311,14 +314,11 @@ class ShbReader:
         layouts
 
     fn read_dependencies() -> [ShbDependencyEntry]:
-        if self.valid == false:
+        val cur = self._open_section(SHB_SECTION_DEPENDENCIES)
+        if not cur.valid:
             return []
-        val offset = self.section_offsets[SHB_SECTION_DEPENDENCIES]
-        if offset == 0:
-            return []
-        var r = BinaryReader.new(self.data)
-        r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        var r = cur.reader
+        val count = cur.count
         var deps: [ShbDependencyEntry] = []
         var i = 0
         while i < count:
