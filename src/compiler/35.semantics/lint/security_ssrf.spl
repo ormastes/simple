@@ -32,6 +32,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -72,71 +73,56 @@ fn check_ssrf(source: text, path: text) -> [SsrfWarning]:
     if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
         return warnings
 
-    val lines = source.split("\n")
-    var in_docstring = false
+    val code_lines = iter_code_lines(source)
 
     # Pass 1: collect user-input variables
     var tainted_vars: [text] = []
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
-
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
-
-        if not in_docstring:
-            val trimmed = line.trim()
-            if not trimmed.starts_with("#"):
-                val tainted = _extract_tainted_var(trimmed)
-                if tainted != "":
-                    tainted_vars.push(tainted)
-
+    while li < code_lines.len():
+        val trimmed = code_lines[li].trimmed
+        if not trimmed.starts_with("#"):
+            val tainted = _extract_tainted_var(trimmed)
+            if tainted != "":
+                tainted_vars.push(tainted)
         li = li + 1
 
     # Pass 2: check for tainted vars flowing to fetch functions
-    in_docstring = false
     var validated_vars: [text] = []
-
     li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
+        if not trimmed.starts_with("#"):
+            if not trimmed.contains("@allow(ssrf)"):
+                # Track variables that go through validation
+                val validated = _extract_validated_var(trimmed)
+                if validated != "":
+                    validated_vars.push(validated)
 
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            if not trimmed.starts_with("#"):
-                if not trimmed.contains("@allow(ssrf)"):
-                    # Track variables that go through validation
-                    val validated = _extract_validated_var(trimmed)
-                    if validated != "":
-                        validated_vars.push(validated)
-
-                    # Check if line passes a tainted var to a fetch function
-                    if _has_fetch_call(trimmed):
-                        val used_tainted = _find_tainted_in_fetch(trimmed, tainted_vars, validated_vars)
-                        if used_tainted != "":
-                            warnings.push(SsrfWarning(
-                                code: "SEC-SSRF001",
-                                severity: "WARN",
-                                message: "user-controlled variable '{used_tainted}' passed to HTTP fetch without URL validation",
-                                hint: "use UrlValidator.validate({used_tainted}, allow_internal: false) or validate_url({used_tainted}) before fetching",
-                                line_num: li + 1,
-                                file_path: path
-                            ))
-
-                    # Also check for direct inline patterns: fetch(request.params["url"])
-                    if _has_direct_request_in_fetch(trimmed):
+                # Check if line passes a tainted var to a fetch function
+                if _has_fetch_call(trimmed):
+                    val used_tainted = _find_tainted_in_fetch(trimmed, tainted_vars, validated_vars)
+                    if used_tainted != "":
                         warnings.push(SsrfWarning(
-                            code: "SEC-SSRF002",
+                            code: "SEC-SSRF001",
                             severity: "WARN",
-                            message: "request parameter passed directly to HTTP fetch function",
-                            hint: "extract to a variable, validate with UrlValidator, then pass to fetch",
-                            line_num: li + 1,
+                            message: "user-controlled variable '{used_tainted}' passed to HTTP fetch without URL validation",
+                            hint: "use UrlValidator.validate({used_tainted}, allow_internal: false) or validate_url({used_tainted}) before fetching",
+                            line_num: cl.line_num,
                             file_path: path
                         ))
+
+                # Also check for direct inline patterns: fetch(request.params["url"])
+                if _has_direct_request_in_fetch(trimmed):
+                    warnings.push(SsrfWarning(
+                        code: "SEC-SSRF002",
+                        severity: "WARN",
+                        message: "request parameter passed directly to HTTP fetch function",
+                        hint: "extract to a variable, validate with UrlValidator, then pass to fetch",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
 
         li = li + 1
 
@@ -336,19 +322,6 @@ fn _find_substring(haystack: text, needle: text) -> i64:
             return i
         i = i + 1
     -1
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
 
 
 # ============================================================================
