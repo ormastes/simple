@@ -37,6 +37,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -81,43 +82,38 @@ fn check_missing_auth(source: text, path: text) -> [MissingAuthWarning]:
     if not _is_web_module(path):
         return warnings
 
+    # Keep raw `lines` for `_has_security_annotation` look-back; iter_code_lines
+    # handles only the docstring filter.
     val lines = source.split("\n")
-    var in_docstring = false
-
+    val code_lines = iter_code_lines(source)
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Check if this is a function definition
+            if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+                val fn_name = _extract_fn_name(trimmed)
 
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Check if this is a function definition
-                if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
-                    val fn_name = _extract_fn_name(trimmed)
-
-                    # Check if function name matches handler pattern
-                    if _is_handler_function(fn_name):
-                        # Check if function has a request parameter (confirms it's a handler)
-                        if _has_request_param(trimmed):
-                            # Check if preceding lines have a security annotation
-                            if not _has_security_annotation(lines, li):
-                                # Check for inline allow annotation
-                                if not trimmed.contains("@allow(missing_auth)"):
-                                    warnings.push(MissingAuthWarning(
-                                        code: "SEC-AUTH001",
-                                        severity: "WARN",
-                                        message: "handler '{fn_name}' has no security annotation; defaults to implicit auth policy",
-                                        hint: "add @public, @requires_auth, @requires_capability(\"role\"), or @deny_all before the handler",
-                                        handler_name: fn_name,
-                                        line_num: li + 1,
-                                        file_path: path
-                                    ))
+                # Check if function name matches handler pattern
+                if _is_handler_function(fn_name):
+                    # Check if function has a request parameter (confirms it's a handler)
+                    if _has_request_param(trimmed):
+                        # Check if preceding lines have a security annotation
+                        if not _has_security_annotation(lines, cl.line_num - 1):
+                            # Check for inline allow annotation
+                            if not trimmed.contains("@allow(missing_auth)"):
+                                warnings.push(MissingAuthWarning(
+                                    code: "SEC-AUTH001",
+                                    severity: "WARN",
+                                    message: "handler '{fn_name}' has no security annotation; defaults to implicit auth policy",
+                                    hint: "add @public, @requires_auth, @requires_capability(\"role\"), or @deny_all before the handler",
+                                    handler_name: fn_name,
+                                    line_num: cl.line_num,
+                                    file_path: path
+                                ))
 
         li = li + 1
 
@@ -286,19 +282,6 @@ fn _extract_fn_name(trimmed: text) -> text:
     if end <= start:
         return ""
     trimmed.slice(start, end)
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
 
 
 # ============================================================================
