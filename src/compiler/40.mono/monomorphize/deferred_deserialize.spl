@@ -114,6 +114,35 @@ fn read_generic_params(data: [u8], offset: i64) -> ([text], i64)?:
         pos = param_result.1
     (params, pos)
 
+# ============================================================================
+# Shared deserialize-X-def prefix/suffix helpers
+# Used by struct/class/enum/trait deserializers (function uses an older nil-check
+# style and is not refactored here).
+# ============================================================================
+
+fn _read_def_prefix(data: [u8], offset: i64) -> (text, [text], i64)?:
+    """Read the common prefix of struct/class/enum/trait deserializers:
+    name (text-field) followed by generic_params. Returns (name, generic_params, new_offset)."""
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+    (name, generic_params, pos)
+
+fn _read_def_suffix(data: [u8], offset: i64) -> (text?, {text: text}, i64)?:
+    """Read the common suffix shared by struct/class/enum deserializers:
+    optional specialization_of + type_bindings dict.
+    Returns (specialization_of, type_bindings, new_offset)."""
+    val spec_result = read_optional_text_field(data, offset)?
+    val specialization_of = spec_result.0
+    var pos = spec_result.1
+    val bindings_result = read_text_dict(data, pos)?
+    val type_bindings = bindings_result.0
+    pos = bindings_result.1
+    (specialization_of, type_bindings, pos)
+
 fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
     """Deserialize a FunctionDef from binary data."""
     # Name
@@ -186,15 +215,11 @@ fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
 
 fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
     """Deserialize a StructDef from binary data."""
-    # Name
-    val name_result = read_text_field(data, offset)?
-    val name = name_result.0
-    var pos = name_result.1
-
-    # Generic params
-    val gp_result = read_generic_params(data, pos)?
-    val generic_params = gp_result.0
-    pos = gp_result.1
+    # Name + generic params
+    val prefix = _read_def_prefix(data, offset)?
+    val name = prefix.0
+    val generic_params = prefix.1
+    var pos = prefix.2
 
     # Fields
     val fields_result = read_text_list(data, pos)?
@@ -207,15 +232,11 @@ fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
     val is_generic = data[pos] == 0x01
     pos = pos + 1
 
-    # Specialization of
-    val spec_result = read_optional_text_field(data, pos)?
-    val specialization_of = spec_result.0
-    pos = spec_result.1
-
-    # Type bindings
-    val bindings_result = read_text_dict(data, pos)?
-    val type_bindings = bindings_result.0
-    pos = bindings_result.1
+    # Specialization of + type bindings
+    val suffix = _read_def_suffix(data, pos)?
+    val specialization_of = suffix.0
+    val type_bindings = suffix.1
+    pos = suffix.2
 
     val struct_def = StructDef(
         name: name,
@@ -229,15 +250,11 @@ fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
 
 fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
     """Deserialize a ClassDef from binary data."""
-    # Name
-    val name_result = read_text_field(data, offset)?
-    val name = name_result.0
-    var pos = name_result.1
-
-    # Generic params
-    val gp_result = read_generic_params(data, pos)?
-    val generic_params = gp_result.0
-    pos = gp_result.1
+    # Name + generic params
+    val prefix = _read_def_prefix(data, offset)?
+    val name = prefix.0
+    val generic_params = prefix.1
+    var pos = prefix.2
 
     # Fields
     val fields_result = read_text_list(data, pos)?
@@ -255,15 +272,11 @@ fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
     val is_generic = data[pos] == 0x01
     pos = pos + 1
 
-    # Specialization of
-    val spec_result = read_optional_text_field(data, pos)?
-    val specialization_of = spec_result.0
-    pos = spec_result.1
-
-    # Type bindings
-    val bindings_result = read_text_dict(data, pos)?
-    val type_bindings = bindings_result.0
-    pos = bindings_result.1
+    # Specialization of + type bindings
+    val suffix = _read_def_suffix(data, pos)?
+    val specialization_of = suffix.0
+    val type_bindings = suffix.1
+    pos = suffix.2
 
     val class_def = ClassDef(
         name: name,
@@ -278,15 +291,11 @@ fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
 
 fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
     """Deserialize an EnumDef from binary data."""
-    # Name
-    val name_result = read_text_field(data, offset)?
-    val name = name_result.0
-    var pos = name_result.1
-
-    # Generic params
-    val gp_result = read_generic_params(data, pos)?
-    val generic_params = gp_result.0
-    pos = gp_result.1
+    # Name + generic params
+    val prefix = _read_def_prefix(data, offset)?
+    val name = prefix.0
+    val generic_params = prefix.1
+    var pos = prefix.2
 
     # Variants
     val variants_result = read_text_list(data, pos)?
@@ -299,15 +308,11 @@ fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
     val is_generic = data[pos] == 0x01
     pos = pos + 1
 
-    # Specialization of
-    val spec_result = read_optional_text_field(data, pos)?
-    val specialization_of = spec_result.0
-    pos = spec_result.1
-
-    # Type bindings
-    val bindings_result = read_text_dict(data, pos)?
-    val type_bindings = bindings_result.0
-    pos = bindings_result.1
+    # Specialization of + type bindings
+    val suffix = _read_def_suffix(data, pos)?
+    val specialization_of = suffix.0
+    val type_bindings = suffix.1
+    pos = suffix.2
 
     val enum_def = EnumDef(
         name: name,
@@ -321,15 +326,11 @@ fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
 
 fn deserialize_trait_def(data: [u8], offset: i64) -> (TraitDef, i64)?:
     """Deserialize a TraitDef from binary data."""
-    # Name
-    val name_result = read_text_field(data, offset)?
-    val name = name_result.0
-    var pos = name_result.1
-
-    # Generic params
-    val gp_result = read_generic_params(data, pos)?
-    val generic_params = gp_result.0
-    pos = gp_result.1
+    # Name + generic params
+    val prefix = _read_def_prefix(data, offset)?
+    val name = prefix.0
+    val generic_params = prefix.1
+    var pos = prefix.2
 
     # Methods
     val methods_result = read_text_list(data, pos)?
