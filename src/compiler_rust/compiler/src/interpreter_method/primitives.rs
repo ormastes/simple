@@ -40,6 +40,23 @@ pub fn handle_int_methods(
                 CastNumericResult::Float(v) => Value::Float(v),
             }
         }
+        "to_char" => {
+            if (0..=0x10FFFF).contains(&n) {
+                if let Some(c) = char::from_u32(n as u32) {
+                    Value::Str(c.to_string())
+                } else {
+                    return Err(CompileError::semantic(format!(
+                        "type mismatch: {} is not a valid Unicode code point",
+                        n
+                    )));
+                }
+            } else {
+                return Err(CompileError::semantic(format!(
+                    "type mismatch: {} is not a valid Unicode code point",
+                    n
+                )));
+            }
+        }
         "to_string" | "to_text" => Value::Str(n.to_string()),
         "clamp" => {
             let min = eval_arg(

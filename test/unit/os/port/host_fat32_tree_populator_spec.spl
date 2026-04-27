@@ -1,0 +1,111 @@
+use std.spec
+use os.port.host_fat32_tree_populator.{populate_host_tree_into_fat32_image}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _repeat_byte(count: i64, byte: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+fn _write_u32(buf: [u8], offset: i64, value: u32):
+    buf[offset] = (value & 0x000000FF).to_u8()
+    buf[offset + 1] = ((value >> 8) & 0x000000FF).to_u8()
+    buf[offset + 2] = ((value >> 16) & 0x000000FF).to_u8()
+    buf[offset + 3] = ((value >> 24) & 0x000000FF).to_u8()
+
+fn _sector_offset(lba: i64) -> i64:
+    lba * 512
+
+fn _cluster_offset(cluster: i64) -> i64:
+    _sector_offset(34 + (cluster - 2))
+
+fn _od_hex(path: text, offset: i64, length: i64) -> text:
+    val command = "od -An -tx1 -j " + offset.to_text() + " -N " + length.to_text() + " '" + path + "' | tr '\\n' ' ' | tr -s ' ' | sed 's/^ //; s/ $//'"
+    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    stdout
+
+fn _make_formatted_fat32_image() -> [u8]:
+    var image = _repeat_byte(50 * 512, 0u8)
+
+    image[11] = 0x00u8
+    image[12] = 0x02u8
+    image[13] = 0x01u8
+    image[14] = 0x20u8
+    image[15] = 0x00u8
+    image[16] = 0x02u8
+    _write_u32(image, 32, 50u32)
+    _write_u32(image, 36, 1u32)
+    _write_u32(image, 44, 2u32)
+    image[510] = 0x55u8
+    image[511] = 0xAAu8
+
+    val fat0 = _sector_offset(32)
+    val fat1 = _sector_offset(33)
+    _write_u32(image, fat0 + 0, 0x0FFFFFF8u32)
+    _write_u32(image, fat0 + 4, 0x0FFFFFFFu32)
+    _write_u32(image, fat0 + 8, 0x0FFFFFFFu32)
+    _write_u32(image, fat1 + 0, 0x0FFFFFF8u32)
+    _write_u32(image, fat1 + 4, 0x0FFFFFFFu32)
+    _write_u32(image, fat1 + 8, 0x0FFFFFFFu32)
+
+    val root_cluster = _cluster_offset(2)
+    image[root_cluster + 0] = 0x00u8
+    image
+
+fn _cleanup(path: text):
+    _ = rt_process_run("/bin/sh", ["-c", "rm -rf '" + path + "'"])
+
+describe "host_fat32_tree_populator":
+    it "mirrors host directories and files into a formatted FAT32 image and flushes":
+        val root = "/tmp/host_fat32_tree_populator_spec"
+        val image_path = root + "/disk.img"
+        val source_root = root + "/src"
+        _cleanup(root)
+
+        expect(rt_dir_create_all(source_root + "/APPS/TOOLS")).to_equal(true)
+        expect(rt_file_write_bytes(image_path, _make_formatted_fat32_image())).to_equal(true)
+        expect(rt_file_write_bytes(source_root + "/KERNEL.BIN", [107u8, 101u8, 114u8, 110u8, 101u8, 108u8, 45u8, 105u8, 109u8, 97u8, 103u8, 101u8])).to_equal(true)
+        expect(rt_file_write_bytes(source_root + "/APPS/HELLO.SMF", [104u8, 101u8, 108u8, 108u8, 111u8, 45u8, 97u8, 112u8, 112u8])).to_equal(true)
+        expect(rt_file_write_bytes(source_root + "/APPS/TOOLS/EMPTY.DAT", [])).to_equal(true)
+
+        val populate_result = populate_host_tree_into_fat32_image(image_path, source_root)
+        expect(populate_result.is_ok()).to_equal(true)
+        expect(_od_hex(image_path, 0, 64).contains("02 01 20 00 02")).to_equal(true)
+
+        val root_dir = _cluster_offset(2)
+        expect(_od_hex(image_path, root_dir + 0, 11)).to_equal("41 50 50 53 20 20 20 20 20 20 20")
+        expect(_od_hex(image_path, root_dir + 11, 1)).to_equal("10")
+        expect(_od_hex(image_path, root_dir + 26, 2)).to_equal("03 00")
+        expect(_od_hex(image_path, root_dir + 32, 11)).to_equal("4b 45 52 4e 45 4c 20 20 42 49 4e")
+        expect(_od_hex(image_path, root_dir + 32 + 11, 1)).to_equal("20")
+        expect(_od_hex(image_path, root_dir + 32 + 26, 2)).to_equal("07 00")
+        expect(_od_hex(image_path, root_dir + 32 + 28, 4)).to_equal("0c 00 00 00")
+
+        val apps_dir = _cluster_offset(3)
+        expect(_od_hex(image_path, apps_dir + 0, 11)).to_equal("2e 20 20 20 20 20 20 20 20 20 20")
+        expect(_od_hex(image_path, apps_dir + 32, 11)).to_equal("2e 2e 20 20 20 20 20 20 20 20 20")
+        expect(_od_hex(image_path, apps_dir + 64, 11)).to_equal("54 4f 4f 4c 53 20 20 20 20 20 20")
+        expect(_od_hex(image_path, apps_dir + 64 + 11, 1)).to_equal("10")
+        expect(_od_hex(image_path, apps_dir + 64 + 26, 2)).to_equal("04 00")
+        expect(_od_hex(image_path, apps_dir + 96, 11)).to_equal("48 45 4c 4c 4f 20 20 20 53 4d 46")
+        expect(_od_hex(image_path, apps_dir + 96 + 11, 1)).to_equal("20")
+        expect(_od_hex(image_path, apps_dir + 96 + 26, 2)).to_equal("06 00")
+        expect(_od_hex(image_path, apps_dir + 96 + 28, 4)).to_equal("09 00 00 00")
+
+        val tools_dir = _cluster_offset(4)
+        expect(_od_hex(image_path, tools_dir + 64, 11)).to_equal("45 4d 50 54 59 20 20 20 44 41 54")
+        expect(_od_hex(image_path, tools_dir + 64 + 11, 1)).to_equal("20")
+        expect(_od_hex(image_path, tools_dir + 64 + 26, 2)).to_equal("05 00")
+        expect(_od_hex(image_path, tools_dir + 64 + 28, 4)).to_equal("00 00 00 00")
+
+        expect(_od_hex(image_path, _cluster_offset(6), 9)).to_equal("68 65 6c 6c 6f 2d 61 70 70")
+        expect(_od_hex(image_path, _cluster_offset(7), 12)).to_equal("6b 65 72 6e 65 6c 2d 69 6d 61 67 65")
+
+        _cleanup(root)

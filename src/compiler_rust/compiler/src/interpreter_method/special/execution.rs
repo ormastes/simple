@@ -141,13 +141,17 @@ pub fn exec_function_with_self_return(
         Err(e) => return Err(e),
     };
 
-    // Write back mutated object arguments passed by identifier.
-    // This lets methods like `source.copy_to(dest)` persist changes to `dest`.
+    // Write back mutated container arguments passed by identifier.
+    // This mirrors normal function-call behavior for arrays, dicts, tuples,
+    // and objects that are mutated inside methods.
     let non_self_params: Vec<_> = func.params.iter().filter(|p| p.name != "self").collect();
     for (param, arg) in non_self_params.into_iter().zip(args.iter()) {
         if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
             if let Some(updated_arg) = local_env.get(&param.name).cloned() {
-                if matches!(updated_arg, Value::Object { .. }) {
+                if matches!(
+                    updated_arg,
+                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                ) {
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }

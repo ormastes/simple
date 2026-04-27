@@ -271,6 +271,34 @@ main = m.any_method(6)
 }
 
 #[test]
+fn interpreter_method_writes_back_mutated_array_argument() {
+    let code = r#"
+class Copier:
+    fn append_answer(self, dest):
+        dest.push(42)
+        return 0
+
+let out = []
+let copier = Copier {}
+copier.append_answer(out)
+main = out[0]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_int_to_char_method_after_numeric_cast() {
+    let code = r#"
+let code = 65 as u8
+let out = code.to_char()
+main = if out == "A": 42 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
 fn interpreter_method_missing_with_context() {
     // method_missing inside context block
     let code = r#"

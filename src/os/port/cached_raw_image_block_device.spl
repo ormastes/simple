@@ -1,0 +1,96 @@
+use std.io_runtime as io
+use os.services.block_device.{BlockDevice}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _validate_sector_size(sector_size: u32) -> Result<(), text>:
+    if sector_size == 0u32:
+        return Err("cached_raw_image_block_device: sector size must be > 0")
+    Ok(())
+
+fn _validate_image_bytes(image_bytes: [u8], sector_size: u32) -> Result<(), text>:
+    val sector_bytes = sector_size.to_u64()
+    if image_bytes.len().to_u64() % sector_bytes != 0u64:
+        return Err("cached_raw_image_block_device: image size must be a multiple of sector size")
+    Ok(())
+
+class CachedRawImageBlockDevice:
+    image_path: text
+    image_bytes: [u8]
+    sector_size_bytes: u64
+    dirty: bool
+
+impl CachedRawImageBlockDevice:
+    static fn from_bytes(image_path: text, image_bytes: [u8], sector_size: u32) -> Result<CachedRawImageBlockDevice, text>:
+        _validate_sector_size(sector_size)?
+        _validate_image_bytes(image_bytes, sector_size)?
+        Ok(CachedRawImageBlockDevice(
+            image_path: image_path,
+            image_bytes: image_bytes,
+            sector_size_bytes: sector_size.to_u64(),
+            dirty: false
+        ))
+
+    static fn load(image_path: text) -> Result<CachedRawImageBlockDevice, text>:
+        CachedRawImageBlockDevice.load_with_sector_size(image_path, 512u32)
+
+    static fn load_with_sector_size(image_path: text, sector_size: u32) -> Result<CachedRawImageBlockDevice, text>:
+        if not io.file_exists(image_path):
+            return Err("cached_raw_image_block_device: image path not found: " + image_path)
+        val image_bytes = match rt_file_read_bytes(image_path):
+            case Some(bytes): bytes
+            case None: return Err("cached_raw_image_block_device: failed to read image bytes: " + image_path)
+        CachedRawImageBlockDevice.from_bytes(image_path, image_bytes, sector_size)
+
+    me fn flush() -> Result<(), text>:
+        if self.image_path == "":
+            return Err("cached_raw_image_block_device: flush requires a backing image path")
+        if not self.dirty:
+            return Ok(())
+        if not rt_file_write_bytes(self.image_path, self.image_bytes):
+            return Err("cached_raw_image_block_device: flush failed: " + self.image_path)
+        self.dirty = false
+        Ok(())
+
+    fn image_len() -> u64:
+        self.image_bytes.len().to_u64()
+
+impl BlockDevice for CachedRawImageBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        val sector_bytes = self.sector_size_bytes.to_i64()
+        if buffer.len().to_i64() < sector_bytes:
+            return Err("cached_raw_image_block_device: read buffer smaller than sector size")
+        val image_bytes = self.image_bytes
+        val start = (lba * self.sector_size_bytes).to_i64()
+        if start + sector_bytes > image_bytes.len().to_i64():
+            return Err("cached_raw_image_block_device: sector out of range")
+        var i: i64 = 0
+        while i < sector_bytes:
+            buffer[i] = image_bytes[start + i]
+            i = i + 1
+        Result.Ok(true)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val sector_bytes = self.sector_size_bytes.to_i64()
+        var image_bytes = self.image_bytes
+        val start = (lba * self.sector_size_bytes).to_i64()
+        if start + sector_bytes > image_bytes.len().to_i64():
+            return Err("cached_raw_image_block_device: sector out of range")
+
+        var i: i64 = 0
+        while i < sector_bytes:
+            image_bytes[start + i] = 0u8
+            i = i + 1
+
+        i = 0
+        while i < sector_bytes and i < data.len().to_i64():
+            image_bytes[start + i] = data[i]
+            i = i + 1
+
+        self.image_bytes = image_bytes
+        self.dirty = true
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        self.sector_size_bytes.to_u32()
