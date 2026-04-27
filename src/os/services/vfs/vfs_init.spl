@@ -27,6 +27,7 @@ use os.kernel.types.fs_types.{FileFlags}
 use common.string_core.{str_char_at}
 
 use os.kernel.log.klog_api.{log_raw_println}
+extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
@@ -298,6 +299,22 @@ fn vfs_boot_init() -> bool:
         log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
         return false
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
+    # BUG-VFS-CACHE-RETURNS-PLACEHOLDER: g_vfs_hello_world_exec_bytes is declared
+    # empty and never seeded, so _cached_known_exec_bytes returns [] for app_id=3
+    # and every downstream FAT32-path attempt uses lowercase/long names the C
+    # bridge cannot find.  Seed it here via the same proven path-read sequence
+    # used for the browser probe above.
+    val hw_probe_path = "/HELLOSMF.SMF"
+    val hw_probe_size = simpleos_fat32_read_path_size(hw_probe_path)
+    if hw_probe_size > 4 and hw_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
+        val hw_read_rc = simpleos_fat32_read_path(hw_probe_path)
+        if hw_read_rc == 0 and _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+            g_vfs_hello_world_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), hw_probe_size.to_u64())
+            serial_println("[vfs-fix] hello_world seeded len={g_vfs_hello_world_exec_bytes.len()}")
+        else:
+            serial_println("[vfs-fix] hello_world seed failed rc={hw_read_rc} size={hw_probe_size}")
+    else:
+        serial_println("[vfs-fix] hello_world probe failed size={hw_probe_size}")
 
     log_raw_println("[vfs-init] VFS ready (C-backed)")
     return true

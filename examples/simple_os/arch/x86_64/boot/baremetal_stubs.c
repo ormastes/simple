@@ -447,7 +447,9 @@ RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
 RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
 RuntimeValue rt_array_new(RuntimeValue cap_val);
-RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
+int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
 RuntimeValue rt_tuple_new(RuntimeValue len_rv);
 RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index);
 RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value);
@@ -480,10 +482,54 @@ static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
+void *malloc(size_t sz);
+
+static inline size_t simpleos_heap_align(size_t sz)
+{
+    return (sz + 15U) & ~(size_t)15U;
+}
+
+static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
+{
+    size_t old_aligned = simpleos_heap_align(old_sz);
+    size_t new_aligned = simpleos_heap_align(new_sz);
+    if (!p) return malloc(new_sz);
+
+    uint8_t *base = (uint8_t *)p;
+    if (base >= (uint8_t *)_heap &&
+        base + old_aligned == (uint8_t *)&_heap[_heap_off]) {
+        if (new_aligned > old_aligned) {
+            size_t grow = new_aligned - old_aligned;
+            if (_heap_off + grow > sizeof(_heap)) {
+                serial_puts("[PANIC] heap exhausted\r\n");
+                serial_puts("[PANIC] heap_off=");
+                serial_put_hex((uint64_t)_heap_off);
+                serial_puts(" req=");
+                serial_put_hex((uint64_t)grow);
+                serial_puts(" limit=");
+                serial_put_hex((uint64_t)sizeof(_heap));
+                serial_puts("\r\n");
+                for (;;) outb(0xF4, 0);
+            }
+            _heap_off += grow;
+        } else {
+            _heap_off -= (old_aligned - new_aligned);
+        }
+        return p;
+    }
+
+    void *n = malloc(new_sz);
+    if (p && n) {
+        size_t copy_sz = old_sz < new_sz ? old_sz : new_sz;
+        __builtin_memcpy(n, p, copy_sz);
+    }
+    return n;
+}
+
 void *malloc(size_t sz)
 {
     void *caller = __builtin_return_address(0);
-    sz = (sz + 15) & ~(size_t)15;
+    sz = simpleos_heap_align(sz);
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
@@ -701,17 +747,22 @@ RuntimeValue rt_string_len(RuntimeValue str)
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    /* Bare-metal native code passes raw loop counters here. */
-    if (!IS_HEAP(str)) return 0;
+    if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s) return NIL_VALUE;
     int64_t i = (int64_t)idx;
-    if (!s || i < 0 || (uint32_t)i >= s->len) return 0;
-    return (RuntimeValue)(unsigned char)s->data[i];
+    if (i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
+    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
 }
 
 RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
 {
-    return rt_string_char_at(str, idx);
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || !IS_INT(idx)) return 0;
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= s->len) return 0;
+    return ENCODE_INT((unsigned char)s->data[i]);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -866,13 +917,12 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
     if (h->type == HEAP_STRING) {
-        return rt_string_char_at(v, idx);
+        if (!IS_INT(idx)) return NIL_VALUE;
+        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
     }
     if (h->type == HEAP_ARRAY) {
-        int64_t i = (int64_t)idx;
-        RuntimeArray *a = (RuntimeArray *)h;
-        if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-        return runtime_array_items(a)[i];
+        if (!IS_INT(idx)) return NIL_VALUE;
+        return rt_array_get(v, (RuntimeValue)DECODE_INT(idx));
     }
     if (h->type == HEAP_MAP) {
         /* Map indexing: key is the idx argument */
@@ -883,22 +933,19 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
 
 RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
 {
-    if (!IS_HEAP(v)) return NIL_VALUE;
+    if (!IS_HEAP(v)) return 0;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    if (!h) return NIL_VALUE;
+    if (!h) return 0;
     if (h->type == HEAP_ARRAY) {
-        int64_t i = (int64_t)idx;
-        RuntimeArray *a = (RuntimeArray *)h;
-        if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-        runtime_array_items(a)[i] = val;
-        return val;
+        if (!IS_INT(idx)) return 0;
+        return rt_array_set(v, (RuntimeValue)DECODE_INT(idx), val);
     }
     if (h->type == HEAP_MAP) {
         /* Map indexing: key is the idx argument */
         rt_map_set(v, idx, val);
-        return val;
+        return 1;
     }
-    return NIL_VALUE;
+    return 0;
 }
 
 /* ===================================================================
@@ -1010,6 +1057,9 @@ RuntimeValue rt_print(RuntimeValue val)
     }
     return NIL_VALUE;
 }
+
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val);
+static int8_t rt_array_set_raw(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
 
 RuntimeValue rt_println(RuntimeValue val)
 {
@@ -8152,7 +8202,7 @@ RuntimeValue rt_clone(RuntimeValue val)
         RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
         RuntimeValue *items = runtime_array_items(a);
         for (uint32_t i = 0; i < a->len; i++) {
-            new_arr = rt_array_push(new_arr, items[i]);
+            new_arr = rt_array_push_handle(new_arr, items[i]);
         }
         return new_arr;
     }
@@ -8288,12 +8338,12 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         for (uint32_t i = 0; i < s->len; i++) {
             RuntimeValue ch = rt_string_new(
                 (RuntimeValue)(uintptr_t)&s->data[i], 1);
-            arr = rt_array_push(arr, ch);
+            arr = rt_array_push_handle(arr, ch);
         }
         return arr;
     }
     if (d->len > s->len) {
-        return rt_array_push(arr, str);
+        return rt_array_push_handle(arr, str);
     }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
@@ -8305,7 +8355,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
             /* Found delimiter at i */
             RuntimeValue part = rt_string_slice(str,
                 ENCODE_INT(start), ENCODE_INT(i));
-            arr = rt_array_push(arr, part);
+            arr = rt_array_push_handle(arr, part);
             i += d->len;
             start = i;
         } else {
@@ -8315,7 +8365,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     /* Remainder */
     RuntimeValue rest = rt_string_slice(str,
         ENCODE_INT(start), ENCODE_INT(s->len));
-    arr = rt_array_push(arr, rest);
+    arr = rt_array_push_handle(arr, rest);
     return arr;
 }
 
@@ -8563,7 +8613,7 @@ RuntimeValue rt_string_chars(RuntimeValue str)
     for (uint32_t i = 0; i < s->len; i++) {
         RuntimeValue ch = rt_string_new(
             (RuntimeValue)(uintptr_t)&s->data[i], 1);
-        arr = rt_array_push(arr, ch);
+        arr = rt_array_push_handle(arr, ch);
     }
     return arr;
 }
@@ -8575,7 +8625,7 @@ RuntimeValue rt_string_bytes(RuntimeValue str)
     RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
     if (!s) return arr;
     for (uint32_t i = 0; i < s->len; i++) {
-        arr = rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+        arr = rt_array_push_handle(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
     }
     return arr;
 }
@@ -8939,7 +8989,7 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
  * Must use raw value, not DECODE_INT. */
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
-    int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
+    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
     if (cap <= 0) cap = 16; /* default capacity */
     if (cap < 16) cap = 16;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
@@ -8956,10 +9006,9 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     return ENCODE_PTR(a);
 }
 
-/* rt_array_push: push element, no growth (matching Rust runtime).
- * Returns ENCODE_PTR of same array. If at capacity, item is silently dropped.
- * Callers must pre-allocate sufficient capacity (compiler uses 16 for empty []). */
-RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
+/* Internal helper for baremetal C code that still expects the mutated array
+ * handle back after append. The exported ABI below returns a status byte. */
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
@@ -8973,11 +9022,23 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     if (a->len >= a->cap) {
         /* Preserve the original header address so callers that treat push as
          * in-place mutation do not keep using a stale handle after growth. */
+        uint32_t old_cap = a->cap;
         uint32_t new_cap = a->cap * 2;
         if (new_cap < 128) new_cap = 128;
-        RuntimeValue *new_items = (RuntimeValue *)malloc((size_t)new_cap * sizeof(RuntimeValue));
+        RuntimeValue *new_items = NULL;
+        if (items == runtime_array_inline_items(a)) {
+            new_items = (RuntimeValue *)malloc((size_t)new_cap * sizeof(RuntimeValue));
+            if (new_items) {
+                for (uint32_t i = 0; i < a->len; i++) new_items[i] = items[i];
+            }
+        } else {
+            new_items = (RuntimeValue *)simpleos_heap_realloc_last(
+                items,
+                (size_t)old_cap * sizeof(RuntimeValue),
+                (size_t)new_cap * sizeof(RuntimeValue)
+            );
+        }
         if (!new_items) return ENCODE_PTR(a); /* alloc failed, drop */
-        for (uint32_t i = 0; i < a->len; i++) new_items[i] = items[i];
         for (uint32_t i = a->len; i < new_cap; i++) new_items[i] = NIL_VALUE;
         a->items = new_items;
         a->cap = new_cap;
@@ -8988,9 +9049,15 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     return ENCODE_PTR(a);
 }
 
+/* Exported array push ABI: mutate in place and return success like hosted. */
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val)
+{
+    return rt_array_push_handle(arr, val) != NIL_VALUE;
+}
+
 RuntimeValue rt_push_byte(RuntimeValue arr, int64_t byte_val)
 {
-    return rt_array_push(arr, ENCODE_INT(byte_val & 0xFF));
+    return rt_array_push_handle(arr, ENCODE_INT(byte_val & 0xFF));
 }
 
 RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
@@ -9402,6 +9469,13 @@ static inline uint32_t _tls_sha256_S1(uint32_t x) { return _tls_sha256_rotr(x, 6
 static inline uint32_t _tls_sha256_s0(uint32_t x) { return _tls_sha256_rotr(x, 7) ^ _tls_sha256_rotr(x, 18) ^ (x >> 3); }
 static inline uint32_t _tls_sha256_s1(uint32_t x) { return _tls_sha256_rotr(x, 17) ^ _tls_sha256_rotr(x, 19) ^ (x >> 10); }
 
+typedef struct {
+    uint32_t h[8];
+    uint64_t total_len;
+    uint32_t block_len;
+    uint8_t block[64];
+} TlsSha256Ctx;
+
 static void _tls_sha256_process_block(const uint8_t *block, uint32_t h[8])
 {
     uint32_t w[64];
@@ -9425,36 +9499,70 @@ static void _tls_sha256_process_block(const uint8_t *block, uint32_t h[8])
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
+static void _tls_sha256_init(TlsSha256Ctx *ctx)
+{
+    for (int i = 0; i < 8; i++) ctx->h[i] = _sha256_H[i];
+    ctx->total_len = 0;
+    ctx->block_len = 0;
+}
+
+static void _tls_sha256_update(TlsSha256Ctx *ctx, const uint8_t *msg, uint32_t msg_len)
+{
+    if (!ctx || (!msg && msg_len != 0U)) return;
+    ctx->total_len += (uint64_t)msg_len;
+    if (ctx->block_len > 0U) {
+        uint32_t take = 64U - ctx->block_len;
+        if (take > msg_len) take = msg_len;
+        if (take > 0U) {
+            memcpy(ctx->block + ctx->block_len, msg, take);
+            ctx->block_len += take;
+            msg += take;
+            msg_len -= take;
+        }
+        if (ctx->block_len == 64U) {
+            _tls_sha256_process_block(ctx->block, ctx->h);
+            ctx->block_len = 0U;
+        }
+    }
+    while (msg_len >= 64U) {
+        _tls_sha256_process_block(msg, ctx->h);
+        msg += 64U;
+        msg_len -= 64U;
+    }
+    if (msg_len > 0U) {
+        memcpy(ctx->block, msg, msg_len);
+        ctx->block_len = msg_len;
+    }
+}
+
+static void _tls_sha256_final(TlsSha256Ctx *ctx, uint8_t out[32])
+{
+    uint64_t bit_len = ctx->total_len * 8ULL;
+    uint8_t final_blocks[128];
+    uint32_t final_len = ctx->block_len;
+    memcpy(final_blocks, ctx->block, final_len);
+    final_blocks[final_len++] = 0x80U;
+    while ((final_len % 64U) != 56U) final_blocks[final_len++] = 0x00U;
+    for (int i = 0; i < 8; i++) {
+        final_blocks[final_len++] = (uint8_t)(bit_len >> (56 - i * 8));
+    }
+    for (uint32_t off = 0; off < final_len; off += 64U) {
+        _tls_sha256_process_block(final_blocks + off, ctx->h);
+    }
+    for (int i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(ctx->h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(ctx->h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(ctx->h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)ctx->h[i];
+    }
+}
+
 static void _tls_sha256_digest(const uint8_t *msg, uint32_t msg_len, uint8_t out[32])
 {
-    uint64_t bit_len = (uint64_t)msg_len * 8ULL;
-    uint32_t padded_len = msg_len + 1;
-    while ((padded_len % 64U) != 56U) padded_len++;
-    padded_len += 8U;
-
-    uint8_t *padded = (uint8_t *)malloc((size_t)padded_len);
-    if (!padded) {
-        for (int i = 0; i < 32; i++) out[i] = 0;
-        return;
-    }
-    memset(padded, 0, padded_len);
-    if (msg_len > 0) memcpy(padded, msg, msg_len);
-    padded[msg_len] = 0x80;
-    for (int i = 0; i < 8; i++)
-        padded[padded_len - 8 + i] = (uint8_t)(bit_len >> (56 - i * 8));
-
-    uint32_t h[8];
-    for (int i = 0; i < 8; i++) h[i] = _sha256_H[i];
-    for (uint32_t off = 0; off < padded_len; off += 64U)
-        _tls_sha256_process_block(padded + off, h);
-    free(padded);
-
-    for (int i = 0; i < 8; i++) {
-        out[i * 4] = (uint8_t)(h[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)h[i];
-    }
+    TlsSha256Ctx ctx;
+    _tls_sha256_init(&ctx);
+    _tls_sha256_update(&ctx, msg, msg_len);
+    _tls_sha256_final(&ctx, out);
 }
 
 static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t *data, uint32_t data_len, uint8_t out[32])
@@ -9463,6 +9571,7 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
     uint8_t ipad[64];
     uint8_t opad[64];
     uint8_t inner_hash[32];
+    TlsSha256Ctx ctx;
     memset(k0, 0, sizeof(k0));
     if (key_len > 64U) {
         _tls_sha256_digest(key, key_len, k0);
@@ -9473,39 +9582,58 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
         ipad[i] = (uint8_t)(k0[i] ^ 0x36U);
         opad[i] = (uint8_t)(k0[i] ^ 0x5cU);
     }
-
-    uint8_t *inner = (uint8_t *)malloc((size_t)64U + data_len);
-    uint8_t *outer = (uint8_t *)malloc((size_t)64U + 32U);
-    if (!inner || !outer) {
-        if (inner) free(inner);
-        if (outer) free(outer);
-        memset(out, 0, 32);
-        return;
-    }
-    memcpy(inner, ipad, 64);
-    if (data_len > 0) memcpy(inner + 64, data, data_len);
-    _tls_sha256_digest(inner, 64U + data_len, inner_hash);
-
-    memcpy(outer, opad, 64);
-    memcpy(outer + 64, inner_hash, 32);
-    _tls_sha256_digest(outer, 96, out);
-    free(inner);
-    free(outer);
+    _tls_sha256_init(&ctx);
+    _tls_sha256_update(&ctx, ipad, 64U);
+    _tls_sha256_update(&ctx, data, data_len);
+    _tls_sha256_final(&ctx, inner_hash);
+    _tls_sha256_init(&ctx);
+    _tls_sha256_update(&ctx, opad, 64U);
+    _tls_sha256_update(&ctx, inner_hash, 32U);
+    _tls_sha256_final(&ctx, out);
 }
 
 static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
 {
+    const uint32_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1U << 20;
     *out_len = 0;
     if (!IS_HEAP(rv)) return NULL;
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
     uint32_t len = arr->len;
+    if (len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
     RuntimeValue *items = runtime_array_items(arr);
     uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
     if (!buf) return NULL;
     for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(items[i]);
     *out_len = len;
     return buf;
+}
+
+static int _tls_materialize_runtime_bytes(RuntimeValue rv,
+                                          uint8_t *stack_buf,
+                                          uint32_t stack_cap,
+                                          const uint8_t **out_data,
+                                          uint8_t **out_heap,
+                                          uint32_t *out_len)
+{
+    *out_data = NULL;
+    *out_heap = NULL;
+    *out_len = 0;
+    if (!IS_HEAP(rv)) return 0;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
+    uint32_t len = arr->len;
+    if (len <= stack_cap) {
+        RuntimeValue *items = runtime_array_items(arr);
+        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rv_byte(items[i]);
+        *out_data = stack_buf;
+        *out_len = len;
+        return 1;
+    }
+    *out_heap = _tls_copy_runtime_bytes(rv, out_len);
+    if (!*out_heap && *out_len != 0U) return 0;
+    *out_data = *out_heap;
+    return 1;
 }
 
 int64_t rt_tls13_record_payload_len(RuntimeValue record_rv)
@@ -9907,12 +10035,15 @@ static RuntimeValue _tls_record_find_with_key(const uint8_t key[16], const uint8
     const uint8_t *tag = raw + 5U + ct_len;
     uint8_t nonce[12];
     memcpy(nonce, iv, 12U);
-    uint64_t carry = (uint64_t)seq_num_i64;
-    for (int i = 11; i >= 4 && carry > 0; i--) {
-        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
-        nonce[i] = (uint8_t)(sum & 0xffU);
-        carry = (carry >> 8) + (sum >> 8);
-    }
+    uint64_t seq_num = (uint64_t)seq_num_i64;
+    nonce[4] ^= (uint8_t)((seq_num >> 56) & 0xffU);
+    nonce[5] ^= (uint8_t)((seq_num >> 48) & 0xffU);
+    nonce[6] ^= (uint8_t)((seq_num >> 40) & 0xffU);
+    nonce[7] ^= (uint8_t)((seq_num >> 32) & 0xffU);
+    nonce[8] ^= (uint8_t)((seq_num >> 24) & 0xffU);
+    nonce[9] ^= (uint8_t)((seq_num >> 16) & 0xffU);
+    nonce[10] ^= (uint8_t)((seq_num >> 8) & 0xffU);
+    nonce[11] ^= (uint8_t)(seq_num & 0xffU);
     uint8_t *inner = (uint8_t *)malloc(ct_len ? ct_len : 1U);
     if (!inner) return empty;
     if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, raw, 5U, tag, inner) != 0) {
@@ -10058,13 +10189,20 @@ RuntimeValue rt_tls13_record_find_handshake_message(RuntimeValue raw_rv, Runtime
 
 RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
 {
+    uint8_t salt_stack[128];
+    uint8_t ikm_stack[256];
+    uint8_t *salt_heap = NULL;
+    uint8_t *ikm_heap = NULL;
+    const uint8_t *salt = NULL;
+    const uint8_t *ikm = NULL;
     uint32_t salt_len = 0, ikm_len = 0;
-    uint8_t *salt = _tls_copy_runtime_bytes(salt_rv, &salt_len);
-    uint8_t *ikm = _tls_copy_runtime_bytes(ikm_rv, &ikm_len);
     uint8_t zero_salt[32];
     uint8_t out[32];
-    if (!ikm && ikm_len != 0) {
-        if (salt) free(salt);
+    if (!_tls_materialize_runtime_bytes(ikm_rv, ikm_stack, sizeof(ikm_stack), &ikm, &ikm_heap, &ikm_len)) {
+        return NIL_VALUE;
+    }
+    if (!_tls_materialize_runtime_bytes(salt_rv, salt_stack, sizeof(salt_stack), &salt, &salt_heap, &salt_len)) {
+        if (ikm_heap) free(ikm_heap);
         return NIL_VALUE;
     }
     if (salt_len == 0) {
@@ -10073,21 +10211,28 @@ RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
     } else {
         _tls_hmac_sha256(salt, salt_len, ikm, ikm_len, out);
     }
-    if (salt) free(salt);
-    if (ikm) free(ikm);
+    if (salt_heap) free(salt_heap);
+    if (ikm_heap) free(ikm_heap);
     return _tls_runtime_array_from_bytes(out, 32);
 }
 
 int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, RuntimeValue out_rv)
 {
+    uint8_t salt_stack[128];
+    uint8_t ikm_stack[256];
+    uint8_t *salt_heap = NULL;
+    uint8_t *ikm_heap = NULL;
+    const uint8_t *salt = NULL;
+    const uint8_t *ikm = NULL;
     uint32_t salt_len = 0, ikm_len = 0;
-    uint8_t *salt = _tls_copy_runtime_bytes(salt_rv, &salt_len);
-    uint8_t *ikm = _tls_copy_runtime_bytes(ikm_rv, &ikm_len);
     uint8_t zero_salt[32];
     uint8_t out[32];
     int64_t ok = 0;
-    if (!ikm && ikm_len != 0) {
-        if (salt) free(salt);
+    if (!_tls_materialize_runtime_bytes(ikm_rv, ikm_stack, sizeof(ikm_stack), &ikm, &ikm_heap, &ikm_len)) {
+        return 0;
+    }
+    if (!_tls_materialize_runtime_bytes(salt_rv, salt_stack, sizeof(salt_stack), &salt, &salt_heap, &salt_len)) {
+        if (ikm_heap) free(ikm_heap);
         return 0;
     }
     if (salt_len == 0) {
@@ -10097,8 +10242,8 @@ int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, Ru
         _tls_hmac_sha256(salt, salt_len, ikm, ikm_len, out);
     }
     ok = _tls_write_runtime_bytes(out_rv, out, 32U);
-    if (salt) free(salt);
-    if (ikm) free(ikm);
+    if (salt_heap) free(salt_heap);
+    if (ikm_heap) free(ikm_heap);
     return ok;
 }
 
@@ -10392,7 +10537,7 @@ static RuntimeValue _tls13_hkdf_expand_label_const_padded(RuntimeValue secret_rv
     }
 
     free(secret);
-    return _tls_runtime_array_from_bytes(okm, 32U);
+    return _tls_runtime_array_from_bytes(okm, info_out_len);
 }
 
 RuntimeValue rt_tls13_hkdf_expand_label_key(RuntimeValue secret_rv)
@@ -11704,20 +11849,27 @@ RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     int64_t i = (int64_t)idx;
+    if (i < 0) i += (int64_t)a->len;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return runtime_array_items(a)[i];
 }
 
-/* rt_array_set: set element at index */
-RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+static int8_t rt_array_set_raw(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
 {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
+    if (!IS_HEAP(arr)) return 0;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     int64_t i = (int64_t)idx;
-    if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    if (i < 0) i += (int64_t)a->len;
+    if (i < 0 || (uint32_t)i >= a->len) return 0;
     runtime_array_items(a)[i] = val;
-    return val;
+    return 1;
+}
+
+/* Exported array set ABI: return success byte like hosted. */
+int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+{
+    return rt_array_set_raw(arr, idx, val);
 }
 
 /* rt_array_len: return RAW (untagged) integer.
@@ -11741,6 +11893,20 @@ RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
     RuntimeValue v = runtime_array_items(a)[idx];
     if (IS_INT(v)) return (RuntimeValue)DECODE_INT(v);
     return (RuntimeValue)(uint8_t)(uint64_t)v;
+}
+/* rt_arm_array_len_u32 — return the element count of a [u8] (or any) array.
+ * Used by x86_64_fs_exec_spawn to gate on executable byte count.
+ * Missing from this file caused spawn:resolve-fail regardless of VFS content
+ * (BUG-VFS-CACHE-RETURNS-PLACEHOLDER root cause, fixed 2026-04-27). */
+RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
+{
+    RuntimeArray *tagged = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) : (RuntimeArray *)0;
+    if (tagged && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap)
+        return (RuntimeValue)tagged->len;
+    RuntimeArray *raw = (RuntimeArray *)(uintptr_t)(uint64_t)arr;
+    if (raw && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap)
+        return (RuntimeValue)raw->len;
+    return 0;
 }
 /* ---- Tuple functions (rt_extras.c not linked in baremetal build) ---- */
 RuntimeValue rt_tuple_new(RuntimeValue len_rv)
@@ -11798,7 +11964,7 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (s >= e) return rt_array_new(ENCODE_INT(1));
     RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
     for (int64_t i = s; i < e; i++) {
-        result = rt_array_push(result, items[i]);
+        result = rt_array_push_handle(result, items[i]);
     }
     return result;
 }
@@ -11899,8 +12065,8 @@ RuntimeValue rt_array_concat(RuntimeValue arr_a, RuntimeValue arr_b)
     RuntimeValue *a_items = (a && a->hdr.type == HEAP_ARRAY) ? runtime_array_items(a) : NULL;
     RuntimeValue *b_items = (b && b->hdr.type == HEAP_ARRAY) ? runtime_array_items(b) : NULL;
     RuntimeValue result = rt_array_new(ENCODE_INT(la + lb > 0 ? la + lb : 1));
-    for (uint32_t i = 0; i < la; i++) result = rt_array_push(result, a_items[i]);
-    for (uint32_t i = 0; i < lb; i++) result = rt_array_push(result, b_items[i]);
+    for (uint32_t i = 0; i < la; i++) result = rt_array_push_handle(result, a_items[i]);
+    for (uint32_t i = 0; i < lb; i++) result = rt_array_push_handle(result, b_items[i]);
     return result;
 }
 
@@ -11928,7 +12094,7 @@ RuntimeValue rt_array_clone(RuntimeValue arr)
     RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
     for (uint32_t i = 0; i < a->len; i++) {
-        result = rt_array_push(result, items[i]);
+        result = rt_array_push_handle(result, items[i]);
     }
     return result;
 }
@@ -12137,7 +12303,7 @@ RuntimeValue rt_map_keys(RuntimeValue map)
     if (!m) return NIL_VALUE;
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->len; i++) {
-        arr = rt_array_push(arr, m->keys[i]);
+        arr = rt_array_push_handle(arr, m->keys[i]);
     }
     return arr;
 }
@@ -12149,7 +12315,7 @@ RuntimeValue rt_map_values(RuntimeValue map)
     if (!m) return NIL_VALUE;
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->len; i++) {
-        arr = rt_array_push(arr, m->values[i]);
+        arr = rt_array_push_handle(arr, m->values[i]);
     }
     return arr;
 }
@@ -12162,9 +12328,9 @@ RuntimeValue rt_map_entries(RuntimeValue map)
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->len; i++) {
         RuntimeValue pair = rt_array_new(ENCODE_INT(2));
-        pair = rt_array_push(pair, m->keys[i]);
-        pair = rt_array_push(pair, m->values[i]);
-        arr = rt_array_push(arr, pair);
+        pair = rt_array_push_handle(pair, m->keys[i]);
+        pair = rt_array_push_handle(pair, m->values[i]);
+        arr = rt_array_push_handle(arr, pair);
     }
     return arr;
 }
