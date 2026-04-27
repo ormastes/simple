@@ -1,0 +1,55 @@
+# Shell exec dispatch — resolve + launch a binary via x86_64 fs-exec-spawn.
+#
+# shell_exec resolves the command name through PATH, then dispatches it via
+# the x86_64 filesystem-exec spawn pipeline.
+#
+# v1 LIMITATION: x86_64_fs_exec_spawn_hello_world_smf() is the only available
+# spawn entry-point; it is hardcoded to /sys/apps/hello_world.smf. shell_exec
+# therefore ignores the resolved path and always launches hello_world.smf.
+# Generalization to accept an arbitrary resolved_path is Phase 2 W-2 work and
+# blocks on a generic spawn function being exposed from x86_64_fs_exec_spawn.spl.
+#
+# MDSOC: feature dimension, shell layer
+
+use os.apps.shell.path_search.{shell_path_search}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_hello_world_smf}
+
+extern fn serial_println(msg: text)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+pub fn shell_exec(cmd: text, argv: [text], envp: [text]) -> i64:
+    """Resolve cmd via PATH and dispatch via x86_64 fs-exec-spawn.
+
+    Returns the PID (>0) on success, or a negative error code:
+      -1  command not found in PATH
+      -2  spawn image-resolve failed (file missing / too small)
+      -8  spawn image-build failed
+      -12 scheduler task creation failed
+      -16 user-mode handoff failed
+
+    v1: The resolved path is logged but the actual spawn is always the
+    hardcoded hello_world.smf entry-point. Phase 2 W-2 will wire the
+    resolved path into a generic spawn call once one is exposed.
+    """
+    serial_println("[shell-exec] exec:cmd={cmd}")
+    serial_println("[shell-exec] exec:argc={argv.len()}")
+    serial_println("[shell-exec] exec:envc={envp.len()}")
+
+    val resolved = shell_path_search(cmd)
+    if resolved == nil:
+        serial_println("[shell-exec] exec:not-found cmd={cmd}")
+        return -1
+
+    val resolved_path = resolved.unwrap()
+    serial_println("[shell-exec] exec:resolved={resolved_path}")
+
+    # v1: dispatch via the only available hardcoded spawn entry-point.
+    # TODO(W-2): replace with generic spawn(resolved_path, argv, envp) once
+    #            x86_64_fs_exec_spawn.spl exposes a path-parameterised function.
+    serial_println("[shell-exec] exec:dispatch=hardcoded-hello_world-v1")
+    val pid = x86_64_fs_exec_spawn_hello_world_smf()
+    serial_println("[shell-exec] exec:result={pid}")
+    pid

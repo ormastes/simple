@@ -1,0 +1,69 @@
+# Shell PATH search — resolve command names to absolute filesystem paths.
+#
+# Searches each directory in PATH left-to-right and returns the first
+# path where the binary exists (g_vfs_read_executable_bytes > 4 bytes).
+#
+# MDSOC: feature dimension, shell layer
+
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+extern fn serial_println(msg: text)
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+
+# Default PATH used when no explicit PATH is provided.
+val SHELL_DEFAULT_PATH: text = "/usr/bin:/sys/apps"
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _path_join(dir: text, name: text) -> text:
+    """Join a directory and a file name into an absolute path."""
+    if dir.ends_with("/"):
+        return "{dir}{name}"
+    "{dir}/{name}"
+
+fn _path_exists(path: text) -> bool:
+    """Return true if the VFS can read more than 4 bytes from path."""
+    val bytes = g_vfs_read_executable_bytes(path)
+    val byte_len = rt_arm_array_len_u32(bytes)
+    byte_len > 4
+
+fn _split_path_dirs(path_env: text) -> [text]:
+    """Split a colon-separated PATH string into individual directory entries."""
+    var dirs: [text] = []
+    var current = ""
+    for ch in path_env:
+        if ch == ":":
+            if current != "":
+                dirs = dirs.push(current)
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current != "":
+        dirs = dirs.push(current)
+    dirs
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+pub fn shell_path_search(cmd: text) -> text?:
+    """Resolve a command name to an absolute path by searching PATH.
+
+    Searches each directory in SHELL_DEFAULT_PATH in order and returns the
+    first hit whose VFS byte-length exceeds 4 (sentinel for 'file exists').
+    Returns nil if the command is not found in any PATH directory.
+
+    v1: Always searches SHELL_DEFAULT_PATH (/usr/bin:/sys/apps).
+    v2 (W-2): Accept runtime PATH from environment.
+    """
+    serial_println("[shell-path] search:cmd={cmd}")
+    val dirs = _split_path_dirs(SHELL_DEFAULT_PATH)
+    for dir in dirs:
+        val candidate = _path_join(dir, cmd)
+        if _path_exists(candidate):
+            serial_println("[shell-path] search:found={candidate}")
+            return Some(candidate)
+    serial_println("[shell-path] search:not-found cmd={cmd}")
+    nil
