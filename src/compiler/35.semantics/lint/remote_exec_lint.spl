@@ -23,6 +23,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -55,32 +56,25 @@ fn lint_diff_markers(source: text, path: text) -> [RemoteExecLintWarning]:
     - Lines where the '+'/'-' is part of a string literal on the same line
     """
     var warnings: [RemoteExecLintWarning] = []
-    val lines = source.split("\n")
-    var in_docstring = false
+    val code_lines = iter_code_lines(source)
 
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
-
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
-
-        if not in_docstring:
-            val stripped = line.trim()
-            # Skip comment lines
-            if not stripped.starts_with("#"):
-                # Check for diff marker pattern: line starts with +/- then 4+ spaces
-                if _is_diff_marker(line):
-                    val marker = line.slice(0, 1)
-                    warnings.push(RemoteExecLintWarning(
-                        code: "RJIT001",
-                        severity: "WARNING",
-                        message: "diff marker '{marker}' at start of line — possible unmerged diff hunk",
-                        hint: "remove the leading '{marker}' or fix the merge conflict",
-                        line_num: li + 1,
-                        file_path: path
-                    ))
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val stripped = cl.trimmed
+        # Skip comment lines
+        if not stripped.starts_with("#"):
+            # Check for diff marker pattern: line starts with +/- then 4+ spaces
+            if _is_diff_marker(cl.raw):
+                val marker = cl.raw.slice(0, 1)
+                warnings.push(RemoteExecLintWarning(
+                    code: "RJIT001",
+                    severity: "WARNING",
+                    message: "diff marker '{marker}' at start of line — possible unmerged diff hunk",
+                    hint: "remove the leading '{marker}' or fix the merge conflict",
+                    line_num: cl.line_num,
+                    file_path: path
+                ))
 
         li = li + 1
 
@@ -253,32 +247,24 @@ fn lint_wrong_shell_import(source: text, path: text) -> [RemoteExecLintWarning]:
     if not path.contains("src/lib/"):
         return warnings
 
-    val lines = source.split("\n")
-    var in_docstring = false
-
+    val code_lines = iter_code_lines(source)
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
-
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Check for "use app.io" or "import app.io"
-                if _is_app_io_import(trimmed):
-                    warnings.push(RemoteExecLintWarning(
-                        code: "RJIT004",
-                        severity: "WARNING",
-                        message: "library code imports 'app.io' which causes 120s+ timeout in tests",
-                        hint: "replace with 'use std.io_runtime'",
-                        line_num: li + 1,
-                        file_path: path
-                    ))
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Check for "use app.io" or "import app.io"
+            if _is_app_io_import(trimmed):
+                warnings.push(RemoteExecLintWarning(
+                    code: "RJIT004",
+                    severity: "WARNING",
+                    message: "library code imports 'app.io' which causes 120s+ timeout in tests",
+                    hint: "replace with 'use std.io_runtime'",
+                    line_num: cl.line_num,
+                    file_path: path
+                ))
 
         li = li + 1
 
@@ -298,8 +284,7 @@ fn lint_zero_capacity_memory_map(source: text, path: text) -> [RemoteExecLintWar
     - code_start: 0, code_end: 0  (both zero literal)
     """
     var warnings: [RemoteExecLintWarning] = []
-    val lines = source.split("\n")
-    var in_docstring = false
+    val code_lines = iter_code_lines(source)
 
     # We need to accumulate lines that form a MemoryMap constructor
     var in_mmap = false
@@ -307,55 +292,49 @@ fn lint_zero_capacity_memory_map(source: text, path: text) -> [RemoteExecLintWar
     var mmap_buffer = ""
 
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Detect start of MemoryMap constructor
+            if trimmed.contains("MemoryMap("):
+                in_mmap = true
+                mmap_start_line = cl.line_num
+                mmap_buffer = trimmed
 
-        if not in_docstring:
-            val trimmed = line.trim()
+            elif in_mmap:
+                mmap_buffer = mmap_buffer + " " + trimmed
 
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Detect start of MemoryMap constructor
-                if trimmed.contains("MemoryMap("):
-                    in_mmap = true
-                    mmap_start_line = li + 1
-                    mmap_buffer = trimmed
+            # Check if the constructor closes
+            if in_mmap and mmap_buffer.contains(")"):
+                # Check for zero-capacity data region
+                val data_zero = _detect_zero_capacity(mmap_buffer, "data_start", "data_end")
+                if data_zero:
+                    warnings.push(RemoteExecLintWarning(
+                        code: "RJIT005",
+                        severity: "WARNING",
+                        message: "MemoryMap has zero data capacity (data_start == data_end)",
+                        hint: "ensure data_end > data_start for a usable data region",
+                        line_num: mmap_start_line,
+                        file_path: path
+                    ))
 
-                elif in_mmap:
-                    mmap_buffer = mmap_buffer + " " + trimmed
+                # Check for zero-capacity code region
+                val code_zero = _detect_zero_capacity(mmap_buffer, "code_start", "code_end")
+                if code_zero:
+                    warnings.push(RemoteExecLintWarning(
+                        code: "RJIT005",
+                        severity: "WARNING",
+                        message: "MemoryMap has zero code capacity (code_start == code_end)",
+                        hint: "ensure code_end > code_start for a usable code region",
+                        line_num: mmap_start_line,
+                        file_path: path
+                    ))
 
-                # Check if the constructor closes
-                if in_mmap and mmap_buffer.contains(")"):
-                    # Check for zero-capacity data region
-                    val data_zero = _detect_zero_capacity(mmap_buffer, "data_start", "data_end")
-                    if data_zero:
-                        warnings.push(RemoteExecLintWarning(
-                            code: "RJIT005",
-                            severity: "WARNING",
-                            message: "MemoryMap has zero data capacity (data_start == data_end)",
-                            hint: "ensure data_end > data_start for a usable data region",
-                            line_num: mmap_start_line,
-                            file_path: path
-                        ))
-
-                    # Check for zero-capacity code region
-                    val code_zero = _detect_zero_capacity(mmap_buffer, "code_start", "code_end")
-                    if code_zero:
-                        warnings.push(RemoteExecLintWarning(
-                            code: "RJIT005",
-                            severity: "WARNING",
-                            message: "MemoryMap has zero code capacity (code_start == code_end)",
-                            hint: "ensure code_end > code_start for a usable code region",
-                            line_num: mmap_start_line,
-                            file_path: path
-                        ))
-
-                    in_mmap = false
-                    mmap_buffer = ""
+                in_mmap = false
+                mmap_buffer = ""
 
         li = li + 1
 
@@ -375,19 +354,6 @@ fn _is_diff_marker(line: text) -> bool:
         return false
     val rest = line.slice(1, 5)
     rest == "    "
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
 
 fn _is_app_io_import(trimmed: text) -> bool:
     """Check if a trimmed line imports app.io."""
