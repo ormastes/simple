@@ -1,0 +1,60 @@
+# x86_64 filesystem-exec scheduler bridge.
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.x86_64.user_entry.{dispatch_enter_user_blocking}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskPriority, user_process_image_entry, user_process_image_file_bytes, user_process_image_segment_count}
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+use os.kernel.log.klog_api.{log_raw_println}
+extern fn arm_fs_exec_trace(id: u64)
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+extern fn rt_arm_elf64_pt_load_count(bytes: [u8]) -> u32
+val X86_64_FS_EXEC_ARCH: Architecture = Architecture.X86_64
+
+fn x86_64_fs_exec_spawn_hello_world_smf() -> i64:
+    """Build and register the filesystem-backed `/sys/apps/hello_world.smf` image."""
+    val path = "/sys/apps/hello_world.smf"
+    arm_fs_exec_trace(40)
+    log_raw_println("[x86_64-fs-exec] spawn:resolve")
+    val bytes = arm_fs_exec_read_file_bytes(path)
+    val byte_len = rt_arm_array_len_u32(bytes)
+    if byte_len <= 4:
+        arm_fs_exec_trace(92)
+        log_raw_println("[x86_64-fs-exec] spawn:resolve-fail")
+        return -2
+
+    arm_fs_exec_trace(41)
+    log_raw_println("[x86_64-fs-exec] spawn:fs-bytes={byte_len}")
+
+    val argv: [text] = []
+    val envp: [text] = []
+    arm_fs_exec_trace(42)
+    log_raw_println("[x86_64-fs-exec] spawn:image")
+    val image = build_user_process_image_unchecked(path, bytes, X86_64_FS_EXEC_ARCH, argv, envp)
+    if user_process_image_entry(image) == 0:
+        arm_fs_exec_trace(93)
+        log_raw_println("[x86_64-fs-exec] spawn:image-fail")
+        return -8
+    arm_fs_exec_trace(43)
+    log_raw_println("[x86_64-fs-exec] spawn:image-ok")
+    log_raw_println("[x86_64-fs-exec] spawn:image-native-bytes={rt_arm_array_len_u32(user_process_image_file_bytes(image))}")
+    log_raw_println("[x86_64-fs-exec] spawn:elf-pt-load-count={rt_arm_elf64_pt_load_count(user_process_image_file_bytes(image))}")
+    log_raw_println("[x86_64-fs-exec] spawn:image-segment-count={user_process_image_segment_count(image)}")
+
+    arm_fs_exec_trace(44)
+    var scheduler = Scheduler.new_bootstrap()
+    arm_fs_exec_trace(45)
+    val pid = scheduler.create_bootstrap_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+    if pid == 0:
+        arm_fs_exec_trace(94)
+        log_raw_println("[x86_64-fs-exec] spawn:scheduler-fail")
+        return -12
+    val handoff = dispatch_enter_user_blocking(pid, scheduler)
+    if handoff != 0:
+        arm_fs_exec_trace(95)
+        log_raw_println("[x86_64-fs-exec] spawn:handoff-fail")
+        return -16
+    arm_fs_exec_trace(46)
+    log_raw_println("[x86_64-fs-exec] spawn:pid={pid}")
+    return pid as i64
