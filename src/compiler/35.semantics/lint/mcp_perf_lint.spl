@@ -19,6 +19,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -113,40 +114,33 @@ fn lint_full_tree_scan(source: text, path: text) -> [McpPerfLintWarning]:
     if not _is_mcp_source(path):
         return warnings
 
-    val lines = source.split("\n")
-    var in_docstring = false
+    val code_lines = iter_code_lines(source)
     var current_fn = ""
     var fn_start_line = 0
 
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Track current function name
+            if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+                current_fn = _extract_fn_name(trimmed)
+                fn_start_line = cl.line_num
 
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Track current function name
-                if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
-                    current_fn = _extract_fn_name(trimmed)
-                    fn_start_line = li + 1
-
-                # Check for scan calls in handler functions
-                if _is_handler_fn(current_fn) and not _is_admin_fn(current_fn):
-                    if _has_tree_scan_call(trimmed):
-                        warnings.push(McpPerfLintWarning(
-                            code: "MCP002",
-                            severity: "WARNING",
-                            message: "full-tree scan in request handler '{current_fn}'",
-                            hint: "use a cached index or limit scan scope; move to reindex/admin flow if needed",
-                            line_num: li + 1,
-                            file_path: path
-                        ))
+            # Check for scan calls in handler functions
+            if _is_handler_fn(current_fn) and not _is_admin_fn(current_fn):
+                if _has_tree_scan_call(trimmed):
+                    warnings.push(McpPerfLintWarning(
+                        code: "MCP002",
+                        severity: "WARNING",
+                        message: "full-tree scan in request handler '{current_fn}'",
+                        hint: "use a cached index or limit scan scope; move to reindex/admin flow if needed",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
 
         li = li + 1
 
@@ -174,38 +168,31 @@ fn lint_per_request_subprocess(source: text, path: text) -> [McpPerfLintWarning]
     if path.ends_with("cli_passthrough.spl"):
         return warnings
 
-    val lines = source.split("\n")
-    var in_docstring = false
+    val code_lines = iter_code_lines(source)
     var current_fn = ""
 
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Track current function
+            if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+                current_fn = _extract_fn_name(trimmed)
 
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Track current function
-                if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
-                    current_fn = _extract_fn_name(trimmed)
-
-                # Check for subprocess calls in handler functions
-                if _is_handler_fn(current_fn):
-                    if _has_subprocess_call(trimmed):
-                        warnings.push(McpPerfLintWarning(
-                            code: "MCP003",
-                            severity: "WARNING",
-                            message: "subprocess execution in request handler '{current_fn}'",
-                            hint: "use in-process function calls instead of shelling out per request",
-                            line_num: li + 1,
-                            file_path: path
-                        ))
+            # Check for subprocess calls in handler functions
+            if _is_handler_fn(current_fn):
+                if _has_subprocess_call(trimmed):
+                    warnings.push(McpPerfLintWarning(
+                        code: "MCP003",
+                        severity: "WARNING",
+                        message: "subprocess execution in request handler '{current_fn}'",
+                        hint: "use in-process function calls instead of shelling out per request",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
 
         li = li + 1
 
@@ -421,19 +408,6 @@ fn _has_invalidation_pattern(trimmed: text) -> bool:
     if trimmed.contains("_CACHE = {}") or trimmed.contains("_cache = {}"):
         return true
     false
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
 
 
 # ============================================================================
