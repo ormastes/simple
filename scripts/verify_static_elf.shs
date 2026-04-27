@@ -1,0 +1,117 @@
+#!/bin/sh
+# Verify that clang_static and rustc_static ELFs are statically linked,
+# sized within budget, and target x86-64 (SimpleOS cross-compiled binaries).
+# Usage: sh scripts/verify_static_elf.shs [path-to-elf ...]
+# Exit: 0=all pass  1=one or more FAIL  2=one or more MISS (not built yet)
+
+set -eu
+
+CLANG_DEFAULT="build/os/clang_static/bin/clang_static"
+RUSTC_DEFAULT="${HOME}/rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc_static"
+
+# Budget in MB
+budget_mb() {
+  case "$(basename "$1")" in
+    clang_static) echo 500 ;;
+    rustc_static)  echo 700 ;;
+    *)             echo 500 ;;
+  esac
+}
+
+overall_fail=0
+overall_miss=0
+
+check_elf() {
+  path="$1"
+  name="$(basename "$path")"
+  status="PASS"
+  notes=""
+
+  # 1. File exists
+  if [ ! -f "${path}" ]; then
+    printf "%-20s  MISS  (not built yet: %s)\n" "${name}" "${path}"
+    overall_miss=1
+    return
+  fi
+
+  file_out="$(file -L "${path}" 2>&1)"
+
+  # 2. ELF 64-bit x86-64 (accept both plain executable and PIE)
+  case "${file_out}" in
+    *"ELF 64-bit LSB"*"x86-64"*) : ;;
+    *)
+      status="FAIL"
+      notes="${notes} [not-x86-64-ELF]"
+      ;;
+  esac
+
+  # 3. Statically linked (file output)
+  case "${file_out}" in
+    *"statically linked"*)
+      : ;;
+    *"dynamically linked"*)
+      status="FAIL"
+      notes="${notes} [BUG-PHASE1-MUST-BE-STATIC: dynamically linked]"
+      ;;
+    *)
+      status="FAIL"
+      notes="${notes} [link-type-unknown]"
+      ;;
+  esac
+
+  # 4. ldd check
+  ldd_out="$(ldd "${path}" 2>&1 || true)"
+  case "${ldd_out}" in
+    *"not a dynamic executable"*) ldd_label="static" ;;
+    *"statically linked"*)        ldd_label="static" ;;
+    *)
+      status="FAIL"
+      ldd_label="dynamic"
+      notes="${notes} [ldd-shows-deps]"
+      ;;
+  esac
+
+  # 5. Size budget (soft warn, does not flip status to FAIL)
+  size_bytes="$(wc -c < "${path}" | tr -d ' ')"
+  size_mb=$(( size_bytes / 1048576 ))
+  budget="$(budget_mb "${path}")"
+  if [ "${size_mb}" -gt "${budget}" ]; then
+    notes="${notes} [WARN: ${size_mb}MB > budget ${budget}MB]"
+  fi
+
+  # 6. readelf NEEDED check (optional, if readelf available)
+  if command -v readelf > /dev/null 2>&1; then
+    needed="$(readelf -d "${path}" 2>/dev/null | grep NEEDED || true)"
+    if [ -n "${needed}" ]; then
+      status="FAIL"
+      notes="${notes} [readelf-NEEDED-entries-found]"
+    fi
+  fi
+
+  printf "%-20s  %-4s  size=%dMB  ldd=%-7s%s\n" \
+    "${name}" "${status}" "${size_mb}" "${ldd_label}" "${notes}"
+
+  if [ "${status}" = "FAIL" ]; then
+    overall_fail=1
+  fi
+}
+
+# Collect paths from args or use defaults
+if [ "$#" -gt 0 ]; then
+  targets="$*"
+else
+  targets="${CLANG_DEFAULT} ${RUSTC_DEFAULT}"
+fi
+
+printf "=== STATIC ELF VERIFY ===\n"
+for t in ${targets}; do
+  check_elf "${t}"
+done
+
+if [ "${overall_miss}" -eq 1 ] && [ "${overall_fail}" -eq 0 ]; then
+  exit 2
+fi
+if [ "${overall_fail}" -eq 1 ]; then
+  exit 1
+fi
+exit 0
