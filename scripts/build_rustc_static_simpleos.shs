@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# build_rustc_static_simpleos.shs — Build rustc as a statically-linked ELF for
+# x86_64-unknown-simpleos using the out-of-tree fork at $HOME/rust.
+#
+# Driver companion to:
+#   scripts/build_rust_simpleos_cross.shs  (cross-compile crates via cargo)
+#   scripts/build_rust_hello_with_stage1.shs (stage1 sysroot smoke test)
+#
+# IMPORTANT: DO NOT invoke this script in CI without the full LLVM + sysroot
+# build in place (~10 min wall-clock build). Use --dry-run to preview.
+#
+# Size budget: target ≤ 500 MB (unstripped stage1 rustc binary).
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 1. Configuration / environment knobs
+# ---------------------------------------------------------------------------
+RUST_ROOT="${RUST_ROOT:-$HOME/rust}"
+STAGE="${STAGE:-1}"
+HOST_TRIPLE="${HOST_TRIPLE:-x86_64-unknown-linux-gnu}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-x86_64-unknown-simpleos}"
+
+# Real artifact produced by x.py (no literal "host/" dir, no "_static" suffix).
+BUILT_RUSTC="$RUST_ROOT/build/$HOST_TRIPLE/stage${STAGE}/bin/rustc"
+# Renamed copy that matches the Phase-1-B output contract.
+RUSTC_STATIC="${RUSTC_STATIC:-$RUST_ROOT/build/$HOST_TRIPLE/stage${STAGE}/bin/rustc_static}"
+
+DRY_RUN=0
+
+# ---------------------------------------------------------------------------
+# 2. Argument parsing
+# ---------------------------------------------------------------------------
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        --stage=*) STAGE="${arg#--stage=}" ;;
+        --help|-h)
+            echo "Usage: $0 [--dry-run] [--stage=N]"
+            echo ""
+            echo "  --dry-run   Print the x.py command without running it."
+            echo "  --stage=N   Bootstrap stage (default: 1)."
+            echo ""
+            echo "Env knobs: RUST_ROOT, HOST_TRIPLE, TARGET_TRIPLE, RUSTC_STATIC"
+            exit 0
+            ;;
+        *) echo "Unknown argument: $arg"; exit 1 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# 3. Preflight: validate fork directory and simpleos branch
+# ---------------------------------------------------------------------------
+echo "[preflight] checking $RUST_ROOT ..."
+
+if [ ! -d "$RUST_ROOT" ]; then
+    echo "ERROR: \$HOME/rust fork not found at $RUST_ROOT"
+    echo "  Fix: clone the simpleos fork: git clone <fork-url> $RUST_ROOT"
+    exit 2
+fi
+
+if [ ! -f "$RUST_ROOT/x.py" ]; then
+    echo "ERROR: x.py not found in $RUST_ROOT — not a rustc source tree"
+    exit 2
+fi
+
+if ! git -C "$RUST_ROOT" rev-parse --verify simpleos >/dev/null 2>&1; then
+    echo "ERROR: 'simpleos' branch not found in $RUST_ROOT"
+    echo "  Fix: git -C $RUST_ROOT checkout simpleos"
+    echo "       (or: git -C $RUST_ROOT fetch origin simpleos)"
+    exit 3
+fi
+
+if [ ! -f "$RUST_ROOT/config.toml" ]; then
+    echo "ERROR: config.toml missing in $RUST_ROOT"
+    echo "  Fix: run scripts/build_rustc_static_simpleos.shs after populating config.toml"
+    exit 4
+fi
+
+echo "[preflight] OK — fork at $RUST_ROOT, simpleos branch exists"
+
+# ---------------------------------------------------------------------------
+# 4. Compose x.py command
+# ---------------------------------------------------------------------------
+XPY_CMD="./x.py build --stage $STAGE rustc --target $TARGET_TRIPLE"
+
+echo ""
+echo "[build] command (cwd: $RUST_ROOT):"
+echo "  $XPY_CMD"
+echo ""
+echo "[build] expected artifact (after rename):"
+echo "  $RUSTC_STATIC"
+echo ""
+echo "[build] size budget: ≤ 500 MB (unstripped stage$STAGE rustc binary)"
+
+# ---------------------------------------------------------------------------
+# 5. Dry-run gate
+# ---------------------------------------------------------------------------
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo ""
+    echo "[dry-run] skipping actual build."
+    echo "[dry-run] to run for real: cd $RUST_ROOT && $XPY_CMD"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Run the build
+# ---------------------------------------------------------------------------
+echo ""
+echo "[build] starting rustc bootstrap (stage $STAGE) — this takes ~10 minutes ..."
+(
+    cd "$RUST_ROOT"
+    $XPY_CMD
+)
+
+# ---------------------------------------------------------------------------
+# 7. Rename to rustc_static and report
+# ---------------------------------------------------------------------------
+if [ ! -f "$BUILT_RUSTC" ]; then
+    echo "ERROR: expected artifact missing after build: $BUILT_RUSTC"
+    exit 5
+fi
+
+cp "$BUILT_RUSTC" "$RUSTC_STATIC"
+
+echo ""
+echo "[done] artifact: $RUSTC_STATIC"
+ls -lh "$RUSTC_STATIC"
+
+SIZE_BYTES="$(wc -c <"$RUSTC_STATIC")"
+SIZE_MB=$((SIZE_BYTES / 1048576))
+if [ "$SIZE_MB" -gt 500 ]; then
+    echo "WARNING: binary is ${SIZE_MB} MB — exceeds 500 MB budget"
+    echo "  Consider: strip --strip-debug $RUSTC_STATIC"
+else
+    echo "[size] ${SIZE_MB} MB — within 500 MB budget"
+fi
