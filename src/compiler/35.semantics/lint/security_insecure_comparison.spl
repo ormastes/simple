@@ -29,6 +29,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -80,42 +81,34 @@ fn check_insecure_comparison(source: text, path: text) -> [InsecureComparisonWar
     if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
         return warnings
 
-    val lines = source.split("\n")
     val names = _sensitive_names()
-    var in_docstring = false
-
+    val code_lines = iter_code_lines(source)
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
-
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Skip lines with allow annotation
-                if not trimmed.contains("@allow(insecure_comparison)"):
-                    # Skip lines using constant_time_compare
-                    if not trimmed.contains("constant_time_compare"):
-                        # Check for == comparison with sensitive variable
-                        if trimmed.contains(" == "):
-                            val matched_name = _find_sensitive_operand(trimmed, names)
-                            if matched_name != "":
-                                # Make sure it's not comparing to nil, true, or false
-                                if not _is_safe_comparison(trimmed, matched_name):
-                                    warnings.push(InsecureComparisonWarning(
-                                        code: "SEC-CMP001",
-                                        severity: "WARN",
-                                        message: "timing-vulnerable == comparison on '{matched_name}'",
-                                        hint: "use constant_time_compare({matched_name}, expected) from std.crypto instead of ==",
-                                        variable_name: matched_name,
-                                        line_num: li + 1,
-                                        file_path: path
-                                    ))
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Skip lines with allow annotation
+            if not trimmed.contains("@allow(insecure_comparison)"):
+                # Skip lines using constant_time_compare
+                if not trimmed.contains("constant_time_compare"):
+                    # Check for == comparison with sensitive variable
+                    if trimmed.contains(" == "):
+                        val matched_name = _find_sensitive_operand(trimmed, names)
+                        if matched_name != "":
+                            # Make sure it's not comparing to nil, true, or false
+                            if not _is_safe_comparison(trimmed, matched_name):
+                                warnings.push(InsecureComparisonWarning(
+                                    code: "SEC-CMP001",
+                                    severity: "WARN",
+                                    message: "timing-vulnerable == comparison on '{matched_name}'",
+                                    hint: "use constant_time_compare({matched_name}, expected) from std.crypto instead of ==",
+                                    variable_name: matched_name,
+                                    line_num: cl.line_num,
+                                    file_path: path
+                                ))
 
         li = li + 1
 
@@ -314,20 +307,6 @@ fn _find_substring(haystack: text, needle: text) -> i64:
             return i
         i = i + 1
     -1
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
-
 
 # ============================================================================
 # Exports

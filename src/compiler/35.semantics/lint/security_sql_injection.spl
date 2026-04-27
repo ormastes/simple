@@ -28,6 +28,7 @@
 # ============================================================================
 
 use std.io_runtime
+use compiler.semantics.lint.lint_text.{iter_code_lines}
 
 
 # ============================================================================
@@ -75,41 +76,33 @@ fn check_sql_injection(source: text, path: text) -> [SqlInjectionWarning]:
     if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
         return warnings
 
-    val lines = source.split("\n")
     val keywords = _sql_keywords()
-    var in_docstring = false
-
+    val code_lines = iter_code_lines(source)
     var li = 0
-    while li < lines.len():
-        val line = lines[li]
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val trimmed = cl.trimmed
 
-        # Track triple-quoted docstring regions
-        if _count_triple_quotes(line) % 2 == 1:
-            in_docstring = not in_docstring
-
-        if not in_docstring:
-            val trimmed = line.trim()
-
-            # Skip comment lines
-            if not trimmed.starts_with("#"):
-                # Skip lines with @allow(sql_injection) annotation
-                if not trimmed.contains("@allow(sql_injection)"):
-                    # Skip lines that use PreparedStatement or QueryBuilder
-                    if not _is_safe_sql_context(trimmed):
-                        # Check if line has both SQL keywords and interpolation
-                        val found_keyword = _find_sql_keyword(trimmed, keywords)
-                        if found_keyword != "":
-                            if _has_interpolation(trimmed):
-                                # Verify the SQL keyword and interpolation are in the same string
-                                if _in_same_string(trimmed, found_keyword):
-                                    warnings.push(SqlInjectionWarning(
-                                        code: "SEC-SQL001",
-                                        severity: "DENY",
-                                        message: "SQL keyword '{found_keyword.trim()}' used with string interpolation -- potential SQL injection",
-                                        hint: "use PreparedStatement(\"... ?\").bind(value) or QueryBuilder instead of string interpolation",
-                                        line_num: li + 1,
-                                        file_path: path
-                                    ))
+        # Skip comment lines
+        if not trimmed.starts_with("#"):
+            # Skip lines with @allow(sql_injection) annotation
+            if not trimmed.contains("@allow(sql_injection)"):
+                # Skip lines that use PreparedStatement or QueryBuilder
+                if not _is_safe_sql_context(trimmed):
+                    # Check if line has both SQL keywords and interpolation
+                    val found_keyword = _find_sql_keyword(trimmed, keywords)
+                    if found_keyword != "":
+                        if _has_interpolation(trimmed):
+                            # Verify the SQL keyword and interpolation are in the same string
+                            if _in_same_string(trimmed, found_keyword):
+                                warnings.push(SqlInjectionWarning(
+                                    code: "SEC-SQL001",
+                                    severity: "DENY",
+                                    message: "SQL keyword '{found_keyword.trim()}' used with string interpolation -- potential SQL injection",
+                                    hint: "use PreparedStatement(\"... ?\").bind(value) or QueryBuilder instead of string interpolation",
+                                    line_num: cl.line_num,
+                                    file_path: path
+                                ))
 
         li = li + 1
 
@@ -232,19 +225,6 @@ fn _is_ident_char(ch: text) -> bool:
     if c == 95:
         return true
     false
-
-fn _count_triple_quotes(line: text) -> i64:
-    """Count the number of triple-quote sequences in a line."""
-    var count = 0
-    var i = 0
-    while i + 2 < line.len():
-        val chunk = line.slice(i, i + 3)
-        if chunk == "\"\"\"":
-            count = count + 1
-            i = i + 3
-        else:
-            i = i + 1
-    count
 
 
 # ============================================================================
