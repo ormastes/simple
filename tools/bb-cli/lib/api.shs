@@ -1,0 +1,56 @@
+#!/bin/sh
+# bb-cli raw API — Bitbucket Cloud REST v2.0
+# Usage: bb_api <path> [-X METHOD] [-d JSON] [--jq EXPR]
+
+BB_API_BASE="https://api.bitbucket.org/2.0"
+
+bb_api() {
+  bb_load_auth || return 1
+  local path="" method="GET" data="" jq_expr=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -X|--method) method="$2"; shift 2 ;;
+      -d|--data)   data="$2"; shift 2 ;;
+      --jq)        jq_expr="$2"; shift 2 ;;
+      -*) echo "error: unknown flag: $1" >&2; return 1 ;;
+      *)  [ -z "$path" ] && path="$1" || { echo "error: extra arg $1" >&2; return 1; }; shift ;;
+    esac
+  done
+  [ -n "$path" ] || { echo "error: path required" >&2; return 1; }
+
+  local url
+  case "$path" in
+    http://*|https://*) url="$path" ;;
+    /*) url="${BB_API_BASE}${path}" ;;
+    *)  url="${BB_API_BASE}/${path}" ;;
+  esac
+
+  local auth; auth=$(bb_auth_header)
+  local response
+  if [ -n "$data" ]; then
+    response=$(curl -sS -X "$method" \
+      -H "Authorization: Basic ${auth}" \
+      -H "Accept: application/json" \
+      -H "Content-Type: application/json" \
+      -d "$data" "$url")
+  else
+    response=$(curl -sS -X "$method" \
+      -H "Authorization: Basic ${auth}" \
+      -H "Accept: application/json" \
+      "$url")
+  fi
+
+  local err_msg
+  err_msg=$(echo "$response" | jq -r 'if type == "object" then (.error.message? // .message? // empty) else empty end' 2>/dev/null || true)
+  if [ -n "$err_msg" ]; then
+    echo "error: ${err_msg}" >&2
+    echo "$response" | jq '.' 2>/dev/null
+    return 1
+  fi
+
+  if [ -n "$jq_expr" ]; then
+    echo "$response" | jq -r "$jq_expr" 2>/dev/null || echo "$response"
+  else
+    echo "$response" | jq '.' 2>/dev/null || echo "$response"
+  fi
+}

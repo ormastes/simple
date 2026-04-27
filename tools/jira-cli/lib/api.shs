@@ -80,6 +80,7 @@ jira_api() {
   elif [ ${#fields[@]} -gt 0 ] || [ ${#raw_fields[@]} -gt 0 ]; then
     body="{}"
     for f in "${fields[@]:-}"; do
+      [ -z "$f" ] && continue
       local key="${f%%=*}"
       local val="${f#*=}"
       # Try to parse as JSON value (number, bool, null, array, object)
@@ -90,6 +91,7 @@ jira_api() {
       fi
     done
     for f in "${raw_fields[@]:-}"; do
+      [ -z "$f" ] && continue
       local key="${f%%=*}"
       local val="${f#*=}"
       body=$(echo "$body" | jq --arg k "$key" --arg v "$val" '.[$k] = $v')
@@ -127,9 +129,9 @@ jira_api() {
     return 1
   fi
 
-  # Check for API errors
+  # Check for API errors (response may be object or array — only objects can have error fields)
   local err_msg
-  err_msg=$(echo "$response" | jq -r '.errorMessages[0] // .message // empty' 2>/dev/null)
+  err_msg=$(echo "$response" | jq -r 'if type == "object" then (.errorMessages[0]? // .message? // empty) else empty end' 2>/dev/null || true)
   if [ -n "$err_msg" ]; then
     echo "error: ${err_msg}" >&2
     # Still output the full response for debugging
