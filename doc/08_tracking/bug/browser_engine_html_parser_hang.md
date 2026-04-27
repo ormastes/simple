@@ -2,9 +2,61 @@
 
 **ID**: BUG-BROWSER-PARSER-HANG  
 **Severity**: High  
-**Status**: Open  
+**Status**: Partially Fixed (verification 2026-04-27)  
 **Date**: 2026-04-09  
 **Component**: `src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`
+
+## Verification Update — 2026-04-27
+
+The "Proposed Fix Options" section below was partially incorrect. After
+hands-on investigation this session, two options needed correction and
+several fixes were applied. Original option text is preserved below for
+historical reference; see inline `**Note (2026-04-27):**` callouts.
+
+### Corrections to original options
+
+- **Option A is unnecessary as a runtime change.** A pure-Simple
+  string builder already exists at
+  `src/lib/common/string_builder.spl` (`common.string_builder.StringBuilder`)
+  with `new()`, `push(part)`, `to_text()`, `is_empty()`, `clear()`. No
+  new `rt_string_builder_*` extern is required — just import and use it.
+- **Option D is not a perf win.** Both `rt_slice` and
+  `rt_string_char_at` call `rt_string_new` identically (see
+  `src/compiler_rust/runtime/src/value/collections.rs:1249` and `:718`),
+  so substituting one for the other allocates the same. The
+  substitution IS still valuable as a **UTF-8 correctness fix** because
+  `rt_slice` does byte indexing while `rt_string_char_at` is
+  codepoint-aware — but it does not reduce allocation count.
+
+### What was applied this session
+
+- Commit `vqvnsrmo` — `rt_slice` identity fast path: a full-string
+  slice (`slice(0, len)`) returns the original heap pointer instead of
+  copying. Mark-sweep GC handles the aliasing safely. The same fast
+  path was added to the interpreter's `slice` handler. Smoke test:
+  100K identity slices on a 5.2KB string → 1.08s wall, 17 MiB peak RSS.
+- Commit `rmn` — UTF-8 correctness sweep: replaced `slice(i, i+1)`
+  hot-loop calls with `char_at(i)` across `browser_engine`, plus
+  StringBuilder conversion of 5 loops in
+  `widget_to_dom.spl` (`split_tag_parts`, `split_spaces`,
+  `split_semicolons`).
+- Commit `rvx` (96f240a) — StringBuilder conversion of 14 tokenizer
+  loops in `dom.spl` and `style_block.spl`:
+  `strip_css_comments`, `dom_split_ws`, `split_comma`,
+  `sb_dom_split_ws`, `split_top_level_commas` (×3),
+  `split_shadow_tokens` (×3), `calc_tokenize`, `calc_split_muldiv`,
+  `sb_split_char`, `sb_split_ws`.
+
+### What is still pending
+
+- `rt_string_new(_, 0)` shared empty-string interning — **deferred**.
+  Needs GC root-set integration; the mark-sweep tri-color GC currently
+  has no clean hook for permanently-rooted objects.
+- ASCII single-char cache in `rt_string_new` (Option C-style) — **deferred**
+  for the same root-set reason.
+- Concat-in-loop sites in `src/lib/common/*` (`rope`, `fraction`,
+  `base64`, `color`, `rich_text`) — **in progress** in a parallel
+  agent F sweep.
 
 ## Summary
 
@@ -122,6 +174,12 @@ The interpreter uses a different string implementation (Rust `String` with in-pr
 ### Option A: String builder runtime function (recommended)
 Add `rt_string_builder_new()`, `rt_string_builder_append_char()`, `rt_string_builder_to_string()` to the Rust runtime. Replace O(n^2) concatenation with O(n) buffer append.
 
+**Note (2026-04-27):** No new runtime is needed. A pure-Simple
+`common.string_builder.StringBuilder` already exists at
+`src/lib/common/string_builder.spl` (`new()`, `push(part)`, `to_text()`,
+`is_empty()`, `clear()`). The O(n) buffer-append approach is what was
+actually applied in commits `rmn` and `rvx` — see Verification Update.
+
 ### Option B: Batch inline style parsing
 Instead of parsing `style="..."` character-by-character, add a runtime function `rt_parse_inline_style(style_str) -> [(key, value)]` that returns all property-value pairs in one call. This moves the parsing to Rust (fast) and returns structured data.
 
@@ -130,6 +188,17 @@ The current `rt_slice` allocates a new `RuntimeString` for every call. For singl
 
 ### Option D: Use text.char_at() instead of text.slice(i, i+1)
 If `rt_string_char_at` returns an integer (char code) instead of a string, the hot loop can compare integers instead of allocating strings. Rewrite `browser_renderer_split_tag_parts` to use `char_at()` + integer comparison.
+
+**Note (2026-04-27):** This option turned out to be a wash for
+allocation count. In the current runtime, `rt_string_char_at` calls
+`rt_string_new` exactly like `rt_slice` does
+(`src/compiler_rust/runtime/src/value/collections.rs:1249` and `:718`),
+so swapping the two does not reduce allocations. The substitution IS
+worth doing as a **UTF-8 correctness** fix (`rt_slice` is byte-indexed,
+`rt_string_char_at` is codepoint-aware) and was applied in commit
+`rmn`. The integer-char-code variant described above (returning an
+`int` codepoint with no `rt_string_new`) would still be a real perf
+win and remains a viable future option.
 
 ## Related Files
 
