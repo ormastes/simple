@@ -1,14 +1,23 @@
 #![allow(unnamed_duplicate_typed_args)]
-# host_key_loader — Load RSA PKCS#8 private key from disk
+# host_key_loader — Load SSH host key material from disk
 #
-# Supports both PEM (-----BEGIN PRIVATE KEY-----) and raw DER formats.
-# Autodetect: PEM if file text starts with "-----BEGIN", DER otherwise.
-# Returns raw PKCS#8 DER bytes; structural validation is the caller's job.
+# Supports:
+# - RSA private keys in PEM (-----BEGIN PRIVATE KEY-----) or raw DER form.
+# - OpenSSH public key / certificate lines (<algo> <base64> [comment]).
+# Returns raw wire-format bytes; structural validation is the caller's job.
 
 # File I/O externs (same pattern as disk_image_bake.spl / ffi/io.spl)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn _file_bytes_or_error(path: text) -> Result<[u8], text>:
+    if not rt_file_exists(path):
+        return Err("host key file not found: {path}")
+    val raw: [u8] = rt_file_read_bytes(path) ?? []
+    if raw.len() == 0:
+        return Err("host key file is empty: {path}")
+    Ok(raw)
 
 # ============================================================================
 # Base64 decode (inline, baremetal-safe — no std import needed)
@@ -98,14 +107,9 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
       Ok([u8])   — raw PKCS#8 DER bytes (not validated structurally)
       Err(text)  — file not found, empty file, or malformed PEM
     """
-    if not rt_file_exists(path):
-        return Err("host key file not found: {path}")
-
     # Read as bytes first so binary DER keys do not get misclassified as empty
     # when the hosted runtime refuses to decode them as UTF-8 text.
-    val raw: [u8] = rt_file_read_bytes(path) ?? []
-    if raw.len() == 0:
-        return Err("host key file is empty: {path}")
+    val raw = _file_bytes_or_error(path)?
 
     val text_content = rt_bytes_to_text(raw)
     val trimmed_content = text_content.trim()
@@ -124,3 +128,57 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
     else:
         # DER path: return raw bytes as-is.
         return Ok(raw)
+
+fn _read_u32_be(data: [u8], offset: u64) -> Result<u64, text>:
+    if offset + 4 > data.len():
+        return Err("truncated SSH string length")
+    Ok(
+        (data[offset].to_u64() << 24) |
+        (data[offset + 1].to_u64() << 16) |
+        (data[offset + 2].to_u64() << 8) |
+        data[offset + 3].to_u64()
+    )
+
+fn _copy_range(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length and start + i < data.len():
+        out.push(data[start + i])
+        i = i + 1
+    out
+
+fn _ssh_blob_algorithm(blob: [u8]) -> Result<text, text>:
+    val name_len = _read_u32_be(blob, 0)?
+    if 4 + name_len > blob.len():
+        return Err("truncated SSH public blob")
+    Ok(rt_bytes_to_text(_copy_range(blob, 4, name_len)))
+
+pub fn load_ssh_public_blob_from_file(path: text) -> Result<[u8], text>:
+    """Load an OpenSSH public key or certificate line from disk.
+
+    Accepts the standard single-line format:
+      <algorithm> <base64-blob> [comment]
+
+    Returns the decoded raw SSH wire blob after a shallow algorithm/header check.
+    """
+    val raw = _file_bytes_or_error(path)?
+    val content = rt_bytes_to_text(raw).trim()
+    val parts = content.split_whitespace()
+    if parts.len() < 2:
+        return Err("malformed SSH public key line: {path}")
+    val algo = parts[0]
+    val decoded = _base64_decode_to_bytes(parts[1])
+    if decoded.len() == 0:
+        return Err("base64 decode produced empty result for SSH public blob: {path}")
+    val decoded_algo = _ssh_blob_algorithm(decoded)?
+    if decoded_algo != algo:
+        return Err("SSH public blob algorithm mismatch in {path}")
+    Ok(decoded)
+
+pub fn load_ssh_host_certificate_from_file(path: text, expected_algorithm: text) -> Result<[u8], text>:
+    """Load an OpenSSH host certificate and validate the certificate algorithm tag."""
+    val blob = load_ssh_public_blob_from_file(path)?
+    val decoded_algo = _ssh_blob_algorithm(blob)?
+    if decoded_algo != expected_algorithm:
+        return Err("unexpected SSH certificate algorithm in {path}: {decoded_algo}")
+    Ok(blob)

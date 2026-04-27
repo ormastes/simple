@@ -39,7 +39,7 @@ Each test:
 """
 
 use std.spipe.*
-use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_kex_public_from_private, ssh_kex_compute_shared}
+use os.apps.sshd.ssh_kex.{HostKeySet, ssh_sign_exchange_hash, host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_build_ecdsa_p256_host_key_blob, ecdsa_p256_public_point_from_pkcs8, ssh_kex_public_from_private, ssh_kex_compute_shared}
 use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, ssh_get_u32, SshStringResult, SshTextResult}
 use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
@@ -144,6 +144,31 @@ fn _decode_sig_blob(blob: [u8]) -> (text, [u8]):
         return (algo_pair.value, [])
     val sig_pair = r_sig.unwrap()
     (algo_pair.value, sig_pair.data)
+
+fn _decode_hostkey_blob(blob: [u8]) -> ([u8], [u8], [u8]):
+    val r_type = ssh_get_string(blob, 0)
+    if r_type.is_err():
+        return ([], [], [])
+    val type_pair = r_type.unwrap()
+    val r_curve = ssh_get_string(blob, type_pair.next_offset)
+    if r_curve.is_err():
+        return (type_pair.data, [], [])
+    val curve_pair = r_curve.unwrap()
+    val r_key = ssh_get_string(blob, curve_pair.next_offset)
+    if r_key.is_err():
+        return (type_pair.data, curve_pair.data, [])
+    val key_pair = r_key.unwrap()
+    (type_pair.data, curve_pair.data, key_pair.data)
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
 
 fn _bytes_all_zero(b: [u8]) -> bool:
     var i: u64 = 0
@@ -535,6 +560,18 @@ describe "ecdsa-sha2-nistp256 host key signing":
                 expect(_bytes_all_zero(fixed64)).to_equal(false)
         else:
             expect(result.is_err()).to_equal(true)
+
+    it "extracts the uncompressed public point from real PKCS#8":
+        val pkcs8 = _hex_decode("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+        val expected_q = _hex_decode("04fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+        expect(ecdsa_p256_public_point_from_pkcs8(pkcs8)).to_equal(expected_q)
+
+    it "builds an ECDSA host key blob with curve label and Q":
+        val q = _hex_decode("04fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+        val parts = _decode_hostkey_blob(ssh_build_ecdsa_p256_host_key_blob(q))
+        expect(_bytes_eq(parts.0, [0x65u8, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])).to_equal(true)
+        expect(_bytes_eq(parts.1, [0x6Eu8, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])).to_equal(true)
+        expect(parts.2).to_equal(q)
 
 # ============================================================================
 # Unknown algorithm

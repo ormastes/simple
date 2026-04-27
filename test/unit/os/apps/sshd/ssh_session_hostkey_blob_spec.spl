@@ -1,0 +1,46 @@
+use os.apps.sshd.ssh_kex.{HostKeySet}
+use os.apps.sshd.ssh_session.{ssh_host_key_blob_for_algo_for_test}
+use os.apps.sshd.ssh_packet.{ssh_get_string}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+fn _ecdsa_p256_pkcs8_der() -> [u8]:
+    hex_to_bytes("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+
+fn _eq_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "SSH session host key blob selection":
+    it "builds an ECDSA host key blob from PKCS#8":
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: _ecdsa_p256_pkcs8_der()
+        )
+        val blob = ssh_host_key_blob_for_algo_for_test("ecdsa-sha2-nistp256", host_keys)
+        expect(blob.len() > 0).to_equal(true)
+
+        val type_pair = ssh_get_string(blob, 0).unwrap()
+        val curve_pair = ssh_get_string(blob, type_pair.next_offset).unwrap()
+        val key_pair = ssh_get_string(blob, curve_pair.next_offset).unwrap()
+
+        expect(_eq_bytes(type_pair.data, [0x65u8, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])).to_equal(true)
+        expect(_eq_bytes(curve_pair.data, [0x6Eu8, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])).to_equal(true)
+        expect(key_pair.data.len()).to_equal(65)
+        expect(key_pair.data[0]).to_equal(0x04)
+
+    it "returns empty when ECDSA key material is absent":
+        val host_keys = HostKeySet(
+            ed25519_seed: nil,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        expect(ssh_host_key_blob_for_algo_for_test("ecdsa-sha2-nistp256", host_keys).len()).to_equal(0)

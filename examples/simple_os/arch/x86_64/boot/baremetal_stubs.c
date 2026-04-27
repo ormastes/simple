@@ -362,6 +362,11 @@ static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
     return IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint64_t)v;
 }
 
+static RuntimeValue simpleos_expose_runtime_value(RuntimeValue v)
+{
+    return IS_INT(v) ? (RuntimeValue)DECODE_INT(v) : v;
+}
+
 RuntimeValue rt_x86_ap_trampoline_vector(void)
 {
     return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_VECTOR;
@@ -696,7 +701,7 @@ RuntimeValue rt_string_len(RuntimeValue str)
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    /* Cranelift bare-metal string indexing currently passes raw indices. */
+    /* Bare-metal native code passes raw loop counters here. */
     if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     int64_t i = (int64_t)idx;
@@ -8923,8 +8928,8 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
     int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
-    if (cap <= 0) cap = 256; /* default capacity */
-    if (cap < 256) cap = 256;
+    if (cap <= 0) cap = 16; /* default capacity */
+    if (cap < 16) cap = 16;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -8954,22 +8959,16 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
      * - C-side callers: explicitly ENCODE_INT or pass heap pointers
      * IndexGet + MIR UnboxInt reads them back correctly. */
     if (a->len >= a->cap) {
-        /* At capacity — grow by allocating a new, larger array and copying.
-         * Bump allocator: old memory is leaked (free is no-op), but this
-         * enables crypto code (SHA-512/256 needs ~400+ byte arrays). */
+        /* Preserve the original header address so callers that treat push as
+         * in-place mutation do not keep using a stale handle after growth. */
         uint32_t new_cap = a->cap * 2;
         if (new_cap < 128) new_cap = 128;
-        size_t alloc_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        RuntimeArray *new_a = (RuntimeArray *)malloc(alloc_size);
-        if (!new_a) return ENCODE_PTR(a); /* alloc failed, drop */
-        new_a->hdr.type = HEAP_ARRAY;
-        new_a->hdr.size = (uint32_t)alloc_size;
-        new_a->len = a->len;
-        new_a->cap = new_cap;
-        new_a->items = runtime_array_inline_items(new_a);
-        for (uint32_t i = 0; i < a->len; i++) new_a->items[i] = items[i];
-        for (uint32_t i = a->len; i < new_cap; i++) new_a->items[i] = NIL_VALUE;
-        a = new_a;
+        RuntimeValue *new_items = (RuntimeValue *)malloc((size_t)new_cap * sizeof(RuntimeValue));
+        if (!new_items) return ENCODE_PTR(a); /* alloc failed, drop */
+        for (uint32_t i = 0; i < a->len; i++) new_items[i] = items[i];
+        for (uint32_t i = a->len; i < new_cap; i++) new_items[i] = NIL_VALUE;
+        a->items = new_items;
+        a->cap = new_cap;
         items = runtime_array_items(a);
     }
     items[a->len] = val;
@@ -9587,6 +9586,18 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
     return ENCODE_PTR(out);
 }
 
+static int64_t _tls_write_runtime_bytes(RuntimeValue out_rv, const uint8_t *buf, uint32_t len)
+{
+    if (!IS_HEAP(out_rv)) return 0;
+    RuntimeArray *out_arr = (RuntimeArray *)DECODE_PTR(out_rv);
+    if (!out_arr || out_arr->hdr.type != HEAP_ARRAY || out_arr->len != len) return 0;
+    RuntimeValue *out_items = runtime_array_items(out_arr);
+    for (uint32_t i = 0; i < len; i++) {
+        out_items[i] = ENCODE_INT(buf[i]);
+    }
+    return 1;
+}
+
 RuntimeValue rt_tls13_sha256(RuntimeValue data_rv)
 {
     uint32_t data_len = 0;
@@ -9884,8 +9895,12 @@ static RuntimeValue _tls_record_find_with_key(const uint8_t key[16], const uint8
     const uint8_t *tag = raw + 5U + ct_len;
     uint8_t nonce[12];
     memcpy(nonce, iv, 12U);
-    uint64_t seq = (uint64_t)seq_num_i64;
-    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
+    uint64_t carry = (uint64_t)seq_num_i64;
+    for (int i = 11; i >= 4 && carry > 0; i--) {
+        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
+        nonce[i] = (uint8_t)(sum & 0xffU);
+        carry = (carry >> 8) + (sum >> 8);
+    }
     uint8_t *inner = (uint8_t *)malloc(ct_len ? ct_len : 1U);
     if (!inner) return empty;
     if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, raw, 5U, tag, inner) != 0) {
@@ -10000,8 +10015,12 @@ RuntimeValue rt_tls13_record_find_handshake_message(RuntimeValue raw_rv, Runtime
     const uint8_t *aad = raw;
     uint8_t nonce[12];
     memcpy(nonce, iv, 12U);
-    uint64_t seq = (uint64_t)seq_num_i64;
-    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
+    uint64_t carry = (uint64_t)seq_num_i64;
+    for (int i = 11; i >= 4 && carry > 0; i--) {
+        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
+        nonce[i] = (uint8_t)(sum & 0xffU);
+        carry = (carry >> 8) + (sum >> 8);
+    }
     uint8_t *inner = (uint8_t *)malloc(ct_len ? ct_len : 1U);
     if (!inner) {
         free(raw); free(key); free(iv);
@@ -10045,6 +10064,30 @@ RuntimeValue rt_tls13_hkdf_extract(RuntimeValue salt_rv, RuntimeValue ikm_rv)
     if (salt) free(salt);
     if (ikm) free(ikm);
     return _tls_runtime_array_from_bytes(out, 32);
+}
+
+int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, RuntimeValue out_rv)
+{
+    uint32_t salt_len = 0, ikm_len = 0;
+    uint8_t *salt = _tls_copy_runtime_bytes(salt_rv, &salt_len);
+    uint8_t *ikm = _tls_copy_runtime_bytes(ikm_rv, &ikm_len);
+    uint8_t zero_salt[32];
+    uint8_t out[32];
+    int64_t ok = 0;
+    if (!ikm && ikm_len != 0) {
+        if (salt) free(salt);
+        return 0;
+    }
+    if (salt_len == 0) {
+        memset(zero_salt, 0, sizeof(zero_salt));
+        _tls_hmac_sha256(zero_salt, 32, ikm, ikm_len, out);
+    } else {
+        _tls_hmac_sha256(salt, salt_len, ikm, ikm_len, out);
+    }
+    ok = _tls_write_runtime_bytes(out_rv, out, 32U);
+    if (salt) free(salt);
+    if (ikm) free(ikm);
+    return ok;
 }
 
 RuntimeValue rt_tls13_handshake_secret_from_record(RuntimeValue derived_rv, RuntimeValue scalar_rv, RuntimeValue record_rv)
@@ -10157,6 +10200,78 @@ RuntimeValue rt_tls13_hkdf_expand_label(RuntimeValue secret_rv, RuntimeValue lab
     free(full_label);
     free(encoded);
     return _tls_runtime_array_from_bytes(okm, out_len);
+}
+
+int64_t rt_tls13_hkdf_expand_label_into(RuntimeValue secret_rv, RuntimeValue label_rv, RuntimeValue context_rv, RuntimeValue out_rv, int64_t length_i64)
+{
+    if (length_i64 < 0 || length_i64 > 255) return 0;
+    uint32_t secret_len = 0, label_len = 0, context_len = 0;
+    uint8_t *secret = _tls_copy_runtime_bytes(secret_rv, &secret_len);
+    uint8_t *label = _tls_copy_runtime_bytes(label_rv, &label_len);
+    uint8_t *context = _tls_copy_runtime_bytes(context_rv, &context_len);
+    if (!secret || !label || !context) {
+        if (secret) free(secret);
+        if (label) free(label);
+        if (context) free(context);
+        return 0;
+    }
+
+    const uint8_t prefix[] = { 't', 'l', 's', '1', '3', ' ' };
+    uint32_t full_label_len = (uint32_t)sizeof(prefix) + label_len;
+    uint8_t *full_label = (uint8_t *)malloc(full_label_len > 0 ? full_label_len : 1);
+    uint32_t encoded_len = 2U + 1U + full_label_len + 1U + context_len;
+    uint8_t *encoded = (uint8_t *)malloc(encoded_len > 0 ? encoded_len : 1);
+    uint8_t okm[255];
+    uint8_t t_prev[32];
+    int64_t ok = 0;
+    if (!full_label || !encoded) {
+        if (full_label) free(full_label);
+        if (encoded) free(encoded);
+        free(secret); free(label); free(context);
+        return 0;
+    }
+    memcpy(full_label, prefix, sizeof(prefix));
+    if (label_len > 0) memcpy(full_label + sizeof(prefix), label, label_len);
+
+    uint32_t pos = 0;
+    uint32_t out_len = (uint32_t)length_i64;
+    encoded[pos++] = (uint8_t)((out_len >> 8) & 0xffU);
+    encoded[pos++] = (uint8_t)(out_len & 0xffU);
+    encoded[pos++] = (uint8_t)full_label_len;
+    memcpy(encoded + pos, full_label, full_label_len);
+    pos += full_label_len;
+    encoded[pos++] = (uint8_t)context_len;
+    if (context_len > 0) memcpy(encoded + pos, context, context_len);
+
+    uint32_t okm_len = 0;
+    uint32_t t_prev_len = 0;
+    uint8_t counter = 1;
+    while (okm_len < out_len) {
+        uint8_t input[32 + 512];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        memcpy(input + input_len, encoded, encoded_len);
+        input_len += encoded_len;
+        input[input_len++] = counter;
+
+        _tls_hmac_sha256(secret, secret_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (out_len - okm_len) < 32U ? (out_len - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+
+    ok = _tls_write_runtime_bytes(out_rv, okm, out_len);
+    free(secret);
+    free(label);
+    free(context);
+    free(full_label);
+    free(encoded);
+    return ok;
 }
 
 static RuntimeValue _tls13_hkdf_expand_label_const(RuntimeValue secret_rv, const uint8_t *label, uint32_t label_len, uint32_t out_len)
@@ -10626,8 +10741,12 @@ RuntimeValue rt_tls13_record_encrypt(RuntimeValue key_rv, RuntimeValue iv_rv,
 
     uint8_t nonce[12];
     memcpy(nonce, iv, 12U);
-    uint64_t seq = (uint64_t)seq_num_i64;
-    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
+    uint64_t carry = (uint64_t)seq_num_i64;
+    for (int i = 11; i >= 4 && carry > 0; i--) {
+        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
+        nonce[i] = (uint8_t)(sum & 0xffU);
+        carry = (carry >> 8) + (sum >> 8);
+    }
 
     if (_tls_aes128_gcm_encrypt_raw(key, nonce, inner, inner_len, record, 5U, record + 5U, record + 5U + inner_len) != 0) {
         goto cleanup;
@@ -10659,7 +10778,7 @@ RuntimeValue rt_ssh_aes128_gcm_encrypt_packet(RuntimeValue key_rv, RuntimeValue 
         goto cleanup;
     }
 
-    uint32_t padding_len = 16U - ((5U + payload_len) % 16U);
+    uint32_t padding_len = 16U - ((1U + payload_len) % 16U);
     if (padding_len < 4U) padding_len += 16U;
     uint32_t packet_length = 1U + payload_len + padding_len;
     uint32_t body_len = packet_length;
@@ -10679,11 +10798,13 @@ RuntimeValue rt_ssh_aes128_gcm_encrypt_packet(RuntimeValue key_rv, RuntimeValue 
     wire[3] = (uint8_t)(packet_length & 0xffU);
 
     uint8_t nonce[12];
-    memcpy(nonce, iv, 4U);
-    uint64_t counter = 0;
-    for (uint32_t i = 4U; i < 12U; i++) counter = (counter << 8) | (uint64_t)iv[i];
-    counter += (uint64_t)seq_num_i64;
-    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] = (uint8_t)((counter >> (8U * i)) & 0xffU);
+    memcpy(nonce, iv, 12U);
+    uint64_t carry = (uint64_t)seq_num_i64;
+    for (int i = 11; i >= 4 && carry > 0; i--) {
+        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
+        nonce[i] = (uint8_t)(sum & 0xffU);
+        carry = (carry >> 8) + (sum >> 8);
+    }
 
     if (_tls_aes128_gcm_encrypt_raw(key, nonce, body, body_len, wire, 4U, wire + 4U, wire + 4U + body_len) != 0) {
         goto cleanup;
@@ -10717,11 +10838,13 @@ RuntimeValue rt_ssh_aes128_gcm_decrypt_packet(RuntimeValue key_rv, RuntimeValue 
 
     uint32_t body_len = packet_len - 4U - 16U;
     uint8_t nonce[12];
-    memcpy(nonce, iv, 4U);
-    uint64_t counter = 0;
-    for (uint32_t i = 4U; i < 12U; i++) counter = (counter << 8) | (uint64_t)iv[i];
-    counter += (uint64_t)seq_num_i64;
-    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] = (uint8_t)((counter >> (8U * i)) & 0xffU);
+    memcpy(nonce, iv, 12U);
+    uint64_t carry = (uint64_t)seq_num_i64;
+    for (int i = 11; i >= 4 && carry > 0; i--) {
+        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
+        nonce[i] = (uint8_t)(sum & 0xffU);
+        carry = (carry >> 8) + (sum >> 8);
+    }
 
     body = (uint8_t *)malloc(body_len ? body_len : 1U);
     if (!body) goto cleanup;

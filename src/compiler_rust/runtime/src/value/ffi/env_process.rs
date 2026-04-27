@@ -15,6 +15,25 @@ fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
 
+#[cfg(unix)]
+fn configure_timeout_child_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Timeout cleanup kills the whole child process group. Make that
+    // invariant true for /bin/sh -> sshpass -> ssh style pipelines.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_timeout_child_process_group(_command: &mut std::process::Command) {}
+
 // ============================================================================
 // Code Coverage & Instrumentation Probes
 // ============================================================================
@@ -282,8 +301,10 @@ fn finish_child_output(mut child: std::process::Child, timeout_ms: i64) -> std::
             if Instant::now() >= deadline {
                 #[cfg(unix)]
                 {
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    let pgid = -(child.id() as i32);
+                    let group_kill_rc = unsafe { libc::kill(pgid, libc::SIGKILL) };
+                    if group_kill_rc != 0 {
+                        let _ = child.kill();
                     }
                 }
                 #[cfg(not(unix))]
@@ -334,6 +355,7 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
     // Build command with arguments
     let mut command = Command::new(cmd_str);
     clear_simple_child_stack_env(&mut command);
+    configure_timeout_child_process_group(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
@@ -396,6 +418,7 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
     // Build command with arguments
     let mut command = Command::new(cmd_str);
     clear_simple_child_stack_env(&mut command);
+    configure_timeout_child_process_group(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
