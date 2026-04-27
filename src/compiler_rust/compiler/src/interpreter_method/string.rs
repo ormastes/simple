@@ -44,8 +44,8 @@ if let Value::Str(ref s) = recv_val {
         "find_str" | "find" | "index_of" => {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.find(&needle) {
-                Some(idx) => Value::some(Value::Int(idx as i64)),
-                None => Value::none(),
+                Some(idx) => Value::Int(idx as i64),
+                None => Value::Int(-1),
             });
         }
         "up" | "upper" | "uppercase" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
@@ -280,6 +280,11 @@ if let Value::Str(ref s) = recv_val {
                 .transpose()?
                 .map(|v| v.as_int().unwrap_or(s.len() as i64) as usize)
                 .unwrap_or(s.len());
+            // Identity fast path: full-string slice avoids the chars() walk + Vec<char>.
+            // Byte-len upper-bounds char count, so end >= s.len() guarantees end >= chars().count().
+            if start == 0 && end >= s.len() {
+                return Ok(Value::Str(s.to_string()));
+            }
             // Work with char indices for unicode safety
             let chars: Vec<char> = s.chars().collect();
             let end = end.min(chars.len());
@@ -297,8 +302,8 @@ if let Value::Str(ref s) = recv_val {
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.rfind(&needle) {
-                Some(idx) => Value::some(Value::Int(idx as i64)),
-                None => Value::none(),
+                Some(idx) => Value::Int(idx as i64),
+                None => Value::Int(-1),
             });
         }
         "parse_int" | "parse_i32" | "parse_i64" => {

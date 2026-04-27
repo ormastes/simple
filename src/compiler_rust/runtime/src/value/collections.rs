@@ -259,6 +259,19 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
     }
 }
 
+/// Read a single byte from a `[u8]`-style runtime array.
+#[no_mangle]
+pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
+    let value = rt_array_get(array, index);
+    if value.is_nil() {
+        return 0;
+    }
+    if value.is_int() {
+        return value.as_int() & 0xFF;
+    }
+    (value.to_raw() as i64) & 0xFF
+}
+
 /// Push an element to an array (no grow, returns false if full)
 #[no_mangle]
 pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
@@ -1241,6 +1254,12 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
 
                 if step != 1 || start >= end {
                     return rt_string_new(std::ptr::null(), 0);
+                }
+
+                // Identity fast path: full-string slice with step 1 returns the same heap object.
+                // Mark-sweep GC keeps it alive as long as any pointer remains reachable.
+                if start == 0 && end == len {
+                    return collection;
                 }
 
                 let data = str_ptr.add(1) as *const u8;
