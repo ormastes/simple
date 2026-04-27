@@ -284,6 +284,8 @@ impl ContextStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_parser::ast::{Argument, Block, ClassDef, Expr, FunctionDef, LetStmt, Mutability, Pattern, Visibility};
+    use simple_parser::token::Span;
     use simple_parser::Parser;
 
     fn parse_code(code: &str) -> Vec<Node> {
@@ -394,17 +396,111 @@ pub fn main():
 
     #[test]
     fn test_symbol_usage_analyzer_method_calls() {
-        let code = r#"
-pub class Calculator:
-    pub fn add(x: i64, y: i64) -> i64:
-        return x + y
-
-pub fn main():
-    let calc = Calculator()
-    let result = calc.add(1, 2)
-    return result
-"#;
-        let nodes = parse_code(code);
+        let nodes = vec![
+            Node::Class(ClassDef {
+                span: Span::new(0, 0, 0, 0),
+                name: "Calculator".to_string(),
+                generic_params: vec![],
+                where_clause: vec![],
+                fields: vec![],
+                methods: vec![FunctionDef {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "add".to_string(),
+                    generic_params: vec![],
+                    params: vec![],
+                    return_type: Some(Type::Simple("i64".to_string())),
+                    where_clause: vec![],
+                    body: Block::default(),
+                    visibility: Visibility::Private,
+                    effects: vec![],
+                    decorators: vec![],
+                    attributes: vec![],
+                    doc_comment: None,
+                    contract: None,
+                    is_abstract: false,
+                    is_sync: false,
+                    bounds_block: None,
+                    is_static: false,
+                    is_me_method: false,
+                    is_generator: false,
+                    return_constraint: None,
+                    is_generic_template: false,
+                    specialization_of: None,
+                    type_bindings: Default::default(),
+                }],
+                parent: None,
+                visibility: Visibility::Private,
+                effects: vec![],
+                attributes: vec![],
+                doc_comment: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: Default::default(),
+                invariant: None,
+                macro_invocations: vec![],
+                mixins: vec![],
+            }),
+            Node::Function(FunctionDef {
+                span: Span::new(0, 0, 0, 0),
+                name: "main".to_string(),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                where_clause: vec![],
+                body: Block {
+                    span: Span::new(0, 0, 0, 0),
+                    statements: vec![
+                        Node::Let(LetStmt {
+                            span: Span::new(0, 0, 0, 0),
+                            pattern: Pattern::Identifier("calc".to_string()),
+                            ty: None,
+                            value: Some(Expr::Call {
+                                callee: Box::new(Expr::Identifier("Calculator".to_string())),
+                                args: vec![],
+                            }),
+                            mutability: Mutability::Immutable,
+                            storage_class: simple_parser::ast::StorageClass::Auto,
+                            is_ghost: false,
+                            is_suspend: false,
+                        }),
+                        Node::Let(LetStmt {
+                            span: Span::new(0, 0, 0, 0),
+                            pattern: Pattern::Identifier("result".to_string()),
+                            ty: None,
+                            value: Some(Expr::MethodCall {
+                                receiver: Box::new(Expr::Identifier("calc".to_string())),
+                                method: "add".to_string(),
+                                args: vec![
+                                    Argument::new(None, Expr::Integer(1)),
+                                    Argument::new(None, Expr::Integer(2)),
+                                ],
+                                generic_args: vec![],
+                            }),
+                            mutability: Mutability::Immutable,
+                            storage_class: simple_parser::ast::StorageClass::Auto,
+                            is_ghost: false,
+                            is_suspend: false,
+                        }),
+                    ],
+                },
+                visibility: Visibility::Public,
+                effects: vec![],
+                decorators: vec![],
+                attributes: vec![],
+                doc_comment: None,
+                contract: None,
+                is_abstract: false,
+                is_sync: false,
+                bounds_block: None,
+                is_static: false,
+                is_me_method: false,
+                is_generator: false,
+                return_constraint: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: Default::default(),
+            }),
+        ];
         let analyzer = SymbolUsageAnalyzer::new();
         let usage = analyzer.analyze(&nodes, "main");
 

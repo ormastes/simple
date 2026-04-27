@@ -325,6 +325,11 @@ pub extern "C" fn rt_array_new_with_cap_i64(cap: i64) -> RuntimeValue {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_array_new_with_cap(cap: i64) -> RuntimeValue {
+    rt_array_new(cap as u64)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_array_new_with_cap_text(cap: i64) -> RuntimeValue {
     rt_array_new(cap as u64)
 }

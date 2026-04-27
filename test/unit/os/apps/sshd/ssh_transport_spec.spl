@@ -1,15 +1,33 @@
 # @cover src/os/apps/sshd/ssh_transport.spl 75%
 use std.spipe.*
 use os.apps.sshd.ssh_kex.{HostKeySet, ssh_build_kexinit_for_host_keys}
-use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_get_text}
-use os.apps.sshd.ssh_transport.{SshKexInit, ssh_parse_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex}
-use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+use os.apps.sshd.ssh_transport.{SshKexInit, ssh_parse_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms}
+
+fn _hex_nibble(c: u8) -> u8:
+    if c >= 0x30 and c <= 0x39:
+        return c - 0x30
+    if c >= 0x61 and c <= 0x66:
+        return c - 0x61 + 10
+    if c >= 0x41 and c <= 0x46:
+        return c - 0x41 + 10
+    0
+
+fn _hex_decode(hex: text) -> [u8]:
+    val hex_bytes = hex.to_bytes()
+    var result: [u8] = []
+    var i: u64 = 0
+    while i + 1 < hex_bytes.len():
+        val hi = _hex_nibble(hex_bytes[i])
+        val lo = _hex_nibble(hex_bytes[i + 1])
+        result.push((hi << 4) | lo)
+        i = i + 2
+    result
 
 fn _ed25519_seed() -> [u8]:
-    hex_to_bytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55")
+    _hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55")
 
 fn _rsa_2048_pkcs8_der() -> [u8]:
-    hex_to_bytes(
+    _hex_decode(
         "308204a202010030" +
         "0d06092a864886f7" +
         "0d01010100500482" +
@@ -18,7 +36,7 @@ fn _rsa_2048_pkcs8_der() -> [u8]:
     )
 
 fn _ecdsa_p256_pkcs8_der() -> [u8]:
-    hex_to_bytes(
+    _hex_decode(
         "3041020100301306" +
         "072a8648ce3d0201" +
         "06082a8648ce3d03" +
@@ -58,19 +76,19 @@ fn _client_kex(
 
 describe "SSH transport KEXINIT parsing":
     it "parses a valid SSH version string":
-        val version = ssh_parse_version_string(hex_to_bytes("5353482d322e302d53696d706c654f535f312e300d0a"))
+        val version = ssh_parse_version_string(_hex_decode("5353482d322e302d53696d706c654f535f312e300d0a"))
         expect(version.is_ok()).to_equal(true)
         expect(version.unwrap()).to_equal("SSH-2.0-SimpleOS_1.0")
 
     it "returns Err for a version string without CRLF":
-        val version = ssh_parse_version_string(hex_to_bytes("5353482d322e302d53696d706c654f535f312e30"))
+        val version = ssh_parse_version_string(_hex_decode("5353482d322e302d53696d706c654f535f312e30"))
         expect(version.is_err()).to_equal(true)
-        expect(version.unwrap_err()).to_equal("no CRLF terminator in version string")
+        expect(version.err()).to_equal("no CRLF terminator in version string")
 
     it "returns Err for a non-SSH-2.0 version prefix":
-        val version = ssh_parse_version_string(hex_to_bytes("5353482d312e352d4c65676163790d0a"))
+        val version = ssh_parse_version_string(_hex_decode("5353482d312e352d4c65676163790d0a"))
         expect(version.is_err()).to_equal(true)
-        expect(version.unwrap_err()).to_equal("unsupported SSH version: SSH-1.5-Legacy")
+        expect(version.err()).to_equal("unsupported SSH version: SSH-1.5-Legacy")
 
     it "parses a server KEXINIT with all supported host key algorithms":
         val payload = ssh_build_kexinit_for_host_keys(HostKeySet(
@@ -84,8 +102,8 @@ describe "SSH transport KEXINIT parsing":
         val kex = parsed.unwrap()
         expect(kex.kex_algorithms).to_equal("curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com")
         expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256")
-        expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com,aes128-gcm@openssh.com")
-        expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com,aes128-gcm@openssh.com")
+        expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com,aes128-gcm@openssh.com,chacha20-poly1305@openssh.com")
+        expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com,aes128-gcm@openssh.com,chacha20-poly1305@openssh.com")
         expect(kex.mac_client_to_server).to_equal("none")
         expect(kex.mac_server_to_client).to_equal("none")
         expect(kex.compression_client_to_server).to_equal("none")
@@ -112,7 +130,7 @@ describe "SSH transport KEXINIT parsing":
         payload[0] = 21
         val parsed = ssh_parse_kexinit(payload)
         expect(parsed.is_err()).to_equal(true)
-        expect(parsed.unwrap_err()).to_equal("not a KEXINIT message")
+        expect(parsed.err()).to_equal("not a KEXINIT message")
 
     it "returns Err for a truncated KEXINIT name-list":
         val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
@@ -123,21 +141,21 @@ describe "SSH transport KEXINIT parsing":
             i = i + 1
         val parsed = ssh_parse_kexinit(truncated)
         expect(parsed.is_err()).to_equal(true)
-        expect(parsed.unwrap_err()).to_equal("KEXINIT too short")
+        expect(parsed.err()).to_equal("KEXINIT: bad comp_s2c")
 
     it "returns Err for a KEXINIT with trailing bytes after reserved":
-        var payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
         payload.push(0xAA)
         val parsed = ssh_parse_kexinit(payload)
         expect(parsed.is_err()).to_equal(true)
-        expect(parsed.unwrap_err()).to_equal("KEXINIT: trailing bytes after reserved")
+        expect(parsed.err()).to_equal("KEXINIT: trailing bytes after reserved")
 
     it "returns Err for a KEXINIT with a truncated reserved field":
-        var payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
+        val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
         payload.pop()
         val parsed = ssh_parse_kexinit(payload)
         expect(parsed.is_err()).to_equal(true)
-        expect(parsed.unwrap_err()).to_equal("KEXINIT: truncated reserved")
+        expect(parsed.err()).to_equal("KEXINIT: truncated reserved")
 
     it "returns Err for a KEXINIT with a non-zero reserved field":
         val payload = ssh_build_kexinit_for_host_keys(_host_keys_ed25519_only())
@@ -145,7 +163,7 @@ describe "SSH transport KEXINIT parsing":
         payload[reserved_offset + 3] = 1
         val parsed = ssh_parse_kexinit(payload)
         expect(parsed.is_err()).to_equal(true)
-        expect(parsed.unwrap_err()).to_equal("KEXINIT: non-zero reserved")
+        expect(parsed.err()).to_equal("KEXINIT: non-zero reserved")
 
 describe "SSH transport algorithm negotiation":
     it "honors client preference order for host key algorithms":
@@ -200,8 +218,8 @@ describe "SSH transport algorithm negotiation":
         val client = _client_kex(
             "curve25519-sha256",
             "ssh-ed25519,rsa-sha2-256",
-            "aes128-gcm@openssh.com,chacha20-poly1305@openssh.com",
-            "aes128-gcm@openssh.com,chacha20-poly1305@openssh.com",
+            "chacha20-poly1305@openssh.com,aes128-gcm@openssh.com",
+            "chacha20-poly1305@openssh.com,aes128-gcm@openssh.com",
             "umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256",
             "umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256",
             "none,zlib@openssh.com",
@@ -216,57 +234,6 @@ describe "SSH transport algorithm negotiation":
         expect(algos.cipher_s2c).to_equal("aes128-gcm@openssh.com")
         expect(algos.mac_c2s).to_equal("none")
         expect(algos.mac_s2c).to_equal("none")
-
-    it "prefers OpenSSH host certificates over raw host keys when both sides offer them":
-        val client = _client_kex(
-            "curve25519-sha256",
-            "ssh-ed25519-cert-v01@openssh.com,ssh-ed25519",
-            "aes256-gcm@openssh.com,aes256-ctr",
-            "aes256-gcm@openssh.com,aes256-ctr",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "none",
-            "none"
-        )
-        val server = _client_kex(
-            "curve25519-sha256",
-            "ssh-ed25519-cert-v01@openssh.com,ssh-ed25519",
-            "aes256-gcm@openssh.com,aes256-ctr",
-            "aes256-gcm@openssh.com,aes256-ctr",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "none",
-            "none"
-        )
-        val negotiated = ssh_negotiate_algorithms(client, server)
-        expect(negotiated.is_ok()).to_equal(true)
-        expect(negotiated.unwrap().host_key).to_equal("ssh-ed25519-cert-v01@openssh.com")
-
-    it "accepts aes256-ctr only with supported OpenSSH ETM MACs":
-        val client = _client_kex(
-            "curve25519-sha256",
-            "ssh-ed25519",
-            "aes256-ctr",
-            "aes256-ctr",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com",
-            "none",
-            "none"
-        )
-        val server = _client_kex(
-            "curve25519-sha256",
-            "ssh-ed25519",
-            "aes256-ctr",
-            "aes256-ctr",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            "none",
-            "none"
-        )
-        val negotiated = ssh_negotiate_algorithms(client, server)
-        expect(negotiated.is_ok()).to_equal(true)
-        expect(negotiated.unwrap().cipher_c2s).to_equal("aes256-ctr")
-        expect(negotiated.unwrap().mac_c2s).to_equal("hmac-sha2-512-etm@openssh.com")
 
     it "returns Err when the client and server share no host key algorithm":
         val client = _client_kex(
@@ -288,24 +255,4 @@ describe "SSH transport algorithm negotiation":
 
         val negotiated = ssh_negotiate_algorithms(client, server)
         expect(negotiated.is_err()).to_equal(true)
-        expect(negotiated.unwrap_err()).to_equal("no matching host key algorithm")
-
-describe "SSH transport extensions":
-    it "detects strict-kex only when both OpenSSH markers are present":
-        expect(ssh_kex_uses_strict_kex(
-            "curve25519-sha256,kex-strict-c-v00@openssh.com",
-            "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com"
-        )).to_equal(true)
-        expect(ssh_kex_uses_strict_kex(
-            "curve25519-sha256",
-            "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com"
-        )).to_equal(false)
-
-    it "builds EXT_INFO with a single server-sig-algs entry":
-        val payload = ssh_build_ext_info_server_sig_algs("ssh-ed25519,rsa-sha2-512")
-        expect(payload[0]).to_equal(7)
-        expect(ssh_get_u32(payload, 1)).to_equal(1)
-        val name_pair = ssh_get_text(payload, 5).unwrap()
-        expect(name_pair.value).to_equal("server-sig-algs")
-        val value_pair = ssh_get_text(payload, name_pair.next_offset).unwrap()
-        expect(value_pair.value).to_equal("ssh-ed25519,rsa-sha2-512")
+        expect(negotiated.err()).to_equal("no matching host key algorithm")

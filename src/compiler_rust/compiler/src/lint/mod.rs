@@ -25,6 +25,8 @@ pub use types::{LintLevel, LintName};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_parser::ast::{Field, Mutability, Node, StructDef};
+    use simple_parser::token::Span;
     use simple_parser::Parser;
     use std::fs;
     use std::path::PathBuf;
@@ -273,14 +275,42 @@ pub fn raw_bytes(count: i32) -> i32:
 
     #[test]
     fn test_public_struct_field() {
-        let code = r#"
-pub struct Config:
-    pub timeout: i64
-    internal: i32
-"#;
-        let diagnostics = check_code(code);
-        // Only public fields should trigger warning
-        assert!(diagnostics.len() == 1);
+        let nodes = vec![Node::Struct(StructDef {
+            span: Span::new(0, 0, 0, 0),
+            name: "Config".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
+            fields: vec![
+                Field {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "timeout".to_string(),
+                    ty: simple_parser::ast::Type::Simple("i64".to_string()),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    visibility: simple_parser::ast::Visibility::Public,
+                },
+                Field {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "internal".to_string(),
+                    ty: simple_parser::ast::Type::Simple("i32".to_string()),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    visibility: simple_parser::ast::Visibility::Private,
+                },
+            ],
+            methods: vec![],
+            visibility: simple_parser::ast::Visibility::Public,
+            attributes: vec![],
+            doc_comment: None,
+            invariant: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: Default::default(),
+        })];
+        let mut checker = LintChecker::new();
+        checker.check_module(&nodes);
+        let diagnostics = checker.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("timeout"));
     }
 

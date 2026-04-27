@@ -150,7 +150,7 @@ fn test_combined_contracts_with_old() {
     // Test function with all contract types and old() captures
     // Note: Contract clauses (in/out/invariant) must appear before regular statements
     let source = r#"
-fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
+fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (new_from: i64, new_to: i64):
     in:
         amount > 0
         from_balance >= amount
@@ -158,12 +158,12 @@ fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
         from_balance >= 0
         to_balance >= 0
     out(res):
-        res.0 == old(from_balance) - amount
-        res.1 == old(to_balance) + amount
-        res.0 + res.1 == old(from_balance) + old(to_balance)
+        res.new_from == old(from_balance) - amount
+        res.new_to == old(to_balance) + amount
+        res.new_from + res.new_to == old(from_balance) + old(to_balance)
     val new_from = from_balance - amount
     val new_to = to_balance + amount
-    return (new_from, new_to)
+    return (new_from: new_from, new_to: new_to)
 "#;
 
     assert!(compile_function(source).is_ok());

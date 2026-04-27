@@ -5,11 +5,11 @@
 # Handles KEXINIT messages and algorithm selection.
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, SshTextResult, SshStringResult}
-use os.kernel.log.klog_api.{log_info, log_raw_println}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_string_to_byte_array(s: text) -> [u8]
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -23,7 +23,6 @@ val SSH_MSG_UNIMPLEMENTED: u8 = 3
 val SSH_MSG_DEBUG: u8 = 4
 val SSH_MSG_SERVICE_REQUEST: u8 = 5
 val SSH_MSG_SERVICE_ACCEPT: u8 = 6
-val SSH_MSG_EXT_INFO: u8 = 7
 val SSH_MSG_KEXINIT: u8 = 20
 val SSH_MSG_NEWKEYS: u8 = 21
 
@@ -41,72 +40,12 @@ val SSH_DISCONNECT_NO_MORE_AUTH_METHODS: u32 = 14
 
 val KEX_ALGORITHM: text = "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com"
 val HOST_KEY_ALGORITHM: text = "ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"
-val CIPHER_ALGORITHM: text = "aes128-gcm@openssh.com"
-val MAC_ALGORITHM: text = "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none"
+val CIPHER_ALGORITHM: text = "aes256-gcm@openssh.com,aes128-gcm@openssh.com,chacha20-poly1305@openssh.com"
+val MAC_ALGORITHM: text = "none"       # Implicit in GCM
 val COMPRESS_ALGORITHM: text = "none"
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
-
-fn _push_raw_string(buf: [u8], data: [u8]):
-    ssh_put_u32(buf, data.len().to_u32())
-    var i: u64 = 0
-    while i < data.len():
-        buf.push(_u8_at(data, i))
-        i = i + 1
-
-fn _disconnect_description_bytes(description: text) -> [u8]:
-    if description == "invalid version string":
-        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x73, 0x74, 0x72, 0x69, 0x6E, 0x67]
-    if description == "no KEXINIT received":
-        return [0x6E, 0x6F, 0x20, 0x4B, 0x45, 0x58, 0x49, 0x4E, 0x49, 0x54, 0x20, 0x72, 0x65, 0x63, 0x65, 0x69, 0x76, 0x65, 0x64]
-    if description == "unexpected pre-kex control message":
-        return [0x75, 0x6E, 0x65, 0x78, 0x70, 0x65, 0x63, 0x74, 0x65, 0x64, 0x20, 0x70, 0x72, 0x65, 0x2D, 0x6B, 0x65, 0x78, 0x20, 0x63, 0x6F, 0x6E, 0x74, 0x72, 0x6F, 0x6C, 0x20, 0x6D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65]
-    if description == "bad KEXINIT":
-        return [0x62, 0x61, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x49, 0x4E, 0x49, 0x54]
-    if description == "algorithm negotiation failed":
-        return [0x61, 0x6C, 0x67, 0x6F, 0x72, 0x69, 0x74, 0x68, 0x6D, 0x20, 0x6E, 0x65, 0x67, 0x6F, 0x74, 0x69, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
-    if description == "no KEX_ECDH_INIT":
-        return [0x6E, 0x6F, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "invalid KEX_ECDH_INIT":
-        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "bad KEX_ECDH_INIT":
-        return [0x62, 0x61, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "empty KEX_ECDH_INIT":
-        return [0x65, 0x6D, 0x70, 0x74, 0x79, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "strict KEX_ECDH_INIT":
-        return [0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "wrong-type KEX_ECDH_INIT":
-        return [0x77, 0x72, 0x6F, 0x6E, 0x67, 0x2D, 0x74, 0x79, 0x70, 0x65, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
-    if description == "emp":
-        return [0x65, 0x6D, 0x70]
-    if description == "stk":
-        return [0x73, 0x74, 0x6B]
-    if description == "t00":
-        return [0x74, 0x30, 0x30]
-    if description == "t20":
-        return [0x74, 0x32, 0x30]
-    if description == "t21":
-        return [0x74, 0x32, 0x31]
-    if description == "t30":
-        return [0x74, 0x33, 0x30]
-    if description == "tox":
-        return [0x74, 0x6F, 0x78]
-    if description == "server X25519 public failed":
-        return [0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x20, 0x58, 0x32, 0x35, 0x35, 0x31, 0x39, 0x20, 0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
-    if description == "server X25519 shared failed":
-        return [0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x20, 0x58, 0x32, 0x35, 0x35, 0x31, 0x39, 0x20, 0x73, 0x68, 0x61, 0x72, 0x65, 0x64, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
-    if description == "host key signing failed":
-        return [0x68, 0x6F, 0x73, 0x74, 0x20, 0x6B, 0x65, 0x79, 0x20, 0x73, 0x69, 0x67, 0x6E, 0x69, 0x6E, 0x67, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
-    if description == "invalid NEWKEYS":
-        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x4E, 0x45, 0x57, 0x4B, 0x45, 0x59, 0x53]
-    if description == "unsupported cipher negotiation":
-        return [0x75, 0x6E, 0x73, 0x75, 0x70, 0x70, 0x6F, 0x72, 0x74, 0x65, 0x64, 0x20, 0x63, 0x69, 0x70, 0x68, 0x65, 0x72, 0x20, 0x6E, 0x65, 0x67, 0x6F, 0x74, 0x69, 0x61, 0x74, 0x69, 0x6F, 0x6E]
-    if description == "no service request":
-        return [0x6E, 0x6F, 0x20, 0x73, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x20, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74]
-    if description == "too many authentication failures":
-        return [0x74, 0x6F, 0x6F, 0x20, 0x6D, 0x61, 0x6E, 0x79, 0x20, 0x61, 0x75, 0x74, 0x68, 0x65, 0x6E, 0x74, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x75, 0x72, 0x65, 0x73]
-    []
 
 # ============================================================================
 # Types
@@ -208,7 +147,7 @@ fn ssh_build_kexinit() -> [u8]:
     Advertises our supported algorithms:
       KEX:       curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com
       Host key:  ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256
-      Cipher:    aes256-gcm@openssh.com,aes128-gcm@openssh.com
+      Cipher:    aes256-gcm@openssh.com,aes128-gcm@openssh.com,chacha20-poly1305@openssh.com
       MAC:       none (implicit in GCM)
       Compress:  none
     """
@@ -386,65 +325,38 @@ fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
 fn _list_contains(list: text, candidate: text) -> bool:
     if candidate == "":
         return false
-    var start: u64 = 0
-    while start <= list.len():
-        val rel_end = list.slice(start, list.len()).index_of(",")
-        var end = list.len()
-        if rel_end >= 0:
-            end = start + rel_end.to_u64()
-        val item = list.slice(start, end).trim()
-        if item == candidate:
-            return true
-        if rel_end < 0:
-            return false
-        start = end + 1
-    false
+    if list == candidate:
+        return true
+    if list.starts_with(candidate + ","):
+        return true
+    if list.ends_with("," + candidate):
+        return true
+    list.contains("," + candidate + ",")
 
 fn _first_match(client_list: text, server_list: text) -> text:
     """Find the first algorithm in client_list that also appears in server_list."""
-    var start: u64 = 0
-    while start <= server_list.len():
-        val rel_end = server_list.slice(start, server_list.len()).index_of(",")
-        var end = server_list.len()
-        if rel_end >= 0:
-            end = start + rel_end.to_u64()
-        val candidate = server_list.slice(start, end).trim()
+    var server_items = server_list.split(",")
+    var si: u64 = 0
+    while si < server_items.len():
+        var candidate: text = server_items[si].trim()
         if _list_contains(client_list, candidate):
             return candidate
-        if rel_end < 0:
-            return ""
-        start = end + 1
+        si = si + 1
     ""
 
 fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
-    if client_list.contains("ssh-ed25519-cert-v01@openssh.com") and server_list.contains("ssh-ed25519-cert-v01@openssh.com"):
-        return "ssh-ed25519-cert-v01@openssh.com"
-    if client_list.contains("ssh-ed25519") and server_list.contains("ssh-ed25519"):
-        return "ssh-ed25519"
-    if client_list.contains("rsa-sha2-512-cert-v01@openssh.com") and server_list.contains("rsa-sha2-512-cert-v01@openssh.com"):
-        return "rsa-sha2-512-cert-v01@openssh.com"
-    if client_list.contains("rsa-sha2-256-cert-v01@openssh.com") and server_list.contains("rsa-sha2-256-cert-v01@openssh.com"):
-        return "rsa-sha2-256-cert-v01@openssh.com"
-    if client_list.contains("ecdsa-sha2-nistp256") and server_list.contains("ecdsa-sha2-nistp256"):
+    if _list_contains(client_list, "ecdsa-sha2-nistp256") and _list_contains(server_list, "ecdsa-sha2-nistp256"):
         return "ecdsa-sha2-nistp256"
-    if client_list.contains("rsa-sha2-512") and server_list.contains("rsa-sha2-512"):
+    if _list_contains(client_list, "ssh-ed25519") and _list_contains(server_list, "ssh-ed25519"):
+        return "ssh-ed25519"
+    if _list_contains(client_list, "rsa-sha2-512") and _list_contains(server_list, "rsa-sha2-512"):
         return "rsa-sha2-512"
-    if client_list.contains("rsa-sha2-256") and server_list.contains("rsa-sha2-256"):
+    if _list_contains(client_list, "rsa-sha2-256") and _list_contains(server_list, "rsa-sha2-256"):
         return "rsa-sha2-256"
     ""
 
 fn _is_aes_gcm(cipher: text) -> bool:
     cipher == "aes256-gcm@openssh.com" or cipher == "aes128-gcm@openssh.com"
-
-fn _is_aes256_ctr(cipher: text) -> bool:
-    cipher == "aes256-ctr"
-
-fn _is_supported_etm(mac: text) -> bool:
-    mac == "hmac-sha2-256-etm@openssh.com" or mac == "hmac-sha2-512-etm@openssh.com"
-
-fn ssh_kex_uses_strict_kex(client_kex_algorithms: text, server_kex_algorithms: text) -> bool:
-    _list_contains(client_kex_algorithms, "kex-strict-c-v00@openssh.com") and
-        _list_contains(server_kex_algorithms, "kex-strict-s-v00@openssh.com")
 
 fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<SshAlgorithms, text>:
     """Choose algorithms from intersection of client and server proposals.
@@ -453,133 +365,83 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     client preference order per RFC 4253 section 7.1.
     """
     var kex: text = ""
-    log_raw_println("[ssh-transport] client kex={client.kex_algorithms}")
-    log_raw_println("[ssh-transport] server kex={server.kex_algorithms}")
     # Baremetal text split/materialization is still fragile in the live SSH
     # lane, so match the only real KEX we implement directly instead of
     # depending on the generic comma-split path when pseudo-algorithms such as
     # kex-strict-s-v00@openssh.com are present in the server list.
-    if client.kex_algorithms.contains("curve25519-sha256") and
-       server.kex_algorithms.contains("curve25519-sha256"):
+    if _list_contains(client.kex_algorithms, "curve25519-sha256") and
+       _list_contains(server.kex_algorithms, "curve25519-sha256"):
         kex = "curve25519-sha256"
     elif _list_contains(client.kex_algorithms, server.kex_algorithms):
         kex = server.kex_algorithms
     else:
         kex = _first_match(client.kex_algorithms, server.kex_algorithms)
     if kex == "":
-        log_raw_println("[ssh-transport] no matching kex")
         log_info("[app.sshd] " + "[ssh-transport] no matching kex")
         return Err("no matching kex algorithm")
 
     var host_key: text = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
-    log_raw_println("[ssh-transport] client hostkey={client.server_host_key_algorithms}")
-    log_raw_println("[ssh-transport] server hostkey={server.server_host_key_algorithms}")
     if host_key == "":
-        log_raw_println("[ssh-transport] no matching host key")
         log_info("[app.sshd] " + "[ssh-transport] no matching host key")
         return Err("no matching host key algorithm")
 
     var cipher_c2s: text = ""
-    log_raw_println("[ssh-transport] client cipher c2s={client.encryption_client_to_server}")
-    log_raw_println("[ssh-transport] server cipher c2s={server.encryption_client_to_server}")
-    if client.encryption_client_to_server.contains("aes128-gcm@openssh.com") and server.encryption_client_to_server.contains("aes128-gcm@openssh.com"):
-        cipher_c2s = "aes128-gcm@openssh.com"
-    elif client.encryption_client_to_server.contains("aes256-ctr") and server.encryption_client_to_server.contains("aes256-ctr"):
-        cipher_c2s = "aes256-ctr"
-    elif _list_contains(client.encryption_client_to_server, server.encryption_client_to_server):
+    if _list_contains(client.encryption_client_to_server, server.encryption_client_to_server):
         cipher_c2s = server.encryption_client_to_server
     else:
         cipher_c2s = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
     if cipher_c2s == "":
-        log_raw_println("[ssh-transport] no matching cipher c2s")
         log_info("[app.sshd] " + "[ssh-transport] no matching cipher c2s")
         return Err("no matching cipher (c2s)")
 
     var cipher_s2c: text = ""
-    log_raw_println("[ssh-transport] client cipher s2c={client.encryption_server_to_client}")
-    log_raw_println("[ssh-transport] server cipher s2c={server.encryption_server_to_client}")
-    if client.encryption_server_to_client.contains("aes128-gcm@openssh.com") and server.encryption_server_to_client.contains("aes128-gcm@openssh.com"):
-        cipher_s2c = "aes128-gcm@openssh.com"
-    elif client.encryption_server_to_client.contains("aes256-ctr") and server.encryption_server_to_client.contains("aes256-ctr"):
-        cipher_s2c = "aes256-ctr"
-    elif _list_contains(client.encryption_server_to_client, server.encryption_server_to_client):
+    if _list_contains(client.encryption_server_to_client, server.encryption_server_to_client):
         cipher_s2c = server.encryption_server_to_client
     else:
         cipher_s2c = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
     if cipher_s2c == "":
-        log_raw_println("[ssh-transport] no matching cipher s2c")
         log_info("[app.sshd] " + "[ssh-transport] no matching cipher s2c")
         return Err("no matching cipher (s2c)")
 
     var mac_c2s: text = ""
-    log_raw_println("[ssh-transport] client mac c2s={client.mac_client_to_server}")
-    log_raw_println("[ssh-transport] server mac c2s={server.mac_client_to_server}")
     if _is_aes_gcm(cipher_c2s):
         mac_c2s = "none"
     else:
-        if client.mac_client_to_server.contains("hmac-sha2-256-etm@openssh.com") and server.mac_client_to_server.contains("hmac-sha2-256-etm@openssh.com"):
-            mac_c2s = "hmac-sha2-256-etm@openssh.com"
-        elif client.mac_client_to_server.contains("hmac-sha2-512-etm@openssh.com") and server.mac_client_to_server.contains("hmac-sha2-512-etm@openssh.com"):
-            mac_c2s = "hmac-sha2-512-etm@openssh.com"
-        elif _list_contains(client.mac_client_to_server, server.mac_client_to_server):
+        if _list_contains(client.mac_client_to_server, server.mac_client_to_server):
             mac_c2s = server.mac_client_to_server
         else:
             mac_c2s = _first_match(client.mac_client_to_server, server.mac_client_to_server)
         if mac_c2s == "":
-            log_raw_println("[ssh-transport] no matching mac c2s")
             log_info("[app.sshd] " + "[ssh-transport] no matching mac c2s")
             return Err("no matching mac (c2s)")
-        if _is_aes256_ctr(cipher_c2s) and not _is_supported_etm(mac_c2s):
-            log_raw_println("[ssh-transport] aes256-ctr requires etm c2s")
-            return Err("aes256-ctr requires OpenSSH ETM MAC (c2s)")
 
     var mac_s2c: text = ""
-    log_raw_println("[ssh-transport] client mac s2c={client.mac_server_to_client}")
-    log_raw_println("[ssh-transport] server mac s2c={server.mac_server_to_client}")
     if _is_aes_gcm(cipher_s2c):
         mac_s2c = "none"
     else:
-        if client.mac_server_to_client.contains("hmac-sha2-256-etm@openssh.com") and server.mac_server_to_client.contains("hmac-sha2-256-etm@openssh.com"):
-            mac_s2c = "hmac-sha2-256-etm@openssh.com"
-        elif client.mac_server_to_client.contains("hmac-sha2-512-etm@openssh.com") and server.mac_server_to_client.contains("hmac-sha2-512-etm@openssh.com"):
-            mac_s2c = "hmac-sha2-512-etm@openssh.com"
-        elif _list_contains(client.mac_server_to_client, server.mac_server_to_client):
+        if _list_contains(client.mac_server_to_client, server.mac_server_to_client):
             mac_s2c = server.mac_server_to_client
         else:
             mac_s2c = _first_match(client.mac_server_to_client, server.mac_server_to_client)
         if mac_s2c == "":
-            log_raw_println("[ssh-transport] no matching mac s2c")
             log_info("[app.sshd] " + "[ssh-transport] no matching mac s2c")
             return Err("no matching mac (s2c)")
-        if _is_aes256_ctr(cipher_s2c) and not _is_supported_etm(mac_s2c):
-            log_raw_println("[ssh-transport] aes256-ctr requires etm s2c")
-            return Err("aes256-ctr requires OpenSSH ETM MAC (s2c)")
 
     var comp_c2s: text = ""
-    log_raw_println("[ssh-transport] client comp c2s={client.compression_client_to_server}")
-    log_raw_println("[ssh-transport] server comp c2s={server.compression_client_to_server}")
-    if client.compression_client_to_server.contains("none") and server.compression_client_to_server.contains("none"):
-        comp_c2s = "none"
-    elif _list_contains(client.compression_client_to_server, server.compression_client_to_server):
+    if _list_contains(client.compression_client_to_server, server.compression_client_to_server):
         comp_c2s = server.compression_client_to_server
     else:
         comp_c2s = _first_match(client.compression_client_to_server, server.compression_client_to_server)
     if comp_c2s == "":
-        log_raw_println("[ssh-transport] no matching compression c2s")
         log_info("[app.sshd] " + "[ssh-transport] no matching compression c2s")
         return Err("no matching compression (c2s)")
 
     var comp_s2c: text = ""
-    log_raw_println("[ssh-transport] client comp s2c={client.compression_server_to_client}")
-    log_raw_println("[ssh-transport] server comp s2c={server.compression_server_to_client}")
-    if client.compression_server_to_client.contains("none") and server.compression_server_to_client.contains("none"):
-        comp_s2c = "none"
-    elif _list_contains(client.compression_server_to_client, server.compression_server_to_client):
+    if _list_contains(client.compression_server_to_client, server.compression_server_to_client):
         comp_s2c = server.compression_server_to_client
     else:
         comp_s2c = _first_match(client.compression_server_to_client, server.compression_server_to_client)
     if comp_s2c == "":
-        log_raw_println("[ssh-transport] no matching compression s2c")
         log_info("[app.sshd] " + "[ssh-transport] no matching compression s2c")
         return Err("no matching compression (s2c)")
 
@@ -602,19 +464,7 @@ fn ssh_build_service_accept(service: text) -> [u8]:
     """Build SSH_MSG_SERVICE_ACCEPT payload."""
     var buf: [u8] = []
     buf.push(SSH_MSG_SERVICE_ACCEPT)
-    _push_raw_string(buf, rt_string_to_byte_array(service))
-    buf
-
-fn ssh_build_ext_info_server_sig_algs(server_sig_algs: text) -> [u8]:
-    """Build SSH_MSG_EXT_INFO with only the server-sig-algs extension."""
-    var buf: [u8] = []
-    buf.push(SSH_MSG_EXT_INFO)
-    ssh_put_u32(buf, 1)
-    _push_raw_string(buf, [
-        0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x2D, 0x73,
-        0x69, 0x67, 0x2D, 0x61, 0x6C, 0x67, 0x73
-    ])
-    _push_raw_string(buf, rt_string_to_byte_array(server_sig_algs))
+    ssh_put_text(buf, service)
     buf
 
 fn ssh_parse_service_request(data: [u8]) -> Result<text, text>:
@@ -639,6 +489,6 @@ fn ssh_build_disconnect(reason: u32, description: text) -> [u8]:
     var buf: [u8] = []
     buf.push(SSH_MSG_DISCONNECT)
     ssh_put_u32(buf, reason)
-    _push_raw_string(buf, _disconnect_description_bytes(description))
-    ssh_put_u32(buf, 0)     # language tag
+    ssh_put_text(buf, description)
+    ssh_put_text(buf, "")     # language tag
     buf

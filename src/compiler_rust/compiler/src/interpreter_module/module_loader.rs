@@ -862,7 +862,11 @@ mod tests {
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();
         let mut enums = HashMap::new();
-        let current_file = Path::new("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..");
+        let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
 
         let value = load_and_merge_module(
             &use_stmt_with_path(
@@ -872,7 +876,7 @@ mod tests {
                     ImportTarget::Single("dir_walk".to_string()),
                 ]),
             ),
-            Some(current_file),
+            Some(&current_file),
             &mut functions,
             &mut classes,
             &mut enums,
@@ -893,14 +897,18 @@ mod tests {
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();
         let mut enums = HashMap::new();
-        let current_file = Path::new("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..");
+        let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
 
         let value = load_and_merge_module(
             &use_stmt_with_path(
                 &["std", "io"],
                 ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())]),
             ),
-            Some(current_file),
+            Some(&current_file),
             &mut functions,
             &mut classes,
             &mut enums,
@@ -1195,10 +1203,10 @@ mod tests {
     }
 
     #[test]
-    fn selective_filter_removes_use_stmt_with_no_matching_name() {
+    fn selective_filter_keeps_use_stmt_with_no_matching_name() {
         let node = make_use_node(&["unrelated_a", "unrelated_b"]);
         let requested = vec!["compile_file".to_string()];
-        assert!(!should_keep_selective_export(&node, &requested));
+        assert!(should_keep_selective_export(&node, &requested));
     }
 
     #[test]

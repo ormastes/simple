@@ -11,9 +11,9 @@
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_self_test}
 use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
-use os.apps.sshd.ssh_kex.{HostKeySet, HostCertificateSet}
+use os.apps.sshd.ssh_kex.{HostKeySet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
-use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file, load_ssh_host_certificate_from_file}
+use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file}
 
 extern fn rt_net_socket(proto: i64) -> i64
 extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
@@ -44,21 +44,6 @@ pub fn sshd_decode_net_runtime_i32_for_test(raw: i64) -> i32:
     """Test hook for tagged direct-runtime integer decoding."""
     decode_net_runtime_i32(raw)
 
-pub fn sshd_build_host_keys_for_session_for_test(
-    advertise_ed25519: bool,
-    ed25519_seed: [u8]?,
-    rsa_pkcs8: [u8]?,
-    rsa_public_blob: [u8]?,
-    ecdsa_p256_pkcs8: [u8]?
-) -> HostKeySet:
-    """Pure test hook mirroring the live session host-key selection policy."""
-    HostKeySet(
-        ed25519_seed: if advertise_ed25519: ed25519_seed else: nil,
-        rsa_pkcs8: rsa_pkcs8,
-        rsa_public_blob: rsa_public_blob,
-        ecdsa_p256_pkcs8: ecdsa_p256_pkcs8
-    )
-
 # ============================================================================
 # SSH Daemon
 # ============================================================================
@@ -79,10 +64,6 @@ class SshDaemon:
     advertise_ed25519_host_key: bool
     host_rsa_pkcs8: [u8]?    # Optional PKCS#8 DER RSA private key
     host_rsa_public_blob: [u8]?   # Optional SSH wire-format RSA public key blob
-    host_ecdsa_p256_pkcs8: [u8]?   # Optional PKCS#8 DER ECDSA P-256 private key
-    host_ed25519_cert: [u8]?
-    host_rsa_sha2_256_cert: [u8]?
-    host_rsa_sha2_512_cert: [u8]?
 
 impl SshDaemon:
 
@@ -112,11 +93,7 @@ impl SshDaemon:
             host_public_key: [],    # Generated in start() after self-test
             advertise_ed25519_host_key: true,
             host_rsa_pkcs8: nil,    # Optional; set via set_host_rsa_key() before start()
-            host_rsa_public_blob: nil,
-            host_ecdsa_p256_pkcs8: nil,
-            host_ed25519_cert: nil,
-            host_rsa_sha2_256_cert: nil,
-            host_rsa_sha2_512_cert: nil
+            host_rsa_public_blob: nil
         )
 
     me add_user(username: text, password: text):
@@ -138,19 +115,6 @@ impl SshDaemon:
     me set_host_rsa_public_blob(blob: [u8]):
         """Set the SSH wire-format RSA public host key blob."""
         self.host_rsa_public_blob = blob
-
-    me set_host_ecdsa_p256_key(pkcs8: [u8]):
-        """Set the ECDSA P-256 host key (PKCS#8 DER-encoded private key)."""
-        self.host_ecdsa_p256_pkcs8 = pkcs8
-
-    me set_host_ed25519_certificate(blob: [u8]):
-        self.host_ed25519_cert = blob
-
-    me set_host_rsa_sha2_256_certificate(blob: [u8]):
-        self.host_rsa_sha2_256_cert = blob
-
-    me set_host_rsa_sha2_512_certificate(blob: [u8]):
-        self.host_rsa_sha2_512_cert = blob
 
     me set_advertise_ed25519_host_key(enabled: bool):
         """Control whether live sessions advertise the generated Ed25519 host key."""
@@ -176,27 +140,15 @@ impl SshDaemon:
             return Err("Ed25519 self-test failed in live lane")
         serial_writeln("[sshd] Ed25519 self-test: PASS")
 
-        # Use a fixed RFC 8032 Ed25519 host key in the live lane.
-        # The current C-side public-key derivation shim can produce a public
-        # key that does not match the seed on baremetal Cranelift, which
-        # breaks SSH host-key signatures. Pinning a known-good seed/public
-        # pair keeps the live recovery path deterministic while the lower-level
-        # runtime bug remains under investigation.
-        var seed: [u8] = [
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
-            0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
-            0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
-            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
-        ]
-        var public_key: [u8] = [
-            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
-            0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-            0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
-            0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
-        ]
+        # Generate host keypair (Ed25519)
+        # Uses C-side Ed25519 implementation via extern fn wrappers,
+        # which avoids the baremetal Cranelift codegen bugs with pure Simple
+        # extended-coordinate point arithmetic.
+        var seed = random_bytes(32)
         serial_writeln("[sshd] Seed bytes={seed.len()}")
-        self.host_private_key = seed
-        self.host_public_key = public_key
+        val keypair = ed25519_keypair_from_seed(seed)
+        self.host_private_key = keypair.0   # 32-byte seed
+        self.host_public_key = keypair.1    # 32-byte Ed25519 public key
         serial_writeln("[sshd] Host keys ready")
 
         # The x64-ssh live lane uses the C-backed TCP runtime directly.
@@ -262,9 +214,8 @@ impl SshDaemon:
 
         # Build host key set from daemon's key material and create the session
         var host_keys = self.build_host_keys_for_session()
-        val host_certs = self.build_host_certificates_for_session()
-        var session = SshSession.new_with_host_materials(
-            client_fd, self.user_db, host_keys, host_certs, self.host_public_key
+        var session = SshSession.new_with_host_keys(
+            client_fd, self.user_db, host_keys
         )
         # Sessions are handled synchronously in this boot profile.
         # Pushing the local session value into self.sessions before run()
@@ -299,14 +250,7 @@ impl SshDaemon:
             ed25519_seed: if self.advertise_ed25519_host_key: self.host_private_key else: nil,
             rsa_pkcs8: self.host_rsa_pkcs8,
             rsa_public_blob: self.host_rsa_public_blob,
-            ecdsa_p256_pkcs8: self.host_ecdsa_p256_pkcs8
-        )
-
-    fn build_host_certificates_for_session() -> HostCertificateSet:
-        HostCertificateSet(
-            ssh_ed25519_cert: self.host_ed25519_cert,
-            rsa_sha2_256_cert: self.host_rsa_sha2_256_cert,
-            rsa_sha2_512_cert: self.host_rsa_sha2_512_cert
+            ecdsa_p256_pkcs8: nil
         )
 
     me stop():
@@ -336,19 +280,5 @@ impl SshDaemon:
         match load_rsa_pkcs8_from_file(path):
             Ok(pkcs8):
                 self.set_host_rsa_key(pkcs8)
-                Ok(())
-            Err(msg): Err(msg)
-
-    me load_host_certificate(path: text, algorithm: text) -> Result<(), text>:
-        match load_ssh_host_certificate_from_file(path, algorithm):
-            Ok(blob):
-                if algorithm == "ssh-ed25519-cert-v01@openssh.com":
-                    self.set_host_ed25519_certificate(blob)
-                elif algorithm == "rsa-sha2-256-cert-v01@openssh.com":
-                    self.set_host_rsa_sha2_256_certificate(blob)
-                elif algorithm == "rsa-sha2-512-cert-v01@openssh.com":
-                    self.set_host_rsa_sha2_512_certificate(blob)
-                else:
-                    return Err("unsupported SSH certificate algorithm: {algorithm}")
                 Ok(())
             Err(msg): Err(msg)

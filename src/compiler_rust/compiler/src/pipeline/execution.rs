@@ -387,11 +387,14 @@ impl CompilerPipeline {
         };
 
         // Check if we have a main function. If not, fall back to interpreter mode.
-        // This handles cases like `main = 42` which are module-level constants,
-        // not function declarations.
+        // This handles file-backed script entry modules like `main = 42`, which
+        // remain valid even though they do not lower to a native `fn main`.
+        // Imported items have already been flattened, and synthetic import nodes
+        // stripped, so evaluating the entry module here preserves prior script
+        // compilation behavior for source-file builds too.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function && source_file.is_none() {
+        if !has_main_function {
             // Fallback: evaluate via interpreter and wrap result
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
@@ -526,15 +529,16 @@ impl CompilerPipeline {
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function && source_path.is_none() {
-            if target.is_wasm() {
-                return Err(wasm_target_fallback_error(
-                    "no native-compilable `fn main()` was found after lowering",
-                ));
+            if !target.is_wasm() {
+                // Fallback: evaluate via interpreter and wrap result
+                // Note: Interpreter result is architecture-neutral (just an i32)
+                let main_value = self.evaluate_module_with_project(&ast_module.items)?;
+                return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
             }
-            // Fallback: evaluate via interpreter and wrap result
-            // Note: Interpreter result is architecture-neutral (just an i32)
-            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
-            return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
+            // Export-only wasm modules are valid for browser hydration and do
+            // not require a native/server-style `main` entrypoint. Keep the
+            // earlier script-statement fallback guard, then continue into wasm
+            // code generation for function-only modules.
         }
 
         // 8. Apply hybrid transformation if needed

@@ -157,7 +157,9 @@ fn module_loader_init():
     irt_init()
 
 fn module_is_loaded(module_path: text) -> i64:
-    if loaded_module_set.has(module_path):
+    if not loaded_module_set.has(module_path):
+        return 0
+    if loaded_module_set[module_path] == true:
         return 1
     0
 
@@ -174,6 +176,25 @@ fn module_get_file_path(module_name: text) -> text:
             return loaded_module_file_paths[i]
         i = i + 1
     ""
+
+fn module_find_by_file_path(file_path: text) -> i64:
+    var i: i64 = 0
+    for loaded_path in loaded_module_file_paths:
+        val module_name = loaded_module_paths[i]
+        if loaded_path == file_path and loaded_path != "" and module_is_loaded(module_name) == 1:
+            return i
+        i = i + 1
+    -1
+
+fn module_alias_loaded(alias_name: text, file_path: text) -> i64:
+    val existing_idx = module_find_by_file_path(file_path)
+    if existing_idx < 0:
+        return 0
+    if module_is_loaded(alias_name) == 1:
+        return 1
+    val exports = loaded_module_exports[existing_idx]
+    module_mark_loaded(alias_name, file_path, exports)
+    1
 
 # ===== Module Path Resolution =====
 
@@ -534,6 +555,9 @@ fn load_module_parse_only(module_name: text, current_file: text) -> i64:
     _module_load_depth = _module_load_depth + 1
 
     val resolved_path = resolve_module_path(module_name, current_file)
+    if module_alias_loaded(module_name, resolved_path) == 1:
+        _module_load_depth = _module_load_depth - 1
+        return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
     val source = load_module_source(resolved_path)
@@ -554,6 +578,9 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
     _module_load_depth = _module_load_depth + 1
 
     val resolved_path = resolve_module_path(module_name, current_file)
+    if module_alias_loaded(module_name, resolved_path) == 1:
+        _module_load_depth = _module_load_depth - 1
+        return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
     val source = load_module_source(resolved_path)
@@ -589,6 +616,9 @@ fn load_module(module_name: text, current_file: text) -> i64:
 
     # Resolve module path
     val resolved_path = resolve_module_path(module_name, current_file)
+    if module_alias_loaded(module_name, resolved_path) == 1:
+        _module_load_depth = _module_load_depth - 1
+        return 1
 
     # Check GC family boundary compatibility (warnings only)
     check_gc_family_boundary(current_file, resolved_path, module_name)
@@ -736,10 +766,14 @@ fn interp_unload_module(module_name: text) -> i64:
     if module_is_loaded(module_name) == 0:
         return 0
 
-    # Remove all tracked names from tables
-    val removed = irt_unload_module(module_name)
-
-    # Remove from loaded-module set so it can be reloaded
-    loaded_module_set[module_name] = false
-
+    val file_path = module_get_file_path(module_name)
+    var removed = 0
+    var i: i64 = 0
+    for loaded_name in loaded_module_paths:
+        val same_name = loaded_name == module_name
+        val same_file = file_path != "" and loaded_module_file_paths[i] == file_path
+        if same_name or same_file:
+            removed = removed + irt_unload_module(loaded_name)
+            loaded_module_set[loaded_name] = false
+        i = i + 1
     removed

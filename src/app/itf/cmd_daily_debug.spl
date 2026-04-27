@@ -3,29 +3,20 @@
 # Implements the 7-step daily-debug pipeline used by
 # `/spipe_loop --daily-debug` and `/company_bug_report ingest`.
 #
-# Pure-Simple driver. Cross-agent dependencies are marked with
-# `# PENDING-INTEGRATION:` blocks; the file compiles standalone via the
-# `outlook_available` feature flag.
+# Pure-Simple driver. The Outlook fetch path uses the curl-backed Graph
+# adapter until the native http transport extern lands.
 
 use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists}
-use std.nogc_sync_mut.io.{regex_find_all, RegexMatch}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename}
 use std.common.pure.runtime.{time_now_unix}
-use app.itf.flags.{_extract_flag, _has_flag}
+use app.itf.flags.{_has_flag}
 use app.itf.output.{print_error, print_info, print_success}
-
-# PENDING-INTEGRATION: outlook adapter import
-# TODO: when Agent A/B lands `src/app/itf/adapter_outlook.spl`, replace the
-# `outlook_available = false` flag with:
-#   use app.itf.adapter_outlook.{outlook_list_messages, OutlookMessage}
-# and remove the stub branch in `_fetch_inbox`.
-val outlook_available: bool = false
-
-# PENDING-INTEGRATION: main.spl wiring
-# TODO: when the orchestrator lands, register `daily-debug` as a top-level
-# subcommand in `src/app/itf/main.spl` so `bin/itf daily-debug` reaches
-# `run_daily_debug` directly. For now this fn is callable from
-# `cmd_daily_debug_spec.spl` and from `/spipe_loop --daily-debug`.
+use app.itf.adapter_outlook_curl.{
+    OutlookCurlClient,
+    outlook_curl_client_acquire,
+    outlook_curl_list_folders,
+    outlook_curl_list_messages,
+}
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -50,10 +41,18 @@ class TriagedArtifact:
 
 fn extract_jira_keys(body: text) -> [text]:
     """Return all Jira-key matches like `ABC-123` from a message body."""
-    val matches = regex_find_all("[A-Z][A-Z0-9]+-[0-9]+", body)
     var out: [text] = []
-    for m in matches:
-        out.push(m.text)
+    var token = ""
+    for ch in body:
+        val allowed = (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-"
+        if allowed:
+            token = token + ch
+        else:
+            if _looks_like_jira_key(token):
+                out.push(token)
+            token = ""
+    if _looks_like_jira_key(token):
+        out.push(token)
     out
 
 fn extract_minio_urls(body: text) -> [text]:
@@ -62,10 +61,12 @@ fn extract_minio_urls(body: text) -> [text]:
     The heuristic matches `https?://host/path/...`; downstream callers filter
     by host/bucket if they want stricter MinIO-only URLs.
     """
-    val matches = regex_find_all("https?://[^/[:space:]]+/[^/[:space:]]+/[^[:space:]]+", body)
     var out: [text] = []
-    for m in matches:
-        out.push(m.text)
+    for raw in body.split(" "):
+        val token = _trim_url_token(raw)
+        val parts = token.split("/")
+        if (token.starts_with("http://") or token.starts_with("https://")) and parts.len() >= 4:
+            out.push(token)
     out
 
 fn triage_kind(url: text) -> text:
@@ -104,7 +105,7 @@ fn parse_watermark(content: text) -> text:
         if trimmed.starts_with("#") or trimmed == "":
             pass_dn
         else if trimmed.starts_with("last_run:"):
-            val v = trimmed.split(":", 2)[1].trim()
+            val v = trimmed["last_run:".len():trimmed.len()].trim()
             if v.starts_with("\"") and v.ends_with("\""):
                 return v[1:v.len() - 1]
             return v
@@ -119,8 +120,8 @@ fn load_watermark() -> text:
     val path = watermark_path()
     if not file_exists(path):
         return _iso_minus_24h()
-    val content = file_read_text(path)
-    if content == nil:
+    val content = file_read_text(path) ?? ""
+    if content == "":
         return _iso_minus_24h()
     val parsed = parse_watermark(content)
     if parsed == "":
@@ -128,19 +129,13 @@ fn load_watermark() -> text:
     parsed
 
 fn save_watermark_atomic(iso_now: text) -> bool:
-    """Atomic save: write to `<path>.tmp`, then rename with mode 0600.
-
-    Returns true on success. Caller must gate with `not dry_run`.
-    """
+    """Atomic save: write to `<path>.tmp`, then rename into place."""
     val path = watermark_path()
     val tmp = "{path}.tmp"
     val body = render_watermark(iso_now)
     if not file_write_text(tmp, body):
         return false
-    # TODO: chmod 0600 + rename via fs syscall once
-    # `std.nogc_sync_mut.file_system.file_ops` exposes `file_rename` and
-    # `file_chmod` (issue #10 follow-up). For now: best-effort overwrite.
-    file_write_text(path, body)
+    file_rename(tmp, path)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -168,19 +163,116 @@ fn _digest_path() -> text:
     """Resolve `doc/08_tracking/debug/<YYYY-MM-DD>.md`."""
     "doc/08_tracking/debug/{_today_yyyy_mm_dd()}.md"
 
-fn _fetch_inbox(_since_iso: text) -> [DailyMessage]:
+fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
     """Fetch inbox messages received since the watermark.
-
-    PENDING-INTEGRATION: this delegates to `outlook_list_messages` once the
-    adapter lands. Until then, `outlook_available = false` returns an empty
-    list so the rest of the pipeline is exercised by tests.
     """
-    if not outlook_available:
+    val tenant = env_get("GRAPH_TENANT_ID")
+    val client_id = env_get("GRAPH_CLIENT_ID")
+    val client_secret = env_get("GRAPH_CLIENT_SECRET")
+    val mailbox = env_get("GRAPH_MAILBOX_UPN")
+    if tenant == "" or client_id == "" or client_secret == "" or mailbox == "":
+        print_info("daily-debug", "outlook skipped (set GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET/GRAPH_MAILBOX_UPN)")
         return []
-    # TODO: replace with real adapter call:
-    #   val raw = outlook_list_messages("Inbox", "receivedDateTime ge {_since_iso}")
-    #   return raw.map(...)
-    []
+    val cache_path = _graph_cache_path()
+    val (ok, client) = outlook_curl_client_acquire(
+        tenant,
+        client_id,
+        "GRAPH_CLIENT_SECRET",
+        mailbox,
+        cache_path,
+    )
+    if not ok:
+        print_info("daily-debug", "outlook token acquisition failed")
+        return []
+
+    val folder_id = _resolve_inbox_folder_id(client)
+    if folder_id == "":
+        print_info("daily-debug", "Inbox folder not found")
+        return []
+
+    val filter = "receivedDateTime ge {since_iso}"
+    val (success, messages, raw) = outlook_curl_list_messages(client, folder_id, filter, 50)
+    if not success:
+        print_info("daily-debug", "outlook fetch failed: {raw}")
+        return []
+
+    var out: [DailyMessage] = []
+    for m in messages:
+        val combined = if m.body_preview != "": "{m.subject}\n{m.body_preview}" else: m.subject
+        out.push(DailyMessage(
+            subject: m.subject,
+            body: m.body_preview,
+            received_iso: m.received,
+            jira_keys: extract_jira_keys(combined),
+            minio_urls: extract_minio_urls(combined),
+        ))
+    out
+
+
+fn _graph_cache_path() -> text:
+    val home = env_get("HOME")
+    val base = if home != "": home else: env_get("USERPROFILE")
+    "{base}/.config/itf/outlook_token_cache.sdn"
+
+
+fn _resolve_inbox_folder_id(client: OutlookCurlClient) -> text:
+    val explicit = env_get("GRAPH_FOLDER_ID")
+    if explicit != "":
+        return explicit
+    val folder_name = env_get("GRAPH_FOLDER_NAME")
+    val wanted = if folder_name != "": folder_name else: "Inbox"
+    val (ok, folders, _raw) = outlook_curl_list_folders(client)
+    if not ok:
+        return ""
+    for f in folders:
+        if f.display_name == wanted:
+            return f.id
+    ""
+
+
+fn _looks_like_jira_key(token: text) -> bool:
+    if token == "" or not token.contains("-"):
+        return false
+    val parts = token.split("-", 2)
+    if parts.len() != 2:
+        return false
+    val left = parts[0]
+    val right = parts[1]
+    if left == "" or right == "":
+        return false
+    for ch in left:
+        if not ((ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9")):
+            return false
+    var first_is_letter = false
+    if left.len() > 0:
+        val ch = left[0]
+        first_is_letter = ch >= "A" and ch <= "Z"
+    if not first_is_letter:
+        return false
+    for ch in right:
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+
+fn _trim_url_token(raw: text) -> text:
+    if raw == "":
+        return ""
+    var start = 0
+    var end = raw.len()
+    while start < end:
+        val ch = raw[start]
+        if ch == "(" or ch == "[" or ch == "<" or ch == "\"" or ch == "'":
+            start = start + 1
+        else:
+            break
+    while end > start:
+        val ch = raw[end - 1]
+        if ch == "." or ch == "," or ch == ";" or ch == ")" or ch == "]" or ch == ">" or ch == "\"" or ch == "'":
+            end = end - 1
+        else:
+            break
+    raw[start:end]
 
 fn _render_digest(messages: [DailyMessage], artifacts: [TriagedArtifact]) -> text:
     """Render the per-day markdown digest body."""
@@ -213,7 +305,7 @@ fn run_daily_debug(args: [text]) -> i64:
 
     # 1. Load watermark
     val since = load_watermark()
-    print_info("daily-debug: since={since} dry_run={dry_run} quiet={quiet}")
+    print_info("daily-debug", "since={since} dry_run={dry_run} quiet={quiet}")
 
     # 2. List inbox since watermark
     val messages = _fetch_inbox(since)
@@ -232,7 +324,7 @@ fn run_daily_debug(args: [text]) -> i64:
             print_error("failed to write daily digest")
             return 1
     else:
-        print_info("dry-run: would write {_digest_path()} ({digest.len()} bytes)")
+        print_info("dry-run", "would write {_digest_path()} ({digest.len()} bytes)")
 
     # 6. Save watermark atomically (gated on dry-run)
     val now = _iso_now()

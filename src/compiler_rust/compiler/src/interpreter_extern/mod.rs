@@ -442,6 +442,7 @@ pub(crate) fn call_extern_function(
         "rt_rsa_sha512_sign" => signatures::rt_rsa_sha512_sign(&evaluated),
         "rt_rsa_sha512_verify" => signatures::rt_rsa_sha512_verify(&evaluated),
         "rt_ed25519_verify" => signatures::rt_ed25519_verify(&evaluated),
+        "rt_tls13_ed25519_verify" => signatures::rt_ed25519_verify(&evaluated),
         "rt_ed25519_sign" => signatures::rt_ed25519_sign(&evaluated),
         "rt_ecdsa_p256_sign" => signatures::rt_ecdsa_p256_sign(&evaluated),
         "rt_ecdsa_p256_verify" => signatures::rt_ecdsa_p256_verify(&evaluated),
@@ -844,6 +845,12 @@ pub(crate) fn call_extern_function(
         "rt_fd_write" => qmp_socket::rt_fd_write(&evaluated),
         "rt_fd_read_until" => qmp_socket::rt_fd_read_until(&evaluated),
         "rt_fd_close" => qmp_socket::rt_fd_close(&evaluated),
+        // jj-wrapper-daemon (D-4 / SJ-UDS-001) — server-side UDS externs
+        "rt_unix_socket_listen" => qmp_socket::rt_unix_socket_listen(&evaluated),
+        "rt_unix_socket_accept" => qmp_socket::rt_unix_socket_accept(&evaluated),
+        "rt_unix_socket_send" => qmp_socket::rt_unix_socket_send(&evaluated),
+        "rt_unix_socket_recv" => qmp_socket::rt_unix_socket_recv(&evaluated),
+        "rt_unix_socket_close" => qmp_socket::rt_unix_socket_close(&evaluated),
         // Path operations
         "rt_path_basename" => file_io::rt_path_basename(&evaluated),
         "rt_path_dirname" => file_io::rt_path_dirname(&evaluated),

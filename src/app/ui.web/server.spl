@@ -10,7 +10,7 @@ use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{update_state}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
-use app.ui.web.ws_handler.{handle_ws_upgrade, is_ws_upgrade_request}
+use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
 use std.nogc_sync_mut.io.tls_ffi.{rt_tls_server_create}
@@ -156,7 +156,10 @@ class WebServer:
                     return
 
                 if is_ws:
-                    handle_ws_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
+                    if self.wm_mode:
+                        handle_ws_wm_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
+                    else:
+                        handle_ws_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
                     return
 
                 if path.starts_with("/wm/native_window"):
@@ -574,13 +577,13 @@ fn run_web(file_path: text, port: i32) -> i64:
 
 fn _tls_requested(args: [text]) -> bool:
     for a in args:
-        if a == "--tls":
+        if a == "--tls" or a == "--https":
             return true
     false
 
 fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
     """Start web server mode for a .ui.sdn file.
-    If --tls flag is present, constructs a TLS listener using
+    If --tls/--https is present, constructs a TLS listener using
     SIMPLE_UI_WEB_TLS_CERT and SIMPLE_UI_WEB_TLS_KEY env vars."""
     val args = rt_cli_get_args()
     if _shared_wm_requested(args):
@@ -594,33 +597,22 @@ fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -
         val cert_path = rt_env_get("SIMPLE_UI_WEB_TLS_CERT") ?? ""
         val key_path = rt_env_get("SIMPLE_UI_WEB_TLS_KEY") ?? ""
         if cert_path == "":
-            print "Error: SIMPLE_UI_WEB_TLS_CERT env var is required for --tls mode"
+            print "Error: SIMPLE_UI_WEB_TLS_CERT env var is required for TLS mode"
             return 1
         if key_path == "":
-            print "Error: SIMPLE_UI_WEB_TLS_KEY env var is required for --tls mode"
+            print "Error: SIMPLE_UI_WEB_TLS_KEY env var is required for TLS mode"
             return 1
         val secret = load_secret(true)
         if secret == "":
             return 1
-        val use_v2 = (rt_env_get("UI_WEB_V2") ?? "") == "1"
-        if use_v2:
-            val tls_handle = rt_tls_server_create(port as i64, cert_path, key_path)
-            if tls_handle <= 0:
-                print "Error: Failed to create TLS server on port {port}"
-                return 1
-            print "Starting TLS UI Web Server (v2/TlsWebServer) on port {port}..."
-            print "Open https://localhost:{port} in your browser"
-            print "Press Ctrl+C to stop"
-            return serve_tls(file_path, port, tls_handle, access_db_path)
-        else:
-            val async_server_result = AsyncWebServer.new_with_access_store_path(file_path, port, access_db_path)
-            match async_server_result:
-                Err(e):
-                    print "Error: " + str(e)
-                    return 1
-                Ok(async_srv):
-                    async_srv.start()
-                    return 0
+        val tls_handle = rt_tls_server_create(port as i64, cert_path, key_path)
+        if tls_handle <= 0:
+            print "Error: Failed to create TLS server on port {port}"
+            return 1
+        print "Starting TLS UI Web Server on port {port}..."
+        print "Open https://localhost:{port} in your browser"
+        print "Press Ctrl+C to stop"
+        return serve_tls(file_path, port, tls_handle, access_db_path)
 
     val server_result = WebServer.new(file_path, port, false)
     match server_result:

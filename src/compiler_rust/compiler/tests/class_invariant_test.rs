@@ -82,7 +82,7 @@ class Account:
     fn new(initial_balance: i64) -> Account:
         return Account(balance: initial_balance)
 
-    pub fn create_with_deposit(amount: i64) -> Account:
+    fn create_with_deposit(amount: i64) -> Account:
         return Account.new(amount)
 "#;
 
@@ -125,10 +125,10 @@ class Counter:
     fn new() -> Counter:
         return Counter(value: 0)
 
-    pub fn increment():
+    fn increment():
         self.value = self.value + 1
 
-    pub fn decrement():
+    fn decrement():
         in:
             self.value > 0
         self.value = self.value - 1
@@ -154,7 +154,7 @@ class Counter:
     fn internal_set(self, new_value: i64):
         self.value = new_value
 
-    pub fn safe_set(self, new_value: i64):
+    fn safe_set(self, new_value: i64):
         if new_value >= 0:
             self.internal_set(new_value)
 "#;
@@ -177,7 +177,7 @@ class Range:
     fn new(a: i64, b: i64) -> Range:
         return Range(min: a, max: b)
 
-    pub fn expand(self, delta: i64):
+    fn expand(self, delta: i64):
         self.max = self.max + delta
 "#;
 
@@ -258,7 +258,7 @@ class Simple:
     fn new(value: i64) -> Simple:
         return Simple(value: value)
 
-    pub fn get_value() -> i64:
+    fn get_value() -> i64:
         return self.value
 "#;
 
@@ -318,7 +318,7 @@ class Public:
     invariant:
         self.value >= 0
 
-    pub fn new(value: i64) -> Public:
+    fn new(value: i64) -> Public:
         return Public(value: value)
 "#;
 
@@ -335,10 +335,10 @@ class Counter:
     invariant:
         self.count >= 0
 
-    pub fn new() -> Counter:
+    fn new() -> Counter:
         return Counter(count: 0)
 
-    pub fn from_value(value: i64) -> Counter:
+    fn from_value(value: i64) -> Counter:
         return Counter(count: value)
 "#;
 
@@ -375,14 +375,14 @@ class BankAccount:
             initial >= 0
         return BankAccount(balance: initial, owner: owner_name)
 
-    pub fn deposit(self, amount: i64) -> ():
+    fn deposit(self, amount: i64) -> ():
         in:
             amount > 0
         out():
             self.balance == old(self.balance) + amount
         self.balance = self.balance + amount
 
-    pub fn withdraw(self, amount: i64) -> bool:
+    fn withdraw(self, amount: i64) -> bool:
         in:
             amount > 0
         if self.balance >= amount:
@@ -393,7 +393,7 @@ class BankAccount:
     fn internal_adjust(self, delta: i64):
         self.balance = self.balance + delta
 
-    pub fn get_balance() -> i64:
+    fn get_balance() -> i64:
         return self.balance
 "#;
 
@@ -422,7 +422,7 @@ class Config:
     fn with_retries(r: i64) -> Config:
         return Config(timeout: 30, retries: r)
 
-    pub fn from_values(t: i64, r: i64) -> Config:
+    fn from_values(t: i64, r: i64) -> Config:
         return Config(timeout: t, retries: r)
 "#;
 
@@ -447,7 +447,7 @@ class MathHelper:
             return 1
         return n * MathHelper.compute_factorial(n - 1)
 
-    pub fn get_value() -> i64:
+    fn get_value() -> i64:
         return self.value
 "#;
 
@@ -472,7 +472,7 @@ struct Point:
     fn origin() -> Point:
         return Point(x: 0, y: 0)
 
-    pub fn distance_from_origin() -> i64:
+    fn distance_from_origin() -> i64:
         return self.x * self.x + self.y * self.y
 "#;
 

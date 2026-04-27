@@ -21,22 +21,20 @@ use os.crypto.random.{random_bytes}
 use os.crypto.curve25519.{x25519, x25519_base}
 use os.crypto.rsa.{RsaSignBackend, rsa_sha256_sign_with_backend, rsa_sha512_sign_with_backend}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
-use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_bool, ssh_put_mpint, ssh_get_string, SshStringResult}
 use std.format.{format_hex}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_dh_curve25519_keypair() -> i64
 extern fn rt_dh_curve25519_public_key(handle: i64) -> [u8]
 extern fn rt_dh_curve25519_shared_secret(handle: i64, their_pub: [u8]) -> [u8]
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
-extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_ed25519_sign_seed(seed: [u8], message: [u8]) -> [u8]
-extern fn serial_println(msg: text)
 
 # ============================================================================
 # Constants
@@ -48,11 +46,6 @@ val _SSH_KEX_HANDLE_TAG: [u8] = [0x53, 0x53, 0x48, 0x4b, 0x45, 0x58, 0x31, 0x39]
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
-
-fn _append_byte(buf: [u8], byte_val: u8) -> [u8]:
-    var out = buf
-    out.push(byte_val)
-    out
 
 fn _encode_handle_backed_private_key(handle: i64) -> [u8]:
     var encoded = _SSH_KEX_HANDLE_TAG
@@ -142,11 +135,11 @@ fn _push_mpint_bytes(buf: [u8], val_bytes: [u8]) -> [u8]:
 
     var body: [u8] = []
     if (_u8_at(val_bytes, start) & 0x80) != 0:
-        body = _append_byte(body, 0)
+        body = rt_push_byte(body, 0)
 
     var i: u64 = start
     while i < val_bytes.len():
-        body = _append_byte(body, _u8_at(val_bytes, i))
+        body = rt_push_byte(body, _u8_at(val_bytes, i).to_i64())
         i = i + 1
 
     _push_string_bytes(buf, body)
@@ -163,14 +156,9 @@ fn _looks_like_baremetal_sha256_truncation(digest: [u8]) -> bool:
 
 fn _sha256_stable(data: [u8]) -> [u8]:
     val digest = sha256(data)
-    val fallback = rt_tls13_sha256(data)
-    if fallback.len() == 32:
-        if _looks_like_baremetal_sha256_truncation(digest):
-            return _push_bytes([], fallback)
-        if digest.len() != fallback.len() or not _bytes_equal(digest, fallback):
-            return _push_bytes([], fallback)
     if not _looks_like_baremetal_sha256_truncation(digest):
         return digest
+    val fallback = rt_tls13_sha256(data)
     if fallback.len() == 32:
         return _push_bytes([], fallback)
     digest
@@ -214,72 +202,66 @@ struct HostKeySet:
     rsa_public_blob: [u8]?
     ecdsa_p256_pkcs8: [u8]?
 
-struct HostCertificateSet:
-    """Optional OpenSSH host certificate blobs keyed by advertised algorithm."""
-    ssh_ed25519_cert: [u8]?
-    rsa_sha2_256_cert: [u8]?
-    rsa_sha2_512_cert: [u8]?
-
 fn _push_ascii_text(buf: [u8], bytes: [u8]):
     """Append a fixed ASCII SSH string without relying on text-to-bytes externs."""
     ssh_put_string(buf, bytes)
 
 fn _push_u32_literal(buf: [u8], b0: u8, b1: u8, b2: u8, b3: u8) -> [u8]:
     var out = buf
-    out = _append_byte(out, b0)
-    out = _append_byte(out, b1)
-    out = _append_byte(out, b2)
-    out = _append_byte(out, b3)
+    out = rt_push_byte(out, b0.to_i64())
+    out = rt_push_byte(out, b1.to_i64())
+    out = rt_push_byte(out, b2.to_i64())
+    out = rt_push_byte(out, b3.to_i64())
     out
 
 fn _push_curve25519_sha256(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x2E)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x75)
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x76)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x39)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x36)
-    out = _append_byte(out, 0x2C)
-    out = _append_byte(out, 0x6B)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x78)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x69)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x76)
-    out = _append_byte(out, 0x30)
-    out = _append_byte(out, 0x30)
-    out = _append_byte(out, 0x40)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x70)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x2E)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x6D)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x75)
+    out = rt_push_byte(out, 0x72)
+    out = rt_push_byte(out, 0x76)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x39)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x36)
+    out = rt_push_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x6B)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x78)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x72)
+    out = rt_push_byte(out, 0x69)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x76)
+    out = rt_push_byte(out, 0x30)
+    out = rt_push_byte(out, 0x30)
+    out = rt_push_byte(out, 0x40)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x2E)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x6D)
     out
 
 fn _push_ssh_ed25519(buf: [u8]) -> [u8]:
@@ -300,53 +282,53 @@ fn _push_ecdsa_p256(buf: [u8]) -> [u8]:
 fn _push_ed25519_rsa_pair(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x25)
     out = _push_ssh_ed25519_bytes(out)
-    out = _append_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x2C)
     out = _push_rsa_sha2_pair_bytes(out)
     out
 
 fn _push_ed25519_ecdsa(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x1F)
     out = _push_ssh_ed25519_bytes(out)
-    out = _append_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x2C)
     out = _push_ecdsa_p256_bytes(out)
     out
 
 fn _push_rsa_pair_ecdsa(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x2D)
     out = _push_rsa_sha2_pair_bytes(out)
-    out = _append_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x2C)
     out = _push_ecdsa_p256_bytes(out)
     out
 
 fn _push_all_host_key_algorithms(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x39)
     out = _push_ssh_ed25519_bytes(out)
-    out = _append_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x2C)
     out = _push_rsa_sha2_pair_bytes(out)
-    out = _append_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x2C)
     out = _push_ecdsa_p256_bytes(out)
     out
 
 fn _push_ssh_ed25519_bytes(buf: [u8]) -> [u8]:
     var out = buf
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x64)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x39)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x64)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x39)
     out
 
 fn _push_bytes(buf: [u8], data: [u8]) -> [u8]:
     var out = buf
     var i: u64 = 0
     while i < data.len():
-        out = _append_byte(out, _u8_at(data, i))
+        out = rt_push_byte(out, _u8_at(data, i))
         i = i + 1
     out
 
@@ -372,233 +354,94 @@ fn _push_string_bytes(buf: [u8], data: [u8]) -> [u8]:
     out = _push_bytes(out, data)
     out
 
-fn _u32_be_bytes(data_len: u64) -> [u8]:
-    _push_u32_literal(
-        [],
-        ((data_len >> 24) & 0xFF).to_u8(),
-        ((data_len >> 16) & 0xFF).to_u8(),
-        ((data_len >> 8) & 0xFF).to_u8(),
-        (data_len & 0xFF).to_u8()
-    )
-
-fn _concat_ssh_string_field(data: [u8]) -> [u8]:
-    rt_bytes_concat(_u32_be_bytes(data.len()), data)
-
-fn _concat_mpint_field(val_bytes: [u8]) -> [u8]:
-    var start: u64 = 0
-    while start < val_bytes.len() and _u8_at(val_bytes, start) == 0:
-        start = start + 1
-
-    if start >= val_bytes.len():
-        return _u32_be_bytes(0)
-
-    var body: [u8] = []
-    if (_u8_at(val_bytes, start) & 0x80) != 0:
-        body = _append_byte(body, 0)
-    body = rt_bytes_concat(body, _slice_bytes(val_bytes, start, val_bytes.len() - start))
-    _concat_ssh_string_field(body)
-
 fn _push_rsa_sha2_pair_bytes(buf: [u8]) -> [u8]:
     var out = buf
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x36)
-    out = _append_byte(out, 0x2C)
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x32)
+    out = rt_push_byte(out, 0x72)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x36)
+    out = rt_push_byte(out, 0x2C)
+    out = rt_push_byte(out, 0x72)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x32)
     out
 
 fn _push_ecdsa_p256_bytes(buf: [u8]) -> [u8]:
     var out = buf
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x64)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x69)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x70)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x36)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x64)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x69)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x74)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x35)
+    out = rt_push_byte(out, 0x36)
     out
 
 fn _push_aes256_gcm_openssh(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x16)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x38)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x67)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6D)
-    out = _append_byte(out, 0x40)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x70)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x2E)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x6D)
-    out
-
-fn _push_server_kex_algorithms(buf: [u8]) -> [u8]:
-    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x39)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x75)
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x76)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x39)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x35)
-    out = _append_byte(out, 0x36)
-    out = _append_byte(out, 0x2C)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x78)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x69)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x66)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x2C)
-    out = _append_byte(out, 0x6B)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x78)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x72)
-    out = _append_byte(out, 0x69)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x74)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x76)
-    out = _append_byte(out, 0x30)
-    out = _append_byte(out, 0x30)
-    out = _append_byte(out, 0x40)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x70)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x2E)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x6D)
-    out
-
-fn _push_gcm_cipher_pair(buf: [u8]) -> [u8]:
-    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x16)
-    out = _append_byte(out, 0x61)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x31)
-    out = _append_byte(out, 0x32)
-    out = _append_byte(out, 0x38)
-    out = _append_byte(out, 0x2D)
-    out = _append_byte(out, 0x67)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6D)
-    out = _append_byte(out, 0x40)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x70)
-    out = _append_byte(out, 0x65)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x73)
-    out = _append_byte(out, 0x68)
-    out = _append_byte(out, 0x2E)
-    out = _append_byte(out, 0x63)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x6D)
+    out = rt_push_byte(out, 0x61)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x31)
+    out = rt_push_byte(out, 0x32)
+    out = rt_push_byte(out, 0x38)
+    out = rt_push_byte(out, 0x2D)
+    out = rt_push_byte(out, 0x67)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x6D)
+    out = rt_push_byte(out, 0x40)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x70)
+    out = rt_push_byte(out, 0x65)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x73)
+    out = rt_push_byte(out, 0x68)
+    out = rt_push_byte(out, 0x2E)
+    out = rt_push_byte(out, 0x63)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x6D)
     out
 
 fn _push_none(buf: [u8]) -> [u8]:
     var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x04)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x6F)
-    out = _append_byte(out, 0x6E)
-    out = _append_byte(out, 0x65)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x6F)
+    out = rt_push_byte(out, 0x6E)
+    out = rt_push_byte(out, 0x65)
     out
 
 fn _push_empty_string(buf: [u8]) -> [u8]:
     _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
-
-fn _push_bool_false(buf: [u8]) -> [u8]:
-    _append_byte(buf, 0)
-
-fn _push_zero_u32(buf: [u8]) -> [u8]:
-    _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
-
-fn _push_host_key_algorithms(buf: [u8], host_keys: HostKeySet) -> [u8]:
-    if host_keys.ed25519_seed != nil:
-        if host_keys.rsa_pkcs8 != nil:
-            if host_keys.ecdsa_p256_pkcs8 != nil:
-                return _push_all_host_key_algorithms(buf)
-            return _push_ed25519_rsa_pair(buf)
-        if host_keys.ecdsa_p256_pkcs8 != nil:
-            return _push_ed25519_ecdsa(buf)
-        return _push_ssh_ed25519(buf)
-
-    if host_keys.rsa_pkcs8 != nil:
-        if host_keys.ecdsa_p256_pkcs8 != nil:
-            return _push_rsa_pair_ecdsa(buf)
-        return _push_rsa_sha2_pair(buf)
-
-    if host_keys.ecdsa_p256_pkcs8 != nil:
-        return _push_ecdsa_p256(buf)
-
-    _push_ssh_ed25519(buf)
 
 fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
     """Return comma-separated list of host key algorithms the server can offer.
@@ -622,33 +465,6 @@ fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
     if algos.len() == 0:
         algos = "ssh-ed25519"
     algos
-
-fn host_key_algorithms_with_certificates(host_keys: HostKeySet, host_certs: HostCertificateSet) -> text:
-    """Return host key algorithms, preferring configured OpenSSH certificates."""
-    var algos: text = ""
-    if host_certs.ssh_ed25519_cert != nil:
-        algos = "ssh-ed25519-cert-v01@openssh.com"
-    if host_keys.ed25519_seed != nil:
-        algos = if algos.len() > 0: algos + ",ssh-ed25519" else: "ssh-ed25519"
-
-    if host_certs.rsa_sha2_256_cert != nil:
-        algos = if algos.len() > 0: algos + ",rsa-sha2-256-cert-v01@openssh.com" else: "rsa-sha2-256-cert-v01@openssh.com"
-    if host_certs.rsa_sha2_512_cert != nil:
-        algos = if algos.len() > 0: algos + ",rsa-sha2-512-cert-v01@openssh.com" else: "rsa-sha2-512-cert-v01@openssh.com"
-    if host_keys.rsa_pkcs8 != nil:
-        algos = if algos.len() > 0: algos + ",rsa-sha2-256,rsa-sha2-512" else: "rsa-sha2-256,rsa-sha2-512"
-
-    if host_keys.ecdsa_p256_pkcs8 != nil:
-        algos = if algos.len() > 0: algos + ",ecdsa-sha2-nistp256" else: "ecdsa-sha2-nistp256"
-
-    if algos.len() == 0:
-        algos = "ssh-ed25519"
-    algos
-
-fn _host_certificates_empty(host_certs: HostCertificateSet) -> bool:
-    host_certs.ssh_ed25519_cert == nil and
-    host_certs.rsa_sha2_256_cert == nil and
-    host_certs.rsa_sha2_512_cert == nil
 
 # ============================================================================
 # Key Generation
@@ -720,28 +536,28 @@ fn ssh_kex_compute_exchange_hash(
     val shared_secret_mpint = shared_secret
 
     # V_C: client version string (without CR LF)
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(client_version))
+    hash_input = _push_string_bytes(hash_input, client_version)
 
     # V_S: server version string (without CR LF)
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(server_version))
+    hash_input = _push_string_bytes(hash_input, server_version)
 
     # I_C: client KEXINIT payload (the full packet payload including msg type)
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(client_kexinit))
+    hash_input = _push_string_bytes(hash_input, client_kexinit)
 
     # I_S: server KEXINIT payload
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(server_kexinit))
+    hash_input = _push_string_bytes(hash_input, server_kexinit)
 
     # K_S: server host key blob
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(host_key_blob))
+    hash_input = _push_string_bytes(hash_input, host_key_blob)
 
     # Q_C: client ephemeral public key (as string, 32 bytes)
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(client_public))
+    hash_input = _push_string_32(hash_input, client_public)
 
     # Q_S: server ephemeral public key (as string, 32 bytes)
-    hash_input = rt_bytes_concat(hash_input, _concat_ssh_string_field(server_public))
+    hash_input = _push_string_32(hash_input, server_public)
 
     # K: shared secret (as mpint — big-endian with sign handling)
-    hash_input = rt_bytes_concat(hash_input, _concat_mpint_field(shared_secret_mpint))
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
     serial_println("[ssh-kex] exchange hash input len={hash_input.len()}")
     serial_println("[ssh-kex] exchange hash input={_bytes_to_hex(hash_input)}")
 
@@ -767,7 +583,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     val shared_secret_mpint = shared_secret
     input = _push_mpint_bytes(input, shared_secret_mpint)
     input = _push_bytes(input, exchange_hash)
-    input = _append_byte(input, letter)
+    input = rt_push_byte(input, letter.to_i64())
     input = _push_bytes(input, session_id)
 
     val k1 = _sha256_stable(input)
@@ -789,7 +605,7 @@ fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id:
     var result: [u8] = []
     var i: u64 = 0
     while i < needed:
-        result = _append_byte(result, _u8_at(key_material, i))
+        result = rt_push_byte(result, _u8_at(key_material, i))
         i = i + 1
     result
 
@@ -857,107 +673,6 @@ fn ssh_build_ecdsa_p256_host_key_blob(q_bytes: [u8]) -> [u8]:
     ssh_put_string(blob, q_bytes)
     blob
 
-struct _DerTlv:
-    value_offset: u64
-    value_length: u64
-    next_offset: u64
-
-fn _read_der_tlv(data: [u8], offset: u64, expected_tag: u8) -> Result<_DerTlv, text>:
-    if offset + 2 > data.len():
-        return Err("der truncated")
-    if data[offset] != expected_tag:
-        return Err("der unexpected tag")
-    val len0 = data[offset + 1]
-    if (len0 & 0x80) == 0:
-        val value_offset = offset + 2
-        val value_length = len0.to_u64()
-        val next_offset = value_offset + value_length
-        if next_offset > data.len():
-            return Err("der value past end")
-        return Ok(_DerTlv(value_offset: value_offset, value_length: value_length, next_offset: next_offset))
-    val count = (len0 & 0x7F).to_u64()
-    if count == 0 or count > 4 or offset + 2 + count > data.len():
-        return Err("der bad length")
-    var value_length: u64 = 0
-    var i: u64 = 0
-    while i < count:
-        value_length = (value_length << 8) | data[offset + 2 + i].to_u64()
-        i = i + 1
-    val value_offset = offset + 2 + count
-    val next_offset = value_offset + value_length
-    if next_offset > data.len():
-        return Err("der value past end")
-    Ok(_DerTlv(value_offset: value_offset, value_length: value_length, next_offset: next_offset))
-
-fn _slice_bytes(data: [u8], start: u64, length: u64) -> [u8]:
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < length and start + i < data.len():
-        out.push(_u8_at(data, start + i))
-        i = i + 1
-    out
-
-fn ecdsa_p256_public_point_from_pkcs8(pkcs8: [u8]) -> [u8]:
-    """Extract 65-byte uncompressed public point Q from ECDSA P-256 PKCS#8."""
-    val outer = _read_der_tlv(pkcs8, 0, 0x30)
-    if outer.is_err():
-        return []
-    var pos = outer.unwrap().value_offset
-
-    val version = _read_der_tlv(pkcs8, pos, 0x02)
-    if version.is_err():
-        return []
-    pos = version.unwrap().next_offset
-
-    val algorithm = _read_der_tlv(pkcs8, pos, 0x30)
-    if algorithm.is_err():
-        return []
-    pos = algorithm.unwrap().next_offset
-
-    val private_octets = _read_der_tlv(pkcs8, pos, 0x04)
-    if private_octets.is_err():
-        return []
-    val ec_private = _slice_bytes(pkcs8, private_octets.unwrap().value_offset, private_octets.unwrap().value_length)
-    if ec_private.len() == 0:
-        return []
-
-    val ec_seq = _read_der_tlv(ec_private, 0, 0x30)
-    if ec_seq.is_err():
-        return []
-    var ec_pos = ec_seq.unwrap().value_offset
-
-    val ec_version = _read_der_tlv(ec_private, ec_pos, 0x02)
-    if ec_version.is_err():
-        return []
-    ec_pos = ec_version.unwrap().next_offset
-
-    val ec_key = _read_der_tlv(ec_private, ec_pos, 0x04)
-    if ec_key.is_err():
-        return []
-    ec_pos = ec_key.unwrap().next_offset
-
-    while ec_pos < ec_private.len():
-        val tag = ec_private[ec_pos]
-        if tag == 0xA0:
-            val parameters = _read_der_tlv(ec_private, ec_pos, 0xA0)
-            if parameters.is_err():
-                return []
-            ec_pos = parameters.unwrap().next_offset
-        elif tag == 0xA1:
-            val public_key = _read_der_tlv(ec_private, ec_pos, 0xA1)
-            if public_key.is_err():
-                return []
-            val bit_string = _read_der_tlv(ec_private, public_key.unwrap().value_offset, 0x03)
-            if bit_string.is_err():
-                return []
-            val bit_bytes = _slice_bytes(ec_private, bit_string.unwrap().value_offset, bit_string.unwrap().value_length)
-            if bit_bytes.len() != 66 or bit_bytes[0] != 0 or bit_bytes[1] != 0x04:
-                return []
-            return _slice_bytes(bit_bytes, 1, 65)
-        else:
-            return []
-    []
-
 # ============================================================================
 # Multi-Algorithm Signing
 # ============================================================================
@@ -974,22 +689,21 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
     Returns Err if the required host key is absent or signing produces
     an empty result (indicating a key/runtime error).
     """
-    if algo == "ssh-ed25519" or algo == "ssh-ed25519-cert-v01@openssh.com":
+    if algo == "ssh-ed25519":
         if host_keys.ed25519_seed == nil:
             return Err("ssh-ed25519: no ed25519 seed configured")
-        val seed = _push_bytes([], host_keys.ed25519_seed)
-        val stable_hash = _push_bytes([], exchange_hash)
-        val pubkey = ed25519_keypair_from_seed(seed).1
+        val seed = host_keys.ed25519_seed
+        val pubkey = rt_ed25519_keypair_pk(seed)
         if pubkey.len() != 32:
             return Err("ssh-ed25519: keypair derive failed")
-        val sig_raw = ed25519_sign(seed, pubkey, stable_hash)
-        if sig_raw.len() != 64:
+        val sig_raw = rt_ed25519_sign_seed(seed, exchange_hash)
+        if sig_raw.len() == 0:
             return Err("ssh-ed25519: signing failed")
         var blob = _push_ssh_ed25519([])
         blob = _push_string_64(blob, sig_raw)
         return Ok(blob)
 
-    elif algo == "rsa-sha2-256" or algo == "rsa-sha2-256-cert-v01@openssh.com":
+    elif algo == "rsa-sha2-256":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-256: no RSA key configured")
         val sig_raw = rsa_sha256_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
@@ -1000,7 +714,7 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
         ssh_put_string(blob, sig_raw)
         return Ok(blob)
 
-    elif algo == "rsa-sha2-512" or algo == "rsa-sha2-512-cert-v01@openssh.com":
+    elif algo == "rsa-sha2-512":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-512: no RSA key configured")
         val sig_raw = rsa_sha512_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
@@ -1033,69 +747,57 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
 # ============================================================================
 
 fn ssh_build_kexinit_for_host_keys(host_keys: HostKeySet) -> [u8]:
-    ssh_build_kexinit_for_host_keys_and_certs(host_keys, HostCertificateSet(
-        ssh_ed25519_cert: nil,
-        rsa_sha2_256_cert: nil,
-        rsa_sha2_512_cert: nil
-    ))
-
-fn ssh_build_kexinit_for_host_keys_and_certs(host_keys: HostKeySet, host_certs: HostCertificateSet) -> [u8]:
     """Build SSH_MSG_KEXINIT advertising host key algorithms present in host_keys.
 
     Wire format is identical to ssh_build_kexinit() in ssh_transport.spl
     except the server_host_key_algorithms field reflects the actual key set.
-    Other algorithms are fixed: curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com
-    KEX, aes256-gcm then aes128-gcm, no MAC, no compression.
+    Other algorithms are fixed: curve25519-sha256,kex-strict-s-v00@openssh.com
+    KEX, aes256-gcm cipher, no MAC, no compression.
     """
-    if _host_certificates_empty(host_certs):
-        var buf: [u8] = []
-
-        buf = _append_byte(buf, 20)
-
-        var i: u64 = 0
-        while i < 16:
-            buf = _append_byte(buf, 0)
-            i = i + 1
-
-        buf = _push_server_kex_algorithms(buf)
-        buf = _push_host_key_algorithms(buf, host_keys)
-        buf = _push_gcm_cipher_pair(buf)
-        buf = _push_gcm_cipher_pair(buf)
-        buf = _push_none(buf)
-        buf = _push_none(buf)
-        buf = _push_none(buf)
-        buf = _push_none(buf)
-
-        # The first empty language list appends correctly through the normal
-        # helper path. The remaining zero-only tail bytes are appended from a
-        # stable zero buffer because literal/byte-at-a-time growth has proven
-        # unreliable on the baremetal live lane.
-        buf = _push_empty_string(buf)
-        buf = rt_bytes_concat(buf, _slice_bytes(_zeroed_32_bytes(), 0, 9))
-        return buf
-
     var buf: [u8] = []
 
     # SSH_MSG_KEXINIT = 20
-    buf = _append_byte(buf, 20)
+    buf = rt_push_byte(buf, 20)
 
     # 16-byte cookie (zeros)
     var i: u64 = 0
     while i < 16:
-        buf = _append_byte(buf, 0)
+        buf = rt_push_byte(buf, 0)
         i = i + 1
 
-    ssh_put_text(buf, "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com")
-    ssh_put_text(buf, host_key_algorithms_with_certificates(host_keys, host_certs))
-    ssh_put_text(buf, "aes128-gcm@openssh.com")
-    ssh_put_text(buf, "aes128-gcm@openssh.com")
-    ssh_put_text(buf, "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none")
-    ssh_put_text(buf, "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none")
-    ssh_put_text(buf, "none")
-    ssh_put_text(buf, "none")
-    ssh_put_text(buf, "")
-    ssh_put_text(buf, "")
+    buf = _push_curve25519_sha256(buf)
+    if host_keys.ed25519_seed != nil:
+        if host_keys.rsa_pkcs8 != nil and host_keys.ecdsa_p256_pkcs8 != nil:
+            buf = _push_all_host_key_algorithms(buf)
+        elif host_keys.rsa_pkcs8 != nil:
+            buf = _push_ed25519_rsa_pair(buf)
+        elif host_keys.ecdsa_p256_pkcs8 != nil:
+            buf = _push_ed25519_ecdsa(buf)
+        else:
+            buf = _push_ssh_ed25519(buf)
+    elif host_keys.rsa_pkcs8 != nil:
+        if host_keys.ecdsa_p256_pkcs8 != nil:
+            buf = _push_rsa_pair_ecdsa(buf)
+        else:
+            buf = _push_rsa_sha2_pair(buf)
+    elif host_keys.ecdsa_p256_pkcs8 != nil:
+        buf = _push_ecdsa_p256(buf)
+    else:
+        buf = _push_ssh_ed25519(buf)
+
+    buf = _push_aes256_gcm_openssh(buf)
+    buf = _push_aes256_gcm_openssh(buf)
+    buf = _push_none(buf)
+    buf = _push_none(buf)
+    buf = _push_none(buf)
+    buf = _push_none(buf)
+    buf = _push_empty_string(buf)
+    buf = _push_empty_string(buf)
+
+    # first_kex_packet_follows = false
     ssh_put_bool(buf, false)
+
+    # reserved uint32 = 0
     ssh_put_u32(buf, 0)
 
     buf

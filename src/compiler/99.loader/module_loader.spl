@@ -4,6 +4,7 @@
 extern fn rt_file_exists(path: text) -> bool
 use compiler.loader.jit_instantiator.{JitInstantiator}
 use compiler.loader.compiler_ffi.{TypeInfo, type_to_string}
+use compiler.loader.metadata_symbols.{metadata_instantiation_symbol_names}
 
 fn _path_tag(path: text) -> text:
     val base = path.split("/").last() ?? path
@@ -23,6 +24,11 @@ fn _name_in(list: [text], name: text) -> bool:
         if n == name:
             return true
     false
+
+fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
+    if not self.jit.loaded_metadata.has(path):
+        return []
+    metadata_instantiation_symbol_names(self.jit.loaded_metadata[path])
 
 enum SymbolType:
     Function
@@ -124,7 +130,12 @@ impl ModuleLoader:
         self.load(path)
 
     me unload(path: text):
+        if not self.modules.has(path):
+            return
         var remove_jit: [text] = []
+        for sym_name in _metadata_instantiation_symbols(self, path):
+            if not _name_in(remove_jit, sym_name):
+                remove_jit.push(sym_name)
         for item in self.jit.jit_cache:
             val sym_name = item[0]
             val rec_cache = item[1]
@@ -173,6 +184,8 @@ impl ModuleLoader:
             rebuilt_globals[sym_name] = (mapped_owner, sym)
 
         self.global_symbols = rebuilt_globals
+        if self.jit.loaded_metadata.has(path):
+            self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
 
         if self.modules.has(path):
             self.modules = self.modules.remove(path)
@@ -206,10 +219,39 @@ impl ModuleLoader:
             self.global_symbols[name] = (owner, sym)
             return SymbolResult.JitCompiled(symbol: sym, code: code)
 
+        match self.jit.try_jit_instantiate(name):
+            case JitInstantiationResult.Success(code, sym_name, address):
+                val addr = if address.?:
+                    address.unwrap()
+                else:
+                    0
+                var owner = "__jit__"
+                val rec = self.jit.exec_mapper.lookup(sym_name)
+                if rec.?:
+                    owner = rec.unwrap().owner_id
+                val sym = LoadedSymbol(
+                    name: sym_name,
+                    address: addr,
+                    size: code.len() as i64,
+                    ty: SymbolType.Function,
+                    is_jit: true,
+                    file_offset: 0
+                )
+                self.global_symbols[sym_name] = (owner, sym)
+                return SymbolResult.JitCompiled(symbol: sym, code: code)
+            case JitInstantiationResult.NotFound(_):
+                return SymbolResult.NotFound(name: name)
+            case JitInstantiationResult.CompilationError(message):
+                return SymbolResult.Error(message: message)
+            case JitInstantiationResult.CircularDependency(cycle):
+                return SymbolResult.Error(message: "circular JIT dependency: " + cycle.join(","))
+            case JitInstantiationResult.UpdateFailed(symbol, error):
+                return SymbolResult.Error(message: "JIT update failed for {symbol}: {error}")
+
         SymbolResult.NotFound(name: name)
 
     fn resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
-        moduleloader_resolve_generic(self, name, type_args)
+        self.resolve_symbol(mangle_name(name, type_args))
 
     fn get_module(path: text):
         if self.modules.has(path):
@@ -241,24 +283,32 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
 fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())
 
-fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+me moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
     if self.modules.has(path):
         return LoadResult.AlreadyLoaded(module: self.modules[path])
     if not rt_file_exists(path):
         return LoadResult.Error(message: "module not found: " + path)
+    val metadata_result = self.jit.load_smf_metadata(path)
+    if metadata_result.is_err():
+        return LoadResult.Error(message: metadata_result.unwrap_err())
 
     val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
     self.modules[path] = m
     LoadResult.Success(module: m)
 
-fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     moduleloader_unload(self, path)
     if self.modules.has(path):
         self.modules = self.modules.remove(path)
     moduleloader_load(self, path)
 
-fn moduleloader_unload(self: ModuleLoader, path: text):
+me moduleloader_unload(self: ModuleLoader, path: text):
+    if not self.modules.has(path):
+        return
     var remove_jit: [text] = []
+    for sym_name in _metadata_instantiation_symbols(self, path):
+        if not _name_in(remove_jit, sym_name):
+            remove_jit.push(sym_name)
     for item in self.jit.jit_cache:
         val sym_name = item[0]
         val rec_cache = item[1]
@@ -307,15 +357,17 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
         rebuilt_globals[sym_name] = (mapped_owner, sym)
 
     self.global_symbols = rebuilt_globals
+    if self.jit.loaded_metadata.has(path):
+        self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
 
     if self.modules.has(path):
         self.modules = self.modules.remove(path)
 
-fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
 
-fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
-    moduleloader_resolve_symbol(self, mangle_name(name, type_args))
+me moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+    self.resolve_symbol(mangle_name(name, type_args))
 
 fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
     if type_args.len() == 0:

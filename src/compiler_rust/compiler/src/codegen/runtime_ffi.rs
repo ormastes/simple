@@ -463,6 +463,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_read_hello_smf", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_sector_bytes", &[], &[I64]),
     RuntimeFuncSpec::new("rt_array_get_byte_raw", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_new_with_cap", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_len_u32", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_byte_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_array_get_u16_le", &[I64, I64], &[I64]),

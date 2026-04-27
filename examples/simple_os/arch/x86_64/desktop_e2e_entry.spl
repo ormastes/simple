@@ -121,23 +121,6 @@ fn _emit_desktop_driver_summary():
         if line != "":
             serial_println(line)
 
-fn _emit_desktop_driver_completion_markers():
-    val pci_count = pcimgr_device_count()
-    if pci_count < 5:
-        return
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/info bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_browser bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_interpreter bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=29208")
-    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=29208")
-    serial_println("[desktop-e2e] virtio-net:mac=52:54:00:12:34:56")
-    serial_println("[desktop-e2e] virtio-net:rx-queue=ok queue=0")
-    serial_println("[desktop-e2e] virtio-net:tx-queue=ok queue=0")
-    serial_println("[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500")
-
 fn _emit_phase_begin(name: text):
     serial_println("[desktop-e2e] phase:begin name={name}")
 
@@ -157,20 +140,6 @@ fn _emit_vfs_app_read_marker(path: text) -> bool:
         return false
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={path} bytes={bytes.len()}")
     true
-
-fn _emit_toolchain_launch_marker(app_id: text, version_path: text, manifest_path: text, primary: text, secondary: text, status: text) -> bool:
-    val manifest_summary = " lane=x86_64-simpleos status={status}"
-    if version_path == "" or manifest_path == "" or primary == "":
-        serial_println("[desktop-e2e] toolchain-launch:fail app={app_id} reason=missing-version path={version_path}")
-        return false
-    if secondary != "":
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} mode=native-wrapper{manifest_summary} tool={primary} aux={secondary} version_path={version_path} manifest_path={manifest_path}")
-    else:
-        serial_println("[desktop-e2e] toolchain-launch:ok app={app_id} mode=native-wrapper{manifest_summary} tool={primary} version_path={version_path} manifest_path={manifest_path}")
-    true
-
-fn _emit_toolchain_process_backed_marker(app: text, pid: u64):
-    serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
 
 fn _next_synthetic_tool_pid() -> u64:
     launcher_get_process_count() + 1
@@ -254,7 +223,7 @@ fn _dispatch_filesystem_tool_app(shell: DesktopShell, key: u32, shortcut: text, 
         shell.drain_wm_actions()
     pid
 
-fn _dispatch_simple_cli_smoke(app: text, args: [text]) -> u64:
+fn _dispatch_simple_cli_smoke(app: text, args: [text], require_process_backed: bool) -> u64:
     val path = "/sys/apps/{app}"
     val pid = launcher_launch_path_with_args(path, args)
     if pid <= 0:
@@ -270,6 +239,10 @@ fn _dispatch_simple_cli_smoke(app: text, args: [text]) -> u64:
         serial_println("[desktop-e2e] simple-cli:ok app={app} pid={pid} path={path}")
         serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
         return pid_u64
+    if require_process_backed:
+        serial_println("[desktop-e2e] simple-cli:fail app={app} path={path} rc=not-process-backed pid={pid}")
+        serial_println("[desktop-e2e] process-backed:fail app={app} pid={pid} reason=not-process-backed")
+        return 0
     serial_println("[desktop-e2e] simple-cli:ok app={app} pid={pid} path={path} backing=detached-tracked")
     serial_println("[desktop-e2e] simple-cli:warn app={app} pid={pid} reason=detached-tracked")
     pid_u64
@@ -666,19 +639,13 @@ fn desktop_e2e_main() -> bool:
     if not _phase_app_launch_ok(simple_loader_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_loader pid={simple_loader_pid}")
         return false
-    val llvm_pid = _dispatch_simple_cli_smoke("llvm", [])
+    val llvm_pid = _dispatch_simple_cli_smoke("llvm", [], true)
     if llvm_pid == 0:
         _emit_phase_fail("migrated-app-launches", "app=llvm pid={llvm_pid}")
         return false
-    if not _emit_toolchain_launch_marker("llvm", "/SYS/LLVMVER.TXT", "/SYS/LLVMMAN.TXT", "/usr/bin/clang", "/usr/bin/lld", "guest-exec"):
-        _emit_phase_fail("migrated-app-launches", "app=llvm pid={llvm_pid} reason=toolchain-marker")
-        return false
-    val rust_pid = _dispatch_simple_cli_smoke("rust", [])
+    val rust_pid = _dispatch_simple_cli_smoke("rust", [], true)
     if rust_pid == 0:
         _emit_phase_fail("migrated-app-launches", "app=rust pid={rust_pid}")
-        return false
-    if not _emit_toolchain_launch_marker("rust", "/SYS/RUSTVER.TXT", "/SYS/RUSTMAN.TXT", "/usr/bin/rustc", "/usr/bin/cargo", "report-and-gate"):
-        _emit_phase_fail("migrated-app-launches", "app=rust pid={rust_pid} reason=toolchain-marker")
         return false
     _emit_phase_ok("migrated-app-launches")
 
@@ -710,7 +677,7 @@ fn desktop_e2e_main() -> bool:
     _emit_phase_ok("generic-vfs-read")
 
     _emit_phase_begin("info-cli-smoke")
-    val info_pid = _dispatch_simple_cli_smoke("info", [])
+    val info_pid = _dispatch_simple_cli_smoke("info", [], false)
     if info_pid == 0:
         _emit_phase_fail("info-cli-smoke", "app=info pid={info_pid}")
         return false

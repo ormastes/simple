@@ -7,17 +7,14 @@
 # The session reads/writes via socket FDs using the POSIX socket API.
 
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
-use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex}
-use os.apps.sshd.ssh_kex.{HostKeySet, HostCertificateSet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_build_ecdsa_p256_host_key_blob, host_key_set_advertised_algorithms, ecdsa_p256_public_point_from_pkcs8}
-use os.apps.sshd.ssh_cipher.{SshCipher, SshCtrPacketResult, SshCtrDecryptResult, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm, ssh_encrypt_packet_aes_ctr_etm, ssh_decrypt_packet_aes_ctr_etm}
-use os.apps.sshd.ssh_mac.{ssh_mac_len}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.ssh_kex.{HostKeySet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_cipher.{SshCipher, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_pty.{SshPty}
 use os.apps.shell.shell_app.{ShellApp}
-use os.kernel.log.klog_api.{log_info, log_raw_println}
-use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 use std.format.{format_hex}
 
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
@@ -31,10 +28,10 @@ extern fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]
 extern fn rt_net_recv_version_text(sock_fd: i64) -> text
 extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_thread_sleep(ms: i64) -> i64
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_ssh_aes128_gcm_encrypt_packet(key: [u8], iv: [u8], seq: i64, payload: [u8]) -> [u8]
@@ -45,20 +42,6 @@ extern fn rt_ssh_aes128_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet
 # ============================================================================
 
 val RECV_BUF_SIZE: u64 = 8192
-
-struct PlainPacketHeader:
-    header: [u8]
-    padding_len: u64
-
-struct _SshTextField:
-    value: text
-    next_offset: u64
-
-struct _AuthRequestFast:
-    username: text
-    service: text
-    method_code: u8
-    password: text
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
@@ -95,164 +78,6 @@ fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
         i = i + 1
     out
 
-fn _build_plain_packet_header(payload_len: u64, block_size: u64) -> PlainPacketHeader:
-    var padding_len: u64 = 4
-    while ((5 + payload_len + padding_len) % block_size) != 0:
-        padding_len = padding_len + 1
-
-    var packet_length_u64: u64 = 1 + payload_len + padding_len
-    var header: [u8] = []
-    header = rt_push_byte(header, ((packet_length_u64 >> 24) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 16) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 8) & 0xFF).to_i64())
-    header = rt_push_byte(header, (packet_length_u64 & 0xFF).to_i64())
-    header = rt_push_byte(header, padding_len.to_i64())
-    PlainPacketHeader(header: header, padding_len: padding_len)
-
-fn _zero_padding_bytes(count: u64) -> [u8]:
-    var padding: [u8] = []
-    var i: u64 = 0
-    while i < count:
-        padding.push(0)
-        i = i + 1
-    padding
-
-fn _copy_range_stable(data: [u8], start: u64, count: u64) -> [u8]:
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < count and start + i < data.len():
-        out.push(_u8_at(data, start + i))
-        i = i + 1
-    out
-
-fn _read_u32_stable(data: [u8], offset: u64) -> u32:
-    var b0: u32 = _u8_at(data, offset).to_u32()
-    var b1: u32 = _u8_at(data, offset + 1).to_u32()
-    var b2: u32 = _u8_at(data, offset + 2).to_u32()
-    var b3: u32 = _u8_at(data, offset + 3).to_u32()
-    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-
-fn _read_text_field_fast(data: [u8], offset: u64) -> Result<_SshTextField, text>:
-    if offset + 4 > data.len():
-        log_raw_println("[sshd-session] fast text err=truncated_length off={offset} len={data.len()}")
-        return Err("truncated length")
-    var field_len_u32: u32 = _read_u32_stable(data, offset)
-    var field_len: u64 = field_len_u32.to_u64()
-    var start: u64 = offset + 4
-    var end: u64 = start + field_len
-    if end > data.len():
-        log_raw_println("[sshd-session] fast text err=truncated_data off={offset} field_len={field_len} end={end} len={data.len()}")
-        return Err("truncated data")
-    val field_bytes = _copy_range_stable(data, start, field_len)
-    Ok(_SshTextField(
-        value: rt_string_from_byte_array(field_bytes),
-        next_offset: end
-    ))
-
-fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
-    log_raw_println("[sshd-session] fast kex begin len={data.len()}")
-    log_raw_println("[sshd-session] fast kex preview={_bytes_to_hex(_copy_prefix_stable(data, 24))}")
-    if data.len() < 17:
-        log_raw_println("[sshd-session] fast kex err=too_short")
-        return Err("KEXINIT too short")
-
-    var off: u64 = 17
-    val r_kex = _read_text_field_fast(data, off)
-    if r_kex.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_kex off={off}")
-        return Err("bad kex")
-    val kex = r_kex.unwrap()
-    off = kex.next_offset
-    log_raw_println("[sshd-session] fast kex stage=kex off={off}")
-    val r_host = _read_text_field_fast(data, off)
-    if r_host.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_host off={off}")
-        return Err("bad host")
-    val host = r_host.unwrap()
-    off = host.next_offset
-    log_raw_println("[sshd-session] fast kex stage=host off={off}")
-    val r_enc_c2s = _read_text_field_fast(data, off)
-    if r_enc_c2s.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_enc_c2s off={off}")
-        return Err("bad enc c2s")
-    val enc_c2s = r_enc_c2s.unwrap()
-    off = enc_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=enc_c2s off={off}")
-    val r_enc_s2c = _read_text_field_fast(data, off)
-    if r_enc_s2c.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_enc_s2c off={off}")
-        return Err("bad enc s2c")
-    val enc_s2c = r_enc_s2c.unwrap()
-    off = enc_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=enc_s2c off={off}")
-    val r_mac_c2s = _read_text_field_fast(data, off)
-    if r_mac_c2s.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_mac_c2s off={off}")
-        return Err("bad mac c2s")
-    val mac_c2s = r_mac_c2s.unwrap()
-    off = mac_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=mac_c2s off={off}")
-    val r_mac_s2c = _read_text_field_fast(data, off)
-    if r_mac_s2c.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_mac_s2c off={off}")
-        return Err("bad mac s2c")
-    val mac_s2c = r_mac_s2c.unwrap()
-    off = mac_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=mac_s2c off={off}")
-    val r_comp_c2s = _read_text_field_fast(data, off)
-    if r_comp_c2s.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_comp_c2s off={off}")
-        return Err("bad comp c2s")
-    val comp_c2s = r_comp_c2s.unwrap()
-    off = comp_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=comp_c2s off={off}")
-    val r_comp_s2c = _read_text_field_fast(data, off)
-    if r_comp_s2c.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_comp_s2c off={off}")
-        return Err("bad comp s2c")
-    val comp_s2c = r_comp_s2c.unwrap()
-    off = comp_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=comp_s2c off={off}")
-    val r_lang1 = _read_text_field_fast(data, off)
-    if r_lang1.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_lang1 off={off}")
-        return Err("bad lang1")
-    val lang1 = r_lang1.unwrap()
-    off = lang1.next_offset
-    log_raw_println("[sshd-session] fast kex stage=lang1 off={off}")
-    val r_lang2 = _read_text_field_fast(data, off)
-    if r_lang2.is_err():
-        log_raw_println("[sshd-session] fast kex err=bad_lang2 off={off}")
-        return Err("bad lang2")
-    val lang2 = r_lang2.unwrap()
-    off = lang2.next_offset
-    log_raw_println("[sshd-session] fast kex stage=lang2 off={off}")
-    if off + 5 > data.len():
-        log_raw_println("[sshd-session] fast kex err=truncated_tail off={off} len={data.len()}")
-        return Err("truncated tail")
-    val first_follows = _u8_at(data, off) != 0
-    off = off + 1
-    if _read_u32_stable(data, off) != 0:
-        log_raw_println("[sshd-session] fast kex err=nonzero_reserved off={off}")
-        return Err("non-zero reserved")
-    off = off + 4
-    if off != data.len():
-        log_raw_println("[sshd-session] fast kex err=trailing_bytes off={off} len={data.len()}")
-        return Err("trailing bytes")
-
-    Ok(SshKexInit(
-        cookie: _copy_range_stable(data, 1, 16),
-        kex_algorithms: kex.value,
-        server_host_key_algorithms: host.value,
-        encryption_client_to_server: enc_c2s.value,
-        encryption_server_to_client: enc_s2c.value,
-        mac_client_to_server: mac_c2s.value,
-        mac_server_to_client: mac_s2c.value,
-        compression_client_to_server: comp_c2s.value,
-        compression_server_to_client: comp_s2c.value,
-        first_kex_packet_follows: first_follows
-    ))
-
 fn _is_ssh_userauth_service_request(payload: [u8]) -> bool:
     if payload.len() != 17:
         return false
@@ -263,61 +88,10 @@ fn _is_ssh_userauth_service_request(payload: [u8]) -> bool:
     val expected: [u8] = [0x73, 0x73, 0x68, 0x2D, 0x75, 0x73, 0x65, 0x72, 0x61, 0x75, 0x74, 0x68]
     var i: u64 = 0
     while i < expected.len():
-        if _u8_at(payload, 5 + i) != _u8_at(expected, i):
+        if _u8_at(payload, 5 + i) != expected[i]:
             return false
         i = i + 1
     true
-
-fn _text_equals_bytes(value: text, expected: [u8]) -> bool:
-    val bytes = rt_string_to_byte_array(value)
-    if bytes.len() != expected.len():
-        return false
-    var i: u64 = 0
-    while i < expected.len():
-        if _u8_at(bytes, i) != _u8_at(expected, i):
-            return false
-        i = i + 1
-    true
-
-fn _parse_auth_request_fast(payload: [u8]) -> Result<_AuthRequestFast, text>:
-    if payload.len() < 2 or _u8_at(payload, 0) != 50:
-        return Err("not auth request")
-    val r_user = _read_text_field_fast(payload, 1)
-    if r_user.is_err():
-        return Err("bad user")
-    val user = r_user.unwrap()
-    val r_service = _read_text_field_fast(payload, user.next_offset)
-    if r_service.is_err():
-        return Err("bad service")
-    val service = r_service.unwrap()
-    val r_method = _read_text_field_fast(payload, service.next_offset)
-    if r_method.is_err():
-        return Err("bad method")
-    val method = r_method.unwrap()
-
-    var method_code: u8 = 0
-    var password: text = ""
-    if _text_equals_bytes(method.value, [0x6E, 0x6F, 0x6E, 0x65]):
-        method_code = 1
-    elif _text_equals_bytes(method.value, [0x70, 0x61, 0x73, 0x73, 0x77, 0x6F, 0x72, 0x64]):
-        method_code = 2
-        var off = method.next_offset
-        if off >= payload.len():
-            return Err("missing password bool")
-        off = off + 1
-        val r_password = _read_text_field_fast(payload, off)
-        if r_password.is_err():
-            return Err("bad password")
-        password = r_password.unwrap().value
-    else:
-        return Err("unsupported auth method")
-
-    Ok(_AuthRequestFast(
-        username: user.value,
-        service: service.value,
-        method_code: method_code,
-        password: password
-    ))
 
 fn _bytes_to_hex(data: [u8]) -> text:
     var out = ""
@@ -334,60 +108,13 @@ fn _bytes_to_hex(data: [u8]) -> text:
 fn _ed25519_public_key_from_seed(seed: [u8]?) -> [u8]:
     if seed == nil:
         return []
-    val pk = ed25519_keypair_from_seed(seed).1
+    val pk = rt_ed25519_keypair_pk(seed)
     if pk.len() != 32:
         return []
     pk
 
-fn ssh_validate_kex_payload(expected_type: u32, payload: [u8], strict_kex: bool) -> Result<(), text>:
-    """Validate an inbound packet while the session is in pre-NEWKEYS KEX."""
-    if payload.len() == 0:
-        log_raw_println("[sshd-session] kex payload invalid: empty")
-        return Err("empty kex payload")
-    val msg_type = _u8_at(payload, 0)
-    if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] kex payload invalid: strict type={msg_type} expected={expected_type}")
-        return Err("strict-kex unexpected pre-newkeys message")
-    if msg_type.to_u32() != expected_type:
-        log_raw_println("[sshd-session] kex payload invalid: type={msg_type} expected={expected_type}")
-        return Err("unexpected kex packet type")
-    Ok(())
-
-fn ssh_validate_kex_ecdh_init_payload(payload: [u8], strict_kex: bool) -> Result<(), text>:
-    """Baremetal-safe validator for SSH_MSG_KEX_ECDH_INIT."""
-    if payload.len() == 0:
-        log_raw_println("[sshd-session] kex ecdh init invalid: empty")
-        return Err("empty kex payload")
-    val msg_type = _u8_at(payload, 0)
-    if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] kex ecdh init invalid: strict type={msg_type}")
-        return Err("strict-kex unexpected pre-newkeys message")
-    if msg_type != SSH_MSG_KEX_ECDH_INIT:
-        log_raw_println("[sshd-session] kex ecdh init invalid: type={msg_type}")
-        if msg_type == 0:
-            return Err("type0")
-        if msg_type == 20:
-            return Err("type20")
-        if msg_type == 21:
-            return Err("type21")
-        if msg_type == 30:
-            return Err("type30")
-        return Err("typex")
-    Ok(())
-
-fn ssh_validate_newkeys_payload(payload: [u8], strict_kex: bool) -> Result<(), text>:
-    """Baremetal-safe validator for SSH_MSG_NEWKEYS."""
-    if payload.len() == 0:
-        log_raw_println("[sshd-session] newkeys invalid: empty")
-        return Err("empty kex payload")
-    val msg_type = _u8_at(payload, 0)
-    if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] newkeys invalid: strict type={msg_type}")
-        return Err("strict-kex unexpected pre-newkeys message")
-    if msg_type != SSH_MSG_NEWKEYS:
-        log_raw_println("[sshd-session] newkeys invalid: type={msg_type}")
-        return Err("unexpected kex packet type")
-    Ok(())
+fn log_info(_msg: text):
+    pass_dn
 
 # ============================================================================
 # Types
@@ -430,15 +157,8 @@ class SshSession:
     iv_s2c: [u8]
     mac_key_c2s: [u8]
     mac_key_s2c: [u8]
-    negotiated_cipher_c2s: text
-    negotiated_cipher_s2c: text
-    negotiated_mac_c2s: text
-    negotiated_mac_s2c: text
+    negotiated_cipher: text
     host_keys: HostKeySet     # Server's long-term host keys (multi-algorithm)
-    host_certs: HostCertificateSet
-    host_ed25519_public: [u8]
-    ctr_counter_c2s: [u8]
-    ctr_counter_s2c: [u8]
 
 impl SshSession:
 
@@ -455,20 +175,9 @@ impl SshSession:
             rsa_public_blob: nil,
             ecdsa_p256_pkcs8: nil
         )
-        SshSession.new_with_host_materials(socket_fd, user_db, keys, HostCertificateSet(
-            ssh_ed25519_cert: nil,
-            rsa_sha2_256_cert: nil,
-            rsa_sha2_512_cert: nil
-        ), host_public)
+        SshSession.new_with_host_keys(socket_fd, user_db, keys)
 
     static fn new_with_host_keys(socket_fd: i32, user_db: SshUserDb, host_keys: HostKeySet) -> SshSession:
-        SshSession.new_with_host_materials(socket_fd, user_db, host_keys, HostCertificateSet(
-            ssh_ed25519_cert: nil,
-            rsa_sha2_256_cert: nil,
-            rsa_sha2_512_cert: nil
-        ), [])
-
-    static fn new_with_host_materials(socket_fd: i32, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
         """Create a new SSH session with a full HostKeySet."""
         SshSession(
             socket_fd: socket_fd,
@@ -495,15 +204,8 @@ impl SshSession:
             iv_s2c: [],
             mac_key_c2s: [],
             mac_key_s2c: [],
-            negotiated_cipher_c2s: "",
-            negotiated_cipher_s2c: "",
-            negotiated_mac_c2s: "",
-            negotiated_mac_s2c: "",
-            host_keys: host_keys,
-            host_certs: host_certs,
-            host_ed25519_public: host_ed25519_public,
-            ctr_counter_c2s: [],
-            ctr_counter_s2c: []
+            negotiated_cipher: "",
+            host_keys: host_keys
         )
 
     me run():
@@ -566,8 +268,7 @@ impl SshSession:
         """Perform key exchange (curve25519-sha256)."""
         log_info("[app.sshd] " + "[sshd-session] kex start")
         # Send our KEXINIT — advertise algorithms available in our host key set
-        val server_kexinit = ssh_build_kexinit_for_host_keys_and_certs(self.host_keys, self.host_certs)
-        log_raw_println("[sshd-session] server kexinit len={server_kexinit.len()}")
+        val server_kexinit = ssh_build_kexinit_for_host_keys(self.host_keys)
         self.server_kexinit_payload = server_kexinit
         self.send_packet(server_kexinit)
 
@@ -578,79 +279,52 @@ impl SshSession:
             log_info("[app.sshd] " + "[sshd-session] client kexinit missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
             return false
-        if _u8_at(client_payload, 0) == SSH_MSG_IGNORE or _u8_at(client_payload, 0) == SSH_MSG_DEBUG:
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unexpected pre-kex control message")
-            return false
         self.client_kexinit_payload = client_payload
 
         # Parse client KEXINIT
-        var r_client_kex = ssh_parse_kexinit(client_payload)
+        val r_client_kex = ssh_parse_kexinit(client_payload)
         if r_client_kex.is_err():
-            log_raw_println("[sshd-session] client kexinit parse failed len={client_payload.len()} attempting fast parse")
-            r_client_kex = _parse_kexinit_fast(client_payload)
-        if r_client_kex.is_err():
-            log_raw_println("[sshd-session] client kexinit fast parse err")
             log_info("[app.sshd] " + "[sshd-session] client kexinit parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
             return false
         val client_kex = r_client_kex.unwrap()
+        log_info("[app.sshd] " + "[sshd-session] client kexinit hex={_bytes_to_hex(client_payload)}")
         log_info("[app.sshd] " + "[sshd-session] client kexinit parsed")
-        log_raw_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
-        log_raw_println("[sshd-session] client hostkey list={client_kex.server_host_key_algorithms}")
-        log_raw_println("[sshd-session] client enc c2s={client_kex.encryption_client_to_server}")
-        log_raw_println("[sshd-session] client mac c2s={client_kex.mac_client_to_server}")
+        log_info("[app.sshd] " + "[sshd-session] client kexinit hex={_bytes_to_hex(client_payload)}")
 
         # Parse our own KEXINIT (for negotiation)
-        val r_server_kex = _parse_kexinit_fast(server_kexinit)
+        val r_server_kex = ssh_parse_kexinit(server_kexinit)
         val server_kex = r_server_kex.unwrap()
         log_info("[app.sshd] " + "[sshd-session] client kex list={client_kex.kex_algorithms}")
         log_info("[app.sshd] " + "[sshd-session] server kex list={server_kex.kex_algorithms}")
-        log_raw_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
-        log_raw_println("[sshd-session] server hostkey list={server_kex.server_host_key_algorithms}")
-        log_raw_println("[sshd-session] server enc c2s={server_kex.encryption_client_to_server}")
-        log_raw_println("[sshd-session] server mac c2s={server_kex.mac_client_to_server}")
-        serial_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
-        serial_println("[sshd-session] client hostkey list={client_kex.server_host_key_algorithms}")
-        serial_println("[sshd-session] client enc c2s={client_kex.encryption_client_to_server}")
-        serial_println("[sshd-session] client mac c2s={client_kex.mac_client_to_server}")
-        serial_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
-        serial_println("[sshd-session] server hostkey list={server_kex.server_host_key_algorithms}")
-        serial_println("[sshd-session] server enc c2s={server_kex.encryption_client_to_server}")
-        serial_println("[sshd-session] server mac c2s={server_kex.mac_client_to_server}")
+        log_info("[app.sshd] " + "[sshd-session] server kexinit hex={_bytes_to_hex(server_kexinit)}")
+        log_info("[app.sshd] " + "[sshd-session] server kexinit hex={_bytes_to_hex(server_kexinit)}")
 
         # Negotiate algorithms
         val r_algos = ssh_negotiate_algorithms(client_kex, server_kex)
         if r_algos.is_err():
-            match r_algos:
-                case Err(msg):
-                    serial_println("[sshd-session] algo negotiation err={msg}")
-                case Ok(_):
-                    pass_dn
-            log_raw_println("[sshd-session] algo negotiation failed")
             log_info("[app.sshd] " + "[sshd-session] algo negotiation failed")
             self.disconnect(3, "algorithm negotiation failed")
             return false
         val algos_early = r_algos.unwrap()
-        val strict_kex = ssh_kex_uses_strict_kex(client_kex.kex_algorithms, server_kex.kex_algorithms)
         log_info("[app.sshd] " + "[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
-        serial_println("[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
 
         # Receive KEX_ECDH_INIT (client's ephemeral public key)
         val kex_init_payload = self.recv_packet_payload()
-        log_raw_println("[sshd-session] client ecdh init received")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh init received")
         if kex_init_payload.len() == 0:
-            log_raw_println("[sshd-session] client ecdh init missing")
+            log_info("[app.sshd] " + "[sshd-session] client ecdh init missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
             return false
+
         val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
         if r_client_pub.is_err():
-            log_raw_println("[sshd-session] client ecdh init parse err")
+            log_info("[app.sshd] " + "[sshd-session] client ecdh init parse err")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
             return false
         val client_public = r_client_pub.unwrap()
-        log_raw_println("[sshd-session] client ecdh pub len={client_public.len()}")
-        log_raw_println("[sshd-session] client ecdh pub={_bytes_to_hex(client_public)}")
-        serial_println("[sshd-session] client ecdh pub={_bytes_to_hex(client_public)}")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh pub len={client_public.len()}")
+        log_info("[app.sshd] " + "[sshd-session] client ecdh pub={_bytes_to_hex(client_public)}")
 
         # Generate our ephemeral keypair
         val server_private = ssh_kex_generate_private_key()
@@ -681,19 +355,10 @@ impl SshSession:
         serial_println("[sshd-session] shared secret={_bytes_to_hex(shared_secret)}")
 
         # Resolve negotiated algorithms — needed now for host-key-blob type
-        var negotiated_hk_algo = algos_early.host_key
+        val negotiated_hk_algo = algos_early.host_key
 
         # Build host key blob for the negotiated algorithm
-        var host_key_blob = _build_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys, self.host_certs)
-        if host_key_blob.len() == 0:
-            if self.host_ed25519_public.len() == 32:
-                negotiated_hk_algo = "ssh-ed25519"
-                host_key_blob = ssh_build_ed25519_host_key_blob(self.host_ed25519_public)
-            elif self.host_keys.ed25519_seed != nil:
-                val fallback_pubkey = _ed25519_public_key_from_seed(self.host_keys.ed25519_seed)
-                if fallback_pubkey.len() == 32:
-                    negotiated_hk_algo = "ssh-ed25519"
-                    host_key_blob = ssh_build_ed25519_host_key_blob(fallback_pubkey)
+        val host_key_blob = _build_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys)
         log_info("[app.sshd] " + "[sshd-session] host key algo={negotiated_hk_algo} blob len={host_key_blob.len()}")
         log_info("[app.sshd] " + "[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
         serial_println("[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
@@ -716,49 +381,13 @@ impl SshSession:
         if self.session_id.len() == 0:
             self.session_id = exchange_hash
 
-        # Sign the exchange hash with the appropriate host key.
-        # For Ed25519 on the live lane, use the daemon's stored public key
-        # directly so the signature is bound to the exact host key blob we
-        # advertised, instead of re-deriving a public key mid-KEX.
-        var sig_blob: [u8] = []
-        if negotiated_hk_algo == "ssh-ed25519" and self.host_keys.ed25519_seed != nil and self.host_ed25519_public.len() == 32:
-            val stable_seed = _copy_bytes_stable(self.host_keys.ed25519_seed)
-            val stable_pub = _copy_bytes_stable(self.host_ed25519_public)
-            val stable_hash = _copy_bytes_stable(exchange_hash)
-            serial_println("[sshd-session] host ed25519 seed={_bytes_to_hex(stable_seed)}")
-            serial_println("[sshd-session] host ed25519 pub={_bytes_to_hex(stable_pub)}")
-            val sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
-            if sig_raw.len() != 64:
-                log_info("[app.sshd] " + "[sshd-session] host key signing err")
-                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
-                return false
-            ssh_put_u32(sig_blob, 11)
-            sig_blob.push(0x73)
-            sig_blob.push(0x73)
-            sig_blob.push(0x68)
-            sig_blob.push(0x2D)
-            sig_blob.push(0x65)
-            sig_blob.push(0x64)
-            sig_blob.push(0x32)
-            sig_blob.push(0x35)
-            sig_blob.push(0x35)
-            sig_blob.push(0x31)
-            sig_blob.push(0x39)
-            sig_blob.push(0x00)
-            sig_blob.push(0x00)
-            sig_blob.push(0x00)
-            sig_blob.push(0x40)
-            var sig_i: u64 = 0
-            while sig_i < 64 and sig_i < sig_raw.len():
-                sig_blob.push(_u8_at(sig_raw, sig_i))
-                sig_i = sig_i + 1
-        else:
-            val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
-            if r_sig.is_err():
-                log_info("[app.sshd] " + "[sshd-session] host key signing err")
-                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
-                return false
-            sig_blob = r_sig.unwrap()
+        # Sign the exchange hash with the appropriate host key
+        val r_sig = ssh_sign_exchange_hash(negotiated_hk_algo, self.host_keys, exchange_hash)
+        if r_sig.is_err():
+            log_info("[app.sshd] " + "[sshd-session] host key signing err")
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
+            return false
+        val sig_blob = r_sig.unwrap()
         log_info("[app.sshd] " + "[sshd-session] sig blob len={sig_blob.len()}")
         serial_println("[sshd-session] sig blob={_bytes_to_hex(sig_blob)}")
         if negotiated_hk_algo == "ssh-ed25519":
@@ -781,6 +410,22 @@ impl SshSession:
         # Send NEWKEYS
         val newkeys = ssh_build_newkeys()
         self.send_packet(newkeys)
+
+        # Receive client NEWKEYS
+        val client_newkeys = self.recv_packet_payload()
+        var client_newkeys_len: u64 = client_newkeys.len()
+        var client_newkeys_type: u8 = 0
+        if client_newkeys_len > 0:
+            client_newkeys_type = _u8_at(client_newkeys, 0)
+        serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
+        if client_newkeys_len == 0:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
+            return false
+        if client_newkeys_type != 21:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "expected NEWKEYS")
+            return false
+
+        # Derive session keys and activate cipher based on negotiated algorithm
         serial_println("[sshd-session] session_id={_bytes_to_hex(self.session_id)}")
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
         serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
@@ -788,16 +433,12 @@ impl SshSession:
         self.iv_c2s = _copy_bytes_stable(keys.iv_c2s)
         self.iv_s2c = _copy_bytes_stable(keys.iv_s2c)
         var enc_key_len: u64 = 0
-        self.negotiated_cipher_c2s = algos_early.cipher_c2s
-        self.negotiated_cipher_s2c = algos_early.cipher_s2c
-        self.negotiated_mac_c2s = algos_early.mac_c2s
-        self.negotiated_mac_s2c = algos_early.mac_s2c
         if algos_early.cipher_c2s == "aes256-gcm@openssh.com" and algos_early.cipher_s2c == "aes256-gcm@openssh.com":
             enc_key_len = 32
+            self.negotiated_cipher = "aes256-gcm@openssh.com"
         elif algos_early.cipher_c2s == "aes128-gcm@openssh.com" and algos_early.cipher_s2c == "aes128-gcm@openssh.com":
             enc_key_len = 16
-        elif algos_early.cipher_c2s == "aes256-ctr" and algos_early.cipher_s2c == "aes256-ctr":
-            enc_key_len = 32
+            self.negotiated_cipher = "aes128-gcm@openssh.com"
         else:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return false
@@ -805,31 +446,12 @@ impl SshSession:
         self.enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, enc_key_len)
         self.mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
         self.mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
-        self.ctr_counter_c2s = _copy_bytes_stable(self.iv_c2s)
-        self.ctr_counter_s2c = _copy_bytes_stable(self.iv_s2c)
         serial_println("[sshd-session] stored iv_c2s={_bytes_to_hex(self.iv_c2s)}")
         serial_println("[sshd-session] stored iv_s2c={_bytes_to_hex(self.iv_s2c)}")
         serial_println("[sshd-session] stored key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
         serial_println("[sshd-session] stored key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
-        # Receive client NEWKEYS under the pre-NEWKEYS plaintext framing.
-        val client_newkeys = self.recv_packet_payload()
-        var client_newkeys_len: u64 = client_newkeys.len()
-        var client_newkeys_type: u8 = 0
-        if client_newkeys_len > 0:
-            client_newkeys_type = _u8_at(client_newkeys, 0)
-        serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
-        if client_newkeys_len != 1 or client_newkeys_type != 21:
-            log_raw_println("[sshd-session] invalid client NEWKEYS payload")
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid NEWKEYS")
-            return false
-
-        # Subsequent encrypted packets start a fresh packet sequence space.
         self.cipher.activate(0, 0)
-        serial_println("[sshd-session] cipher activated c2s_seq=0 s2c_seq=0")
         log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq=0 s2c_seq=0")
-
-        val ext_info = ssh_build_ext_info_server_sig_algs(host_key_set_advertised_algorithms(self.host_keys))
-        self.send_packet(ext_info)
         log_info("[app.sshd] " + "[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
@@ -842,30 +464,16 @@ impl SshSession:
     me do_service_request() -> bool:
         """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
         log_info("[app.sshd] " + "[sshd-session] service request")
-        while true:
-            val payload = self.recv_packet_payload()
-            serial_println("[sshd-session] service payload len={payload.len()} payload={_bytes_to_hex(payload)}")
-            if payload.len() == 0:
-                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
-                return false
+        val payload = self.recv_packet_payload()
+        serial_println("[sshd-session] service payload len={payload.len()} payload={_bytes_to_hex(payload)}")
+        if payload.len() == 0:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
+            return false
 
-            val msg_type = _u8_at(payload, 0)
-            if msg_type == 7 or msg_type == 2 or msg_type == 4:
-                serial_println("[sshd-session] pre-auth skip type=0x{format_hex(msg_type.to_i64())}")
-                log_raw_println("[sshd-session] skip pre-auth msg type=0x{format_hex(msg_type.to_i64())}")
-                pass_dn
-            else:
-                serial_println("[sshd-session] pre-auth validate payload={_bytes_to_hex(payload)}")
-                if not _is_ssh_userauth_service_request(payload):
-                    serial_println("[sshd-session] invalid service request payload")
-                    self.disconnect(2, "invalid service request")
-                    return false
-
-                val accept = ssh_build_service_accept("ssh-userauth")
-                serial_println("[sshd-session] service accept payload={_bytes_to_hex(accept)}")
-                self.send_packet(accept)
-                log_info("[app.sshd] " + "[sshd-session] service request ok")
-                return true
+        val accept = ssh_build_service_accept("ssh-userauth")
+        self.send_packet(accept)
+        log_info("[app.sshd] " + "[sshd-session] service request ok")
+        true
 
     # ========================================================================
     # Phase 4: Authentication
@@ -878,46 +486,33 @@ impl SshSession:
 
         while attempts < MAX_AUTH_ATTEMPTS:
             val payload = self.recv_packet_payload()
-            serial_println("[sshd-session] auth payload len={payload.len()} payload={_bytes_to_hex(payload)}")
             if payload.len() == 0:
                 self.state = SessionState.Closed
                 return false
 
-            val auth_msg_type = _u8_at(payload, 0)
-            if auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
-                serial_println("[sshd-session] auth skip type=0x{format_hex(auth_msg_type.to_u64(), 1)}")
-                continue
-
-            if auth_msg_type != 50:
+            if _u8_at(payload, 0) != SSH_MSG_USERAUTH_REQUEST:
                 # Ignore non-auth messages during auth phase
                 attempts = attempts + 1
                 continue
 
-            val r_fast_auth = _parse_auth_request_fast(payload)
-            if r_fast_auth.is_err():
+            val r = ssh_parse_auth_request(payload)
+            if r.is_err():
                 attempts = attempts + 1
-                val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                self.send_packet(disc)
-                self.state = SessionState.Closed
-                return false
-            val fast_auth = r_fast_auth.unwrap()
-            serial_println("[sshd-session] auth fast service={fast_auth.service} method_code={fast_auth.method_code}")
-            if not _text_equals_bytes(fast_auth.service, [0x73u8, 0x73, 0x68, 0x2D, 0x63, 0x6F, 0x6E, 0x6E, 0x65, 0x63, 0x74, 0x69, 0x6F, 0x6E]):
-                attempts = attempts + 1
-                val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                self.send_packet(disc)
-                self.state = SessionState.Closed
-                return false
-
-            if fast_auth.method_code == 1:
-                val fail_base: [u8] = [51u8, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6F, 0x72, 0x64, 0x00]
-                val fail = _copy_bytes_stable(fail_base)
-                serial_println("[sshd-session] auth none fail payload={_bytes_to_hex(fail)}")
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                 self.send_packet(fail)
+                continue
 
-            elif fast_auth.method_code == 2:
-                if self.user_db.authenticate_password(fast_auth.username, fast_auth.password):
-                    self.authenticated_user = fast_auth.username
+            val req = r.unwrap()
+
+            if req.method == "none":
+                # "none" method: always fail, but tell client which methods are available
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
+                self.send_packet(fail)
+                attempts = attempts + 1
+
+            elif req.method == "password":
+                if self.user_db.authenticate_password(req.username, req.password):
+                    self.authenticated_user = req.username
                     val success = ssh_build_auth_success()
                     self.send_packet(success)
                     log_info("[app.sshd] " + "[sshd-session] auth ok")
@@ -925,14 +520,79 @@ impl SshSession:
                     return true
                 else:
                     attempts = attempts + 1
-                    val fail_base: [u8] = [51u8, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6F, 0x72, 0x64, 0x00]
-                    val fail = _copy_bytes_stable(fail_base)
+                    val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                     self.send_packet(fail)
 
+            elif req.method == "keyboard-interactive":
+                val info_req = ssh_build_userauth_info_request(
+                    "SimpleOS SSH",
+                    "Password authentication",
+                    "Password: ",
+                    false
+                )
+                self.send_packet(info_req)
+                val response_payload = self.recv_packet_payload()
+                val r_password = ssh_parse_userauth_info_response(response_payload)
+                if r_password.is_ok() and self.user_db.authenticate_password(req.username, r_password.unwrap()):
+                    self.authenticated_user = req.username
+                    val success = ssh_build_auth_success()
+                    self.send_packet(success)
+                    log_info("[app.sshd] " + "[sshd-session] auth ok (keyboard-interactive)")
+                    self.state = SessionState.Interactive
+                    return true
+                else:
+                    attempts = attempts + 1
+                    val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
+                    self.send_packet(fail)
+
+            elif req.method == "publickey":
+                if not req.has_signature:
+                    # Probe: client asks if the key is acceptable — respond PK_OK
+                    val pk_ok = ssh_build_userauth_pk_ok(req.key_algo, req.key_blob)
+                    self.send_packet(pk_ok)
+                    # Don't increment attempts — probe is not a failure
+                else:
+                    # Verify: build signed_data per RFC 4252 §7 and verify signature
+                    val signed_data = _build_publickey_signed_data(
+                        self.session_id, req.username, req.key_algo, req.key_blob
+                    )
+                    # Unwrap the SSH signature envelope: string algo_name + string raw_sig
+                    val raw_sig = _unwrap_ssh_signature(req.signature)
+                    var verified: bool = false
+                    if req.key_algo == "rsa-sha2-256":
+                        val spki_der = ssh_rsa_blob_to_spki_der(req.key_blob)
+                        val vr = rt_rsa_sha256_verify(spki_der, signed_data, raw_sig)
+                        verified = vr == 1
+                    elif req.key_algo == "ssh-ed25519":
+                        # Ed25519 blob: string "ssh-ed25519" + string raw_pubkey (32 bytes)
+                        val raw_pubkey = _extract_ed25519_pubkey(req.key_blob)
+                        val vr = rt_ed25519_verify(signed_data, raw_pubkey, raw_sig)
+                        verified = vr == 1
+                    else:
+                        verified = false
+
+                    if verified:
+                        val user_exists = self.user_db.find_user(req.username)
+                        if user_exists != nil:
+                            self.authenticated_user = req.username
+                            val success = ssh_build_auth_success()
+                            self.send_packet(success)
+                            log_info("[app.sshd] " + "[sshd-session] auth ok (publickey)")
+                            self.state = SessionState.Interactive
+                            return true
+                        else:
+                            attempts = attempts + 1
+                            val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
+                            self.send_packet(fail)
+                    else:
+                        attempts = attempts + 1
+                        val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
+                        self.send_packet(fail)
+
             else:
+                # Unknown method
                 attempts = attempts + 1
-                val fail_base: [u8] = [51u8, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6F, 0x72, 0x64, 0x00]
-                val fail = _copy_bytes_stable(fail_base)
+                val fail = ssh_build_auth_failure(["publickey", "password", "keyboard-interactive"], false)
                 self.send_packet(fail)
 
         # Too many failed attempts
@@ -999,23 +659,17 @@ impl SshSession:
     me _handle_channel_open(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_OPEN."""
         serial_println("[sshd-session] handle_channel_open len={payload.len()}")
-        if payload.len() >= 24 and _u8_at(payload, 0) == 90:
-            val r_type = _read_text_field_fast(payload, 1)
-            if r_type.is_ok():
-                val ch_type = r_type.unwrap()
-                if _text_equals_bytes(ch_type.value, [0x73, 0x65, 0x73, 0x73, 0x69, 0x6F, 0x6E]) and ch_type.next_offset + 12 <= payload.len():
-                    val remote_id = _read_u32_stable(payload, ch_type.next_offset)
-                    val remote_window = _read_u32_stable(payload, ch_type.next_offset + 4)
-                    val remote_max_packet = _read_u32_stable(payload, ch_type.next_offset + 8)
-                    serial_println("[sshd-session] channel open=session (live fast path)")
-                    val local_id: u32 = 0
-                    self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
-                    val confirm = ssh_build_channel_open_confirmation(
-                        remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
-                    )
-                    serial_println("[sshd-session] channel open confirm len={confirm.len()}")
-                    self.send_packet(confirm)
-                    return
+        if _is_session_channel_open_payload(payload):
+            serial_println("[sshd-session] channel open=session (live fast path)")
+            val remote_id: u32 = 0
+            val local_id: u32 = 0
+            self.channels.seed_open(local_id, ChannelType.Session, remote_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+            val confirm = ssh_build_channel_open_confirmation(
+                remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+            )
+            serial_println("[sshd-session] channel open confirm len={confirm.len()}")
+            self.send_packet(confirm)
+            return
 
         val r = ssh_parse_channel_open(payload)
         if r.is_err():
@@ -1123,32 +777,15 @@ impl SshSession:
 
     me _handle_channel_request(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_REQUEST (pty-req, shell, exec, env, window-change)."""
-        if payload.len() < 11 or _u8_at(payload, 0) != 98:
+        val r = ssh_parse_channel_request(payload)
+        if r.is_err():
             return
-        val recipient = _read_u32_stable(payload, 1)
-        val r_type = _read_text_field_fast(payload, 5)
-        if r_type.is_err():
-            return
-        val req_type = r_type.unwrap()
-        if req_type.next_offset >= payload.len():
-            return
-        val want_reply = _u8_at(payload, req_type.next_offset) != 0
-        var off = req_type.next_offset + 1
-        var request_code: u8 = 0
-        if _text_equals_bytes(req_type.value, [0x70, 0x74, 0x79, 0x2D, 0x72, 0x65, 0x71]):
-            request_code = 1
-        elif _text_equals_bytes(req_type.value, [0x73, 0x68, 0x65, 0x6C, 0x6C]):
-            request_code = 2
-        elif _text_equals_bytes(req_type.value, [0x65, 0x78, 0x65, 0x63]):
-            request_code = 3
-        elif _text_equals_bytes(req_type.value, [0x73, 0x75, 0x62, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6D]):
-            request_code = 4
-        elif _text_equals_bytes(req_type.value, [0x65, 0x6E, 0x76]):
-            request_code = 5
-        elif _text_equals_bytes(req_type.value, [0x77, 0x69, 0x6E, 0x64, 0x6F, 0x77, 0x2D, 0x63, 0x68, 0x61, 0x6E, 0x67, 0x65]):
-            request_code = 6
-        else:
-            return
+
+        val parsed = r.unwrap()
+        val recipient = parsed.0
+        val req_type = parsed.1
+        val want_reply = parsed.2
+        var off = parsed.3
 
         val ch = self.channels.find(recipient)
         if ch == nil:
@@ -1157,32 +794,32 @@ impl SshSession:
                 self.send_packet(fail)
             return
 
-        if request_code == 1:
+        if req_type == "pty-req":
             self._handle_pty_request(payload, off, recipient, ch.remote_id, want_reply)
 
-        elif request_code == 2:
+        elif req_type == "shell":
             self._handle_shell_request(recipient, ch.remote_id, want_reply)
 
-        elif request_code == 3:
+        elif req_type == "exec":
             serial_println("[sshd-session] channel request=exec want_reply={want_reply}")
             self._handle_exec_request(payload, off, recipient, ch.remote_id, want_reply)
 
-        elif request_code == 4:
+        elif req_type == "subsystem":
             if want_reply:
                 val fail = ssh_build_channel_failure(ch.remote_id)
                 self.send_packet(fail)
 
-        elif request_code == 5:
+        elif req_type == "env":
             # Environment variable setting — parse but don't act on it
             if want_reply:
                 val success = ssh_build_channel_success(ch.remote_id)
                 self.send_packet(success)
 
-        elif request_code == 6:
+        elif req_type == "window-change":
             # Terminal resize
             if off + 8 <= payload.len():
-                val new_cols = _read_u32_stable(payload, off)
-                val new_rows = _read_u32_stable(payload, off + 4)
+                val new_cols = ssh_get_u32(payload, off)
+                val new_rows = ssh_get_u32(payload, off + 4)
                 if val pty = self.pty:
                     pty.resize(new_cols, new_rows)
             # window-change never wants reply per RFC
@@ -1270,7 +907,8 @@ impl SshSession:
 
     me _handle_exec_request(payload: [u8], off: u64, local_id: u32, remote_id: u32, want_reply: bool):
         """Handle exec requests by running the command through the same shell REPL."""
-        val r_command = _read_text_field_fast(payload, off)
+        var pos = off
+        val r_command = ssh_get_text(payload, pos)
         if r_command.is_err():
             if want_reply:
                 val fail = ssh_build_channel_failure(remote_id)
@@ -1324,21 +962,10 @@ impl SshSession:
 
     me _send_channel_exit_status(remote_id: u32, exit_status: u32):
         var payload: [u8] = []
-        payload.push(98)
+        ssh_put_byte(payload, SSH_MSG_CHANNEL_REQUEST)
         ssh_put_u32(payload, remote_id)
-        ssh_put_u32(payload, 11)
-        payload.push(0x65)
-        payload.push(0x78)
-        payload.push(0x69)
-        payload.push(0x74)
-        payload.push(0x2D)
-        payload.push(0x73)
-        payload.push(0x74)
-        payload.push(0x61)
-        payload.push(0x74)
-        payload.push(0x75)
-        payload.push(0x73)
-        payload.push(0)
+        ssh_put_text(payload, "exit-status")
+        ssh_put_bool(payload, false)
         ssh_put_u32(payload, exit_status)
         self.send_packet(payload)
 
@@ -1382,30 +1009,17 @@ impl SshSession:
 
     me send_packet(payload: [u8]):
         """Send an SSH packet. Encrypts if cipher is active."""
-        val stable_payload = _copy_bytes_stable(payload)
-        serial_println("[sshd-session] send_packet active={self.cipher.active} payload_len={stable_payload.len()} send_seq={self.send_seq}")
+        serial_println("[sshd-session] send_packet active={self.cipher.active} payload_len={payload.len()} send_seq={self.send_seq}")
         if self.cipher.active:
             var encrypted: [u8] = []
-            if self.negotiated_cipher_s2c == "aes256-gcm@openssh.com":
-                encrypted = ssh_encrypt_packet_aes_gcm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
-            elif self.negotiated_cipher_s2c == "aes128-gcm@openssh.com":
-                encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), stable_payload)
-                serial_println("[sshd-session] send encrypted len={encrypted.len()} seq={self.cipher.seq_s2c} packet={_bytes_to_hex(encrypted)}")
-            elif self.negotiated_cipher_s2c == "aes256-ctr":
-                val ctr_packet = ssh_encrypt_packet_aes_ctr_etm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.ctr_counter_s2c, self.negotiated_mac_s2c, self.mac_key_s2c)
-                if ctr_packet.is_err():
-                    return
-                val built = ctr_packet.unwrap()
-                encrypted = built.packet
-                self.ctr_counter_s2c = built.next_counter
+            if self.negotiated_cipher == "aes256-gcm@openssh.com":
+                encrypted = ssh_encrypt_packet_aes_gcm(payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
             else:
-                return
+                encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), payload)
             self.raw_send(encrypted)
             self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
         else:
-            val header = _build_plain_packet_header(stable_payload.len(), 8)
-            val packet_with_payload = rt_bytes_concat(header.header, stable_payload)
-            val packet = rt_bytes_concat(packet_with_payload, _zero_padding_bytes(header.padding_len))
+            val packet = ssh_packet_build(payload, self.send_seq)
             self.raw_send(packet)
         self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
 
@@ -1421,10 +1035,9 @@ impl SshSession:
             if payload.len() == 0:
                 log_info("[app.sshd] " + "[sshd-session] plaintext incomplete")
                 return []
-            val stable_payload = _copy_bytes_stable(payload)
             log_info("[app.sshd] " + "[sshd-session] plaintext packet ok")
             self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-            return stable_payload
+            return payload
 
         var i: u64 = 0
         if self.recv_buf.len() == 0:
@@ -1441,43 +1054,6 @@ impl SshSession:
                     self.recv_buf = new_data
 
         if self.cipher.active:
-            if self.negotiated_cipher_c2s == "aes256-ctr":
-                val mac_len = ssh_mac_len(self.negotiated_mac_c2s)
-                var ctr_empty_spins: u64 = 0
-                while self.recv_buf.len() < 4 + mac_len + 1:
-                    val more_head = self.raw_recv(RECV_BUF_SIZE)
-                    if more_head.len() == 0:
-                        ctr_empty_spins = ctr_empty_spins + 1
-                        if ctr_empty_spins > 100000:
-                            return []
-                        rt_thread_sleep(1)
-                        pass_dn
-                    else:
-                        ctr_empty_spins = 0
-                        self.recv_buf = rt_bytes_concat(self.recv_buf, more_head)
-                val packet_length = ssh_get_u32(self.recv_buf, 0).to_u64()
-                val total_needed = 4 + packet_length + mac_len
-                while self.recv_buf.len() < total_needed:
-                    val more = self.raw_recv(RECV_BUF_SIZE)
-                    if more.len() == 0:
-                        ctr_empty_spins = ctr_empty_spins + 1
-                        if ctr_empty_spins > 100000:
-                            return []
-                        rt_thread_sleep(1)
-                        pass_dn
-                    else:
-                        ctr_empty_spins = 0
-                        self.recv_buf = rt_bytes_concat(self.recv_buf, more)
-                val enc_packet = _copy_range_stable(self.recv_buf, 0, total_needed)
-                self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
-                val decrypted = ssh_decrypt_packet_aes_ctr_etm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.ctr_counter_c2s, self.negotiated_mac_c2s, self.mac_key_c2s)
-                if decrypted.is_err():
-                    return []
-                val packet = decrypted.unwrap()
-                self.ctr_counter_c2s = packet.next_counter
-                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
-                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                return packet.payload
             # Encrypted mode: need at least 4 bytes for length + 16 for tag
             var empty_spins: u64 = 0
             while self.recv_buf.len() < 20:
@@ -1511,14 +1087,14 @@ impl SshSession:
                     self.recv_buf = rt_bytes_concat(self.recv_buf, more)
 
             # Extract the encrypted packet
-            var enc_packet = _copy_range_stable(self.recv_buf, 0, total_needed)
+            var enc_packet = rt_bytes_slice(self.recv_buf, 0, total_needed.to_i64())
             serial_println("[sshd-session] recv encrypted len={enc_packet.len()} seq={self.cipher.seq_c2s} packet={_bytes_to_hex(enc_packet)}")
 
             # Remove consumed bytes from recv_buf
             self.recv_buf = _slice_range(self.recv_buf, total_needed, self.recv_buf.len())
 
             # Decrypt
-            if self.negotiated_cipher_c2s == "aes256-gcm@openssh.com":
+            if self.negotiated_cipher == "aes256-gcm@openssh.com":
                 val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
                 if decrypted.is_ok():
                     self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
@@ -1540,11 +1116,8 @@ impl SshSession:
 
     me disconnect(reason: u32, description: text):
         """Send SSH_MSG_DISCONNECT and close the session."""
-        serial_println("[sshd-session] disconnect reason={reason} desc={description}")
         log_info("[app.sshd] " + "[sshd-session] disconnect reason={reason} description={description}")
         val msg = ssh_build_disconnect(reason, description)
-        serial_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
-        log_raw_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
         self.send_packet(msg)
         self.state = SessionState.Closed
 
@@ -1567,42 +1140,24 @@ impl SshSession:
 # Host Key Helpers
 # ============================================================================
 
-fn _build_host_key_blob_for_algo(algo: text, host_keys: HostKeySet, host_certs: HostCertificateSet) -> [u8]:
+fn _build_host_key_blob_for_algo(algo: text, host_keys: HostKeySet) -> [u8]:
     """Build the SSH host key blob for the negotiated host key algorithm.
 
     For ssh-ed25519: derives the public key from the seed and builds the blob.
     For rsa-sha2-256 / rsa-sha2-512: uses the prebuilt SSH RSA public blob.
-    For ecdsa-sha2-nistp256: derives the uncompressed P-256 public point from PKCS#8.
+    For ecdsa-sha2-nistp256: not yet fully supported (returns empty blob).
     Callers pass the blob directly into the exchange hash computation.
     """
-    if algo == "ssh-ed25519-cert-v01@openssh.com":
-        if host_certs.ssh_ed25519_cert != nil:
-            return host_certs.ssh_ed25519_cert
-        return []
     if algo == "ssh-ed25519":
         val pubkey = _ed25519_public_key_from_seed(host_keys.ed25519_seed)
         if pubkey.len() != 32:
             return []
         return ssh_build_ed25519_host_key_blob(pubkey)
-    if algo == "rsa-sha2-256-cert-v01@openssh.com":
-        if host_certs.rsa_sha2_256_cert != nil:
-            return host_certs.rsa_sha2_256_cert
-        return []
-    if algo == "rsa-sha2-512-cert-v01@openssh.com":
-        if host_certs.rsa_sha2_512_cert != nil:
-            return host_certs.rsa_sha2_512_cert
-        return []
     if algo == "rsa-sha2-256" or algo == "rsa-sha2-512":
         if host_keys.rsa_public_blob != nil:
             return host_keys.rsa_public_blob
         return []
-    if algo == "ecdsa-sha2-nistp256":
-        if host_keys.ecdsa_p256_pkcs8 == nil:
-            return []
-        val q_bytes = ecdsa_p256_public_point_from_pkcs8(host_keys.ecdsa_p256_pkcs8)
-        if q_bytes.len() != 65:
-            return []
-        return ssh_build_ecdsa_p256_host_key_blob(q_bytes)
+    # For ECDSA the server needs to supply the public key separately.
     []
 
 # ============================================================================
@@ -1692,13 +1247,3 @@ pub fn ssh_shell_roundtrip_output_for_test(input: text) -> text:
     val _running = shell.feed_remote_input(input)
     output = "{output}{shell.take_remote_output()}"
     output
-
-pub fn ssh_validate_kex_payload_for_test(expected_type: u32, payload: [u8], strict_kex: bool) -> Result<(), text>:
-    ssh_validate_kex_payload(expected_type, payload, strict_kex)
-
-pub fn ssh_host_key_blob_for_algo_for_test(algo: text, host_keys: HostKeySet) -> [u8]:
-    _build_host_key_blob_for_algo(algo, host_keys, HostCertificateSet(
-        ssh_ed25519_cert: nil,
-        rsa_sha2_256_cert: nil,
-        rsa_sha2_512_cert: nil
-    ))

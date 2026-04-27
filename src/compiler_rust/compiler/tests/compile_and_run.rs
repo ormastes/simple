@@ -119,12 +119,12 @@ fn compile_logical_or() {
 
 #[test]
 fn compile_let_binding() {
-    assert_eq!(compile_and_run("let x = 42\nmain = x"), 42);
+    assert_eq!(compile_and_run("val x = 42\nmain = x"), 42);
 }
 
 #[test]
 fn compile_multiple_lets() {
-    assert_eq!(compile_and_run("let a = 10\nlet b = 32\nmain = a + b"), 42);
+    assert_eq!(compile_and_run("val a = 10\nval b = 32\nmain = a + b"), 42);
 }
 
 #[test]

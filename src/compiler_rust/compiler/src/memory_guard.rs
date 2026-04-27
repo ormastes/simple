@@ -6,12 +6,13 @@
 //! # Usage
 //! ```rust,no_run
 //! use simple_compiler::memory_guard::{MemoryGuard, ModuleLoadGuard};
+//! use std::path::Path;
 //!
 //! // Initialize once at startup
 //! MemoryGuard::init();
 //!
 //! // Per-module load tracking
-//! let guard = ModuleLoadGuard::enter("path/to/module.spl");
+//! let guard = ModuleLoadGuard::enter(Path::new("path/to/module.spl"));
 //! // ... load module ...
 //! guard.exit(); // records RSS delta, warns if threshold exceeded
 //! ```

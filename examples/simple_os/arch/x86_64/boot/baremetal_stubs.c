@@ -8944,9 +8944,10 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     return ENCODE_PTR(a);
 }
 
-/* rt_array_push: push element, no growth (matching Rust runtime).
- * Returns ENCODE_PTR of same array. If at capacity, item is silently dropped.
- * Callers must pre-allocate sufficient capacity (compiler uses 16 for empty []). */
+/* rt_array_push: push element in-place.
+ * Returns ENCODE_PTR of the same array. If at capacity, grow only the backing
+ * items buffer so the array handle stays stable for codegen callers that do
+ * not store back a replacement pointer from push(). */
 RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
@@ -8961,7 +8962,8 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     if (a->len >= a->cap) {
         /* Preserve the original header address so callers that treat push as
          * in-place mutation do not keep using a stale handle after growth. */
-        uint32_t new_cap = a->cap * 2;
+        uint32_t old_cap = a->cap;
+        uint32_t new_cap = old_cap * 2;
         if (new_cap < 128) new_cap = 128;
         RuntimeValue *new_items = (RuntimeValue *)malloc((size_t)new_cap * sizeof(RuntimeValue));
         if (!new_items) return ENCODE_PTR(a); /* alloc failed, drop */
@@ -10839,12 +10841,8 @@ RuntimeValue rt_ssh_aes128_gcm_decrypt_packet(RuntimeValue key_rv, RuntimeValue 
     uint32_t body_len = packet_len - 4U - 16U;
     uint8_t nonce[12];
     memcpy(nonce, iv, 12U);
-    uint64_t carry = (uint64_t)seq_num_i64;
-    for (int i = 11; i >= 4 && carry > 0; i--) {
-        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
-        nonce[i] = (uint8_t)(sum & 0xffU);
-        carry = (carry >> 8) + (sum >> 8);
-    }
+    uint64_t seq = (uint64_t)seq_num_i64;
+    for (uint32_t i = 0; i < 8U; i++) nonce[11U - i] ^= (uint8_t)((seq >> (8U * i)) & 0xffU);
 
     body = (uint8_t *)malloc(body_len ? body_len : 1U);
     if (!body) goto cleanup;

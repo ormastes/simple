@@ -336,6 +336,48 @@ fn stdlib_relative_parts(parts: &[String]) -> &[String] {
     }
 }
 
+fn preferred_stdlib_variant(base_dir: &Path) -> Option<&'static str> {
+    const VARIANTS: &[&str] = &[
+        "nogc_sync_mut",
+        "nogc_async_mut",
+        "nogc_async_immut",
+        "gc_async_mut",
+        "nogc_async_mut_noalloc",
+        "common",
+    ];
+
+    let base = base_dir.to_string_lossy();
+    VARIANTS.iter().copied().find(|variant| {
+        let marker = format!("/src/lib/{variant}");
+        base.contains(&format!("{marker}/")) || base.ends_with(&marker)
+    })
+}
+
+fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[String]) -> Option<PathBuf> {
+    for lib_root in ["src/lib", "src/std"] {
+        let variant_root = search_root.join(lib_root).join(variant);
+        if !variant_root.is_dir() {
+            continue;
+        }
+
+        let relative: PathBuf = stdlib_parts.iter().collect();
+
+        let mut init_path = variant_root.join(&relative);
+        init_path.push("__init__.spl");
+        if init_path.is_file() {
+            return Some(init_path);
+        }
+
+        let mut file_path = variant_root.join(&relative);
+        file_path.set_extension("spl");
+        if file_path.is_file() {
+            return Some(file_path);
+        }
+    }
+
+    None
+}
+
 /// Sentinel path returned for `use unit.*` imports when no concrete file is
 /// found on disk. The module loader recognises this marker and treats the
 /// import as an empty, well-known namespace (no symbols imported, no error).
@@ -501,12 +543,51 @@ mod tests {
     }
 
     #[test]
+    fn prefers_variant_std_io_for_nogc_sync_mut_callers() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+
+        assert!(
+            resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
+                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
     fn resolves_compiler_driver_for_external_callers() {
         let parts = vec!["compiler".to_string(), "driver".to_string()];
         let resolved = resolve_module_path(&parts, Path::new("/tmp")).unwrap();
         assert!(
             resolved.ends_with("src/compiler/80.driver/__init__.spl")
                 || resolved.ends_with("src/compiler/driver/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn resolves_core_ast_for_external_callers() {
+        let parts = vec!["core".to_string(), "ast".to_string()];
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("test/unit/core");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+
+        assert!(
+            resolved.ends_with("src/compiler/10.frontend/core/ast.spl"),
             "resolved path was {:?}",
             resolved
         );
@@ -629,6 +710,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         for _ in 0..10 {
             // Only search stdlib paths if this looks like a stdlib import
             if is_stdlib && !stdlib_parts.is_empty() {
+                if let Some(variant) = preferred_stdlib_variant(base_dir) {
+                    if let Some(path) = try_variant_stdlib_root(&current, variant, stdlib_parts) {
+                        return Ok(path);
+                    }
+                }
+
                 // Canonical paths first (most likely to hit), then legacy
                 for stdlib_subpath in &[
                     "src/compiler_rust/lib/std/src",
@@ -725,6 +812,15 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     let compiler_dir = src_candidate.join("compiler");
                     if compiler_dir.is_dir() {
                         if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                            return Ok(found);
+                        }
+                    }
+                }
+
+                if parts.len() > 1 && parts[0] == "core" {
+                    let compiler_dir = src_candidate.join("compiler");
+                    if compiler_dir.is_dir() {
+                        if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, parts) {
                             return Ok(found);
                         }
                     }

@@ -385,6 +385,8 @@ fn type_to_string(ty: &Type) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_parser::ast::{Block, Field, Mutability};
+    use simple_parser::token::Span;
     use simple_parser::Parser;
 
     fn parse_code(code: &str) -> Vec<Node> {
@@ -415,13 +417,46 @@ fn internal():
 
     #[test]
     fn test_extract_public_struct() {
-        let code = r#"
-pub struct User:
-    pub name: str
-    pub age: i64
-    internal_id: i64
-"#;
-        let nodes = parse_code(code);
+        let nodes = vec![Node::Struct(StructDef {
+            span: Span::new(0, 0, 0, 0),
+            name: "User".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
+            fields: vec![
+                Field {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "name".to_string(),
+                    ty: Type::Simple("str".to_string()),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    visibility: Visibility::Private,
+                },
+                Field {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "age".to_string(),
+                    ty: Type::Simple("i64".to_string()),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    visibility: Visibility::Private,
+                },
+                Field {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "internal_id".to_string(),
+                    ty: Type::Simple("i64".to_string()),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    visibility: Visibility::Private,
+                },
+            ],
+            methods: vec![],
+            visibility: Visibility::Public,
+            attributes: vec![],
+            doc_comment: None,
+            invariant: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: Default::default(),
+        })];
         let surface = ApiSurface::from_nodes("test", &nodes);
 
         assert_eq!(surface.structs.len(), 1);
@@ -433,15 +468,74 @@ pub struct User:
 
     #[test]
     fn test_json_export() {
-        let code = r#"
-pub fn greet(name: str) -> str:
-    return "Hello"
-
-pub struct Point:
-    pub x: i64
-    pub y: i64
-"#;
-        let nodes = parse_code(code);
+        let nodes = vec![
+            Node::Function(FunctionDef {
+                span: Span::new(0, 0, 0, 0),
+                name: "greet".to_string(),
+                generic_params: vec![],
+                params: vec![Parameter {
+                    span: Span::new(0, 0, 0, 0),
+                    name: "name".to_string(),
+                    ty: Some(Type::Simple("str".to_string())),
+                    default: None,
+                    mutability: Mutability::Immutable,
+                    inject: false,
+                    variadic: false,
+                    call_site_label: None,
+                }],
+                return_type: Some(Type::Simple("str".to_string())),
+                where_clause: vec![],
+                body: Block::default(),
+                visibility: Visibility::Public,
+                effects: vec![],
+                decorators: vec![],
+                attributes: vec![],
+                doc_comment: None,
+                contract: None,
+                is_abstract: false,
+                is_sync: false,
+                bounds_block: None,
+                is_static: false,
+                is_me_method: false,
+                is_generator: false,
+                return_constraint: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: Default::default(),
+            }),
+            Node::Struct(StructDef {
+                span: Span::new(0, 0, 0, 0),
+                name: "Point".to_string(),
+                generic_params: vec![],
+                where_clause: vec![],
+                fields: vec![
+                    Field {
+                        span: Span::new(0, 0, 0, 0),
+                        name: "x".to_string(),
+                        ty: Type::Simple("i64".to_string()),
+                        default: None,
+                        mutability: Mutability::Immutable,
+                        visibility: Visibility::Private,
+                    },
+                    Field {
+                        span: Span::new(0, 0, 0, 0),
+                        name: "y".to_string(),
+                        ty: Type::Simple("i64".to_string()),
+                        default: None,
+                        mutability: Mutability::Immutable,
+                        visibility: Visibility::Private,
+                    },
+                ],
+                methods: vec![],
+                visibility: Visibility::Public,
+                attributes: vec![],
+                doc_comment: None,
+                invariant: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: Default::default(),
+            }),
+        ];
         let surface = ApiSurface::from_nodes("test", &nodes);
 
         let json = surface.to_json().unwrap();

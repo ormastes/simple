@@ -62,6 +62,7 @@ use compiler.core.parser_decls.{parse_module_body}
 var par_errors: [text] = []
 var par_warnings: [text] = []
 var par_struct_names: [text] = []
+var par_had_error: bool = false
 
 extern fn rt_is_debug_mode_enabled() -> bool
 
@@ -95,13 +96,10 @@ fn par_col_get() -> i64:
     lex_token_col()
 
 fn par_had_error_set(value: bool):
-    if value:
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR", "1")
-    else:
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR", "0")
+    par_had_error = value
 
 fn par_had_error_get() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP_PAR_HAD_ERROR") ?? "0") == "1"
+    par_had_error
 
 # ===== Parser Init =====
 
@@ -116,11 +114,11 @@ fn parser_init_with_path(source: text, path: text):
         par_warnings = []
     if par_struct_names == nil:
         par_struct_names = []
+    par_had_error = false
     ast_reset()
     if path != "":
         module_set_path(path)
     lex_init_with_path(source, path)
-    par_had_error_set(false)
     parser_advance()
 
 fn parser_advance():
@@ -380,12 +378,18 @@ fn parser_parse_type_with_union() -> i64:
 # ===== Top-Level Module Entry Points =====
 
 fn parse_module(source: text, path: text):
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     val preprocessed = _pp_preprocess_conditionals(source)
     parser_init_with_path(preprocessed, path)
     parse_module_body()
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     # Nil-guards: module-level vars may be nil in native binaries
     if par_errors == nil:
         par_errors = []
@@ -393,12 +397,14 @@ fn parse_module_file(source: text, path: text):
         par_warnings = []
     if par_struct_names == nil:
         par_struct_names = []
+    par_had_error = false
     val preprocessed = _pp_preprocess_conditionals(source)
     module_set_path(path)
     lex_init_with_path(preprocessed, path)
-    par_had_error_set(false)
     parser_advance()
     parse_module_body()
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
 
 fn parser_has_errors() -> bool:
     par_had_error_get()

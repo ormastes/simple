@@ -11,7 +11,6 @@ use std.nogc_sync_mut.ffi.io.{dir_create_all}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_getpid() -> i64
@@ -30,7 +29,7 @@ fn _ssh_probe_command_for_port(port: i64) -> text:
         "-o NumberOfPasswordPrompts=1 " +
         "-p {port} root@127.0.0.1 true"
 
-fn _scenario_x64_ssh_on_port(port: i64, disk_path: text) -> QemuScenario:
+fn _scenario_x64_ssh_on_port(port: i64) -> QemuScenario:
     QemuScenario(
         name: "x64-ssh-{port}",
         arch: Architecture.X86_64,
@@ -39,7 +38,7 @@ fn _scenario_x64_ssh_on_port(port: i64, disk_path: text) -> QemuScenario:
         memory: "2G",
         qemu_extra: [
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-drive", "file={disk_path},if=none,id=nvm,format=raw",
+            "-drive", "file=build/os/simpleos_disk.img,if=none,id=nvm,format=raw",
             "-device", "nvme,serial=deadbeef,drive=nvm",
             "-netdev", "user,id=n0,hostfwd=tcp::{port}-:22",
             "-device", "virtio-net-pci,netdev=n0"
@@ -59,17 +58,6 @@ fn _cleanup_known_hosts():
     if rt_file_exists(path):
         rt_file_delete(path)
 
-fn _prepare_run_disk(run_token: text) -> Result<text, text>:
-    val source = "build/os/simpleos_disk.img"
-    val dest = "build/os/simpleos_disk_{run_token}.img"
-    if not rt_file_exists(source):
-        return Err("missing base disk image: {source}")
-    if rt_file_exists(dest):
-        rt_file_delete(dest)
-    if not rt_file_copy(source, dest):
-        return Err("failed to copy disk image to {dest}")
-    Ok(dest)
-
 fn _assert_ssh_live_login(backend: text):
     val target = get_ssh_live_target()
     val port_result = allocate_live_host_port(32000)
@@ -77,6 +65,7 @@ fn _assert_ssh_live_login(backend: text):
     if port_result.is_err():
         return
     val host_port = port_result.unwrap()
+    val scenario = _scenario_x64_ssh_on_port(host_port)
     val built = build_os_with_backend(target, backend)
     if backend == "llvm" and not built:
         print "[ssh_live_login_in_qemu_spec] LLVM backend unavailable, skipping build lane"
@@ -85,15 +74,10 @@ fn _assert_ssh_live_login(backend: text):
     expect(built).to_equal(true)
     val build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
     expect(build_marker.len() > 0).to_equal(true)
-    val run_token = "{backend}_{rt_getpid()}_{rt_time_now_unix_micros()}"
-    val disk_result = _prepare_run_disk(run_token)
-    expect(disk_result.is_ok()).to_equal(true)
-    if disk_result.is_err():
-        return
-    val run_disk = disk_result.unwrap()
-    val scenario = _scenario_x64_ssh_on_port(host_port, run_disk)
     expect(can_run_target(target)).to_equal(true)
     expect(ensure_scenario_media(scenario)).to_equal(true)
+
+    val run_token = "{backend}_{rt_getpid()}_{rt_time_now_unix_micros()}"
     val qmp_socket = "/tmp/simpleos_ssh_live_spec_{run_token}.sock"
     val serial_log = "build/os/ssh_live_spec_{run_token}.log"
     dir_create_all("build/os")
@@ -128,8 +112,6 @@ fn _assert_ssh_live_login(backend: text):
                     rt_file_write_text("build/os/ssh_live_login_failure_{backend}.stderr.log", boot_stderr)
 
             val stopped = stop_guest(handle)
-            if rt_file_exists(run_disk):
-                rt_file_delete(run_disk)
             expect(stopped).to_equal(true)
             expect(ready).to_equal(true)
             if ready:
@@ -139,8 +121,6 @@ fn _assert_ssh_live_login(backend: text):
                 expect(final_serial.contains("[ed25519-c] FAIL")).to_equal(false)
                 expect(final_serial.contains("heap exhausted")).to_equal(false)
         Err(err):
-            if rt_file_exists(run_disk):
-                rt_file_delete(run_disk)
             print "[ssh_live_login_in_qemu_spec] failed to spawn guest ({backend}): {err}"
             expect(err.len() > 0).to_equal(false)
 

@@ -11,6 +11,7 @@ use simple_dependency_tracker::{
     visibility::Visibility as TrackerVisibility,
 };
 use simple_parser::ast::{CommonUseStmt, ImportTarget, ModulePath, Visibility};
+use simple_parser::Parser;
 use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
@@ -433,7 +434,24 @@ impl ModuleResolver {
 
     /// Get all symbols exported by a module
     pub fn get_exports(&self, resolved: &ResolvedModule) -> ResolveResult<Vec<String>> {
-        if let Some(manifest) = &resolved.manifest {
+        let manifest = if let Some(manifest) = &resolved.manifest {
+            Some(manifest.clone())
+        } else if resolved.is_directory && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
+            let mut source = std::fs::read_to_string(&resolved.path)
+                .map_err(|e| crate::error::factory::failed_to_read_file(&resolved.path, &e))?;
+            if source.contains('\r') {
+                source = source.replace('\r', "");
+            }
+            let mut parser = Parser::new(&source);
+            let module = parser
+                .parse()
+                .map_err(|e| crate::error::factory::failed_to_parse_file("__init__.spl", &e))?;
+            Some(self.extract_manifest(&module, resolved.path.parent().unwrap_or_else(|| Path::new(".")))?)
+        } else {
+            None
+        };
+
+        if let Some(manifest) = manifest.as_ref() {
             let mut exports = Vec::new();
 
             // Add re-exported symbols

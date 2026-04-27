@@ -198,6 +198,102 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
     None
 }
 
+fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    for stdlib_subpath in &[
+        "src/lib",
+        "src/std",
+        "src/std/src",
+        "src/lib/std/src",
+        "lib/std/src",
+        "rust/lib/std/src",
+        "simple/std_lib/src",
+        "std_lib/src",
+    ] {
+        let stdlib_candidate = root.join(stdlib_subpath);
+        if !stdlib_candidate.exists() {
+            continue;
+        }
+
+        let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
+            parts[1..].to_vec()
+        } else if !parts.is_empty() && parts[0] == "std_lib" {
+            parts[1..].to_vec()
+        } else {
+            parts.to_vec()
+        };
+
+        if stdlib_parts.is_empty() {
+            continue;
+        }
+
+        if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+            let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
+            if compat_init.exists() && compat_init.is_file() {
+                return Some(compat_init);
+            }
+        }
+
+        let mut stdlib_path = stdlib_candidate.clone();
+        for part in &stdlib_parts {
+            stdlib_path = stdlib_path.join(part);
+        }
+        stdlib_path.set_extension("spl");
+        if stdlib_path.exists() && stdlib_path.is_file() {
+            return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
+        }
+
+        let mut stdlib_init_path = stdlib_candidate.clone();
+        for part in &stdlib_parts {
+            stdlib_init_path = stdlib_init_path.join(part);
+        }
+        stdlib_init_path = stdlib_init_path.join("__init__");
+        stdlib_init_path.set_extension("spl");
+        if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+            return Some(stdlib_init_path);
+        }
+
+        let mut stdlib_mod_path = stdlib_candidate.clone();
+        for part in &stdlib_parts {
+            stdlib_mod_path = stdlib_mod_path.join(part);
+        }
+        stdlib_mod_path = stdlib_mod_path.join("mod");
+        stdlib_mod_path.set_extension("spl");
+        if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
+            return Some(stdlib_mod_path);
+        }
+
+        for subdir in &[
+            "nogc_async_mut",
+            "nogc_sync_mut",
+            "nogc_async_immut",
+            "common",
+            "gc_async_mut",
+            "nogc_async_mut_noalloc",
+        ] {
+            let mut sub_init_path = stdlib_candidate.join(subdir);
+            for part in &stdlib_parts {
+                sub_init_path = sub_init_path.join(part);
+            }
+            sub_init_path = sub_init_path.join("__init__");
+            sub_init_path.set_extension("spl");
+            if sub_init_path.exists() && sub_init_path.is_file() {
+                return Some(sub_init_path);
+            }
+
+            let mut sub_path = stdlib_candidate.join(subdir);
+            for part in &stdlib_parts {
+                sub_path = sub_path.join(part);
+            }
+            sub_path.set_extension("spl");
+            if sub_path.exists() && sub_path.is_file() {
+                return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+            }
+        }
+    }
+
+    None
+}
+
 fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
     match target {
         ImportTarget::Glob => {}
@@ -213,6 +309,22 @@ fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
 
 fn should_flatten_transitively(target: &ImportTarget) -> bool {
     matches!(target, ImportTarget::Group(_) | ImportTarget::Glob)
+}
+
+fn source_snippet_for_span<'a>(source: &'a str, span: simple_parser::token::Span) -> Option<&'a str> {
+    source.get(span.start..span.end)
+}
+
+fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
+    if !should_flatten_transitively(&use_stmt.target) {
+        return false;
+    }
+
+    match &use_stmt.target {
+        ImportTarget::Group(_) => true,
+        ImportTarget::Glob => source_snippet_for_span(source, use_stmt.span).is_some_and(|snippet| snippet.contains('*')),
+        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => false,
+    }
 }
 
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
@@ -918,13 +1030,14 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
+                    let flatten_this_import = should_flatten_nested_import(use_stmt, &source);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
                         Some(effective_caps),
-                        should_flatten_transitively(&use_stmt.target),
+                        flatten_this_import,
                     )?;
-                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
                             use_stmt,
@@ -950,7 +1063,9 @@ fn load_module_with_imports_internal(
                     }
 
                     // Add imported items for flattened access (functions/classes in global scope)
-                    items.extend(imported.items);
+                    if flatten_this_import {
+                        items.extend(imported.items);
+                    }
                 }
                 // ALSO keep the UseStmt so evaluate_module can create the module binding
                 // The module exports cache prevents redundant re-parsing
@@ -973,13 +1088,14 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
+                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
                         Some(effective_caps),
-                        should_flatten_transitively(&temp_use.target),
+                        flatten_this_import,
                     )?;
-                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
                             &temp_use,
@@ -1003,7 +1119,9 @@ fn load_module_with_imports_internal(
                         }
                     }
 
-                    items.extend(imported.items);
+                    if flatten_this_import {
+                        items.extend(imported.items);
+                    }
                 }
                 items.push(item);
                 continue;
@@ -1019,13 +1137,14 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
+                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
                         Some(effective_caps),
-                        should_flatten_transitively(&temp_use.target),
+                        flatten_this_import,
                     )?;
-                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                    if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
                             &temp_use,
@@ -1049,7 +1168,9 @@ fn load_module_with_imports_internal(
                         }
                     }
 
-                    items.extend(imported.items);
+                    if flatten_this_import {
+                        items.extend(imported.items);
+                    }
                 }
                 items.push(item);
                 continue;
@@ -1067,13 +1188,14 @@ fn load_module_with_imports_internal(
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
+                        let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
                         let mut imported = load_module_with_imports_internal(
                             &resolved,
                             visited,
                             Some(effective_caps),
-                            should_flatten_transitively(&temp_use.target),
+                            flatten_this_import,
                         )?;
-                        if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                        if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                             imported.items.extend(load_matching_package_siblings(
                                 &resolved,
                                 &temp_use,
@@ -1100,7 +1222,9 @@ fn load_module_with_imports_internal(
                         }
 
                         // Add imported items for flattened access
-                        items.extend(imported.items);
+                        if flatten_this_import {
+                            items.extend(imported.items);
+                        }
                     }
                 }
             }
@@ -1156,105 +1280,27 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     // Walk up the directory tree to find stdlib
     let mut current = base.to_path_buf();
     for _ in 0..10 {
-        // Try various stdlib locations (matching interpreter behavior)
-        for stdlib_subpath in &[
-            "src/lib",
-            // Preferred: repo layout uses src/std/*
-            "src/std",
-            // Legacy layouts kept for compatibility with older checkouts
-            "src/std/src",
-            "src/lib/std/src",
-            "lib/std/src",
-            "rust/lib/std/src",
-            "simple/std_lib/src",
-            "std_lib/src",
-        ] {
-            let stdlib_candidate = current.join(stdlib_subpath);
-            if stdlib_candidate.exists() {
-                // Handle "std" prefix stripping for std.* imports
-                let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
-                    parts[1..].to_vec()
-                } else if !parts.is_empty() && parts[0] == "std_lib" {
-                    // Also handle std_lib.* imports -> strip std_lib prefix
-                    parts[1..].to_vec()
-                } else {
-                    parts.clone()
-                };
-
-                if !stdlib_parts.is_empty() {
-                    if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
-                        let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
-                        if compat_init.exists() && compat_init.is_file() {
-                            return Some(compat_init);
-                        }
-                    }
-
-                    // Try resolving from stdlib
-                    let mut stdlib_path = stdlib_candidate.clone();
-                    for part in &stdlib_parts {
-                        stdlib_path = stdlib_path.join(part);
-                    }
-                    stdlib_path.set_extension("spl");
-                    if stdlib_path.exists() && stdlib_path.is_file() {
-                        return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
-                    }
-
-                    // Also try __init__.spl in stdlib
-                    let mut stdlib_init_path = stdlib_candidate.clone();
-                    for part in &stdlib_parts {
-                        stdlib_init_path = stdlib_init_path.join(part);
-                    }
-                    stdlib_init_path = stdlib_init_path.join("__init__");
-                    stdlib_init_path.set_extension("spl");
-                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
-                        return Some(stdlib_init_path);
-                    }
-
-                    // Also try mod.spl in stdlib
-                    let mut stdlib_mod_path = stdlib_candidate.clone();
-                    for part in &stdlib_parts {
-                        stdlib_mod_path = stdlib_mod_path.join(part);
-                    }
-                    stdlib_mod_path = stdlib_mod_path.join("mod");
-                    stdlib_mod_path.set_extension("spl");
-                    if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
-                        return Some(stdlib_mod_path);
-                    }
-
-                    for subdir in &[
-                        "nogc_async_mut",
-                        "nogc_sync_mut",
-                        "nogc_async_immut",
-                        "common",
-                        "gc_async_mut",
-                        "nogc_async_mut_noalloc",
-                    ] {
-                        let mut sub_init_path = stdlib_candidate.join(subdir);
-                        for part in &stdlib_parts {
-                            sub_init_path = sub_init_path.join(part);
-                        }
-                        sub_init_path = sub_init_path.join("__init__");
-                        sub_init_path.set_extension("spl");
-                        if sub_init_path.exists() && sub_init_path.is_file() {
-                            return Some(sub_init_path);
-                        }
-
-                        let mut sub_path = stdlib_candidate.join(subdir);
-                        for part in &stdlib_parts {
-                            sub_path = sub_path.join(part);
-                        }
-                        sub_path.set_extension("spl");
-                        if sub_path.exists() && sub_path.is_file() {
-                            return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
-                        }
-                    }
-                }
-            }
+        if let Some(resolved) = resolve_from_stdlib_root(&current, &parts, use_stmt) {
+            return Some(resolved);
         }
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
         } else {
             break;
+        }
+    }
+
+    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_root.join("..").join("..").join("..");
+    for fallback_root in [
+        repo_root,
+        manifest_root.join("..").join(".."),
+        manifest_root.join(".."),
+        manifest_root.to_path_buf(),
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    ] {
+        if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, &parts, use_stmt) {
+            return Some(resolved);
         }
     }
 
@@ -1495,6 +1541,7 @@ mod tests {
     #[test]
     fn web_wm_example_flattens_nested_web_helpers() {
         let entry = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
             .join("..")
             .join("..")
             .join("examples")

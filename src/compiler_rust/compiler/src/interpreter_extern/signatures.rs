@@ -294,12 +294,12 @@ pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
 // Ed25519 verify
 // ---------------------------------------------------------------------------
 
-/// `rt_ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64`
+/// `rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64`
 pub fn rt_ed25519_verify(args: &[Value]) -> Result<Value, CompileError> {
-    let Some(pk) = extract_bytes(args, 0) else {
+    let Some(msg) = extract_bytes(args, 0) else {
         return Ok(Value::Int(0));
     };
-    let Some(msg) = extract_bytes(args, 1) else {
+    let Some(pk) = extract_bytes(args, 1) else {
         return Ok(Value::Int(0));
     };
     let Some(sig) = extract_bytes(args, 2) else {
