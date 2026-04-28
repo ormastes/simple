@@ -4,6 +4,7 @@
 
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{CellRef, CellValue, cell_ref_to_string, cell_display_text, col_to_letter}
+use common.string_builder.{StringBuilder}
 
 # =========================================================================
 # CSV Import
@@ -72,35 +73,37 @@ fn export_csv(sheet: Sheet) -> text:
 fn _split_csv_lines(content: text) -> [text]:
     """Split CSV content into lines, respecting quoted fields that contain newlines."""
     var lines: [text] = []
-    var current = ""
+    var sb = StringBuilder.new()
     var in_quotes = false
     var i = 0
     while i < content.len():
         val c = content.char_at(i)
         if c == "\"":
             in_quotes = not in_quotes
-            current = "{current}{c}"
+            sb.push(c)
         elif c == "\n" and not in_quotes:
-            if current.len() > 0 or lines.len() > 0:
+            if not sb.is_empty() or lines.len() > 0:
                 # Strip trailing \r
-                if current.len() > 0 and current.char_at(current.len() - 1) == "\r":
-                    current = current.substring(0, current.len() - 1)
-                lines = lines.push(current)
-            current = ""
+                var s = sb.to_text()
+                if s.len() > 0 and s.char_at(s.len() - 1) == "\r":
+                    s = s.substring(0, s.len() - 1)
+                lines = lines.push(s)
+            sb.clear()
         else:
-            current = "{current}{c}"
+            sb.push(c)
         i = i + 1
     # Last line
-    if current.len() > 0:
-        if current.char_at(current.len() - 1) == "\r":
-            current = current.substring(0, current.len() - 1)
-        lines = lines.push(current)
+    if not sb.is_empty():
+        var s = sb.to_text()
+        if s.char_at(s.len() - 1) == "\r":
+            s = s.substring(0, s.len() - 1)
+        lines = lines.push(s)
     lines
 
 fn _parse_csv_line(line: text) -> [text]:
     """Parse a single CSV line into fields. Handles quoted fields and escaped quotes."""
     var fields: [text] = []
-    var current = ""
+    var sb = StringBuilder.new()
     var in_quotes = false
     var i = 0
     while i < line.len():
@@ -109,23 +112,23 @@ fn _parse_csv_line(line: text) -> [text]:
             if c == "\"":
                 # Check for escaped quote ""
                 if i + 1 < line.len() and line.char_at(i + 1) == "\"":
-                    current = "{current}\""
+                    sb.push("\"")
                     i = i + 2
                     continue
                 else:
                     in_quotes = false
             else:
-                current = "{current}{c}"
+                sb.push(c)
         else:
             if c == "\"":
                 in_quotes = true
             elif c == ",":
-                fields = fields.push(current)
-                current = ""
+                fields = fields.push(sb.to_text())
+                sb.clear()
             else:
-                current = "{current}{c}"
+                sb.push(c)
         i = i + 1
-    fields = fields.push(current)
+    fields = fields.push(sb.to_text())
     fields
 
 # =========================================================================
@@ -145,15 +148,16 @@ fn _csv_escape_field(field: text) -> text:
     if not needs_quoting:
         return field
     # Escape quotes by doubling them
-    var escaped = ""
+    var sb = StringBuilder.new()
     i = 0
     while i < field.len():
         val c = field.char_at(i)
         if c == "\"":
-            escaped = "{escaped}\"\""
+            sb.push("\"\"")
         else:
-            escaped = "{escaped}{c}"
+            sb.push(c)
         i = i + 1
+    val escaped = sb.to_text()
     "\"{escaped}\""
 
 # =========================================================================
@@ -162,25 +166,17 @@ fn _csv_escape_field(field: text) -> text:
 
 fn _join_with_comma(items: [text]) -> text:
     """Join a list of text with comma separator."""
-    var result = ""
-    var first = true
+    var sb = StringBuilder.new()
     for item in items:
-        if not first:
-            result = "{result},"
-        result = "{result}{item}"
-        first = false
-    result
+        sb.push_sep(item, ",")
+    sb.to_text()
 
 fn _join_with_newline(items: [text]) -> text:
     """Join a list of text with newline separator."""
-    var result = ""
-    var first = true
+    var sb = StringBuilder.new()
     for item in items:
-        if not first:
-            result = "{result}\n"
-        result = "{result}{item}"
-        first = false
-    result
+        sb.push_sep(item, "\n")
+    sb.to_text()
 
 # =========================================================================
 # Cell Reference Helper (local, avoid circular import)
