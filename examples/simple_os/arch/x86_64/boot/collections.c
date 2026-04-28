@@ -15,56 +15,15 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "../../common/baremetal_runtime.h"
 
-/* ===================================================================
- * Type definitions — must match baremetal_stubs.c
- * =================================================================== */
-
-typedef int64_t RuntimeValue;
 typedef RuntimeValue RV;
 
-#define TAG_MASK    0x7ULL
-#define TAG_INT     0x0ULL
-#define TAG_HEAP    0x1ULL
-#define TAG_FLOAT   0x2ULL
-#define TAG_SPECIAL 0x3ULL
-
-#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
-
-#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
-
-#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
-
-#define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
-
-typedef struct {
-    uint32_t type;
-    uint32_t size;
-} HeapHeader;
-
-#define HEAP_STRING    1
-#define HEAP_ARRAY     2
-#define HEAP_MAP       3
-#define HEAP_OBJECT    4
 #define HEAP_CLOSURE   5
 #define HEAP_MODULE    6
 #define HEAP_ENUM      7
 #define HEAP_BTREEMAP  8
 #define HEAP_BTREESET  9
-
-/* Matches the RuntimeArray in baremetal_stubs.c (flexible array member). */
-typedef struct {
-    HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
-} RuntimeArray;
 
 /* Sorted parallel arrays of keys + values.
  * For BTreeSet, values == NULL. */

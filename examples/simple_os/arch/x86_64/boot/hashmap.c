@@ -19,45 +19,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-
-/* ===================================================================
- * Types and tagging (must match baremetal_stubs.c)
- * =================================================================== */
-
-typedef int64_t RuntimeValue;
-
-#define TAG_MASK    0x7ULL
-#define TAG_INT     0x0ULL
-#define TAG_HEAP    0x1ULL
-#define TAG_SPECIAL 0x3ULL
-
-#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
-
-#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
-
-#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
-
-#define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
-
-typedef struct {
-    uint32_t type;
-    uint32_t size;
-} HeapHeader;
-
-typedef struct {
-    HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
-} RuntimeArray;
-
-#define HEAP_ARRAY   2
+#include "../../common/baremetal_runtime.h"
 
 /* ===================================================================
  * HashMap / HashSet internal structure
