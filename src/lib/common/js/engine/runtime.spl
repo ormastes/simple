@@ -394,23 +394,33 @@ class JsRuntime:
     me _register_native(name: text, native_id: i64) -> i64:
         # Store a JsFunction with empty body — the interpreter will check for
         # negative IDs and dispatch to the native handler.
-        val fn_idx = self.interpreter.functions.len()
+        var interpreter = self.interpreter
+        val fn_idx = interpreter.functions.len()
         val placeholder = JsFunction(
             name: name,
             params: [],
             body: [],
             closure_env: -1,
         )
-        self.interpreter.functions.push(placeholder)
-        self.native_functions.push(Pair(first: name, second: native_id))
-        self.interpreter.native_id_map.push(Pair(first: fn_idx, second: native_id))
+        var functions = interpreter.functions
+        functions.push(placeholder)
+        interpreter.functions = functions
+        var native_functions = self.native_functions
+        native_functions.push(Pair(first: name, second: native_id))
+        self.native_functions = native_functions
+        var native_id_map = interpreter.native_id_map
+        native_id_map.push(Pair(first: fn_idx, second: native_id))
+        interpreter.native_id_map = native_id_map
+        self.interpreter = interpreter
         fn_idx
 
     # Define a native function in the global scope
     me _define_global_fn(name: text, native_id: i64):
         val fn_idx = self._register_native(name, native_id)
         val fn_val = JsValue.Function(id: fn_idx)
-        self.interpreter.define_global_value(name, fn_val)
+        var interpreter = self.interpreter
+        interpreter.define_global_value(name, fn_val)
+        self.interpreter = interpreter
 
     # Define a native method on an object
     me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
@@ -498,21 +508,13 @@ class JsRuntime:
 
     me create_host_object() -> i64:
         var interpreter = self.interpreter
-        val obj_id = interpreter.object_store.next_id
-        interpreter.object_store.next_id = interpreter.object_store.next_id + 1
-        interpreter.object_store.obj_proto_ids.push(-1)
+        val obj_id = interpreter.create_object()
         self.interpreter = interpreter
         obj_id
 
     me set_host_property(obj_id: i64, key: text, value: JsValue):
         var interpreter = self.interpreter
-        interpreter.object_store.prop_obj_ids.push(obj_id)
-        interpreter.object_store.prop_keys.push(key)
-        interpreter.object_store.prop_values.push(value)
-        interpreter.object_store.prop_ref_tags.push("")
-        interpreter.object_store.prop_ref_ids.push("")
-        interpreter.object_store.prop_enumerables.push(true)
-        interpreter.object_store.prop_configurables.push(true)
+        interpreter.set_object_property(obj_id, key, value)
         self.interpreter = interpreter
 
     fn get_host_property(obj_id: i64, key: text) -> JsValue:

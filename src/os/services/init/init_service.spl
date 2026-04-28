@@ -6,7 +6,7 @@
 # launcher. This gives SimpleOS a service-level supervision surface that sits
 # above the driver-specific supervisor.
 
-use os.userlib.process.{spawn_binary}
+use os.userlib.process.{spawn_binary, spawn_binary_with_args}
 use os.crash_policy.{
     AppClass, AppExitDisposition, CrashReason, SupervisorPolicy,
     classify_exit_code, crash_reason_text, default_invariant_violation_disposition,
@@ -29,6 +29,7 @@ enum ServiceState:
 struct ServiceDef:
     name: text
     binary: text
+    args: [text]
     dependencies: [text]
     capabilities: [text]
     restart: RestartPolicy
@@ -39,8 +40,10 @@ struct ServiceInstance:
     state: ServiceState
     restart_count: i32
 
-fn _default_launcher(binary: text, priority: u8) -> Result<u64, text>:
-    spawn_binary(binary, priority)
+fn _default_launcher(binary: text, args: [text], priority: u8) -> Result<u64, text>:
+    if args.len() == 0:
+        return spawn_binary(binary, priority)
+    spawn_binary_with_args(binary, args, [], priority)
 
 fn _priority_to_u8(priority: text) -> u8:
     match priority:
@@ -78,13 +81,13 @@ fn _is_launchable(state: ServiceState) -> bool:
 class InitService:
     services: [ServiceInstance]
     boot_complete: bool
-    launcher: fn(text, u8) -> Result<u64, text>
+    launcher: fn(text, [text], u8) -> Result<u64, text>
 
 impl InitService:
     static fn new() -> InitService:
         InitService(services: [], boot_complete: false, launcher: _default_launcher)
 
-    static fn with_launcher(launcher: fn(text, u8) -> Result<u64, text>) -> InitService:
+    static fn with_launcher(launcher: fn(text, [text], u8) -> Result<u64, text>) -> InitService:
         InitService(services: [], boot_complete: false, launcher: launcher)
 
     me register(def_: ServiceDef):
@@ -143,17 +146,21 @@ impl InitService:
         val idx = self._find_service_index(name)
         if idx < 0:
             return
-        val svc = self.services[idx]
+        var svc = self.services[idx]
         if not self.can_start_service(name):
             return
-        self.services[idx].state = ServiceState.Starting
+        svc.state = ServiceState.Starting
+        self.services[idx] = svc
         val priority = _priority_to_u8(svc.definition.priority)
-        val launch_result = self.launcher(svc.definition.binary, priority)
+        val launch = self.launcher
+        val launch_result = launch(svc.definition.binary, svc.definition.args, priority)
         match launch_result:
             case Ok(pid):
-                self.services[idx].state = ServiceState.Running(pid: pid)
+                svc.state = ServiceState.Running(pid: pid)
+                self.services[idx] = svc
             case Err(msg):
-                self.services[idx].state = ServiceState.Failed(reason: msg)
+                svc.state = ServiceState.Failed(reason: msg)
+                self.services[idx] = svc
 
     me handle_service_exit(name: text, exit_code: i32) -> AppExitDisposition:
         self.handle_service_crash(name, classify_exit_code(exit_code))
@@ -214,27 +221,35 @@ impl InitService:
                 true
 
     me _apply_exit_disposition(idx: i64, disposition: AppExitDisposition, reason_text: text):
+        var svc = self.services[idx]
         match disposition:
             case AppExitDisposition.Restart:
-                self.services[idx].restart_count = self.services[idx].restart_count + 1
-                self.services[idx].state = ServiceState.Stopped
-                self.start_service(self.services[idx].definition.name)
+                svc.restart_count = svc.restart_count + 1
+                svc.state = ServiceState.Stopped
+                self.services[idx] = svc
+                self.start_service(svc.definition.name)
             case AppExitDisposition.Stop:
-                self.services[idx].state = ServiceState.Stopped
+                svc.state = ServiceState.Stopped
+                self.services[idx] = svc
             case AppExitDisposition.Quarantine:
-                self.services[idx].state = ServiceState.Quarantined(reason: reason_text)
+                svc.state = ServiceState.Quarantined(reason: reason_text)
+                self.services[idx] = svc
             case AppExitDisposition.Escalate:
-                self.services[idx].state = ServiceState.Failed(reason: reason_text)
+                svc.state = ServiceState.Failed(reason: reason_text)
+                self.services[idx] = svc
             case AppExitDisposition.Reboot:
-                self.services[idx].state = ServiceState.Failed(reason: reason_text)
+                svc.state = ServiceState.Failed(reason: reason_text)
+                self.services[idx] = svc
             case AppExitDisposition.Halt:
-                self.services[idx].state = ServiceState.Failed(reason: reason_text)
+                svc.state = ServiceState.Failed(reason: reason_text)
+                self.services[idx] = svc
 
 fn default_services() -> [ServiceDef]:
     [
         ServiceDef(
             name: "vfs",
             binary: "/sys/services/vfs",
+            args: [],
             dependencies: [],
             capabilities: ["FileRead(/)", "FileWrite(/)"],
             restart: RestartPolicy.Always,
@@ -243,6 +258,7 @@ fn default_services() -> [ServiceDef]:
         ServiceDef(
             name: "net",
             binary: "/sys/services/net",
+            args: [],
             dependencies: [],
             capabilities: ["NetAdmin", "NetRaw"],
             restart: RestartPolicy.Always,
@@ -251,6 +267,7 @@ fn default_services() -> [ServiceDef]:
         ServiceDef(
             name: "compositor",
             binary: "/sys/services/compositor",
+            args: [],
             dependencies: ["vfs"],
             capabilities: ["Display", "Input"],
             restart: RestartPolicy.Always,
@@ -259,6 +276,7 @@ fn default_services() -> [ServiceDef]:
         ServiceDef(
             name: "desktop",
             binary: "/sys/apps/desktop",
+            args: [],
             dependencies: ["compositor", "vfs"],
             capabilities: ["WindowManage", "FileRead(/home)"],
             restart: RestartPolicy.OnFailure,
@@ -267,6 +285,7 @@ fn default_services() -> [ServiceDef]:
         ServiceDef(
             name: "llm_mcp",
             binary: "/sys/services/llm_mcp",
+            args: [],
             dependencies: ["compositor", "vfs", "net"],
             capabilities: ["NetClient", "UiAccess", "FileRead(/)"],
             restart: RestartPolicy.OnFailure,

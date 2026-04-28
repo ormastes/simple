@@ -10247,6 +10247,54 @@ int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, Ru
     return ok;
 }
 
+/* RFC 5869 §2.3: raw HKDF-Expand. Mirrors rt_tls13_hkdf_expand_label_into but
+ * skips TLS 1.3 HkdfLabel encoding; info is fed verbatim. */
+int64_t rt_tls13_hkdf_expand_into(RuntimeValue prk_rv, RuntimeValue info_rv, RuntimeValue out_rv, int64_t length_i64)
+{
+    if (length_i64 < 0 || length_i64 > 255) return 0;
+    uint32_t prk_len = 0, info_len = 0;
+    uint8_t *prk = _tls_copy_runtime_bytes(prk_rv, &prk_len);
+    uint8_t *info = _tls_copy_runtime_bytes(info_rv, &info_len);
+    if (!prk) {
+        if (info) free(info);
+        return 0;
+    }
+    uint8_t okm[255];
+    uint8_t t_prev[32];
+    uint32_t okm_len = 0;
+    uint32_t t_prev_len = 0;
+    uint8_t counter = 1;
+    uint32_t out_len = (uint32_t)length_i64;
+    while (okm_len < out_len) {
+        uint8_t input[32 + 1024];
+        uint32_t input_len = 0;
+        if (t_prev_len > 0) {
+            memcpy(input + input_len, t_prev, t_prev_len);
+            input_len += t_prev_len;
+        }
+        if (info_len > 0) {
+            if (info_len > sizeof(input) - input_len - 1U) {
+                free(prk);
+                if (info) free(info);
+                return 0;
+            }
+            memcpy(input + input_len, info, info_len);
+            input_len += info_len;
+        }
+        input[input_len++] = counter;
+        _tls_hmac_sha256(prk, prk_len, input, input_len, t_prev);
+        t_prev_len = 32;
+        uint32_t take = (out_len - okm_len) < 32U ? (out_len - okm_len) : 32U;
+        memcpy(okm + okm_len, t_prev, take);
+        okm_len += take;
+        counter++;
+    }
+    int64_t ok = _tls_write_runtime_bytes(out_rv, okm, out_len);
+    free(prk);
+    if (info) free(info);
+    return ok;
+}
+
 RuntimeValue rt_tls13_handshake_secret_from_record(RuntimeValue derived_rv, RuntimeValue scalar_rv, RuntimeValue record_rv)
 {
     uint32_t derived_len = 0, scalar_len = 0, record_len = 0;
