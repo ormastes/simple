@@ -171,6 +171,11 @@ impl MathParser {
                     let right = self.parse_power()?;
                     left = MathExpr::Mod(Box::new(left), Box::new(right));
                 }
+                MathToken::At => {
+                    self.advance();
+                    let right = self.parse_power()?;
+                    left = MathExpr::MatMul(Box::new(left), Box::new(right));
+                }
                 // Implicit multiplication: number followed by identifier or paren
                 // e.g., 2x, 3(x+1)
                 MathToken::Ident(_) | MathToken::LParen if self.is_implicit_mul(&left) => {
@@ -225,7 +230,7 @@ impl MathParser {
                 // Subscript: x[i]
                 MathToken::LBracket => {
                     self.advance();
-                    let index = self.parse_expression()?;
+                    let index = self.parse_subscript_index()?;
                     self.expect(MathToken::RBracket)?;
                     expr = MathExpr::Subscript(Box::new(expr), Box::new(index));
                 }
@@ -250,6 +255,52 @@ impl MathParser {
         }
 
         Ok(expr)
+    }
+
+    fn parse_subscript_index(&mut self) -> Result<MathExpr, CompileError> {
+        let mut indices = Vec::new();
+        indices.push(self.parse_slice_expr()?);
+        while self.current() == &MathToken::Comma {
+            self.advance();
+            indices.push(self.parse_slice_expr()?);
+        }
+        if indices.len() == 1 {
+            Ok(indices.remove(0))
+        } else {
+            Ok(MathExpr::Array(indices))
+        }
+    }
+
+    fn parse_slice_expr(&mut self) -> Result<MathExpr, CompileError> {
+        if self.current() == &MathToken::DotDot {
+            self.advance();
+            return Ok(MathExpr::Slice { start: None, end: None });
+        }
+
+        if self.current() == &MathToken::Colon {
+            self.advance();
+            let end = if self.current() == &MathToken::Comma || self.current() == &MathToken::RBracket {
+                None
+            } else {
+                Some(Box::new(self.parse_expression()?))
+            };
+            return Ok(MathExpr::Slice { start: None, end });
+        }
+
+        let first = self.parse_expression()?;
+        if self.current() == &MathToken::Colon {
+            self.advance();
+            let end = if self.current() == &MathToken::Comma || self.current() == &MathToken::RBracket {
+                None
+            } else {
+                Some(Box::new(self.parse_expression()?))
+            };
+            return Ok(MathExpr::Slice {
+                start: Some(Box::new(first)),
+                end,
+            });
+        }
+        Ok(first)
     }
 
     /// Parse primary: numbers, identifiers, groups, function calls

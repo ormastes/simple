@@ -8,7 +8,6 @@ use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, _DIAG_COLLECT_MODE, _DIAG_COLLECTED}
 use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
 use app.cli.query_lint_scan.{lint_scan_line}
-use std.report.emitter.lsp.{LspEmitter}
 
 # AST-based lint pass imports
 use compiler.core.ast.{ast_reset, module_get_decls}
@@ -29,16 +28,16 @@ fn _emit_lint_if_readable(file: text, format: text):
 
 fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, [text]):
     """Run the full lint pipeline in JSON collection mode."""
-    val prev_mode = _DIAG_COLLECT_MODE
-    val prev_collected = _DIAG_COLLECTED
-
     _DIAG_COLLECT_MODE = true
     _DIAG_COLLECTED = []
-    val count = _emit_source_lint_diagnostics(file, source, "json")
+    val lines = source.split("\n")
+    var count = 0
+    count = count + _run_ast_lint_passes(source, file, "json")
+    count = count + _emit_basic_line_lints(lines, file, "json")
+    count = count + _emit_text_heuristic_lints(lines, file, "json")
     val collected = _DIAG_COLLECTED
-
-    _DIAG_COLLECT_MODE = prev_mode
-    _DIAG_COLLECTED = prev_collected
+    _DIAG_COLLECT_MODE = false
+    _DIAG_COLLECTED = []
     (count, collected)
 
 fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
@@ -62,19 +61,26 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     """
     val lines = source.split("\n")
     var count = 0
-    val emitter = LspEmitter.default_emitter()
+    if format == "json":
+        count = count + _run_ast_lint_passes(source, file, format)
+        count = count + _emit_basic_line_lints(lines, file, format)
+        count = count + _emit_text_heuristic_lints(lines, file, format)
+    else:
+        count = count + _emit_basic_line_lints(lines, file, format)
+        count = count + _emit_text_heuristic_lints(lines, file, format)
+        count = count + _run_ast_lint_passes(source, file, format)
+    count
 
-    # --- Deprecated pattern detection (text-based) ---
+fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
+    var count = 0
     var lint_i = 0
     while lint_i < lines.len():
         val scan = lint_scan_line(lines, lint_i)
         val trimmed = scan.trimmed
         val line_num = scan.line_num
 
-        # DEPR001: Type__method() calls — identifier containing __ not at start/end
-        count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format, emitter)
+        count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format)
 
-        # DEPR002: .new() constructor calls
         if trimmed.contains(".new("):
             if format == "json":
                 val col = _find_in_line(trimmed, ".new(") + 1
@@ -83,7 +89,6 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
                 print "{file}:{line_num}: warning[DEPR002]: '.new()' constructor is deprecated"
             count = count + 1
 
-        # DEPR003: Bare 'pass' (not pass_todo, pass_do_nothing, pass_dn)
         if (trimmed == "pass" or trimmed.starts_with("pass ") or trimmed.starts_with("pass#")):
             if not trimmed.starts_with("pass_"):
                 if format == "json":
@@ -92,7 +97,6 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
                     print "{file}:{line_num}: warning[DEPR003]: bare 'pass' is deprecated"
                 count = count + 1
 
-        # UNREACH: Statements after return in same block
         if _is_return_statement(trimmed):
             val next_unreachable = _find_next_statement_in_block(lines, lint_i)
             if next_unreachable > 0:
@@ -103,31 +107,17 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
                 count = count + 1
 
         lint_i = lint_i + 1
+    count
 
-    # --- Unused variable detection (text-based heuristic) ---
-    count = count + _check_unused_vars_text(lines, file, format, emitter)
-
-    # --- Match exhaustiveness (text-based heuristic) ---
-    count = count + _check_match_exhaustiveness_text(lines, file, format, emitter)
-
-    # --- Closure capture warning (text-based heuristic) ---
-    count = count + _check_closure_capture_text(lines, file, format, emitter)
-
-    # --- Ignored return value (text-based heuristic) ---
-    count = count + _check_ignored_return_text(lines, file, format, emitter)
-
-    # --- Multiline boolean without parens (text-based heuristic) ---
-    count = count + _check_multiline_bool_text(lines, file, format, emitter)
-
-    # --- Safety: unsafe operations outside unsafe block (text-based heuristic) ---
-    count = count + _check_safety_text(lines, file, format, emitter)
-
-    # --- Visibility: private access across modules (text-based heuristic) ---
-    count = count + _check_visibility_text(lines, file, format, emitter)
-
-    # --- AST-based lint passes (argument count, collection patterns, etc.) ---
-    count = count + _run_ast_lint_passes(source, file, format, emitter)
-
+fn _emit_text_heuristic_lints(lines: [text], file: text, format: text) -> i64:
+    var count = 0
+    count = count + _check_unused_vars_text(lines, file, format)
+    count = count + _check_match_exhaustiveness_text(lines, file, format)
+    count = count + _check_closure_capture_text(lines, file, format)
+    count = count + _check_ignored_return_text(lines, file, format)
+    count = count + _check_multiline_bool_text(lines, file, format)
+    count = count + _check_safety_text(lines, file, format)
+    count = count + _check_visibility_text(lines, file, format)
     count
 
 fn _is_return_statement(trimmed: text) -> bool:
@@ -160,7 +150,7 @@ fn _find_next_statement_in_block(lines: [text], return_idx: i64) -> i64:
         ni = ni + 1
     0
 
-fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text, format: text, emitter: LspEmitter) -> i64:
+fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text, format: text) -> i64:
     """Check for Type__method() deprecated call pattern in a line."""
     # Look for identifier__identifier( pattern
     var ci = 0
@@ -192,7 +182,7 @@ fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text,
             ci = ci + 1
     found
 
-fn _check_unused_vars_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+fn _check_unused_vars_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for unused variable detection.
 
     Scans for val/var declarations with _ prefix convention NOT used,
@@ -348,7 +338,7 @@ fn _severity_text_to_json(severity: text) -> i64:
         return 2
     2
 
-fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmitter) -> i64:
+fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     """Parse source into AST and run all AST-based lint passes.
 
     Runs the following checks after parsing the source:
@@ -378,7 +368,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
         val line_num = _find_fn_line_in_source(lines, w.fn_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
             print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
@@ -390,7 +380,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
         val line_num = _find_fn_line_in_source(lines, w.item_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
             print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
@@ -402,7 +392,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
         val line_num = _find_fn_line_in_source(lines, w.fn_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
             print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
@@ -415,7 +405,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
         val sev = _severity_text_to_json(w.severity)
         # STUB warnings get Unnecessary tag (faded rendering in IDE)
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
         else:
             print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
@@ -426,7 +416,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
     for w in star_warnings:
         val line_num = _find_use_line_in_source(lines, w.module_path)
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
             print "{file}:{line_num}: warning[{w.code}]: {w.message}"
@@ -437,10 +427,18 @@ fn _run_ast_lint_passes(source: text, file: text, format: text, emitter: LspEmit
     for w in wide_warnings:
         # Module-level warning, report on line 1
         if format == "json":
-            val msg = emitter.escape_string(w.message)
+            val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg} ({w.export_count} symbols, threshold {w.threshold})\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
             print "{file}:1: warning[{w.code}]: {w.message} ({w.export_count} symbols, threshold {w.threshold})"
         count = count + 1
 
     count
+
+fn _escape_json(value: text) -> text:
+    var out = value.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out

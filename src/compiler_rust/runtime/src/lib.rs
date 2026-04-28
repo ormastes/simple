@@ -65,6 +65,70 @@ static SIMPLE_KEEP_RT_DECISION_PROBE: extern "C" fn(u64, bool) = value::rt_decis
 static SIMPLE_KEEP_RT_CONDITION_PROBE: extern "C" fn(u64, u32, bool) = value::rt_condition_probe;
 #[used]
 static SIMPLE_KEEP_RT_PATH_PROBE: extern "C" fn(u64, u32) = value::rt_path_probe;
+#[used]
+static SIMPLE_KEEP_RT_DYN_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
+    rt_dyn_torch_tensor_from_bits_1d;
+#[used]
+static SIMPLE_KEEP_RT_PS_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
+    rt_ps_torch_tensor_from_bits_1d;
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_runtime_library() -> Option<&'static libloading::Library> {
+    use std::sync::OnceLock;
+    static TORCH_RUNTIME: OnceLock<Option<&'static libloading::Library>> = OnceLock::new();
+
+    TORCH_RUNTIME
+        .get_or_init(|| {
+            let path = std::env::var("SIMPLE_RUNTIME_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        "libsimple_runtime.so".to_string()
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        "libsimple_runtime.dylib".to_string()
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        "simple_runtime.dll".to_string()
+                    }
+                });
+            let lib = unsafe { libloading::Library::new(&path).ok()? };
+            Some(Box::leak(Box::new(lib)))
+        })
+        .as_ref()
+        .copied()
+}
+
+#[cfg(not(feature = "pytorch"))]
+#[no_mangle]
+pub extern "C" fn rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> u64 {
+    let Some(lib) = torch_runtime_library() else {
+        return 0;
+    };
+    unsafe {
+        let Ok(func) = lib.get::<unsafe extern "C" fn(*const i64, i64) -> u64>(b"rt_dyn_torch_tensor_from_bits_1d")
+        else {
+            return 0;
+        };
+        func(data_bits_ptr, data_len)
+    }
+}
+
+#[cfg(feature = "pytorch")]
+pub use value::torch::rt_dyn_torch_tensor_from_bits_1d;
+
+#[cfg(not(feature = "pytorch"))]
+#[no_mangle]
+pub extern "C" fn rt_ps_torch_tensor_from_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> u64 {
+    rt_dyn_torch_tensor_from_bits_1d(data_bits_ptr, data_len)
+}
+
+#[cfg(feature = "pytorch")]
+pub use value::torch::rt_ps_torch_tensor_from_bits_1d;
 
 // Re-export executor types and functions
 pub use executor::{

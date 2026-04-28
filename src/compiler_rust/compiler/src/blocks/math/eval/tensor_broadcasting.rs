@@ -53,6 +53,7 @@ pub fn flatten_to_tensor(values: &[MathValue]) -> Result<(Vec<f64>, Vec<usize>),
 
     // Check first element to determine structure
     match &values[0] {
+        MathValue::Error(message) => Ok((vec![message.len() as f64], vec![1])),
         MathValue::Int(_) | MathValue::Float(_) | MathValue::Bool(_) => {
             // All elements should be scalars
             let data: Vec<f64> = values.iter().map(|v| v.as_f64()).collect::<Result<_, _>>()?;

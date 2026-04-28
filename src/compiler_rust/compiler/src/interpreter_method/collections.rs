@@ -11,6 +11,16 @@ use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
+fn array_ndim(arr: &[Value]) -> i64 {
+    if arr.is_empty() {
+        return 1;
+    }
+    match &arr[0] {
+        Value::Array(inner) => 1 + array_ndim(inner),
+        _ => 1,
+    }
+}
+
 /// Handle Array methods
 #[allow(clippy::too_many_arguments)]
 pub fn handle_array_methods(
@@ -25,6 +35,7 @@ pub fn handle_array_methods(
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
         "len" | "length" => Value::Int(arr.len() as i64),
+        "ndim" => Value::Int(array_ndim(arr)),
         "is_empty" => Value::Bool(arr.is_empty()),
         "first" => arr.first().cloned().unwrap_or(Value::Nil),
         "last" => arr.last().cloned().unwrap_or(Value::Nil),

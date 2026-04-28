@@ -27,6 +27,7 @@ pub enum MathToken {
     Plus,      // +
     Minus,     // -
     Star,      // *
+    At,        // @
     Slash,     // /
     Caret,     // ^
     Percent,   // %
@@ -219,6 +220,7 @@ impl<'a> MathLexer<'a> {
                 }
                 '-' => MathToken::Minus,
                 '*' => MathToken::Star,
+                '@' => MathToken::At,
                 '/' => MathToken::Slash,
                 '^' => MathToken::Caret,
                 '%' => MathToken::Percent,

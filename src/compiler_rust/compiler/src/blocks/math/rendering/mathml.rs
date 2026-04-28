@@ -65,6 +65,11 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
             expr_to_mathml(left),
             expr_to_mathml(right)
         ),
+        MathExpr::MatMul(left, right) => format!(
+            "<mrow>{}<mo>@</mo>{}</mrow>",
+            expr_to_mathml(left),
+            expr_to_mathml(right)
+        ),
         MathExpr::Div(left, right) => format!("<mfrac>{}{}</mfrac>", expr_to_mathml(left), expr_to_mathml(right)),
         MathExpr::Pow(base, exp) => format!("<msup>{}{}</msup>", expr_to_mathml(base), expr_to_mathml(exp)),
         MathExpr::Mod(left, right) => format!(
@@ -79,6 +84,15 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
         MathExpr::App(name, args) => app_to_mathml(name, args),
 
         MathExpr::Subscript(base, index) => format!("<msub>{}{}</msub>", expr_to_mathml(base), expr_to_mathml(index)),
+        MathExpr::Slice { start, end } => {
+            let start_str = start.as_ref().map(|s| expr_to_mathml(s)).unwrap_or_default();
+            let end_str = end.as_ref().map(|e| expr_to_mathml(e)).unwrap_or_default();
+            if start.is_none() && end.is_none() {
+                "<mrow><mo>..</mo></mrow>".to_string()
+            } else {
+                format!("<mrow>{}<mo>:</mo>{}</mrow>", start_str, end_str)
+            }
+        }
 
         MathExpr::Group(inner) => format!("<mrow><mo>(</mo>{}<mo>)</mo></mrow>", expr_to_mathml(inner)),
 

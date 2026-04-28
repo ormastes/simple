@@ -20,6 +20,7 @@ where
     F: Fn(f64, f64) -> f64,
 {
     match (left, right) {
+        (MathValue::Error(message), _) | (_, MathValue::Error(message)) => Ok(MathValue::Error(message.clone())),
         // Scalar ops
         (MathValue::Int(a), MathValue::Int(b)) => {
             let result = op(*a as f64, *b as f64);
@@ -69,6 +70,7 @@ where
     F: Fn(f64) -> f64,
 {
     match val {
+        MathValue::Error(message) => Ok(MathValue::Error(message.clone())),
         MathValue::Int(n) => Ok(float_or_int_math(op(*n as f64))),
         MathValue::Float(f) => Ok(MathValue::Float(op(*f))),
         MathValue::Bool(b) => Ok(MathValue::Float(op(if *b { 1.0 } else { 0.0 }))),

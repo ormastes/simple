@@ -42,6 +42,7 @@ pub enum MathValue {
     Float(f64),
     Bool(bool),
     Tensor(Tensor),
+    Error(String),
 }
 
 impl MathValue {
@@ -54,6 +55,11 @@ impl MathValue {
                 // Convert tensor to Value::Array with nested structure
                 tensor_to_value(&t)
             }
+            MathValue::Error(message) => Value::Enum {
+                enum_name: "Result".to_string(),
+                variant: "Err".to_string(),
+                payload: Some(Box::new(Value::Str(message))),
+            },
         }
     }
 
@@ -63,6 +69,7 @@ impl MathValue {
             MathValue::Float(f) => Ok(*f),
             MathValue::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             MathValue::Tensor(t) => t.item(),
+            MathValue::Error(message) => Err(CompileError::semantic(format!("math error: {}", message))),
         }
     }
 
@@ -230,6 +237,14 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
             binary_op(&l, &r, |a, b| a * b, "mul")
         }
 
+        MathExpr::MatMul(left, right) => {
+            let l = eval_with_env(left, env)?;
+            let r = eval_with_env(right, env)?;
+            let a = get_tensor(&l)?;
+            let b = get_tensor(&r)?;
+            Ok(MathValue::Tensor(a.matmul(&b)?))
+        }
+
         MathExpr::Div(left, right) => {
             let l = eval_with_env(left, env)?;
             let r = eval_with_env(right, env)?;
@@ -282,31 +297,13 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
 
         MathExpr::Subscript(base, index) => {
             let b = eval_with_env(base, env)?;
-            let idx = eval_with_env(index, env)?;
-
-            match (&b, &idx) {
-                (MathValue::Tensor(t), MathValue::Int(i)) => {
-                    if t.ndim() == 1 {
-                        let i = *i as usize;
-                        if i >= t.shape[0] {
-                            return Err(crate::error::factory::tensor_1d_index_out_of_bounds(i, t.shape[0]));
-                        }
-                        Ok(MathValue::Float(t.data[i]))
-                    } else {
-                        // For multi-dim, return slice
-                        let i = *i as usize;
-                        let inner_size: usize = t.shape[1..].iter().product();
-                        let start = i * inner_size;
-                        let data = t.data[start..start + inner_size].to_vec();
-                        Ok(MathValue::Tensor(Tensor::new(data, t.shape[1..].to_vec())?))
-                    }
-                }
-                _ => {
-                    // For non-tensors, just evaluate base
-                    Ok(b)
-                }
+            match &b {
+                MathValue::Tensor(t) => eval_tensor_subscript(t, index, env),
+                _ => Ok(b),
             }
         }
+
+        MathExpr::Slice { .. } => Err(CompileError::semantic("slice expression must appear inside subscript".to_string())),
 
         MathExpr::Group(inner) => eval_with_env(inner, env),
 
@@ -389,6 +386,8 @@ fn eval_function(
         // Tensor operations
         // ==========================================================================
         "matmul" => tensor_functions::eval_matmul(&eval_args),
+        "inv" => tensor_functions::eval_inv(&eval_args),
+        "solve" => tensor_functions::eval_solve(&eval_args),
         "dot" => tensor_functions::eval_dot(&eval_args),
         "transpose" | "T" => tensor_functions::eval_transpose(&eval_args),
         "reshape" => tensor_functions::eval_reshape(&eval_args),
@@ -464,6 +463,116 @@ fn eval_function(
 
         _ => Err(crate::error::factory::unknown_math_function(name)),
     }
+}
+
+fn eval_tensor_subscript(
+    tensor: &Tensor,
+    index: &MathExpr,
+    env: &mut HashMap<String, MathValue>,
+) -> Result<MathValue, CompileError> {
+    match index {
+        MathExpr::Int(i) => index_tensor_axis(tensor, *i),
+        MathExpr::Array(items) => {
+            if items.len() == 2 {
+                match (&items[0], &items[1]) {
+                    (MathExpr::Slice { .. }, MathExpr::Int(col)) => slice_tensor_2d_column(tensor, &items[0], *col),
+                    _ => slice_tensor_2d(tensor, &items[0], &items[1], env),
+                }
+            } else {
+                Err(CompileError::semantic("unsupported tensor subscript arity".to_string()))
+            }
+        }
+        MathExpr::Slice { .. } => slice_tensor_1d(tensor, index, env),
+        _ => {
+            let idx = eval_with_env(index, env)?;
+            match idx {
+                MathValue::Int(i) => index_tensor_axis(tensor, i),
+                _ => Err(CompileError::semantic("unsupported tensor index".to_string())),
+            }
+        }
+    }
+}
+
+fn index_tensor_axis(tensor: &Tensor, i: i64) -> Result<MathValue, CompileError> {
+    let idx = i as usize;
+    if tensor.ndim() == 1 {
+        if idx >= tensor.shape[0] {
+            return Err(crate::error::factory::tensor_1d_index_out_of_bounds(idx, tensor.shape[0]));
+        }
+        Ok(MathValue::Float(tensor.data[idx]))
+    } else {
+        let inner_size: usize = tensor.shape[1..].iter().product();
+        let start = idx * inner_size;
+        let data = tensor.data[start..start + inner_size].to_vec();
+        Ok(MathValue::Tensor(Tensor::new(data, tensor.shape[1..].to_vec())?))
+    }
+}
+
+fn eval_slice_bound(
+    bound: &Option<Box<MathExpr>>,
+    env: &mut HashMap<String, MathValue>,
+    default: usize,
+) -> Result<usize, CompileError> {
+    match bound {
+        Some(expr) => Ok(eval_with_env(expr, env)?.as_f64()? as usize),
+        None => Ok(default),
+    }
+}
+
+fn slice_tensor_1d(
+    tensor: &Tensor,
+    index: &MathExpr,
+    env: &mut HashMap<String, MathValue>,
+) -> Result<MathValue, CompileError> {
+    let MathExpr::Slice { start, end } = index else {
+        unreachable!()
+    };
+    let s = eval_slice_bound(start, env, 0)?;
+    let e = eval_slice_bound(end, env, tensor.shape[0])?;
+    Ok(MathValue::Tensor(Tensor::new(tensor.data[s..e].to_vec(), vec![e - s])?))
+}
+
+fn slice_tensor_2d(
+    tensor: &Tensor,
+    row_index: &MathExpr,
+    col_index: &MathExpr,
+    env: &mut HashMap<String, MathValue>,
+) -> Result<MathValue, CompileError> {
+    let MathExpr::Slice { start: row_start, end: row_end } = row_index else {
+        return Err(CompileError::semantic("2D slicing requires row slice".to_string()));
+    };
+    let MathExpr::Slice { start: col_start, end: col_end } = col_index else {
+        return Err(CompileError::semantic("2D slicing requires col slice".to_string()));
+    };
+    let rs = eval_slice_bound(row_start, env, 0)?;
+    let re = eval_slice_bound(row_end, env, tensor.shape[0])?;
+    let cs = eval_slice_bound(col_start, env, 0)?;
+    let ce = eval_slice_bound(col_end, env, tensor.shape[1])?;
+    let mut data = Vec::new();
+    for r in rs..re {
+        for c in cs..ce {
+            data.push(tensor.data[r * tensor.shape[1] + c]);
+        }
+    }
+    Ok(MathValue::Tensor(Tensor::new(data, vec![re - rs, ce - cs])?))
+}
+
+fn slice_tensor_2d_column(
+    tensor: &Tensor,
+    row_index: &MathExpr,
+    col: i64,
+) -> Result<MathValue, CompileError> {
+    let MathExpr::Slice { start, end } = row_index else {
+        return Err(CompileError::semantic("column slicing requires row slice".to_string()));
+    };
+    let rs = start.as_ref().map(|e| match e.as_ref() { MathExpr::Int(i) => *i as usize, _ => 0 }).unwrap_or(0);
+    let re = end.as_ref().map(|e| match e.as_ref() { MathExpr::Int(i) => *i as usize, _ => tensor.shape[0] }).unwrap_or(tensor.shape[0]);
+    let c = col as usize;
+    let mut data = Vec::new();
+    for r in rs..re {
+        data.push(tensor.data[r * tensor.shape[1] + c]);
+    }
+    Ok(MathValue::Tensor(Tensor::new(data, vec![re - rs])?))
 }
 
 #[cfg(test)]

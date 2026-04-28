@@ -59,6 +59,9 @@ fn expr_to_lean(expr: &MathExpr) -> String {
         MathExpr::Mul(left, right) => {
             format!("{} * {}", expr_to_lean(left), expr_to_lean(right))
         }
+        MathExpr::MatMul(left, right) => {
+            format!("{} @ {}", expr_to_lean(left), expr_to_lean(right))
+        }
         MathExpr::Div(left, right) => {
             format!("{} / {}", expr_to_lean(left), expr_to_lean(right))
         }
@@ -76,6 +79,15 @@ fn expr_to_lean(expr: &MathExpr) -> String {
 
         MathExpr::Subscript(base, index) => {
             format!("{}[{}]", expr_to_lean(base), expr_to_lean(index))
+        }
+        MathExpr::Slice { start, end } => {
+            let start_str = start.as_ref().map(|s| expr_to_lean(s)).unwrap_or_default();
+            let end_str = end.as_ref().map(|e| expr_to_lean(e)).unwrap_or_default();
+            if start.is_none() && end.is_none() {
+                "..".to_string()
+            } else {
+                format!("{}:{}", start_str, end_str)
+            }
         }
 
         MathExpr::Group(inner) => format!("({})", expr_to_lean(inner)),

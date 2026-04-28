@@ -270,13 +270,14 @@ pub fn load_and_merge_module(
     }
 
     // Build module path from segments (path only, not the import target)
-    // Filter out "crate" and "self" prefixes — both refer to the current module's directory.
-    // "self" in `use self.main.{...}` means "sibling module in same directory".
+    // Filter out relative-prefix markers that refer to the current module's directory.
+    // `self` in `use self.main.{...}` and leading `.` in `use .wiki_tool.{...}`
+    // are both sibling-package imports, not real path segments.
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
         .iter()
-        .filter(|s| s.as_str() != "crate" && s.as_str() != "self")
+        .filter(|s| s.as_str() != "crate" && s.as_str() != "self" && s.as_str() != ".")
         .cloned()
         .collect();
 
@@ -789,7 +790,7 @@ mod tests {
         should_keep_selective_export,
     };
     use crate::value::Value;
-    use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
+    use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
     use simple_parser::token::Span;
     use std::fs;
     use std::path::Path;
@@ -921,6 +922,80 @@ mod tests {
         };
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn relative_dot_group_imports_load_sibling_modules() {
+        let temp = tempfile::tempdir().unwrap();
+        let package_dir = temp.path().join("wiki_keyword");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let wiki_tool = package_dir.join("wiki_tool.spl");
+        fs::write(
+            &wiki_tool,
+            r#"
+fn wiki_handler(args: [text]) -> [u8]:
+    "ok".bytes()
+
+export wiki_handler
+"#,
+        )
+        .unwrap();
+
+        let register = package_dir.join("register.spl");
+        fs::write(
+            &register,
+            r#"
+use .wiki_tool.{wiki_handler}
+
+fn register_wiki_tool() -> [u8]:
+    wiki_handler([])
+
+export register_wiki_tool
+"#,
+        )
+        .unwrap();
+
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &[".", "wiki_tool"],
+                ImportTarget::Group(vec![ImportTarget::Single("wiki_handler".to_string())]),
+            ),
+            Some(&register),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("wiki_handler"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn parser_keeps_relative_group_import_module_segment() {
+        let mut parser = simple_parser::Parser::new("use .wiki_tool.{wiki_handler}\n");
+        let module = parser.parse().unwrap();
+        let stmt = match &module.items[0] {
+            Node::UseStmt(stmt) => stmt,
+            other => panic!("expected use stmt, got {:?}", other),
+        };
+
+        assert_eq!(stmt.path.segments, vec![".".to_string(), "wiki_tool".to_string()]);
+        assert!(matches!(
+            &stmt.target,
+            ImportTarget::Group(items)
+                if items.len() == 1
+                    && matches!(&items[0], ImportTarget::Single(name) if name == "wiki_handler")
+        ));
     }
 
     #[test]

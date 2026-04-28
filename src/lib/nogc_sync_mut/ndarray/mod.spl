@@ -226,16 +226,15 @@ struct NDArray:
         Ok(make_array(out_f64, out_i64, out_bool, Shape.new([Index.new(raw_array_len(self.dtype, out_f64, out_i64, out_bool))]), self.dtype))
 
     fn mask(self, mask_values: NDArray) -> NDArray:
-        self.try_mask(mask_values).unwrap()
-
-    fn try_mask(self, mask_values: NDArray) -> Result<NDArray, NdarrayError>:
-        if mask_values.raw_len() != self.raw_len():
-            return Err(NdarrayError.ShapeMismatch)
+        val self_len = raw_array_len(self.dtype, self.data_f64, self.data_i64, self.data_bool)
+        val mask_len = mask_values.data_bool.len()
+        if mask_len != self_len:
+            panic("called unwrap on Err: NdarrayError::ShapeMismatch")
         var out_f64: [Float64] = []
         var out_i64: [Int64] = []
         var out_bool: [Bool] = []
         var i = 0
-        while i < self.raw_len():
+        while i < self_len:
             if mask_values.data_bool[i].value:
                 match self.dtype:
                     case DType.F64:
@@ -245,7 +244,16 @@ struct NDArray:
                     case DType.Bool:
                         out_bool.push(self.data_bool[i])
             i = i + 1
-        Ok(make_array(out_f64, out_i64, out_bool, Shape.new([Index.new(raw_array_len(self.dtype, out_f64, out_i64, out_bool))]), self.dtype))
+        make_array(
+            out_f64,
+            out_i64,
+            out_bool,
+            Shape.new([Index.new(raw_array_len(self.dtype, out_f64, out_i64, out_bool))]),
+            self.dtype
+        )
+
+    fn try_mask(self, mask_values: NDArray) -> Result<NDArray, NdarrayError>:
+        try_mask_impl(self, mask_values)
 
     fn add(self, other: NDArray) -> NDArray:
         add_impl(self, other)
@@ -357,6 +365,31 @@ fn f64_at_broadcast_impl(array_value: NDArray, indices: [Index]) -> Float64:
             actual[i] = indices[i + delta]
         i = i + 1
     array_value.get_f64_at(actual)
+
+fn try_mask_impl(array_value: NDArray, mask_values: NDArray) -> Result<NDArray, NdarrayError>:
+    if mask_values.raw_len() != array_value.raw_len():
+        return Err(NdarrayError.ShapeMismatch)
+    var out_f64: [Float64] = []
+    var out_i64: [Int64] = []
+    var out_bool: [Bool] = []
+    var i = 0
+    while i < array_value.raw_len():
+        if mask_values.data_bool[i].value:
+            match array_value.dtype:
+                case DType.F64:
+                    out_f64.push(array_value.data_f64[i])
+                case DType.I64:
+                    out_i64.push(array_value.data_i64[i])
+                case DType.Bool:
+                    out_bool.push(array_value.data_bool[i])
+        i = i + 1
+    Ok(make_array(
+        out_f64,
+        out_i64,
+        out_bool,
+        Shape.new([Index.new(raw_array_len(array_value.dtype, out_f64, out_i64, out_bool))]),
+        array_value.dtype
+    ))
 
 fn raw_array_len(dtype: DType, data_f64: [Float64], data_i64: [Int64], data_bool: [Bool]) -> i64:
     match dtype:

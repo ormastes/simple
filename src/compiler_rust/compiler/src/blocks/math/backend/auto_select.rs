@@ -204,6 +204,7 @@ fn analyze_expr(expr: &crate::blocks::math::ast::MathExpr, complexity: &mut Expr
         MathExpr::Add(l, r)
         | MathExpr::Sub(l, r)
         | MathExpr::Mul(l, r)
+        | MathExpr::MatMul(l, r)
         | MathExpr::Div(l, r)
         | MathExpr::Pow(l, r)
         | MathExpr::Mod(l, r)
@@ -223,6 +224,14 @@ fn analyze_expr(expr: &crate::blocks::math::ast::MathExpr, complexity: &mut Expr
         MathExpr::Subscript(base, idx) => {
             analyze_expr(base, complexity);
             analyze_expr(idx, complexity);
+        }
+        MathExpr::Slice { start, end } => {
+            if let Some(start) = start {
+                analyze_expr(start, complexity);
+            }
+            if let Some(end) = end {
+                analyze_expr(end, complexity);
+            }
         }
         MathExpr::Int(_) | MathExpr::Float(_) | MathExpr::Var(_) => {}
     }

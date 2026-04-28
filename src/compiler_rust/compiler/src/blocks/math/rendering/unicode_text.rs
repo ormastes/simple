@@ -54,6 +54,9 @@ fn expr_to_text(expr: &MathExpr) -> String {
         MathExpr::Mul(left, right) => {
             format!("{}\u{22c5}{}", expr_to_text(left), expr_to_text(right))
         }
+        MathExpr::MatMul(left, right) => {
+            format!("{} @ {}", expr_to_text(left), expr_to_text(right))
+        }
         MathExpr::Div(left, right) => {
             format!("{}/{}", expr_to_text(left), expr_to_text(right))
         }
@@ -83,6 +86,15 @@ fn expr_to_text(expr: &MathExpr) -> String {
                 format!("{}{}", base_str, sub)
             } else {
                 format!("{}[{}]", base_str, idx_str)
+            }
+        }
+        MathExpr::Slice { start, end } => {
+            let start_str = start.as_ref().map(|s| expr_to_text(s)).unwrap_or_default();
+            let end_str = end.as_ref().map(|e| expr_to_text(e)).unwrap_or_default();
+            if start.is_none() && end.is_none() {
+                "..".to_string()
+            } else {
+                format!("{}:{}", start_str, end_str)
             }
         }
 

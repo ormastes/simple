@@ -6,6 +6,18 @@ use os.kernel.types.syscall_types.{new_net_if_info}
 class IpAddr:
     octets: [u8]
 
+fn _parse_decimal_u8(s: text) -> Result<u8, text>:
+    if s == "":
+        return Err("empty decimal value")
+    var out: u64 = 0
+    for ch in s:
+        if ch < "0" or ch > "9":
+            return Err("invalid decimal value: {s}")
+        out = out * 10 + (ch.to_i32() - "0".to_i32()).to_u64()
+    if out > 255:
+        return Err("decimal value out of range: {s}")
+    Ok(out.to_u8())
+
 impl IpAddr:
     fn to_text() -> text:
         "{self.octets[0]}.{self.octets[1]}.{self.octets[2]}.{self.octets[3]}"
@@ -17,10 +29,10 @@ impl IpAddr:
         var octets: [u8] = []
         var i = 0
         while i < 4:
-            val v = parts[i].parse_u64()
-            if v > 255:
-                return Err("IP octet out of range: {parts[i]}")
-            octets.push(v as u8)
+            val parsed = _parse_decimal_u8(parts[i])
+            if parsed.is_err():
+                return Err("IP octet invalid: {parts[i]}")
+            octets.push(parsed.unwrap())
             i = i + 1
         Ok(IpAddr(octets: octets))
 
@@ -74,7 +86,30 @@ fn send(sock: Socket, data: [u8]) -> Result<u64, text>:
         return Err("send returned invalid length {result}")
     Ok(result as u64)
 
+fn socket_send(sock: Socket, data: [u8]) -> Result<u64, text>:
+    """Keyword-safe wrapper for socket send."""
+    val data_ptr = _array_data_ptr(data)
+    val result = syscall(75, sock.fd as u64, data_ptr, data.len() as u64, 0, 0)
+    if result < 0:
+        return Err("send failed with code {result}")
+    if result as u64 > data.len() as u64:
+        return Err("send returned invalid length {result}")
+    Ok(result as u64)
+
 fn recv(sock: Socket, max_len: u64) -> Result<[u8], text>:
+    if max_len > _NET_MAX_USER_RECV:
+        return Err("recv requested invalid length {max_len}")
+    var buf: [u8] = [0; max_len]
+    val buf_ptr = _array_data_ptr(buf)
+    val result = syscall(76, sock.fd as u64, buf_ptr, max_len, 0, 0)
+    if result < 0:
+        return Err("recv failed with code {result}")
+    if result as u64 > max_len:
+        return Err("recv returned invalid length {result}")
+    Ok(buf.slice(0, result as u64))
+
+fn socket_recv(sock: Socket, max_len: u64) -> Result<[u8], text>:
+    """Keyword-safe wrapper for socket recv."""
     if max_len > _NET_MAX_USER_RECV:
         return Err("recv requested invalid length {max_len}")
     var buf: [u8] = [0; max_len]
@@ -99,5 +134,4 @@ fn _pack_sockaddr(addr: SockAddr) -> u64:
     packed
 
 fn _array_data_ptr(data: [u8]) -> u64:
-    val hdr = unsafe_addr_of(data)
-    hdr + 16
+    data.data_ptr().to_u64()

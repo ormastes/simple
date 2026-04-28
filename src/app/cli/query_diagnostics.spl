@@ -8,7 +8,6 @@ use app.cli.query_sanitize.{sanitize_path}
 use app.cli.query_helpers.{_extract_flag}
 use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED, _diag_emit_or_collect, _parse_error_location, _find_in_line_from, query_file_read_rich, query_file_exists, query_dir_list, query_process_run}
 use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _collect_lint_diagnostics_json}
-use std.report.emitter.lsp.{LspEmitter}
 
 fn query_check(file: text, cmd_args: [text]) -> i64:
     val format = _extract_flag(cmd_args, "--format", "text")
@@ -360,23 +359,30 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
     var json_file_entries: [text] = []
 
     for spl_file in spl_files:
-        val check_result = _run_simple_check(spl_file)
-        val check_stdout = check_result.0
-        val check_stderr = check_result.1
-        val check_code = check_result.2
-        val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
         var file_has_issues = false
         var file_diag_count = 0
         var file_json_diags: [text] = []
 
         if format == "json":
-            val compiler_diags = _collect_check_output_diagnostics_json(spl_file, check_stdout, check_stderr)
-            if compiler_diags.len() > 0:
+            val query_json = _run_query_check_json(spl_file)
+            val compiler_diags = _extract_query_check_diagnostics(query_json.0)
+            file_diag_count = compiler_diags.len()
+            if file_diag_count > 0:
                 file_has_issues = true
-                file_diag_count = file_diag_count + compiler_diags.len()
                 for diagnostic in compiler_diags:
                     file_json_diags.push(diagnostic)
-        else:
+            if file_has_issues:
+                files_with_issues = files_with_issues + 1
+                if file_json_diags.len() > 0:
+                    json_file_entries.push("{\"file\":{_json_text(spl_file)},\"diagnostics\":[{file_json_diags.join(\",\")}]}")
+            total_diagnostics = total_diagnostics + file_diag_count
+            continue
+        val check_result = _run_simple_check(spl_file)
+        val check_stdout = check_result.0
+        val check_stderr = check_result.1
+        val check_code = check_result.2
+        val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
+        if format != "json":
             if check_stdout != "":
                 print check_stdout
             if check_stderr != "":
@@ -385,27 +391,16 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                 file_has_issues = true
                 file_diag_count = file_diag_count + _count_check_output_diagnostics(spl_file, check_stdout, check_stderr)
 
-        if query_file_exists(spl_file):
+        if format != "json" and query_file_exists(spl_file):
             val source = query_file_read_rich(spl_file) ?? ""
             if source != "" and should_lint:
-                if format == "json":
-                    val lint_count = _collect_lint_diagnostics_json(spl_file, source)
-                    if lint_count.0 > 0:
-                        file_has_issues = true
-                        file_diag_count = file_diag_count + lint_count.0
-                        for diagnostic in lint_count.1:
-                            file_json_diags.push(diagnostic)
-                else:
-                    val lint_count = _emit_source_lint_diagnostics(spl_file, source, format)
-                    if lint_count > 0:
-                        file_has_issues = true
-                        file_diag_count = file_diag_count + lint_count
+                val lint_count = _emit_source_lint_diagnostics(spl_file, source, format)
+                if lint_count > 0:
+                    file_has_issues = true
+                    file_diag_count = file_diag_count + lint_count
 
         if file_has_issues:
             files_with_issues = files_with_issues + 1
-            if format == "json" and file_json_diags.len() > 0:
-                val emitter = LspEmitter.default_emitter()
-                json_file_entries.push("{\"file\":{emitter.encode_string(spl_file)},\"diagnostics\":[{file_json_diags.join(\",\")}]}")
         total_diagnostics = total_diagnostics + file_diag_count
 
     if format == "json":
@@ -452,6 +447,9 @@ fn _find_simple_binary() -> text:
 fn _run_simple_check(file: text) -> (text, text, i64):
     query_process_run(_find_simple_binary(), ["check", file])
 
+fn _run_query_check_json(file: text) -> (text, text, i64):
+    query_process_run(_find_simple_binary(), ["run", "src/app/cli/query.spl", "check", file, "--format", "json"])
+
 fn _should_run_lint_after_check(check_stdout: text, check_stderr: text) -> bool:
     val combined = _strip_ansi(check_stdout + "\n" + check_stderr)
     if combined.trim() == "":
@@ -487,6 +485,78 @@ fn _collect_check_output_diagnostics_json(file: text, check_stdout: text, check_
             diagnostics.push(diagnostic)
     diagnostics
 
+fn _extract_query_check_diagnostics(check_json: text) -> [text]:
+    val key = "\"diagnostics\":["
+    val key_idx = _find_in_line_from(check_json, key, 0)
+    if key_idx < 0:
+        return []
+    val start = key_idx + key.len()
+    val end = _find_matching_json_array_end(check_json, start)
+    if end < start:
+        return []
+    val inner = check_json.substring(start, end).trim()
+    if inner == "":
+        return []
+    _split_top_level_json_objects(inner)
+
+fn _find_matching_json_array_end(s: text, start: i64) -> i64:
+    var depth = 1
+    var i = start
+    var in_string = false
+    var escaped = false
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+            i = i + 1
+            continue
+        if ch == "\"":
+            in_string = true
+        elif ch == "[":
+            depth = depth + 1
+        elif ch == "]":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _split_top_level_json_objects(s: text) -> [text]:
+    var result: [text] = []
+    var depth = 0
+    var start = 0
+    var in_string = false
+    var escaped = false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+            i = i + 1
+            continue
+        if ch == "\"":
+            in_string = true
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                result = result.push(s.substring(start, i + 1))
+        i = i + 1
+    result
+
 fn _parse_check_output_line_json(file: text, line: text) -> text:
     val trimmed = line.trim()
     if trimmed == "":
@@ -510,12 +580,22 @@ fn _parse_check_output_line_json(file: text, line: text) -> text:
         msg = _strip_diag_severity_prefix(msg, "hint")
     elif msg.starts_with("error"):
         msg = _strip_diag_severity_prefix(msg, "error")
-    val emitter = LspEmitter.default_emitter()
     val code = _extract_error_code(msg, "ParseError")
-    "{\"severity\":{severity},\"code\":{emitter.encode_string(code)},\"message\":{emitter.encode_string(msg)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
+    "{\"severity\":{severity},\"code\":{_json_text(code)},\"message\":{_json_text(msg)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
 
 fn _strip_diag_severity_prefix(msg: text, severity_word: text) -> text:
     var rest = msg.substring(severity_word.len()).trim()
     if rest.starts_with(":"):
         rest = rest.substring(1).trim()
     rest
+
+fn _json_text(value: text) -> text:
+    "\"" + _escape_json(value) + "\""
+
+fn _escape_json(value: text) -> text:
+    var out = value.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out

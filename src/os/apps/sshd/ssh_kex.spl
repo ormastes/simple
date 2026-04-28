@@ -29,9 +29,6 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 extern fn rt_dh_curve25519_keypair() -> i64
 extern fn rt_dh_curve25519_public_key(handle: i64) -> [u8]
 extern fn rt_dh_curve25519_shared_secret(handle: i64, their_pub: [u8]) -> [u8]
-extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
-extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
-extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_ed25519_sign_seed(seed: [u8], message: [u8]) -> [u8]
@@ -170,16 +167,8 @@ fn _looks_like_baremetal_sha256_truncation(digest: [u8]) -> bool:
 
 fn _sha256_stable(data: [u8]) -> [u8]:
     val digest = sha256(data)
-    val fallback = rt_tls13_sha256(data)
-    if fallback.len() == 32:
-        if _looks_like_baremetal_sha256_truncation(digest):
-            return _push_bytes([], fallback)
-        if digest.len() != fallback.len() or not _bytes_equal(digest, fallback):
-            return _push_bytes([], fallback)
     if not _looks_like_baremetal_sha256_truncation(digest):
         return digest
-    if fallback.len() == 32:
-        return _push_bytes([], fallback)
     digest
 
 # ============================================================================
@@ -676,10 +665,7 @@ fn ssh_kex_public_from_private(private: [u8]) -> [u8]:
     if _is_handle_backed_private_key(private):
         return _push_bytes([], rt_dh_curve25519_public_key(_decode_handle_backed_private_key(private)))
     val stable_private = _push_bytes([], private)
-    val runtime_public = rt_tls13_x25519_public_key(stable_private)
     val public = x25519_base(stable_private)
-    if runtime_public.len() == 32:
-        return _push_bytes([], runtime_public)
     if public.len() == 32:
         return _push_bytes([], public)
     []
@@ -693,10 +679,7 @@ fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
         return _push_bytes([], rt_dh_curve25519_shared_secret(_decode_handle_backed_private_key(our_private), their_public))
     val stable_private = _push_bytes([], our_private)
     val stable_public = _push_bytes([], their_public)
-    val shared = rt_tls13_x25519_shared_secret(stable_private, stable_public)
     val pure_shared = x25519(stable_private, stable_public)
-    if shared.len() == 32:
-        return _push_bytes([], shared)
     if pure_shared.len() == 32:
         return _push_bytes([], pure_shared)
     []
@@ -749,8 +732,6 @@ fn ssh_kex_compute_exchange_hash(
 
     # K: shared secret (as mpint — big-endian with sign handling)
     hash_input = _concat_bytes(hash_input, _concat_mpint_field(shared_secret_mpint))
-    serial_println("[ssh-kex] exchange hash input len={hash_input.len()}")
-    serial_println("[ssh-kex] exchange hash input={_bytes_to_hex(hash_input)}")
 
     _sha256_stable(hash_input)
 

@@ -27,6 +27,8 @@ pub enum MathExpr {
     Sub(Box<MathExpr>, Box<MathExpr>),
     /// Multiplication: a * b, a · b, or implicit (2x)
     Mul(Box<MathExpr>, Box<MathExpr>),
+    /// Matrix multiplication: a @ b
+    MatMul(Box<MathExpr>, Box<MathExpr>),
     /// Division: a / b
     Div(Box<MathExpr>, Box<MathExpr>),
     /// Power: a ^ b
@@ -48,6 +50,11 @@ pub enum MathExpr {
     // === Subscript/Superscript ===
     /// Subscript: x[i] or x_i
     Subscript(Box<MathExpr>, Box<MathExpr>),
+    /// Slice: a:b, .., a:, :b
+    Slice {
+        start: Option<Box<MathExpr>>,
+        end: Option<Box<MathExpr>>,
+    },
 
     // === Grouping ===
     /// Parenthesized expression
@@ -147,7 +154,7 @@ pub fn is_builtin_function(name: &str) -> bool {
         "tensor" | "zeros" | "ones" | "full" | "eye" |
         "arange" | "linspace" | "rand" | "randn" |
         // Tensor operations
-        "matmul" | "dot" | "transpose" | "T" |
+        "matmul" | "dot" | "transpose" | "T" | "inv" | "solve" |
         "reshape" | "flatten" | "squeeze" | "unsqueeze" |
         "shape" | "ndim" | "numel" | "item" |
         // Tensor reductions
@@ -259,6 +266,7 @@ impl MathExpr {
                 // Use \cdot for explicit multiplication
                 format!("{} \\cdot {}", left.to_latex(), right.to_latex())
             }
+            MathExpr::MatMul(left, right) => format!("{} @ {}", left.to_latex(), right.to_latex()),
             MathExpr::Div(left, right) => {
                 format!("\\frac{{{}}}{{{}}}", left.to_latex(), right.to_latex())
             }
@@ -299,6 +307,15 @@ impl MathExpr {
             // Subscript
             MathExpr::Subscript(base, index) => {
                 format!("{}_{{{}}}", base.to_latex(), index.to_latex())
+            }
+            MathExpr::Slice { start, end } => {
+                let start_str = start.as_ref().map(|s| s.to_latex()).unwrap_or_default();
+                let end_str = end.as_ref().map(|e| e.to_latex()).unwrap_or_default();
+                if start.is_none() && end.is_none() {
+                    "..".to_string()
+                } else {
+                    format!("{}:{}", start_str, end_str)
+                }
             }
 
             // Grouping

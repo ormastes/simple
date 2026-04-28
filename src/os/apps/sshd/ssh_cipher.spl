@@ -25,7 +25,6 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32, ssh_packet_build, ssh_pac
 use std.format.{format_hex}
 
 extern fn serial_println(msg: text)
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
@@ -56,6 +55,11 @@ enum CipherMode:
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
+    var out = arr
+    out.push(byte_val)
+    out
 
 # ============================================================================
 # Cipher State
@@ -90,7 +94,6 @@ impl SshCipher:
         self.seq_s2c = start_s2c_seq
         self.active = true
         self.mode = CipherMode.Aes256Gcm
-        serial_println("[ssh-cipher] activate seq_s2c={self.seq_s2c}")
 
     me activate_chacha20(start_c2s_seq: u32, start_s2c_seq: u32):
         """Activate encryption with derived session keys (ChaCha20-Poly1305)."""
@@ -107,7 +110,6 @@ impl SshCipher:
 
 fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
     """Encrypt an outgoing SSH packet (server-to-client direction)."""
-    serial_println("[ssh-cipher] encrypt enter seq={seq_s2c} payload_len={payload.len()} iv_len={iv_s2c.len()} key_len={enc_key_s2c.len()}")
     var padding_len: u64 = 4
     while ((1 + payload.len() + padding_len) % 16) != 0:
         padding_len = padding_len + 1
@@ -117,36 +119,31 @@ fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv
     val aad_b2: u8 = ((packet_length >> 8) & 0xFF).to_u8()
     val aad_b3: u8 = (packet_length & 0xFF).to_u8()
     var aad: [u8] = []
-    aad = rt_push_byte(aad, aad_b0.to_i64())
-    aad = rt_push_byte(aad, aad_b1.to_i64())
-    aad = rt_push_byte(aad, aad_b2.to_i64())
-    aad = rt_push_byte(aad, aad_b3.to_i64())
+    aad = _push_byte(aad, aad_b0)
+    aad = _push_byte(aad, aad_b1)
+    aad = _push_byte(aad, aad_b2)
+    aad = _push_byte(aad, aad_b3)
     var body: [u8] = []
-    body = rt_push_byte(body, padding_len.to_i64())
+    body = _push_byte(body, padding_len.to_u8())
     var i: u64 = 0
     while i < payload.len():
-        body = rt_push_byte(body, _u8_at(payload, i).to_i64())
+        body = _push_byte(body, _u8_at(payload, i))
         i = i + 1
     i = 0
     while i < padding_len:
-        body = rt_push_byte(body, 0)
+        body = _push_byte(body, 0)
         i = i + 1
-    serial_println("[ssh-cipher] aes payload_len={payload.len()} packet_length={packet_length} aad={_u8s_hex(aad)} body_len={body.len()}")
-
     val nonce = _make_nonce(iv_s2c, seq_s2c)
-    serial_println("[ssh-cipher] aes nonce={_u8s_hex(nonce)}")
-
     val encrypted_with_tag = aes256_gcm_encrypt(enc_key_s2c, nonce, body, aad)
-    serial_println("[ssh-cipher] aes encrypted={_u8s_hex(encrypted_with_tag)}")
 
     var result: [u8] = []
     i = 0
     while i < aad.len():
-        result = rt_push_byte(result, _u8_at(aad, i).to_i64())
+        result = _push_byte(result, _u8_at(aad, i))
         i = i + 1
     i = 0
     while i < encrypted_with_tag.len():
-        result = rt_push_byte(result, _u8_at(encrypted_with_tag, i).to_i64())
+        result = _push_byte(result, _u8_at(encrypted_with_tag, i))
         i = i + 1
 
     result

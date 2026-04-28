@@ -87,6 +87,7 @@ pub fn eval_abs(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
     // Preserve type: Int -> Int, Float -> Float
     match &args[0] {
+        MathValue::Error(message) => Ok(MathValue::Error(message.clone())),
         MathValue::Int(i) => Ok(MathValue::Int(i.abs())),
         MathValue::Float(f) => Ok(MathValue::Float(f.abs())),
         MathValue::Bool(b) => Ok(MathValue::Int(if *b { 1 } else { 0 })),

@@ -294,6 +294,28 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
     None
 }
 
+fn strip_flattened_import_nodes(module: Module) -> Module {
+    let items = module
+        .items
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item,
+                Node::UseStmt(_)
+                    | Node::MultiUse(_)
+                    | Node::CommonUseStmt(_)
+                    | Node::ExportUseStmt(_)
+                    | Node::StructuredExportStmt(_)
+                    | Node::AutoImportStmt(_)
+            )
+        })
+        .collect();
+    Module {
+        name: module.name,
+        items,
+    }
+}
+
 fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
     match target {
         ImportTarget::Glob => {}
@@ -1064,7 +1086,7 @@ fn load_module_with_imports_internal(
 
                     // Add imported items for flattened access (functions/classes in global scope)
                     if flatten_this_import {
-                        items.extend(imported.items);
+                        items.extend(strip_flattened_import_nodes(imported).items);
                     }
                 }
                 // ALSO keep the UseStmt so evaluate_module can create the module binding
@@ -1120,7 +1142,7 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
-                        items.extend(imported.items);
+                        items.extend(strip_flattened_import_nodes(imported).items);
                     }
                 }
                 items.push(item);
@@ -1169,7 +1191,7 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
-                        items.extend(imported.items);
+                        items.extend(strip_flattened_import_nodes(imported).items);
                     }
                 }
                 items.push(item);
@@ -1223,7 +1245,7 @@ fn load_module_with_imports_internal(
 
                         // Add imported items for flattened access
                         if flatten_this_import {
-                            items.extend(imported.items);
+                            items.extend(strip_flattened_import_nodes(imported).items);
                         }
                     }
                 }
@@ -1248,7 +1270,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         .path
         .segments
         .iter()
-        .filter(|s| s.as_str() != "crate")
+        .filter(|s| s.as_str() != "crate" && s.as_str() != "self" && s.as_str() != ".")
         .cloned()
         .collect();
 

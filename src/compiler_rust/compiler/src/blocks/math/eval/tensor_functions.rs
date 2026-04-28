@@ -180,6 +180,41 @@ pub fn eval_matmul(args: &[MathValue]) -> Result<MathValue, CompileError> {
     Ok(MathValue::Tensor(a.matmul(&b)?))
 }
 
+pub fn eval_inv(args: &[MathValue]) -> Result<MathValue, CompileError> {
+    require_tensor_args("inv", args, 1)?;
+    let a = get_tensor(&args[0])?;
+    if a.shape == vec![2, 2] {
+        let det = a.data[0] * a.data[3] - a.data[1] * a.data[2];
+        if det == 0.0 {
+            return Ok(MathValue::Error("singular matrix".to_string()));
+        }
+        let data = vec![
+            a.data[3] / det,
+            -a.data[1] / det,
+            -a.data[2] / det,
+            a.data[0] / det,
+        ];
+        return Ok(MathValue::Tensor(Tensor::new(data, vec![2, 2])?));
+    }
+    Err(CompileError::semantic("inv currently supports only 2x2 tensors".to_string()))
+}
+
+pub fn eval_solve(args: &[MathValue]) -> Result<MathValue, CompileError> {
+    require_tensor_args("solve", args, 2)?;
+    let a = get_tensor(&args[0])?;
+    let b = get_tensor(&args[1])?;
+    if a.shape == vec![2, 2] && b.shape == vec![2] {
+        let det = a.data[0] * a.data[3] - a.data[1] * a.data[2];
+        if det == 0.0 {
+            return Ok(MathValue::Error("singular matrix".to_string()));
+        }
+        let x0 = (b.data[0] * a.data[3] - a.data[1] * b.data[1]) / det;
+        let x1 = (a.data[0] * b.data[1] - b.data[0] * a.data[2]) / det;
+        return Ok(MathValue::Tensor(Tensor::new(vec![x0, x1], vec![2])?));
+    }
+    Err(CompileError::semantic("solve currently supports 2x2 matrix and length-2 rhs".to_string()))
+}
+
 pub fn eval_dot(args: &[MathValue]) -> Result<MathValue, CompileError> {
     require_tensor_args("dot", args, 2)?;
     let a = get_tensor(&args[0])?;
