@@ -9,6 +9,7 @@
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_tls13_hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]
 extern fn rt_tls13_hkdf_extract_into(salt: [u8], ikm: [u8], out: [u8]) -> i64
+extern fn rt_tls13_hkdf_expand_into(prk: [u8], info: [u8], out: [u8], length: i64) -> i64
 extern fn rt_tls13_hkdf_expand_label(secret: [u8], label: [u8], context: [u8], length: i64) -> [u8]
 extern fn rt_tls13_hkdf_expand_label_into(secret: [u8], label: [u8], context: [u8], out: [u8], length: i64) -> i64
 extern fn rt_tls13_hkdf_expand_label_derived(secret: [u8], context: [u8]) -> [u8]
@@ -131,7 +132,21 @@ fn hkdf_expand_with_info_len(prk: [u8], info: [u8], info_len: u64, length: u64) 
 
     T(0) = empty string
     T(i) = HMAC-Hash(PRK, T(i-1) || info || i)
+
+    Compile-mode fast-path: delegate to rt_tls13_hkdf_expand_into. Pure-Simple
+    code below depends on `[u8].len()` and `[u32]` shifts that compile-mode
+    Cranelift miscompiles. C extern reads runtime lengths directly.
     """
+    val _unused_info_len = info_len
+    var out_buf: [u8] = []
+    var alloc_i: u64 = 0
+    while alloc_i < length:
+        out_buf.push(0x00)
+        alloc_i = alloc_i + 1
+    val rc = rt_tls13_hkdf_expand_into(prk, info, out_buf, length.to_i64())
+    if rc != 0:
+        return out_buf
+
     val digest_len: u64 = 32
     val block_count = if length == 0 { 0u64 } else { ((length + digest_len - 1) / digest_len) }
     var okm: [u8] = []
