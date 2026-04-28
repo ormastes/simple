@@ -372,20 +372,22 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         }
     }
 
-    let mut config = NativeBuildConfig::default();
-    config.file_timeout = timeout;
-    config.verbose = verbose;
-    config.strip = strip;
-    config.num_threads = threads;
-    config.incremental = incremental;
-    config.clean = clean;
-    config.cache_dir = cache_dir;
-    config.no_mangle = no_mangle;
-    config.backend = backend.clone();
-    config.runtime_path = runtime_path;
-    config.runtime_bundle = runtime_bundle;
-    config.entry_closure = entry_closure;
-    config.linker_script = linker_script;
+    let mut config = NativeBuildConfig {
+        file_timeout: timeout,
+        verbose,
+        strip,
+        num_threads: threads,
+        incremental,
+        clean,
+        cache_dir,
+        no_mangle,
+        backend: backend.clone(),
+        runtime_path,
+        runtime_bundle,
+        entry_closure,
+        linker_script,
+        ..Default::default()
+    };
 
     // Parse and set target override
     let target = if let Some(ref triple) = target_triple {
