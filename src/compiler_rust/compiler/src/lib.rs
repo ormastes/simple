@@ -122,7 +122,7 @@ pub use interpreter::{
     is_timeout_exceeded,
     reset_timeout,
 };
-pub use watchdog::{start_watchdog, stop_watchdog};
+pub use watchdog::{set_watchdog_context, start_watchdog, stop_watchdog};
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
 pub use layout_recorder::{
     clear_recording, export_layout_config, export_layout_sdn, is_recording, merge_with_config, record_function_call,

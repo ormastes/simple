@@ -32,7 +32,7 @@ use simple_compiler::interpreter::clear_pinned_strings;
 use simple_compiler::interpreter::clear_concurrency_registries;
 use simple_compiler::codegen::clear_cranelift_registries;
 use simple_compiler::interpreter_ffi::clear_compiled_functions;
-use simple_compiler::{start_watchdog, stop_watchdog};
+use simple_compiler::{set_watchdog_context, start_watchdog, stop_watchdog};
 use simple_compiler::import_loader::collect_imported_module_paths;
 use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection_enabled, reset_recursion_depth};
 use simple_native_loader::default_runtime_provider;
@@ -446,7 +446,11 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     let runner = create_test_runner(options);
 
     // Start per-test watchdog timer so infinite loops trigger TimeoutExceeded.
+    // Tag the watchdog context with the spec path so a kill writes the path
+    // into crash_<PID>.log (otherwise the log only carries PID, making it
+    // impossible to tell which spec timed out in a multi-spec run).
     let timeout_secs = per_test_timeout_secs(path);
+    set_watchdog_context(Some(path.display().to_string()));
     start_watchdog(timeout_secs);
 
     // catch_unwind catches panics (including stack overflows on some platforms)
@@ -471,6 +475,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
 
     // Stop watchdog and reset the timeout flag for the next test.
     stop_watchdog();
+    set_watchdog_context(None);
     reset_timeout();
 
     // Check RSS after the test. If memory grew beyond the limit, report the

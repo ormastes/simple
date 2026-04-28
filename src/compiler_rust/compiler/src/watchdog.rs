@@ -19,6 +19,21 @@ struct WatchdogHandle {
 
 static WATCHDOG: Mutex<Option<WatchdogHandle>> = Mutex::new(None);
 
+/// Optional context (e.g. current spec path) recorded into the crash log
+/// when the watchdog fires. Set by the test runner (or any caller) before
+/// `start_watchdog` and cleared after `stop_watchdog` to disambiguate which
+/// spec each `crash_<PID>.log` entry came from.
+static WATCHDOG_CONTEXT: Mutex<Option<String>> = Mutex::new(None);
+
+/// Set or clear the watchdog context label. Pass `Some(path)` before
+/// `start_watchdog` to tag the kill, and `None` after `stop_watchdog`
+/// to avoid leaking a stale label into a later, unrelated kill.
+pub fn set_watchdog_context(ctx: Option<String>) {
+    if let Ok(mut g) = WATCHDOG_CONTEXT.lock() {
+        *g = ctx;
+    }
+}
+
 /// Memory limit in bytes for the watchdog to monitor.
 /// Defaults to 0 (disabled). Overridable via `SIMPLE_MEMORY_LIMIT_MB`
 /// (or legacy `SIMPLE_TEST_MEMORY_LIMIT_MB`).
@@ -133,6 +148,11 @@ fn write_watchdog_crash_log(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "=== WATCHDOG CRASH ===");
         let _ = writeln!(f, "PID: {}", pid);
+        if let Ok(g) = WATCHDOG_CONTEXT.lock() {
+            if let Some(s) = g.as_ref() {
+                let _ = writeln!(f, "Spec: {}", s);
+            }
+        }
         let _ = writeln!(f, "OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
         let _ = writeln!(f, "{}", msg);
         let _ = writeln!(f, "======================\n");
@@ -201,5 +221,49 @@ mod tests {
         start_watchdog(60);
         assert!(!fault_detection::is_timeout_exceeded());
         stop_watchdog();
+    }
+
+    #[test]
+    fn test_watchdog_crash_log_includes_spec_context() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        fault_detection::reset_timeout();
+        // Route the crash log to a test-private dir so we don't pollute .simple/logs
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_dir = std::env::temp_dir().join(format!("watchdog_log_test_{}", nanos));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::env::set_var("SIMPLE_LOG_DIR", &tmp_dir);
+
+        let spec_path = "/tmp/some/fake_demo_spec.spl";
+        set_watchdog_context(Some(spec_path.to_string()));
+        start_watchdog(1);
+        // Wait until the watchdog fires
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !fault_detection::is_timeout_exceeded() {
+            assert!(
+                Instant::now() < deadline,
+                "watchdog did not fire within 10 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop_watchdog();
+        set_watchdog_context(None);
+        fault_detection::reset_timeout();
+
+        // Find the crash log and verify it contains the spec path.
+        let pid = std::process::id();
+        let log_path = tmp_dir.join(format!("crash_{}.log", pid));
+        let contents = std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", log_path.display(), e));
+        assert!(
+            contents.contains(&format!("Spec: {}", spec_path)),
+            "crash log missing spec context. Contents:\n{}",
+            contents
+        );
+        std::env::remove_var("SIMPLE_LOG_DIR");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
