@@ -97,7 +97,25 @@ Fix order matters:
 
 3. **`lowering_expr_call.rs` ~lines 115–130**: Insert `MirInst::BoxInt` before each `rt_array_push` call for integer-typed enum construction args (mirrors what `lower_assign_stmt` does for regular assignments).
 
-The live gate is green via the `rt_tls13_record_decrypt_compact` workaround. No fix was attempted in this investigation pass (primary bug is outside the assigned `mir/lower/`+`codegen/instr/` scope).
+### Fix attempt (2026-04-28) — INCOMPLETE
+
+Fixes #1 and #3 were applied in tree:
+- `stmt_lowering.rs:893-896` — `payload_expr_ty = TypeId::ANY` when `payload_patterns.len() > 1`.
+- `lowering_expr_call.rs:121-160` — `MirInst::BoxInt` inserted before `rt_array_push` for arg types in {I8/I16/I32/I64/U8/U16/U32/U64/BOOL}.
+
+Verification: rebuilt with `cargo build`, force-rebuilt the QEMU kernel, switched D4 in `tls_unit_entry.spl` from `rt_tls13_record_decrypt_compact` back to enum destructuring (`if val RecordResult.Ok(ct4, dt4) = dec4`). Result: **D4 still produces `ct4=0`**. Live gate dropped 36/0 → 35/1.
+
+Reverted D4 to compact-API; live gate restored to 36/0.
+
+**The bug is deeper than the traced 4-step path.** Possible additional sources:
+- Step 2 (`lowering_expr_builtin.rs` `rt_enum_payload` UnboxInt) may still trigger something else even when `expr_ty=ANY` (e.g., the `tagged_vregs` insertion at line 33 with downstream Store/Load propagation).
+- The runtime `rt_array_push_handle` may not actually preserve tagging across the array slot despite the comment.
+- `rt_index_get`'s `ENCODE_INT(idx)` may interact unexpectedly with our BoxInt'd values during lookup.
+- A separate path in MIR lowering may still insert `UnboxInt` between construction and destructuring.
+
+A future investigation should probe between each step empirically (print intermediate VReg values during run) instead of only static-tracing.
+
+The live gate is green via the `rt_tls13_record_decrypt_compact` workaround. The compiler partial fix remains in tree; reverting it is unnecessary because it doesn't regress anything (live gate is 36/0 with the workaround).
 
 ## Workaround in tree (2026-04-28)
 

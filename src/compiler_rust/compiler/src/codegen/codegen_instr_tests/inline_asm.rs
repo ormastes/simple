@@ -1,6 +1,12 @@
 use super::aot_compiles;
 use crate::hir::{HirStmt, Lowerer};
 use crate::mir::{BlockId, MirInst};
+use std::sync::{Mutex, OnceLock};
+
+fn inline_asm_test_lock() -> &'static Mutex<()> {
+    static INLINE_ASM_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    INLINE_ASM_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn lower_body(source: &str) -> Vec<HirStmt> {
     let mut parser = simple_parser::Parser::new(source);
@@ -13,6 +19,7 @@ fn lower_body(source: &str) -> Vec<HirStmt> {
 
 #[test]
 fn codegen_inline_asm_single_instruction_collects_cli() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_cli", |f| {
         let ret = f.new_vreg();
@@ -35,6 +42,7 @@ fn codegen_inline_asm_single_instruction_collects_cli() {
 
 #[test]
 fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_cli_hlt", |f| {
         let ret = f.new_vreg();
@@ -58,6 +66,7 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
 
 #[test]
 fn native_inline_asm_x86_target_uses_intel_syntax() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_x86_intel", |f| {
         let ret = f.new_vreg();
@@ -86,6 +95,7 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
 
 #[test]
 fn native_inline_asm_riscv_target_preserves_raw_instructions() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_riscv_raw", |f| {
         let ret = f.new_vreg();
@@ -113,6 +123,7 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
 
 #[test]
 fn native_inline_asm_skips_unresolved_simple_operands() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
     crate::codegen::inline_asm::clear_inline_asm_blocks();
     assert!(aot_compiles("inline_asm_operand_skip", |f| {
         let ret = f.new_vreg();
