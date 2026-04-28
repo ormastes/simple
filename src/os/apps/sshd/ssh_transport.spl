@@ -4,11 +4,9 @@
 # Version exchange, algorithm negotiation, and key exchange init.
 # Handles KEXINIT messages and algorithm selection.
 
-use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, SshTextResult, SshStringResult}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_bytes_to_text, SshTextResult, SshStringResult}
 use os.kernel.log.klog_api.{log_info, log_raw_println}
 
-extern fn rt_bytes_to_text(data: [u8]) -> text
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_string_to_byte_array(s: text) -> [u8]
 # ============================================================================
 # Constants
@@ -46,7 +44,7 @@ val MAC_ALGORITHM: text = "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@opens
 val COMPRESS_ALGORITHM: text = "none"
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+    data[idx]
 
 fn _push_raw_string(buf: [u8], data: [u8]):
     ssh_put_u32(buf, data.len().to_u32())
@@ -190,7 +188,7 @@ fn ssh_parse_version_string(data: [u8]) -> Result<text, text>:
             while i < end:
                 version_bytes.push(_u8_at(data, i))
                 i = i + 1
-            var version: text = rt_bytes_to_text(version_bytes)
+            var version: text = ssh_ascii_bytes_to_text(version_bytes)
             if not version.starts_with("SSH-2.0-"):
                 return Err("unsupported SSH version: {version}")
             return Ok(version)
@@ -386,34 +384,18 @@ fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
 fn _list_contains(list: text, candidate: text) -> bool:
     if candidate == "":
         return false
-    var start: u64 = 0
-    while start <= list.len():
-        val rel_end = list.slice(start, list.len()).index_of(",")
-        var end = list.len()
-        if rel_end >= 0:
-            end = start + rel_end.to_u64()
-        val item = list.slice(start, end).trim()
+    for raw in list.split(","):
+        val item = raw.trim()
         if item == candidate:
             return true
-        if rel_end < 0:
-            return false
-        start = end + 1
     false
 
 fn _first_match(client_list: text, server_list: text) -> text:
     """Find the first algorithm in client_list that also appears in server_list."""
-    var start: u64 = 0
-    while start <= server_list.len():
-        val rel_end = server_list.slice(start, server_list.len()).index_of(",")
-        var end = server_list.len()
-        if rel_end >= 0:
-            end = start + rel_end.to_u64()
-        val candidate = server_list.slice(start, end).trim()
+    for raw in server_list.split(","):
+        val candidate = raw.trim()
         if _list_contains(client_list, candidate):
             return candidate
-        if rel_end < 0:
-            return ""
-        start = end + 1
     ""
 
 fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
