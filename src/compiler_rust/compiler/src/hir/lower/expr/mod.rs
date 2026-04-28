@@ -269,11 +269,7 @@ impl Lowerer {
         }
 
         // Lower arguments for generic method call
-        let mut hir_args = Vec::new();
-        for arg in args {
-            let expr = self.lower_expr(&arg.value, ctx)?;
-            hir_args.push(expr);
-        }
+        let hir_args = self.lower_call_args(args, ctx)?;
 
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
@@ -383,11 +379,7 @@ impl Lowerer {
         let is_array = matches!(self.module.types.get(receiver.ty), Some(HirType::Array { .. }));
 
         // Lower arguments
-        let mut hir_args = Vec::new();
-        for arg in args {
-            let expr = self.lower_expr(&arg.value, ctx)?;
-            hir_args.push(expr);
-        }
+        let hir_args = self.lower_call_args(args, ctx)?;
 
         // String methods
         if is_string {

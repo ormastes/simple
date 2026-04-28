@@ -6,6 +6,26 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    /// Lower a positional argument list to `Vec<HirExpr>`.
+    ///
+    /// **Drops `arg.name`** — this is intentional. All call sites using this helper
+    /// have already inspected `arg.name` upstream to dispatch struct-init vs positional
+    /// paths. Inside the lowering loop, names are never read.
+    ///
+    /// TODO: if named-arg HIR ever lands (e.g., keyword arguments preserved into HirExpr),
+    /// call sites that use this helper must switch back to a name-aware loop.
+    pub(in crate::hir::lower) fn lower_call_args(
+        &mut self,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            out.push(self.lower_expr(&arg.value, ctx)?);
+        }
+        Ok(out)
+    }
+
     /// Helper to lower builtin function calls with consistent handling
     pub(in crate::hir::lower) fn lower_builtin_call(
         &mut self,
@@ -14,10 +34,7 @@ impl Lowerer {
         ret_ty: TypeId,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let mut args_hir = Vec::new();
-        for arg in args {
-            args_hir.push(self.lower_expr(&arg.value, ctx)?);
-        }
+        let args_hir = self.lower_call_args(args, ctx)?;
         Ok(HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: name.to_string(),

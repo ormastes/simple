@@ -49,10 +49,7 @@ impl Lowerer {
                         kind: HirExprKind::Global(name.clone()),
                         ty: TypeId::ANY,
                     });
-                    let mut args_hir = Vec::new();
-                    for arg in args {
-                        args_hir.push(self.lower_expr(&arg.value, ctx)?);
-                    }
+                    let args_hir = self.lower_call_args(args, ctx)?;
                     return Ok(HirExpr {
                         kind: HirExprKind::Call {
                             func: func_hir,
@@ -71,11 +68,7 @@ impl Lowerer {
                     return self.lower_bitfield_constructor(struct_ty, args, ctx);
                 }
                 // Lower arguments as positional field initializers
-                let mut fields_hir = Vec::new();
-                for arg in args {
-                    let field_hir = self.lower_expr(&arg.value, ctx)?;
-                    fields_hir.push(field_hir);
-                }
+                let fields_hir = self.lower_call_args(args, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
                         ty: struct_ty,
@@ -90,11 +83,7 @@ impl Lowerer {
                 // In lenient mode, uppercase identifier with named arguments is likely
                 // a struct construction even if the type isn't in the registry.
                 // Use TypeId::ANY since we don't have the actual type info.
-                let mut fields_hir = Vec::new();
-                for arg in args {
-                    let field_hir = self.lower_expr(&arg.value, ctx)?;
-                    fields_hir.push(field_hir);
-                }
+                let fields_hir = self.lower_call_args(args, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
                         ty: TypeId::ANY,
@@ -193,10 +182,7 @@ impl Lowerer {
 
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
-        let mut args_hir = Vec::new();
-        for arg in args {
-            args_hir.push(self.lower_expr(&arg.value, ctx)?);
-        }
+        let args_hir = self.lower_call_args(args, ctx)?;
 
         // Return type comes from function type
         let ret_ty = func_hir.ty; // Simplified - would need function type lookup

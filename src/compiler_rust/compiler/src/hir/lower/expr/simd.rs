@@ -238,10 +238,7 @@ impl Lowerer {
 
         let qualified_name = format!("{}.{}", class_name, method);
 
-        let mut args_hir = Vec::new();
-        for arg in args {
-            args_hir.push(self.lower_expr(&arg.value, ctx)?);
-        }
+        let args_hir = self.lower_call_args(args, ctx)?;
 
         // Look up the return type from the module's functions
         let return_ty = self
