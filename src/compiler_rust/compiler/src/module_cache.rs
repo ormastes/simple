@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tracing::trace;
+use crate::interpreter::FUNCTION_OVERLOADS;
 
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
@@ -306,6 +307,12 @@ pub fn merge_cached_module_definitions(
                 if name != "main" {
                     // Don't add "main" from imported modules -- Arc clone is cheap
                     functions.insert(name.clone(), func_def.clone());
+                    FUNCTION_OVERLOADS.with(|cell| {
+                        cell.borrow_mut()
+                            .entry(name.clone())
+                            .or_default()
+                            .push(func_def.clone());
+                    });
                 }
             }
         }

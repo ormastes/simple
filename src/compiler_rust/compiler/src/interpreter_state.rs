@@ -197,6 +197,11 @@ thread_local! {
     /// are not in the local `impl_methods` parameter.
     /// Key is type name, value is list of methods from impl blocks for that type.
     pub(crate) static GLOBAL_IMPL_METHODS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
+
+    /// Interpreted function overload registry keyed by source-level function name.
+    /// This keeps all duplicate definitions so runtime dispatch can choose the
+    /// correct overload instead of relying on the flat function map.
+    pub(crate) static FUNCTION_OVERLOADS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -569,6 +574,9 @@ pub fn clear_interpreter_state() {
 
     // Clear global impl methods
     GLOBAL_IMPL_METHODS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear interpreted function overloads
+    FUNCTION_OVERLOADS.with(|cell| cell.borrow_mut().clear());
 
     // Clear unit system registries
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());

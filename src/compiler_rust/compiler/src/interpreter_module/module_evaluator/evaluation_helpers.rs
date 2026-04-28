@@ -13,6 +13,7 @@ use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern, Visibility
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
+use crate::interpreter::FUNCTION_OVERLOADS;
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
 use crate::interpreter::module_cache::filter_functions_from_value;
@@ -70,6 +71,12 @@ pub(super) fn register_definitions(
             Node::Function(f) => {
                 let arc_f = Arc::new(f.clone());
                 local_functions.insert(f.name.clone(), Arc::clone(&arc_f));
+                FUNCTION_OVERLOADS.with(|cell| {
+                    cell.borrow_mut()
+                        .entry(f.name.clone())
+                        .or_default()
+                        .push(Arc::clone(&arc_f));
+                });
                 // Don't add "main" from imported modules to global functions
                 // to prevent auto-execution when the main script finishes
                 if f.name != "main" {
@@ -439,6 +446,12 @@ fn process_use_stmt(
                 for (name, export_value) in module_exports.iter() {
                     if let Value::Function { def, .. } = export_value {
                         global_functions.insert(name.clone(), Arc::clone(def));
+                        FUNCTION_OVERLOADS.with(|cell| {
+                            cell.borrow_mut()
+                                .entry(name.clone())
+                                .or_default()
+                                .push(Arc::clone(def));
+                        });
                     }
                     env.insert(name.clone(), export_value.clone());
                     exports.insert(name.clone(), export_value.clone());

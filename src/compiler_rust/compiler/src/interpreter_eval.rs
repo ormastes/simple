@@ -30,7 +30,7 @@ use super::{
     validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
     MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
     UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
@@ -215,7 +215,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     for item in items {
         match item {
             Node::Function(f) => {
-                functions.insert(f.name.clone(), Arc::new(f.clone()));
+                let func = Arc::new(f.clone());
+                functions.insert(f.name.clone(), Arc::clone(&func));
+                FUNCTION_OVERLOADS.with(|cell| {
+                    cell.borrow_mut()
+                        .entry(f.name.clone())
+                        .or_default()
+                        .push(Arc::clone(&func));
+                });
             }
             Node::Struct(s) => {
                 // Pre-register struct constructor and class definition

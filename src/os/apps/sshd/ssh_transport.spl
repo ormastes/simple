@@ -399,19 +399,19 @@ fn _first_match(client_list: text, server_list: text) -> text:
     ""
 
 fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
-    if client_list.contains("ssh-ed25519-cert-v01@openssh.com") and server_list.contains("ssh-ed25519-cert-v01@openssh.com"):
+    if _list_contains(client_list, "ssh-ed25519-cert-v01@openssh.com") and _list_contains(server_list, "ssh-ed25519-cert-v01@openssh.com"):
         return "ssh-ed25519-cert-v01@openssh.com"
-    if client_list.contains("ssh-ed25519") and server_list.contains("ssh-ed25519"):
+    if _list_contains(client_list, "ssh-ed25519") and _list_contains(server_list, "ssh-ed25519"):
         return "ssh-ed25519"
-    if client_list.contains("rsa-sha2-512-cert-v01@openssh.com") and server_list.contains("rsa-sha2-512-cert-v01@openssh.com"):
+    if _list_contains(client_list, "rsa-sha2-512-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-512-cert-v01@openssh.com"):
         return "rsa-sha2-512-cert-v01@openssh.com"
-    if client_list.contains("rsa-sha2-256-cert-v01@openssh.com") and server_list.contains("rsa-sha2-256-cert-v01@openssh.com"):
+    if _list_contains(client_list, "rsa-sha2-256-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-256-cert-v01@openssh.com"):
         return "rsa-sha2-256-cert-v01@openssh.com"
-    if client_list.contains("ecdsa-sha2-nistp256") and server_list.contains("ecdsa-sha2-nistp256"):
+    if _list_contains(client_list, "ecdsa-sha2-nistp256") and _list_contains(server_list, "ecdsa-sha2-nistp256"):
         return "ecdsa-sha2-nistp256"
-    if client_list.contains("rsa-sha2-512") and server_list.contains("rsa-sha2-512"):
+    if _list_contains(client_list, "rsa-sha2-512") and _list_contains(server_list, "rsa-sha2-512"):
         return "rsa-sha2-512"
-    if client_list.contains("rsa-sha2-256") and server_list.contains("rsa-sha2-256"):
+    if _list_contains(client_list, "rsa-sha2-256") and _list_contains(server_list, "rsa-sha2-256"):
         return "rsa-sha2-256"
     ""
 
@@ -434,135 +434,66 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     Returns the first matching algorithm for each category, following
     client preference order per RFC 4253 section 7.1.
     """
-    var kex: text = ""
-    log_raw_println("[ssh-transport] client kex={client.kex_algorithms}")
-    log_raw_println("[ssh-transport] server kex={server.kex_algorithms}")
-    # Baremetal text split/materialization is still fragile in the live SSH
-    # lane, so match the only real KEX we implement directly instead of
-    # depending on the generic comma-split path when pseudo-algorithms such as
-    # kex-strict-s-v00@openssh.com are present in the server list.
-    if client.kex_algorithms.contains("curve25519-sha256") and
-       server.kex_algorithms.contains("curve25519-sha256"):
+    var kex = ""
+    if _list_contains(client.kex_algorithms, "curve25519-sha256") and _list_contains(server.kex_algorithms, "curve25519-sha256"):
         kex = "curve25519-sha256"
-    elif _list_contains(client.kex_algorithms, server.kex_algorithms):
-        kex = server.kex_algorithms
-    else:
-        kex = _first_match(client.kex_algorithms, server.kex_algorithms)
     if kex == "":
-        log_raw_println("[ssh-transport] no matching kex")
-        log_info("[app.sshd] " + "[ssh-transport] no matching kex")
         return Err("no matching kex algorithm")
 
-    var host_key: text = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
-    log_raw_println("[ssh-transport] client hostkey={client.server_host_key_algorithms}")
-    log_raw_println("[ssh-transport] server hostkey={server.server_host_key_algorithms}")
+    val host_key = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
     if host_key == "":
-        log_raw_println("[ssh-transport] no matching host key")
-        log_info("[app.sshd] " + "[ssh-transport] no matching host key")
         return Err("no matching host key algorithm")
 
-    var cipher_c2s: text = ""
-    log_raw_println("[ssh-transport] client cipher c2s={client.encryption_client_to_server}")
-    log_raw_println("[ssh-transport] server cipher c2s={server.encryption_client_to_server}")
-    if client.encryption_client_to_server.contains("aes128-gcm@openssh.com") and server.encryption_client_to_server.contains("aes128-gcm@openssh.com"):
+    var cipher_c2s = ""
+    if _list_contains(client.encryption_client_to_server, "aes128-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes128-gcm@openssh.com"):
         cipher_c2s = "aes128-gcm@openssh.com"
-    elif client.encryption_client_to_server.contains("aes256-ctr") and server.encryption_client_to_server.contains("aes256-ctr"):
+    elif _list_contains(client.encryption_client_to_server, "aes256-ctr") and _list_contains(server.encryption_client_to_server, "aes256-ctr"):
         cipher_c2s = "aes256-ctr"
-    elif _list_contains(client.encryption_client_to_server, server.encryption_client_to_server):
-        cipher_c2s = server.encryption_client_to_server
-    else:
-        cipher_c2s = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
     if cipher_c2s == "":
-        log_raw_println("[ssh-transport] no matching cipher c2s")
-        log_info("[app.sshd] " + "[ssh-transport] no matching cipher c2s")
         return Err("no matching cipher (c2s)")
 
-    var cipher_s2c: text = ""
-    log_raw_println("[ssh-transport] client cipher s2c={client.encryption_server_to_client}")
-    log_raw_println("[ssh-transport] server cipher s2c={server.encryption_server_to_client}")
-    if client.encryption_server_to_client.contains("aes128-gcm@openssh.com") and server.encryption_server_to_client.contains("aes128-gcm@openssh.com"):
+    var cipher_s2c = ""
+    if _list_contains(client.encryption_server_to_client, "aes128-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes128-gcm@openssh.com"):
         cipher_s2c = "aes128-gcm@openssh.com"
-    elif client.encryption_server_to_client.contains("aes256-ctr") and server.encryption_server_to_client.contains("aes256-ctr"):
+    elif _list_contains(client.encryption_server_to_client, "aes256-ctr") and _list_contains(server.encryption_server_to_client, "aes256-ctr"):
         cipher_s2c = "aes256-ctr"
-    elif _list_contains(client.encryption_server_to_client, server.encryption_server_to_client):
-        cipher_s2c = server.encryption_server_to_client
-    else:
-        cipher_s2c = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
     if cipher_s2c == "":
-        log_raw_println("[ssh-transport] no matching cipher s2c")
-        log_info("[app.sshd] " + "[ssh-transport] no matching cipher s2c")
         return Err("no matching cipher (s2c)")
 
-    var mac_c2s: text = ""
-    log_raw_println("[ssh-transport] client mac c2s={client.mac_client_to_server}")
-    log_raw_println("[ssh-transport] server mac c2s={server.mac_client_to_server}")
+    var mac_c2s = ""
     if _is_aes_gcm(cipher_c2s):
         mac_c2s = "none"
-    else:
-        if client.mac_client_to_server.contains("hmac-sha2-256-etm@openssh.com") and server.mac_client_to_server.contains("hmac-sha2-256-etm@openssh.com"):
-            mac_c2s = "hmac-sha2-256-etm@openssh.com"
-        elif client.mac_client_to_server.contains("hmac-sha2-512-etm@openssh.com") and server.mac_client_to_server.contains("hmac-sha2-512-etm@openssh.com"):
-            mac_c2s = "hmac-sha2-512-etm@openssh.com"
-        elif _list_contains(client.mac_client_to_server, server.mac_client_to_server):
-            mac_c2s = server.mac_client_to_server
-        else:
-            mac_c2s = _first_match(client.mac_client_to_server, server.mac_client_to_server)
-        if mac_c2s == "":
-            log_raw_println("[ssh-transport] no matching mac c2s")
-            log_info("[app.sshd] " + "[ssh-transport] no matching mac c2s")
-            return Err("no matching mac (c2s)")
-        if _is_aes256_ctr(cipher_c2s) and not _is_supported_etm(mac_c2s):
-            log_raw_println("[ssh-transport] aes256-ctr requires etm c2s")
-            return Err("aes256-ctr requires OpenSSH ETM MAC (c2s)")
+    elif _list_contains(client.mac_client_to_server, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-256-etm@openssh.com"):
+        mac_c2s = "hmac-sha2-256-etm@openssh.com"
+    elif _list_contains(client.mac_client_to_server, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-512-etm@openssh.com"):
+        mac_c2s = "hmac-sha2-512-etm@openssh.com"
+    if mac_c2s == "":
+        return Err("no matching mac (c2s)")
+    if _is_aes256_ctr(cipher_c2s) and not _is_supported_etm(mac_c2s):
+        return Err("aes256-ctr requires OpenSSH ETM MAC (c2s)")
 
-    var mac_s2c: text = ""
-    log_raw_println("[ssh-transport] client mac s2c={client.mac_server_to_client}")
-    log_raw_println("[ssh-transport] server mac s2c={server.mac_server_to_client}")
+    var mac_s2c = ""
     if _is_aes_gcm(cipher_s2c):
         mac_s2c = "none"
-    else:
-        if client.mac_server_to_client.contains("hmac-sha2-256-etm@openssh.com") and server.mac_server_to_client.contains("hmac-sha2-256-etm@openssh.com"):
-            mac_s2c = "hmac-sha2-256-etm@openssh.com"
-        elif client.mac_server_to_client.contains("hmac-sha2-512-etm@openssh.com") and server.mac_server_to_client.contains("hmac-sha2-512-etm@openssh.com"):
-            mac_s2c = "hmac-sha2-512-etm@openssh.com"
-        elif _list_contains(client.mac_server_to_client, server.mac_server_to_client):
-            mac_s2c = server.mac_server_to_client
-        else:
-            mac_s2c = _first_match(client.mac_server_to_client, server.mac_server_to_client)
-        if mac_s2c == "":
-            log_raw_println("[ssh-transport] no matching mac s2c")
-            log_info("[app.sshd] " + "[ssh-transport] no matching mac s2c")
-            return Err("no matching mac (s2c)")
-        if _is_aes256_ctr(cipher_s2c) and not _is_supported_etm(mac_s2c):
-            log_raw_println("[ssh-transport] aes256-ctr requires etm s2c")
-            return Err("aes256-ctr requires OpenSSH ETM MAC (s2c)")
+    elif _list_contains(client.mac_server_to_client, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-256-etm@openssh.com"):
+        mac_s2c = "hmac-sha2-256-etm@openssh.com"
+    elif _list_contains(client.mac_server_to_client, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-512-etm@openssh.com"):
+        mac_s2c = "hmac-sha2-512-etm@openssh.com"
+    if mac_s2c == "":
+        return Err("no matching mac (s2c)")
+    if _is_aes256_ctr(cipher_s2c) and not _is_supported_etm(mac_s2c):
+        return Err("aes256-ctr requires OpenSSH ETM MAC (s2c)")
 
-    var comp_c2s: text = ""
-    log_raw_println("[ssh-transport] client comp c2s={client.compression_client_to_server}")
-    log_raw_println("[ssh-transport] server comp c2s={server.compression_client_to_server}")
-    if client.compression_client_to_server.contains("none") and server.compression_client_to_server.contains("none"):
+    var comp_c2s = ""
+    if _list_contains(client.compression_client_to_server, "none") and _list_contains(server.compression_client_to_server, "none"):
         comp_c2s = "none"
-    elif _list_contains(client.compression_client_to_server, server.compression_client_to_server):
-        comp_c2s = server.compression_client_to_server
-    else:
-        comp_c2s = _first_match(client.compression_client_to_server, server.compression_client_to_server)
     if comp_c2s == "":
-        log_raw_println("[ssh-transport] no matching compression c2s")
-        log_info("[app.sshd] " + "[ssh-transport] no matching compression c2s")
         return Err("no matching compression (c2s)")
 
-    var comp_s2c: text = ""
-    log_raw_println("[ssh-transport] client comp s2c={client.compression_server_to_client}")
-    log_raw_println("[ssh-transport] server comp s2c={server.compression_server_to_client}")
-    if client.compression_server_to_client.contains("none") and server.compression_server_to_client.contains("none"):
+    var comp_s2c = ""
+    if _list_contains(client.compression_server_to_client, "none") and _list_contains(server.compression_server_to_client, "none"):
         comp_s2c = "none"
-    elif _list_contains(client.compression_server_to_client, server.compression_server_to_client):
-        comp_s2c = server.compression_server_to_client
-    else:
-        comp_s2c = _first_match(client.compression_server_to_client, server.compression_server_to_client)
     if comp_s2c == "":
-        log_raw_println("[ssh-transport] no matching compression s2c")
-        log_info("[app.sshd] " + "[ssh-transport] no matching compression s2c")
         return Err("no matching compression (s2c)")
 
     Ok(SshAlgorithms(

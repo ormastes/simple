@@ -22,18 +22,73 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
-    GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS,
+    FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Type};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
+
+fn value_type_matches_name(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object { class, .. } => class == expected,
+        Value::Enum { enum_name, .. } => enum_name == expected,
+        _ => value.type_name() == expected,
+    }
+}
+
+fn value_matches_type(value: &Value, ty: &Type) -> bool {
+    match ty {
+        Type::Simple(name) | Type::Generic { name, .. } => value_type_matches_name(value, name),
+        Type::Array { element, .. } => match value {
+            Value::Array(items) => items.iter().all(|item| value_matches_type(item, element)),
+            Value::FrozenArray(items) => items.iter().all(|item| value_matches_type(item, element)),
+            Value::Tuple(items) => items.iter().all(|item| value_matches_type(item, element)),
+            _ => false,
+        },
+        _ => true,
+    }
+}
+
+fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
+    if func.params.len() != values.len() {
+        return None;
+    }
+
+    let mut score = 0usize;
+    for (param, value) in func.params.iter().zip(values.iter()) {
+        if let Some(ty) = &param.ty {
+            if !value_matches_type(value, ty) {
+                return None;
+            }
+            score += match ty {
+                Type::Array { .. } => 4,
+                Type::Simple(_) | Type::Generic { .. } => 2,
+                _ => 1,
+            };
+        }
+    }
+    Some(score)
+}
+
+fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<Arc<FunctionDef>> {
+    let mut best: Option<(usize, Arc<FunctionDef>)> = None;
+    for func in candidates {
+        if let Some(score) = overload_score(func, values) {
+            match &best {
+                Some((best_score, _)) if *best_score >= score => {}
+                _ => best = Some((score, Arc::clone(func))),
+            }
+        }
+    }
+    best.map(|(_, func)| func)
+}
 
 #[allow(clippy::borrowed_box)]
 pub(crate) fn evaluate_call(
@@ -92,7 +147,29 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Priority 4: Check regular functions (user-defined) — most common case
+        // Priority 4: Check overloaded regular functions before the flat map fallback.
+        let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
+        if let Some(overloads) = overloads {
+            if overloads.len() > 1 {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_overload(&overloads, &evaluated_args) {
+                    return core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                }
+            }
+        }
+
+        // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
@@ -102,7 +179,7 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Priority 5: Check env for decorated functions and closures (decorators store
+        // Priority 6: Check env for decorated functions and closures (decorators store
         // the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
             match val {
