@@ -333,7 +333,7 @@ fn should_flatten_transitively(target: &ImportTarget) -> bool {
     matches!(target, ImportTarget::Group(_) | ImportTarget::Glob)
 }
 
-fn source_snippet_for_span<'a>(source: &'a str, span: simple_parser::token::Span) -> Option<&'a str> {
+fn source_snippet_for_span(source: &str, span: simple_parser::token::Span) -> Option<&str> {
     source.get(span.start..span.end)
 }
 

@@ -151,7 +151,7 @@ fn generate_vhdl_with_metadata(
     Ok(out)
 }
 
-fn vhdl_entity_table<'a>(module: &'a mir::MirModule) -> Result<BTreeMap<&'a str, &'a MirFunction>, CompileError> {
+fn vhdl_entity_table(module: &mir::MirModule) -> Result<BTreeMap<&str, &MirFunction>, CompileError> {
     let mut entities = BTreeMap::new();
     let mut sanitized_names: HashMap<String, String> = HashMap::new();
     for func in &module.functions {

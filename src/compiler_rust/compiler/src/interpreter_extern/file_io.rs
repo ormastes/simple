@@ -393,7 +393,7 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(n)) => *n as u64,
         _ => return Ok(Value::Bool(false)),
     };
-    let file = match OpenOptions::new().write(true).create(true).open(&path) {
+    let file = match OpenOptions::new().write(true).create(true).truncate(false).open(&path) {
         Ok(f) => f,
         Err(_) => return Ok(Value::Bool(false)),
     };
