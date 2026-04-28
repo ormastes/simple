@@ -5,17 +5,21 @@ enum LinalgError:
     Singular
 
 fn vector_from(values: [Float64]) -> NDArray:
-    array(values)
+    make_f64_array(values, Shape.new([Index.new(values.len())]))
 
 fn matrix_from_rows(rows: [[Float64]]) -> NDArray:
     val row_count = rows.len()
     val col_count = if row_count == 0: 0 else: rows[0].len()
     var flat: [Float64] = []
+    var i = 0
+    while i < row_count * col_count:
+        flat.push(Float64.new(0.0))
+        i = i + 1
     var r = 0
     while r < row_count:
         var c = 0
         while c < col_count:
-            flat.push(rows[r][c])
+            flat[r * col_count + c] = rows[r][c]
             c = c + 1
         r = r + 1
     make_f64_array(flat, Shape.new([Index.new(row_count), Index.new(col_count)]))
@@ -40,21 +44,30 @@ fn try_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, LinalgErr
     while i < x.data_f64.len():
         out.push(Float64.new(x.data_f64[i].value * alpha.value + y.data_f64[i].value))
         i = i + 1
-    Ok(array(out))
+    Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
 
 fn gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> NDArray:
-    var rows_out: [[Float64]] = []
+    var flat: [Float64] = []
+    var flat_len = a.rows().value * b.cols().value
+    var flat_i = 0
+    while flat_i < flat_len:
+        flat.push(Float64.new(0.0))
+        flat_i = flat_i + 1
     var row = 0
     while row < a.rows().value:
-        var row_result = row_vector_f64(c_in, row).mul_scalar(beta)
-        var k = 0
-        while k < a.cols().value:
-            val coeff = Float64.new(alpha.value * a.get_f64_at([Index.new(row), Index.new(k)]).value)
-            row_result = axpy(coeff, row_vector_f64(b, k), row_result)
-            k = k + 1
-        rows_out.push(row_result.to_f64_values())
+        var col = 0
+        while col < b.cols().value:
+            var value = beta.value * c_in.get_f64_at([Index.new(row), Index.new(col)]).value
+            var k = 0
+            while k < a.cols().value:
+                value = value + alpha.value
+                    * a.get_f64_at([Index.new(row), Index.new(k)]).value
+                    * b.get_f64_at([Index.new(k), Index.new(col)]).value
+                k = k + 1
+            flat[row * b.cols().value + col] = Float64.new(value)
+            col = col + 1
         row = row + 1
-    matrix_from_rows(rows_out)
+    make_f64_array(flat, Shape.new([a.rows(), b.cols()]))
 
 fn try_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, LinalgError>:
     if a.cols().value != b.rows().value:
@@ -70,68 +83,53 @@ fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
         return Err(LinalgError.DimensionMismatch)
     if b.len().value != n:
         return Err(LinalgError.DimensionMismatch)
-    var mat: [[Float64]] = []
+    var mat: [f64] = []
+    var rhs: [f64] = []
     var row = 0
     while row < n:
-        var current: [Float64] = []
         var col = 0
         while col < n:
-            current.push(a.get_f64_at([Index.new(row), Index.new(col)]))
+            mat.push(a.get_f64_at([Index.new(row), Index.new(col)]).value)
             col = col + 1
-        mat.push(current)
-        row = row + 1
-    var rhs: [Float64] = []
-    row = 0
-    while row < n:
-        rhs.push(b.get_f64(Index.new(row)))
+        rhs.push(b.get_f64(Index.new(row)).value)
         row = row + 1
     var pivot = 0
     while pivot < n:
-        if mat[pivot][pivot].value == 0.0:
+        val pivot_pos = pivot * n + pivot
+        if mat[pivot_pos] == 0.0:
             return Err(LinalgError.Singular)
         var lower = pivot + 1
         while lower < n:
-            val factor = mat[lower][pivot].value / mat[pivot][pivot].value
+            val factor = mat[lower * n + pivot] / mat[pivot_pos]
             var col = pivot
             while col < n:
-                mat[lower][col] = Float64.new(mat[lower][col].value - factor * mat[pivot][col].value)
+                val pos = lower * n + col
+                val pivot_col = pivot * n + col
+                mat[pos] = mat[pos] - factor * mat[pivot_col]
                 col = col + 1
-            rhs[lower] = Float64.new(rhs[lower].value - factor * rhs[pivot].value)
+            rhs[lower] = rhs[lower] - factor * rhs[pivot]
             lower = lower + 1
         pivot = pivot + 1
-    var x: [Float64] = []
+    var x: [f64] = []
     var i = 0
     while i < n:
-        x.push(Float64.new(0.0))
+        x.push(0.0)
         i = i + 1
     i = n - 1
     while i >= 0:
-        var sum = rhs[i].value
+        var sum = rhs[i]
         var col = i + 1
         while col < n:
-            sum = sum - mat[i][col].value * x[col].value
+            sum = sum - mat[i * n + col] * x[col]
             col = col + 1
-        if mat[i][i].value == 0.0:
+        val diag = mat[i * n + i]
+        if diag == 0.0:
             return Err(LinalgError.Singular)
-        x[i] = Float64.new(sum / mat[i][i].value)
+        x[i] = sum / diag
         i = i - 1
-    Ok(array(x))
-
-fn row_vector_f64(array_value: NDArray, row: i64) -> NDArray:
     var out: [Float64] = []
-    var col = 0
-    while col < array_value.cols().value:
-        out.push(array_value.get_f64_at([Index.new(row), Index.new(col)]))
-        col = col + 1
-    array(out)
-
-fn basis_vector_f64(length: i64, index: i64) -> NDArray:
-    var out: [Float64] = []
-    var i = 0
-    while i < length:
-        if i == index:
-            out.push(Float64.new(1.0))
-        else:
-            out.push(Float64.new(0.0))
+    i = 0
+    while i < x.len():
+        out.push(Float64.new(x[i]))
         i = i + 1
-    array(out)
+    Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))

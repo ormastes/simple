@@ -6,85 +6,41 @@
 
 use app.cli.query_sanitize.{sanitize_path}
 use app.cli.query_helpers.{_extract_flag}
-use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED, _diag_emit_or_collect, _parse_error_location, _find_in_line, _find_in_line_from, query_file_read_rich, query_file_exists, query_dir_list}
-use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _is_return_statement, _find_next_statement_in_block}
-use app.cli.query_lint_checks.{_check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
-use app.cli.query_lint_scan.{lint_scan_line}
-use compiler.driver.driver_api_core.{check_file}
-use compiler.driver.driver_types.{CompileResult}
+use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED, _diag_emit_or_collect, _parse_error_location, _find_in_line_from, query_file_read_rich, query_file_exists, query_dir_list, query_process_run}
+use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _collect_lint_diagnostics_json}
 use std.report.emitter.lsp.{LspEmitter}
 
 fn query_check(file: text, cmd_args: [text]) -> i64:
     val format = _extract_flag(cmd_args, "--format", "text")
-    # In JSON mode, collect diagnostics and wrap in MCP-compatible structure
+    val check_result = _run_simple_check(file)
+    val check_stdout = check_result.0
+    val check_stderr = check_result.1
+    val check_code = check_result.2
+    val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
+
     if format == "json":
         _DIAG_COLLECT_MODE = true
         _DIAG_COLLECTED = []
-    val result = check_file(file)
-    match result:
-        case CompileResult.Success(_):
-            # Run source-based lint checks for additional diagnostics
-            if query_file_exists(file):
-                val source = query_file_read_rich(file) ?? ""
-                if source != "":
-                    _emit_source_lint_diagnostics(file, source, format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 0
-        case CompileResult.TypeError(errors):
-            _emit_check_errors(file, errors, "TypeError", format)
+        val check_diags = _collect_check_output_diagnostics_json(file, check_stdout, check_stderr)
+        for diagnostic in check_diags:
+            _diag_emit_or_collect(diagnostic)
+        if should_lint:
             _emit_lint_if_readable(file, format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
+        _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+        _DIAG_COLLECT_MODE = false
+        if check_code != 0:
             return 1
-        case CompileResult.ParseError(errors):
-            _emit_check_errors(file, errors, "ParseError", format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case CompileResult.BlockError(errors):
-            _emit_check_errors(file, errors, "BlockError", format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case CompileResult.ResolveError(errors):
-            _emit_check_errors(file, errors, "ResolveError", format)
-            _emit_lint_if_readable(file, format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case CompileResult.BorrowError(errors):
-            _emit_check_errors(file, errors, "BorrowError", format)
-            _emit_lint_if_readable(file, format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case CompileResult.CodegenError(msg):
-            _emit_check_errors(file, [msg], "CodegenError", format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case CompileResult.RuntimeError(msg):
-            _emit_check_errors(file, [msg], "RuntimeError", format)
-            if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            return 1
-        case _:
-            if format == "json":
-                _DIAG_COLLECTED.push("{\"severity\":1,\"code\":\"E0000\",\"message\":\"check failed\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple\"}")
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
-                _DIAG_COLLECT_MODE = false
-            else:
-                print "{file}:1:1: error: check failed"
-            return 1
+        return 0
+
+    if check_stdout != "":
+        print check_stdout
+    if check_stderr != "":
+        print check_stderr
+    if should_lint:
+        _emit_lint_if_readable(file, format)
+    if check_code != 0:
+        return 1
+    0
 
 fn _emit_mcp_diagnostics_wrapper(diagnostics: [text]):
     """Wrap collected diagnostics in MCP-compatible structured content format."""
@@ -100,64 +56,6 @@ fn _emit_mcp_diagnostics_wrapper(diagnostics: [text]):
     parts.push(",\"structuredContent\":{\"diagnostics\":" + diags_array + ",\"count\":" + str(count) + "}")
     parts.push(",\"isError\":false}")
     print parts.join("")
-
-fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text):
-    """Emit compiler errors in text or JSON format.
-
-    Supports structured error strings with related information:
-    - "|||RELATED:line:col:message" segments are emitted as relatedInformation
-    - "|||HELP:message" segments are appended to the diagnostic message
-    """
-    if format == "json":
-        val emitter = LspEmitter.default_emitter()
-        for err in errors:
-            # Split structured metadata from the core error
-            val structured = _split_structured_error(err)
-            val core_err = structured.0
-            val related_items = structured.1
-            val help_text = structured.2
-
-            val parsed = _parse_error_location(core_err)
-            val line = parsed.0
-            val col = parsed.1
-            var msg = parsed.2
-            # Append help text to message if present
-            if help_text != "":
-                msg = "{msg} (help: {help_text})"
-            val code = _extract_error_code(msg, error_kind)
-            var parts: [text] = []
-            parts.push("{\"severity\":1")
-            parts.push(",\"code\":{emitter.encode_string(code)}")
-            parts.push(",\"message\":{emitter.encode_string(msg)}")
-            parts.push(",\"line\":{line}")
-            parts.push(",\"col\":{col}")
-            parts.push(",\"end_line\":{line}")
-            parts.push(",\"end_col\":{col}")
-            parts.push(",\"tags\":[]")
-            parts.push(",\"source\":\"simple\"")
-            # Emit relatedInformation if present
-            if related_items.len() > 0:
-                var info_parts: [text] = []
-                for item in related_items:
-                    val rel_parsed = _parse_error_location(item)
-                    val rel_line = rel_parsed.0
-                    val rel_col = rel_parsed.1
-                    val rel_msg = rel_parsed.2
-                    info_parts.push("{\"location\":{\"uri\":{emitter.encode_string(file)},\"range\":{\"start\":{\"line\":{rel_line - 1},\"character\":{rel_col - 1}},\"end\":{\"line\":{rel_line - 1},\"character\":{rel_col}}}},\"message\":{emitter.encode_string(rel_msg)}}")
-                parts.push(",\"relatedInformation\":[{info_parts.join(\",\")}]")
-            parts.push("}")
-            _diag_emit_or_collect(parts.join(""))
-    else:
-        for err in errors:
-            # Strip structured metadata for text format
-            val structured = _split_structured_error(err)
-            val core_err = structured.0
-            val help_text = structured.2
-            if help_text != "":
-                print "{file}:{core_err}"
-                print "  = help: {help_text}"
-            else:
-                print "{file}:{core_err}"
 
 fn _split_structured_error(err: text) -> (text, [text], text):
     """Split a structured error string into (core_error, related_items, help_text).
@@ -434,19 +332,6 @@ fn _is_error_code(s: text) -> bool:
         i = i + 1
     true
 
-fn _compile_result_error_kind(result: CompileResult) -> text:
-    """Extract the error kind name from a CompileResult variant."""
-    match result:
-        case CompileResult.Success(_): "Success"
-        case CompileResult.TypeError(_): "TypeError"
-        case CompileResult.ParseError(_): "ParseError"
-        case CompileResult.BlockError(_): "BlockError"
-        case CompileResult.ResolveError(_): "ResolveError"
-        case CompileResult.BorrowError(_): "BorrowError"
-        case CompileResult.CodegenError(_): "CodegenError"
-        case CompileResult.RuntimeError(_): "RuntimeError"
-        case _: "Unknown"
-
 fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
     """Run diagnostics on all .spl files in a directory.
 
@@ -475,82 +360,41 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
     var json_file_entries: [text] = []
 
     for spl_file in spl_files:
-        val result = check_file(spl_file)
+        val check_result = _run_simple_check(spl_file)
+        val check_stdout = check_result.0
+        val check_stderr = check_result.1
+        val check_code = check_result.2
+        val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
         var file_has_issues = false
         var file_diag_count = 0
+        var file_json_diags: [text] = []
 
-        val ws_error_kind = _compile_result_error_kind(result)
-
-        match result:
-            case CompileResult.Success(_):
-                pass_do_nothing
-            case _:
+        if format == "json":
+            val compiler_diags = _collect_check_output_diagnostics_json(spl_file, check_stdout, check_stderr)
+            if compiler_diags.len() > 0:
                 file_has_issues = true
-                val errors = result.get_errors()
-                if format == "json":
-                    val emitter = LspEmitter.default_emitter()
-                    var diag_parts: [text] = []
-                    for err in errors:
-                        # Parse structured error metadata
-                        val structured = _split_structured_error(err)
-                        val core_err = structured.0
-                        val related_items = structured.1
-                        val help_text = structured.2
+                file_diag_count = file_diag_count + compiler_diags.len()
+                for diagnostic in compiler_diags:
+                    file_json_diags.push(diagnostic)
+        else:
+            if check_stdout != "":
+                print check_stdout
+            if check_stderr != "":
+                print check_stderr
+            if check_code != 0:
+                file_has_issues = true
+                file_diag_count = file_diag_count + _count_check_output_diagnostics(spl_file, check_stdout, check_stderr)
 
-                        val parsed = _parse_error_location(core_err)
-                        val err_line = parsed.0
-                        val err_col = parsed.1
-                        var err_msg = parsed.2
-                        if help_text != "":
-                            err_msg = "{err_msg} (help: {help_text})"
-                        val err_code = _extract_error_code(err_msg, ws_error_kind)
-                        var parts: [text] = []
-                        parts.push("{\"severity\":1")
-                        parts.push(",\"code\":{emitter.encode_string(err_code)}")
-                        parts.push(",\"message\":{emitter.encode_string(err_msg)}")
-                        parts.push(",\"line\":{err_line}")
-                        parts.push(",\"col\":{err_col}")
-                        parts.push(",\"end_line\":{err_line}")
-                        parts.push(",\"end_col\":{err_col}")
-                        parts.push(",\"tags\":[]")
-                        parts.push(",\"source\":\"simple\"")
-                        # Emit relatedInformation if present
-                        if related_items.len() > 0:
-                            var info_parts: [text] = []
-                            for item in related_items:
-                                val rel_parsed = _parse_error_location(item)
-                                val rel_line = rel_parsed.0
-                                val rel_col = rel_parsed.1
-                                val rel_msg = rel_parsed.2
-                                info_parts.push("{\"location\":{\"uri\":{emitter.encode_string(spl_file)},\"range\":{\"start\":{\"line\":{rel_line - 1},\"character\":{rel_col - 1}},\"end\":{\"line\":{rel_line - 1},\"character\":{rel_col}}}},\"message\":{emitter.encode_string(rel_msg)}}")
-                            parts.push(",\"relatedInformation\":[{info_parts.join(\",\")}]")
-                        parts.push("}")
-                        diag_parts.push(parts.join(""))
-                        file_diag_count = file_diag_count + 1
-                    json_file_entries.push("{\"file\":{emitter.encode_string(spl_file)},\"diagnostics\":[{diag_parts.join(\",\")}]}")
-                else:
-                    for err in errors:
-                        val structured = _split_structured_error(err)
-                        val core_err = structured.0
-                        val help_text = structured.2
-                        if help_text != "":
-                            print "{spl_file}:{core_err}"
-                            print "  = help: {help_text}"
-                        else:
-                            print "{spl_file}:{core_err}"
-                        file_diag_count = file_diag_count + 1
-
-        # Also run source-level lint checks
         if query_file_exists(spl_file):
             val source = query_file_read_rich(spl_file) ?? ""
-            if source != "":
+            if source != "" and should_lint:
                 if format == "json":
-                    # Capture lint diagnostics for this file
                     val lint_count = _collect_lint_diagnostics_json(spl_file, source)
                     if lint_count.0 > 0:
                         file_has_issues = true
                         file_diag_count = file_diag_count + lint_count.0
-                        json_file_entries.push("{\"file\":\"{spl_file}\",\"diagnostics\":[{lint_count.1}]}")
+                        for diagnostic in lint_count.1:
+                            file_json_diags.push(diagnostic)
                 else:
                     val lint_count = _emit_source_lint_diagnostics(spl_file, source, format)
                     if lint_count > 0:
@@ -559,6 +403,9 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
 
         if file_has_issues:
             files_with_issues = files_with_issues + 1
+            if format == "json" and file_json_diags.len() > 0:
+                val emitter = LspEmitter.default_emitter()
+                json_file_entries.push("{\"file\":{emitter.encode_string(spl_file)},\"diagnostics\":[{file_json_diags.join(\",\")}]}")
         total_diagnostics = total_diagnostics + file_diag_count
 
     if format == "json":
@@ -587,61 +434,88 @@ fn _collect_spl_files(dir: text, files: [text]):
         elif not entry.contains("."):
             _collect_spl_files(full_path, files)
 
-fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
-    """Run source-based lint checks and return (count, json_diagnostics_string).
-    This captures diagnostics as JSON strings instead of printing them.
-    """
-    val lines = source.split("\n")
-    var count = 0
+fn _find_simple_binary() -> text:
+    if query_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if query_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if query_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if query_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if query_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if query_file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn _run_simple_check(file: text) -> (text, text, i64):
+    query_process_run(_find_simple_binary(), ["check", file])
+
+fn _should_run_lint_after_check(check_stdout: text, check_stderr: text) -> bool:
+    val combined = _strip_ansi(check_stdout + "\n" + check_stderr)
+    if combined.trim() == "":
+        return true
+    if combined.contains("unexpected token") or combined.contains("ParseError"):
+        return false
+    true
+
+fn _strip_ansi(s: text) -> text:
     var parts: [text] = []
+    var in_escape = false
+    for ch in s:
+        if in_escape:
+            if ch == "m":
+                in_escape = false
+            continue
+        if ch == "\033" or ch == "\x1b":
+            in_escape = true
+            continue
+        parts.push(ch)
+    parts.join("")
+
+fn _count_check_output_diagnostics(file: text, check_stdout: text, check_stderr: text) -> i64:
+    _collect_check_output_diagnostics_json(file, check_stdout, check_stderr).len()
+
+fn _collect_check_output_diagnostics_json(file: text, check_stdout: text, check_stderr: text) -> [text]:
+    val clean_output = _strip_ansi(check_stdout + "\n" + check_stderr)
+    val lines = clean_output.split("\n")
+    var diagnostics: [text] = []
+    for line in lines:
+        val diagnostic = _parse_check_output_line_json(file, line)
+        if diagnostic != "":
+            diagnostics.push(diagnostic)
+    diagnostics
+
+fn _parse_check_output_line_json(file: text, line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return ""
+    val prefix = file + ":"
+    if not trimmed.starts_with(prefix):
+        return ""
+    val parsed = _parse_error_location(trimmed.substring(prefix.len()))
+    val line_num = parsed.0
+    val col_num = parsed.1
+    var msg = parsed.2
+    var severity = 1
+    if msg.starts_with("warning"):
+        severity = 2
+        msg = _strip_diag_severity_prefix(msg, "warning")
+    elif msg.starts_with("info"):
+        severity = 3
+        msg = _strip_diag_severity_prefix(msg, "info")
+    elif msg.starts_with("hint"):
+        severity = 4
+        msg = _strip_diag_severity_prefix(msg, "hint")
+    elif msg.starts_with("error"):
+        msg = _strip_diag_severity_prefix(msg, "error")
     val emitter = LspEmitter.default_emitter()
+    val code = _extract_error_code(msg, "ParseError")
+    "{\"severity\":{severity},\"code\":{emitter.encode_string(code)},\"message\":{emitter.encode_string(msg)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
 
-    var collect_i = 0
-    while collect_i < lines.len():
-        val scan = lint_scan_line(lines, collect_i)
-        val trimmed = scan.trimmed
-        val line_num = scan.line_num
-
-        # DEPR002: .new() calls
-        if trimmed.contains(".new("):
-            val col = _find_in_line(trimmed, ".new(") + 1
-            parts.push("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 5},\"tags\":[2],\"source\":\"simple-lint\"}")
-            count = count + 1
-
-        # DEPR003: Bare pass
-        if (trimmed == "pass" or trimmed.starts_with("pass ") or trimmed.starts_with("pass#")):
-            if not trimmed.starts_with("pass_"):
-                parts.push("{\"severity\":2,\"code\":\"DEPR003\",\"message\":\"bare 'pass' is deprecated\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":5,\"tags\":[2],\"source\":\"simple-lint\"}")
-                count = count + 1
-
-        # UNREACH: After return
-        if _is_return_statement(trimmed):
-            val next_unreachable = _find_next_statement_in_block(lines, li)
-            if next_unreachable > 0:
-                parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
-                count = count + 1
-
-        collect_i = collect_i + 1
-
-    # Run text-based new lint checks and collect their JSON output
-    # These use _diag_emit_or_collect which collects to _DIAG_COLLECTED when in collect mode
-    val prev_mode = _DIAG_COLLECT_MODE
-    _DIAG_COLLECT_MODE = true
-    val prev_collected = _DIAG_COLLECTED
-    _DIAG_COLLECTED = []
-
-    val clos_count = _check_closure_capture_text(lines, file, "json", emitter)
-    val ret_count = _check_ignored_return_text(lines, file, "json", emitter)
-    val bool_count = _check_multiline_bool_text(lines, file, "json", emitter)
-    val safe_count = _check_safety_text(lines, file, "json", emitter)
-    val vis_count = _check_visibility_text(lines, file, "json", emitter)
-
-    for d in _DIAG_COLLECTED:
-        parts.push(d)
-    count = count + clos_count + ret_count + bool_count + safe_count + vis_count
-
-    _DIAG_COLLECT_MODE = prev_mode
-    _DIAG_COLLECTED = prev_collected
-
-    (count, parts.join(","))
-
+fn _strip_diag_severity_prefix(msg: text, severity_word: text) -> text:
+    var rest = msg.substring(severity_word.len()).trim()
+    if rest.starts_with(":"):
+        rest = rest.substring(1).trim()
+    rest
