@@ -315,6 +315,32 @@ pub fn rt_bytes_alloc(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
+/// Allocate a `[u32]` of `len` elements all set to `fill` in O(len) C-side.
+///
+/// Same family as `rt_bytes_alloc` (B2, feedback_interpreter_bulk_buffer.md):
+/// per-element interpreter `push` is quadratic on big buffers. Browser
+/// pixel-buffer fill (200x200 = 40,000 ARGB u32s in
+/// `BrowserRenderer.render_dom_to_pixels`) was costing ~30 s/call before this.
+/// Now it's a single Rust-side `vec![]` macro: O(n) at native speed.
+pub fn rt_u32_alloc_filled(args: &[Value]) -> Result<Value, CompileError> {
+    let len = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    let fill = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    if len <= 0 {
+        return Ok(Value::array(vec![]));
+    }
+    // Truncate to u32 then re-widen to i64 so the runtime tag matches what
+    // Simple-side `[u32]` indexing expects (signed i64 storage of u32 bits).
+    let fill_u32 = fill as u32;
+    let arr: Vec<Value> = vec![Value::Int(fill_u32 as i64); len as usize];
+    Ok(Value::array(arr))
+}
+
 /// Create a byte array from a raw memory pointer
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = match args.first() {

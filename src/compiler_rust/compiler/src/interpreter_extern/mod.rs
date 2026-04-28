@@ -814,6 +814,7 @@ pub(crate) fn call_extern_function(
         "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
         "rt_black_box" => file_io::rt_black_box(&evaluated),
         "rt_bytes_alloc" => file_io::rt_bytes_alloc(&evaluated),
+        "rt_u32_alloc_filled" => file_io::rt_u32_alloc_filled(&evaluated),
         "rt_bytes_from_raw" => file_io::rt_bytes_from_raw(&evaluated),
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
         "rt_file_truncate" => file_io::rt_file_truncate(&evaluated),

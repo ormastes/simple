@@ -26,6 +26,11 @@ use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
+# Bulk allocator for ARGB pixel buffers — replaces 40K-iteration interpreter
+# push loop with a single Rust-side `vec![]` (~300x speedup per
+# pixel_verify_browser_glass_runtime_per_call_2026-04-28.md, B2 family).
+extern fn rt_u32_alloc_filled(len: u64, fill: u32) -> [u32]
+
 # =========================================================================
 # Render Result
 # =========================================================================
@@ -179,10 +184,9 @@ class BrowserRenderer:
             val body_rgba = _find_body_bg_color(root)
             val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
             val pixel_count = self.viewport_w * self.viewport_h
-            var i = 0
-            while i < pixel_count:
-                pixels.push(fill_argb)
-                i = i + 1
+            # Bulk fill via runtime extern: 40K-element interpreter push loop
+            # was costing ~30s/call (pixel_verify_browser_glass_runtime_per_call_2026-04-28.md).
+            pixels = rt_u32_alloc_filled(pixel_count, fill_argb)
             pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
         return BeRenderResult(
             format: "pixels",
