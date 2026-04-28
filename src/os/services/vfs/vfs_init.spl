@@ -73,6 +73,7 @@ var g_vfs_llvm_exec_bytes: [u8] = []
 var g_vfs_rust_exec_bytes: [u8] = []
 var g_vfs_clang_static_exec_bytes: [u8] = []
 var g_vfs_rustc_static_exec_bytes: [u8] = []
+var g_vfs_simple_exec_bytes: [u8] = []
 
 class CNvmeBlockAdapter:
     """Wraps C NVMe bridge as BlockDevice for FAT32."""
@@ -340,6 +341,17 @@ fn vfs_boot_init() -> bool:
     else:
         serial_println("[vfs-fix] rustc_static probe skipped size={rs_probe_size}")
 
+    val si_probe_size = simpleos_fat32_read_path_size("/SIMPLSTC.SMF")
+    if si_probe_size > 4 and si_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
+        val si_read_rc = simpleos_fat32_read_path("/SIMPLSTC.SMF")
+        if si_read_rc == 0:
+            g_vfs_simple_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), si_probe_size.to_u64())
+            serial_println("[vfs-fix] simple seeded len={g_vfs_simple_exec_bytes.len()}")
+        else:
+            serial_println("[vfs-fix] simple seed failed rc={si_read_rc} size={si_probe_size}")
+    else:
+        serial_println("[vfs-fix] simple probe skipped size={si_probe_size}")
+
     log_raw_println("[vfs-init] VFS ready (C-backed)")
     return true
 
@@ -569,6 +581,14 @@ fn g_vfs_known_app_id(path: text) -> u64:
         return 7
     if path == "/RUSTCSTC.SMF":
         return 7
+    if path == "/sys/apps/simple":
+        return 8
+    if path == "/sys/apps/simple.smf":
+        return 8
+    if path == "/SYS/APPS/SIMPLSTC.SMF":
+        return 8
+    if path == "/SIMPLSTC.SMF":
+        return 8
     0
 
 fn _vfs_exec_disk_alias(path: text) -> text:
@@ -629,6 +649,10 @@ fn _vfs_exec_disk_alias(path: text) -> text:
             "/SYS/APPS/RUSTCSTC.SMF"
         case "/sys/apps/rustc_static.smf":
             "/SYS/APPS/RUSTCSTC.SMF"
+        case "/sys/apps/simple":
+            "/SYS/APPS/SIMPLSTC.SMF"
+        case "/sys/apps/simple.smf":
+            "/SYS/APPS/SIMPLSTC.SMF"
         case _:
             path
 
@@ -734,6 +758,8 @@ fn _cached_known_exec_bytes(path: text) -> [u8]:
         return g_vfs_clang_static_exec_bytes
     if app_id == 7:
         return g_vfs_rustc_static_exec_bytes
+    if app_id == 8:
+        return g_vfs_simple_exec_bytes
     []
 
 fn _cached_lazy_exec_bytes(path: text) -> [u8]:

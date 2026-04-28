@@ -66,6 +66,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     val hello_c_path       = "/tmp/hello_c.o"
     val clang_static_path  = "build/os/clang_static/bin/clang_static"
     val rustc_static_path  = "build/os/rust_static/bin/rustc_static"
+    val simple_path        = "bin/release/x86_64-unknown-linux-gnu/simple"
 
     # --- Step 1: load hello_rs ---
     val rs_entry = match _load_payload(hello_rs_path, "HELLORS    "):
@@ -84,6 +85,18 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     # --- Step 3: ensure output dir + build real FAT32 image ---
     io.dir_create_all("build/os")
     var payloads: [PayloadEntry] = [rs_entry]
+
+    # --- Step 3-fixtures: VERSION.TXT + BROWSMF.SMF (mount-probe satisfaction) ---
+    # The kernel's _vfs_boot_init_pure_nvme_fat32 requires both files to mount.
+    # Wave-4a flat-bake puts files at root; Team S's mount-probe fallback (commit
+    # bbdd694a05) reads /BROWSMF.SMF after /SYS/APPS/BROWSMF.SMF fails.
+    val version_bytes: [u8] = [83u8, 105u8, 109u8, 112u8, 108u8, 101u8, 79u8, 83u8, 32u8, 80u8, 49u8, 10u8]
+    payloads.push(PayloadEntry(path: "VERSION TXT", data: version_bytes))
+    print "bake: added VERSION.TXT stub (12 bytes)"
+    # BROWSMF stand-in: reuse the hello_rs ELF — kernel only checks ELF magic.
+    val brow_entry = PayloadEntry(path: "BROWSMFSMF ", data: rs_entry.data)
+    payloads.push(brow_entry)
+    print "bake: added BROWSMF.SMF stand-in (mirrors hello_rs ELF)"
 
     # --- Step 3a/3b: optionally bake clang_static + rustc_static ---
     # Skipped if either marker file is absent (default-off mode keeps bake fast).
@@ -104,6 +117,13 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
                     payloads.push(e)
                 case Err(_):
                     print "bake: rustc_static load failed (skipped)"
+        if io.file_exists(simple_path):
+            match _load_payload(simple_path, "SIMPLSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded simple (" + io.file_size(simple_path).to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple load failed (skipped)"
     else:
         print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
 
