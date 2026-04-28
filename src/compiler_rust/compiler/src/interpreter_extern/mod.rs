@@ -749,6 +749,28 @@ pub(crate) fn call_extern_function(
         // Vulkan GPU Functions (13 functions, feature-gated)
         // ====================================================================
         "rt_vk_available" => gpu::rt_vk_available_fn(&evaluated),
+        "rt_cuda_available" => gpu::rt_cuda_available_fn(&evaluated),
+        "rt_cuda_init" => gpu::rt_cuda_init_fn(&evaluated),
+        "rt_cuda_device_count" => gpu::rt_cuda_device_count_fn(&evaluated),
+        "rt_cuda_device_get" => gpu::rt_cuda_device_get_fn(&evaluated),
+        "rt_cuda_device_name" => gpu::rt_cuda_device_name_fn(&evaluated),
+        "rt_cuda_device_compute_capability" => gpu::rt_cuda_device_compute_capability_fn(&evaluated),
+        "rt_cuda_ctx_create" => gpu::rt_cuda_ctx_create_fn(&evaluated),
+        "rt_cuda_ctx_destroy" => gpu::rt_cuda_ctx_destroy_fn(&evaluated),
+        "rt_cuda_ctx_synchronize" => gpu::rt_cuda_ctx_synchronize_fn(&evaluated),
+        "rt_cuda_mem_alloc" => gpu::rt_cuda_mem_alloc_fn(&evaluated),
+        "rt_cuda_mem_free" => gpu::rt_cuda_mem_free_fn(&evaluated),
+        "rt_cuda_memcpy_htod" => gpu::rt_cuda_memcpy_htod_fn(&evaluated),
+        "rt_cuda_memcpy_dtoh" => gpu::rt_cuda_memcpy_dtoh_fn(&evaluated),
+        "rt_cuda_memcpy_dtod" => gpu::rt_cuda_memcpy_dtod_fn(&evaluated),
+        "rt_cuda_memset" => gpu::rt_cuda_memset_fn(&evaluated),
+        "rt_cuda_module_load" => gpu::rt_cuda_module_load_fn(&evaluated),
+        "rt_cuda_module_load_data" => gpu::rt_cuda_module_load_data_fn(&evaluated),
+        "rt_cuda_module_unload" => gpu::rt_cuda_module_unload_fn(&evaluated),
+        "rt_cuda_module_get_function" => gpu::rt_cuda_module_get_function_fn(&evaluated),
+        "rt_cuda_launch_kernel" => gpu::rt_cuda_launch_kernel_fn(&evaluated),
+        "rt_cuda_sync" => gpu::rt_cuda_sync_fn(&evaluated),
+        "rt_cuda_get_error_string" => gpu::rt_cuda_get_error_string_fn(&evaluated),
         #[cfg(feature = "vulkan")]
         "rt_vk_device_create" => gpu::rt_vk_device_create_fn(&evaluated),
         #[cfg(feature = "vulkan")]

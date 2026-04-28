@@ -40,7 +40,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
-use std::sync::{Once, OnceLock};
+use std::sync::OnceLock;
 
 /// CUDA error codes (subset)
 #[repr(C)]
@@ -175,37 +175,30 @@ mod cuda_stubs {
 use cuda_stubs::*;
 
 /// CUDA runtime initialization
-static CUDA_INIT: Once = Once::new();
-static mut CUDA_INITIALIZED: bool = false;
+static CUDA_INIT_RESULT: OnceLock<CudaResult<()>> = OnceLock::new();
 #[cfg(feature = "cuda")]
 static DEFAULT_CONTEXT: OnceLock<Result<usize, CudaError>> = OnceLock::new();
 
 /// Initialize CUDA driver
 fn init_cuda() -> CudaResult<()> {
-    let mut result = CudaError::Success;
-
-    CUDA_INIT.call_once(|| {
+    *CUDA_INIT_RESULT.get_or_init(|| {
         #[cfg(feature = "cuda")]
-        unsafe {
+        {
+            unsafe {
             let err = cuInit(0);
             if err != 0 {
-                result = std::mem::transmute(err);
-            } else {
-                CUDA_INITIALIZED = true;
+                    Err(std::mem::transmute(err))
+                } else {
+                    Ok(())
+                }
             }
         }
 
         #[cfg(not(feature = "cuda"))]
         {
-            result = CudaError::NotInitialized;
+            Err(CudaError::NotInitialized)
         }
-    });
-
-    if result == CudaError::Success {
-        Ok(())
-    } else {
-        Err(result)
-    }
+    })
 }
 
 #[cfg(feature = "cuda")]

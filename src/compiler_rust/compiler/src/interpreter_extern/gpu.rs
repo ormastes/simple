@@ -5,6 +5,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use std::ffi::{CStr, CString};
 
 // Import Vulkan FFI functions when feature is enabled
 #[cfg(feature = "vulkan")]
@@ -13,6 +14,348 @@ use simple_runtime::value::gpu_vulkan::{
     rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile, rt_vk_kernel_free,
     rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
 };
+
+#[cfg(feature = "cuda")]
+use simple_runtime::cuda_runtime::{
+    rt_cuda_available, rt_cuda_ctx_create, rt_cuda_ctx_destroy, rt_cuda_ctx_synchronize, rt_cuda_device_compute_capability,
+    rt_cuda_device_count, rt_cuda_device_get, rt_cuda_device_name, rt_cuda_get_error_string, rt_cuda_init,
+    rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod,
+    rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data,
+    rt_cuda_module_unload, rt_cuda_sync,
+};
+
+fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
+    args.get(index)
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help(format!("{name} requires exactly {expected} argument(s)"));
+            CompileError::semantic_with_context(format!("{name} expects {expected} arguments"), ctx)
+        })?
+        .as_int()
+}
+
+fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
+    match args.get(index) {
+        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(other) => Err(CompileError::semantic(format!(
+            "{name} argument {index} must be text, got {}",
+            other.type_name()
+        ))),
+        None => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help(format!("{name} requires exactly {expected} argument(s)"));
+            Err(CompileError::semantic_with_context(
+                format!("{name} expects {expected} arguments"),
+                ctx,
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
+    CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
+}
+
+fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    }
+}
+
+pub fn rt_cuda_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_available()));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(0))
+    }
+}
+
+pub fn rt_cuda_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_init()));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_device_count()));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(0))
+    }
+}
+
+pub fn rt_cuda_device_get_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device_id = arg_i64(args, 0, "rt_cuda_device_get", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_device_get(device_id)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_cuda_device_name", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Str(c_ptr_to_string(rt_cuda_device_name(device))));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Str(String::new()))
+    }
+}
+
+pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_cuda_device_compute_capability", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_device_compute_capability(device)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_ctx_create_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_cuda_ctx_create", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_ctx_create(device)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_ctx_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ctx = arg_i64(args, 0, "rt_cuda_ctx_destroy", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_ctx_destroy(ctx)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_ctx_synchronize_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_ctx_synchronize()));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let size = arg_i64(args, 0, "rt_cuda_mem_alloc", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_mem_alloc(size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = arg_i64(args, 0, "rt_cuda_mem_free", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_mem_free(ptr)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memcpy_htod_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod", 3)?;
+    let src = arg_i64(args, 1, "rt_cuda_memcpy_htod", 3)?;
+    let size = arg_i64(args, 2, "rt_cuda_memcpy_htod", 3)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memcpy_htod(dst, src, size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memcpy_dtoh_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_dtoh", 3)?;
+    let src = arg_i64(args, 1, "rt_cuda_memcpy_dtoh", 3)?;
+    let size = arg_i64(args, 2, "rt_cuda_memcpy_dtoh", 3)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memcpy_dtoh(dst, src, size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memcpy_dtod_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_dtod", 3)?;
+    let src = arg_i64(args, 1, "rt_cuda_memcpy_dtod", 3)?;
+    let size = arg_i64(args, 2, "rt_cuda_memcpy_dtod", 3)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memcpy_dtod(dst, src, size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memset_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = arg_i64(args, 0, "rt_cuda_memset", 3)?;
+    let value = arg_i64(args, 1, "rt_cuda_memset", 3)?;
+    let size = arg_i64(args, 2, "rt_cuda_memset", 3)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memset(ptr, value, size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_module_load_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let path = arg_text(args, 0, "rt_cuda_module_load", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        let c_path = c_string_or_error(path, "rt_cuda_module_load")?;
+        return Ok(Value::Int(rt_cuda_module_load(c_path.as_ptr())));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptx = arg_text(args, 0, "rt_cuda_module_load_data", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        let c_ptx = c_string_or_error(ptx, "rt_cuda_module_load_data")?;
+        return Ok(Value::Int(rt_cuda_module_load_data(c_ptx.as_ptr())));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_module_unload_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let module = arg_i64(args, 0, "rt_cuda_module_unload", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_module_unload(module)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let module = arg_i64(args, 0, "rt_cuda_module_get_function", 2)?;
+    let func_name = arg_text(args, 1, "rt_cuda_module_get_function", 2)?;
+    #[cfg(feature = "cuda")]
+    {
+        let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
+        return Ok(Value::Int(rt_cuda_module_get_function(module, c_name.as_ptr())));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let module = arg_i64(args, 0, "rt_cuda_launch_kernel", 9)?;
+    let func_name = arg_text(args, 1, "rt_cuda_launch_kernel", 9)?;
+    let grid_x = arg_i64(args, 2, "rt_cuda_launch_kernel", 9)?;
+    let grid_y = arg_i64(args, 3, "rt_cuda_launch_kernel", 9)?;
+    let grid_z = arg_i64(args, 4, "rt_cuda_launch_kernel", 9)?;
+    let block_x = arg_i64(args, 5, "rt_cuda_launch_kernel", 9)?;
+    let block_y = arg_i64(args, 6, "rt_cuda_launch_kernel", 9)?;
+    let block_z = arg_i64(args, 7, "rt_cuda_launch_kernel", 9)?;
+    let args_ptr = arg_i64(args, 8, "rt_cuda_launch_kernel", 9)?;
+    #[cfg(feature = "cuda")]
+    {
+        let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
+        return Ok(Value::Int(rt_cuda_launch_kernel(
+            module,
+            c_name.as_ptr(),
+            grid_x,
+            grid_y,
+            grid_z,
+            block_x,
+            block_y,
+            block_z,
+            args_ptr,
+        )));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_sync_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_sync()));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let error_code = arg_i64(args, 0, "rt_cuda_get_error_string", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Str(c_ptr_to_string(rt_cuda_get_error_string(error_code))));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Str(String::from("CUDA support disabled")))
+    }
+}
 
 /// Check if Vulkan is available
 #[cfg(feature = "vulkan")]

@@ -30,7 +30,7 @@ These tests declare `extern fn` bindings that call C functions not present in th
 |------|---------------|-----------|-------|
 | `test/dyn_torch_test.spl` | `rt_torch_available` (via `DynLoader`) | 0 it-blocks (top-level script) | Calls `dyn_torch_available()` which uses `DynLoader.call0` — fails when `libspl_torch.so` is absent |
 | `test/feature/app/fault_detection_spec.spl` | `rt_fault_set_stack_overflow_detection` | 36 | Stubs exist in `src/app/io/debug_stubs.spl` but the test uses `use std.sys.fault_detection.*` which must resolve differently. The `debug_stubs.spl` approach requires proper module routing. |
-| `test/feature/usage/cuda_spec.spl` | `rt_cuda_is_available` | 18 | Defined as `extern fn` in `src/app/io/cuda_ffi.spl`; no runtime C symbol |
+| `test/feature/usage/cuda_spec.spl` | Host CUDA driver init (`cuInit`) | 18 | Simple CUDA extern dispatch is now wired; real device enumeration still depends on a machine where `cuInit` succeeds |
 | `test/deploy/smoke_spec.spl` | `rt_shell` | 12 | `extern fn rt_shell(cmd: text) -> text` — template exists in `ffi_gen.templates/bootstrap_ffi.txt` but not in binary |
 | `test/unit/app/io/gamepad_ffi_spec.spl` | `rt_gamepad_init` | 61 | `extern fn rt_gamepad_init() -> i64` in `gamepad_ffi.spl`; Gilrs library not linked |
 | `test/unit/app/io/graphics2d_ffi_spec.spl` | `rt_lyon_path_builder_new` | 59 | `extern fn rt_lyon_path_builder_new() -> i64` in `graphics2d_ffi.spl`; Lyon library not linked |
@@ -142,7 +142,7 @@ These tests fail because the source modules they test have unimplemented functio
 | `test/unit/app/mcp/di_handler_wiring_spec.spl` | Dependency injection wiring for MCP handlers; some DI container methods not implemented | ~10 | When MCP DI wiring is complete |
 | `test/unit/app/test_runner_new/integration_test_config_spec.spl` | `IntegrationTestConfig` struct fields or constructors differ from test expectations | ~8 | When test runner config API is stabilized |
 | `test/unit/app/test_runner_new/test_config_spec.spl` | Similar config struct mismatch | ~6 | When test runner config API is stabilized |
-| `test/feature/usage/cuda_spec.spl` | `cuda_available()` calls `rt_cuda_is_available` extern which is not in binary (see also Cat A) | 18 | When CUDA runtime is linked |
+| `test/feature/usage/cuda_spec.spl` | Pure Simple CUDA surface now compiles and reports backend state correctly, but real GPU execution is still blocked on host `cuInit` returning `CUDA_ERROR_NOT_INITIALIZED` | 18 | When the host CUDA driver/API initializes successfully for this process |
 
 **Previously reported (WS2+WS3) but now resolved:**
 - `test/feature/search_spec.spl` — file does not exist at this path (may have been renamed/deleted)
@@ -168,6 +168,7 @@ These tests fail because the source modules they test have unimplemented functio
 2. LLVM/WASM backend tests require the respective compiler toolchains installed.
 3. Network tests require connectivity and target servers.
 4. GPU tests (`cuda_spec.spl`, `vulkan_spec.spl`) require actual hardware with drivers.
+   CUDA note: `nvidia-smi` may still see devices even when the CUDA Driver API fails to initialize for the process. In that state, `cuda_available()` correctly reports `false` and `cuda_device_count()` reports `0`.
 5. Hardware IO tests (gamepad, windowing) require physical devices or display servers.
 
 ### Interpreter Mode Test Limitation (All Tests)
