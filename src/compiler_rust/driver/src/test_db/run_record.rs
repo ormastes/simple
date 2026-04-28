@@ -67,9 +67,7 @@ impl TestRunRecord {
             start_time: now.to_rfc3339(),
             end_time: String::new(),
             pid: std::process::id(),
-            hostname: hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string()),
+            hostname: detect_hostname(),
             status: TestRunStatus::Running,
             test_count: 0,
             passed: 0,
@@ -246,6 +244,29 @@ impl TestRunRecord {
 
         report
     }
+}
+
+fn detect_hostname() -> String {
+    for key in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(value) = std::fs::read_to_string("/etc/hostname") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    "unknown".to_string()
 }
 
 impl Record for TestRunRecord {

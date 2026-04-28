@@ -88,6 +88,7 @@ The primary size/startup problem has shifted from broad dynamic loader over-link
   - runtime service/network/package crates through `simple-runtime`: `socket2`, `ureq`, `rustls`, `webpki-roots`, `tar`, `flate2`, `xz2`
   - interactive/auth/watcher crates through direct driver deps: `rustyline`, `notify`, `sysinfo`, `rpassword`, `argon2`, `hostname`
 - `simple-driver` previously declared optional `jj-lib` and `jj-cli` Rust crate dependencies even though the in-repo JJ wrapper uses `std::process::Command("jj")` and does not link those crates. That stale manifest edge has now been removed and should remain forbidden.
+- `simple-driver` previously used the external `hostname` crate only to stamp test-run records. That has been replaced with a small env/file fallback, so `hostname` is no longer a justified direct dependency and should remain forbidden.
 - `simple-native-all` is the effective root for `native-build` package outputs such as `simple_mcp_server` and `simple_lsp_mcp_server`.
 - `simple-native-all` currently depends directly on `simple-driver`, which means native-built servers inherit CLI-only subsystems they do not need on their startup path.
 - `spl_hosted_runtime` is still part of the `simple-native-all` root. Its default features remain stub-only, so this is lower priority than the `simple-native-all -> simple-driver` edge, but it is still a real architecture dependency.
@@ -108,4 +109,4 @@ The primary size/startup problem has shifted from broad dynamic loader over-link
   - `readelf` / `ldd` loaded-module surfaces where applicable
   - direct dependency lists for `simple-driver` and `simple-native-all`
   - startup-path crate closures and suspect architecture edges
-- The script is intentionally report-first: it fails on missing required artifacts, forbidden stale direct deps such as `simple-driver -> jj-lib/jj-cli`, or root-dependency drift, and reports broader architecture suspects without pretending they are fixed yet.
+- The script is intentionally report-first: it fails on missing required artifacts, forbidden stale direct deps such as `simple-driver -> jj-lib/jj-cli/hostname`, or root-dependency drift, and reports broader architecture suspects without pretending they are fixed yet.

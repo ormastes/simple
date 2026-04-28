@@ -15,4 +15,4 @@ Codex final requirements, 2026-04-23.
 - REQ-011: A repeatable native-binary dependency audit command must report the loaded shared-library surface for common local CLI, package, and bootstrap executables when those artifacts are available.
 - REQ-012: The native-binary dependency audit must report direct and transitive startup-path Rust dependencies for `simple-driver` and `simple-native-all`.
 - REQ-013: The native-binary dependency audit must explicitly surface known architecture overreach, including `simple-native-all -> simple-driver` and broad default runtime service crates on the CLI startup path.
-- REQ-014: `simple-driver` must not declare direct `jj-lib` or `jj-cli` crate dependencies while the JJ integration remains implemented through the in-repo subprocess wrapper.
+- REQ-014: `simple-driver` must not declare stale direct `jj-lib`, `jj-cli`, or `hostname` crate dependencies while the JJ integration remains implemented through the in-repo subprocess wrapper and test-run hostname capture remains satisfied by std/env-based fallback logic.
