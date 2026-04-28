@@ -164,20 +164,55 @@ a workaround, not a fix — `hal.spl` should be refactored per fix-path 4
 above so any kernel build target works regardless of where the call is
 attached.
 
-## Adjacent finding: /SIMPLSTC.SMF shell-PATH unreachability
+## Adjacent finding: hal.spl is not the only unconditional importer
 
-`src/os/apps/shell/path_search.spl:14` hardcodes default PATH to
-`/usr/bin:/sys/apps`. The Simple compiler is baked as `/SIMPLSTC.SMF`
-at the FAT32 root by `src/os/port/disk_image_bake.spl`. Typing
-`simple` in the shell calls `shell_path_search("simple")`, which builds
-candidate paths `/usr/bin/simple` and `/sys/apps/simple` — neither of
-which exists. The `/sys/apps/SIMPLSTC.SMF` alias in
-`src/os/services/vfs/vfs_init.spl:586` doesn't match either (different
-filename).
+`src/os/kernel/arch/mod.spl` (the arch-dispatch hub, separate from
+`hal.spl`) ALSO unconditionally imports every arch's modules. From its
+own header: "The CURRENT_ARCH constant determines which architecture is
+active. It is set here to match the compilation target. When
+cross-compiling, this constant should be changed to match the target
+triple." The author intended dead-code elimination to drop foreign-arch
+code, but the inline-asm extractor runs before DCE and emits all `asm
+volatile:` blocks regardless.
 
-The smallest fix is to bake an additional `PayloadEntry` at
-`/usr/bin/simple` (or `/sys/apps/simple`) pointing at the same host
-file, so the existing PATH search resolves. That's Step 4 of
-`~/.claude/plans/complete-porting-llvm-rust-reactive-cosmos.md`. It is
-gated on the kernel build being unblocked — without that, no in-OS
-test can verify the wire works.
+Empirical test (2026-04-28 followup): commenting out only the riscv64
+imports in `hal.spl:51-59` did NOT fix the build. The same RISC-V
+mnemonics still leaked into `simple_asm_blocks.c` because `mod.spl` was
+still pulling them in.
+
+**Practical implication:** any "comment out the foreign-arch imports"
+quick fix needs to update **both** `hal.spl` AND `mod.spl`, plus
+possibly any function bodies in those files that reference the now-gone
+symbols (`Rv64Hal`, `rv64_serial_init`, etc.). That's not a quick fix
+anymore — it's the per-arch hal/mod refactor in disguise (fix-path 4 in
+the main proposal section above).
+
+## Adjacent finding: shell-PATH wire already exists (correction)
+
+Initial reading suggested shell PATH couldn't reach `/SIMPLSTC.SMF`.
+That was wrong. `src/os/services/vfs/vfs_init.spl:584-587` declares
+explicit aliases:
+
+```
+if path == "/sys/apps/simple":      return 8
+if path == "/sys/apps/simple.smf":  return 8
+if path == "/SYS/APPS/SIMPLSTC.SMF": return 8
+if path == "/SIMPLSTC.SMF":         return 8
+```
+
+(`return 8` is a fallback-table index that resolves to the seeded SMF
+bytes via `g_vfs_simple_exec_bytes`.) Default PATH (`/usr/bin:/sys/apps`
+in `src/os/apps/shell/path_search.spl:14`) already includes `/sys/apps`,
+so typing `simple` in the shell builds candidate `/sys/apps/simple`,
+which the VFS alias resolves. `_path_exists` returns true because
+`g_vfs_read_executable_bytes("/sys/apps/simple")` returns the SMF byte
+buffer. `shell_path_search` returns `Some("/sys/apps/simple")`,
+`exec.spl:40` dispatches `x86_64_fs_exec_spawn("/sys/apps/simple", …)`,
+and the loader receives the VFS-resolved bytes.
+
+So no bake change or PATH widening is required — the resolution chain
+is wired. The remaining empirical question is whether
+`x86_64_fs_exec_spawn` itself honors the same VFS alias path during
+ELF/SMF load (it should, since it ultimately reads via the same VFS),
+and whether the SMF then executes correctly. Both unverifiable until
+the kernel build itself is fixed (see top of this doc).
