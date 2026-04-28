@@ -10,9 +10,9 @@
 ## Phase 2: Duplication Removal
 
 ```bash
-bin/simple duplicate-check <dir> --min-lines 5        # Token duplication (5+ lines)
-bin/simple duplicate-check <dir> --cosine --min-lines 5  # Structural similarity
-bin/simple duplicate-check <dir> --semantic            # Same-intent detection
+bin/simple duplicate-check <dir>                        # Semantic duplication by default
+bin/simple duplicate-check <dir> --semantic-threshold 0.92  # Tighten semantic matching
+bin/simple duplicate-check <dir> --format json         # Machine-readable semantic report
 ```
 
 Fix: extract shared helpers, use parameter objects for repeated param lists (3+).

@@ -91,7 +91,7 @@ review-team:    explore -> docs          (sequential)
 
 ### Phase 11-13: Bug Reports + Duplication + Refactoring
 1. Document workarounds in `doc/08_tracking/bug/<feature>_limitations.md`
-2. Duplication: `bin/simple duplicate-check <dir>` (token + cosine + semantic)
+2. Duplication: `bin/simple duplicate-check <dir>` (semantic by default; lexical flags deprecated)
 3. Stub scan: verify pass_todo reasons, detect identity-returns (STUB001 = hard fail -> loop to Phase 8)
 4. Split files >800 lines
 5. Run `/refactor` skill for comprehensive code quality check.

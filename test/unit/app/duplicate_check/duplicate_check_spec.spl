@@ -1,7 +1,7 @@
-use app.duplicate_check.config.{default_config}
-use app.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
-use app.duplicate_check.formatter.{summarize_duplicate_groups, duplicate_lines_per_block, format_score_hundredths, format_ratio_tenths}
-use app.duplicate_check.main.{collect_command_args, parse_args}
+use compiler.tools.duplicate_check.config.{default_config}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
+use compiler.tools.duplicate_check.formatter.{summarize_duplicate_groups, duplicate_lines_per_block, format_score_hundredths, format_ratio_tenths}
+use compiler.tools.duplicate_check.main.{collect_command_args, parse_args, collect_deprecated_lexical_flags}
 
 fn sample_block(file: text, line_start: i64, line_end: i64, hash_value: i64, code: text) -> DuplicateBlock:
     DuplicateBlock(
@@ -34,47 +34,46 @@ describe "duplicate_check command argument parsing":
         expect(cmd_args[1]).to_equal("--format")
         expect(cmd_args[2]).to_equal("json")
 
-    it "parses semantic and cache flags into config":
+    it "defaults to semantic analysis and parses semantic flags":
         val config = parse_args([
             "/tmp/dup_scope",
-            "--semantic",
-            "--semantic-threshold",
-            "0.93",
-            "--cache-path",
-            "/tmp/duplicate-check-cache.sdn",
-            "--jobs",
-            "4",
-            "--format",
-            "json"
+            "--semantic-threshold=0.93",
+            "--semantic-model",
+            "nomic-embed-text",
+            "--format=json"
         ])
 
         expect(config.use_semantic).to_equal(true)
         expect(config.semantic_threshold > 0.92).to_equal(true)
         expect(config.semantic_threshold < 0.94).to_equal(true)
-        expect(config.use_incremental).to_equal(true)
-        expect(config.incremental_cache_path).to_equal("/tmp/duplicate-check-cache.sdn")
-        expect(config.use_parallel).to_equal(true)
-        expect(config.num_workers).to_equal(4)
+        expect(config.semantic_model).to_equal("nomic-embed-text")
         expect(config.output_format).to_equal("json")
 
-    it "keeps identifier and literal detail in cosine mode":
-        val config = parse_args([
+    it "accepts deprecated lexical flags for compatibility":
+        val args = [
             "/tmp/dup_scope",
-            "--cosine"
-        ])
+            "--cosine",
+            "--min-tokens",
+            "30",
+            "--min-lines=5",
+            "--cache-path=/tmp/duplicate-check-cache.sdn",
+            "--jobs",
+            "4"
+        ]
+        val config = parse_args(args)
+        val deprecated = collect_deprecated_lexical_flags(args)
 
-        expect(config.use_cosine_similarity).to_equal(true)
-        expect(config.ignore_identifiers).to_equal(false)
-        expect(config.ignore_literals).to_equal(false)
-
-    it "parses explicit five-line token duplication threshold":
-        val config = parse_args([
-            "/tmp/dup_scope",
-            "--min-lines",
-            "5"
-        ])
-
+        expect(config.use_semantic).to_equal(true)
+        expect(config.min_tokens).to_equal(30)
         expect(config.min_lines).to_equal(5)
+        expect(config.incremental_cache_path).to_equal("/tmp/duplicate-check-cache.sdn")
+        expect(config.num_workers).to_equal(4)
+        expect(deprecated.len()).to_equal(5)
+        expect(deprecated[0]).to_equal("--cosine")
+        expect(deprecated[1]).to_equal("--min-tokens")
+        expect(deprecated[2]).to_equal("--min-lines")
+        expect(deprecated[3]).to_equal("--cache-path")
+        expect(deprecated[4]).to_equal("--jobs")
 
 describe "duplicate_check formatter shared helpers":
     it "summarizes duplicate groups with unique file counting":

@@ -18,7 +18,7 @@ fn matrix_from_rows(rows: [[Float64]]) -> NDArray:
             flat.push(rows[r][c])
             c = c + 1
         r = r + 1
-    make_f64_array(flat, Shape.new([Index.new(row_count), Index.new(col_count)]))
+    array(flat).reshape(Shape.new([Index.new(row_count), Index.new(col_count)]))
 
 fn zeros_matrix(rows: Index, cols: Index) -> NDArray:
     zeros(Shape.new([rows, cols]))
@@ -40,24 +40,37 @@ fn try_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, LinalgErr
     while i < x.data_f64.len():
         out.push(Float64.new(x.data_f64[i].value * alpha.value + y.data_f64[i].value))
         i = i + 1
-    Ok(make_f64_array(out, x.shape))
+    Ok(array(out))
 
 fn gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> NDArray:
-    var out: [Float64] = []
+    var rows_out: [[Float64]] = []
     var row = 0
     while row < a.rows().value:
-        var col = 0
-        while col < b.cols().value:
-            var acc = 0.0
-            var k = 0
-            while k < a.cols().value:
-                acc = acc + a.get_f64_at([Index.new(row), Index.new(k)]).value * b.get_f64_at([Index.new(k), Index.new(col)]).value
-                k = k + 1
-            val cv = c_in.get_f64_at([Index.new(row), Index.new(col)]).value
-            out.push(Float64.new(alpha.value * acc + beta.value * cv.value))
-            col = col + 1
+        var row_result = row_vector_f64(c_in, row).mul_scalar(beta)
+        var k = 0
+        while k < a.cols().value:
+            val coeff = Float64.new(alpha.value * a.get_f64_at([Index.new(row), Index.new(k)]).value)
+            row_result = axpy(coeff, row_vector_f64(b, k), row_result)
+            k = k + 1
+        rows_out.push(row_result.to_f64_values())
         row = row + 1
-    make_f64_array(out, Shape.new([a.rows(), b.cols()]))
+    matrix_from_rows(rows_out)
+
+fn try_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, LinalgError>:
+    if a.cols().value != b.rows().value:
+        return Err(LinalgError.DimensionMismatch)
+    if c_in.rows().value != a.rows().value or c_in.cols().value != b.cols().value:
+        return Err(LinalgError.DimensionMismatch)
+    val result = gemm(alpha, a, b, beta, c_in)
+    Ok(result)
+
+fn row_vector_f64(array_value: NDArray, row: i64) -> NDArray:
+    var out: [Float64] = []
+    var col = 0
+    while col < array_value.cols().value:
+        out.push(array_value.get_f64_at([Index.new(row), Index.new(col)]))
+        col = col + 1
+    array(out)
 
 fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
     val n = a.rows().value
@@ -115,4 +128,5 @@ fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
     while i < x.len():
         out.push(Float64.new(x[i]))
         i = i + 1
-    Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+    val result = array(out)
+    Ok(result)

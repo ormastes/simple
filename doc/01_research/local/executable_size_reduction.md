@@ -78,13 +78,16 @@ Measured on the current Linux workspace:
 | `bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server` | `libm`, `libunwind`, `libstdc++`, `libgcc_s`, `libc` | LSP package binary has the same narrow dynamic surface. |
 | `src/compiler_rust/target/bootstrap/simple` | `libgcc_s`, `libm`, `libc` | Bootstrap CLI is dynamically small too. |
 
-The primary size/startup problem has shifted from dynamic loader over-linking to **static crate/module closure** retained through coarse Rust binary roots and `native-build` archive roots.
+Additional local evidence: `src/compiler_rust/target/release/simple` currently loads `liblzma.so.5`, which points directly at the package/compression path (`xz2`) remaining on the default CLI root.
+
+The primary size/startup problem has shifted from broad dynamic loader over-linking to **static crate/module closure** retained through coarse Rust binary roots and `native-build` archive roots, with a smaller secondary problem of individual service crates still surfacing as extra shared-library loads in some local builds.
 
 ### Per-Binary Rust Root Findings
 
 - `simple-driver` is the root crate for the CLI variants and currently keeps broad subsystems on the default startup path:
   - runtime service/network/package crates through `simple-runtime`: `socket2`, `ureq`, `rustls`, `webpki-roots`, `tar`, `flate2`, `xz2`
   - interactive/auth/watcher crates through direct driver deps: `rustyline`, `notify`, `sysinfo`, `rpassword`, `argon2`, `hostname`
+- `simple-driver` previously declared optional `jj-lib` and `jj-cli` Rust crate dependencies even though the in-repo JJ wrapper uses `std::process::Command("jj")` and does not link those crates. That stale manifest edge has now been removed and should remain forbidden.
 - `simple-native-all` is the effective root for `native-build` package outputs such as `simple_mcp_server` and `simple_lsp_mcp_server`.
 - `simple-native-all` currently depends directly on `simple-driver`, which means native-built servers inherit CLI-only subsystems they do not need on their startup path.
 - `spl_hosted_runtime` is still part of the `simple-native-all` root. Its default features remain stub-only, so this is lower priority than the `simple-native-all -> simple-driver` edge, but it is still a real architecture dependency.
@@ -105,4 +108,4 @@ The primary size/startup problem has shifted from dynamic loader over-linking to
   - `readelf` / `ldd` loaded-module surfaces where applicable
   - direct dependency lists for `simple-driver` and `simple-native-all`
   - startup-path crate closures and suspect architecture edges
-- The script is intentionally report-first: it fails on missing required artifacts or root-dependency drift, and reports architecture suspects without pretending they are fixed yet.
+- The script is intentionally report-first: it fails on missing required artifacts, forbidden stale direct deps such as `simple-driver -> jj-lib/jj-cli`, or root-dependency drift, and reports broader architecture suspects without pretending they are fixed yet.

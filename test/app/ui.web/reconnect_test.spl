@@ -4,12 +4,10 @@
 # patches_since is a free function in common.ui.patch_stream, not a method
 # on UISession — tests call it directly.
 #
-# v1 behaviour (from patch_stream.spl):
-#   from_sequence <= 0 OR events empty  => PatchSinceResult(snapshot: snap, patches: [])
-#   from_sequence > 0 AND events exist AND from_sequence >= events[0].sequence
-#                                       => PatchSinceResult(snapshot: nil, patches: [])
-#   from_sequence > 0 AND events exist AND from_sequence < events[0].sequence
-#                                       => PatchSinceResult(snapshot: snap, patches: [])
+# Current behaviour (from patch_stream.spl):
+#   from_sequence <= 0 OR events empty      => PatchSinceResult(snapshot: snap, patches: [])
+#   earliest > from_sequence + 1            => PatchSinceResult(snapshot: snap, patches: [])
+#   otherwise                               => PatchSinceResult(snapshot: nil, patches: warm_path_patches)
 
 use std.spipe.*
 use common.ui.patch_stream.{PatchStream, PatchSinceResult, patches_since}
@@ -123,17 +121,17 @@ describe "patches_since with existing events":
     ## Resume path
 
     When from_sequence > 0 and events exist:
-    - from_sequence >= earliest sequence -> (nil, []) — client is in retention window
-    - from_sequence < earliest sequence  -> (snapshot, []) — structural reset
+    - earliest > from_sequence + 1 -> (snapshot, []) — structural reset
+    - otherwise                    -> (nil, patches) — client is in retention window
     """
 
-    it "returns nil snapshot when client is in retention window":
+    it "returns nil snapshot and one patch when client is in retention window":
         val snap = _make_empty_snapshot()
         val events = [_make_event(1i64), _make_event(2i64)]
-        # from_sequence 1 >= earliest 1 => client is within window
+        # earliest 1 is not greater than from_sequence + 1 => warm path
         val result = patches_since(snap, events, 1i64)
         expect(result.snapshot).to_be_nil()
-        expect(result.patches.len()).to_equal(0)
+        expect(result.patches.len()).to_equal(1)
 
     it "returns snapshot on revision mismatch (from_sequence behind retention window)":
         val snap = _make_empty_snapshot()
@@ -176,12 +174,21 @@ describe "patches_since resume — event injection":
         val snap = _make_empty_snapshot()
         val events = [_make_event(100i64)]
         val result = patches_since(snap, events, 100i64)
-        # from_sequence 100 >= earliest 100 => in window
+        # earliest 100 is not greater than from_sequence + 1 => in window
         expect(result.snapshot).to_be_nil()
 
-    it "from_sequence one before earliest triggers structural reset":
+    it "from_sequence one before earliest stays in window":
         val snap = _make_empty_snapshot()
         val events = [_make_event(100i64)]
         val result = patches_since(snap, events, 99i64)
-        # 99 < 100 => behind retention => returns snapshot
+        # earliest 100 is not greater than 99 + 1 => warm path
+        expect(result.snapshot).to_be_nil()
+        expect(result.patches.len()).to_equal(1)
+
+    it "from_sequence two before earliest triggers structural reset":
+        val snap = _make_empty_snapshot()
+        val events = [_make_event(100i64)]
+        val result = patches_since(snap, events, 98i64)
+        # earliest 100 is greater than 98 + 1 => behind retention
         expect(result.snapshot).to_equal(snap)
+        expect(result.patches.len()).to_equal(0)

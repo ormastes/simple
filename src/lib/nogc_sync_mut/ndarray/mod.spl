@@ -248,7 +248,35 @@ struct NDArray:
         Ok(make_array(out_f64, out_i64, out_bool, Shape.new([Index.new(raw_array_len(self.dtype, out_f64, out_i64, out_bool))]), self.dtype))
 
     fn add(self, other: NDArray) -> NDArray:
-        self.try_add(other).unwrap()
+        val out_shape = broadcast_shapes(self.shape, other.shape).unwrap()
+        if self.shape.dims.len() == 2 and other.shape.dims.len() == 2 and self.cols().value == 1 and other.rows().value == 1:
+            val base_row = row_vector_f64(other, 0)
+            var rows_out: [[Float64]] = []
+            var row = 0
+            while row < self.rows().value:
+                val row_result = base_row.add_scalar(self.get_f64_at([Index.new(row), Index.new(0)]))
+                rows_out.push(row_result.to_f64_values())
+                row = row + 1
+            return array2d_f64(rows_out)
+        if self.shape.dims.len() == 2 and other.shape.dims.len() == 1 and self.cols().value == other.len().value:
+            var rows_out: [[Float64]] = []
+            var row = 0
+            while row < self.rows().value:
+                val row_vec = row_vector_f64(self, row)
+                val row_result = add1d_f64(row_vec, other)
+                rows_out.push(row_result.to_f64_values())
+                row = row + 1
+            return array2d_f64(rows_out)
+        val total = out_shape.numel().value
+        var out: [Float64] = []
+        var i = 0
+        while i < total:
+            val indices = unravel_index(i, out_shape)
+            val left = self.f64_at_broadcast(indices)
+            val right = other.f64_at_broadcast(indices)
+            out.push(Float64.new(left.value + right.value))
+            i = i + 1
+        array(out).reshape(out_shape)
 
     fn try_add(self, other: NDArray) -> Result<NDArray, NdarrayError>:
         val shape_result = broadcast_shapes(self.shape, other.shape)
@@ -257,37 +285,25 @@ struct NDArray:
                 return Err(e)
             case Ok(_):
                 pass
-        val out_shape = shape_result.unwrap()
-        var result = zeros(out_shape)
-        var i = 0
-        while i < out_shape.numel().value:
-            val indices = unravel_index(i, out_shape)
-            val left = self.f64_at_broadcast(indices)
-            val right = other.f64_at_broadcast(indices)
-            val sum = left.value + right.value
-            result.data_f64[i] = Float64.new(sum)
-            i = i + 1
+        val result = self.add(other)
         Ok(result)
 
     fn add_scalar(self, scalar: Float64) -> NDArray:
-        var result = zeros(Shape.new([Index.new(self.len().value)]))
+        var out: [Float64] = []
         var i = 0
-        while i < self.len().value:
-            val current = self.get_f64(Index.new(i)).value
-            val sum = current + scalar.value
-            result.data_f64[i] = Float64.new(sum)
+        while i < self.data_f64.len():
+            out.push(Float64.new(self.data_f64[i].value + scalar.value))
             i = i + 1
-        result
+        array(out)
 
     fn mul_scalar(self, scalar: Float64) -> NDArray:
-        var result = zeros(clone_shape(self.shape))
+        val shape = clone_shape(self.shape)
+        var out: [Float64] = []
         var i = 0
-        while i < self.len().value:
-            val current = self.get_f64(Index.new(i)).value
-            val product = current * scalar.value
-            result.data_f64[i] = Float64.new(product)
+        while i < self.data_f64.len():
+            out.push(Float64.new(self.data_f64[i].value * scalar.value))
             i = i + 1
-        result
+        array(out).reshape(shape)
 
     fn f64_at_broadcast(self, indices: [Index]) -> Float64:
         val delta = indices.len() - self.shape.dims.len()
@@ -348,6 +364,35 @@ fn array(values: [Int64]) -> NDArray:
 
 fn array(values: [Bool]) -> NDArray:
     make_bool_array(values, Shape.new([Index.new(values.len())]))
+
+fn array2d_f64(rows: [[Float64]]) -> NDArray:
+    val row_count = rows.len()
+    val col_count = if row_count == 0: 0 else: rows[0].len()
+    var flat: [Float64] = []
+    var row = 0
+    while row < row_count:
+        var col = 0
+        while col < col_count:
+            flat.push(rows[row][col])
+            col = col + 1
+        row = row + 1
+    array(flat).reshape(Shape.new([Index.new(row_count), Index.new(col_count)]))
+
+fn row_vector_f64(array_value: NDArray, row: i64) -> NDArray:
+    var out: [Float64] = []
+    var col = 0
+    while col < array_value.cols().value:
+        out.push(array_value.get_f64_at([Index.new(row), Index.new(col)]))
+        col = col + 1
+    array(out)
+
+fn add1d_f64(left: NDArray, right: NDArray) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < left.data_f64.len():
+        out.push(Float64.new(left.data_f64[i].value + right.data_f64[i].value))
+        i = i + 1
+    array(out)
 
 fn filled_array(shape: Shape, fill: Float64) -> NDArray:
     var out: [Float64] = []

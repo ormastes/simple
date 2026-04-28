@@ -88,47 +88,18 @@ binary_targets = [
 
 root_targets = {
     "simple-driver": {
-        "expected_normal": {
-            "simple-native-loader",
-            "simple-term-io",
-            "simple-compiler",
-            "simple-parser",
-            "simple-runtime",
-            "simple-common",
-            "simple-sdn",
-            "tempfile",
-            "walkdir",
-            "notify",
-            "serde",
-            "serde_json",
-            "tracing",
-            "tracing-subscriber",
-            "tracing-appender",
-            "rustyline",
-            "dirs-next",
-            "chrono",
-            "ctrlc",
-            "parking_lot",
-            "paste",
-            "indexmap",
-            "regex",
-            "rayon",
-            "sysinfo",
-            "sha2",
-            "hostname",
-            "argon2",
-            "rpassword",
-        },
-        "expected_target:cfg(unix)": {"libc"},
-        "expected_target:cfg(windows)": {"winapi"},
+        "expected": {},
+        "forbidden_direct": {"jj-cli", "jj-lib"},
     },
     "simple-native-all": {
-        "expected_normal": {
-            "simple-common",
-            "simple-compiler",
-            "simple-driver",
-            "simple-runtime",
-            "spl_hosted_runtime",
+        "expected": {
+            "normal": {
+                "simple-common",
+                "simple-compiler",
+                "simple-driver",
+                "simple-runtime",
+                "spl_hosted_runtime",
+            },
         },
     },
 }
@@ -278,26 +249,33 @@ if not found_any_binary and not skip_missing:
 
 print("")
 print("Root crate direct dependencies")
-for crate_name, expectations in root_targets.items():
+for crate_name, target_config in root_targets.items():
     deps = packages[crate_name]["dependencies"]
     actual: dict[str, set[str]] = {}
+    direct_names: set[str] = set()
     rows: list[str] = []
     for dep in deps:
         bucket = dep_bucket(dep)
         actual.setdefault(bucket, set()).add(dep["name"])
+        direct_names.add(dep["name"])
         rows.append(f"{dep['name']} [{bucket}] ({dep_mode(dep)})")
     print(f"- {crate_name}:")
     for row in sorted(rows):
         print(f"  - {row}")
-    for bucket, expected_names in expectations.items():
+    for bucket, expected_names in target_config["expected"].items():
         found = actual.get(bucket, set())
         if found != expected_names:
             errors.append(
                 f"{crate_name} {bucket} deps mismatch: expected {sorted(expected_names)}, found {sorted(found)}"
             )
-    extra_buckets = set(actual) - set(expectations)
+    extra_buckets = set(actual) - set(target_config["expected"])
     if extra_buckets:
-        errors.append(f"{crate_name} has unexpected dependency buckets: {sorted(extra_buckets)}")
+        if target_config["expected"]:
+            errors.append(f"{crate_name} has unexpected dependency buckets: {sorted(extra_buckets)}")
+    forbidden_direct = target_config.get("forbidden_direct", set())
+    forbidden_hits = sorted(name for name in direct_names if name in forbidden_direct)
+    if forbidden_hits:
+        errors.append(f"{crate_name} still declares forbidden direct deps: {forbidden_hits}")
 
 print("")
 print("Root crate startup-path closure")

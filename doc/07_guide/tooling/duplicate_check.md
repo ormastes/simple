@@ -1,24 +1,34 @@
 # Code Duplication Detection Guide
 
-The Simple compiler includes a built-in code duplication detector using Karp-Rabin rolling hash with token-based analysis.
+`simple duplicate-check` now runs semantic documentation similarity analysis by default.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Scan directory
+# Scan a directory with semantic analysis
 simple duplicate-check src/
 
-# Scan specific path
+# Scan a focused subtree
 simple duplicate-check src/app/
 
-# Run via build system
-simple build duplication
+# Tune semantic sensitivity
+simple duplicate-check src/ --semantic-threshold 0.92
 
-# Include in all quality checks
-simple build check
+# Force JSON output
+simple duplicate-check src/ --format json
 ```
+
+`--semantic` is still accepted, but it is optional because semantic analysis is already the default.
+
+---
+
+## Compatibility With Removed Lexical Modes
+
+Legacy lexical flags such as `--min-tokens`, `--min-lines`, `--min-impact`, `--cosine`, `--parallel`, `--jobs`, `--no-cache`, and `--cache-path` are still accepted temporarily.
+
+When those flags are used, `simple duplicate-check` prints a deprecation warning and continues with semantic-only analysis. The command no longer performs token-window or cosine/token-feature duplication scans.
 
 ---
 
@@ -28,18 +38,15 @@ Create `simple.duplicate-check.sdn` in the project root:
 
 ```sdn
 duplicate-check:
-  min-tokens: 30              # Minimum tokens per duplicate block
-  min-lines: 5                # Minimum lines per duplicate block
-  min-impact: 100             # Minimum impact score (occurrences x lines)
+  output-format: text
+  max-allowed: 0
 
-  ignore-identifiers: true    # Treat all identifiers as equivalent
-  ignore-literals: false      # Keep literal values distinct
-  ignore-comments: true       # Skip comments
-  ignore-whitespace: true     # Normalize whitespace
-
-  output-format: text         # text | json | sdn
-  report-path: doc/analysis/duplicate_db.sdn
-  max-allowed: 0              # Fail build if > N duplicates
+  use-semantic: true
+  semantic-threshold: 0.90
+  semantic-drift-threshold: 0.40
+  semantic-model: nomic-embed-text
+  ollama-url: http://localhost:11434
+  rebuild-embeddings: false
 
   exclude:
     - "test/"
@@ -48,107 +55,56 @@ duplicate-check:
     - "**/*_test.spl"
 ```
 
-### Command-Line Options
+Lexical config keys may still parse for migration compatibility, but they no longer affect command behavior.
+
+---
+
+## Output Modes
 
 ```bash
-simple duplicate-check src/ --min-tokens 20 --min-lines 5
-simple duplicate-check src/ --min-impact 50
-simple duplicate-check src/ --format json
-simple duplicate-check src/ --exclude "vendor/"
+simple duplicate-check src/ --format=json > duplicates.json
 simple duplicate-check src/ --max-allowed 5
 ```
 
-### Duplication Modes
+- `text` prints the semantic similarity report.
+- `json` emits semantic matches and summary fields.
 
-```bash
-# Exact token-window duplication, using the default five-line minimum
-simple duplicate-check src/ --min-lines 5
+---
 
-# Cosine similarity over token-frequency vectors
-simple duplicate-check src/ --cosine --min-lines 5
+## Ollama And Fallback Behavior
 
-# Semantic documentation similarity
-simple duplicate-check src/ --semantic
-```
+Semantic mode uses Ollama embeddings only when `SIMPLE_DUPCHECK_USE_OLLAMA_HTTP=1` is set and Ollama is reachable.
 
-Cosine mode preserves identifier and literal detail so unrelated helpers are not collapsed by normalization. Semantic mode uses Ollama embeddings only when `SIMPLE_DUPCHECK_USE_OLLAMA_HTTP=1` is set; otherwise it prints a text-based fallback notice and uses local text similarity.
+If Ollama is unavailable, the command prints a warning and falls back to local text-based similarity scoring so the CLI still completes.
 
 ---
 
 ## Understanding Results
 
-**Impact Score = Occurrences x Lines per Block** -- higher scores indicate more significant duplication.
+The report focuses on:
 
-### Text Output
+1. Similar documented items whose comments appear copy-pasted or near-identical.
+2. Missing documentation coverage in the scanned scope.
+3. Optional drift warnings when semantic scoring indicates documentation mismatch behavior.
 
-```
-Found 3 duplicate groups (142 total lines duplicated)
+Example:
 
-1. Impact Score: 140 (5 occurrences, 28 lines each)
-   Files:
-   - src/app/ffi_gen/specs/cranelift_ops.spl:34-42
-   - src/app/ffi_gen/specs/cranelift_advanced.spl:25-33
-   Code preview:
-      let mut contexts = FUNC_CONTEXTS.lock().unwrap();
-      ...
-```
+```text
+Semantic Doc Similarity Report
+==============================
 
-### JSON Output
+Source: 42 items, 31 documented [text-based fallback]
 
-```bash
-simple duplicate-check src/ --format=json > duplicates.json
-simple duplicate-check src/ --format=json | jq '.summary.total_groups'
-```
-
-### SDN Database
-
-```bash
-simple duplicate-check src/ --format=sdn
-# Creates doc/analysis/duplicate_db.sdn
+Similar Docs (>0.90): 2 pairs
+  [1.00] src/app/a.spl:add_score (L2) <-> src/app/b.spl:merge_score (L2) [COPY-PASTE]
 ```
 
 ---
 
-## Detection Algorithm
-
-1. **Tokenize** -- Convert source to tokens (keywords, identifiers, operators, literals)
-2. **Normalize** -- Apply configured normalizations
-3. **Hash** -- Compute rolling hashes over token windows
-4. **Match** -- Find identical hash sequences across files
-5. **Group** -- Group matching blocks by hash
-6. **Rank** -- Sort by impact score
-
-With `ignore-identifiers: true`, structurally similar code is detected even with different variable names:
-
-```simple
-# These are detected as duplicates:
-fn process_user(user_id):
-    val user = fetch_user(user_id)
-    val data = transform(user)
-    return save_result(data)
-
-fn handle_item(item_id):
-    val item = fetch_item(item_id)
-    val result = transform(item)
-    return save_result(result)
-```
-
----
-
-## Best Practices
-
-1. **Start with high thresholds** (`min-impact: 100`) to focus on significant duplicates
-2. **Enable identifier normalization** to find structural duplicates
-3. **Exclude test code** -- tests often have intentional duplication
-4. **Track over time** -- commit `duplicate_db.sdn` and use `--max-allowed` in CI
-5. **Refactor incrementally** -- start with highest impact scores, extract helpers
-
----
-
-## CI/CD Integration
+## CI Integration
 
 ```yaml
-- name: Check Code Duplication
+- name: Check semantic doc duplication
   run: |
     bin/simple duplicate-check src/ --format=json > duplicates.json
     bin/simple duplicate-check src/ --max-allowed=5
@@ -156,18 +112,8 @@ fn handle_item(item_id):
 
 ---
 
-## Troubleshooting
-
-**Slow performance**: Use exclusion patterns, increase `min-tokens`, or run only on changed files.
-
-**False positives**: Increase `min-tokens` and `min-lines`, or use `ignore-identifiers: false`.
-
-**False negatives**: Enable `ignore-identifiers: true` and `ignore-literals: true`, lower `min-impact`.
-
----
-
 ## Related Commands
 
-- `simple lint` -- Code quality linting
-- `simple fmt` -- Code formatting
-- `simple build check` -- All quality checks (includes duplication)
+- `simple lint` — Code quality linting
+- `simple fmt` — Code formatting
+- `simple build check` — Aggregate quality checks

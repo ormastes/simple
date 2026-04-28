@@ -14,7 +14,7 @@ class OverflowError:
 
 class BoundedChannel<T>:
     capacity: i64     # maximum items in flight; default 256
-    buffer: List<Any> # ring storage; T items stored as Any
+    buffer: [T?]      # ring storage
     head: i64         # index of oldest item (next recv)
     tail: i64         # index of next write slot
     size: i64         # current number of items
@@ -44,11 +44,11 @@ class BoundedChannel<T>:
             self.head = (self.head + 1) % self.capacity
             self.size = self.size - 1
             self.dropped = self.dropped + 1u64
-            self.buffer = self.buffer.set(self.tail, item)
+            self.buffer[self.tail] = item
             self.tail = (self.tail + 1) % self.capacity
             self.size = self.size + 1
             return Err(OverflowError(dropped_count: self.dropped))
-        self.buffer = self.buffer.set(self.tail, item)
+        self.buffer[self.tail] = item
         self.tail = (self.tail + 1) % self.capacity
         self.size = self.size + 1
         return Ok(())
@@ -57,18 +57,20 @@ class BoundedChannel<T>:
         """Receive the oldest item, or None if empty."""
         if self.size == 0:
             return None
-        val item = self.buffer.get(self.head)
+        val item = self.buffer[self.head]
         self.head = (self.head + 1) % self.capacity
         self.size = self.size - 1
-        return Some(item as T)
+        return item
 
     me try_recv() -> Option<Any>:
         """Receive as Any (matches the Channel.try_recv() call pattern)."""
         if self.size == 0:
             return None
-        val item = self.buffer.get(self.head)
+        val item = self.buffer[self.head]
         self.head = (self.head + 1) % self.capacity
         self.size = self.size - 1
+        if item == nil:
+            return None
         return Some(item)
 
     me send(item: Any):
@@ -90,9 +92,9 @@ class BoundedChannel<T>:
 # Private helpers
 # =========================================================================
 
-fn _make_buffer(capacity: i64) -> List<Any>:
-    """Pre-allocate a list of `capacity` nil slots."""
-    var buf: List<Any> = []
+fn _make_buffer<T>(capacity: i64) -> [T?]:
+    """Pre-allocate an array of `capacity` nil slots."""
+    var buf: [T?] = []
     var i = 0
     while i < capacity:
         buf = buf.push(nil)

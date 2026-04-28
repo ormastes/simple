@@ -2,12 +2,7 @@
 # Duplication detection CLI
 
 use compiler.tools.duplicate_check.config (load_config, DuplicationConfig)
-use compiler.tools.duplicate_check.detector.{collect_files, scan_duplicate_blocks, group_by_hash, refine_groups_with_similarity, sort_by_impact, new_token_interner, DuplicateGroup, DuplicateBlock}
-use compiler.tools.duplicate_check.formatter (print_text_report, print_json_report, write_sdn_database)
 use compiler.tools.duplicate_check.debug (init_debug)
-use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
-use compiler.tools.duplicate_check.parallel.{process_files_parallel, ParallelConfig}
-use compiler.tools.duplicate_check.incremental.{load_incremental_cache, process_files_incremental, format_incremental_stats, normalize_block_hashes}
 use compiler.tools.duplicate_check.semantic.{run_semantic_analysis}
 use compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
 use std.ffi.cli.{cli_get_args, cli_exit}
@@ -56,67 +51,86 @@ fn collect_command_args(all_args: [text]) -> [text]:
         i = i + 1
     cmd_args
 
-fn build_groups_from_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager) -> [DuplicateGroup]:
-    val exact_groups = group_by_hash(all_blocks, config)
-    val refined_groups = if config.use_cosine_similarity:
-        refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
-    else:
-        exact_groups
-    sort_by_impact(refined_groups)
-
-fn scan_files_sequential(files: [text], config: DuplicationConfig, cache_manager) -> [DuplicateBlock]:
-    val interner = new_token_interner()
-    val blocks = scan_duplicate_blocks(files, config, cache_manager, interner)
-    normalize_block_hashes(blocks)
-
-fn scan_files(files: [text], config: DuplicationConfig, cache_manager) -> ([DuplicateBlock], text):
-    if config.use_incremental:
-        val incremental_cache = load_incremental_cache(config.incremental_cache_path, config)
-        val result = process_files_incremental(files, config, incremental_cache, cache_manager)
-        val blocks = result.0
-        val stats = format_incremental_stats(result.1)
-        return (blocks, stats)
-
-    if config.use_parallel:
-        val parallel_config = ParallelConfig(
-            num_workers: config.num_workers,
-            batch_size: 10,
-            enabled: true
-        )
-        val blocks = process_files_parallel(files, parallel_config, cache_manager, config)
-        return (blocks, "")
-
-    (scan_files_sequential(files, config, cache_manager), "")
-
 fn print_usage():
     print "Usage: simple duplicate-check [path] [options]"
     print ""
+    print "Default behavior:"
+    print "  Run semantic documentation similarity analysis on the target path."
+    print ""
     print "Options:"
-    print "  --min-tokens N      Minimum tokens per duplicate (default: 30)"
-    print "  --min-lines N       Minimum lines per duplicate (default: 5)"
-    print "  --min-impact N      Minimum impact score to report (default: 50)"
-    print "  --format FORMAT     Output format: text, json, sdn (default: text)"
+    print "  --format FORMAT     Output format: text or json (default: text)"
     print "  --exclude PATTERN   Exclude files matching pattern"
     print "  --verbose, -v       Show detailed progress information"
     print "  --quiet, -q         Suppress all output except results"
-    print "  --cosine            Enable cosine similarity for fuzzy matching"
-    print "  --parallel          Enable parallel processing"
-    print "  --jobs N            Number of parallel workers (implies --parallel)"
-    print "  --no-cache          Disable incremental cache"
-    print "  --cache-path PATH   Path to incremental cache (enables caching)"
-    print "  --semantic          Enable semantic doc similarity analysis"
+    print "  --semantic          Optional compatibility flag; semantic analysis is already the default"
     print "  --semantic-threshold N  Similarity threshold (default: 0.90)"
     print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
     print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
     print "  --rebuild-embeddings  Force rebuild embedding cache"
-    print "  --benchmark         Run performance benchmark"
-    print "  --benchmark-iterations N  Number of benchmark iterations (default: 3)"
-    print "  --benchmark-save PATH     Save benchmark results to file"
-    print "  --benchmark-compare PATH  Compare with previous benchmark"
+    print ""
+    print "Deprecated compatibility flags:"
+    print "  --min-tokens N      Accepted with warning; lexical duplication checking was removed"
+    print "  --min-lines N       Accepted with warning; lexical duplication checking was removed"
+    print "  --min-impact N      Accepted with warning; lexical duplication checking was removed"
+    print "  --cosine            Accepted with warning; semantic-only analysis now runs instead"
+    print "  --parallel          Accepted with warning; lexical duplication checking was removed"
+    print "  --jobs N            Accepted with warning; lexical duplication checking was removed"
+    print "  --no-cache          Accepted with warning; lexical duplication checking was removed"
+    print "  --cache-path PATH   Accepted with warning; lexical duplication checking was removed"
     print "  --help, -h          Show this help"
+
+fn append_unique_flag(flags: [text], seen: {text: bool}, flag: text):
+    if seen[flag] ?? false:
+        return
+    seen[flag] = true
+    flags.push(flag)
+
+fn collect_deprecated_lexical_flags(args: [text]) -> [text]:
+    var flags: [text] = []
+    var seen = {}
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+
+        if arg == "--min-tokens" or arg.starts_with("--min-tokens="):
+            append_unique_flag(flags, seen, "--min-tokens")
+            i = if arg == "--min-tokens" and i + 1 < args.len(): i + 2 else: i + 1
+        elif arg == "--min-lines" or arg.starts_with("--min-lines="):
+            append_unique_flag(flags, seen, "--min-lines")
+            i = if arg == "--min-lines" and i + 1 < args.len(): i + 2 else: i + 1
+        elif arg == "--min-impact" or arg.starts_with("--min-impact="):
+            append_unique_flag(flags, seen, "--min-impact")
+            i = if arg == "--min-impact" and i + 1 < args.len(): i + 2 else: i + 1
+        elif arg == "--cosine":
+            append_unique_flag(flags, seen, "--cosine")
+            i = i + 1
+        elif arg == "--parallel":
+            append_unique_flag(flags, seen, "--parallel")
+            i = i + 1
+        elif arg == "--jobs" or arg.starts_with("--jobs="):
+            append_unique_flag(flags, seen, "--jobs")
+            i = if arg == "--jobs" and i + 1 < args.len(): i + 2 else: i + 1
+        elif arg == "--no-cache":
+            append_unique_flag(flags, seen, "--no-cache")
+            i = i + 1
+        elif arg == "--cache-path" or arg.starts_with("--cache-path="):
+            append_unique_flag(flags, seen, "--cache-path")
+            i = if arg == "--cache-path" and i + 1 < args.len(): i + 2 else: i + 1
+        else:
+            i = i + 1
+    flags
+
+fn print_deprecation_warning(flags: [text]):
+    if flags.len() == 0:
+        return
+    print "WARNING: lexical duplicate-check options are deprecated and no longer change analysis."
+    print "  Requested: {flags.join(', ')}"
+    print "  `simple duplicate-check` now runs semantic-only analysis."
+    print ""
 
 fn parse_args(args: [text]) -> DuplicationConfig:
     var config = load_config()
+    config.use_semantic = true
 
     var i = 0
     while i < args.len():
@@ -125,18 +139,33 @@ fn parse_args(args: [text]) -> DuplicationConfig:
         if arg == "--min-tokens" and i + 1 < args.len():
             config.min_tokens = int(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--min-tokens="):
+            config.min_tokens = int(arg.slice("--min-tokens=".len(), arg.len()))
+            i = i + 1
         elif arg == "--min-lines" and i + 1 < args.len():
             config.min_lines = int(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--min-lines="):
+            config.min_lines = int(arg.slice("--min-lines=".len(), arg.len()))
+            i = i + 1
         elif arg == "--min-impact" and i + 1 < args.len():
             config.min_impact = int(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--min-impact="):
+            config.min_impact = int(arg.slice("--min-impact=".len(), arg.len()))
+            i = i + 1
         elif arg == "--format" and i + 1 < args.len():
             config.output_format = args[i + 1]
             i = i + 2
+        elif arg.starts_with("--format="):
+            config.output_format = arg.slice("--format=".len(), arg.len())
+            i = i + 1
         elif arg == "--exclude" and i + 1 < args.len():
             config.exclude_patterns.push(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--exclude="):
+            config.exclude_patterns.push(arg.slice("--exclude=".len(), arg.len()))
+            i = i + 1
         elif arg == "--verbose" or arg == "-v":
             config.verbose = true
             i = i + 1
@@ -150,10 +179,12 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             config.use_parallel = true
             config.num_workers = int(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--jobs="):
+            config.use_parallel = true
+            config.num_workers = int(arg.slice("--jobs=".len(), arg.len()))
+            i = i + 1
         elif arg == "--cosine":
             config.use_cosine_similarity = true
-            # Cosine mode needs lexical detail to avoid collapsing unrelated
-            # helper bodies into the same structural feature vectors.
             config.ignore_identifiers = false
             config.ignore_literals = false
             i = i + 1
@@ -163,12 +194,21 @@ fn parse_args(args: [text]) -> DuplicationConfig:
         elif arg == "--semantic-threshold" and i + 1 < args.len():
             config.semantic_threshold = float(args[i + 1])
             i = i + 2
+        elif arg.starts_with("--semantic-threshold="):
+            config.semantic_threshold = float(arg.slice("--semantic-threshold=".len(), arg.len()))
+            i = i + 1
         elif arg == "--semantic-model" and i + 1 < args.len():
             config.semantic_model = args[i + 1]
             i = i + 2
+        elif arg.starts_with("--semantic-model="):
+            config.semantic_model = arg.slice("--semantic-model=".len(), arg.len())
+            i = i + 1
         elif arg == "--ollama-url" and i + 1 < args.len():
             config.ollama_url = args[i + 1]
             i = i + 2
+        elif arg.starts_with("--ollama-url="):
+            config.ollama_url = arg.slice("--ollama-url=".len(), arg.len())
+            i = i + 1
         elif arg == "--rebuild-embeddings":
             config.rebuild_embeddings = true
             i = i + 1
@@ -179,6 +219,10 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             config.use_incremental = true
             config.incremental_cache_path = args[i + 1]
             i = i + 2
+        elif arg.starts_with("--cache-path="):
+            config.use_incremental = true
+            config.incremental_cache_path = arg.slice("--cache-path=".len(), arg.len())
+            i = i + 1
         elif arg == "--help" or arg == "-h":
             print_usage()
             cli_exit(0)
@@ -201,49 +245,20 @@ fn main():
     val cmd_args = collect_command_args(raw_args)
 
     val config = parse_args(cmd_args)
+    val deprecated_flags = collect_deprecated_lexical_flags(cmd_args)
 
     val target_path = if cmd_args.len() > 0 and not cmd_args[0].starts_with("-"):
         cmd_args[0]
     else:
         "src/"
 
-    # Semantic analysis mode
-    if config.use_semantic:
-        val report = run_semantic_analysis(target_path, config)
-        if config.output_format == "json":
-            print_semantic_json_report(report)
-        else:
-            print_semantic_text_report(report, config)
-        val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
-        cli_exit(exit_code)
+    print_deprecation_warning(deprecated_flags)
 
-    val files = collect_files(target_path, config)
-
-    if files.len() == 0:
-        print "No files found to scan"
-        cli_exit(1)
-
-    val cache_manager = new_token_cache_manager()
-
-    val scan_result = scan_files(files, config, cache_manager)
-    val groups = build_groups_from_blocks(scan_result.0, config, cache_manager)
-
-    if config.verbose and not config.quiet:
-        print ""
-        if scan_result.1.len() > 0:
-            print scan_result.1
-        print get_cache_stats(cache_manager)
-        print ""
-    elif not config.quiet:
-        print ""
-
+    val report = run_semantic_analysis(target_path, config)
     if config.output_format == "json":
-        print_json_report(groups)
-    elif config.output_format == "sdn":
-        write_sdn_database(groups, config.report_path)
-        print_text_report(groups)
+        print_semantic_json_report(report)
     else:
-        print_text_report(groups)
+        print_semantic_text_report(report, config)
 
-    val exit_code = if groups.len() > config.max_allowed: 1 else: 0
+    val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
     cli_exit(exit_code)
