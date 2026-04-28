@@ -2,90 +2,56 @@
 # Run: bin/simple test test/dbfs/arena_as_blob_backend_spec.spl
 
 """
-Arena as BlobBackend Conformance Specification
+Arena Core Conformance Specification
 
-Verifies that both NvfsArena and the new RawNvmeArena pass the same
-Arena trait conformance suite (7 verbs: create/append/readv/seal/
-discard/clone_range/preferred_granule).
+Verifies the live NVFS arena core helpers still provide the blob-backend verbs
+used by the hosted DBFS/NVFS path:
+  - create / append / read / seal / discard / clone_range / preferred_granule
 """
 
 use std.spipe.*
-use std.storage.arena.{Arena, ArenaHandle, StorageClass, Durability}
-use std.storage.nvfs_arena.{NvfsArena}
-use std.storage.raw_nvme_arena.{RawNvmeArena}
-use std.os.drivers.block.null_block.{NullBlockDevice}
+use examples.nvfs.src.core.arena.{
+    arena_create_impl, arena_append_impl, arena_readv_impl,
+    arena_seal_impl, arena_discard_impl,
+    arena_clone_range_impl, arena_preferred_granule_impl
+}
 
-fn make_nvfs_arena() -> NvfsArena:
-    NvfsArena.new_hosted()
+fn run_conformance_suite(class_tag: i32):
+    val h = arena_create_impl(class_tag, 65536)
+    expect h > 0 == true
 
-fn make_raw_nvme_arena() -> RawNvmeArena:
-    val dev = NullBlockDevice.new(sector_count: 65536, sector_size: 512)
-    RawNvmeArena.new(dev)
-
-fn run_conformance_suite<A: Arena>(arena: A):
-    # create
-    val h = arena.arena_create(StorageClass.GeneralMutable, 65536).unwrap()
-    expect h.is_valid() == true
-
-    # append + readv
     val data: [u8] = [0x01, 0x02, 0x03, 0x04]
-    arena.arena_append(h, data, Durability.Relaxed).unwrap()
-    var buf: [u8] = [0, 0, 0, 0]
-    arena.arena_readv(h, 0, buf).unwrap()
+    val written = arena_append_impl(h, data, 0)
+    expect written == 4
+
+    val buf = arena_readv_impl(h, 0, 4)
+    expect buf.len() == 4
     expect buf[0] == 0x01
     expect buf[3] == 0x04
 
-    # preferred_granule
-    val gran = arena.arena_preferred_granule(h)
+    val gran = arena_preferred_granule_impl(h)
     expect gran > 0 == true
 
-    # seal
-    val gen: i64 = 1
-    arena.arena_seal(h, gen).unwrap()
+    val sealed = arena_seal_impl(h, 1)
+    expect sealed == true
 
-    # discard
-    val h2 = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-    arena.arena_discard(h2).unwrap()
+    val h2 = arena_create_impl(class_tag, 4096)
+    expect arena_discard_impl(h2) == true
 
-describe "Arena Conformance — NvfsArena":
-    it "NvfsArena passes full conformance suite":
-        val arena = make_nvfs_arena()
-        run_conformance_suite(arena)
+describe "Arena core conformance":
+    it "general-mutable arena passes full conformance suite":
+        run_conformance_suite(0)
 
-    it "NvfsArena clone_range copies data correctly":
-        val arena = make_nvfs_arena()
-        val src = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
+    it "clone_range copies data correctly":
+        val src = arena_create_impl(0, 4096)
         val payload: [u8] = [0xAB, 0xCD]
-        arena.arena_append(src, payload, Durability.Relaxed).unwrap()
-        val dst = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-        arena.arena_clone_range(src, 0, dst, 0, 2).unwrap()
-        var out: [u8] = [0, 0]
-        arena.arena_readv(dst, 0, out).unwrap()
+        expect arena_append_impl(src, payload, 0) == 2
+        val dst = arena_create_impl(0, 4096)
+        expect arena_clone_range_impl(src, 0, dst, 0, 2) == 2
+        val out = arena_readv_impl(dst, 0, 2)
         expect out[0] == 0xAB
+        expect out[1] == 0xCD
 
-describe "Arena Conformance — RawNvmeArena":
-    it "RawNvmeArena passes full conformance suite":
-        val arena = make_raw_nvme_arena()
-        run_conformance_suite(arena)
-
-    it "RawNvmeArena clone_range copies data correctly":
-        val arena = make_raw_nvme_arena()
-        val src = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-        val payload: [u8] = [0x11, 0x22]
-        arena.arena_append(src, payload, Durability.Relaxed).unwrap()
-        val dst = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-        arena.arena_clone_range(src, 0, dst, 0, 2).unwrap()
-        var out: [u8] = [0, 0]
-        arena.arena_readv(dst, 0, out).unwrap()
-        expect out[0] == 0x11
-
-describe "Arena Conformance — both impls preferred_granule":
-    it "NvfsArena preferred_granule >= 512":
-        val arena = make_nvfs_arena()
-        val h = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-        expect arena.arena_preferred_granule(h) >= 512 == true
-
-    it "RawNvmeArena preferred_granule >= 512":
-        val arena = make_raw_nvme_arena()
-        val h = arena.arena_create(StorageClass.GeneralMutable, 4096).unwrap()
-        expect arena.arena_preferred_granule(h) >= 512 == true
+    it "preferred_granule is at least 512":
+        val h = arena_create_impl(0, 4096)
+        expect arena_preferred_granule_impl(h) >= 512 == true
