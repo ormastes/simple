@@ -701,7 +701,7 @@ impl Lowerer {
     }
 
     /// Check if a symbol should be imported based on the import target.
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
             ImportTarget::Glob => true,           // Import everything

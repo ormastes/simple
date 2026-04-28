@@ -13,7 +13,7 @@ use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
 use winit::platform::x11::EventLoopBuilderExtX11;
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
+#[allow(deprecated)] // reason: winit API deprecated upstream; migration tracked, not blocking this release
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
@@ -57,7 +57,7 @@ pub(super) fn macos_pump(event_loop_id: i64) {
             while let Ok(cmd) = ps.command_rx.try_recv() {
                 let _ = ps.proxy.send_event(UserEvent::Command(cmd));
             }
-            #[allow(deprecated)]
+            #[allow(deprecated)] // reason: winit API deprecated upstream; migration tracked, not blocking this release
             let _ = ps
                 .event_loop
                 .pump_events(Some(std::time::Duration::from_millis(1)), |event, target| match event {

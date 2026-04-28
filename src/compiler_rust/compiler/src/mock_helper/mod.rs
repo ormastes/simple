@@ -1,7 +1,7 @@
 pub mod api_scanner;
 pub mod coverage;
 pub mod coverage_extended;
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)] // reason: pointer safety enforced by caller contract documented in SAFETY comment
 pub mod ffi;
 pub mod fluent;
 pub mod mock_policy;

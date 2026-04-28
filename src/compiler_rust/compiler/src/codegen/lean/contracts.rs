@@ -305,7 +305,7 @@ impl<'a> ContractTranslator<'a> {
     }
 
     /// Translate a predicate expression to a Lean proposition
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn translate_predicate(
         &self,
         expr_translator: &ExprTranslator,

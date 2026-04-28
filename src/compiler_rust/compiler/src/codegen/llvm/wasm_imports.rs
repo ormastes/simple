@@ -38,7 +38,7 @@ pub type WasiTimestamp = u64;
 pub type WasiClockid = u32;
 
 /// Clock IDs for clock_time_get
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 pub mod clock_id {
     use super::WasiClockid;
 
@@ -56,7 +56,7 @@ pub mod clock_id {
 }
 
 /// Standard file descriptors
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 pub mod fd {
     use super::WasiFd;
 

@@ -27,7 +27,7 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     provider: Arc<dyn RuntimeSymbolProvider>,
 }
 

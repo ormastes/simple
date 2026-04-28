@@ -155,7 +155,7 @@ impl BindingSpecializer {
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn specialize_expr(&self, expr: &Expr) -> Expr {
         match expr {
             // Method calls are the primary target for specialization

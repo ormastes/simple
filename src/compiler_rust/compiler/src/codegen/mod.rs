@@ -4,7 +4,7 @@ pub mod bytecode;
 pub mod common_backend;
 mod cranelift;
 pub mod cranelift_emitter;
-#[allow(clippy::missing_safety_doc)]
+#[allow(clippy::missing_safety_doc)] // reason: safety contract documented in the calling module-level doc comment
 pub mod cranelift_ffi;
 pub mod dispatch;
 pub mod emitter_trait;

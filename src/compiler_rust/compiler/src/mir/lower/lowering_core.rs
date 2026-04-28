@@ -44,7 +44,7 @@ pub enum ContractMode {
 
 impl ContractMode {
     /// Parse contract mode from string (CLI flag value)
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "off" | "none" => Some(ContractMode::Off),
@@ -106,7 +106,7 @@ pub struct ContractContext {
 
 /// Explicit lowerer state - makes state transitions verifiable
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)] // reason: enum variant sizes are bounded; Box refactor deferred
 pub enum LowererState {
     /// Not currently lowering any function
     Idle,

@@ -349,7 +349,7 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     /// Create or return a no-op body stub (fn() -> void) and return its FuncId.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     pub fn ensure_body_stub(&mut self) -> BackendResult<cranelift_module::FuncId> {
         if let Some(id) = self.body_stub {
             return Ok(id);

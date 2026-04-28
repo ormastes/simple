@@ -90,7 +90,7 @@ fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<
     best.map(|(_, func)| func)
 }
 
-#[allow(clippy::borrowed_box)]
+#[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],

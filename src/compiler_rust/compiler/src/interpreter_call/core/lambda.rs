@@ -11,7 +11,7 @@ use std::collections::HashMap;
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn exec_lambda(
     params: &[String],
     body: &simple_parser::ast::Expr,

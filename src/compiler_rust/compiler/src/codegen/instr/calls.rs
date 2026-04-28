@@ -100,7 +100,7 @@ fn needs_runtime_value_untagging(func_name: &str) -> bool {
 /// Untag a RuntimeValue to raw i64 by right-shifting 3 bits.
 /// RuntimeValue integers are encoded as (value << 3) | TAG_INT where TAG_INT = 0.
 /// So untagging is simply value >> 3 (arithmetic shift).
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 fn untag_runtime_value_to_int(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,

@@ -14,7 +14,7 @@ use simple_common::target::Target;
 use crate::elf_utils::extract_code_from_object;
 
 /// Write an SMF binary that returns the given value from main.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 pub(crate) fn write_smf_with_return_value(
     path: &Path,
     return_value: i32,

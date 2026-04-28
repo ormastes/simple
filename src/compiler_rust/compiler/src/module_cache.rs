@@ -233,7 +233,7 @@ pub fn decrement_load_depth() {
 }
 
 /// Get current module load depth
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 pub fn get_load_depth() -> usize {
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow())
 }

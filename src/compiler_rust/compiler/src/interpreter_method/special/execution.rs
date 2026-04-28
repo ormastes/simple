@@ -24,7 +24,7 @@ macro_rules! extract_block_result {
     };
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn find_and_exec_method_with_self(
     method: &str,
     args: &[Argument],
@@ -74,7 +74,7 @@ pub fn find_and_exec_method_with_self(
 }
 
 /// Execute a function and return both result and modified self
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],

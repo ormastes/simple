@@ -40,7 +40,7 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Emit a path probe instruction if coverage is enabled
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     pub(super) fn emit_path_probe(&mut self, path_id: u32, block_id: u32) -> MirLowerResult<()> {
         if !self.coverage_enabled {
             return Ok(());

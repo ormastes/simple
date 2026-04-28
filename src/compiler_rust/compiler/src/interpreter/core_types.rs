@@ -57,7 +57,7 @@ pub(crate) type UnitFamilies = HashMap<String, UnitFamilyInfo>;
 
 /// Information about a unit family for conversion support
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used when to_X() method dispatch is implemented
+#[allow(dead_code)] // Fields used when to_X() method dispatch is implemented // reason: reachable via FFI or future entry point; not yet wired
 pub(crate) struct UnitFamilyInfo {
     /// Base type (e.g., f64)
     pub base_type: Type,
@@ -76,7 +76,7 @@ pub(crate) type TraitImpls = HashMap<(String, String), Vec<Arc<FunctionDef>>>;
 pub(crate) enum Control {
     Next,
     Return(crate::value::Value),
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     Break(Option<crate::value::Value>, Option<String>),
     Continue(Option<String>),
 }

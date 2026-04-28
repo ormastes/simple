@@ -29,7 +29,7 @@ pub fn handle_future_methods(future: &crate::value::FutureValue, method: &str) -
 }
 
 /// Handle Channel methods (send, recv, try_recv)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_channel_methods(
     channel: &crate::value::ChannelValue,
     method: &str,
@@ -80,7 +80,7 @@ pub fn handle_channel_methods(
 }
 
 /// Handle ThreadPool methods (submit)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_threadpool_methods(
     _pool: &crate::value::ThreadPoolValue,
     method: &str,

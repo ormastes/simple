@@ -218,7 +218,7 @@ pub(crate) fn compile_await<M: Module>(
 /// * `future` - Register containing MonoioFuture
 /// * `mir_block_id` - Current MIR block ID
 /// * `entry_block` - Entry block for state machine
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
 pub(crate) fn compile_await_monoio<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

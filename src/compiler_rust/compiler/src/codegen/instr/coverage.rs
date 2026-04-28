@@ -41,7 +41,7 @@ pub fn compile_decision_probe<M: Module>(
 ///
 /// Calls rt_condition_probe(decision_id, condition_id, result) to track which conditions
 /// within a complex decision (e.g., A && B || C) independently affect the outcome.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn compile_condition_probe<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

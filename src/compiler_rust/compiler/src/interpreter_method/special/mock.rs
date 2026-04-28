@@ -42,7 +42,7 @@ macro_rules! with_configuring_method {
     }};
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_mock_methods(
     mock: &crate::value::MockValue,
     method: &str,

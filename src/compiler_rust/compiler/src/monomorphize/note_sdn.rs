@@ -254,7 +254,7 @@ impl InstantiationStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "compiled" => Ok(InstantiationStatus::Compiled),
@@ -371,7 +371,7 @@ impl DependencyKind {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "type_param" => Ok(DependencyKind::TypeParam),

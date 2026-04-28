@@ -106,7 +106,7 @@ impl Lowerer {
     }
 
     /// Check an expression for async function calls from sync functions.
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     pub(super) fn check_expr_for_async_calls(
         &self,
         expr: &HirExpr,

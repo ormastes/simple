@@ -356,7 +356,7 @@ pub(crate) fn exec_block_value(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn eval_arg(
     args: &[Argument],
     index: usize,

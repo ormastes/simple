@@ -594,7 +594,7 @@ pub fn list_targets() -> i32 {
 }
 
 /// Compile a source file to a standalone native binary
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn compile_file_native(
     source: &Path,
     output: Option<PathBuf>,

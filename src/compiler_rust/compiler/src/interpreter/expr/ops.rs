@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 /// Try to dispatch a binary operator to a dunder method on an Object value.
 /// Returns None if the left value is not an Object or doesn't have the method.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn try_dunder_binop(
     dunder_name: &str,
     left: &Value,
@@ -56,7 +56,7 @@ fn try_dunder_binop(
 }
 /// Try to dispatch a unary operator to a dunder method on an Object value.
 /// Returns None if the value is not an Object or doesn't have the method.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn try_dunder_unaryop(
     dunder_name: &str,
     operand: &Value,

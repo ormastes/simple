@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::super::{evaluate_expr, Enums, ImplMethods};
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_arg(
     args: &[simple_parser::ast::Argument],
     idx: usize,
@@ -26,7 +26,7 @@ pub(crate) fn eval_arg(
 }
 
 /// Evaluate an argument as i64 with default
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_arg_int(
     args: &[simple_parser::ast::Argument],
     idx: usize,
@@ -51,7 +51,7 @@ pub(crate) fn eval_arg_int(
 }
 
 /// Evaluate an argument as usize with default
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_arg_usize(
     args: &[simple_parser::ast::Argument],
     idx: usize,

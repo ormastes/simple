@@ -17,7 +17,7 @@ pub enum AdviceForm {
 }
 
 impl AdviceForm {
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "before" => Some(AdviceForm::Before),

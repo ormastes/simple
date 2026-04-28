@@ -124,7 +124,7 @@ impl<'a> VerificationChecker<'a> {
     }
 
     /// Check if an expression contains a call to the given function
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn expr_calls_function(&self, expr: &HirExpr, name: &str) -> bool {
         match &expr.kind {
             HirExprKind::Call { func, args, .. } => {

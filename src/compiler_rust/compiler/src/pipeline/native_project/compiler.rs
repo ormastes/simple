@@ -321,7 +321,7 @@ pub(crate) fn compile_file_to_object(
 }
 
 /// Compile a file with panic catching and timeout.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn compile_file_safe(
     source: String,
     file_path: PathBuf,

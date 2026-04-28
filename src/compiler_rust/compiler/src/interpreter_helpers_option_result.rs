@@ -52,7 +52,7 @@ fn apply_lambda_to_value(
 /// Generic function to handle Option map/and_then operations on Some variant
 /// - mapper: function to apply to the value
 /// - wrap_result: function to wrap the result (Some for map, identity for and_then)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn handle_option_operation<F, W>(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -89,7 +89,7 @@ where
 /// Generic function to handle Result map operations on Ok variant
 /// - wrap_ok: function to wrap Ok result
 /// - wrap_err: function to wrap Err result
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn handle_result_map_operation<WOk, WErr>(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -122,7 +122,7 @@ where
 }
 
 /// Option map: apply lambda to Some value
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_option_map(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -148,7 +148,7 @@ pub(crate) fn eval_option_map(
 }
 
 /// Option and_then: flat-map - apply lambda that returns Option to Some value
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_option_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -174,7 +174,7 @@ pub(crate) fn eval_option_and_then(
 }
 
 /// Option or_else: if None, call function to get alternative Option
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_option_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -208,7 +208,7 @@ pub(crate) fn eval_option_or_else(
 }
 
 /// Option filter: if Some and predicate returns true, keep Some; else None
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_option_filter(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -243,7 +243,7 @@ pub(crate) fn eval_option_filter(
 }
 
 /// Result map: apply lambda to Ok value
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_result_map(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -272,7 +272,7 @@ pub(crate) fn eval_result_map(
 }
 
 /// Result map_err: apply lambda to Err value
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_result_map_err(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -301,7 +301,7 @@ pub(crate) fn eval_result_map_err(
 }
 
 /// Result and_then: flat-map - apply lambda that returns Result to Ok value
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_result_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
@@ -328,7 +328,7 @@ pub(crate) fn eval_result_and_then(
 }
 
 /// Result or_else: if Err, call function to get alternative Result
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn eval_result_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,

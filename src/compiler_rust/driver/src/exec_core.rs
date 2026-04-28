@@ -67,7 +67,7 @@ impl ExecCore {
     }
 
     /// Create with a GC runtime and custom symbol provider
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[allow(clippy::arc_with_non_send_sync)] // reason: Arc used for single-threaded ref-counting in interpreter context
     pub fn with_gc_and_provider(gc: GcRuntime, provider: Arc<dyn RuntimeSymbolProvider>) -> Self {
         let gc = Arc::new(gc);
         // Check SIMPLE_EXECUTION_MODE env var for default mode

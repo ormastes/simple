@@ -305,7 +305,7 @@ impl SymbolUsageAnalyzer {
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn collect_type_usage(&self, ty: &Type, usage: &mut SymbolUsage) {
         match ty {
             Type::Simple(name) => {
@@ -349,7 +349,7 @@ impl SymbolUsageAnalyzer {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     fn is_builtin_type(&self, name: &str) -> bool {
         matches!(
             name,

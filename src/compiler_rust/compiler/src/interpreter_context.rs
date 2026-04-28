@@ -14,7 +14,7 @@ use super::interpreter_helpers::try_method_missing;
 use super::interpreter_method::find_and_exec_method_with_self;
 use super::{evaluate_expr, Enums, ImplMethods, CONTEXT_OBJECT};
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(super) fn dispatch_context_method(
     ctx: &Value,
     method: &str,

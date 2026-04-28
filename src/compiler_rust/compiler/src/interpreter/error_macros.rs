@@ -1,7 +1,7 @@
 // Error handling macros to reduce boilerplate
 
 // These macros are defined for potential future use
-#[allow(unused_macros)]
+#[allow(unused_macros)] // reason: macro defined for conditional use; unused in current build configuration
 /// Create a runtime error with message
 macro_rules! runtime_err {
     ($msg:expr) => {
@@ -22,7 +22,7 @@ macro_rules! semantic_err {
     };
 }
 
-#[allow(unused_macros)]
+#[allow(unused_macros)] // reason: macro defined for conditional use; unused in current build configuration
 /// Create a codegen error with message
 macro_rules! codegen_err {
     ($msg:expr) => {
@@ -33,7 +33,7 @@ macro_rules! codegen_err {
     };
 }
 
-#[allow(unused_macros)]
+#[allow(unused_macros)] // reason: macro defined for conditional use; unused in current build configuration
 /// Return early with a runtime error
 macro_rules! bail_runtime {
     ($msg:expr) => {

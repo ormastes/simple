@@ -9,7 +9,7 @@ use crate::test_stats::{compute_statistics, detect_outliers, has_significant_cha
 // ============================================================================
 
 /// Update test result in database
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn update_test_result(
     db: &mut TestDb,
     test_id: &str,

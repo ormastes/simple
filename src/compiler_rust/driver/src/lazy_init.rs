@@ -164,7 +164,7 @@ macro_rules! lazy_static {
             $(
                 static [<__LAZY_ $name>]: $crate::lazy_init::LazyStatic<$ty> = $crate::lazy_init::LazyStatic::new();
 
-                #[allow(non_snake_case)]
+                #[allow(non_snake_case)] // reason: identifier mirrors external protocol or generated symbol convention
                 fn $name() -> &'static $ty {
                     [<__LAZY_ $name>].get_or_init(|| $init)
                 }

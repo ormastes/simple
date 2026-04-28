@@ -30,7 +30,7 @@ impl Lowerer {
     ///     | 3 | 1 |
     /// ```
     /// Becomes: torch.tensor([[3, 1]], device="cuda")
-    #[allow(clippy::vec_box)]
+    #[allow(clippy::vec_box)] // reason: Vec<Box<>> needed for heterogeneous dispatch; refactor deferred
     pub(super) fn lower_grid_literal(
         &mut self,
         rows: &[Vec<Box<Expr>>],
@@ -133,7 +133,7 @@ impl Lowerer {
     ///         | 0 | 0 | 0 | 1.0   |
     ///         | 1 | 2 | 3 | 2.0   |
     /// ```
-    #[allow(clippy::borrowed_box)]
+    #[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
     pub(super) fn lower_tensor_literal(
         &mut self,
         _dtype: &str,
@@ -255,7 +255,7 @@ impl Lowerer {
     /// This optimization would detect sparsity ratio and choose appropriate
     /// representation automatically. See PyTorch sparse tensor documentation
     /// for COO (coordinate) format details.
-    #[allow(clippy::borrowed_box, clippy::vec_box)]
+    #[allow(clippy::borrowed_box, clippy::vec_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
     pub(super) fn create_sparse_tensor(
         &mut self,
         values: &[Vec<Box<Expr>>],

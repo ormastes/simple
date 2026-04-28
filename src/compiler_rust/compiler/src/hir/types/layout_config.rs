@@ -342,7 +342,7 @@ impl LayoutConfig {
     }
 
     /// Load layout configuration from SDN string.
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Result<Self, LayoutConfigError> {
         use simple_sdn::{parse, SdnValue};
 

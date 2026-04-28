@@ -219,7 +219,7 @@ fn sync_vars_to_vregs(
 
 /// Compile a complete MIR function body.
 /// This is shared between AOT (cranelift.rs) and JIT (jit.rs) backends.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn compile_function_body<M: Module>(
     module: &mut M,
     cranelift_func: &mut cranelift_codegen::ir::Function,

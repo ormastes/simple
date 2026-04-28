@@ -38,7 +38,7 @@ pub struct SpirvModule {
     pub(super) builder: Builder,
 
     /// Module being built
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     pub(super) module: Module,
 
     /// Map from MIR function name to SPIR-V function ID

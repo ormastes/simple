@@ -22,7 +22,7 @@ fn array_ndim(arr: &[Value]) -> i64 {
 }
 
 /// Handle Array methods
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_array_methods(
     arr: &[Value],
     method: &str,
@@ -653,7 +653,7 @@ pub fn handle_array_methods(
 }
 
 /// Handle Tuple methods
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_tuple_methods(
     tup: &[Value],
     method: &str,
@@ -753,7 +753,7 @@ pub fn handle_tuple_methods(
 }
 
 /// Handle FrozenArray methods (read-only operations only)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_array_methods(
     arr: &std::sync::Arc<Vec<Value>>,
     method: &str,
@@ -783,7 +783,7 @@ pub fn handle_frozen_array_methods(
 }
 
 /// Handle FixedSizeArray methods (no size-changing operations)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_fixed_size_array_methods(
     size: usize,
     data: &[Value],
@@ -817,7 +817,7 @@ pub fn handle_fixed_size_array_methods(
 }
 
 /// Handle FrozenDict methods (read-only operations only)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_dict_methods(
     map: &std::sync::Arc<HashMap<String, Value>>,
     method: &str,
@@ -847,7 +847,7 @@ pub fn handle_frozen_dict_methods(
 }
 
 /// Handle Dict methods
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_dict_methods(
     map: &HashMap<String, Value>,
     method: &str,

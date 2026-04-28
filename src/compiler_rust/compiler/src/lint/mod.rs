@@ -229,7 +229,7 @@ fn classify(x: i64):
     #[test]
     fn test_allow_suppresses_spipe_placeholder_tests() {
         let code = r#"
-#[allow(spipe_placeholder_tests)]
+#[allow(spipe_placeholder_tests)] // reason: lint test exercises placeholder-test detection; annotated to avoid self-referential false positive
 describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
@@ -241,7 +241,7 @@ describe "demo":
     #[test]
     fn test_allow_suppresses_stub_impl() {
         let code = r#"
-#[allow(stub_impl)]
+#[allow(stub_impl)] // reason: lint test body exercises stub_impl detection; annotation prevents false positive in test
 fn not_done(port: i64) -> i64:
     pass_todo("implement driver")
 "#;
@@ -264,7 +264,7 @@ pub fn format_number(x: i64) -> text:
     #[test]
     fn test_allow_suppresses_warning() {
         let code = r#"
-#[allow(primitive_api)]
+#[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
 pub fn raw_bytes(count: i32) -> i32:
     return count
 "#;
@@ -1192,7 +1192,7 @@ fn my_function():
     #[test]
     fn test_known_attribute_no_warning() {
         let code = r#"
-#[allow(primitive_api)]
+#[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
 pub fn my_function(x: i64):
     pass
 "#;
@@ -1203,7 +1203,7 @@ pub fn my_function(x: i64):
     #[test]
     fn test_allow_unknown_decorator_suppresses() {
         let code = r#"
-#[allow(unknown_decorator)]
+#[allow(unknown_decorator)] // reason: lint type descriptor documents unknown_decorator; allow is intentional self-reference
 @MyCustomDecorator
 fn my_function():
     pass
@@ -1215,7 +1215,7 @@ fn my_function():
     #[test]
     fn test_allow_unknown_annotation_suppresses_both() {
         let code = r#"
-#[allow(unknown_annotation)]
+#[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
 @MyCustomDecorator
 fn my_function():
     pass

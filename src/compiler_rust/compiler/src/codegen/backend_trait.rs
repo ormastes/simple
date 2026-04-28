@@ -45,7 +45,7 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Select the appropriate backend for a target
-    #[allow(unused_variables)]
+    #[allow(unused_variables)] // reason: stub awaiting backend impl; parameters required by the trait/extern signature
     pub fn for_target(target: &Target) -> Self {
         #[cfg(feature = "llvm")]
         {
@@ -111,7 +111,7 @@ impl BackendKind {
     ///
     /// Returns Vulkan backend if available, otherwise falls back to Software backend
     /// which executes GPU kernels on the CPU.
-    #[allow(unused_variables)]
+    #[allow(unused_variables)] // reason: stub awaiting backend impl; parameters required by the trait/extern signature
     pub fn for_gpu_kernel(target: &Target) -> Self {
         #[cfg(feature = "vulkan")]
         {

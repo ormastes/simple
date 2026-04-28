@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 // Import IN_NEW_METHOD from interpreter_call module
 use crate::interpreter::IN_NEW_METHOD;
 
-#[allow(clippy::borrowed_box, clippy::too_many_arguments)]
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
 pub fn handle_trait_object_methods(
     trait_name: &str,
     inner: &Box<Value>,
@@ -75,7 +75,7 @@ pub fn handle_trait_object_methods(
 }
 
 /// Handle Constructor static method calls
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_constructor_methods(
     class_name: &str,
     method: &str,

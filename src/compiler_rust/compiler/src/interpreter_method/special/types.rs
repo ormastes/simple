@@ -28,7 +28,7 @@ macro_rules! extract_block_result {
     };
 }
 
-#[allow(clippy::borrowed_box, clippy::too_many_arguments)]
+#[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
 pub fn handle_unit_methods(
     value: &Box<Value>,
     suffix: &str,
@@ -192,7 +192,7 @@ pub fn handle_unit_methods(
 }
 
 /// Handle Option methods (is_some, is_none, unwrap, expect, map, and_then, etc.)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_option_methods(
     recv_val: &Value,
     enum_name: &str,
@@ -409,7 +409,7 @@ pub fn handle_option_methods(
 }
 
 /// Handle Result methods (is_ok, is_err, unwrap, expect, map, map_err, and_then, etc.)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_result_methods(
     recv_val: &Value,
     enum_name: &str,

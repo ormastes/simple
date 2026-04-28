@@ -169,7 +169,7 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Apply ELF relocations to extracted code.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn apply_elf_relocations(
     code: &mut [u8],
     elf_data: &[u8],
@@ -433,7 +433,7 @@ fn get_elf_string(elf_data: &[u8], strtab_off: usize, offset: usize) -> String {
 }
 
 /// Resolve a runtime symbol name to its address.
-#[allow(clippy::fn_to_numeric_cast_any)]
+#[allow(clippy::fn_to_numeric_cast_any)] // reason: function pointer cast to usize for runtime symbol table address
 fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     // Map symbol names to function pointers
     let addr: usize = match name {

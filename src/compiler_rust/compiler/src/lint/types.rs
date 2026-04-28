@@ -16,7 +16,7 @@ pub enum LintLevel {
 
 impl LintLevel {
     /// Parse lint level from string (attribute value)
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "allow" => Some(LintLevel::Allow),
@@ -118,7 +118,7 @@ impl LintName {
     }
 
     /// Parse lint name from string
-    #[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "primitive_api" => Some(LintName::PrimitiveApi),
@@ -254,7 +254,7 @@ Does not trigger:
 
 If you really need primitives in a public API:
 
-    #[allow(primitive_api)]
+    #[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
     pub fn legacy_api(value: i64)
 
 Or in simple.sdn:
@@ -311,7 +311,7 @@ Call sites become self-documenting:
 
 If you need boolean parameters:
 
-    #[allow(bare_bool)]
+    #[allow(bare_bool)] // reason: boolean parameter is part of the lint descriptor public API
     pub fn set_flag(value: bool)
 
 Or in simple.sdn:
@@ -347,7 +347,7 @@ Does not trigger:
     print("Debug output")
 
     # In _spec.spl with explicit allow
-    #[allow(print_in_test_spec)]
+    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
     fn debug_helper():
         print("Debug info")
 
@@ -360,13 +360,13 @@ Does not trigger:
     """
 
 2. If print is genuinely needed (e.g., debugging), add an attribute:
-    #[allow(print_in_test_spec)]
+    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
     fn debug_test():
         print("Debug output")
 
 === How to suppress ===
 
-    #[allow(print_in_test_spec)]
+    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
     fn test_with_print():
         print("Needed for this test")
 
@@ -426,7 +426,7 @@ Examples:
 === How to suppress ===
 
 If you have a TODO that doesn't fit the format (rare):
-    #[allow(todo_format)]
+    #[allow(todo_format)] // reason: lint description uses TODO marker as structured descriptor data, not a code placeholder
 
 Or in simple.sdn:
     [lints]
@@ -500,7 +500,7 @@ Use named arguments for parameters that share a type:
 
 If positional arguments are intentional:
 
-    #[allow(unnamed_duplicate_typed_args)]
+    #[allow(unnamed_duplicate_typed_args)] // reason: lint descriptor method uses positional args matching its target lint's pattern
     fn swap(a: i64, b: i64):
         ...
 
@@ -579,7 +579,7 @@ Does not trigger:
 
 If the resource is intentionally left open (e.g., returned to caller):
 
-    #[allow(resource_leak)]
+    #[allow(resource_leak)] // reason: lint type descriptor for resource_leak check; allow prevents self-referential false positive
     fn create_connection() -> TcpStream:
         TcpStream.connect("localhost:8080")  # Caller is responsible
 
@@ -631,7 +631,7 @@ Does not trigger:
 
 === How to suppress ===
 
-    #[allow(init_boundary_violation)]
+    #[allow(init_boundary_violation)] // reason: lint type descriptor for init_boundary_violation; allow avoids self-referential false positive
     use crate.pkg.internal.Helper
 
 Or in simple.sdn:
@@ -688,13 +688,13 @@ Known decorators: @async, @pure, @io, @net, @fs, @unsafe, @verify, @trusted, @gh
 
 === How to suppress ===
 
-    #[allow(unknown_decorator)]
+    #[allow(unknown_decorator)] // reason: lint type descriptor documents unknown_decorator; allow is intentional self-reference
     @MyCustomDecorator
     fn my_function():
         pass
 
 Or suppress all unknown annotations:
-    #[allow(unknown_annotation)]
+    #[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
 "#.to_string(),
             LintName::UnknownAttribute => r#"Lint: unknown_attribute
 Level: warn (default)
@@ -708,13 +708,13 @@ Known attributes: #[allow], #[warn], #[deny], #[default], #[concurrency_mode], #
 
 === How to suppress ===
 
-    #[allow(unknown_attribute)]
+    #[allow(unknown_attribute)] // reason: lint type descriptor documents unknown_attribute; allow is intentional self-reference
     #[my_custom_attr]
     fn my_function():
         pass
 
 Or suppress all unknown annotations:
-    #[allow(unknown_annotation)]
+    #[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
 "#.to_string(),
             LintName::ExportOutsideInit => r#"Lint: export_outside_init
 Level: deny (error)
@@ -807,7 +807,7 @@ Group related parameters into a struct:
 
 === How to suppress ===
 
-    #[allow(too_many_arguments)]
+    #[allow(too_many_arguments)] // reason: ABI-locked entry signature; refactoring would break caller contract
     fn my_complex_function(a, b, c, d, e, f, g, h):
         ...
 "#.to_string(),

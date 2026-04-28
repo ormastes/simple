@@ -54,7 +54,7 @@ pub(super) fn add_builtin_types(env: &mut Env) {
 }
 
 /// First pass: register functions and types
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(super) fn register_definitions(
     items: &[Node],
     local_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
@@ -310,7 +310,7 @@ pub(super) fn register_definitions(
 }
 
 /// Second pass: process imports and assignments to build the environment
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(super) fn process_imports_and_assignments(
     items: &[Node],
     module_path: Option<&Path>,
@@ -483,7 +483,7 @@ fn process_use_stmt(
 }
 
 /// Process an export statement
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn process_export_stmt(
     export_stmt: &simple_parser::ast::ExportUseStmt,
     module_path: Option<&Path>,

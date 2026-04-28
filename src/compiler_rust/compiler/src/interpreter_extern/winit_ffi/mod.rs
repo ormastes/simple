@@ -18,7 +18,7 @@ use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
 use winit::platform::x11::EventLoopBuilderExtX11;
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
+#[allow(deprecated)] // reason: winit API deprecated upstream; migration tracked, not blocking this release
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;

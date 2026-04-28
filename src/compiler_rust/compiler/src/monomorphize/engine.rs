@@ -33,7 +33,7 @@ impl HasFieldsAndMethods for ClassDef {
 
 pub struct Monomorphizer<'a> {
     /// The module being processed
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
     module: &'a Module,
 
     /// Generic function definitions (name -> def)

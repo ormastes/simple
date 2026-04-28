@@ -23,7 +23,7 @@ pub enum FutureState {
 }
 
 /// A future that wraps a computation with configurable execution mode
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity)] // reason: complex async/future type is an implementation detail; alias would add noise
 pub struct FutureValue {
     /// The result once computed
     result: Arc<Mutex<Option<Result<Value, String>>>>,

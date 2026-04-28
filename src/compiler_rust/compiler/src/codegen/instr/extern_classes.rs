@@ -21,7 +21,7 @@ use super::{InstrContext, InstrResult};
 ///
 /// The runtime function signature is:
 /// `rt_ffi_object_call_method(obj: i64, method_name_ptr: i64, method_name_len: i64, argc: i64, argv: i64) -> i64`
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn compile_extern_method_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
