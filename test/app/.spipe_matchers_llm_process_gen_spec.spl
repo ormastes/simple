@@ -1,0 +1,354 @@
+# @cover src/app/llm_process_gen/main.spl 80%
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn shell(command: text) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn run_gen(args: [text]) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("bin/simple", ["llm-process-gen"] + args)
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn root(name: text) -> text:
+    "/tmp/simple_llm_process_gen_" + name
+
+fn seed(root_path: text, mode: text):
+    val source_file = if mode == "gemini_toml_skill": "src/source.toml" else: "src/source.md"
+    val source_body = if mode == "gemini_toml_skill": "description = \"Demo command\"\nprompt = \"\"\"\nRun demo.\n\"\"\"\n" else: "hello source\n"
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process' '" + root_path + "/src' '" + root_path + "/out' && " +
+        "cat > '" + root_path + "/" + source_file + "' <<'SRC'\n" + source_body + "SRC\n" +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: sample_doc\n" +
+        "    kind: skill\n" +
+        "    owner: test\n" +
+        "    stage: test\n" +
+        "    source_path: " + source_file + "\n" +
+        "    target_path: out/generated.md\n" +
+        "    mode: " + mode + "\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_tools(root_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process/skill_command/skills/codex/demo' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: demo_tools\n" +
+        "    kind: tools\n" +
+        "    owner: codex\n" +
+        "    stage: demo\n" +
+        "    source_path: doc/00_llm_process/llm_process_manifest.sdn\n" +
+        "    target_path: doc/00_llm_process/skill_command/skills/codex/demo/tools.sdn\n" +
+        "    mode: tools_sdn\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_claude_lib_tools(root_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process/skill_command/skills/claude/lib/demo' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: claude_lib_demo_tools\n" +
+        "    kind: tools\n" +
+        "    owner: claude_lib\n" +
+        "    stage: lib\n" +
+        "    source_path: doc/00_llm_process/llm_process_manifest.sdn\n" +
+        "    target_path: doc/00_llm_process/skill_command/skills/claude/lib/demo/tools.sdn\n" +
+        "    mode: claude_lib_tools_sdn\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_skeleton(root_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process/template' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/template/feature_skill.md' <<'SRC'\n# <feature>\nSource: src/<feature-or-area>/\nSRC\n" +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: feature_demo_skeleton\n" +
+        "    kind: feature_expert\n" +
+        "    owner: llm_process\n" +
+        "    stage: expert\n" +
+        "    source_path: doc/00_llm_process/template/feature_skill.md\n" +
+        "    target_path: doc/00_llm_process/feature_expert/demo_feature/skill.md\n" +
+        "    mode: skeleton\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_list_filters(root_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process' '" + root_path + "/src' '" + root_path + "/out' && " +
+        "printf 'alpha\\n' > '" + root_path + "/src/a.md' && " +
+        "printf 'description = \"Beta\"\\nprompt = \"\"\"\\nRun beta.\\n\"\"\"\\n' > '" + root_path + "/src/b.toml' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: codex_a\n" +
+        "    kind: skill\n" +
+        "    owner: codex\n" +
+        "    stage: impl\n" +
+        "    source_path: src/a.md\n" +
+        "    target_path: out/a.md\n" +
+        "    mode: managed\n" +
+        "  - id: gemini_b\n" +
+        "    kind: skill\n" +
+        "    owner: gemini\n" +
+        "    stage: design\n" +
+        "    source_path: src/b.toml\n" +
+        "    target_path: out/b.md\n" +
+        "    mode: gemini_toml_skill\n" +
+        "  - id: codex_tools\n" +
+        "    kind: tools\n" +
+        "    owner: codex\n" +
+        "    stage: impl\n" +
+        "    source_path: doc/00_llm_process/llm_process_manifest.sdn\n" +
+        "    target_path: out/tools.sdn\n" +
+        "    mode: tools_sdn\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_invalid_mode(root_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process' '" + root_path + "/src' && " +
+        "printf 'alpha\\n' > '" + root_path + "/src/a.md' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: bad_mode\n" +
+        "    kind: skill\n" +
+        "    owner: codex\n" +
+        "    stage: impl\n" +
+        "    source_path: src/a.md\n" +
+        "    target_path: out/a.md\n" +
+        "    mode: tool_sdn\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn seed_pipe_tools(root_path: text, id: text, stage: text, target_path: text):
+    val script = "rm -rf '" + root_path + "' && mkdir -p '" + root_path + "/doc/00_llm_process' '" + root_path + "/" + parent_dir(target_path) + "' && " +
+        "cat > '" + root_path + "/doc/00_llm_process/llm_process_manifest.sdn' <<'EOF'\n" +
+        "skills:\n  - id: sample\ncommands:\n  - id: sample\nsubagents:\n  - id: sample\ntools:\n  - id: sample\nexpert_routes:\n  - id: sample\n" +
+        "generated_files:\n" +
+        "  - id: " + id + "\n" +
+        "    kind: tools\n" +
+        "    owner: claude\n" +
+        "    stage: " + stage + "\n" +
+        "    source_path: doc/00_llm_process/llm_process_manifest.sdn\n" +
+        "    target_path: " + target_path + "\n" +
+        "    mode: tools_sdn\n" +
+        "EOF"
+    expect shell(script).exit_code == 0
+
+fn parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/") ?? -1
+    if idx <= 0:
+        return "."
+    path.slice(0, idx)
+
+fn read_file(path: text) -> text:
+    rt_file_read_text(path)
+
+describe "llm-process-gen":
+    it "is registered in the command tables":
+        expect shell("rg -n 'name: \"llm-process-gen\"' src/compiler_rust/driver/src/main.rs").exit_code == 0
+        expect shell("rg -n 'name: \"llm-process-gen\"' src/app/cli/dispatch/table.spl").exit_code == 0
+
+    it "reports a missing manifest as check failure":
+        val r = root("missing")
+        shell("rm -rf '" + r + "' && mkdir -p '" + r + "'")
+        val result = run_gen(["check", "--root", r])
+        expect result.exit_code == 1
+        expect (result.stdout).contains("missing manifest")
+
+    it "creates a missing managed target and then check passes":
+        val r = root("create")
+        seed(r, "managed")
+        expect run_gen(["check", "--root", r]).exit_code == 1
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        expect rt_file_exists(r + "/out/generated.md") == true
+        expect run_gen(["check", "--root", r]).exit_code == 0
+
+    it "refuses manual edits unless force is supplied":
+        val r = root("manual")
+        seed(r, "managed")
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        expect shell("printf '\\nmanual edit\\n' >> '" + r + "/out/generated.md'").exit_code == 0
+        val refused = run_gen(["generate", "--root", r])
+        expect refused.exit_code == 1
+        expect (refused.stdout).contains("refusing")
+        expect run_gen(["generate", "--force", "--root", r]).exit_code == 0
+        val regenerated = read_file(r + "/out/generated.md")
+        expect regenerated.contains("manual edit") == false
+
+    it "renders Gemini TOML command files as managed skills":
+        val r = root("gemini")
+        seed(r, "gemini_toml_skill")
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        val content = read_file(r + "/out/generated.md")
+        expect (content).contains("llm-process-gen: managed")
+        expect (content).contains("Demo command")
+        expect (content).contains("Run demo.")
+
+    it "generates managed tools metadata":
+        val r = root("tools")
+        seed_tools(r)
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        val content = read_file(r + "/doc/00_llm_process/skill_command/skills/codex/demo/tools.sdn")
+        expect (content).contains("llm-process-gen: managed")
+        expect (content).contains("skill_tools |skill, source|")
+        expect (content).contains("simple_mcp")
+
+    it "generates Claude lib tools metadata":
+        val r = root("claude_lib_tools")
+        seed_claude_lib_tools(r)
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        val content = read_file(r + "/doc/00_llm_process/skill_command/skills/claude/lib/demo/tools.sdn")
+        expect (content).contains("llm-process-gen: managed")
+        expect (content).contains("demo, claude_lib")
+        expect (content).contains("Run project-specific query")
+
+    it "lists managed records as json":
+        val r = root("list")
+        seed(r, "managed")
+        val result = run_gen(["list", "--root", r, "--json"])
+        expect result.exit_code == 0
+        expect (result.stdout).contains("\"records\":1")
+        expect (result.stdout).contains("\"id\":\"sample_doc\"")
+        expect (result.stdout).contains("\"mode\":\"managed\"")
+
+    it "filters listed records by owner mode and stage":
+        val r = root("list_filters")
+        seed_list_filters(r)
+        val by_owner = run_gen(["list", "--root", r, "--json", "--owner", "codex"])
+        expect by_owner.exit_code == 0
+        expect (by_owner.stdout).contains("\"records\":2")
+        expect (by_owner.stdout).contains("\"id\":\"codex_a\"")
+        expect (by_owner.stdout).contains("\"id\":\"codex_tools\"")
+        val owner_has_gemini = by_owner.stdout.contains("\"id\":\"gemini_b\"")
+        expect owner_has_gemini == false
+        val by_mode = run_gen(["list", "--root", r, "--json", "--mode=tools_sdn"])
+        expect by_mode.exit_code == 0
+        expect (by_mode.stdout).contains("\"records\":1")
+        expect (by_mode.stdout).contains("\"id\":\"codex_tools\"")
+        val mode_has_codex_a = by_mode.stdout.contains("\"id\":\"codex_a\"")
+        expect mode_has_codex_a == false
+        val by_stage = run_gen(["list", "--root", r, "--stage", "design"])
+        expect by_stage.exit_code == 0
+        expect (by_stage.stdout).contains("gemini_b")
+        val stage_has_codex_a = by_stage.stdout.contains("codex_a")
+        expect stage_has_codex_a == false
+
+    it "rejects unsupported generated file modes":
+        val r = root("invalid_mode")
+        seed_invalid_mode(r)
+        val checked = run_gen(["check", "--root", r])
+        expect checked.exit_code == 1
+        expect (checked.stdout).contains("unsupported mode tool_sdn")
+        val generated = run_gen(["generate", "--root", r])
+        expect generated.exit_code == 1
+        expect (generated.stdout).contains("unsupported mode tool_sdn")
+
+    it "renders pipe stage tools with stage-specific tool sets":
+        val research_root = root("pipe_research")
+        seed_pipe_tools(research_root, "pipe_research_tools", "research", "doc/00_llm_process/skill_command/skills/pipe/research/tools.sdn")
+        expect run_gen(["generate", "--root", research_root]).exit_code == 0
+        val research = read_file(research_root + "/doc/00_llm_process/skill_command/skills/pipe/research/tools.sdn")
+        expect (research).contains("simple_mcp")
+        expect (research).contains("playwright")
+        val research_has_duplicate_check = research.contains("duplicate_check")
+        expect research_has_duplicate_check == false
+
+        val design_root = root("pipe_design")
+        seed_pipe_tools(design_root, "pipe_design_tools", "design", "doc/00_llm_process/skill_command/skills/pipe/design/tools.sdn")
+        expect run_gen(["generate", "--root", design_root]).exit_code == 0
+        val design = read_file(design_root + "/doc/00_llm_process/skill_command/skills/pipe/design/tools.sdn")
+        expect (design).contains("simple_lsp_mcp")
+        expect (design).contains("spipe")
+
+        val release_root = root("pipe_release")
+        seed_pipe_tools(release_root, "pipe_release_tools", "release", "doc/00_llm_process/skill_command/skills/pipe/release/tools.sdn")
+        expect run_gen(["generate", "--root", release_root]).exit_code == 0
+        val release = read_file(release_root + "/doc/00_llm_process/skill_command/skills/pipe/release/tools.sdn")
+        expect (release).contains("version_files")
+        expect (release).contains("npm")
+
+        val verify_root = root("pipe_verify")
+        seed_pipe_tools(verify_root, "pipe_verify_tools", "verify", "doc/00_llm_process/skill_command/skills/pipe/verify/tools.sdn")
+        expect run_gen(["generate", "--root", verify_root]).exit_code == 0
+        val verify = read_file(verify_root + "/doc/00_llm_process/skill_command/skills/pipe/verify/tools.sdn")
+        expect (verify).contains("smoke_core")
+        expect (verify).contains("smoke_mcp")
+
+    it "renders pipe impl tools with target-specific tool sets":
+        val impl_root = root("pipe_impl")
+        seed_pipe_tools(impl_root, "pipe_impl_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/tools.sdn")
+        expect run_gen(["generate", "--root", impl_root]).exit_code == 0
+        val impl = read_file(impl_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/tools.sdn")
+        expect (impl).contains("duplicate_check")
+        expect (impl).contains("playwright")
+
+        val dev_root = root("pipe_impl_dev")
+        seed_pipe_tools(dev_root, "pipe_impl_dev_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/dev/tools.sdn")
+        expect run_gen(["generate", "--root", dev_root]).exit_code == 0
+        val dev = read_file(dev_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/dev/tools.sdn")
+        expect (dev).contains("playwright")
+        val dev_has_duplicate_check = dev.contains("duplicate_check")
+        expect dev_has_duplicate_check == false
+
+        val refactor_root = root("pipe_impl_refactor")
+        seed_pipe_tools(refactor_root, "pipe_impl_refactor_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/refactor/tools.sdn")
+        expect run_gen(["generate", "--root", refactor_root]).exit_code == 0
+        val refactor = read_file(refactor_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/refactor/tools.sdn")
+        expect (refactor).contains("duplicate_check")
+        expect (refactor).contains("call sites")
+
+        val loop_root = root("pipe_impl_spipe_loop")
+        seed_pipe_tools(loop_root, "pipe_impl_spipe_loop_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/spipe_loop/tools.sdn")
+        expect run_gen(["generate", "--root", loop_root]).exit_code == 0
+        val loop = read_file(loop_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/spipe_loop/tools.sdn")
+        expect (loop).contains("failing specs")
+        val loop_has_duplicate_check = loop.contains("duplicate_check")
+        expect loop_has_duplicate_check == false
+
+        val stitch_root = root("pipe_impl_stitch")
+        seed_pipe_tools(stitch_root, "pipe_impl_stitch_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/stitch/tools.sdn")
+        expect run_gen(["generate", "--root", stitch_root]).exit_code == 0
+        val stitch = read_file(stitch_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/stitch/tools.sdn")
+        expect (stitch).contains("stitch_mcp")
+        val stitch_has_duplicate_check = stitch.contains("duplicate_check")
+        expect stitch_has_duplicate_check == false
+
+        val sync_root = root("pipe_impl_sync")
+        seed_pipe_tools(sync_root, "pipe_impl_sync_tools", "impl", "doc/00_llm_process/skill_command/skills/pipe/impl/sync/tools.sdn")
+        expect run_gen(["generate", "--root", sync_root]).exit_code == 0
+        val sync = read_file(sync_root + "/doc/00_llm_process/skill_command/skills/pipe/impl/sync/tools.sdn")
+        expect (sync).contains("jj")
+        val sync_has_duplicate_check = sync.contains("duplicate_check")
+        expect sync_has_duplicate_check == false
+
+    it "creates skeleton experts once and preserves manual updates":
+        val r = root("skeleton")
+        seed_skeleton(r)
+        expect run_gen(["generate", "--root", r]).exit_code == 0
+        val path = r + "/doc/00_llm_process/feature_expert/demo_feature/skill.md"
+        expect (read_file(path)).contains("# demo_feature")
+        expect shell("printf '\\nManual note\\n' >> '" + path + "'").exit_code == 0
+        expect run_gen(["generate", "--force", "--root", r]).exit_code == 0
+        expect (read_file(path)).contains("Manual note")
+
+    it "emits JSON drift status":
+        val r = root("json")
+        seed(r, "managed")
+        val result = run_gen(["check", "--root", r, "--json"])
+        expect result.exit_code == 1
+        expect (result.stdout).contains("\"ok\":false")
+        expect (result.stdout).contains("sample_doc")

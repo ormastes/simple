@@ -1,0 +1,117 @@
+use std.ndarray.*
+
+enum LinalgError:
+    DimensionMismatch
+    Singular
+
+fn vector_from(values: [Float64]) -> NDArray<Float64>:
+    array(values)
+
+fn matrix_from_rows(rows: [[Float64]]) -> NDArray<Float64>:
+    val row_count = rows.len()
+    val col_count = if row_count == 0: 0 else: rows[0].len()
+    var flat: [Float64] = []
+    var r = 0
+    while r < row_count:
+        var c = 0
+        while c < col_count:
+            flat.push(rows[r][c])
+            c = c + 1
+        r = r + 1
+    array(flat).reshape(Shape.new([Index.new(row_count), Index.new(col_count)]))
+
+fn zeros_matrix(rows: Index, cols: Index) -> NDArray<Float64>:
+    zeros(Shape.new([rows, cols]))
+
+fn full_matrix(rows: Index, cols: Index, fill: Float64) -> NDArray<Float64>:
+    full(Shape.new([rows, cols]), fill)
+
+fn eye_matrix(size: Index) -> NDArray<Float64>:
+    eye(size)
+
+fn axpy(alpha: Float64, x: NDArray<Float64>, y: NDArray<Float64>) -> NDArray<Float64>:
+    try_axpy(alpha, x, y).unwrap()
+
+fn try_axpy(alpha: Float64, x: NDArray<Float64>, y: NDArray<Float64>) -> Result<NDArray<Float64>, LinalgError>:
+    if x.shape != y.shape:
+        return Err(LinalgError.DimensionMismatch)
+    var out: [Float64] = []
+    var i = 0
+    while i < x.data.len():
+        out.push(Float64.new(x.data[i].value * alpha.value + y.data[i].value))
+        i = i + 1
+    Ok(array(out).reshape(x.shape))
+
+fn gemm(alpha: Float64, a: NDArray<Float64>, b: NDArray<Float64>, beta: Float64, c_in: NDArray<Float64>) -> NDArray<Float64>:
+    if a.cols().value != b.rows().value:
+        panic("gemm shape mismatch")
+    if c_in.rows().value != a.rows().value or c_in.cols().value != b.cols().value:
+        panic("gemm accumulator shape mismatch")
+    var out: [Float64] = []
+    var row = 0
+    while row < a.rows().value:
+        var col = 0
+        while col < b.cols().value:
+            var acc = 0.0
+            var k = 0
+            while k < a.cols().value:
+                acc = acc + a.get_at([Index.new(row), Index.new(k)]).value * b.get_at([Index.new(k), Index.new(col)]).value
+                k = k + 1
+            acc = alpha.value * acc + beta.value * c_in.get_at([Index.new(row), Index.new(col)]).value
+            out.push(Float64.new(acc))
+            col = col + 1
+        row = row + 1
+    array(out).reshape(Shape.new([a.rows(), b.cols()]))
+
+fn solve(a: NDArray<Float64>, b: NDArray<Float64>) -> Result<NDArray<Float64>, LinalgError>:
+    val n = a.rows().value
+    if a.rows().value != a.cols().value:
+        return Err(LinalgError.DimensionMismatch)
+    if b.len().value != n:
+        return Err(LinalgError.DimensionMismatch)
+    var mat: [[f64]] = []
+    var row = 0
+    while row < n:
+        var current: [f64] = []
+        var col = 0
+        while col < n:
+            current.push(a.get_at([Index.new(row), Index.new(col)]).value)
+            col = col + 1
+        mat.push(current)
+        row = row + 1
+    var rhs: [f64] = []
+    row = 0
+    while row < n:
+        rhs.push(b.get(Index.new(row)).value)
+        row = row + 1
+    var pivot = 0
+    while pivot < n:
+        if mat[pivot][pivot] == 0.0:
+            return Err(LinalgError.Singular)
+        var lower = pivot + 1
+        while lower < n:
+            val factor = mat[lower][pivot] / mat[pivot][pivot]
+            var col = pivot
+            while col < n:
+                mat[lower][col] = mat[lower][col] - factor * mat[pivot][col]
+                col = col + 1
+            rhs[lower] = rhs[lower] - factor * rhs[pivot]
+            lower = lower + 1
+        pivot = pivot + 1
+    var x: [Float64] = []
+    var idx = 0
+    while idx < n:
+        x.push(Float64.new(0.0))
+        idx = idx + 1
+    var i = n - 1
+    while i >= 0:
+        var sum = rhs[i]
+        var col = i + 1
+        while col < n:
+            sum = sum - mat[i][col] * x[col].value
+            col = col + 1
+        if mat[i][i] == 0.0:
+            return Err(LinalgError.Singular)
+        x[i] = Float64.new(sum / mat[i][i])
+        i = i - 1
+    Ok(array(x))

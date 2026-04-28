@@ -15,3 +15,26 @@ The size script accepts explicit artifact paths or defaults to common local arti
 ## Tests
 
 Rust unit coverage builds tiny C objects and verifies that the runtime-retention set includes object undefineds and required roots while excluding unused runtime symbols.
+
+## Loader Closure Detail
+
+`simple-runtime-abi` reuses the existing runtime symbol-name list and adds a small registration surface:
+
+- `RuntimeSymbolEntry`
+- `register_static_runtime_symbols`
+- `lookup_registered_static_runtime_symbol`
+
+`simple-runtime` generates `RUNTIME_SYMBOL_ENTRIES` at build time from `RUNTIME_SYMBOL_NAMES`, filters that list to symbols actually defined in the default runtime build, and registers the resulting static slice during initialization. `simple-native-loader::StaticSymbolProvider` now delegates to the ABI registry instead of importing `simple-runtime`.
+
+## Loader Dependency Audit
+
+`scripts/check-loader-dependency-closure.shs` uses `cargo metadata`, `cargo tree`, and manifest parsing to report:
+
+- direct dependencies for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`
+- classification as normal, platform-gated, feature-gated, or test-only
+- the normal transitive startup-path set for `simple-native-loader`
+
+It fails when:
+
+- `simple-native-loader` regains `simple-runtime` in its normal dependency tree
+- a loader-crate direct dependency set diverges from the documented allowlist

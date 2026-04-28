@@ -1,0 +1,37 @@
+# Maps to: AC-6, AC-9
+# Run: bin/simple test test/dbfs/dbfs_hw_passthrough_spec.spl
+
+"""
+DBFS Hardware Direct-Accessibility Specification
+
+Verifies AC-6: DBFS reads storage through a BlockDevice it did not create,
+and non-DBFS drivers (e.g. RamFs) still resolve their BlockDevice independently.
+"""
+
+use std.spipe.*
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.db.dbfs_driver.{DbFsDriver}
+
+describe "DBFS HW passthrough — non-DBFS driver resolves BlockDevice":
+    it "RamFsDriver mounted alongside DBFS still resolves its own BlockDevice":
+        val mt = MountTable.new()
+        val ramfs = RamFsDriver.new()
+        mt.mount("/", DriverInstance.RamFs(ramfs), MountOptions.default()).unwrap()
+        val dbfs = DbFsDriver.new_hosted()
+        mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
+        val dev = mt.block_device_for("/etc/config").unwrap()
+        expect dev.is_ram_backed() == true
+
+describe "DBFS HW passthrough — DBFS reads through a pre-existing BlockDevice":
+    it "DbFsDriver.open_on_device() uses the provided BlockDevice, not a private channel":
+        val blk = BlockDevice.new_hosted()
+        val dbfs = DbFsDriver.open_on_device(blk)
+        val fh = dbfs.open("/hw_test.bin", OpenFlags.create_write()).unwrap()
+        dbfs.write(fh, "ac6-ok").unwrap()
+        val fh2 = dbfs.open("/hw_test.bin", OpenFlags.read_only()).unwrap()
+        val got = dbfs.read(fh2, 6).unwrap()
+        expect got == "ac6-ok"

@@ -243,7 +243,7 @@ pub unsafe extern "C" fn rt_unix_socket_connect(path_ptr: i64, path_len: i64) ->
 }
 
 #[cfg(test)]
-mod tests {
+mod uds_tests {
     use super::*;
 
     #[test]

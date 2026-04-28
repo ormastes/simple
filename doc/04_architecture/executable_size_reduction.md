@@ -17,3 +17,17 @@ The change stays inside existing build boundaries.
 ## Guardrail Layer
 
 `scripts/check-executable-size-budgets.shs` owns byte budgets and release-strip checks. Budgets are configurable through environment variables so release maintainers can adjust thresholds without editing workflow logic.
+
+## Loader ABI Layer
+
+The runtime symbol ABI now lives in `simple-runtime-abi`, not `simple-common` or `simple-runtime`. `simple-native-loader` consumes that crate for `AbiVersion`, `RuntimeSymbolProvider`, `RUNTIME_SYMBOL_NAMES`, and registered static symbol lookup. `simple-runtime` remains the implementation owner of the actual symbol functions and publishes its static registration table through the ABI crate.
+
+This keeps the primary architecture seam narrow:
+
+- `simple-native-loader -> simple-runtime-abi`
+- `simple-runtime -> simple-runtime-abi`
+- no normal `simple-native-loader -> simple-runtime` edge
+
+## Loader Dependency Guardrails
+
+`scripts/check-loader-dependency-closure.shs` is the regression guard for the loader startup path. It checks direct-dependency allowlists for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`, then walks the `simple-native-loader` normal dependency tree and fails if `simple-runtime` reappears there.

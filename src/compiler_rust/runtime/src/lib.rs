@@ -53,7 +53,7 @@ fn init_monoio() {
 
 #[ctor::ctor]
 fn register_static_runtime_symbols_with_abi() {
-    let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
+    register_static_runtime_symbols();
 }
 pub mod parallel;
 pub mod sandbox;
@@ -126,6 +126,10 @@ pub use memory::no_gc::NoGcAllocator;
 #[no_mangle]
 pub extern "C" fn simple_runtime_abi_version() -> u32 {
     simple_runtime_abi::AbiVersion::CURRENT.to_u32()
+}
+
+pub fn register_static_runtime_symbols() {
+    let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
 
 #[no_mangle]

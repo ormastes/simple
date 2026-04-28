@@ -7,3 +7,5 @@ Codex task breakdown, 2026-04-23.
 3. Add a reusable size-budget script.
 4. Wire release packaging to strip MCP/LSP native binaries and run the budget script.
 5. Record local/domain research, requirements, architecture, and verification notes.
+6. Split the runtime symbol ABI into a dedicated crate and remove the normal `simple-native-loader -> simple-runtime` edge.
+7. Add a loader dependency-closure audit and trim unused `simple-loader` direct dependencies.

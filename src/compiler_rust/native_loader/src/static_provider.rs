@@ -49,9 +49,29 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_runtime_abi::{RuntimeSymbolEntry, register_static_runtime_symbols};
+    use std::sync::Once;
+
+    extern "C" fn rt_array_new() {}
+
+    extern "C" fn rt_println_value() {}
+
+    extern "C" fn rt_value_int() {}
+
+    extern "C" fn rt_interp_call() {}
+
+    static TEST_RUNTIME_SYMBOLS: &[RuntimeSymbolEntry] = &[
+        RuntimeSymbolEntry::new("rt_array_new", rt_array_new as *const u8),
+        RuntimeSymbolEntry::new("rt_println_value", rt_println_value as *const u8),
+        RuntimeSymbolEntry::new("rt_value_int", rt_value_int as *const u8),
+        RuntimeSymbolEntry::new("rt_interp_call", rt_interp_call as *const u8),
+    ];
 
     fn ensure_runtime_registered() {
-        let _ = simple_runtime::simple_runtime_abi_version();
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = register_static_runtime_symbols(TEST_RUNTIME_SYMBOLS);
+        });
     }
 
     #[test]

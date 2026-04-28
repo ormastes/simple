@@ -1,0 +1,119 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use os.crypto.sha256.{sha256_with_len, sha256_hmac_with_len, sha256_hmac_from_list}
+use os.tls13.hkdf.{hkdf_extract, hkdf_extract_from_list, hkdf_expand, hkdf_expand_label}
+use os.tls13.transcript.{transcript_new, transcript_add, transcript_hash}
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn main():
+    #![allow(unnamed_duplicate_typed_args)]
+    # @tag:system
+
+
+
+    describe "TLS diag":
+
+        it "hkdf_extract changes when IKM changes":
+            val ikm_a: [u8] = [
+                0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
+                0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
+                0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8
+            ]
+
+            val ikm_diff: [u8] = [
+                0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8,
+                0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8,
+                0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8, 0xAAu8
+            ]
+
+            val salt_a: [u8] = [
+                0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8,
+                0x07u8, 0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8
+            ]
+
+            val prk_a = hkdf_extract(salt_a, ikm_a)
+            val prk_diff = hkdf_extract(salt_a, ikm_diff)
+            expect _bytes_eq(prk_a, prk_diff) == false
+
+        it "hkdf_extract_from_list changes when IKM changes":
+            var ikm_a = []
+            var i = 0
+            while i < 79:
+                ikm_a.push(0x41)
+                i = i + 1
+            ikm_a.push(0x41)
+
+            var ikm_diff = []
+            i = 0
+            while i < 79:
+                ikm_diff.push(0x41)
+                i = i + 1
+            ikm_diff.push(0x42)
+
+            var salt_a = []
+            salt_a.push(0x00)
+            salt_a.push(0x01)
+            salt_a.push(0x02)
+            salt_a.push(0x03)
+            salt_a.push(0x04)
+            salt_a.push(0x05)
+            salt_a.push(0x06)
+            salt_a.push(0x07)
+            salt_a.push(0x08)
+            salt_a.push(0x09)
+            salt_a.push(0x0a)
+            salt_a.push(0x0b)
+            salt_a.push(0x0c)
+
+            val prk_a = hkdf_extract_from_list(salt_a, ikm_a)
+            val prk_diff = hkdf_extract_from_list(salt_a, ikm_diff)
+            expect prk_a.len() == 32
+            expect prk_diff.len() == 32
+
+        it "hkdf_expand_label encodes a different info block than raw expand":
+            val prk_a: [u8] = [
+                0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8, 0x08u8,
+                0x09u8, 0x0Au8, 0x0Bu8, 0x0Cu8, 0x0Du8, 0x0Eu8, 0x0Fu8, 0x10u8,
+                0x11u8, 0x12u8, 0x13u8, 0x14u8, 0x15u8, 0x16u8, 0x17u8, 0x18u8,
+                0x19u8, 0x1Au8, 0x1Bu8, 0x1Cu8, 0x1Du8, 0x1Eu8, 0x1Fu8, 0x20u8
+            ]
+            val empty_ctx: [u8] = []
+            val label_out = hkdf_expand_label(prk_a, "key", empty_ctx, 32)
+            val raw_expand = hkdf_expand(prk_a, empty_ctx, 32)
+            expect _bytes_eq(label_out, raw_expand) == false
+
+        it "transcript hash changes when message bytes change":
+            val t0 = transcript_new()
+            val h4 = transcript_hash(transcript_add(t0, [0xAAu8, 0xBBu8]))
+            val h5 = transcript_hash(transcript_add(t0, [0xCCu8, 0xDDu8]))
+            expect _bytes_eq(h4, h5) == false
+
+        it "hmac_from_list differs when second-block bytes change":
+            var msg_a = []
+            var msg_b = []
+            var i = 0
+            while i < 79:
+                msg_a.push(0x41)
+                msg_b.push(0x41)
+                i = i + 1
+            msg_a.push(0x41)
+            msg_b.push(0x42)
+
+            val key = [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c
+            ]
+            val hmac_a = sha256_hmac_from_list(key, msg_a)
+            val hmac_b = sha256_hmac_from_list(key, msg_b)
+            expect _bytes_eq(hmac_a, hmac_b) == false

@@ -165,12 +165,34 @@ pub fn static_provider() -> Arc<dyn RuntimeSymbolProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_runtime_abi::{RuntimeSymbolEntry, register_static_runtime_symbols};
     use std::sync::Mutex;
+    use std::sync::Once;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    extern "C" fn rt_array_new() {}
+    extern "C" fn rt_println_value() {}
+    extern "C" fn rt_value_int() {}
+    extern "C" fn rt_interp_call() {}
+
+    static TEST_RUNTIME_SYMBOLS: &[RuntimeSymbolEntry] = &[
+        RuntimeSymbolEntry::new("rt_array_new", rt_array_new as *const u8),
+        RuntimeSymbolEntry::new("rt_println_value", rt_println_value as *const u8),
+        RuntimeSymbolEntry::new("rt_value_int", rt_value_int as *const u8),
+        RuntimeSymbolEntry::new("rt_interp_call", rt_interp_call as *const u8),
+    ];
+
+    fn ensure_runtime_registered() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = register_static_runtime_symbols(TEST_RUNTIME_SYMBOLS);
+        });
+    }
+
     #[test]
     fn test_static_mode() {
+        ensure_runtime_registered();
         let provider = create_runtime_provider(RuntimeLoadMode::Static).unwrap();
         assert_eq!(provider.name(), "static");
         assert!(provider.get_symbol("rt_array_new").is_some());
@@ -178,6 +200,7 @@ mod tests {
 
     #[test]
     fn test_default_provider() {
+        ensure_runtime_registered();
         // Should always succeed (falls back to static if dynamic fails)
         let provider = default_runtime_provider();
         assert!(provider.get_symbol("rt_array_new").is_some());
@@ -191,6 +214,7 @@ mod tests {
 
     #[test]
     fn test_chained_with_static_fallback() {
+        ensure_runtime_registered();
         // Even if dynamic loading fails, static should work
         let mode = RuntimeLoadMode::Chained(vec![
             RuntimeLoadMode::DynamicPath("/nonexistent/path.so".to_string()),

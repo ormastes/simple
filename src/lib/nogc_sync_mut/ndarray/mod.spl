@@ -1,0 +1,444 @@
+enum DType:
+    F64
+    I64
+    Bool
+
+struct Float64:
+    value: f64
+
+    static fn new(value: f64) -> Float64:
+        Float64(value: value)
+
+struct Int64:
+    value: i64
+
+    static fn new(value: i64) -> Int64:
+        Int64(value: value)
+
+struct Bool:
+    value: bool
+
+    static fn new(value: bool) -> Bool:
+        Bool(value: value)
+
+struct Index:
+    value: i64
+
+    static fn new(value: i64) -> Index:
+        Index(value: value)
+
+struct Shape:
+    dims: [Index]
+
+    static fn new(dims: [Index]) -> Shape:
+        Shape(dims: dims)
+
+    fn len(self) -> Index:
+        Index.new(self.dims.len())
+
+    fn numel(self) -> Index:
+        var total = 1
+        var i = 0
+        while i < self.dims.len():
+            total = total * self.dims[i].value
+            i = i + 1
+        Index.new(total)
+
+struct Slice:
+    start: Index
+    stop: Index
+    step: Index
+
+    static fn new(start: Index, stop: Index, step: Index) -> Slice:
+        Slice(start: start, stop: stop, step: step)
+
+struct SliceBounds:
+    start: i64
+    stop: i64
+    step: i64
+
+enum NdarrayError:
+    InvalidShape
+    InvalidStep
+    InvalidLinspace
+    ShapeMismatch
+    IndexOutOfBounds
+
+struct NDArray<T>:
+    data: [T]
+    shape: Shape
+    dtype: DType
+
+    fn len(self) -> Index:
+        self.shape.numel()
+
+    fn rows(self) -> Index:
+        if self.shape.dims.len() == 0:
+            return Index.new(0)
+        self.shape.dims[0]
+
+    fn cols(self) -> Index:
+        if self.shape.dims.len() < 2:
+            return Index.new(0)
+        self.shape.dims[1]
+
+    fn ndim(self) -> i64:
+        self.shape.dims.len()
+
+    fn reshape(self, shape: Shape) -> NDArray<T>:
+        NDArray(data: self.data, shape: shape, dtype: self.dtype)
+
+    fn get(self, index: Index) -> T:
+        var pos = index.value
+        if pos < 0:
+            pos = self.data.len() + pos
+        self.data[pos]
+
+    fn try_get(self, index: Index) -> Result<T, NdarrayError>:
+        if index.value < 0 or index.value >= self.data.len():
+            return Err(NdarrayError.IndexOutOfBounds)
+        Ok(self.data[index.value])
+
+    fn get_at(self, indices: [Index]) -> T:
+        self.data[flat_index(self.shape, indices)]
+
+    fn try_get_at(self, indices: [Index]) -> Result<T, NdarrayError>:
+        val idx_result = try_flat_index(self.shape, indices)
+        match idx_result:
+            case Ok(pos):
+                Ok(self.data[pos])
+            case Err(e):
+                Err(e)
+
+    fn slice(self, range: Slice) -> NDArray<T>:
+        self.try_slice(range).unwrap()
+
+    fn try_slice(self, range: Slice) -> Result<NDArray<T>, NdarrayError>:
+        if range.step.value == 0:
+            return Err(NdarrayError.InvalidStep)
+        val bounds = normalize_slice(range, self.data.len())
+        if bounds.is_err():
+            return Err(bounds.error())
+        val normalized = bounds.unwrap()
+        var out: [T] = []
+        var i = normalized.start
+        if normalized.step > 0:
+            while i < normalized.stop:
+                out.push(self.data[i])
+                i = i + normalized.step
+        else:
+            while i > normalized.stop:
+                out.push(self.data[i])
+                i = i + normalized.step
+        Ok(NDArray(data: out, shape: Shape.new([Index.new(out.len())]), dtype: self.dtype))
+
+    fn slice_2d(self, row_slice: Slice, col_slice: Slice) -> NDArray<T>:
+        val row_bounds = normalize_slice(row_slice, self.rows().value).unwrap()
+        val col_bounds = normalize_slice(col_slice, self.cols().value).unwrap()
+        var out: [T] = []
+        var row_count = 0
+        var col_count = 0
+        var r = row_bounds.start
+        if row_bounds.step > 0:
+            while r < row_bounds.stop:
+                row_count = row_count + 1
+                col_count = 0
+                var c = col_bounds.start
+                if col_bounds.step > 0:
+                    while c < col_bounds.stop:
+                        out.push(self.get_at([Index.new(r), Index.new(c)]))
+                        c = c + col_bounds.step
+                        col_count = col_count + 1
+                else:
+                    while c > col_bounds.stop:
+                        out.push(self.get_at([Index.new(r), Index.new(c)]))
+                        c = c + col_bounds.step
+                        col_count = col_count + 1
+                r = r + row_bounds.step
+        else:
+            while r > row_bounds.stop:
+                row_count = row_count + 1
+                col_count = 0
+                var c = col_bounds.start
+                if col_bounds.step > 0:
+                    while c < col_bounds.stop:
+                        out.push(self.get_at([Index.new(r), Index.new(c)]))
+                        c = c + col_bounds.step
+                        col_count = col_count + 1
+                else:
+                    while c > col_bounds.stop:
+                        out.push(self.get_at([Index.new(r), Index.new(c)]))
+                        c = c + col_bounds.step
+                        col_count = col_count + 1
+                r = r + row_bounds.step
+        NDArray(
+            data: out,
+            shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+            dtype: self.dtype
+        )
+
+    fn gather(self, idx: NDArray<Int64>) -> NDArray<T>:
+        self.try_gather(idx).unwrap()
+
+    fn try_gather(self, idx: NDArray<Int64>) -> Result<NDArray<T>, NdarrayError>:
+        var out: [T] = []
+        var i = 0
+        while i < idx.data.len():
+            val pos = idx.data[i].value
+            if pos < 0 or pos >= self.data.len():
+                return Err(NdarrayError.IndexOutOfBounds)
+            out.push(self.data[pos])
+            i = i + 1
+        Ok(NDArray(data: out, shape: Shape.new([Index.new(out.len())]), dtype: self.dtype))
+
+    fn mask(self, mask_values: NDArray<Bool>) -> NDArray<T>:
+        self.try_mask(mask_values).unwrap()
+
+    fn try_mask(self, mask_values: NDArray<Bool>) -> Result<NDArray<T>, NdarrayError>:
+        if mask_values.data.len() != self.data.len():
+            return Err(NdarrayError.ShapeMismatch)
+        var out: [T] = []
+        var i = 0
+        while i < self.data.len():
+            if mask_values.data[i].value:
+                out.push(self.data[i])
+            i = i + 1
+        Ok(NDArray(data: out, shape: Shape.new([Index.new(out.len())]), dtype: self.dtype))
+
+struct DTypeArray:
+    data: [DType]
+
+    fn len(self) -> Index:
+        Index.new(self.data.len())
+
+    fn dtype_at(self, index: Index) -> DType:
+        self.data[index.value]
+
+fn array(values: [Float64]) -> NDArray<Float64>:
+    NDArray(data: values, shape: Shape.new([Index.new(values.len())]), dtype: DType.F64)
+
+fn array(values: [Int64]) -> NDArray<Int64>:
+    NDArray(data: values, shape: Shape.new([Index.new(values.len())]), dtype: DType.I64)
+
+fn array(values: [Bool]) -> NDArray<Bool>:
+    NDArray(data: values, shape: Shape.new([Index.new(values.len())]), dtype: DType.Bool)
+
+fn zeros(shape: Shape) -> NDArray<Float64>:
+    try_zeros(shape).unwrap()
+
+fn try_zeros(shape: Shape) -> Result<NDArray<Float64>, NdarrayError>:
+    if has_negative_dim(shape):
+        return Err(NdarrayError.InvalidShape)
+    var out: [Float64] = []
+    var i = 0
+    val total = shape.numel().value
+    while i < total:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    Ok(NDArray(data: out, shape: shape, dtype: DType.F64))
+
+fn ones(shape: Shape) -> NDArray<Float64>:
+    var out: [Float64] = []
+    var i = 0
+    val total = shape.numel().value
+    while i < total:
+        out.push(Float64.new(1.0))
+        i = i + 1
+    NDArray(data: out, shape: shape, dtype: DType.F64)
+
+fn full(shape: Shape, fill: Float64) -> NDArray<Float64>:
+    var out: [Float64] = []
+    var i = 0
+    val total = shape.numel().value
+    while i < total:
+        out.push(fill)
+        i = i + 1
+    NDArray(data: out, shape: shape, dtype: DType.F64)
+
+fn empty(shape: Shape) -> NDArray<Float64>:
+    zeros(shape)
+
+fn eye(size: Index) -> NDArray<Float64>:
+    var out: [Float64] = []
+    var row = 0
+    while row < size.value:
+        var col = 0
+        while col < size.value:
+            if row == col:
+                out.push(Float64.new(1.0))
+            else:
+                out.push(Float64.new(0.0))
+            col = col + 1
+        row = row + 1
+    NDArray(data: out, shape: Shape.new([size, size]), dtype: DType.F64)
+
+fn arange(start: Float64, stop: Float64, step: Float64) -> NDArray<Float64>:
+    try_arange(start, stop, step).unwrap()
+
+fn try_arange(start: Float64, stop: Float64, step: Float64) -> Result<NDArray<Float64>, NdarrayError>:
+    if step.value == 0.0:
+        return Err(NdarrayError.InvalidStep)
+    var out: [Float64] = []
+    var current = start.value
+    while current < stop.value:
+            out.push(Float64.new(current))
+        current = current + step.value
+    Ok(NDArray(data: out, shape: Shape.new([Index.new(out.len())]), dtype: DType.F64))
+
+fn linspace(start: Float64, stop: Float64, count: Index) -> NDArray<Float64>:
+    try_linspace(start, stop, count).unwrap()
+
+fn try_linspace(start: Float64, stop: Float64, count: Index) -> Result<NDArray<Float64>, NdarrayError>:
+    if count.value <= 0:
+        return Err(NdarrayError.InvalidLinspace)
+    if count.value == 1:
+        return Ok(array([start]))
+    var out: [Float64] = []
+    val step = (stop.value - start.value) / (count.value - 1) as f64
+    var i = 0
+    while i < count.value:
+        out.push(Float64.new(start.value + step * i as f64))
+        i = i + 1
+    Ok(NDArray(data: out, shape: Shape.new([count]), dtype: DType.F64))
+
+fn broadcast_shapes(left: Shape, right: Shape) -> Result<Shape, NdarrayError>:
+    var result_rev: [Index] = []
+    var li = left.dims.len() - 1
+    var ri = right.dims.len() - 1
+    while li >= 0 or ri >= 0:
+        var ldim = 1
+        var rdim = 1
+        if li >= 0:
+            ldim = left.dims[li].value
+        if ri >= 0:
+            rdim = right.dims[ri].value
+        if ldim != rdim and ldim != 1 and rdim != 1:
+            return Err(NdarrayError.ShapeMismatch)
+        var out_dim = rdim
+        if ldim > rdim:
+            out_dim = ldim
+        result_rev.push(Index.new(out_dim))
+        li = li - 1
+        ri = ri - 1
+    var result: [Index] = []
+    var i = result_rev.len() - 1
+    while i >= 0:
+        result.push(result_rev[i])
+        i = i - 1
+    Ok(Shape.new(result))
+
+fn add(left: NDArray<Float64>, right: NDArray<Float64>) -> NDArray<Float64>:
+    left.add(right)
+
+fn flat_index(shape: Shape, indices: [Index]) -> i64:
+    var offset = 0
+    var stride = 1
+    var dim = shape.dims.len() - 1
+    while dim >= 0:
+        offset = offset + indices[dim].value * stride
+        stride = stride * shape.dims[dim].value
+        dim = dim - 1
+    offset
+
+fn try_flat_index(shape: Shape, indices: [Index]) -> Result<i64, NdarrayError>:
+    if indices.len() != shape.dims.len():
+        return Err(NdarrayError.IndexOutOfBounds)
+    var offset = 0
+    var stride = 1
+    var dim = shape.dims.len() - 1
+    while dim >= 0:
+        val raw = indices[dim].value
+        if raw < 0 or raw >= shape.dims[dim].value:
+            return Err(NdarrayError.IndexOutOfBounds)
+        offset = offset + raw * stride
+        stride = stride * shape.dims[dim].value
+        dim = dim - 1
+    Ok(offset)
+
+fn normalize_slice(range: Slice, length: i64) -> Result<SliceBounds, NdarrayError>:
+    if range.step.value == 0:
+        return Err(NdarrayError.InvalidStep)
+    var start = range.start.value
+    var stop = range.stop.value
+    if start < 0:
+        start = length + start
+    if stop < 0:
+        stop = length + stop
+    if start < 0 or start > length or stop < 0 or stop > length:
+        return Err(NdarrayError.IndexOutOfBounds)
+    Ok(SliceBounds(start: start, stop: stop, step: range.step.value))
+
+fn has_negative_dim(shape: Shape) -> bool:
+    var i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value < 0:
+            return true
+        i = i + 1
+    false
+
+impl NDArray<Float64>:
+    fn add(self, other: NDArray<Float64>) -> NDArray<Float64>:
+        self.try_add(other).unwrap()
+
+    fn try_add(self, other: NDArray<Float64>) -> Result<NDArray<Float64>, NdarrayError>:
+        val target_shape = broadcast_shapes(self.shape, other.shape)
+        if target_shape.is_err():
+            return Err(target_shape.error())
+        val shape = target_shape.unwrap()
+        var out: [Float64] = []
+        var i = 0
+        val total = shape.numel().value
+        while i < total:
+            val indices = unravel_index(i, shape)
+            val left_value = self.get_broadcast(indices)
+            val right_value = other.get_broadcast(indices)
+            out.push(Float64.new(left_value.value + right_value.value))
+            i = i + 1
+        Ok(NDArray(data: out, shape: shape, dtype: DType.F64))
+
+    fn add_scalar(self, scalar: Float64) -> NDArray<Float64>:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.data.len():
+            out.push(Float64.new(self.data[i].value + scalar.value))
+            i = i + 1
+        NDArray(data: out, shape: self.shape, dtype: DType.F64)
+
+    fn mul_scalar(self, scalar: Float64) -> NDArray<Float64>:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.data.len():
+            out.push(Float64.new(self.data[i].value * scalar.value))
+            i = i + 1
+        NDArray(data: out, shape: self.shape, dtype: DType.F64)
+
+    fn get_broadcast(self, target_indices: [Index]) -> Float64:
+        var actual: [Index] = []
+        val delta = target_indices.len() - self.shape.dims.len()
+        var i = 0
+        while i < self.shape.dims.len():
+            val target_idx = target_indices[i + delta].value
+            if self.shape.dims[i].value == 1:
+                actual.push(Index.new(0))
+            else:
+                actual.push(Index.new(target_idx))
+            i = i + 1
+        self.get_at(actual)
+
+fn unravel_index(flat: i64, shape: Shape) -> [Index]:
+    if shape.dims.len() == 0:
+        return []
+    var rem = flat
+    var rev: [Index] = []
+    var i = shape.dims.len() - 1
+    while i >= 0:
+        val dim = shape.dims[i].value
+        rev.push(Index.new(rem % dim))
+        rem = rem / dim
+        i = i - 1
+    var out: [Index] = []
+    i = rev.len() - 1
+    while i >= 0:
+        out.push(rev[i])
+        i = i - 1
+    out

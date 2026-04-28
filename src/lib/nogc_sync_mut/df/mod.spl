@@ -1,0 +1,283 @@
+use std.ndarray.*
+
+struct Symbol:
+    text: text
+
+    static fn from(value: text) -> Symbol:
+        Symbol(text: value)
+
+enum DfError:
+    ShapeMismatch
+    ColumnNotFound
+    DuplicateColumn
+
+enum DfValue:
+    F64(Float64)
+    I64(Int64)
+    B(Bool)
+    Txt(text)
+    Na
+
+struct Series<T>:
+    name: Symbol
+    values: NDArray<T>
+    dtype: DType
+
+    static fn from_values(name: Symbol, values: [Float64]) -> Series<Float64>:
+        Series(name: name, values: array(values), dtype: DType.F64)
+
+    static fn from_values(name: Symbol, values: [Int64]) -> Series<Int64>:
+        Series(name: name, values: array(values), dtype: DType.I64)
+
+    fn len(self) -> Index:
+        self.values.len()
+
+    fn dtype(self) -> DType:
+        self.dtype
+
+    fn get(self, index: Index) -> T:
+        self.values.get(index)
+
+struct SeriesDType:
+    values: [DType]
+
+    fn len(self) -> Index:
+        Index(self.values.len())
+
+    fn dtype_at(self, index: Index) -> DType:
+        self.values[index.value]
+
+enum SeriesErased:
+    F64Series(Series<Float64>)
+    I64Series(Series<Int64>)
+
+struct DataFrameShape:
+    rows: Index
+    cols: Index
+
+struct DataFrame:
+    columns_internal: [SeriesErased]
+
+    static fn from_columns(columns_internal: [SeriesErased]) -> Result<DataFrame, DfError>:
+        if columns_internal.len() == 0:
+            return Ok(DataFrame(columns_internal: []))
+        val expected = series_len(columns_internal[0]).value
+        var i = 1
+        while i < columns_internal.len():
+            if series_len(columns_internal[i]).value != expected:
+                return Err(DfError.ShapeMismatch)
+            i = i + 1
+        Ok(DataFrame(columns_internal: columns_internal))
+
+    static fn from_rows(rows: [[(Symbol, DfValue)]]) -> Result<DataFrame, DfError>:
+        if rows.len() == 0:
+            return Ok(DataFrame(columns_internal: []))
+        var names: [Symbol] = []
+        var kinds: [DType] = []
+        var first = rows[0]
+        var i = 0
+        while i < first.len():
+            names.push(first[i].0)
+            kinds.push(dtype_of(first[i].1))
+            i = i + 1
+        var float_cols: [[Float64]] = []
+        var int_cols: [[Int64]] = []
+        i = 0
+        while i < names.len():
+            float_cols.push([])
+            int_cols.push([])
+            i = i + 1
+        var row_idx = 0
+        while row_idx < rows.len():
+            val row = rows[row_idx]
+            if row.len() != names.len():
+                return Err(DfError.ShapeMismatch)
+            var col_idx = 0
+            while col_idx < row.len():
+                match row[col_idx].1:
+                    case DfValue.F64(v):
+                        float_cols[col_idx].push(v)
+                    case DfValue.I64(v):
+                        int_cols[col_idx].push(v)
+                    case _:
+                        return Err(DfError.ShapeMismatch)
+                col_idx = col_idx + 1
+            row_idx = row_idx + 1
+        var built: [SeriesErased] = []
+        i = 0
+        while i < names.len():
+            if kinds[i] == DType.F64:
+                built.push(SeriesErased.F64Series(Series.from_values(names[i], float_cols[i])))
+            else:
+                built.push(SeriesErased.I64Series(Series.from_values(names[i], int_cols[i])))
+            i = i + 1
+        DataFrame.from_columns(built)
+
+    fn columns(self) -> [Symbol]:
+        var out: [Symbol] = []
+        var i = 0
+        while i < self.columns_internal.len():
+            out.push(series_name(self.columns_internal[i]))
+            i = i + 1
+        out
+
+    fn num_rows(self) -> Index:
+        if self.columns_internal.len() == 0:
+            return Index(0)
+        series_len(self.columns_internal[0])
+
+    fn num_cols(self) -> Index:
+        Index(self.columns_internal.len())
+
+    fn column_count(self) -> Index:
+        self.num_cols()
+
+    fn shape(self) -> DataFrameShape:
+        DataFrameShape(rows: self.num_rows(), cols: self.num_cols())
+
+    fn dtypes(self) -> SeriesDType:
+        var out: [DType] = []
+        var i = 0
+        while i < self.columns_internal.len():
+            out.push(series_dtype(self.columns_internal[i]))
+            i = i + 1
+        SeriesDType(values: out)
+
+    fn col(self, name: Symbol) -> Result<Series<Float64>, DfError>:
+        var i = 0
+        while i < self.columns_internal.len():
+            val current = self.columns_internal[i]
+            if series_name(current) == name:
+                match current:
+                    case SeriesErased.F64Series(series):
+                        return Ok(series)
+                    case SeriesErased.I64Series(series):
+                        return Ok(int_series_to_float(series))
+            i = i + 1
+        Err(DfError.ColumnNotFound)
+
+    fn assign(self, name: Symbol, series: SeriesErased) -> DataFrame:
+        var out: [SeriesErased] = []
+        var replaced = false
+        var i = 0
+        while i < self.columns_internal.len():
+            if series_name(self.columns_internal[i]) == name:
+                out.push(rename_series(series, name))
+                replaced = true
+            else:
+                out.push(self.columns_internal[i])
+            i = i + 1
+        if not replaced:
+            out.push(rename_series(series, name))
+        DataFrame(columns_internal: out)
+
+    fn drop(self, name: Symbol) -> Result<DataFrame, DfError>:
+        var out: [SeriesErased] = []
+        var removed = false
+        var i = 0
+        while i < self.columns_internal.len():
+            if series_name(self.columns_internal[i]) == name:
+                removed = true
+            else:
+                out.push(self.columns_internal[i])
+            i = i + 1
+        if not removed:
+            return Err(DfError.ColumnNotFound)
+        Ok(DataFrame(columns_internal: out))
+
+    fn rename(self, old_name: Symbol, new_name: Symbol) -> Result<DataFrame, DfError>:
+        var i = 0
+        while i < self.columns_internal.len():
+            if series_name(self.columns_internal[i]) == new_name:
+                return Err(DfError.DuplicateColumn)
+            i = i + 1
+        var out: [SeriesErased] = []
+        var found = false
+        i = 0
+        while i < self.columns_internal.len():
+            if series_name(self.columns_internal[i]) == old_name:
+                out.push(rename_series(self.columns_internal[i], new_name))
+                found = true
+            else:
+                out.push(self.columns_internal[i])
+            i = i + 1
+        if not found:
+            return Err(DfError.ColumnNotFound)
+        Ok(DataFrame(columns_internal: out))
+
+    fn astype(self, name: Symbol, dtype: DType) -> Result<DataFrame, DfError>:
+        var out: [SeriesErased] = []
+        var found = false
+        var i = 0
+        while i < self.columns_internal.len():
+            val current = self.columns_internal[i]
+            if series_name(current) == name:
+                found = true
+                if dtype == DType.F64:
+                    out.push(SeriesErased.F64Series(series_to_float(current)))
+                else:
+                    out.push(series_to_int(current))
+            else:
+                out.push(current)
+            i = i + 1
+        if not found:
+            return Err(DfError.ColumnNotFound)
+        Ok(DataFrame(columns_internal: out))
+
+fn series_len(series: SeriesErased) -> Index:
+    match series:
+        case SeriesErased.F64Series(s): s.len()
+        case SeriesErased.I64Series(s): s.len()
+
+fn series_name(series: SeriesErased) -> Symbol:
+    match series:
+        case SeriesErased.F64Series(s): s.name
+        case SeriesErased.I64Series(s): s.name
+
+fn series_dtype(series: SeriesErased) -> DType:
+    match series:
+        case SeriesErased.F64Series(_): DType.F64
+        case SeriesErased.I64Series(_): DType.I64
+
+fn rename_series(series: SeriesErased, name: Symbol) -> SeriesErased:
+    match series:
+        case SeriesErased.F64Series(s):
+            SeriesErased.F64Series(Series<Float64>(name: name, values: s.values, dtype: s.dtype))
+        case SeriesErased.I64Series(s):
+            SeriesErased.I64Series(Series<Int64>(name: name, values: s.values, dtype: s.dtype))
+
+fn int_series_to_float(series: Series<Int64>) -> Series<Float64>:
+    var out: [Float64] = []
+    var i = 0
+    while i < series.values.data.len():
+        out.push(Float64(series.values.data[i].value as f64))
+        i = i + 1
+    Series<Float64>(name: series.name, values: array(out), dtype: DType.F64)
+
+fn series_to_float(series: SeriesErased) -> Series<Float64>:
+    match series:
+        case SeriesErased.F64Series(s): s
+        case SeriesErased.I64Series(s): int_series_to_float(s)
+
+fn series_to_int(series: SeriesErased) -> SeriesErased:
+    match series:
+        case SeriesErased.I64Series(s): SeriesErased.I64Series(s)
+        case SeriesErased.F64Series(s):
+            var out: [Int64] = []
+            var i = 0
+            while i < s.values.data.len():
+                out.push(Int64(s.values.data[i].value as i64))
+                i = i + 1
+            SeriesErased.I64Series(Series<Int64>(name: s.name, values: array(out), dtype: DType.I64))
+
+fn dtype_of(value: DfValue) -> DType:
+    match value:
+        case DfValue.F64(_): DType.F64
+        case DfValue.I64(_): DType.I64
+        case DfValue.B(_): DType.Bool
+        case _:
+            DType.Bool
+
+impl Series<Float64>:
+    fn add(self, other: Series<Float64>) -> Series<Float64>:
+        Series<Float64>(name: self.name, values: self.values.add(other.values), dtype: DType.F64)
