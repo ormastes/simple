@@ -142,3 +142,42 @@ I reverted my no-op `@cfg` additions to keep the source clean.
 
 Either path 2, 3, or 4 unblocks the smoke-test work in the
 simple-from-FS plan; path 1 does not.
+
+## Adjacent finding: kernel-build-target asymmetry
+
+While diagnosing this bug we observed that `desktop_e2e_entry.spl` builds
+cleanly (verified by `build/os/kernel_rebuild2.log` from 2026-04-28
+00:28, output `simpleos_desktop_e2e_32.elf`) while `os_entry.spl` does
+NOT (the cached `simpleos_x86_64.elf` is from Apr 26). Both target
+x86_64 — they differ only in their import closures. `desktop_e2e_entry`
+imports compositor / framebuffer / desktop-shell modules and **does not**
+transitively pull in `os.kernel.arch.hal`, which is the file with the
+unconditional multi-arch `use` chain that drags `arch/riscv64/*` into
+the build. `os_entry` imports `os.kernel.boot.init_services`, which DOES
+transitively pull in `hal.spl`.
+
+**Practical implication:** any new in-OS smoke test that wants to call
+`x86_64_fs_exec_spawn(...)` will compile cleanly only if attached to a
+build target whose closure does not include `hal.spl`. Today,
+`desktop_e2e_entry.spl` is such a target; `os_entry.spl` is not. This is
+a workaround, not a fix — `hal.spl` should be refactored per fix-path 4
+above so any kernel build target works regardless of where the call is
+attached.
+
+## Adjacent finding: /SIMPLSTC.SMF shell-PATH unreachability
+
+`src/os/apps/shell/path_search.spl:14` hardcodes default PATH to
+`/usr/bin:/sys/apps`. The Simple compiler is baked as `/SIMPLSTC.SMF`
+at the FAT32 root by `src/os/port/disk_image_bake.spl`. Typing
+`simple` in the shell calls `shell_path_search("simple")`, which builds
+candidate paths `/usr/bin/simple` and `/sys/apps/simple` — neither of
+which exists. The `/sys/apps/SIMPLSTC.SMF` alias in
+`src/os/services/vfs/vfs_init.spl:586` doesn't match either (different
+filename).
+
+The smallest fix is to bake an additional `PayloadEntry` at
+`/usr/bin/simple` (or `/sys/apps/simple`) pointing at the same host
+file, so the existing PATH search resolves. That's Step 4 of
+`~/.claude/plans/complete-porting-llvm-rust-reactive-cosmos.md`. It is
+gated on the kernel build being unblocked — without that, no in-OS
+test can verify the wire works.
