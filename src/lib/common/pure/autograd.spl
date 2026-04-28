@@ -30,6 +30,35 @@ enum OpType:
     DivScalar
     AddScalar
 
+fn make_leaf_tensor(value: TensorF64, requires_grad: bool) -> Tensor:
+    Tensor(
+        value: value,
+        grad: nil,
+        requires_grad: requires_grad,
+        op_type: nil,
+        inputs: nil,
+        op_name: "leaf"
+    )
+
+fn track_unary_op(result_value: TensorF64, input: Tensor, op_type: OpType, op_name: text) -> Tensor:
+    if not input.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(op_type)
+    result.inputs = Some([input])
+    result.op_name = op_name
+    result
+
+fn track_binary_op(result_value: TensorF64, left: Tensor, right: Tensor, op_type: OpType, op_name: text) -> Tensor:
+    val requires_grad = left.requires_grad or right.requires_grad
+    if not requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(op_type)
+    result.inputs = Some([left, right])
+    result.op_name = op_name
+    result
+
 # ============================================================================
 # Tensor with Gradient Tracking
 # ============================================================================
@@ -43,24 +72,10 @@ class Tensor:
     op_name: text
 
     static fn from_data(data: [f64], shape: [i64], requires_grad: bool = false) -> Tensor:
-        Tensor(
-            value: from_data(data, shape),
-            grad: nil,
-            requires_grad: requires_grad,
-            op_type: nil,
-            inputs: nil,
-            op_name: "leaf"
-        )
+        make_leaf_tensor(from_data(data, shape), requires_grad)
 
     static fn from_value(value: TensorF64, requires_grad: bool = false) -> Tensor:
-        Tensor(
-            value: value,
-            grad: nil,
-            requires_grad: requires_grad,
-            op_type: nil,
-            inputs: nil,
-            op_name: "leaf"
-        )
+        make_leaf_tensor(value, requires_grad)
 
     static fn zeros(shape: [i64], requires_grad: bool = false) -> Tensor:
         Tensor.from_value(zeros(shape), requires_grad)
@@ -102,28 +117,14 @@ fn tensor_from_data(data: [f64], shape: [i64], requires_grad: bool = false) -> T
 
     Workaround for: Tensor.from_data(data, shape, requires_grad)
     """
-    Tensor(
-        value: from_data(data, shape),
-        grad: nil,
-        requires_grad: requires_grad,
-        op_type: nil,
-        inputs: nil,
-        op_name: "leaf"
-    )
+    make_leaf_tensor(from_data(data, shape), requires_grad)
 
 fn tensor_from_value(value: TensorF64, requires_grad: bool = false) -> Tensor:
     """Create tensor from TensorF64 value.
 
     Workaround for: Tensor.from_value(value, requires_grad)
     """
-    Tensor(
-        value: value,
-        grad: nil,
-        requires_grad: requires_grad,
-        op_type: nil,
-        inputs: nil,
-        op_name: "leaf"
-    )
+    make_leaf_tensor(value, requires_grad)
 
 fn tensor_zeros(shape: [i64], requires_grad: bool = false) -> Tensor:
     """Create tensor filled with zeros.
@@ -374,58 +375,22 @@ fn propagate_grads(t: Tensor, grad_out: TensorF64):
 
 fn tensor_add(a: Tensor, b: Tensor) -> Tensor:
     val result_value = add(a.value, b.value)
-    val requires_grad = a.requires_grad or b.requires_grad
-
-    if not requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Add)
-    result.inputs = Some([a, b])
-    result.op_name = "add"
-    result
+    track_binary_op(result_value, a, b, OpType.Add, "add")
 
 
 fn tensor_sub(a: Tensor, b: Tensor) -> Tensor:
     val result_value = sub(a.value, b.value)
-    val requires_grad = a.requires_grad or b.requires_grad
-
-    if not requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Sub)
-    result.inputs = Some([a, b])
-    result.op_name = "sub"
-    result
+    track_binary_op(result_value, a, b, OpType.Sub, "sub")
 
 
 fn tensor_mul(a: Tensor, b: Tensor) -> Tensor:
     val result_value = mul(a.value, b.value)
-    val requires_grad = a.requires_grad or b.requires_grad
-
-    if not requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Mul)
-    result.inputs = Some([a, b])
-    result.op_name = "mul"
-    result
+    track_binary_op(result_value, a, b, OpType.Mul, "mul")
 
 
 fn tensor_matmul(a: Tensor, b: Tensor) -> Tensor:
     val result_value = matmul(a.value, b.value)
-    val requires_grad = a.requires_grad or b.requires_grad
-
-    if not requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.MatMul)
-    result.inputs = Some([a, b])
-    result.op_name = "matmul"
-    result
+    track_binary_op(result_value, a, b, OpType.MatMul, "matmul")
 
 
 fn tensor_relu(x: Tensor) -> Tensor:
@@ -436,14 +401,7 @@ fn tensor_relu(x: Tensor) -> Tensor:
 
     val result_value = from_data(result_data, x.value.shape)
 
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Relu)
-    result.inputs = Some([x])
-    result.op_name = "relu"
-    result
+    track_unary_op(result_value, x, OpType.Relu, "relu")
 
 
 fn tensor_sum(x: Tensor) -> Tensor:
@@ -453,14 +411,7 @@ fn tensor_sum(x: Tensor) -> Tensor:
 
     val result_value = from_data([total], [1])
 
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Sum)
-    result.inputs = Some([x])
-    result.op_name = "sum"
-    result
+    track_unary_op(result_value, x, OpType.Sum, "sum")
 
 
 fn tensor_mean(x: Tensor) -> Tensor:
@@ -471,119 +422,49 @@ fn tensor_mean(x: Tensor) -> Tensor:
     val mean_val = total / x.value.data.len()
     val result_value = from_data([mean_val], [1])
 
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Mean)
-    result.inputs = Some([x])
-    result.op_name = "mean"
-    result
+    track_unary_op(result_value, x, OpType.Mean, "mean")
 
 
 fn tensor_mul_scalar(x: Tensor, scalar: f64) -> Tensor:
     val result_value = mul_scalar(x.value, scalar)
-
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.MulScalar)
-    result.inputs = Some([x])
-    result.op_name = "mul_scalar"
-    result
+    track_unary_op(result_value, x, OpType.MulScalar, "mul_scalar")
 
 
 fn tensor_div(a: Tensor, b: Tensor) -> Tensor:
     val result_value = div(a.value, b.value)
-    val rg = a.requires_grad or b.requires_grad
-    if not rg:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Div)
-    result.inputs = Some([a, b])
-    result.op_name = "div"
-    result
+    track_binary_op(result_value, a, b, OpType.Div, "div")
 
 fn tensor_sigmoid(x: Tensor) -> Tensor:
     val result_value = sigmoid(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Sigmoid)
-    result.inputs = Some([x])
-    result.op_name = "sigmoid"
-    result
+    track_unary_op(result_value, x, OpType.Sigmoid, "sigmoid")
 
 fn tensor_tanh(x: Tensor) -> Tensor:
     val result_value = tanh(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Tanh)
-    result.inputs = Some([x])
-    result.op_name = "tanh"
-    result
+    track_unary_op(result_value, x, OpType.Tanh, "tanh")
 
 fn tensor_exp_op(x: Tensor) -> Tensor:
     val result_value = tensor_exp(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Exp)
-    result.inputs = Some([x])
-    result.op_name = "exp"
-    result
+    track_unary_op(result_value, x, OpType.Exp, "exp")
 
 fn tensor_log_op(x: Tensor) -> Tensor:
     val result_value = tensor_log(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Log)
-    result.inputs = Some([x])
-    result.op_name = "log"
-    result
+    track_unary_op(result_value, x, OpType.Log, "log")
 
 fn tensor_neg(x: Tensor) -> Tensor:
     val result_value = neg(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Neg)
-    result.inputs = Some([x])
-    result.op_name = "neg"
-    result
+    track_unary_op(result_value, x, OpType.Neg, "neg")
 
 fn tensor_softmax(x: Tensor) -> Tensor:
     val result_value = softmax(x.value)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.Softmax)
-    result.inputs = Some([x])
-    result.op_name = "softmax"
-    result
+    track_unary_op(result_value, x, OpType.Softmax, "softmax")
 
 fn tensor_div_scalar(x: Tensor, scalar: f64) -> Tensor:
     val result_value = div_scalar(x.value, scalar)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.DivScalar)
-    result.inputs = Some([x])
-    result.op_name = "div_scalar"
-    result
+    track_unary_op(result_value, x, OpType.DivScalar, "div_scalar")
 
 fn tensor_add_scalar(x: Tensor, scalar: f64) -> Tensor:
     val result_value = add_scalar(x.value, scalar)
-    if not x.requires_grad:
-        return Tensor.from_value(result_value, requires_grad: false)
-    var result = Tensor.from_value(result_value, requires_grad: true)
-    result.op_type = Some(OpType.AddScalar)
-    result.inputs = Some([x])
-    result.op_name = "add_scalar"
-    result
+    track_unary_op(result_value, x, OpType.AddScalar, "add_scalar")
 
 
 fn detach(x: Tensor) -> Tensor:

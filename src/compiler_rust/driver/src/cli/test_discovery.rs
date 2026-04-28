@@ -57,6 +57,9 @@ pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files
 /// Check if a file is a test file
 pub fn is_test_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if is_transient_generated_test_artifact(name) {
+            return false;
+        }
         let is_simple_ext = name.ends_with(".spl") || name.ends_with(".simple") || name.ends_with(".sscript");
         let is_test = name.contains("_spec.") || name.contains("_test.");
         is_simple_ext && is_test
@@ -68,6 +71,9 @@ pub fn is_test_file(path: &Path) -> bool {
 /// Check if a file is a skipped test file (*.spl.skip, *_spec.spl.skip, etc.)
 pub fn is_skip_test_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if is_transient_generated_test_artifact(name) {
+            return false;
+        }
         // Match patterns like *_spec.spl.skip, *_test.spl.skip
         let is_skip_ext =
             name.ends_with(".spl.skip") || name.ends_with(".simple.skip") || name.ends_with(".sscript.skip");
@@ -76,6 +82,10 @@ pub fn is_skip_test_file(path: &Path) -> bool {
     } else {
         false
     }
+}
+
+fn is_transient_generated_test_artifact(name: &str) -> bool {
+    name.starts_with(".spipe_matchers_") || name.starts_with(".spipe_wrapped_entry_")
 }
 
 /// Extract tags from a test file.

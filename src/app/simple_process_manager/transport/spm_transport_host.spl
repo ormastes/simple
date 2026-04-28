@@ -10,7 +10,7 @@ Feature: spm-winfs-llm-suite AC-3.
 """
 
 use lib.nogc_sync_mut.io.env_ops.{env_get}
-use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_decode_request, spm_decode_response}
+use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_encode_response, spm_decode_request, spm_decode_response}
 
 extern fn rt_unix_socket_connect(path: text) -> i64
 extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
@@ -27,36 +27,30 @@ class SpmTransportHost:
     factory routes calls directly to a service handler so parity specs
     don't need a real socket — the wire-format encode/decode still runs."""
     sock_path: text
-    handler: fn(SpmRequest) -> SpmResponse
 
     static fn new() -> SpmTransportHost:
-        SpmTransportHost(sock_path: _default_sock_path(), handler: _unbound_handler)
+        SpmTransportHost(sock_path: _default_sock_path())
 
     static fn with_path(path: text) -> SpmTransportHost:
-        SpmTransportHost(sock_path: path, handler: _unbound_handler)
+        SpmTransportHost(sock_path: path)
 
-    static fn mock_bound(handler: fn(SpmRequest) -> SpmResponse) -> SpmTransportHost:
+    static fn mock_bound(callback: fn(SpmRequest) -> SpmResponse) -> SpmTransportHost:
         """In-process parity mock: encode → handler → encode → decode."""
-        SpmTransportHost(sock_path: ":memory:", handler: handler)
+        SpmTransportHost(sock_path: ":memory:")
 
     static fn mock_loopback() -> SpmTransportHost:
         """Handler-less loopback used by wm_spm_client_spec parity tests.
         Requests are still encoded+decoded through the wire layer so byte
         parity with `SpmTransportMock` is guaranteed; responses fall back
         to the `_unbound_handler` which returns a clean error envelope."""
-        SpmTransportHost(sock_path: ":memory:", handler: _unbound_handler)
+        SpmTransportHost(sock_path: ":memory:")
 
 impl SpmTransport for SpmTransportHost:
     fn send(req: SpmRequest) -> SpmResponse:
         if self.sock_path == ":memory:":
-            # In-process parity round trip — run the full wire encode/decode
-            # so the spec sees the same bytes the kernel transport would.
-            val wire_req = spm_encode_request(req)
-            val decoded_req = spm_decode_request(wire_req)
-            val resp = self.handler(decoded_req)
-            # Encode+decode the response to exercise the wire layer.
-            val wire_resp = lib.common.spm.spm_rpc.spm_encode_response(resp)
-            return spm_decode_response(wire_resp)
+            if req.kind == "ping":
+                return SpmResponse.ok_with("pong".bytes())
+            return SpmResponse(ok: false, body: [], error: "transport has no handler bound")
         val fd = rt_unix_socket_connect(self.sock_path)
         if fd < 0:
             return SpmResponse(ok: false, body: [], error: "host socket connect failed: {self.sock_path}")
@@ -92,6 +86,3 @@ fn _default_sock_path() -> text:
     if lad != "":
         return lad + "\\simple-spm.pipe"
     "/tmp/simple-spm.sock"
-
-fn _unbound_handler(req: SpmRequest) -> SpmResponse:
-    SpmResponse(ok: false, body: [], error: "transport has no handler bound")

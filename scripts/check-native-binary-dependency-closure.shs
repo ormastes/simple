@@ -1,0 +1,335 @@
+#!/bin/sh
+# Audit native binary dependency closure and loaded modules for common local outputs.
+
+set -eu
+
+skip_missing=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --skip-missing)
+      skip_missing=1
+      ;;
+    --help|-h)
+      echo "usage: sh scripts/check-native-binary-dependency-closure.shs [--skip-missing]"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+python3 - "$repo_root" "$skip_missing" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any
+
+repo_root = pathlib.Path(sys.argv[1])
+skip_missing = sys.argv[2] == "1"
+workspace_root = repo_root / "src/compiler_rust"
+workspace_manifest = workspace_root / "Cargo.toml"
+
+binary_targets = [
+    {
+        "name": "debug-cli",
+        "build_root": "simple-driver",
+        "candidates": ["src/compiler_rust/target/debug/simple"],
+    },
+    {
+        "name": "release-cli",
+        "build_root": "simple-driver",
+        "candidates": ["src/compiler_rust/target/release/simple", "src/compiler_rust/bin/release/simple"],
+    },
+    {
+        "name": "release-opt-cli",
+        "build_root": "simple-driver",
+        "candidates": ["src/compiler_rust/target/release-opt/simple"],
+    },
+    {
+        "name": "bootstrap-cli",
+        "build_root": "simple-driver",
+        "candidates": ["src/compiler_rust/target/bootstrap/simple"],
+    },
+    {
+        "name": "package-cli",
+        "build_root": "simple-driver",
+        "candidates": [
+            "bin/release/x86_64-unknown-linux-gnu/simple",
+            "bin/release/linux-x86_64/simple",
+            "bin/release/freebsd-x86_64/simple",
+        ],
+    },
+    {
+        "name": "package-mcp",
+        "build_root": "simple-native-all",
+        "candidates": [
+            "bin/release/x86_64-unknown-linux-gnu/simple_mcp_server",
+            "bin/release/linux-x86_64/simple_mcp_server",
+            "bin/release/freebsd-x86_64/simple_mcp_server",
+        ],
+    },
+    {
+        "name": "package-lsp",
+        "build_root": "simple-native-all",
+        "candidates": [
+            "bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server",
+            "bin/release/linux-x86_64/simple_lsp_mcp_server",
+            "bin/release/freebsd-x86_64/simple_lsp_mcp_server",
+        ],
+    },
+]
+
+root_targets = {
+    "simple-driver": {
+        "expected_normal": {
+            "simple-native-loader",
+            "simple-term-io",
+            "simple-compiler",
+            "simple-parser",
+            "simple-runtime",
+            "simple-common",
+            "simple-sdn",
+            "tempfile",
+            "walkdir",
+            "notify",
+            "serde",
+            "serde_json",
+            "tracing",
+            "tracing-subscriber",
+            "tracing-appender",
+            "rustyline",
+            "dirs-next",
+            "chrono",
+            "ctrlc",
+            "parking_lot",
+            "paste",
+            "indexmap",
+            "regex",
+            "rayon",
+            "sysinfo",
+            "sha2",
+            "hostname",
+            "argon2",
+            "rpassword",
+        },
+        "expected_target:cfg(unix)": {"libc"},
+        "expected_target:cfg(windows)": {"winapi"},
+    },
+    "simple-native-all": {
+        "expected_normal": {
+            "simple-common",
+            "simple-compiler",
+            "simple-driver",
+            "simple-runtime",
+            "spl_hosted_runtime",
+        },
+    },
+}
+
+suspect_groups = {
+    "runtime-service": {"socket2", "ureq", "rustls", "webpki-roots", "tar", "flate2", "xz2", "ring"},
+    "interactive-cli": {"rustyline", "notify", "sysinfo", "rpassword", "argon2", "hostname"},
+    "native-build-overreach": {"simple-driver"},
+    "hosted-surface": {"spl_hosted_runtime", "wgpu", "winit", "ash", "objc2", "windows-sys"},
+}
+
+def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=repo_root,
+        check=check,
+        text=True,
+        capture_output=True,
+    )
+
+def parse_metadata() -> dict[str, Any]:
+    result = run(["cargo", "metadata", "--format-version", "1", "--manifest-path", str(workspace_manifest), "--no-deps"])
+    return json.loads(result.stdout)
+
+def package_map(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {pkg["name"]: pkg for pkg in metadata["packages"]}
+
+def dep_bucket(dep: dict[str, Any]) -> str:
+    kind = dep.get("kind")
+    target = dep.get("target")
+    if kind == "dev":
+        return "dev"
+    if target:
+        return f"target:{target}"
+    return "normal"
+
+def dep_mode(dep: dict[str, Any]) -> str:
+    flags: list[str] = []
+    if dep.get("kind") == "dev":
+        flags.append("test-only")
+    if dep.get("target"):
+        flags.append("platform-gated")
+    if dep.get("optional"):
+        flags.append("feature-gated")
+    flags.append("default" if dep.get("uses_default_features", True) else "defaults-off")
+    if dep.get("features"):
+        flags.append("features=" + ",".join(dep["features"]))
+    return ", ".join(flags)
+
+def tree_for(crate_name: str) -> list[str]:
+    tree = run(
+        [
+            "cargo",
+            "tree",
+            "--manifest-path",
+            str(workspace_manifest),
+            "-p",
+            crate_name,
+            "-e",
+            "normal",
+            "--prefix",
+            "none",
+        ]
+    ).stdout.splitlines()
+    result: list[str] = []
+    seen: set[str] = set()
+    for line in tree:
+        if " v" not in line:
+            continue
+        name = line.split(" v", 1)[0].strip()
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+def first_existing(candidates: list[str]) -> pathlib.Path | None:
+    for candidate in candidates:
+        path = repo_root / candidate
+        if path.exists():
+            return path
+    return None
+
+def file_kind(path: pathlib.Path) -> str:
+    result = run(["file", "-b", str(path)], check=False)
+    return result.stdout.strip() or result.stderr.strip() or "unknown"
+
+def readelf_needed(path: pathlib.Path) -> list[str]:
+    result = run(["readelf", "-d", str(path)], check=False)
+    libs: list[str] = []
+    for line in result.stdout.splitlines():
+        if "Shared library:" not in line:
+            continue
+        start = line.find("[")
+        end = line.find("]", start + 1)
+        if start >= 0 and end > start:
+            libs.append(line[start + 1 : end])
+    return libs
+
+def ldd_needed(path: pathlib.Path) -> list[str]:
+    result = run(["ldd", str(path)], check=False)
+    if result.returncode != 0:
+        return []
+    libs: list[str] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or "=>" not in stripped:
+            continue
+        libs.append(stripped.split("=>", 1)[0].strip())
+    return libs
+
+metadata = parse_metadata()
+packages = package_map(metadata)
+errors: list[str] = []
+
+print("Native binary dependency closure report")
+print("")
+
+print("Binary artifacts")
+found_any_binary = False
+for target in binary_targets:
+    path = first_existing(target["candidates"])
+    if path is None:
+        if skip_missing:
+            print(f"- {target['name']}: missing (skipped)")
+            continue
+        errors.append(f"{target['name']} missing; searched {target['candidates']}")
+        continue
+
+    found_any_binary = True
+    rel = path.relative_to(repo_root)
+    kind = file_kind(path)
+    readelf_libs = readelf_needed(path)
+    ldd_libs = ldd_needed(path) if "ELF" in kind else []
+    print(f"- {target['name']}: {rel} [build-root={target['build_root']}]")
+    print(f"  kind: {kind}")
+    if readelf_libs:
+        print(f"  readelf-needed: {', '.join(readelf_libs)}")
+    else:
+        print("  readelf-needed: none/unsupported")
+    if ldd_libs:
+        print(f"  ldd-loaded: {', '.join(ldd_libs)}")
+    else:
+        print("  ldd-loaded: none/unsupported")
+
+if not found_any_binary and not skip_missing:
+    errors.append("no native binary artifacts were found")
+
+print("")
+print("Root crate direct dependencies")
+for crate_name, expectations in root_targets.items():
+    deps = packages[crate_name]["dependencies"]
+    actual: dict[str, set[str]] = {}
+    rows: list[str] = []
+    for dep in deps:
+        bucket = dep_bucket(dep)
+        actual.setdefault(bucket, set()).add(dep["name"])
+        rows.append(f"{dep['name']} [{bucket}] ({dep_mode(dep)})")
+    print(f"- {crate_name}:")
+    for row in sorted(rows):
+        print(f"  - {row}")
+    for bucket, expected_names in expectations.items():
+        found = actual.get(bucket, set())
+        if found != expected_names:
+            errors.append(
+                f"{crate_name} {bucket} deps mismatch: expected {sorted(expected_names)}, found {sorted(found)}"
+            )
+    extra_buckets = set(actual) - set(expectations)
+    if extra_buckets:
+        errors.append(f"{crate_name} has unexpected dependency buckets: {sorted(extra_buckets)}")
+
+print("")
+print("Root crate startup-path closure")
+root_trees: dict[str, list[str]] = {}
+for crate_name in root_targets:
+    tree = tree_for(crate_name)
+    root_trees[crate_name] = tree
+    print(f"- {crate_name}: {len(tree)} crates on normal startup path")
+    for group_name, suspects in suspect_groups.items():
+        hits = sorted(name for name in tree if name in suspects)
+        if hits:
+            print(f"  - suspect/{group_name}: {', '.join(hits)}")
+
+print("")
+print("Architecture findings")
+driver_tree = set(root_trees["simple-driver"])
+native_all_tree = set(root_trees["simple-native-all"])
+if {"socket2", "ureq", "rustls", "tar", "xz2", "flate2"} & driver_tree:
+    print("- `simple-runtime` keeps network/package service crates on the default CLI startup path.")
+if "simple-driver" in native_all_tree:
+    print("- `simple-native-all` depends on `simple-driver`, so native-build outputs inherit broad CLI-only subsystems.")
+if "spl_hosted_runtime" in native_all_tree:
+    print("- `spl_hosted_runtime` is present on the native-build archive root; current default is stub-only, but the dependency edge still exists.")
+print("- Current ELF `DT_NEEDED` sets are comparatively small; the larger issue is statically linked crate closure.")
+
+if errors:
+    print("")
+    print("FAIL")
+    for error in errors:
+        print(f"- {error}")
+    sys.exit(1)
+
+print("")
+print("PASS")
+PY

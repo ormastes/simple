@@ -62,3 +62,47 @@ Measured locally from the current workspace after the loader-closure implementat
 - `simple-native-loader` now depends on `simple-runtime-abi` instead of `simple-runtime`.
 - `simple-runtime` now generates and registers its static symbol table through the ABI crate during build/runtime initialization.
 - `scripts/check-loader-dependency-closure.shs` enforces the direct-dependency allowlists and fails if `simple-native-loader` regains a normal dependency on `simple-runtime`.
+
+## Native Binary Dependency Architecture Follow-On
+
+Codex per-binary audit findings, 2026-04-28.
+
+### OS-Loaded Module Surface
+
+Measured on the current Linux workspace:
+
+| Executable | Dynamic libs observed | Main takeaway |
+| --- | --- | --- |
+| `bin/release/x86_64-unknown-linux-gnu/simple` | `libm`, `libunwind`, `libstdc++`, `libgcc_s`, `libc` | The ELF `DT_NEEDED` set is already narrow. |
+| `bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` | `libm`, `libunwind`, `libstdc++`, `libgcc_s`, `libc` | Package MCP binary is not over-linking extra shared libraries. |
+| `bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server` | `libm`, `libunwind`, `libstdc++`, `libgcc_s`, `libc` | LSP package binary has the same narrow dynamic surface. |
+| `src/compiler_rust/target/bootstrap/simple` | `libgcc_s`, `libm`, `libc` | Bootstrap CLI is dynamically small too. |
+
+The primary size/startup problem has shifted from dynamic loader over-linking to **static crate/module closure** retained through coarse Rust binary roots and `native-build` archive roots.
+
+### Per-Binary Rust Root Findings
+
+- `simple-driver` is the root crate for the CLI variants and currently keeps broad subsystems on the default startup path:
+  - runtime service/network/package crates through `simple-runtime`: `socket2`, `ureq`, `rustls`, `webpki-roots`, `tar`, `flate2`, `xz2`
+  - interactive/auth/watcher crates through direct driver deps: `rustyline`, `notify`, `sysinfo`, `rpassword`, `argon2`, `hostname`
+- `simple-native-all` is the effective root for `native-build` package outputs such as `simple_mcp_server` and `simple_lsp_mcp_server`.
+- `simple-native-all` currently depends directly on `simple-driver`, which means native-built servers inherit CLI-only subsystems they do not need on their startup path.
+- `spl_hosted_runtime` is still part of the `simple-native-all` root. Its default features remain stub-only, so this is lower priority than the `simple-native-all -> simple-driver` edge, but it is still a real architecture dependency.
+
+### Highest-Value Architecture Issues
+
+1. `simple-native-all -> simple-driver`
+   Native-built MCP/LSP outputs currently inherit broad CLI subsystems because the archive root includes driver hooks and test-runner/file-execution helpers by depending on all of `simple-driver`.
+2. `simple-driver -> simple-runtime` with broad default runtime services
+   Runtime networking/package/compression crates are present even on plain CLI startup paths where most commands do not need them.
+3. Coarse single-binary CLI composition
+   REPL, watcher, auth/qualified-ignore, and other command-family dependencies stay resident in the default CLI root rather than narrower helper crates or feature capsules.
+
+### Implemented Audit Surface
+
+- Added `scripts/check-native-binary-dependency-closure.shs` to report:
+  - common native executable artifacts found in the local workspace
+  - `readelf` / `ldd` loaded-module surfaces where applicable
+  - direct dependency lists for `simple-driver` and `simple-native-all`
+  - startup-path crate closures and suspect architecture edges
+- The script is intentionally report-first: it fails on missing required artifacts or root-dependency drift, and reports architecture suspects without pretending they are fixed yet.

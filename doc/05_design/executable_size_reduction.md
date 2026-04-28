@@ -38,3 +38,41 @@ It fails when:
 
 - `simple-native-loader` regains `simple-runtime` in its normal dependency tree
 - a loader-crate direct dependency set diverges from the documented allowlist
+
+## Native Binary Audit Detail
+
+`scripts/check-native-binary-dependency-closure.shs` extends the feature from loader-only closure to binary-root closure.
+
+It inspects the common local native outputs for:
+
+- CLI binaries from debug/release/release-opt/bootstrap roots
+- packaged CLI/MCP/LSP binaries under `bin/release/...`
+
+For each available artifact it records:
+
+- artifact path and build root
+- `file` classification
+- `readelf` `DT_NEEDED` shared libraries when available
+- `ldd` loaded libraries when supported by the host
+
+It also inspects the Rust build roots:
+
+- `simple-driver`
+- `simple-native-all`
+
+For each root it reports:
+
+- direct dependencies with bucket/mode classification
+- normal startup-path transitive closure from `cargo tree`
+- suspect groups such as runtime-service crates, interactive CLI crates, native-build overreach, and hosted-surface crates
+
+## Follow-On Fix Targets
+
+The audit is expected to keep surfacing two priority seams until they are refactored:
+
+1. `simple-native-all -> simple-driver`
+   This is the primary reason native-built MCP/LSP binaries inherit CLI-only dependencies.
+2. broad default `simple-runtime` service crates
+   This keeps package/network/TLS/compression functionality on the CLI startup path even for commands that do not need it.
+
+The current implementation is intentionally diagnostic rather than pretending to solve those broader refactors in the same change.

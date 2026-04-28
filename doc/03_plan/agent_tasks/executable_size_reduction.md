@@ -9,3 +9,5 @@ Codex task breakdown, 2026-04-23.
 5. Record local/domain research, requirements, architecture, and verification notes.
 6. Split the runtime symbol ABI into a dedicated crate and remove the normal `simple-native-loader -> simple-runtime` edge.
 7. Add a loader dependency-closure audit and trim unused `simple-loader` direct dependencies.
+8. Add a per-binary native dependency audit covering CLI, bootstrap, and native-built package executables.
+9. Use the audit to drive a follow-on architecture split that removes `simple-native-all -> simple-driver` and narrows broad default runtime services.

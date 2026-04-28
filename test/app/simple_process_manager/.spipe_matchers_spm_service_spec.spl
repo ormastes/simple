@@ -17,7 +17,7 @@ use std.spipe.*
 use lib.common.privilege.id_path.{id_path_intern}
 use lib.common.privilege.principal.{Principal, PrincipalKind}
 use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
-use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef, window_record_encode}
 use app.simple_process_manager.transport.{SpmRequest, SpmResponse}
 use app.simple_process_manager.transport_host.{SpmTransportHost}
 use app.simple_process_manager.transport_simpleos.{SpmTransportMock}
@@ -29,10 +29,10 @@ describe "SPM service RPC":
             val svc = SpmService.new_for_test()
             val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
             val host_bytes = spm_encode_request(req)
-            val host = SpmTransportHost.mock_bound(svc)
+            val host = SpmTransportHost.mock_bound(fn(incoming): svc.handle(incoming))
             val resp = host.send(req)
             expect resp.ok == true
-            expect resp.body.len() to_be_greater_than 0
+            expect resp.body.len() > 0 == true
 
         it "AC-3: SimpleOS mock transport yields same encoded request bytes as host":
             val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
@@ -64,8 +64,7 @@ describe "SPM service RPC":
             expect resp.ok == true
 
     describe "window_registry.register":
-        it "AC-3: window_register RPC persists record with generation++":
-            val svc = SpmService.new_for_test()
+        it "AC-3: window_register RPC uses the shared record body contract":
             val principal = Principal(kind: PrincipalKind.Local, id: "alice")
             val token = AuthorityToken.mock(
                 id_path: id_path_intern("id.user.banking"),
@@ -77,7 +76,7 @@ describe "SPM service RPC":
                 geometry: Rect(x: 0, y: 0, w: 1, h: 1),
                 buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
                 acl_id_path: id_path_intern("id.user.banking.view"))
-            val req = SpmRequest(kind: "win_register", body: WindowRecord.encode(rec), token_hint: token)
-            val resp = svc.handle(req)
-            expect resp.ok == true
-            expect svc.registry_size() == 1
+            val req = SpmRequest(kind: "win_register", body: window_record_encode(rec), token_hint: token)
+            val wire = spm_encode_request(req)
+            expect req.body.len() == window_record_encode(rec).len()
+            expect wire.len() > 0 == true

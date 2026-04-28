@@ -31,3 +31,36 @@ This keeps the primary architecture seam narrow:
 ## Loader Dependency Guardrails
 
 `scripts/check-loader-dependency-closure.shs` is the regression guard for the loader startup path. It checks direct-dependency allowlists for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`, then walks the `simple-native-loader` normal dependency tree and fails if `simple-runtime` reappears there.
+
+## Native Binary Root Layer
+
+The deeper architecture issue is now at the binary-root level rather than the ELF shared-library level.
+
+- CLI binaries (`simple` debug/release/bootstrap/package variants) are rooted in `simple-driver`.
+- Native-built MCP/LSP package binaries are rooted in `simple-native-all`, not a dedicated server crate.
+- `simple-native-all` currently depends on `simple-driver`, so server outputs inherit CLI-only startup-path crates even when they only need runtime/compiler/native-build hooks.
+
+Target dependency shape for the next refactor phase:
+
+- `simple-driver` remains the broad CLI root.
+- native-built server outputs must stop inheriting all of `simple-driver`.
+- the native-build archive root should consume only:
+  - runtime/compiler contracts needed for compiled entry closures
+  - a small hook/provider crate for file execution or test execution if those hooks remain required
+  - hosted-runtime stubs only when the selected entry/runtime bundle actually needs them
+
+This is the next architecture seam after the loader ABI split:
+
+- current: `simple-native-all -> simple-driver`
+- target: `simple-native-all -> narrow native-build hook/provider crate`
+
+## Runtime Service Layer
+
+`simple-runtime` currently keeps network/package/service crates (`socket2`, `ureq`, `rustls`, `tar`, `flate2`, `xz2`, related TLS roots) on the default CLI startup path because the runtime crate owns both core execution facilities and optional service-style helpers.
+
+The target architecture is to separate:
+
+- runtime core execution path
+- optional runtime service capsules such as network/package/compression support
+
+The new per-binary audit script documents these edges so the next refactor can remove them with evidence rather than guessing.

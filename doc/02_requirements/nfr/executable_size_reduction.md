@@ -8,3 +8,5 @@ Codex final NFRs, 2026-04-23.
 - NFR-004: The native linker must keep existing debug and fallback paths available for local diagnostics.
 - NFR-005: Loader dependency-closure checks must classify direct dependencies by normal, platform-gated, feature-gated, or test-only status.
 - NFR-006: Loader artifact budgets must include loader-related `.rlib` or archive outputs when those artifacts are provided to the budget checker.
+- NFR-007: Native-binary dependency audits must be deterministic shell checks that can skip missing local artifacts only when the caller explicitly passes `--skip-missing`.
+- NFR-008: Native-binary dependency audits must distinguish OS-loaded shared libraries from statically retained crate/module closure.
