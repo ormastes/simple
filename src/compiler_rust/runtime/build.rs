@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
@@ -62,9 +62,9 @@ fn main() {
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
 }
 
-fn runtime_defines_symbol(root: &PathBuf, symbol: &str) -> bool {
+fn runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
     let needle = format!("fn {symbol}");
-    let mut stack = vec![root.clone()];
+    let mut stack = vec![root.to_path_buf()];
 
     while let Some(path) = stack.pop() {
         let Ok(entries) = fs::read_dir(&path) else {

@@ -114,7 +114,7 @@ pub extern "C" fn rt_serial_read(fd: i64, max_bytes: i64) -> RuntimeValue {
                 return string_to_runtime_value("");
             } else {
                 let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                if errno == libc::EAGAIN as i32 || errno == libc::EWOULDBLOCK as i32 {
+                if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                     if start.elapsed() >= timeout {
                         return string_to_runtime_value("");
                     }

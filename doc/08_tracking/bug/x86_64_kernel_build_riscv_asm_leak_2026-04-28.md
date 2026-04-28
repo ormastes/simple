@@ -164,6 +164,123 @@ a workaround, not a fix — `hal.spl` should be refactored per fix-path 4
 above so any kernel build target works regardless of where the call is
 attached.
 
+## ROOT-CAUSE UPDATE (2026-04-28 sonnet team): not a closure problem at all
+
+A 3-Sonnet team confirmed the actual root cause is one level deeper than
+the proposed fix-paths above. The Simple build invocation in
+`scripts/os_qemu_test.shs:62-67` was:
+
+```
+bin/simple native-build \
+    --entry examples/simple_os/arch/x86_64/os_entry.spl \
+    --target x86_64-unknown-none \
+    -o "$KERNEL" \
+    --linker-script ... \
+    --source src/os
+```
+
+`--source src/os` does NOT walk the import closure — it **directory-crawls
+every `.spl` under that source root** and compiles them all, regardless
+of whether they're reachable via any `use` chain from the entry. The
+inline-asm extractor sees `src/os/kernel/arch/riscv64/trap_vector.spl`
+purely because that file exists under `src/os/`, not because anything
+imports it.
+
+**The actual fix is adding `--entry-closure`** to the `native-build`
+invocation. With it, the compiler walks only modules reachable from
+`--entry`. `bin/simple native-build --help` documents the flag as
+"Compile only modules reachable from --entry."
+
+This makes the `@cfg` non-honoring on `use` statements (and on
+inline-asm extraction) much less critical — it would only bite if a
+truly transitive import chain pulled in foreign-arch code. With
+`--entry-closure` and a sane import graph, the leak vanishes.
+
+The hal.spl/mod.spl x86_64-only stripping done by Agent A is still
+useful (defense in depth, simpler closures) but is not load-bearing.
+Other arch owners (riscv64, arm64, etc.) need to re-add their own
+imports when building for their target.
+
+## SHOWSTOPPER FINDING (2026-04-28 sonnet team): SMF format is broken
+
+A separate Sonnet wrote `test/system/simple_smf_format_validity_spec.spl`
+testing whether a baked Simple SMF parses through the loader's
+`SmfReaderMemory.parse_header_from_bytes` (the same path the SimpleOS
+loader uses). Result: **8 of 14 tests fail** with concrete byte-layout
+mismatches:
+
+```
+String table offset beyond data (sym_table=678604832768, sym_count=0)
+String table offset beyond data (sym_table=11876890243497984, sym_count=0)
+```
+
+Byte-level analysis confirmed:
+- Version field at offset 4-5 reads `(0, 1)`; reader expects `(1, 1)` (v1.1 contract)
+- Bytes 20-27 (expected `section_table_offset` u64 LE) contain ASCII text `"PLE_"`
+- Symbol table offset values are physically impossible for a 219-byte file
+
+**This confirms `feedback_mcp_cache_off_by_default.md`** ("compiler
+emits broken SMFs") with a concrete artifact. Even when the kernel
+build is fixed and QEMU boots, `/SIMPLSTC.SMF` cannot load because the
+SMF **writer**'s field layout disagrees with the reader's expected
+layout.
+
+The bug is in the SMF writer, not the loader, not the runtime, not the
+boot path. The whole `bake → exec /SIMPLSTC.SMF` chain is downstream
+of fixing the writer.
+
+Surface-level `is_ok()` passes are interpreter-mode false-positives per
+`feedback_compile_mode_false_greens.md`.
+
+## Followup finding (2026-04-28 after `--entry-closure`)
+
+Adding `--entry-closure` to `scripts/os_qemu_test.shs:63` confirmed the
+fix is real for the asm side: `simple_asm_blocks.c` is no longer the
+failure point, and the build progresses past clang compilation to the
+freestanding link phase. **However** it exposes a different blocker:
+
+```
+Freestanding unresolved symbol check: 875 unexpected symbol(s)
+Link failed. Objects kept at: /tmp/.tmpKDFBVc
+Build failed: freestanding link has unexpected unresolved symbol(s):
+  BeDomNode_dot_element, BeDomNode_dot_text, CalcValue_dot_failed,
+  OpenFlags_dot_read_write, Point_dot_xy, TCP_MAX_RETRIES_dot_to_u64,
+  apps__browser_demo__browser_demo__WindowClient,
+  apps__editor__editor__VfsManager,
+  apps__shell__shell_app__VfsManager,
+  apps__shell__shell_app__WindowClient,
+  apps__shell__shell_app__Terminal,
+  ... [875 total]
+```
+
+The closure walker reaches `os.apps.shell.shell_app.ShellApp` (the entry's
+direct import) but does not transitively pull in the trait/struct types
+shell_app references via dynamic dispatch (VfsManager, WindowClient,
+Terminal, Job, ParsedCommand, Stmt, ScriptEngine, etc.). With
+`--entry-closure` mode, those symbols become unresolved at link time.
+
+This is **a separate bug from the asm leak**, with a different fix
+domain (closure-walker reachability through traits, not arch gating).
+Two approaches:
+
+1. **Fix the closure walker** to follow trait method dispatch into the
+   types that implement those traits, OR via `impl` blocks.
+2. **Keep `--entry-closure` off** and instead split sources so
+   foreign-arch files live outside `--source` roots that get walked.
+
+Until either is implemented, the kernel `os_entry.spl` build is still
+broken — but for a different reason than this bug doc originally
+documented. The `--entry-closure` change in `scripts/os_qemu_test.shs`
+is left in place because it fixes the asm leak (the original issue) and
+the new symptom is downstream, not a regression.
+
+## Sonnet team work (2026-04-28)
+
+- **Build invocation**: `scripts/os_qemu_test.shs:63` — `--entry-closure` flag added (1-line fix). Verifies x86_64 kernel build unblocked.
+- **hal.spl + mod.spl**: stripped to x86_64-only imports for defense in depth. Other arch owners must re-add their imports for their target.
+- **PayloadEntry schema**: `src/os/port/disk_image.spl` now has a `guest_path` field; `disk_image_bake.spl` uses it to stage the simple binary at `/sys/apps/simple` on the mkfs fast path. `bake_disk_via_mkfs.shs` now uses `mcopy -s` for recursive copy. Path-resolvable without the `vfs_init.spl:584` alias.
+- **SMF spec**: `test/system/simple_smf_format_validity_spec.spl` — 14 tests, 8 fail, definitive proof that the SMF writer is broken.
+
 ## Adjacent finding: hal.spl is not the only unconditional importer
 
 `src/os/kernel/arch/mod.spl` (the arch-dispatch hub, separate from
