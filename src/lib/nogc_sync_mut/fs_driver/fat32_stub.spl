@@ -171,3 +171,91 @@ impl FsDriver for FsFat32Driver:
 
     me fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
         Ok(())
+
+    static fn new_ram_backed() -> FsFat32Driver:
+        """Create a RAM-backed (empty) FsFat32Driver for tests."""
+        FsFat32Driver(
+            name:    "Fat32Driver",
+            inner:   Fat32Core.new(RamBlockDevice.new_empty()),
+            mounted: false
+        )
+
+    static fn new_ram_backed_with_file(filename: text, content: text) -> FsFat32Driver:
+        """Create a RAM-backed FsFat32Driver pre-populated with one file."""
+        FsFat32Driver(
+            name:    "Fat32Driver",
+            inner:   Fat32Core.new(RamBlockDevice.new_with_file(filename, content)),
+            mounted: false
+        )
+
+# --- RamBlockDevice — minimal in-memory block device for testing ---
+
+var _ram_block_sectors: [RamSector] = []
+
+struct RamSector:
+    """One 512-byte sector in the RAM block device store."""
+    lba:  u64
+    data: [u8]
+
+struct RamBlockDevice:
+    """In-memory block device backed by a module-level sector store."""
+    inst_id: i64
+    files:   [RamFile]
+
+struct RamFile:
+    """A named file pre-loaded in the RAM block device (for test fixtures)."""
+    name:    text
+    content: text
+
+var _ram_block_next_inst: i64 = 1
+
+fn _ram_block_alloc_inst() -> i64:
+    val id = _ram_block_next_inst
+    _ram_block_next_inst = _ram_block_next_inst + 1
+    id
+
+impl RamBlockDevice:
+    static fn new_empty() -> RamBlockDevice:
+        """Create an empty RAM block device."""
+        RamBlockDevice(inst_id: _ram_block_alloc_inst(), files: [])
+
+    static fn new_with_file(filename: text, content: text) -> RamBlockDevice:
+        """Create a RAM block device pre-loaded with one named file."""
+        var files: [RamFile] = []
+        files.push(RamFile(name: filename, content: content))
+        RamBlockDevice(inst_id: _ram_block_alloc_inst(), files: files)
+
+impl BlockDevice for RamBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        """Return zeroed sector (or sector data if written)."""
+        for s in _ram_block_sectors:
+            if s.lba == lba:
+                var i: i32 = 0
+                while i < s.data.len() as i32 and i < buffer.len() as i32:
+                    buffer[i] = s.data[i]
+                    i = i + 1
+                return Result.Ok(true)
+        # Zero fill
+        var j: i32 = 0
+        while j < buffer.len() as i32:
+            buffer[j] = 0
+            j = j + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write sector data to the module-level store."""
+        var new_store: [RamSector] = []
+        var found: bool = false
+        for s in _ram_block_sectors:
+            if s.lba == lba:
+                new_store.push(RamSector(lba: lba, data: data))
+                found = true
+            else:
+                new_store.push(s)
+        if not found:
+            new_store.push(RamSector(lba: lba, data: data))
+        _ram_block_sectors = new_store
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
