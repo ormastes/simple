@@ -7,7 +7,7 @@ use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
-use crate::mir::instructions::MirInst;
+use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
 
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_stmt(&mut self, stmt: &HirStmt, contract: Option<&HirContract>) -> MirLowerResult<()> {
@@ -947,6 +947,17 @@ impl<'a> MirLowerer<'a> {
                         | crate::hir::TypeId::BOOL
                 );
                 let needs_float_unbox = matches!(element_ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64);
+                // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
+                // element types so the loop variable's value gets the correct narrow TypeId.
+                let narrow_to_signed: Option<(u8, bool)> = match element_ty {
+                    crate::hir::TypeId::U8 => Some((8, false)),
+                    crate::hir::TypeId::U16 => Some((16, false)),
+                    crate::hir::TypeId::U32 => Some((32, false)),
+                    crate::hir::TypeId::I8 => Some((8, true)),
+                    crate::hir::TypeId::I16 => Some((16, true)),
+                    crate::hir::TypeId::I32 => Some((32, true)),
+                    _ => None,
+                };
 
                 // Load current index and get element
                 self.with_func(|func, current_block| {
@@ -959,6 +970,13 @@ impl<'a> MirLowerer<'a> {
                         func.new_vreg()
                     } else {
                         raw_element
+                    };
+                    // For narrow int element types, UnboxInt -> intermediate i64,
+                    // then UnitNarrow -> element so element gets the narrow TypeId.
+                    let unboxed_intermediate = if narrow_to_signed.is_some() {
+                        func.new_vreg()
+                    } else {
+                        element
                     };
                     let var_addr = func.new_vreg();
 
@@ -992,9 +1010,20 @@ impl<'a> MirLowerer<'a> {
                     // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
                     if needs_int_unbox {
                         block.instructions.push(MirInst::UnboxInt {
-                            dest: element,
+                            dest: unboxed_intermediate,
                             value: raw_element,
                         });
+                        // FR-DRIVER-0002b: narrow to actual element width when needed.
+                        if let Some((to_bits, signed)) = narrow_to_signed {
+                            block.instructions.push(MirInst::UnitNarrow {
+                                dest: element,
+                                value: unboxed_intermediate,
+                                from_bits: 64,
+                                to_bits,
+                                signed,
+                                overflow: UnitOverflowBehavior::Wrap,
+                            });
+                        }
                     } else if needs_float_unbox {
                         block.instructions.push(MirInst::UnboxFloat {
                             dest: element,

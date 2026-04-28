@@ -1,0 +1,91 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.spipe.*
+use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, Lsn, WAL_RECORD_COMMIT}
+
+
+fn main():
+    # Maps to: AC-3, AC-5, AC-9
+    # Run: bin/simple test test/dbfs/dbfs_engine_wal_spec.spl
+
+    """
+    DBFS WAL Specification
+    
+    Verifies write-ahead log append, flush, durable LSN tracking,
+    and recovery cursor positioning:
+      1. append returns monotonically increasing LSN
+      2. durable_lsn advances after flush
+      3. recovery cursor starts at intent_log_head
+      4. appended record readable before flush
+      5. flush is idempotent
+    """
+
+
+    describe "DBFS WAL — append":
+        """Append contract: monotonic LSNs, readable records."""
+    
+        it "first append returns LSN > 0":
+            val wal = DbfsWal.new()
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
+            val lsn = wal.append(rec).unwrap()
+            expect lsn > 0 == true
+    
+        it "successive appends produce strictly increasing LSNs":
+            val wal = DbfsWal.new()
+            val rec1 = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "a")
+            val rec2 = WalRecord(txn_id: 2, record_type: WAL_RECORD_COMMIT, payload: "b")
+            val lsn1 = wal.append(rec1).unwrap()
+            val lsn2 = wal.append(rec2).unwrap()
+            expect lsn2 > lsn1 == true
+    
+        it "appended record is readable by LSN before flush":
+            val wal = DbfsWal.new()
+            val rec = WalRecord(txn_id: 3, record_type: WAL_RECORD_COMMIT, payload: "hello")
+            val lsn = wal.append(rec).unwrap()
+            val got = wal.read_record(lsn).unwrap()
+            expect got.txn_id == 3
+    
+    describe "DBFS WAL — flush and durable LSN":
+        """Flush advances durable_lsn."""
+
+        it "durable_lsn is 0 before any flush":
+            val wal = DbfsWal.new()
+            expect wal.durable_lsn() == 0
+
+        it "durable_lsn equals tail_lsn after flush":
+            val wal = DbfsWal.new()
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
+            val lsn = wal.append(rec).unwrap()
+            wal.flush().unwrap()
+            expect wal.durable_lsn() == lsn
+
+        it "flush is idempotent":
+            val wal = DbfsWal.new()
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
+            wal.append(rec).unwrap()
+            wal.flush().unwrap()
+            val r = wal.flush()
+            expect r.is_ok() == true
+
+    describe "DBFS WAL — recovery cursor":
+        """Recovery cursor starts at intent_log_head."""
+    
+        it "recovery_cursor starts at intent_log_head after flush":
+            val wal = DbfsWal.new()
+            val rec = WalRecord(txn_id: 10, record_type: WAL_RECORD_COMMIT, payload: "")
+            wal.append(rec).unwrap()
+            wal.flush().unwrap()
+            val head = wal.intent_log_head()
+            val cursor = wal.recovery_cursor()
+            expect cursor.start_lsn() == head
+    
+        it "recovery cursor iterates all committed records":
+            val wal = DbfsWal.new()
+            wal.append(WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "a")).unwrap()
+            wal.append(WalRecord(txn_id: 2, record_type: WAL_RECORD_COMMIT, payload: "b")).unwrap()
+            wal.flush().unwrap()
+            val cursor = wal.recovery_cursor()
+            val records = cursor.collect_committed().unwrap()
+            expect records.len() == 2

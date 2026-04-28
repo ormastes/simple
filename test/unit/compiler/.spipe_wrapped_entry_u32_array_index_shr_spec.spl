@@ -1,0 +1,142 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+
+
+fn u32_array_high_bit_shr3() -> u32:
+    val arr: [u32] = [0x80000000 as u32]
+    val x: u32 = arr[0]
+    x >> 3
+
+fn u32_array_all_ones_shr3() -> u32:
+    val arr: [u32] = [0xFFFFFFFF as u32]
+    val x: u32 = arr[0]
+    x >> 3
+
+fn u32_sha_recurrence_shape() -> u32:
+    val arr: [u32] = [0x10000000 as u32, 0xF0000000 as u32, 0x0F0F0F0F as u32]
+    # Shape mirrors `arr[a] + (arr[b] ^ arr[c])` from sha256 schedule, with a `>>`
+    # in the middle to force the signed/unsigned dispatch through the indexed read.
+    val ai: u32 = arr[0]
+    val bi: u32 = arr[1]
+    val ci: u32 = arr[2]
+    val shifted: u32 = bi >> 3
+    ai + (shifted ^ ci)
+
+fn u32_array_for_loop_shr3() -> u32:
+    val arr: [u32] = [0x80000000 as u32]
+    var acc: u32 = 0 as u32
+    for w in arr:
+        acc = acc + (w >> 3)
+    acc
+
+fn i32_array_minus_one_shr3() -> i32:
+    val arr: [i32] = [-1 as i32]
+    val x: i32 = arr[0]
+    x >> 3
+
+fn main():
+    # A2 / FR-DRIVER-0002b regression: indexed-array reads must narrow to the
+    # element type before downstream `>>`, `+`, `^`, etc.
+    #
+    # Today, `arr[i]` for `arr: [u32]` lowers as:
+    #     %raw  = rt_index_get(arr, i)        # boxed RuntimeValue
+    #     %u    = MirInst::UnboxInt %raw      # codegen sshr-3, dest typed I64 (signed)
+    # and the value is left as a sign-extended I64. For elements with bit 31 set
+    # (e.g. `0xFFFFFFFF`), a subsequent `>>` picks `sshr` (signed) and produces a
+    # sign-extended i64 result instead of the unsigned u32 logical-shift result.
+    #
+    # This is the exact bit-level mechanism by which SHA-256 small_sigma0 corrupts
+    # the message schedule (see `src/os/crypto/sha256.spl:220-280` —
+    # `_u32_mask(rotr32(w,7) ^ rotr32(w,18) ^ (w >> 3))`), which propagates into
+    # HKDF-Expand and breaks live TLS (A2: `okm_a` first byte 186 vs RFC 60).
+    #
+    # Phase 5 fixes this by emitting `MirInst::UnitNarrow{from:64,to:W,signed}` after
+    # every indexed-int unbox in:
+    #   - src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:361-370
+    #   - src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs:993-1002
+    #   - src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs:51-61
+    #
+    # This spec is the focused regression that gates Phase 5: it currently fails
+    # (each `it` reports the wrong sign-extended value) and turns green after the
+    # UnitNarrow emit lands.
+    #
+    # @tag: compiler,regression,cranelift,shift,fr-driver-0002b,a2,sha256
+
+    # ---------------------------------------------------------------------------
+    # Helpers — exercise the three lowering call sites the patch touches.
+    # ---------------------------------------------------------------------------
+
+    # Patch site #1: general expression-context indexed read, then >>.
+    # `arr[0] >> 3` for arr[0] = 0xFFFFFFFF.
+    # Right answer (unsigned u32 logical):   0xFFFFFFFF >> 3 = 0x1FFFFFFF
+    # Wrong answer (current sign-extended i64): 0xFFFFFFFF as i64 >> 3 = 0x1FFFFFFF too —
+    # BUT once the next `+`/`^` operand mixes, the sign-bit fill becomes visible.
+    # The cleanest single-op witness is to use 0x80000000 which only differs
+    # when the implicit i64 sign-extension is present:
+    #   0x80000000 as u32 >> 3 = 0x10000000  (correct, ushr from u32)
+    #   sign-extend(0x80000000) as i64 >> 3 = 0xFFFFFFFFF0000000 (low-32 = 0xF0000000) (wrong)
+    # The low-32 bits differ, so a u32-typed comparison catches the bug.
+
+    # SHA-256 schedule recurrence shape, minimal scale.
+    # Mirrors the pattern at src/os/crypto/sha256.spl:220-280, e.g.
+    #   small_sigma0(w[t-15]) and the schedule:
+    #   w[t] = w[t-16] + small_sigma0(w[t-15]) + w[t-7] + small_sigma1(w[t-2]).
+    #
+    # Pick three constants so the right (unsigned) and wrong (signed) lowerings
+    # disagree on bit-31-set values surviving `>>` and `^`:
+    #   a := 0x10000000     (bit 31 NOT set)
+    #   b := 0xF0000000     (bit 31 set; signed-vs-unsigned shift visible)
+    #   c := 0x0F0F0F0F     (bit 31 NOT set; XOR partner)
+    #
+    # Right answer (unsigned, u32 wrap on `+`):
+    #   b >> 3 = 0xF0000000 >>u 3 = 0x1E000000
+    #   (b >> 3) ^ c = 0x1E000000 ^ 0x0F0F0F0F = 0x110F0F0F
+    #   a + ((b>>3) ^ c) = 0x10000000 + 0x110F0F0F = 0x210F0F0F
+    #
+    # Wrong answer (current code: signed sshr on sign-extended i64):
+    #   sign-extend(0xF0000000) as i64 = 0xFFFFFFFFF0000000
+    #   that >> 3 (sshr) = 0xFFFFFFFFFE000000  (low-32 = 0xFE000000)
+    #   ^ 0x0F0F0F0F = 0xF10F0F0F
+    #   + 0x10000000 (with i64 + then narrow) = 0x010F0F0F (low-32, wraps)
+    # The low-32 u32 result is 0x010F0F0F vs the correct 0x210F0F0F — distinguishable.
+
+    # Patch site #2: for-loop element extraction.  After Phase 5, the loop variable
+    # `w` is narrowed before the `>>` consumes it, so the high-bit value flows through
+    # correctly.  Pre-fix, `w` is sign-extended i64 → `>> 3` is `sshr` → wrong.
+    # Signed companion: confirm that `[i32]` indexed `>>` still does ARITHMETIC
+    # shift after the patch (signed narrow uses sshr, not ushr).  -1i32 >> 3 = -1.
+    # ---------------------------------------------------------------------------
+    # Spec
+    # ---------------------------------------------------------------------------
+
+    describe "Indexed `[u32]` read narrows before `>>` (A2 / FR-DRIVER-0002b array variant)":
+        it "AC-1a: arr[0] >> 3 with arr[0]=0x80000000 yields 0x10000000 (unsigned logical shift)":
+            val got: u32 = u32_array_high_bit_shr3()
+            val expected: u32 = 0x10000000 as u32
+            expect got == expected
+
+        it "AC-1b: arr[0] >> 3 with arr[0]=0xFFFFFFFF yields 0x1FFFFFFF (unsigned logical shift)":
+            val got: u32 = u32_array_all_ones_shr3()
+            val expected: u32 = 0x1FFFFFFF as u32
+            expect got == expected
+
+        it "AC-1c: SHA-recurrence shape `arr[a] + ((arr[b] >> 3) ^ arr[c])` yields unsigned-correct 0x210F0F0F":
+            # Mirrors `w[t-16] + small_sigma0-like(w[t-15]) + ... ^ ...` from
+            # src/os/crypto/sha256.spl:220-280 at minimum scale.  Distinguishes
+            # signed-i64 lowering (wrong: 0x010F0F0F) from u32-narrowed (right).
+            val got: u32 = u32_sha_recurrence_shape()
+            val expected: u32 = 0x210F0F0F as u32
+            expect got == expected
+
+        it "AC-1d: for-loop `for w in arr: acc += w >> 3` matches direct indexed read":
+            val got: u32 = u32_array_for_loop_shr3()
+            val expected: u32 = 0x10000000 as u32
+            expect got == expected
+
+        it "AC-1e: signed [i32] arr[0] >> 3 still arithmetic-shifts (-1 >> 3 == -1)":
+            # Guard against an over-eager fix that drops signedness for [i32] too.
+            # SIGNED narrow path must keep `signed: true` in UnitNarrow so the
+            # downstream `>>` dispatches to `sshr`.
+            expect i32_array_minus_one_shr3() == -1

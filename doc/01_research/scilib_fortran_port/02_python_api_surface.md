@@ -1,9 +1,8 @@
 # Python API Surface Inventory: NumPy / pandas / scikit-learn
 
-**Phase:** 2-research (wide-and-shallow) · **Date:** 2026-04-27
-
-**Flags:** `C`=collision with existing `src/lib/` · `M`=math-block-friendly · `P`=no-primitive pressure
-**Existing overlap:** `Tensor`+factory in `nogc_sync_mut/src/tensor.spl`; `Table`/`Column` in `src/table.spl`. New namespaces wrap/supersede. `Tensor→NDArray` rename is arch-phase decision.
+**Phase:** 2-research · **Date:** 2026-04-27
+**Flags:** `C`=collision with `src/lib/` · `M`=math-block-friendly · `P`=no-primitive pressure
+**Overlap:** `Tensor`+factory in `nogc_sync_mut/src/tensor.spl`; `Table`/`Column` in `src/table.spl`. `Tensor→NDArray` rename is arch-phase decision.
 
 ---
 
@@ -49,9 +48,8 @@
 | Name | Diff | Why | Simple Name | Flags |
 |------|------|-----|-------------|-------|
 | `add/sub/mul/div` | medium | broadcast+dtype dispatch; `+*-/` operators | `add/sub/mul/div<T>` | M |
-| `exp/log` | medium | conflict `common/optimization/` and `common/complex/` free fns | `ndarray.exp/log` | C M |
-| `sin/cos` | medium | conflict `common/complex/trigonometric.*` | `ndarray.sin/cos` | C M |
-| `sqrt` | medium | conflicts `common/optimization/utilities.sqrt` | `ndarray.sqrt` | C M |
+| `exp/log` | medium | conflict `common/optimization/` and `common/complex/` | `ndarray.exp/log` | C M |
+| `sin/cos/sqrt` | medium | conflict `common/complex/trigonometric.*` and `common/optimization/` | `ndarray.sin/cos/sqrt` | C M |
 
 ### Reductions
 
@@ -67,8 +65,8 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `dot` | `np.dot(a, b)` | medium | 1-D dot or 2-D matmul; BLAS | `linalg.dot<T>` | C M |
-| `matmul` | `np.matmul(a, b)` | medium | strict 2-D+; math-block `@` | `linalg.matmul<T>` | M |
+| `dot` | `np.dot(a, b)` | medium | 1-D dot or 2-D matmul (BLAS) | `linalg.dot<T>` | C M |
+| `matmul` | `np.matmul(a, b)` | medium | strict 2-D+; `@` operator | `linalg.matmul<T>` | M |
 | `inv` | `np.linalg.inv(a)` | hard | LAPACK DGETRI; singular error path | `linalg.inv` | — |
 | `solve` | `np.linalg.solve(a, b)` | hard | LAPACK DGESV; hide pivot array | `linalg.solve` | — |
 | `eig` | `np.linalg.eig(a)` | hard | LAPACK DGEEV; complex output→`Complex64` | `linalg.eig` | P |
@@ -81,8 +79,8 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `default_rng` | `np.random.default_rng(seed)` | medium | mutable `RngState` wrapper needed | `random.default_rng` | P |
-| `normal/uniform` | `rng.normal/uniform(loc,scale,size)` | medium | FFI to cuRAND or host RNG | `rng.normal/uniform` | — |
+| `default_rng` | `np.random.default_rng(seed)` | medium | mutable `RngState` wrapper | `random.default_rng` | P |
+| `normal/uniform` | `rng.normal/uniform(loc,scale,size)` | medium | FFI to cuRAND or host | `rng.normal/uniform` | — |
 | `integers` | `rng.integers(low,high,size)` | medium | `NDArray<Index>` return | `rng.integers` | P |
 | `save/load` | `np.save/load(file, arr)` | medium | .npy header; no pickle | `io.save/load<T>` | — |
 | `loadtxt` | `np.loadtxt(fname, dtype, delimiter)` | hard | string parse + dtype inference + delimiter dispatch | `io.load_txt<T>` | P |
@@ -98,11 +96,11 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `DataFrame` | `pd.DataFrame(data, index, columns)` | medium | dtype inference per column; polymorphic `data` | `DataFrame.new` | P |
-| `Series` | `pd.Series(data, index, name, dtype)` | medium | generic `Series<T>` with optional label index | `Series.new<T>` | P |
-| `loc` | `df.loc[label, col]` | hard | label alignment; multi-axis; slice-of-labels | `df.loc` | M P |
-| `iloc` | `df.iloc[i, j]` | medium | pure integer positional | `df.iloc` | M P |
-| `at` / `iat` | `df.at[label,col]` / `df.iat[i,j]` | trivial | single-cell fast access | `df.at` / `df.iat` | P |
+| `DataFrame` | `pd.DataFrame(data, index, columns)` | medium | dtype inference per column; polymorphic | `DataFrame.new` | P |
+| `Series` | `pd.Series(data, index, name, dtype)` | medium | generic `Series<T>`; optional label index | `Series.new<T>` | P |
+| `loc` | `df.loc[label, col]` | hard | label align; multi-axis; label-slice | `df.loc` | M P |
+| `iloc` | `df.iloc[i, j]` | medium | integer positional | `df.iloc` | M P |
+| `at` / `iat` | scalar label/integer access | trivial | single-cell fast path | `df.at` / `df.iat` | P |
 
 ### Column Operations
 
@@ -110,9 +108,9 @@
 |------|-----------------|------|-----|-------------|-------|
 | `assign` | `df.assign(**kwargs)` | medium | variable-arity→named map | `df.assign` | P |
 | `drop` | `df.drop(labels, axis)` | medium | axis dispatch; `Table.drop` exists | `df.drop` | C |
-| `rename` | `df.rename(columns={})` | trivial | map-based; `Table.rename` exists | `df.rename` | C |
+| `rename` | `df.rename(columns={})` | trivial | `Table.rename` exists | `df.rename` | C |
 | `dtypes` | `df.dtypes` | trivial | `Series<DType>` attribute | `df.dtypes` | C |
-| `astype` | `df.astype(dtype)` | medium | per-column cast; polymorphic | `df.astype` | P |
+| `astype` | `df.astype(dtype)` | medium | per-column cast | `df.astype` | P |
 | `df['col']` | column subscript | trivial | single→`Series`; multi→`DataFrame` | `df[col]` | M |
 
 ### GroupBy
@@ -137,27 +135,27 @@
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
 | `isna` | `df.isna()` | trivial | bool frame/series | `df.is_na` | M |
-| `fillna` | `df.fillna(value)` | medium | scalar/dict/forward-fill polymorphism | `df.fill_na` | P |
-| `dropna` | `df.dropna(axis, how)` | medium | how=any/all + axis | `df.drop_na` | — |
+| `fillna` | `df.fillna(value)` | medium | scalar/dict/forward-fill | `df.fill_na` | P |
+| `dropna` | `df.dropna(axis, how)` | medium | how=any/all; axis | `df.drop_na` | — |
 
 ### I/O & Datetime
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `read_csv` | `pd.read_csv(filepath, sep, header, dtype)` | hard | dtype inference; nullable; header detect | `io.read_csv` | P |
-| `to_csv` | `df.to_csv(path, sep, index)` | medium | nullable + escape | `df.to_csv` | — |
-| `read_parquet` | `pd.read_parquet(path, columns)` | hard | binary format; Parquet FFI needed | `io.read_parquet` | — |
-| `read_json` | `pd.read_json(path, orient)` | medium | orient dispatch; recursive struct | `io.read_json` | P |
-| `to_datetime` | `pd.to_datetime(arg, format, utc)` | hard | format auto-detect; tz; polymorphic input | `to_datetime` | P |
-| `dt` accessor | `s.dt.year / .month / .day_of_week` | medium | accessor pattern; many sub-fields | `Series<DateTime>.dt` | — |
+| `read_csv` | `pd.read_csv(filepath, sep, header, dtype)` | hard | dtype inference; nullable; header | `io.read_csv` | P |
+| `to_csv` | `df.to_csv(path, sep, index)` | medium | nullable+escape | `df.to_csv` | — |
+| `read_parquet` | `pd.read_parquet(path, columns)` | hard | binary; Parquet FFI | `io.read_parquet` | — |
+| `read_json` | `pd.read_json(path, orient)` | medium | orient dispatch; recursive | `io.read_json` | P |
+| `to_datetime` | `pd.to_datetime(arg, format, utc)` | hard | format auto-detect; tz; polymorphic | `to_datetime` | P |
+| `dt` accessor | `s.dt.year/.month/.day_of_week` | medium | accessor; many sub-fields | `Series<DateTime>.dt` | — |
 
 ### Inspection & Sorting
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
 | `head/tail` | `df.head/tail(n=5)` | trivial | `Table.head/tail` exist | `df.head/tail` | C |
-| `describe` | `df.describe(include)` | medium | per-column stats + quartiles | `df.describe` | — |
-| `info` | `df.info(verbose)` | trivial | introspection text output | `df.info` | — |
+| `describe` | `df.describe(include)` | medium | per-column stats+quartiles | `df.describe` | — |
+| `info` | `df.info(verbose)` | trivial | introspection text | `df.info` | — |
 | `sort_values` | `df.sort_values(by, ascending, na_position)` | medium | multi-key stable sort; NaN pos | `df.sort_values` | P |
 | `sort_index` | `df.sort_index(axis, ascending)` | medium | index sort; axis dispatch | `df.sort_index` | — |
 | `set_index` | `df.set_index(keys, drop)` | medium | promote column→label index | `df.set_index` | P |
@@ -167,10 +165,10 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `apply` | `df.apply(func, axis)` | hard | axis dispatch; return shape varies; closure under no-inheritance | `df.apply` | P |
+| `apply` | `df.apply(func, axis)` | hard | axis dispatch; return shape varies; closure param | `df.apply` | P |
 | `map` | `s.map(func_or_dict)` | medium | `Column.map<U>` exists; dict lookup path | `series.map<U>` | C |
 | `value_counts/unique/nunique` | `s.value_counts/unique/nunique()` | trivial/medium | `Column.value_counts/unique` exist | `series.value_counts/unique/nunique` | C |
-| `drop_duplicates` | `df.drop_duplicates(subset, keep)` | medium | hash rows; subset dispatch | `df.drop_duplicates` | — |
+| `drop_duplicates` | `df.drop_duplicates(subset, keep)` | medium | hash rows; subset+keep | `df.drop_duplicates` | — |
 | `pivot_table` | `df.pivot_table(values,index,columns,aggfunc)` | hard | multi-level groupby+reshape; aggfunc polymorphic | `df.pivot_table` | P |
 | `melt` | `pd.melt(df, id_vars, value_vars)` | medium | wide→long reshape | `std.df.melt` | — |
 | `str` accessor | `s.str.lower()/.contains()/.split()` | medium | vectorized text ops; `std.common.text` | `Series<text>.str` | — |
@@ -197,17 +195,17 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `train_test_split` | `train_test_split(*arrays, test_size, random_state)` | medium | variadic arrays; random shuffle | `ml.train_test_split<T>` | P |
+| `train_test_split` | `train_test_split(*arrays, test_size, seed)` | medium | variadic arrays; random shuffle | `ml.train_test_split<T>` | P |
 | `cross_val_score` | `cross_val_score(est, X, y, cv, scoring)` | hard | clone per fold; scoring polymorphic | `ml.cross_val_score` | P |
-| `KFold` | `KFold(n_splits, shuffle, random_state)` | medium | index-pair iterator | `ml.KFold.new` | P |
-| `StratifiedKFold` | `StratifiedKFold(n_splits, shuffle)` | hard | label-frequency equalization per fold; sort+count | `ml.StratifiedKFold.new` | P |
+| `KFold` | `KFold(n_splits, shuffle, seed)` | medium | index-pair iterator | `ml.KFold.new` | P |
+| `StratifiedKFold` | `StratifiedKFold(n_splits, shuffle)` | hard | label-freq equalization; sort+count | `ml.StratifiedKFold.new` | P |
 
 ### Preprocessing
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
 | `StandardScaler` | `StandardScaler(with_mean, with_std)` | medium | stateful mean/std per feature | `ml.StandardScaler.new` | — |
-| `MinMaxScaler` | `MinMaxScaler(feature_range=(0,1))` | medium | stateful min/max per feature | `ml.MinMaxScaler.new` | P |
+| `MinMaxScaler` | `MinMaxScaler(feature_range=(0,1))` | medium | stateful min/max per feature | `ml.MinMaxScaler.new` | — |
 | `OneHotEncoder` | `OneHotEncoder(sparse_output, handle_unknown)` | hard | sparse output; unknown-category state | `ml.OneHotEncoder.new` | P |
 | `LabelEncoder` | `LabelEncoder()` | medium | sorted labels→`Index`; inverse_transform needed | `ml.LabelEncoder.new` | P |
 
@@ -228,9 +226,9 @@
 
 | Name | Python Signature | Diff | Why | Simple Name | Flags |
 |------|-----------------|------|-----|-------------|-------|
-| `mean_squared_error` | `mse(y_true, y_pred, squared)` | trivial | closed-form reduction | `metrics.mse` | M |
+| `mean_squared_error` | `mse(y_true, y_pred, squared)` | trivial | reduction | `metrics.mse` | M |
 | `accuracy_score` | `accuracy(y_true, y_pred, normalize)` | trivial | count equality | `metrics.accuracy<T>` | — |
-| `r2_score` | `r2(y_true, y_pred)` | trivial | closed-form | `metrics.r2` | M |
+| `r2_score` | `r2(y_true, y_pred)` | trivial | reduction | `metrics.r2` | M |
 | `confusion_matrix` | `confusion_matrix(y_true, y_pred, labels, normalize)` | hard | label enum + normalization dispatch | `metrics.confusion_matrix<T>` | P |
 | `classification_report` | `classification_report(y_true, y_pred, target_names)` | hard | per-class P/R/F1; text output | `metrics.classification_report<T>` | P |
 

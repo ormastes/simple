@@ -1,0 +1,104 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.spipe.*
+use app.web_dashboard.server.{DashboardServer}
+
+fn main():
+    # Web Dashboard Server and Router Specification
+    #
+    # Focused coverage for the main dashboard server entrypoint.
+
+
+    # ============================================================================
+    # Main dashboard router
+    # ============================================================================
+
+    describe "Web dashboard server router":
+        """
+        Covers the primary server routes without touching the network stack.
+        """
+
+        it "redirects unauthenticated requests for / to /login":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request("GET", "/", "", "")
+            expect (resp).starts_with("HTTP/1.1 302 Found")
+            expect (resp).contains("Location: /login")
+
+        it "serves the login page on GET /login":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request("GET", "/login", "", "")
+            expect (resp).starts_with("HTTP/1.1 200 OK")
+            expect (resp).contains("Content-Type: text/html")
+            expect (resp).contains("<!DOCTYPE html>")
+            expect (resp).contains("LLM Dashboard Login")
+            expect (resp).contains("<form method=\"POST\" action=\"/login\">")
+            expect (resp).contains("Peer Base Pack")
+            expect resp.contains("/api/tmux/sessions") == false
+            expect resp.contains("/ws/terminal?session=") == false
+
+        it "rejects empty login submissions without minting an authenticated session":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request("POST", "/login", "", "")
+            expect (
+                resp.starts_with("HTTP/1.1 400")
+                or resp.starts_with("HTTP/1.1 401")
+                or resp.starts_with("HTTP/1.1 422")
+            ) to_equal true
+            expect resp.contains("Set-Cookie:") == false
+            expect (
+                resp.contains("LLM Dashboard Login")
+                or resp.contains("Location: /login")
+                or resp.contains("invalid")
+                or resp.contains("Invalid")
+            ) to_equal true
+
+        it "logout clears any active session and returns to /login":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request(
+                "GET",
+                "/logout",
+                "",
+                "Cookie: llm_dashboard_session=stale-session\r\n"
+            )
+            expect (
+                resp.starts_with("HTTP/1.1 302 Found")
+                or resp.starts_with("HTTP/1.1 303 See Other")
+            ) to_equal true
+            expect (resp).contains("Location: /login")
+            expect (
+                resp.contains("Set-Cookie:")
+                or resp.contains("Max-Age=0")
+                or resp.contains("Expires=")
+            ) to_equal true
+
+        it "rejects unauthenticated API access":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request("GET", "/api/tmux", "", "")
+            expect (resp).starts_with("HTTP/1.1 401 Unauthorized")
+            expect (resp).contains("Content-Type: application/json")
+
+        it "rejects unauthenticated terminal and tmux capture access on deeper routes":
+            val server = DashboardServer.new(4242)
+            val tmux_resp = server.route_request("GET", "/api/tmux/capture?session=main&window=0&pane=0", "", "")
+            expect (tmux_resp).starts_with("HTTP/1.1 401 Unauthorized")
+
+            val ws_resp = server.route_request("GET", "/ws/terminal?session=main&window=0&pane=0", "", "")
+            expect (
+                ws_resp.starts_with("HTTP/1.1 401 Unauthorized")
+                or ws_resp.starts_with("HTTP/1.1 302 Found")
+                or ws_resp.starts_with("HTTP/1.1 403 Forbidden")
+            ) to_equal true
+
+        it "routes unknown paths to the login redirect when unauthenticated":
+            val server = DashboardServer.new(4242)
+            val resp = server.route_request("GET", "/does-not-exist", "", "")
+            expect (resp).starts_with("HTTP/1.1 302 Found")
+            expect (resp).contains("Location: /login")
+fn main():
+    #![allow(spipe_empty_examples)]
+    #![allow(spipe_boolean_wrapper_assertions)]
+    @allow(spipe_empty_examples)
+    @allow(spipe_boolean_wrapper_assertions)
+

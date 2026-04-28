@@ -1,0 +1,307 @@
+# @cover src/lib/common/linalg/blas.spl 80%
+"""
+# BLAS gemm Specification
+
+**Feature IDs:** scilib-blas-gemm
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_blas.md
+**Design:** doc/05_design/scilib_port_architecture.md
+
+## Overview
+
+`gemm(alpha, A, B, beta, C)` computes `C := alpha * A * B + beta * C`
+(BLAS Level-3 dgemm). All matrices are typed: `Float64`, `Matrix<Float64>`.
+
+## Operand-Swap Convention (CRITICAL — T-BLAS-13 risk)
+
+cuBLAS is column-major. A row-major buffer of M passed to cuBLAS as column-major
+is interpreted as Mᵀ. Therefore Layer B applies the identity `(AB)ᵀ = BᵀAᵀ`:
+it passes (B_rm, A_rm) — i.e., operands swapped — to `cublasDgemm_64`.
+cuBLAS then computes Bᵀ·Aᵀ = (AB)ᵀ in column-major, which is AB in row-major.
+
+**This swap is invisible to Layer C / specs.** Specs assert ordinary row-major
+results: `C[i,j] = alpha * Σ_k A[i,k] * B[k,j] + beta * C_in[i,j]`.
+The operand-swap is the exact thing these specs are designed to catch if wrong:
+using rectangular (non-square) shapes makes a transposed result have the wrong
+shape, producing a loud DimensionMismatch rather than silent bad numbers.
+
+## Implementation Notes
+
+Specs run under `SIMPLE_BLAS_BACKEND=mock` (set by `bin/simple test` for
+`test/feature/scilib/` paths). Mock must compute correct small-N results
+per T-CUDA-02. These specs fail until T-BLAS-11 (gemm Layer B) + T-BLAS-12
+(gemm Layer C) land — TDD. No `skip()`, no `--mode=native` (AC-7 / feedback_no_coverups).
+
+Tasks covered: T-BLAS-11 (gemm Layer B operand-swap + Layer A call),
+T-BLAS-12 (gemm Layer C public API), T-BLAS-13 (operand-swap correctness spec).
+"""
+
+use std.spipe.*
+use std.linalg.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: 2×3 @ 3×2 — canonical rectangular case
+# ============================================================================
+
+describe "linalg.gemm — 2x3 @ 3x2 canonical case":
+    """
+    ## Canonical rectangular multiplication
+
+    A (2×3) = [[1,2,3],[4,5,6]], B (3×2) = [[7,8],[9,10],[11,12]]
+
+    Hand-computed A·B (2×2):
+      C[0,0] = 1*7 + 2*9 + 3*11 = 58
+      C[0,1] = 1*8 + 2*10 + 3*12 = 64
+      C[1,0] = 4*7 + 5*9 + 6*11 = 139
+      C[1,1] = 4*8 + 5*10 + 6*12 = 154
+
+    This shape (2×3 and 3×2) makes any operand-swap bug cause a DimensionMismatch
+    (the caller would see a 3×3 or incompatible result) rather than wrong-but-plausible
+    numbers — catching T-BLAS-13 risk loudly.
+    """
+
+    context "alpha=1.0, beta=0.0 (pure multiply)":
+        """
+        ### alpha=1 / beta=0: C = A*B, ignoring C_in
+        """
+
+        it "returns C[0,0]=58.0":
+            # T-BLAS-11, T-BLAS-13
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = zeros_matrix(Index(2), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(0), Index(0)])).to_equal(Float64(58.0))
+
+        it "returns C[0,1]=64.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = zeros_matrix(Index(2), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(0), Index(1)])).to_equal(Float64(64.0))
+
+        it "returns C[1,0]=139.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = zeros_matrix(Index(2), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(1), Index(0)])).to_equal(Float64(139.0))
+
+        it "returns C[1,1]=154.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = zeros_matrix(Index(2), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(1), Index(1)])).to_equal(Float64(154.0))
+
+        it "result has shape 2x2":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = zeros_matrix(Index(2), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.rows()).to_equal(Index(2))
+            expect(c.cols()).to_equal(Index(2))
+
+
+# ============================================================================
+# Test Group 2: alpha=2, beta=3 — mixed scale path
+# ============================================================================
+
+describe "linalg.gemm — alpha=2 / beta=3 mixed scale":
+    """
+    ## Mixed alpha / beta
+
+    Same A and B as above. C_in = [[1,1],[1,1]].
+    Expected:
+      C[0,0] = 2*58 + 3*1 = 119
+      C[0,1] = 2*64 + 3*1 = 131
+      C[1,0] = 2*139 + 3*1 = 281
+      C[1,1] = 2*154 + 3*1 = 311
+
+    This exercises the beta-accumulate path, distinct from the pure-multiply path.
+    """
+
+    context "C_in = all-ones 2x2":
+        it "returns C[0,0]=119.0":
+            # T-BLAS-12: beta-accumulate path
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = full_matrix(Index(2), Index(2), Float64(1.0))
+            val c = gemm(Float64(2.0), a, b, Float64(3.0), c_in)
+            expect(c.get_at([Index(0), Index(0)])).to_equal(Float64(119.0))
+
+        it "returns C[0,1]=131.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = full_matrix(Index(2), Index(2), Float64(1.0))
+            val c = gemm(Float64(2.0), a, b, Float64(3.0), c_in)
+            expect(c.get_at([Index(0), Index(1)])).to_equal(Float64(131.0))
+
+        it "returns C[1,0]=281.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = full_matrix(Index(2), Index(2), Float64(1.0))
+            val c = gemm(Float64(2.0), a, b, Float64(3.0), c_in)
+            expect(c.get_at([Index(1), Index(0)])).to_equal(Float64(281.0))
+
+        it "returns C[1,1]=311.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(2.0), Float64(3.0)],
+                [Float64(4.0), Float64(5.0), Float64(6.0)]])
+            val b = matrix_from_rows([
+                [Float64(7.0), Float64(8.0)],
+                [Float64(9.0), Float64(10.0)],
+                [Float64(11.0), Float64(12.0)]])
+            val c_in = full_matrix(Index(2), Index(2), Float64(1.0))
+            val c = gemm(Float64(2.0), a, b, Float64(3.0), c_in)
+            expect(c.get_at([Index(1), Index(1)])).to_equal(Float64(311.0))
+
+
+# ============================================================================
+# Test Group 3: Non-square second rectangular case (3×4 @ 4×2 → 3×2)
+# ============================================================================
+
+describe "linalg.gemm — 3x4 @ 4x2 non-square":
+    """
+    ## Non-square: different m, n, k
+
+    A (3×4), B (4×2) → C (3×2). Uses a different K than the canonical case,
+    making any row/col confusion produce the wrong output shape (4×3 instead
+    of 3×2), loudly failing the shape assertions.
+
+    A = [[1,0,0,0],[0,1,0,0],[0,0,1,0]]   (identity columns, first 3)
+    B = [[1,2],[3,4],[5,6],[7,8]]
+
+    A·B: row 0 picks row 0 of B = [1,2]; row 1 picks row 1 = [3,4]; row 2 picks row 2 = [5,6]
+    Expected C = [[1,2],[3,4],[5,6]]
+    """
+
+    context "alpha=1.0, beta=0.0, A is partial identity":
+        it "result has shape 3x2":
+            # T-BLAS-13: non-square operand-swap invariant
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(0.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(1.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(0.0), Float64(1.0), Float64(0.0)]])
+            val b = matrix_from_rows([
+                [Float64(1.0), Float64(2.0)],
+                [Float64(3.0), Float64(4.0)],
+                [Float64(5.0), Float64(6.0)],
+                [Float64(7.0), Float64(8.0)]])
+            val c_in = zeros_matrix(Index(3), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.rows()).to_equal(Index(3))
+            expect(c.cols()).to_equal(Index(2))
+
+        it "returns C[0,0]=1.0 and C[0,1]=2.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(0.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(1.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(0.0), Float64(1.0), Float64(0.0)]])
+            val b = matrix_from_rows([
+                [Float64(1.0), Float64(2.0)],
+                [Float64(3.0), Float64(4.0)],
+                [Float64(5.0), Float64(6.0)],
+                [Float64(7.0), Float64(8.0)]])
+            val c_in = zeros_matrix(Index(3), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(0), Index(0)])).to_equal(Float64(1.0))
+            expect(c.get_at([Index(0), Index(1)])).to_equal(Float64(2.0))
+
+        it "returns C[2,0]=5.0 and C[2,1]=6.0":
+            val a = matrix_from_rows([
+                [Float64(1.0), Float64(0.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(1.0), Float64(0.0), Float64(0.0)],
+                [Float64(0.0), Float64(0.0), Float64(1.0), Float64(0.0)]])
+            val b = matrix_from_rows([
+                [Float64(1.0), Float64(2.0)],
+                [Float64(3.0), Float64(4.0)],
+                [Float64(5.0), Float64(6.0)],
+                [Float64(7.0), Float64(8.0)]])
+            val c_in = zeros_matrix(Index(3), Index(2))
+            val c = gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+            expect(c.get_at([Index(2), Index(0)])).to_equal(Float64(5.0))
+            expect(c.get_at([Index(2), Index(1)])).to_equal(Float64(6.0))
+
+
+# ============================================================================
+# Test Group 4: Error path — shape mismatch
+# ============================================================================
+
+describe "linalg.gemm — shape mismatch error":
+    """
+    ## Error handling
+
+    A.cols must equal B.rows; C must be A.rows × B.cols.
+    Violations return `Result.Err(LinalgError.DimensionMismatch(...))`.
+    """
+
+    it "returns an error when A.cols != B.rows":
+        # T-BLAS-12: dimension guard on inner dimension
+        val a = matrix_from_rows([
+            [Float64(1.0), Float64(2.0)],
+            [Float64(3.0), Float64(4.0)]])
+        val b = matrix_from_rows([
+            [Float64(1.0), Float64(2.0), Float64(3.0)],
+            [Float64(4.0), Float64(5.0), Float64(6.0)],
+            [Float64(7.0), Float64(8.0), Float64(9.0)]])
+        val c_in = zeros_matrix(Index(2), Index(3))
+        val r = try_gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+        expect(r.error?).to_equal(true)
+
+    it "returns an error when C dimensions don't match A.rows x B.cols":
+        # T-BLAS-12: C output dimension guard
+        val a = matrix_from_rows([
+            [Float64(1.0), Float64(2.0), Float64(3.0)],
+            [Float64(4.0), Float64(5.0), Float64(6.0)]])
+        val b = matrix_from_rows([
+            [Float64(7.0), Float64(8.0)],
+            [Float64(9.0), Float64(10.0)],
+            [Float64(11.0), Float64(12.0)]])
+        val c_in = zeros_matrix(Index(3), Index(3))
+        val r = try_gemm(Float64(1.0), a, b, Float64(0.0), c_in)
+        expect(r.error?).to_equal(true)

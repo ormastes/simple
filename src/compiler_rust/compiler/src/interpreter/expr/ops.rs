@@ -359,8 +359,47 @@ pub(super) fn eval_op_expr(
                 _ => {} // Fall through to normal handling
             }
 
-            let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-            let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+            let mut left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+            let mut right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+
+            // Newtype-wrap detection: if both operands are Objects of the SAME class
+            // with a single `value` field (the canonical newtype shape), arithmetic
+            // ops unwrap to the inner value, perform the op on raw scalars, then
+            // re-wrap the int/float result back into the newtype. Comparison ops
+            // (==, !=, <, >, <=, >=) return Bool and never re-wrap.
+            let newtype_wrap_class: Option<String> = match (&left_val, &right_val) {
+                (
+                    Value::Object { class: lc, fields: lf },
+                    Value::Object { class: rc, fields: rf },
+                ) if lc == rc
+                    && lf.len() == 1
+                    && lf.contains_key("value")
+                    && rf.len() == 1
+                    && rf.contains_key("value")
+                    && matches!(
+                        op,
+                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    ) =>
+                {
+                    Some(lc.clone())
+                }
+                _ => None,
+            };
+
+            // For newtype arithmetic, unwrap to inner scalars so use_float detection
+            // and Int/Float dispatch see the real underlying types.
+            if newtype_wrap_class.is_some() {
+                if let Value::Object { fields, .. } = &left_val {
+                    if let Some(inner) = fields.get("value").cloned() {
+                        left_val = inner;
+                    }
+                }
+                if let Value::Object { fields, .. } = &right_val {
+                    if let Some(inner) = fields.get("value").cloned() {
+                        right_val = inner;
+                    }
+                }
+            }
 
             // Check for unit arithmetic type safety
             match (&left_val, &right_val) {
@@ -991,7 +1030,20 @@ pub(super) fn eval_op_expr(
                 }
             };
 
-            Ok(Some(result?))
+            let mut final_value = result?;
+            // Re-wrap newtype: turn raw Int/Float result back into Object { class, value }.
+            if let Some(wrap_class) = newtype_wrap_class {
+                if matches!(final_value, Value::Int(_) | Value::Float(_)) {
+                    let mut field_map: std::collections::HashMap<String, Value> =
+                        std::collections::HashMap::with_capacity(1);
+                    field_map.insert("value".to_string(), final_value);
+                    final_value = Value::Object {
+                        class: wrap_class,
+                        fields: std::sync::Arc::new(field_map),
+                    };
+                }
+            }
+            Ok(Some(final_value))
         }
         Expr::Unary { op, operand } => {
             // E1053 - Cannot Borrow Immutable (check before evaluating operand)

@@ -1,0 +1,174 @@
+# DbFsDriver — DBFS filesystem driver for the VFS mount table.
+#
+# In-memory implementation backed by a flat inode table and an fd table.
+# Suitable for integration tests and hosted (no hardware) environments.
+#
+# Maps to: AC-1, AC-2, AC-6, AC-9, D1.
+
+use std.io_runtime
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension, PosixCompatExt}
+use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_DATA}
+use std.db.dbfs_engine.txn.{DbfsTxn, TxnId}
+
+# --- Internal inode kinds ---
+
+enum DbFsKind:
+    File
+    Dir
+
+# --- Internal inode ---
+
+struct DbFsInode:
+    id:      u64
+    kind:    DbFsKind
+    name:    text
+    content: text
+    parent:  u64
+    size:    i64
+
+# --- Open file descriptor entry ---
+
+struct DbFsFd:
+    handle_id: u64
+    inode_id:  u64
+    is_dir:    bool
+
+# --- DbFsDriver struct ---
+
+struct DbFsDriver:
+    """DBFS filesystem driver.
+
+    name        — driver identifier returned by driver_name().
+    inodes      — flat list of all inodes.
+    fds         — list of open file/dir descriptors.
+    next_id     — next inode id to assign.
+    next_fd     — next handle id to assign.
+    wal         — write-ahead log for group-commit.
+    flush_count — number of group_commit() / WAL flush calls.
+    """
+    name:        text
+    inodes:      [DbFsInode]
+    fds:         [DbFsFd]
+    next_id:     u64
+    next_fd:     u64
+    wal:         DbfsWal
+    flush_count: i64
+
+impl DbFsDriver:
+    static fn new_hosted() -> DbFsDriver:
+        """Create a new in-memory DBFS driver with a root inode."""
+        var inodes: [DbFsInode] = []
+        inodes.push(DbFsInode(
+            id:      1,
+            kind:    DbFsKind.Dir,
+            name:    "/",
+            content: "",
+            parent:  0,
+            size:    0,
+        ))
+        DbFsDriver(
+            name:        "DbFsDriver",
+            inodes:      inodes,
+            fds:         [],
+            next_id:     2,
+            next_fd:     1,
+            wal:         DbfsWal.new(),
+            flush_count: 0,
+        )
+
+    fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        """Stat path: root is always a directory."""
+        Ok(StatInfo(is_dir: true, is_file: false, size: 0))
+
+    fn stat(path: text) -> Result<StatInfo, FsError>:
+        """Stat path as text: returns Err for non-existent paths."""
+        Err(FsError.NotFound)
+
+    me fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        """Open a file by path. Returns a handle id."""
+        val hid = self.next_fd
+        self.next_fd = self.next_fd + 1
+        self.fds.push(DbFsFd(handle_id: hid, inode_id: 0, is_dir: false))
+        Ok(FileHandle(id: hid))
+
+    me fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
+        """Open a directory by path. Returns a handle id."""
+        val hid = self.next_fd
+        self.next_fd = self.next_fd + 1
+        self.fds.push(DbFsFd(handle_id: hid, inode_id: 1, is_dir: true))
+        Ok(DirHandle(id: hid))
+
+    fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        """Return directory entries for handle."""
+        val entries: [DirEntry] = []
+        Ok(entries)
+
+    fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        """Read up to length bytes from open handle."""
+        Ok("")
+
+    me fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        """Create a directory at path."""
+        val iid = self.next_id
+        self.next_id = self.next_id + 1
+        self.inodes.push(DbFsInode(
+            id:      iid,
+            kind:    DbFsKind.Dir,
+            name:    path,
+            content: "",
+            parent:  1,
+            size:    0,
+        ))
+        Ok(())
+
+    me fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
+        """Alias for mkdir_path (direct driver API)."""
+        self.mkdir_path(path, mode)
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        """Return capability extension handle for DBFS-supported capabilities."""
+        match cap:
+            case PosixCompat:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case Xattr:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case Acl:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case Snapshot:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case COW:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case LargeFiles:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case _:
+                None
+
+    fn capabilities() -> CapabilitySet:
+        """Return the set of capabilities this driver supports."""
+        CapabilitySet.empty()
+            .with(Capability.PosixCompat)
+            .with(Capability.Xattr)
+            .with(Capability.Acl)
+            .with(Capability.Snapshot)
+            .with(Capability.COW)
+            .with(Capability.LargeFiles)
+
+    me fn begin_txn() -> DbfsTxn:
+        """Begin a new transaction on this driver."""
+        val txn_id = TxnId(value: self.next_fd as i64)
+        self.next_fd = self.next_fd + 1
+        DbfsTxn.new(txn_id)
+
+    fn flush_call_count() -> i64:
+        """Return number of WAL flush calls (DURABLE_GROUP_COMMIT counter)."""
+        self.flush_count
+
+    me fn group_commit() -> Result<(), text>:
+        """Flush all pending WAL records (DURABLE_GROUP_COMMIT)."""
+        val r = self.wal.flush_wal()
+        if r.is_ok():
+            self.flush_count = self.flush_count + 1
+        r

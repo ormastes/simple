@@ -275,6 +275,46 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             Node::Bitfield(bitfield) => {
                 super::register_bitfield(bitfield);
             }
+            Node::Newtype(nt) => {
+                // Lower newtype to a synthetic class with single `value` field.
+                // `Width(value: 3)` then routes through normal class instantiation.
+                let synth_field = simple_parser::ast::Field {
+                    span: nt.span,
+                    name: "value".to_string(),
+                    ty: nt.inner_type.clone(),
+                    default: None,
+                    mutability: simple_parser::ast::Mutability::Immutable,
+                    visibility: simple_parser::ast::Visibility::Public,
+                };
+                env.insert(
+                    nt.name.clone(),
+                    Value::Constructor {
+                        class_name: nt.name.clone(),
+                    },
+                );
+                classes.insert(
+                    nt.name.clone(),
+                    Arc::new(ClassDef {
+                        span: nt.span,
+                        name: nt.name.clone(),
+                        generic_params: Vec::new(),
+                        where_clause: vec![],
+                        fields: vec![synth_field],
+                        methods: vec![],
+                        parent: None,
+                        visibility: nt.visibility,
+                        effects: Vec::new(),
+                        attributes: Vec::new(),
+                        doc_comment: nt.doc_comment.clone(),
+                        invariant: None,
+                        macro_invocations: Vec::new(),
+                        mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
+                    }),
+                );
+            }
             _ => {}
         }
     }

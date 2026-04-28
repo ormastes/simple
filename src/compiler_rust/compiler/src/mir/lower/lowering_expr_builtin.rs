@@ -3,7 +3,7 @@
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{HirExpr, TypeId};
 use crate::mir::effects::CallTarget;
-use crate::mir::instructions::{MirInst, VReg};
+use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_builtin_call_expr(
@@ -48,14 +48,39 @@ impl<'a> MirLowerer<'a> {
             let needs_float_unbox = matches!(expr_ty, TypeId::F32 | TypeId::F64);
 
             if needs_int_unbox {
+                // FR-DRIVER-0002b: narrow after UnboxInt so the dest VReg gets
+                // stamped with the correct narrow TypeId (U8/U16/U32/I8/I16/I32).
+                let (to_bits, signed_opt): (u8, Option<bool>) = match expr_ty {
+                    TypeId::U8 => (8, Some(false)),
+                    TypeId::U16 => (16, Some(false)),
+                    TypeId::U32 => (32, Some(false)),
+                    TypeId::I8 => (8, Some(true)),
+                    TypeId::I16 => (16, Some(true)),
+                    TypeId::I32 => (32, Some(true)),
+                    // U64/I64/BOOL: keep i64-typed unboxed VReg unchanged.
+                    _ => (0, None),
+                };
                 return self.with_func(|func, current_block| {
                     let unboxed = func.new_vreg();
+                    let narrowed_opt = signed_opt.map(|_| func.new_vreg());
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::UnboxInt {
                         dest: unboxed,
                         value: raw_result,
                     });
-                    unboxed
+                    if let (Some(narrowed), Some(signed)) = (narrowed_opt, signed_opt) {
+                        block.instructions.push(MirInst::UnitNarrow {
+                            dest: narrowed,
+                            value: unboxed,
+                            from_bits: 64,
+                            to_bits,
+                            signed,
+                            overflow: UnitOverflowBehavior::Wrap,
+                        });
+                        narrowed
+                    } else {
+                        unboxed
+                    }
                 });
             } else if needs_float_unbox {
                 return self.with_func(|func, current_block| {

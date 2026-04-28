@@ -1,0 +1,214 @@
+# @cover src/lib/nogc_sync_mut/df/columns.spl 80%
+"""
+# DataFrame Column Operations Specification
+
+**Feature IDs:** scilib-df-column-ops
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft (v1.1 — ships AFTER NDArray + linalg)
+**Plan:** doc/03_plan/agent_tasks/scilib_port_df.md
+**Design:** doc/05_design/scilib_port_architecture.md
+
+## Overview
+
+DataFrame column-level operations: accessor, assign, drop, rename,
+dtypes, astype. **DataFrame ops are PLAIN method calls — never inside
+`math{}`** (architect anti-pattern #2; OQ-A: string-keyed indexing and
+groupby semantics are structurally incompatible with `MathExpr`).
+
+Tasks covered: T-DF-08..14 (column accessor + assign + drop + rename
++ dtypes + astype).
+
+## v1.1 phasing
+
+This file's specs FAIL until v1.1 lands `std.df`. v1 only ships
+`std.ndarray` + `std.linalg`. Per `feedback_no_coverups`, the specs are
+written with concrete assertions — no `skip()`, no TODO→NOTE — and they
+fail naturally until v1.1 impl arrives.
+
+## Method-call vs block-syntax
+
+Pandas-style `df['col']` becomes `df.col("name")` (or the bracket
+operator if it lands as a typed wrapper). It is NOT lowered through
+`math{}`. The Phase 5/6 impl team must keep the API surface as
+plain Simple methods.
+"""
+
+use std.spipe.*
+use std.df.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: Column accessor
+# ============================================================================
+
+describe "DataFrame column accessor":
+    """
+    ## df.col(name) -> Series<T>
+
+    Returns the named column as a typed Series. Returns an error result
+    when the name is missing.
+    """
+
+    context "valid column name":
+        it "returns the requested column as a Series":
+            val df = DataFrame.from_columns([
+                Column(name: "a", values: array([Float64(1.0), Float64(2.0), Float64(3.0)])),
+                Column(name: "b", values: array([Int64(10), Int64(20), Int64(30)])),
+            ])
+            val a = df.col("a").unwrap()
+            expect(a.len()).to_equal(Index(3))
+            expect(a.get(Index(0))).to_equal(Float64(1.0))
+            expect(a.get(Index(2))).to_equal(Float64(3.0))
+
+    context "missing column name":
+        it "returns an error result":
+            val df = DataFrame.from_columns([
+                Column(name: "a", values: array([Float64(1.0), Float64(2.0)])),
+            ])
+            val r = df.col("not_there")
+            expect(r.error?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: assign / drop
+# ============================================================================
+
+describe "DataFrame assign and drop":
+    """
+    ## df.assign(name, series) and df.drop(name)
+
+    `assign` adds a new column or replaces an existing one. `drop`
+    removes a column. Both return a NEW DataFrame (functional style);
+    in-place forms are out of scope for v1.1.
+    """
+
+    it "assign adds a new column to the schema":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0), Float64(2.0)])),
+        ])
+        val df2 = df.assign("b", array([Float64(10.0), Float64(20.0)]))
+        expect(df2.column_count()).to_equal(Index(2))
+        val b = df2.col("b").unwrap()
+        expect(b.get(Index(0))).to_equal(Float64(10.0))
+
+    it "assign replaces an existing column":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0), Float64(2.0)])),
+        ])
+        val df2 = df.assign("a", array([Float64(99.0), Float64(98.0)]))
+        expect(df2.column_count()).to_equal(Index(1))
+        val a = df2.col("a").unwrap()
+        expect(a.get(Index(0))).to_equal(Float64(99.0))
+
+    it "drop removes the named column":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0)])),
+            Column(name: "b", values: array([Float64(2.0)])),
+        ])
+        val df2 = df.drop("a").unwrap()
+        expect(df2.column_count()).to_equal(Index(1))
+        expect(df2.col("a").error?).to_equal(true)
+        val b = df2.col("b").unwrap()
+        expect(b.get(Index(0))).to_equal(Float64(2.0))
+
+    it "drop returns an error when column is missing":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0)])),
+        ])
+        val r = df.drop("not_there")
+        expect(r.error?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: rename
+# ============================================================================
+
+describe "DataFrame rename":
+    """
+    ## df.rename(old, new) -> DataFrame
+
+    Returns a new DataFrame with the column renamed. Errors if `old`
+    is missing or `new` already exists.
+    """
+
+    it "renames an existing column":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0), Float64(2.0)])),
+        ])
+        val df2 = df.rename("a", "alpha").unwrap()
+        expect(df2.col("alpha").unwrap().get(Index(0))).to_equal(Float64(1.0))
+        expect(df2.col("a").error?).to_equal(true)
+
+    it "errors when new name already exists":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0)])),
+            Column(name: "b", values: array([Float64(2.0)])),
+        ])
+        val r = df.rename("a", "b")
+        expect(r.error?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: dtypes / astype
+# ============================================================================
+
+describe "DataFrame dtypes and astype":
+    """
+    ## df.dtypes() and df.astype(col, dtype)
+
+    `dtypes()` returns a Schema — a typed list of (name, DType) pairs.
+    `astype(col, dtype)` returns a new DataFrame with the named column
+    converted to the target dtype.
+    """
+
+    it "dtypes returns the schema in column order":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0)])),
+            Column(name: "b", values: array([Int64(10)])),
+        ])
+        val s = df.dtypes()
+        expect(s.len()).to_equal(Index(2))
+        expect(s.dtype_at(Index(0))).to_equal(DType.Float64)
+        expect(s.dtype_at(Index(1))).to_equal(DType.Int64)
+
+    it "astype converts Int64 column to Float64":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Int64(1), Int64(2), Int64(3)])),
+        ])
+        val df2 = df.astype("a", DType.Float64).unwrap()
+        val a = df2.col("a").unwrap()
+        expect(a.dtype).to_equal(DType.Float64)
+        expect(a.get(Index(0))).to_equal(Float64(1.0))
+        expect(a.get(Index(2))).to_equal(Float64(3.0))
+
+
+# ============================================================================
+# Test Group 5: math-block isolation invariant
+# ============================================================================
+
+describe "DataFrame ops do NOT participate in math{}":
+    """
+    ## Architect anti-pattern #2
+
+    DataFrame ops are plain Simple method calls. They MUST NOT lower
+    through the math{} block. This spec encodes the boundary so a
+    future PR cannot quietly start trying to put df ops into math{}.
+
+    The spec asserts that the public surface is method-only by
+    calling exclusively via methods — there is no math{ df['a'] }
+    syntax under any v1.1 path.
+    """
+
+    it "df.col(...).add(other) goes through Series methods, not math{}":
+        val df = DataFrame.from_columns([
+            Column(name: "a", values: array([Float64(1.0), Float64(2.0)])),
+            Column(name: "b", values: array([Float64(10.0), Float64(20.0)])),
+        ])
+        val a = df.col("a").unwrap()
+        val b = df.col("b").unwrap()
+        val r = a.add(b)
+        expect(r.len()).to_equal(Index(2))
+        expect(r.get(Index(0))).to_equal(Float64(11.0))
+        expect(r.get(Index(1))).to_equal(Float64(22.0))

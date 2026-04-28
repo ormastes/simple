@@ -1,0 +1,155 @@
+# @cover src/lib/common/linalg/blas.spl 80%
+"""
+# BLAS axpy Specification
+
+**Feature IDs:** scilib-blas-axpy
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_blas.md
+**Design:** doc/05_design/scilib_port_architecture.md
+
+## Overview
+
+`axpy(alpha, x, y)` computes `y := alpha * x + y` (BLAS Level-1 daxpy).
+Public API is primitive-free: `Float64`, `NDArray<Float64>`, `LinalgError`.
+
+## Behavior
+
+- Updates each element: `y[i] = alpha * x[i] + y[i]`
+- Returns a new `NDArray<Float64>` (caller owns result; y is not mutated)
+- Requires `x.shape == y.shape`; returns `Result.Err(LinalgError.DimensionMismatch)` otherwise
+
+## Implementation Notes
+
+Specs run under `SIMPLE_BLAS_BACKEND=mock` (set by `bin/simple test` for
+`test/feature/scilib/` paths; callers must not set it in test code).
+Mock backend computes correct small-N results per T-CUDA-02 (not zero-stubs).
+These specs fail until T-BLAS-05 (axpy Layer B) + T-BLAS-06 (axpy Layer C) land — TDD.
+No `skip()`, no `--mode=native` bypass (per `feedback_no_coverups`, AC-7).
+
+Tasks covered: T-BLAS-05 (axpy Layer B), T-BLAS-06 (axpy Layer C).
+"""
+
+use std.spipe.*
+use std.linalg.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: Correct computation — small N
+# ============================================================================
+
+describe "linalg.axpy — small-N correctness":
+    """
+    ## Small-N correctness
+
+    N=4 with non-trivial alpha and nonzero x and y. All values are
+    integer-exact in Float64 so `to_equal` is valid (no rounding).
+    """
+
+    context "alpha=2.0, x=[1,2,3,4], y=[5,6,7,8]":
+        """
+        ### Scenario: typical axpy
+
+        Expected: y_out[i] = 2*x[i] + y[i]
+        = [2*1+5, 2*2+6, 2*3+7, 2*4+8] = [7, 10, 13, 16]
+        """
+
+        it "returns the correct element at index 0":
+            # T-BLAS-05, T-BLAS-06
+            val x = array([Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)])
+            val y = array([Float64(5.0), Float64(6.0), Float64(7.0), Float64(8.0)])
+            val result = axpy(Float64(2.0), x, y)
+            expect(result.get(Index(0))).to_equal(Float64(7.0))
+
+        it "returns the correct element at index 1":
+            val x = array([Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)])
+            val y = array([Float64(5.0), Float64(6.0), Float64(7.0), Float64(8.0)])
+            val result = axpy(Float64(2.0), x, y)
+            expect(result.get(Index(1))).to_equal(Float64(10.0))
+
+        it "returns the correct element at index 2":
+            val x = array([Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)])
+            val y = array([Float64(5.0), Float64(6.0), Float64(7.0), Float64(8.0)])
+            val result = axpy(Float64(2.0), x, y)
+            expect(result.get(Index(2))).to_equal(Float64(13.0))
+
+        it "returns the correct element at index 3":
+            val x = array([Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)])
+            val y = array([Float64(5.0), Float64(6.0), Float64(7.0), Float64(8.0)])
+            val result = axpy(Float64(2.0), x, y)
+            expect(result.get(Index(3))).to_equal(Float64(16.0))
+
+        it "result has the same shape as input":
+            val x = array([Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)])
+            val y = array([Float64(5.0), Float64(6.0), Float64(7.0), Float64(8.0)])
+            val result = axpy(Float64(2.0), x, y)
+            expect(result.shape).to_equal(Shape([Index(4)]))
+
+
+# ============================================================================
+# Test Group 2: Edge cases — zero vector x and alpha=0
+# ============================================================================
+
+describe "linalg.axpy — zero-vector and alpha=0 edge cases":
+    """
+    ## Edge cases
+
+    Zero x: result should equal y unchanged.
+    Alpha=0: contribution of x vanishes; result equals y.
+    """
+
+    context "zero-vector x":
+        """
+        ### Scenario: x is all zeros
+
+        alpha*x = 0 for all i, so result[i] = y[i].
+        T-BLAS-05: mock must not compute alpha*0 as NaN or skip the add.
+        """
+
+        it "returns y unchanged when x is the zero vector":
+            # T-BLAS-05: zero-vector path
+            val x = array([Float64(0.0), Float64(0.0), Float64(0.0)])
+            val y = array([Float64(3.0), Float64(5.0), Float64(7.0)])
+            val result = axpy(Float64(4.0), x, y)
+            expect(result.get(Index(0))).to_equal(Float64(3.0))
+            expect(result.get(Index(1))).to_equal(Float64(5.0))
+            expect(result.get(Index(2))).to_equal(Float64(7.0))
+
+    context "alpha=0.0":
+        """
+        ### Scenario: alpha is zero
+
+        alpha=0 means x contributes nothing; result[i] = 0*x[i] + y[i] = y[i].
+        """
+
+        it "returns y unchanged when alpha is zero":
+            # T-BLAS-06: alpha=0 no-op path
+            val x = array([Float64(9.0), Float64(8.0), Float64(7.0)])
+            val y = array([Float64(1.0), Float64(2.0), Float64(3.0)])
+            val result = axpy(Float64(0.0), x, y)
+            expect(result.get(Index(0))).to_equal(Float64(1.0))
+            expect(result.get(Index(1))).to_equal(Float64(2.0))
+            expect(result.get(Index(2))).to_equal(Float64(3.0))
+
+
+# ============================================================================
+# Test Group 3: Error path — shape mismatch
+# ============================================================================
+
+describe "linalg.axpy — shape mismatch error":
+    """
+    ## Error handling
+
+    `axpy` requires x.shape == y.shape. A mismatch returns
+    `Result.Err(LinalgError.DimensionMismatch(...))`.
+    Per language rule: `Result<T, E>`; no exceptions thrown.
+    """
+
+    it "returns an error when x and y have different lengths":
+        # T-BLAS-06: dimension guard
+        val x = array([Float64(1.0), Float64(2.0)])
+        val y = array([Float64(1.0), Float64(2.0), Float64(3.0)])
+        val r = try_axpy(Float64(1.0), x, y)
+        expect(r.error?).to_equal(true)

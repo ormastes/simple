@@ -85,6 +85,42 @@ fn primitive_field_method_call_is_builtin_qualified() {
 }
 
 // =============================================================================
+// Regression: lint_val_crash 2026-04-28 — field access on for-loop binding
+// (`for r in rs:` where `rs: [R]`) must lower to FieldGet, NOT a name-based
+// rt_function_not_found("line") call. See doc/08_tracking/bug/lint_val_crash_2026-04-28.md
+// =============================================================================
+
+#[test]
+fn for_loop_struct_field_access_lowers_to_field_get() {
+    let mir = compile_to_mir(
+        "struct R:\n    line: i64\n\nfn f(rs: [R]) -> i64:\n    var total: i64 = 0\n    for r in rs:\n        total = total + r.line\n    return total\n",
+    )
+    .unwrap();
+    // The loop body must lower the field access via FieldGet (struct-offset load).
+    assert!(
+        has_inst(&mir, |i| matches!(i, MirInst::FieldGet { .. })),
+        "for-loop r.line should emit MirInst::FieldGet, not a name-based call"
+    );
+    // It must NOT lower to a function call by name "line" (the rt_function_not_found
+    // fallback path). Equally, it must not lower as a virtual MethodCall on a
+    // missing method named "line".
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. } if target.name() == "line"
+        )),
+        "for-loop r.line must not emit a Call to a function named 'line'"
+    );
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::MethodCallVirtual { .. }
+        )),
+        "for-loop r.line must not emit a virtual method dispatch — receiver type is statically known"
+    );
+}
+
+// =============================================================================
 // Pointer operations (lowering_expr.rs - PointerRef, PointerDeref)
 // =============================================================================
 

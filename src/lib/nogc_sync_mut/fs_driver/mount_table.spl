@@ -6,7 +6,7 @@
 #
 # Source: doc/05_design/fs_driver_interface.md §3, §8.
 
-use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, DirEntry, OpenFlags}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{CapabilitySet}
@@ -26,13 +26,13 @@ struct MountEntry:
     """Single active mount.
 
     id           — unique mount table slot index.
-    mount_point  — absolute path at which this filesystem is mounted.
+    mount_point  — absolute path string at which this filesystem is mounted.
     driver       — concrete driver wrapped in DriverInstance.
     opts         — options negotiated at mount time.
     active_caps  — capabilities active after mount-time negotiation.
     """
     id:          MountId
-    mount_point: Path
+    mount_point: text
     driver:      DriverInstance
     opts:        MountOptions
     active_caps: u32   # CapabilitySet.bits after negotiation
@@ -54,14 +54,14 @@ impl MountTable:
     static fn new() -> MountTable:
         MountTable(mounts: [], next_id: 1)
 
-    me fn mount(path: Path, driver: DriverInstance, opts: MountOptions) -> Result<MountId, FsError>:
+    me fn mount(path: text, driver: DriverInstance, opts: MountOptions) -> Result<MountId, FsError>:
         """Add a new mount at path.
 
         Fails with AlreadyExists if path is already a mount point.
         Assigns a fresh MountId and appends the entry.
         """
         for entry in self.mounts:
-            if entry.mount_point.raw == path.raw:
+            if entry.mount_point == path:
                 return Err(FsError.AlreadyExists)
 
         val id = MountId(id: self.next_id)
@@ -78,7 +78,7 @@ impl MountTable:
         self.mounts.push(entry)
         Ok(id)
 
-    me fn unmount(path: Path) -> Result<(), FsError>:
+    me fn unmount(path: text) -> Result<(), FsError>:
         """Remove the mount at path.
 
         Fails with NotFound if no mount exists at exactly that path.
@@ -87,7 +87,7 @@ impl MountTable:
         var idx: i64 = -1
         var i: i64 = 0
         while i < self.mounts.len() as i64:
-            if self.mounts[i as i32].mount_point.raw == path.raw:
+            if self.mounts[i as i32].mount_point == path:
                 idx = i
             i = i + 1
         if idx < 0:
@@ -95,19 +95,17 @@ impl MountTable:
         self.mounts.remove(idx as i32)
         Ok(())
 
-    fn lookup(path: Path) -> MountEntry?:
-        """Return the MountEntry whose mount_point is the longest prefix of path.
-
-        Returns nil if no mount covers path.
-        """
+    fn lookup_text(path: text) -> MountEntry?:
+        """Return the MountEntry whose mount_point is the longest prefix of path."""
         var best_len: i64 = -1
         var best_idx: i32 = -1
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val mp = self.mounts[i].mount_point
             if path.starts_with(mp):
-                if mp.len() > best_len:
-                    best_len = mp.len()
+                val mp_len = mp.len()
+                if mp_len > best_len:
+                    best_len = mp_len
                     best_idx = i
             i = i + 1
         if best_idx < 0:
@@ -115,13 +113,17 @@ impl MountTable:
         else:
             Some(self.mounts[best_idx])
 
+    fn lookup(path: Path) -> MountEntry?:
+        """Return the MountEntry whose mount_point is the longest prefix of path."""
+        self.lookup_text(path.raw)
+
     fn resolve(path: Path) -> Result<(MountId, Path), FsError>:
         """Resolve path to (mount_id, relpath_within_mount).
 
         relpath is the suffix of path after stripping the mount point prefix.
         Fails with NotFound if no mount covers path.
         """
-        val entry_opt = self.lookup(path)
+        val entry_opt = self.lookup_text(path.raw)
         match entry_opt:
             case nil:
                 Err(FsError.NotFound)
@@ -136,3 +138,69 @@ impl MountTable:
                     ci = ci + 1
                 val relpath = Path(raw: rel_raw)
                 Ok((entry.id, relpath))
+
+    fn resolve_driver(path: text) -> Result<DriverInstance, FsError>:
+        """Return the DriverInstance whose mount point best covers path."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                Ok(entry.driver)
+
+    fn stat(path: text) -> Result<StatInfo, FsError>:
+        """Stat path via the appropriate mounted driver."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                entry.driver.stat_path(Path(raw: path))
+
+    me fn open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        """Open path for I/O via the appropriate mounted driver."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                entry.driver.open_path(Path(raw: path), flags)
+
+    me fn opendir(path: text) -> Result<DirHandle, FsError>:
+        """Open directory via the appropriate mounted driver."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                entry.driver.opendir_path(Path(raw: path))
+
+    fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        """Read directory entries via the first mounted driver (handle is opaque)."""
+        if self.mounts.len() == 0:
+            return Err(FsError.NotFound)
+        self.mounts[0].driver.readdir_handle(handle)
+
+    fn read(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        """Read up to length bytes from open file handle."""
+        if self.mounts.len() == 0:
+            return Err(FsError.NotFound)
+        self.mounts[0].driver.read_handle(handle, length)
+
+    me fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
+        """Create directory at path via the appropriate mounted driver."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                entry.driver.mkdir_path(path, mode)
+
+    fn block_device_for(path: text) -> Result<text, FsError>:
+        """Return a text tag identifying the block device for the mount at path."""
+        val entry_opt = self.lookup_text(path)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                Ok(entry.driver.driver_name())

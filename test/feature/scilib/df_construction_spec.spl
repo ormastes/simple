@@ -1,0 +1,303 @@
+# @cover src/lib/nogc_sync_mut/df/types.spl 80%
+# @cover src/lib/nogc_sync_mut/df/construct.spl 80%
+"""
+# DataFrame Construction Specification
+
+**Feature IDs:** #T-DF-04, #T-DF-05, #T-DF-06, #T-DF-07
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Design:** doc/05_design/scilib_port_architecture.md §8
+**Plan:** doc/03_plan/agent_tasks/scilib_port_df.md
+
+## Overview
+
+Validates construction of `Series<T>` and `DataFrame` from typed sequences,
+named column maps, and row lists. Covers schema/dtypes/shape/columns accessors
+and critical error paths (empty frame, mismatched column lengths).
+
+## Phase Note
+
+These specs are v1.1 — they FAIL until Phase 5 ships NDArray (v1) and Phase 5
+ships the df library (v1.1). Failure is expected and correct until then.
+All specs run via `bin/simple test` in interpreter mode; no `--mode=native`.
+`SIMPLE_BLAS_BACKEND=mock` must be set (NDArray backing).
+
+## Anti-Pattern Reminder
+
+DataFrame ops are NEVER inside `math{}` blocks. String-keyed column indexing is
+fundamentally incompatible with `MathExpr` (architect anti-pattern #2, AC-3).
+All construction and accessor calls in this spec are plain Simple method calls.
+
+## Key Concepts
+
+| Concept        | Description                                              |
+|----------------|----------------------------------------------------------|
+| Series<T>      | Typed 1-D column backed by NDArray<T>                   |
+| DataFrame      | Collection of SeriesErased columns sharing a row index   |
+| SeriesErased   | Enum wrapping typed Series variants for heterogeneous df |
+| Symbol         | Interned column name (fallback: Symbol = text in v1.1)  |
+| DfError        | Error enum: ShapeMismatch, ColumnNotFound, etc.          |
+"""
+
+use std.spipe.*
+
+
+# ============================================================================
+# Test Group 1: Series<T> construction and field access (T-DF-04)
+# ============================================================================
+
+describe "Series construction":
+    """
+    ## Series<T> — from_values factory and accessors
+
+    Covers T-DF-04: construction of typed Series from value sequences,
+    verifying name, len, and dtype return correct typed results.
+    No primitive types at test surface — use Float64::new / Int64::new wrappers.
+    """
+
+    context "when constructing Series<Float64>":
+        """
+        ### Scenario: Float64 column from explicit values
+
+        Series.from_values must accept a typed sequence and produce a Series
+        whose .name(), .len(), and .dtype() match the construction arguments.
+        """
+
+        it "returns correct name":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.5), Float64::new(2.5), Float64::new(3.5)]
+            )
+            expect(s.name()).to_equal(Symbol.from("price"))
+
+        it "returns correct length":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.5), Float64::new(2.5), Float64::new(3.5)]
+            )
+            expect(s.len()).to_equal(Index::new(3))
+
+        it "returns DType.F64 for Float64 series":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.5), Float64::new(2.5), Float64::new(3.5)]
+            )
+            expect(s.dtype()).to_equal(DType.F64)
+
+    context "when constructing Series<Int64>":
+        """
+        ### Scenario: Int64 column from explicit values
+        """
+
+        it "returns DType.I64 for Int64 series":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("count"),
+                values: [Int64::new(10), Int64::new(20), Int64::new(30)]
+            )
+            expect(s.dtype()).to_equal(DType.I64)
+
+        it "returns correct length for Int64 series":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("count"),
+                values: [Int64::new(10), Int64::new(20)]
+            )
+            expect(s.len()).to_equal(Index::new(2))
+
+    context "when constructing an empty Series<Float64>":
+        """
+        ### Scenario: empty series edge case — len == 0, dtype preserved
+        """
+
+        it "has zero length":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("empty_col"),
+                values: []<Float64>
+            )
+            expect(s.len()).to_equal(Index::new(0))
+
+        it "preserves DType.F64 on empty series":  # T-DF-04
+            val s = Series.from_values(
+                name: Symbol.from("empty_col"),
+                values: []<Float64>
+            )
+            expect(s.dtype()).to_equal(DType.F64)
+
+
+# ============================================================================
+# Test Group 2: DataFrame.from_columns (T-DF-06 / T-DF-07)
+# ============================================================================
+
+describe "DataFrame construction from columns":
+    """
+    ## DataFrame.from_columns — schema, shape, dtypes accessors
+
+    Covers T-DF-06 and T-DF-07: building a DataFrame from a list of named
+    typed Series and verifying schema order, column count, row count,
+    dtypes() return, and shape accessor.
+    """
+
+    context "when given two typed columns of equal length":
+        """
+        ### Scenario: normal heterogeneous construction
+
+        A Float64 price column and an Int64 quantity column; 3 rows each.
+        """
+
+        it "schema matches column names in insertion order":  # T-DF-06
+            val price_col = SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+            ))
+            val qty_col = SeriesErased.I64Series(Series.from_values(
+                name: Symbol.from("qty"),
+                values: [Int64::new(5), Int64::new(10), Int64::new(15)]
+            ))
+            val df = DataFrame.from_columns([price_col, qty_col]).unwrap()
+            val schema = df.columns()
+            expect(schema.len()).to_equal(Index::new(2))
+            expect(schema[Index::new(0)]).to_equal(Symbol.from("price"))
+            expect(schema[Index::new(1)]).to_equal(Symbol.from("qty"))
+
+        it "num_rows returns row count":  # T-DF-06
+            val price_col = SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+            ))
+            val df = DataFrame.from_columns([price_col]).unwrap()
+            expect(df.num_rows()).to_equal(Index::new(3))
+
+        it "num_cols returns column count":  # T-DF-06
+            val price_col = SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+            ))
+            val qty_col = SeriesErased.I64Series(Series.from_values(
+                name: Symbol.from("qty"),
+                values: [Int64::new(5), Int64::new(10), Int64::new(15)]
+            ))
+            val df = DataFrame.from_columns([price_col, qty_col]).unwrap()
+            expect(df.num_cols()).to_equal(Index::new(2))
+
+        it "shape returns (num_rows, num_cols) tuple":  # T-DF-06
+            val price_col = SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+            ))
+            val qty_col = SeriesErased.I64Series(Series.from_values(
+                name: Symbol.from("qty"),
+                values: [Int64::new(5), Int64::new(10), Int64::new(15)]
+            ))
+            val df = DataFrame.from_columns([price_col, qty_col]).unwrap()
+            val s = df.shape()
+            expect(s.rows).to_equal(Index::new(3))
+            expect(s.cols).to_equal(Index::new(2))
+
+        it "dtypes() returns per-column dtype Series":  # T-DF-07
+            val price_col = SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("price"),
+                values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+            ))
+            val qty_col = SeriesErased.I64Series(Series.from_values(
+                name: Symbol.from("qty"),
+                values: [Int64::new(5), Int64::new(10), Int64::new(15)]
+            ))
+            val df = DataFrame.from_columns([price_col, qty_col]).unwrap()
+            val dtypes = df.dtypes()
+            expect(dtypes.len()).to_equal(Index::new(2))
+            expect(dtypes[Index::new(0)]).to_equal(DType.F64)
+            expect(dtypes[Index::new(1)]).to_equal(DType.I64)
+
+
+# ============================================================================
+# Test Group 3: DataFrame.from_rows (T-DF-06 / T-DF-07)
+# ============================================================================
+
+describe "DataFrame construction from rows":
+    """
+    ## DataFrame.from_rows — row-oriented construction
+
+    Covers T-DF-06 and T-DF-07 for the row-map factory.
+    Each row is a list of (Symbol, DfValue) pairs. Schema is inferred from
+    first row; subsequent rows must match.
+    """
+
+    context "when given uniform rows":
+
+        it "produces correct column count from row maps":  # T-DF-06
+            val rows = [
+                [(Symbol.from("x"), DfValue.F64(Float64::new(1.0))),
+                 (Symbol.from("y"), DfValue.I64(Int64::new(10)))],
+                [(Symbol.from("x"), DfValue.F64(Float64::new(2.0))),
+                 (Symbol.from("y"), DfValue.I64(Int64::new(20)))]
+            ]
+            val df = DataFrame.from_rows(rows).unwrap()
+            expect(df.num_cols()).to_equal(Index::new(2))
+
+        it "produces correct row count":  # T-DF-06
+            val rows = [
+                [(Symbol.from("x"), DfValue.F64(Float64::new(1.0)))],
+                [(Symbol.from("x"), DfValue.F64(Float64::new(2.0)))],
+                [(Symbol.from("x"), DfValue.F64(Float64::new(3.0)))]
+            ]
+            val df = DataFrame.from_rows(rows).unwrap()
+            expect(df.num_rows()).to_equal(Index::new(3))
+
+
+# ============================================================================
+# Test Group 4: Empty DataFrame edge cases (T-DF-06)
+# ============================================================================
+
+describe "Empty DataFrame edge cases":
+    """
+    ## Empty DataFrame
+
+    A DataFrame with zero columns and zero rows must not crash.
+    Accessors must return typed zero-valued results.
+    """
+
+    it "from_columns with empty list produces zero-column frame":  # T-DF-06
+        val df = DataFrame.from_columns([]).unwrap()
+        expect(df.num_cols()).to_equal(Index::new(0))
+        expect(df.num_rows()).to_equal(Index::new(0))
+
+    it "dtypes() on empty frame returns zero-length Series":  # T-DF-07
+        val df = DataFrame.from_columns([]).unwrap()
+        expect(df.dtypes().len()).to_equal(Index::new(0))
+
+
+# ============================================================================
+# Test Group 5: Mismatched column length error path (T-DF-07)
+# ============================================================================
+
+describe "DataFrame construction error paths":
+    """
+    ## Mismatched column lengths
+
+    Covers T-DF-07: from_columns must return Result.Err(DfError.ShapeMismatch)
+    when column lengths differ. No panic, no silent truncation.
+    """
+
+    it "returns ShapeMismatch error for mismatched column lengths":  # T-DF-07
+        val col_3 = SeriesErased.F64Series(Series.from_values(
+            name: Symbol.from("a"),
+            values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+        ))
+        val col_2 = SeriesErased.I64Series(Series.from_values(
+            name: Symbol.from("b"),
+            values: [Int64::new(10), Int64::new(20)]
+        ))
+        val result = DataFrame.from_columns([col_3, col_2])
+        expect(result.is_err()).to_equal(true)
+
+    it "ShapeMismatch error variant is DfError.ShapeMismatch":  # T-DF-07
+        val col_3 = SeriesErased.F64Series(Series.from_values(
+            name: Symbol.from("a"),
+            values: [Float64::new(1.0), Float64::new(2.0), Float64::new(3.0)]
+        ))
+        val col_2 = SeriesErased.I64Series(Series.from_values(
+            name: Symbol.from("b"),
+            values: [Int64::new(10), Int64::new(20)]
+        ))
+        val result = DataFrame.from_columns([col_3, col_2])
+        expect(result.error()).to_equal(DfError.ShapeMismatch)

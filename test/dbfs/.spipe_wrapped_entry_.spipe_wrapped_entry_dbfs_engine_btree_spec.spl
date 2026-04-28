@@ -1,0 +1,103 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.spipe.*
+use std.db.dbfs_engine.ns_btree.{NsBTree, DentryKey, Ino}
+
+fn main():
+    # Maps to: AC-3, AC-9
+    # Run: bin/simple test test/dbfs/dbfs_engine_btree_spec.spl
+
+    """
+    DBFS B-Tree Specification
+    
+    Verifies the generic B-tree used for namespace and metadata:
+      1. insert + point-lookup round-trip
+      2. range scan returns sorted results
+      3. delete removes key
+      4. MVCC snapshot read at older generation
+      5. duplicate key insert updates existing value
+    """
+
+
+    describe "DBFS B-Tree — insert and lookup":
+        """Basic insert/lookup contract."""
+    
+        it "insert then lookup returns the same value":
+            val tree = NsBTree.new()
+            val key = DentryKey(parent_ino: 1, name_hash: 0x1234)
+            tree.insert(key, Ino(42)).unwrap()
+            val got = tree.lookup(key).unwrap()
+            expect got.value == 42
+    
+        it "lookup on missing key returns None":
+            val tree = NsBTree.new()
+            val key = DentryKey(parent_ino: 99, name_hash: 0xDEAD)
+            val got = tree.lookup(key)
+            expect got.is_none() == true
+    
+        it "duplicate insert updates value":
+            val tree = NsBTree.new()
+            val key = DentryKey(parent_ino: 1, name_hash: 0x01)
+            tree.insert(key, Ino(10)).unwrap()
+            tree.insert(key, Ino(20)).unwrap()
+            val got = tree.lookup(key).unwrap()
+            expect got.value == 20
+    
+    describe "DBFS B-Tree — range scan":
+        """Range scan returns all keys in [lo, hi]."""
+
+        it "range scan returns entries in sorted order":
+            val tree = NsBTree.new()
+            tree.insert(DentryKey(parent_ino: 1, name_hash: 3), Ino(3)).unwrap()
+            tree.insert(DentryKey(parent_ino: 1, name_hash: 1), Ino(1)).unwrap()
+            tree.insert(DentryKey(parent_ino: 1, name_hash: 2), Ino(2)).unwrap()
+            val lo = DentryKey(parent_ino: 1, name_hash: 1)
+            val hi = DentryKey(parent_ino: 1, name_hash: 3)
+            val results = tree.range_scan(lo, hi).unwrap()
+            expect results.len() == 3
+            expect results[0].1.value == 1
+            expect results[2].1.value == 3
+
+        it "range scan with no matches returns empty list":
+            val tree = NsBTree.new()
+            tree.insert(DentryKey(parent_ino: 1, name_hash: 100), Ino(1)).unwrap()
+            val lo = DentryKey(parent_ino: 1, name_hash: 200)
+            val hi = DentryKey(parent_ino: 1, name_hash: 300)
+            val results = tree.range_scan(lo, hi).unwrap()
+            expect results.len() == 0
+
+    describe "DBFS B-Tree — delete":
+        """Delete removes the entry; subsequent lookup returns None."""
+    
+        it "delete then lookup returns None":
+            val tree = NsBTree.new()
+            val key = DentryKey(parent_ino: 1, name_hash: 0x55)
+            tree.insert(key, Ino(7)).unwrap()
+            tree.delete(key).unwrap()
+            val got = tree.lookup(key)
+            expect got.is_none() == true
+    
+        it "delete missing key returns ok (idempotent)":
+            val tree = NsBTree.new()
+            val key = DentryKey(parent_ino: 5, name_hash: 0xFF)
+            val r = tree.delete(key)
+            expect r.is_ok() == true
+    
+    describe "DBFS B-Tree — MVCC snapshot":
+        """Snapshot read at generation G sees only writes <= G."""
+
+        it "snapshot at older gen does not see newer insert":
+            val tree = NsBTree.new()
+            val snap_gen: i64 = tree.current_gen()
+            val key = DentryKey(parent_ino: 1, name_hash: 0xAA)
+            tree.insert(key, Ino(99)).unwrap()
+            val got = tree.lookup_at_gen(key, snap_gen)
+            expect got.is_none() == true
+fn main():
+    #![allow(spipe_empty_examples)]
+    #![allow(spipe_boolean_wrapper_assertions)]
+    @allow(spipe_empty_examples)
+    @allow(spipe_boolean_wrapper_assertions)
+

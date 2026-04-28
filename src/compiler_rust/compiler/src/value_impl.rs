@@ -11,6 +11,10 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).as_int(),
             Value::Borrow(b) => b.inner().as_int(),
             Value::BorrowMut(b) => b.inner().as_int(),
+            // Newtype wrapper: object with single `value` field auto-unwraps to inner.
+            Value::Object { fields, .. } if fields.len() == 1 && fields.contains_key("value") => {
+                fields.get("value").unwrap().as_int()
+            }
             Value::Str(_) => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -55,6 +59,10 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).as_float(),
             Value::Borrow(b) => b.inner().as_float(),
             Value::BorrowMut(b) => b.inner().as_float(),
+            // Newtype wrapper: object with single `value` field auto-unwraps to inner.
+            Value::Object { fields, .. } if fields.len() == 1 && fields.contains_key("value") => {
+                fields.get("value").unwrap().as_float()
+            }
             Value::Nil => Ok(0.0),
             other => {
                 let actual_type = self.type_name();

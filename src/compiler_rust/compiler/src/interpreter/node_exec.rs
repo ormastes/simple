@@ -423,6 +423,47 @@ pub(crate) fn exec_node(
             }
             Ok(Control::Next)
         }
+        Node::Newtype(nt) => {
+            // Newtype `Name = T` is lowered to an internal class `Name { value: T }`.
+            // Constructor `Name(value: x)` and field access `.value` then route through
+            // the existing class machinery. Operators on the wrapped value still need
+            // dunder dispatch — handled separately if/when added.
+            let synth_field = simple_parser::ast::Field {
+                span: nt.span,
+                name: "value".to_string(),
+                ty: nt.inner_type.clone(),
+                default: None,
+                mutability: simple_parser::ast::Mutability::Immutable,
+                visibility: simple_parser::ast::Visibility::Public,
+            };
+            let synth_class = ClassDef {
+                span: nt.span,
+                name: nt.name.clone(),
+                generic_params: Vec::new(),
+                where_clause: vec![],
+                fields: vec![synth_field],
+                methods: vec![],
+                parent: None,
+                visibility: nt.visibility,
+                effects: Vec::new(),
+                attributes: Vec::new(),
+                doc_comment: nt.doc_comment.clone(),
+                invariant: None,
+                macro_invocations: vec![],
+                mixins: vec![],
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: std::collections::HashMap::new(),
+            };
+            classes.insert(nt.name.clone(), Arc::new(synth_class));
+            env.insert(
+                nt.name.clone(),
+                Value::Constructor {
+                    class_name: nt.name.clone(),
+                },
+            );
+            Ok(Control::Next)
+        }
         Node::Enum(e) => {
             // Register enum type in local scope via thread-local
             BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));

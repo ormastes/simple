@@ -1,0 +1,118 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.spipe.*
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.types.{OpenFlags, MountOptions}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.instance.{DriverInstance}
+use std.db.dbfs_driver.{DbFsDriver}
+
+fn make_mounted() -> MountTable:
+    val mt = MountTable.new()
+    val dbfs = DbFsDriver.new_hosted()
+    mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
+    mt
+
+fn main():
+    # Maps to: AC-8, AC-9
+    # Run: bin/simple test test/dbfs/dbfs_posix_shim_spec.spl
+
+    """
+    DBFS POSIX Shim Specification (D10)
+    
+    Verifies the POSIX-compat subset (D10):
+      - random write via COW rewrites EXTENT_REF
+      - rename-over-existing is atomic
+      - unlink-while-open tombstones (data accessible until close)
+      - truncate shrink and grow
+      - out-of-scope ops return ENOTSUP (mmap shared-writable, hard links, O_DIRECT)
+    """
+
+
+    describe "DBFS POSIX Shim — random write via COW":
+        it "pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data":
+            val mt = make_mounted()
+            val fh = mt.open("/data/cow.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh, "AAAAABBBBB").unwrap()
+            mt.pwrite(fh, "CCCCC", 5).unwrap()
+            val fh2 = mt.open("/data/cow.txt", OpenFlags.read_only()).unwrap()
+            val got = mt.read(fh2, 10).unwrap()
+            expect got == "AAAAACCCCC"
+
+        it "pwrite does not corrupt bytes before the written offset":
+            val mt = make_mounted()
+            val fh = mt.open("/data/cow2.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh, "XXXXXXXXXX").unwrap()
+            mt.pwrite(fh, "YY", 8).unwrap()
+            val fh2 = mt.open("/data/cow2.txt", OpenFlags.read_only()).unwrap()
+            val got = mt.read(fh2, 10).unwrap()
+            expect got[0] == 'X'
+            expect got[8] == 'Y'
+
+    describe "DBFS POSIX Shim — rename-over-existing":
+        it "rename-over-existing is atomic (target replaced)":
+            val mt = make_mounted()
+            val fh1 = mt.open("/data/a.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh1, "aaa").unwrap()
+            mt.close(fh1).unwrap()
+            val fh2 = mt.open("/data/b.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh2, "bbb").unwrap()
+            mt.close(fh2).unwrap()
+            mt.rename("/data/a.txt", "/data/b.txt").unwrap()
+            val fh3 = mt.open("/data/b.txt", OpenFlags.read_only()).unwrap()
+            val got = mt.read(fh3, 3).unwrap()
+            expect got == "aaa"
+
+    describe "DBFS POSIX Shim — unlink-while-open tombstone":
+        it "unlink while handle open: data accessible until close":
+            val mt = make_mounted()
+            val fh = mt.open("/data/tomb.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh, "ghost").unwrap()
+            mt.unlink("/data/tomb.txt").unwrap()
+            # File is unlinked but handle still valid
+            val got = mt.read(fh, 5).unwrap()
+            expect got == "ghost"
+            mt.close(fh).unwrap()
+
+        it "after close, unlinked file is not accessible":
+            val mt = make_mounted()
+            val fh = mt.open("/data/gone.txt", OpenFlags.create_write()).unwrap()
+            mt.unlink("/data/gone.txt").unwrap()
+            mt.close(fh).unwrap()
+            val r = mt.stat("/data/gone.txt")
+            expect r.is_err() == true
+
+    describe "DBFS POSIX Shim — truncate":
+        it "truncate shrinks file; stat shows new size":
+            val mt = make_mounted()
+            val fh = mt.open("/data/trunc.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh, "0123456789").unwrap()
+            mt.ftruncate(fh, 5).unwrap()
+            val stat = mt.stat("/data/trunc.txt").unwrap()
+            expect stat.size == 5
+
+        it "truncate grows file; extended region reads as zeros":
+            val mt = make_mounted()
+            val fh = mt.open("/data/grow.txt", OpenFlags.create_write()).unwrap()
+            mt.write(fh, "AB").unwrap()
+            mt.ftruncate(fh, 6).unwrap()
+            val fh2 = mt.open("/data/grow.txt", OpenFlags.read_only()).unwrap()
+            val got = mt.pread(fh2, 2, 4).unwrap()
+            expect got[0] == 0
+
+    describe "DBFS POSIX Shim — out-of-scope ops return ENOTSUP":
+        it "mmap_shared_writable returns ENOTSUP":
+            val mt = make_mounted()
+            val fh = mt.open("/data/mmap.txt", OpenFlags.create_write()).unwrap()
+            val r = mt.mmap_shared_writable(fh, 0, 4096)
+            expect r.is_err() == true
+
+        it "link (hard link) returns ENOTSUP":
+            val mt = make_mounted()
+            val fh = mt.open("/data/src.txt", OpenFlags.create_write()).unwrap()
+            mt.close(fh).unwrap()
+            val r = mt.link("/data/src.txt", "/data/lnk.txt")
+            expect r.is_err() == true

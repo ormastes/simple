@@ -1,0 +1,141 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.skia.entity.canvas.{SkCanvas, SkCanvasSaveLayerRec, sk_canvas_make, sk_save_layer_rec}
+use std.skia.entity.geometry.{SkIRect, SkRect, sk_rect_make_wh}
+use std.skia.entity.paint.{sk_paint_new}
+use std.skia.entity.picture.{SkPictureOpKind}
+use std.skia.entity.matrix.{Matrix3x3}
+
+
+fn main():
+    # @cover src/lib/skia/entity/canvas.spl 80%
+    """
+    # Skia Canvas Specification
+    
+    **Feature IDs:** #SKI-006
+    **Category:** Stdlib
+    **Difficulty:** 2/5
+    **Status:** Implemented
+    
+    ## Overview
+    
+    Tests for SkCanvas save/restore state, dimensions, and basic predicates.
+    Note: draw calls return SkCanvas stubs (pass_todo bodies), so we only test
+    the state-management and non-drawing methods.
+    """
+
+
+    describe "SkCanvas construction":
+        it "sk_canvas_make sets width and height":
+            val c = sk_canvas_make(800, 600)
+            expect c.width == 800
+            expect c.height == 600
+
+        it "initial save count is 1":
+            val c = sk_canvas_make(100, 100)
+            expect c.get_save_count() == 1
+
+        it "image_info_width matches construction":
+            val c = sk_canvas_make(1920, 1080)
+            expect c.image_info_width() == 1920
+
+        it "image_info_height matches construction":
+            val c = sk_canvas_make(1920, 1080)
+            expect c.image_info_height() == 1080
+
+    describe "SkCanvas save/restore":
+        it "save increments count":
+            val c = sk_canvas_make(100, 100)
+            val c2 = c.save()
+            expect c2.get_save_count() == 2
+
+        it "save twice increments to 3":
+            val c = sk_canvas_make(100, 100)
+            val c3 = c.save().save()
+            expect c3.get_save_count() == 3
+
+        it "restore decrements count":
+            val c = sk_canvas_make(100, 100)
+            val c2 = c.save()
+            val c3 = c2.restore()
+            expect c3.get_save_count() == 1
+
+        it "restore at 1 stays at 1":
+            val c = sk_canvas_make(100, 100)
+            val c2 = c.restore()
+            expect c2.get_save_count() == 1
+
+        it "save_layer increments count":
+            val c = sk_canvas_make(100, 100)
+            val rec = sk_save_layer_rec(nil, nil)
+            val c2 = c.save_layer(rec)
+            expect c2.get_save_count() == 2
+
+        it "restore_to_count sets exact count":
+            val c = sk_canvas_make(100, 100)
+            val c2 = c.save().save().save()
+            val c3 = c2.restore_to_count(2)
+            expect c3.get_save_count() == 2
+
+        it "restore_to_count clamped at 1":
+            val c = sk_canvas_make(100, 100)
+            val c2 = c.restore_to_count(0)
+            expect c2.get_save_count() == 1
+
+    describe "SkCanvas clip bounds":
+        it "get_device_clip_bounds returns full canvas":
+            val c = sk_canvas_make(640, 480)
+            val bounds = c.get_device_clip_bounds()
+            expect bounds.right == 640
+            expect bounds.bottom == 480
+            expect bounds.left == 0
+            expect bounds.top == 0
+
+    describe "SkCanvasSaveLayerRec":
+        it "constructs with nil bounds and nil paint":
+            val rec = sk_save_layer_rec(nil, nil)
+            expect rec.bounds == nil
+            expect rec.paint == nil
+
+    describe "SkCanvas recording":
+        it "draw_rect during recording produces one DrawRect op in the SkPicture":
+            val bounds = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+            val c0 = sk_canvas_make(100, 100)
+            val c1 = c0.begin_recording(bounds)
+            val paint = sk_paint_new()
+            val rect = SkRect(left: 10.0, top: 10.0, right: 50.0, bottom: 50.0)
+            val c2 = c1.draw_rect(rect, paint)
+            val picture = c2.end_recording()
+            expect picture.op_count == 1
+            expect picture.ops[0].kind == SkPictureOpKind.DrawRect
+
+    describe "SkCanvas matrix ops":
+        it "concat with recorder appends a SetMatrix op":
+            val bounds = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+            val c0 = sk_canvas_make(100, 100)
+            val c1 = c0.begin_recording(bounds)
+            val m = Matrix3x3.translate(3.0, 4.0)
+            val c2 = c1.concat(m)
+            val picture = c2.end_recording()
+            expect picture.op_count == 1
+            expect picture.ops[0].kind == SkPictureOpKind.SetMatrix
+
+        it "set_matrix with recorder appends a SetMatrix op with correct tx/ty":
+            val bounds = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+            val c0 = sk_canvas_make(100, 100)
+            val c1 = c0.begin_recording(bounds)
+            val m = Matrix3x3.translate(11.0, 13.0)
+            val c2 = c1.set_matrix(m)
+            val picture = c2.end_recording()
+            expect picture.op_count == 1
+            expect picture.ops[0].kind == SkPictureOpKind.SetMatrix
+            expect picture.ops[0].rect.left == 11.0
+            expect picture.ops[0].rect.top == 13.0
+
+        it "concat without recorder does not crash":
+            val c = sk_canvas_make(100, 100)
+            val m = Matrix3x3.translate(1.0, 2.0)
+            val c2 = c.concat(m)
+            expect c2.width == 100

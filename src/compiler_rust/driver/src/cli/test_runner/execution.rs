@@ -496,8 +496,25 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     // Use run_file_interpreted() instead of run_file() because the default JIT
     // (Cranelift) crashes on some patterns (large functions with many var mutations
     // + string interpolation). The `run` command also uses interpreted mode for .spl files.
+    //
+    // Preprocess _spec.spl files so the infix-expect form (`expect a to_start_with b`)
+    // and the method-form (`expect(x).to_be_true()`) get rewritten into primitive
+    // forms the interpreter can dispatch — previously these only ran in SMF mode.
+    // Always apply the matcher-only preprocessor so `expect(x).to_be_true()`
+    // and infix forms are rewritten to primitive `expect <expr>` before the
+    // interpreter sees them.  This is safe for all specs including those with
+    // multi-line use blocks — unlike the full SMF preprocessor it does no
+    // class-hoisting or fn-main wrapping.
+    let exec_path_buf: PathBuf;
+    let exec_path_ref: &Path = match preprocess_matchers_only(path) {
+        Ok(pp) => {
+            exec_path_buf = pp;
+            exec_path_buf.as_path()
+        }
+        Err(_) => path,
+    };
     let run_result: Result<i32, String> =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(path))) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(exec_path_ref))) {
             Ok(inner) => inner,
             Err(panic_info) => {
                 let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -861,6 +878,30 @@ fn pending_skip(name: text, deps: text):
 # === end spipe inline helpers ===
 "#;
 
+/// Rewrite `expect <a> <matcher> <b>` infix forms (legacy specs) into the
+/// `expect(a).to_<matcher>(b)` method form so the later method-rewrite pass
+/// can fold them into primitive `expect a <op> b` HIR forms.
+fn rewrite_infix_expect_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("expect ") || trimmed.starts_with("expect(") {
+        return line.to_string();
+    }
+    for matcher in ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with"] {
+        let needle = format!(" {} ", matcher);
+        if let Some(split_at) = trimmed.find(&needle) {
+            let actual = trimmed["expect ".len()..split_at].trim();
+            let expected = trimmed[split_at + needle.len()..].trim();
+            if actual.is_empty() || expected.is_empty() {
+                return line.to_string();
+            }
+            let indent_len = line.len().saturating_sub(line.trim_start().len());
+            let indent = &line[..indent_len];
+            return format!("{indent}expect({actual}).{matcher}({expected})");
+        }
+    }
+    line.to_string()
+}
+
 /// Rewrite `expect(actual).to_<matcher>(expected)` calls into the equivalent
 /// infix `expect <actual> <op> <expected>` form that the compiler's HIR-level
 /// BDD recognizer (see `stmt_lowering.rs::try_lower_bdd_statement`) lowers
@@ -966,6 +1007,40 @@ fn rewrite_method_expect_line(line: &str) -> String {
     }
 }
 
+/// Lightweight matcher-only preprocessor for interpreter mode.
+///
+/// Runs only the two line-level expect rewrites (infix and method form) with
+/// NO class hoisting, NO part-splitting, and NO `fn main()` wrapping.  Safe
+/// for any spec, including those with multi-line use blocks that caused the
+/// old SMF preprocessor to misassemble the file.
+///
+/// If no line changed the original path is returned unchanged (no temp file).
+fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
+    let path_str = path.to_string_lossy();
+    if !path_str.ends_with("_spec.spl") {
+        return Ok(path.to_path_buf());
+    }
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let mut changed = false;
+    let mut out_lines: Vec<String> = Vec::with_capacity(content.lines().count());
+    for raw_line in content.lines() {
+        let infix = rewrite_infix_expect_line(raw_line);
+        let rewritten = rewrite_method_expect_line(&infix);
+        if rewritten != raw_line {
+            changed = true;
+        }
+        out_lines.push(rewritten);
+    }
+    if !changed {
+        return Ok(path.to_path_buf());
+    }
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("spec.spl");
+    let tmp_path = path.parent().unwrap_or_else(|| Path::new(".")).join(format!(".spipe_matchers_{}", file_name));
+    fs::write(&tmp_path, out_lines.join("\n"))
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+    Ok(tmp_path)
+}
+
 fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let path_str = path.to_string_lossy();
     if !path_str.ends_with("_spec.spl") {
@@ -993,29 +1068,6 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     // define the same class name in different `it` blocks). On collision we
     // skip hoisting the second occurrence and emit a warning comment.
     let mut hoisted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    fn rewrite_infix_expect_line(line: &str) -> String {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("expect ") || trimmed.starts_with("expect(") {
-            return line.to_string();
-        }
-
-        for matcher in ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with"] {
-            let needle = format!(" {} ", matcher);
-            if let Some(split_at) = trimmed.find(&needle) {
-                let actual = trimmed["expect ".len()..split_at].trim();
-                let expected = trimmed[split_at + needle.len()..].trim();
-                if actual.is_empty() || expected.is_empty() {
-                    return line.to_string();
-                }
-                let indent_len = line.len().saturating_sub(line.trim_start().len());
-                let indent = &line[..indent_len];
-                return format!("{indent}expect({actual}).{matcher}({expected})");
-            }
-        }
-
-        line.to_string()
-    }
 
     fn extract_def_name(trimmed: &str) -> Option<String> {
         // "class Foo", "class Foo<T>", "class Foo(", "enum Bar:" etc.
