@@ -79,14 +79,66 @@ doesn't address this RISC-V issue.
   recently was either skipping `--tier 1` or running off a different
   branch.
 
-## Proposed fixes (in order of locality)
+## Empirical findings (2026-04-28 follow-up)
 
-1. Add an arch-gate to `_rv64_trap_vector` in
-   `src/os/kernel/arch/riscv64/trap_vector.spl` (and any sibling files
-   under `arch/riscv64/` and `arch/aarch64/`, `arch/arm64/` etc. with
-   inline asm).
-2. Make the build walker skip `arch/<arch>/` directories whose `<arch>`
-   doesn't match the current target triple. Implement once; benefits
-   every future arch-specific module.
+I attempted to apply the file-level `@cfg` arch-gate fix (proposal 1
+below). It does not work, for two reasons:
 
-Either path unblocks the smoke-test work in the simple-from-FS plan.
+- **The two-arg form `@cfg("target_arch", "riscv64")` is silently
+  ignored.** I added it at the top of all 5 RISC-V files
+  (`trap_vector.spl`, `cpu.spl`, `context.spl`, `sbi.spl`, `boot.spl`,
+  modeled on the precedent at
+  `src/lib/nogc_async_mut_noalloc/baremetal/arm/semihost.spl:15-18`).
+  Rebuilt; same RISC-V mnemonics still appeared in
+  `simple_asm_blocks.c`. The arm/semihost.spl precedent is a no-op for
+  inline-asm extraction.
+- **The single-arg form `@cfg(riscv64)` (used at function level in
+  `src/os/kernel/arch/hal.spl:217-242`) is also evidence that `@cfg`
+  doesn't gate `use` statements.** `hal.spl` lines 22-69 import
+  x86_64, x86_32, arm64, arm32, riscv64, and riscv32 modules
+  unconditionally. When targeting x86_64, the riscv64 imports still
+  pull `arch/riscv64/*.spl` into the build closure; the inline-asm
+  extractor then emits all those `asm volatile:` blocks into
+  `simple_asm_blocks.c` regardless of the body-level `@cfg(riscv64)`
+  guards on hal.spl's functions.
+
+The `@cfg` attribute appears to gate something later in the pipeline
+(possibly type-check or codegen of the function body), but NOT:
+
+1. Whether the file is included in the build closure
+2. Whether `use` statements drag in foreign-arch modules
+3. Whether `asm volatile:` blocks are emitted to the consolidated C blob
+
+Until one of these is fixed in the Rust seed compiler, no source-level
+attribute fixes the leak.
+
+I reverted my no-op `@cfg` additions to keep the source clean.
+
+## Proposed fixes (in order of locality, REVISED)
+
+1. **(Was proposal 1 — does not work.)** ~~Add an arch-gate to
+   `_rv64_trap_vector` etc.~~ Empirically a no-op; left here only so
+   future readers don't repeat the experiment.
+
+2. **Make `@cfg` actually gate `use` statements and inline asm
+   extraction.** This is a Simple compiler change in
+   `src/compiler_rust/` — likely in the import-resolution phase
+   (currently `@cfg` is parsed but doesn't filter the closure walker)
+   and the inline-asm extraction phase (currently emits all asm blocks
+   into `simple_asm_blocks.c`). Right structural fix; non-trivial.
+
+3. **Make the build walker skip `arch/<arch>/` directories whose
+   `<arch>` doesn't match the current target triple.** Path-based
+   exclusion in the build script or the closure walker. Bypasses the
+   `@cfg` machinery entirely. Easier to implement than (2) but only
+   covers the common arch case, not generic feature gating.
+
+4. **Refactor `src/os/kernel/arch/hal.spl` to import only the active
+   arch's modules.** Either by splitting into per-arch hal files
+   (`hal_x86_64.spl`, `hal_riscv64.spl`, etc.) selected by a single
+   top-level dispatch import, or by some build-system trick that
+   substitutes the right arch at config time. Largest source diff but
+   doesn't require compiler changes.
+
+Either path 2, 3, or 4 unblocks the smoke-test work in the
+simple-from-FS plan; path 1 does not.

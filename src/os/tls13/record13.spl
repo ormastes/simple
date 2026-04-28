@@ -32,7 +32,7 @@ class RecordKey:
     iv: [u8]     # 12 bytes — base IV (XOR'd with seq_num to form nonce)
 
 enum RecordResult:
-    Ok(content_type: u8, data: [u8])
+    Ok(content_type: i64, data: [u8])
     Err(msg: text)
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
@@ -86,13 +86,13 @@ fn _record_unpack_inner_with_len(inner: [u8], inner_len: u64) -> RecordResult:
         cursor = idx
     if cursor >= inner_len:
         return RecordResult.Err("decrypted inner plaintext missing content type")
-    val real_content_type = _u8_at(inner, cursor)
+    val real_content_type: i64 = _u8_at(inner, cursor).to_i64()
     var data: [u8] = []
     var j: u64 = 0
     while j < cursor:
         data.push(_u8_at(inner, j))
         j = j + 1
-    RecordResult.Ok(content_type: real_content_type, data: data)
+    RecordResult.Ok(real_content_type, data)
 
 # ============================================================================
 # record13_make_nonce
@@ -156,10 +156,11 @@ fn record13_encrypt(rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u
 
     Returns: 5-byte header || ciphertext || 16-byte tag.
     """
-    if seq_num == 0 and content_type == 0x17u8 and plaintext.len() > 0:
-        val fast_record = rt_tls13_record_encrypt(rk.key, rk.iv, seq_num, content_type, plaintext)
-        if fast_record.len() >= 5:
-            return fast_record
+    # Compile-mode fast-path: delegate to C extern unconditionally. Pure-Simple
+    # path below uses [u8].len() / [u32] shifts that Cranelift miscompiles.
+    val fast_record = rt_tls13_record_encrypt(rk.key, rk.iv, seq_num, content_type, plaintext)
+    if fast_record.len() >= 5:
+        return fast_record
 
     # TLSInnerPlaintext = plaintext || content_type byte
     var inner: [u8] = rt_array_new_with_cap((plaintext.len() + 1).to_i64())

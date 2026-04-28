@@ -10944,13 +10944,26 @@ RuntimeValue rt_tls13_record_encrypt(RuntimeValue key_rv, RuntimeValue iv_rv,
     record[3] = (uint8_t)((payload_len >> 8) & 0xffU);
     record[4] = (uint8_t)(payload_len & 0xffU);
 
+    /* TLS 1.3 §5.3: per_record_nonce = pad_to_12(seq_num) XOR static_iv.
+     * Was previously implemented as add-with-carry, which agrees with XOR for
+     * seq=0 only — that's why D3 (seq=0) passed but D4/D9/D10 (seq>0) failed
+     * with auth tag mismatch. Pure-Simple `record13_make_nonce` already uses
+     * XOR; this aligns the helper with the spec. */
     uint8_t nonce[12];
-    memcpy(nonce, iv, 12U);
-    uint64_t carry = (uint64_t)seq_num_i64;
-    for (int i = 11; i >= 4 && carry > 0; i--) {
-        uint64_t sum = (uint64_t)nonce[i] + (carry & 0xffU);
-        nonce[i] = (uint8_t)(sum & 0xffU);
-        carry = (carry >> 8) + (sum >> 8);
+    nonce[0] = iv[0];
+    nonce[1] = iv[1];
+    nonce[2] = iv[2];
+    nonce[3] = iv[3];
+    {
+        uint64_t s = (uint64_t)seq_num_i64;
+        nonce[4]  = iv[4]  ^ (uint8_t)((s >> 56) & 0xffU);
+        nonce[5]  = iv[5]  ^ (uint8_t)((s >> 48) & 0xffU);
+        nonce[6]  = iv[6]  ^ (uint8_t)((s >> 40) & 0xffU);
+        nonce[7]  = iv[7]  ^ (uint8_t)((s >> 32) & 0xffU);
+        nonce[8]  = iv[8]  ^ (uint8_t)((s >> 24) & 0xffU);
+        nonce[9]  = iv[9]  ^ (uint8_t)((s >> 16) & 0xffU);
+        nonce[10] = iv[10] ^ (uint8_t)((s >> 8)  & 0xffU);
+        nonce[11] = iv[11] ^ (uint8_t)(s & 0xffU);
     }
 
     if (_tls_aes128_gcm_encrypt_raw(key, nonce, inner, inner_len, record, 5U, record + 5U, record + 5U + inner_len) != 0) {

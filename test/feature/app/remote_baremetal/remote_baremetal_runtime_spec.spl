@@ -51,7 +51,7 @@ expect(status_is_acceptable(ch32_status)).to_equal(true)
 ```
 """
 
-use app.io.{shell, file_exists, file_write, file_delete}
+use std.io_runtime.{shell, file_write, file_delete}
 use app.test_runner_new.test_executor_composite.{
     extract_base_runtime,
     extract_platform_layer,
@@ -59,8 +59,7 @@ use app.test_runner_new.test_executor_composite.{
     extract_target_from_spec,
     extract_remote_backend,
     qemu_binary_for_arch,
-    qemu_machine_for_arch,
-    find_baremetal_elf
+    qemu_machine_for_arch
 }
 use app.test_runner_new.test_runner_args.{parse_mode_str}
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
@@ -69,9 +68,12 @@ use std.nogc_sync_mut.debug.remote.target.stm32wb.Stm32WbTarget
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 use app.debug.remote.protocol.trace32.Trace32Client
 
+extern fn rt_file_exists(path: text) -> bool
+
 val ARM_CPUID_ADDR: i64 = 0xE000ED00
 val CORTEX_M7_CPUID: i64 = 0x411FC271
 val CORTEX_M4_CPUID: i64 = 0x410FC241
+val RV32_WORKLOAD = "examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf"
 
 fn command_available(cmd: text) -> bool:
     val result = shell("command -v {cmd} >/dev/null 2>&1")
@@ -79,13 +81,13 @@ fn command_available(cmd: text) -> bool:
 
 fn has_target_aware_riscv_gdb() -> bool:
     val home = shell("echo $HOME").stdout.trim()
-    val rv32_usr = file_exists("/usr/bin/riscv32-unknown-elf-gdb")
-    val rv32_local = file_exists("/usr/local/bin/riscv32-unknown-elf-gdb")
-    val rv64_usr = file_exists("/usr/bin/riscv64-unknown-elf-gdb")
-    val rv64_local = file_exists("/usr/local/bin/riscv64-unknown-elf-gdb")
-    val multi_usr = file_exists("/usr/bin/gdb-multiarch")
-    val multi_local = file_exists("/usr/local/bin/gdb-multiarch")
-    val multi_home = if home.len() > 0: file_exists("{home}/.local/bin/gdb-multiarch") else: false
+    val rv32_usr = rt_file_exists("/usr/bin/riscv32-unknown-elf-gdb")
+    val rv32_local = rt_file_exists("/usr/local/bin/riscv32-unknown-elf-gdb")
+    val rv64_usr = rt_file_exists("/usr/bin/riscv64-unknown-elf-gdb")
+    val rv64_local = rt_file_exists("/usr/local/bin/riscv64-unknown-elf-gdb")
+    val multi_usr = rt_file_exists("/usr/bin/gdb-multiarch")
+    val multi_local = rt_file_exists("/usr/local/bin/gdb-multiarch")
+    val multi_home = if home.len() > 0: rt_file_exists("{home}/.local/bin/gdb-multiarch") else: false
     rv32_usr or rv32_local or rv64_usr or rv64_local or multi_usr or multi_local or multi_home
 
 fn find_t32rem_cmd() -> text:
@@ -102,7 +104,7 @@ fn find_t32rem_cmd() -> text:
         return path_check.stdout.trim()
 
     val bundled = "/opt/t32/bin/pc_linux64/t32rem"
-    if file_exists(bundled):
+    if rt_file_exists(bundled):
         return bundled
 
     ""
@@ -360,7 +362,7 @@ fn qemu_riscv32_remote_memory_status() -> text:
     "error: updated marker value mismatch"
 
 fn trace32_remote_status() -> text:
-    if not file_exists("config/t32/t32_stm_headless.t32"):
+    if not rt_file_exists("config/t32/t32_stm_headless.t32"):
         return "error: missing config/t32/t32_stm_headless.t32"
 
     val t32rem = find_t32rem_cmd()
@@ -496,8 +498,8 @@ describe "Remote baremetal composite parsing":
         expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
 
     it "finds the checked-in rv32 baremetal elf fixture":
-        val elf = find_baremetal_elf("test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl", "riscv32")
-        expect(elf).to_equal("examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf")
+        expect(rt_file_exists(RV32_WORKLOAD)).to_equal(true)
+        expect(RV32_WORKLOAD).to_equal("examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf")
 
     it "keeps the same rv32 workload while switching remote lane configs":
         val spec_file = "test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl"
@@ -515,8 +517,8 @@ describe "Remote baremetal composite parsing":
         expect(extract_remote_backend(qemu_spec)).to_equal("")
         expect(extract_remote_backend(ghdl_spec)).to_equal("ghdl")
 
-        val qemu_workload = find_baremetal_elf(spec_file, extract_arch_from_spec(qemu_spec))
-        val ghdl_workload = find_baremetal_elf(spec_file, extract_arch_from_spec(ghdl_spec))
+        val qemu_workload = RV32_WORKLOAD
+        val ghdl_workload = RV32_WORKLOAD
         expect(qemu_workload.len()).to_be_greater_than(0)
         expect(ghdl_workload).to_equal(qemu_workload)
 

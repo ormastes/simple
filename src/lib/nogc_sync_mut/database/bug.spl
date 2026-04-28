@@ -87,8 +87,7 @@ fn load_bug_database(path: text) -> BugDatabase?:
 fn create_bug_database(path: text) -> BugDatabase:
     val db = SdnDatabase.new(path)
 
-    # Create bugs table
-    val bugs_table = SdnTable.new("bugs", [
+    val bug_columns = [
         "id",
         "severity",
         "status",
@@ -99,7 +98,13 @@ fn create_bug_database(path: text) -> BugDatabase:
         "created_at",
         "updated_at",
         "valid"
-    ])
+    ]
+
+    # Create bug tables
+    val bugs_active_table = SdnTable.new("bugs_active", bug_columns)
+    db.set_table("bugs_active", bugs_active_table)
+
+    val bugs_table = SdnTable.new("bugs", bug_columns)
     db.set_table("bugs", bugs_table)
 
     # Create description table (multiline)
@@ -131,12 +136,41 @@ fn create_bug_database(path: text) -> BugDatabase:
 class BugDatabase:
     db: SdnDatabase
 
+    fn available_bug_tables() -> [text]:
+        var tables: [text] = []
+        if self.db.get_table("bugs_active").?:
+            tables.push("bugs_active")
+        if self.db.get_table("bugs").?:
+            tables.push("bugs")
+        if tables.len() == 0:
+            tables.push("bugs")
+        tables
+
+    fn is_split_table_db() -> bool:
+        self.db.get_table("bugs_active").?
+
+    fn target_table_name(status: BugStatus) -> text:
+        if status == BugStatus.Open or status == BugStatus.Investigating or status == BugStatus.Confirmed:
+            if self.db.get_table("bugs_active").?:
+                return "bugs_active"
+        "bugs"
+
+    fn find_bug_table_name(id: text) -> text:
+        for table_name in self.available_bug_tables():
+            val table_opt = self.db.get_table(table_name)
+            if not table_opt.?:
+                continue
+            val row_opt = table_opt.unwrap().get_row(id)
+            if row_opt.?:
+                return table_name
+        ""
+
     # Convert bug to SDN row
     fn bug_to_row(bug: Bug) -> SdnRow:
         val row = SdnRow.empty()
         row.set("id", bug.id)
         row.set("severity", severity_to_string(bug.severity))
-        row.set("status", status_to_string(bug.status))
+        row.set("status", status_to_storage_string(bug.status))
         row.set("title", bug.title)
         row.set("file", bug.file)
         row.set("line", "{bug.line}")
@@ -153,7 +187,7 @@ class BugDatabase:
             match column:
                 "id" => row.set("id", bug.id)
                 "severity" => row.set("severity", severity_to_string(bug.severity))
-                "status" => row.set("status", status_to_string(bug.status))
+                "status" => row.set("status", status_to_storage_string(bug.status))
                 "title" => row.set("title", bug.title)
                 "file" => row.set("file", bug.file)
                 "line" => row.set("line", "{bug.line}")
@@ -167,7 +201,11 @@ class BugDatabase:
 
     # Add new bug
     me add_bug(bug: Bug) -> bool:
-        if not self.db.add_row_to_table("bugs", bug_to_row(bug)):
+        if self.get_bug(bug.id).?:
+            return false
+
+        val table_name = self.target_table_name(bug.status)
+        if not self.db.add_row_to_table(table_name, bug_to_row(bug)):
             return false
 
         # Add multiline fields
@@ -196,12 +234,14 @@ class BugDatabase:
 
     # Get bug by ID
     fn get_bug(id: text) -> Bug?:
-        val bugs_table_opt = self.db.get_table("bugs")
-        if not bugs_table_opt.?:
-            return None
-        val bugs_table = bugs_table_opt.unwrap()
-
-        val row_opt = bugs_table.get_row(id)
+        var row_opt: SdnRow? = None
+        for table_name in self.available_bug_tables():
+            val table_opt = self.db.get_table(table_name)
+            if not table_opt.?:
+                continue
+            row_opt = table_opt.unwrap().get_row(id)
+            if row_opt.?:
+                break
         if not row_opt.?:
             return None
         val row = row_opt.unwrap()
@@ -267,13 +307,16 @@ class BugDatabase:
 
     # Get all bugs
     fn all_bugs() -> [Bug]:
-        val bugs_table = self.db.get_table("bugs")?
         var result = []
-
-        for row in bugs_table.valid_rows():
-            val id = row.get("id")?
-            val bug = self.get_bug(id)?
-            result.push(bug)
+        for table_name in self.available_bug_tables():
+            val table_opt = self.db.get_table(table_name)
+            if not table_opt.?:
+                continue
+            val bugs_table = table_opt.unwrap()
+            for row in bugs_table.valid_rows():
+                val id = row.get("id")?
+                val bug = self.get_bug(id)?
+                result.push(bug)
 
         result
 
@@ -301,20 +344,25 @@ class BugDatabase:
 
     # Update bug
     me update_bug(id: text, bug: Bug) -> bool:
-        var bugs_table_opt = self.db.get_table_mut("bugs")
-        if not bugs_table_opt.?:
+        val current_table_name = self.find_bug_table_name(id)
+        if current_table_name == "":
             return false
-        var bugs_table = bugs_table_opt.unwrap()
-        if not bugs_table.columns.contains("valid"):
-            val updated = bugs_table.update_row(id, self.bug_to_row_for_table(bug, bugs_table))
-            self.db.set_table("bugs", bugs_table)
+
+        val target_table_name = self.target_table_name(bug.status)
+        var current_table = self.db.get_table_mut(current_table_name)?
+
+        if current_table_name == target_table_name:
+            val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
+            self.db.set_table(current_table_name, current_table)
             return updated
 
-        # Mark old bug as invalid (get_table returns copy, must write back)
-        bugs_table.mark_deleted(id)
-        self.db.set_table("bugs", bugs_table)
+        if not current_table.columns.contains("valid"):
+            val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
+            self.db.set_table(current_table_name, current_table)
+            return updated
 
-        # Add updated bug
+        current_table.mark_deleted(id)
+        self.db.set_table(current_table_name, current_table)
         self.add_bug(bug)
 
     # Resolve bug — marks status Closed and records updated_at timestamp
@@ -338,19 +386,7 @@ class BugDatabase:
             updated_at: timestamp,
             valid: old_bug.valid
         )
-        var bugs_table_opt = self.db.get_table_mut("bugs")
-        if not bugs_table_opt.?:
-            return false
-        var bugs_table = bugs_table_opt.unwrap()
-        if not bugs_table.columns.contains("valid"):
-            val updated = bugs_table.update_row(id, self.bug_to_row_for_table(resolved, bugs_table))
-            self.db.set_table("bugs", bugs_table)
-            return updated
-
-        # Mark old entry as invalid, then insert resolved copy
-        bugs_table.mark_deleted(id)
-        self.db.set_table("bugs", bugs_table)
-        self.add_bug(resolved)
+        self.update_bug(id, resolved)
 
     # Save to disk
     me save() -> bool:
@@ -371,7 +407,7 @@ class BugDatabase:
             # Count by status
             if b.status == BugStatus.Open or b.status == BugStatus.Investigating or b.status == BugStatus.Confirmed:
                 open = open + 1
-            elif b.status == BugStatus.Fixed or b.status == BugStatus.Closed:
+            else:
                 fixed = fixed + 1
             # Count by severity
             if b.severity == BugSeverity.P0:
@@ -425,74 +461,100 @@ class BugDatabase:
         var issues: [DbIssue] = []
         val db_name = "bug"
 
-        val bugs_table_opt = self.db.get_table("bugs")
-        if not bugs_table_opt.?:
+        val table_names = self.available_bug_tables()
+        var bug_tables: [SdnTable] = []
+        for table_name in table_names:
+            val table_opt = self.db.get_table(table_name)
+            if table_opt.?:
+                bug_tables.push(table_opt.unwrap())
+
+        if bug_tables.len() == 0:
             issues.push(DbIssue(
                 db_name: db_name,
                 severity: "error",
                 issue_type: "missing_table",
-                message: "Expected 'bugs' table not found in bug database",
+                message: "Expected bug table not found in bug database",
                 auto_fixable: false
             ))
             return issues
 
-        val bugs_table = bugs_table_opt.unwrap()
-
-        # Duplicate ID check
-        val dup_issues = check_duplicate_ids(bugs_table, "id", db_name)
-        for issue in dup_issues:
-            issues.push(issue)
-
-        # Valid column check
-        val valid_issues = check_valid_column(bugs_table, db_name)
-        for issue in valid_issues:
-            issues.push(issue)
-
-        # Severity values check
         val valid_severities = ["P0", "P1", "P2", "P3", "Important"]
-        val sev_issues = check_enum_values(bugs_table, "severity", valid_severities, db_name)
-        for issue in sev_issues:
-            issues.push(issue)
+        val valid_statuses = [
+            "open", "investigating", "confirmed", "fixed", "closed", "wontfix",
+            "documented_limitation", "documented", "invalid", "cannot_reproduce",
+            "Open", "Investigating", "Confirmed", "Fixed", "Closed", "Wontfix"
+        ]
+        var seen_ids: Dict<text, text> = {}
 
-        # Status values check
-        val valid_statuses = ["Open", "Investigating", "Confirmed", "Fixed", "Closed", "Wontfix"]
-        val status_issues = check_enum_values(bugs_table, "status", valid_statuses, db_name)
-        for issue in status_issues:
-            issues.push(issue)
+        for bugs_table in bug_tables:
+            val dup_issues = check_duplicate_ids(bugs_table, "id", db_name)
+            for issue in dup_issues:
+                issues.push(issue)
 
-        # File references exist
-        val file_issues = check_file_refs(bugs_table, "file", db_name)
-        for issue in file_issues:
-            issues.push(issue)
+            val valid_issues = check_valid_column(bugs_table, db_name)
+            for issue in valid_issues:
+                issues.push(issue)
 
-        # Empty required fields
-        val empty_title = check_empty_required(bugs_table, "title", db_name)
-        for issue in empty_title:
-            issues.push(issue)
+            val sev_issues = check_enum_values(bugs_table, "severity", valid_severities, db_name)
+            for issue in sev_issues:
+                issues.push(issue)
 
-        val empty_id = check_empty_required(bugs_table, "id", db_name)
-        for issue in empty_id:
-            issues.push(issue)
+            val status_issues = check_enum_values(bugs_table, "status", valid_statuses, db_name)
+            for issue in status_issues:
+                issues.push(issue)
+
+            val file_issues = check_file_refs(bugs_table, "file", db_name)
+            for issue in file_issues:
+                issues.push(issue)
+
+            val empty_title = check_empty_required(bugs_table, "title", db_name)
+            for issue in empty_title:
+                issues.push(issue)
+
+            val empty_id = check_empty_required(bugs_table, "id", db_name)
+            for issue in empty_id:
+                issues.push(issue)
+
+            for row in bugs_table.valid_rows():
+                val id = row.get("id") ?? ""
+                if id == "":
+                    continue
+                if seen_ids.has(id):
+                    issues.push(DbIssue(
+                        db_name: db_name,
+                        severity: "error",
+                        issue_type: "duplicate_id",
+                        message: "Duplicate bug id '{id}' appears in both '{seen_ids[id]}' and '{bugs_table.name}'",
+                        auto_fixable: false
+                    ))
+                else:
+                    seen_ids[id] = bugs_table.name
+
+        val bug_id_table = SdnTable.new("bug_ids", ["id"])
+        for id in seen_ids.keys():
+            val row = SdnRow.empty()
+            row.set("id", id)
+            bug_id_table.add_row(row)
 
         # Orphaned entries in auxiliary tables
         val desc_table_opt = self.db.get_table("bug_descriptions")
         if desc_table_opt.?:
             val desc_table = desc_table_opt.unwrap()
-            val orphan_issues = check_orphan_refs(desc_table, "bug_id", bugs_table, "id", db_name)
+            val orphan_issues = check_orphan_refs(desc_table, "bug_id", bug_id_table, "id", db_name)
             for issue in orphan_issues:
                 issues.push(issue)
 
         val fix_table_opt = self.db.get_table("bug_fix_strategies")
         if fix_table_opt.?:
             val fix_table = fix_table_opt.unwrap()
-            val orphan_issues = check_orphan_refs(fix_table, "bug_id", bugs_table, "id", db_name)
+            val orphan_issues = check_orphan_refs(fix_table, "bug_id", bug_id_table, "id", db_name)
             for issue in orphan_issues:
                 issues.push(issue)
 
         val log_table_opt = self.db.get_table("bug_investigation_logs")
         if log_table_opt.?:
             val log_table = log_table_opt.unwrap()
-            val orphan_issues = check_orphan_refs(log_table, "bug_id", bugs_table, "id", db_name)
+            val orphan_issues = check_orphan_refs(log_table, "bug_id", bug_id_table, "id", db_name)
             for issue in orphan_issues:
                 issues.push(issue)
 
@@ -552,14 +614,28 @@ fn status_to_string(status: BugStatus) -> text:
         BugStatus.Closed: "Closed"
         BugStatus.Wontfix: "Wontfix"
 
+fn status_to_storage_string(status: BugStatus) -> text:
+    match status:
+        BugStatus.Open: "open"
+        BugStatus.Investigating: "investigating"
+        BugStatus.Confirmed: "confirmed"
+        BugStatus.Fixed: "fixed"
+        BugStatus.Closed: "closed"
+        BugStatus.Wontfix: "wontfix"
+
 fn parse_status(s: text) -> BugStatus:
-    match s:
-        "Open": BugStatus.Open
-        "Investigating": BugStatus.Investigating
-        "Confirmed": BugStatus.Confirmed
-        "Fixed": BugStatus.Fixed
-        "Closed": BugStatus.Closed
-        "Wontfix": BugStatus.Wontfix
+    match s.lower():
+        "": BugStatus.Open
+        "open": BugStatus.Open
+        "investigating": BugStatus.Investigating
+        "confirmed": BugStatus.Confirmed
+        "fixed": BugStatus.Fixed
+        "closed": BugStatus.Closed
+        "wontfix": BugStatus.Wontfix
+        "documented_limitation": BugStatus.Closed
+        "documented": BugStatus.Closed
+        "invalid": BugStatus.Closed
+        "cannot_reproduce": BugStatus.Closed
         _: BugStatus.Open
 
 # ============================================================================
@@ -575,7 +651,7 @@ fn bug_to_row(bug: Bug) -> SdnRow:
     val row = SdnRow.empty()
     row.set("id", bug.id)
     row.set("severity", severity_to_string(bug.severity))
-    row.set("status", status_to_string(bug.status))
+    row.set("status", status_to_storage_string(bug.status))
     row.set("title", bug.title)
     row.set("file", bug.file)
     row.set("line", "{bug.line}")

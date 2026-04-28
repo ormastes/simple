@@ -13,6 +13,7 @@ extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_aes_sbox(i: i64) -> i64
 extern fn rt_aes_rcon(i: i64) -> i64
 extern fn rt_aes128_encrypt_block_into(key: [u8], block: [u8], out: [u8]) -> i64
+extern fn rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -516,7 +517,15 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
 
     Returns: ciphertext || 16-byte authentication tag (concatenated).
         The last 16 bytes of the result are the tag.
+
+    Compile-mode fast-path: pure-Simple GHASH/AES uses [u32] shifts that
+    Cranelift miscompiles. Delegate to rt_tls13_aes128_gcm_encrypt; the C
+    extern returns ciphertext || tag matching this contract.
     """
+    val fast = rt_tls13_aes128_gcm_encrypt(key, nonce, plaintext, aad)
+    if fast.len() != 0:
+        return fast
+
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)
