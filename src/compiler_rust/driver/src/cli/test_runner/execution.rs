@@ -45,6 +45,11 @@ use scenario_artifacts::write_scenario_manifest;
 use crate::exec_core::run_main;
 
 /// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
+///
+/// QEMU-tagged specs (path under test/qemu/, or files containing `@qemu` /
+/// `@tag:qemu` in the first ~4 KB) get a longer budget because they typically
+/// run several `_run_qemu(arch)` invocations, each up to 15 s. Override the
+/// QEMU-specific budget with `SIMPLE_QEMU_TEST_TIMEOUT_SECS` (default 240).
 fn per_test_timeout_secs(path: &Path) -> u64 {
     if let Ok(raw) = std::env::var("SIMPLE_TEST_TIMEOUT") {
         if let Ok(parsed) = raw.parse::<u64>() {
@@ -56,10 +61,43 @@ fn per_test_timeout_secs(path: &Path) -> u64 {
             return 300;
         }
     }
+    if is_qemu_spec(path) {
+        let qemu_default = std::env::var("SIMPLE_QEMU_TEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(240);
+        return qemu_default;
+    }
     if path.components().any(|c| c.as_os_str() == "system") {
         return 120;
     }
     60
+}
+
+/// Returns true if the spec is a QEMU-driven test (path under `test/qemu/`,
+/// or first ~4 KB of the file contains `@qemu` / `@tag:qemu`).
+fn is_qemu_spec(path: &Path) -> bool {
+    let mut saw_test = false;
+    for c in path.components() {
+        let s = c.as_os_str();
+        if s == "test" {
+            saw_test = true;
+        } else if saw_test && s == "qemu" {
+            return true;
+        }
+    }
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = f.read(&mut buf) {
+            if let Ok(text) = std::str::from_utf8(&buf[..n]) {
+                if text.contains("@qemu") || text.contains("@tag:qemu") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Get current process RSS in bytes. Returns 0 on failure.
