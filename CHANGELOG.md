@@ -2,6 +2,32 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.8] - 2026-04-28
+
+### Added
+- **SimpleOS bootstrap lane** — `bootstrap-from-scratch.sh --target=simpleos-x86_64` end-to-end with kernel build, package mode, and `os_qemu_test.shs` harness wired to the platform catalog
+- **Driver framework rollout (A–E)** — pure-Simple `@driver` / `@native_lib` framework, manifest encoder, and DMA primitives across x86_64/x86/arm64/arm32/riscv64/riscv32 (FR-DRIVER-0001..0006)
+- **Rust stage1 sysroot** — `x86_64-unknown-simpleos` libstd lane with `${SDKROOT}` symlink shim
+- **MDSOC+** as default architecture for SimpleOS userland/apps (ECS business layer); kernel/drivers stay MDSOC-only
+- **Browser platform** progress — Blink/Skia/cc/viz-style naming, WebGPU compute-draw extern, WSS handshake + TLS hardening
+- **TTF font path** end-to-end via `font_renderer` with `SIMPLE_TTF_DYLIB` / `SIMPLE_TTF_PATH` env opt-ins
+- **t32_lsp_mcp cache opt-in** — `setup.sh` gates SMF compile + use behind `SIMPLE_MCP_USE_CACHE=1`; default is `.spl` interpret
+
+### Fixed
+- **Cranelift right-shift (`>>`)** — fixed in compiled mode (FR-DRIVER-0002b); driver-framework division workaround obsolete
+- **Submodule gitlink flips** under jj ↔ git — accept submodule files-as-tree + `.gitmodules` + separate inner-repo push
+- **Release-binary error reporting** — `bin/simple <script.spl>` (no `run`) now surfaces real errors on stderr (B1)
+- **Interpreter `[u8]` bulk allocation** — `rt_bytes_alloc(len) -> [u8]` extern (B2); 32 MiB allocates in ~1.5s
+- **Clippy** — `simple-parser`, `simple-common`, `simple-native-all` warnings eliminated; runtime `build.rs` (`Path` vs `PathBuf`) and `serial.rs` errno comparisons cleaned up
+- **VHDL backend** — switch return targets, goto-return chains, scalar source-facade width ops, tuple/enum aggregates
+- **x86_64 kernel build** — root-cause analysis for cross-arch riscv inline-asm leak (use `--entry-closure`)
+
+### Changed
+- **MCP wrapper default** — runs from `.spl` by default; SMF cache strictly opt-in via `SIMPLE_MCP_USE_CACHE=1`
+- **`bin/simple build`** — clarified that `build` falls through wrapper whitelist; new externs require `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
+- **SSpec compile pipeline** — documented limitations; `--mode=smf` / `--compile` still produce false-greens; verify in interpreter mode until R2-broader lands
+- **Release prep workflow** — local `check_release_payload.shs`, `check-mcp-release-assets.shs`, `check-executable-size-budgets.shs`, and `check-loader-dependency-closure.shs` smoke checks before tag
+
 ## [0.9.6] - 2026-04-22
 
 ### Added
