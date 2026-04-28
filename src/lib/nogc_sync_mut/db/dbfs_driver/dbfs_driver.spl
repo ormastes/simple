@@ -14,6 +14,9 @@ use std.fs_driver.capability.{Capability, CapabilitySet}
 use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_DATA}
 use std.db.dbfs_engine.txn.{DbfsTxn, TxnId}
+use std.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena}
+use std.fs_driver.block_device.{BlockDevice}
+use std.storage.durability.{DurabilityClass}
 
 # --- Internal inode kinds ---
 
@@ -54,19 +57,23 @@ var _dbfs_next_inst: i64 = 1
 struct DbFsDriver:
     """DBFS filesystem driver.
 
-    name        — driver identifier returned by driver_name().
-    inst_id     — unique instance ID (keys into _dbfs_inodes / _dbfs_fds).
-    next_id     — next inode id to assign (module-level ops use this as seed).
-    next_fd     — next handle id to assign.
-    wal         — write-ahead log for group-commit.
-    flush_count — number of group_commit() / WAL flush calls.
+    name             — driver identifier returned by driver_name().
+    inst_id          — unique instance ID (keys into _dbfs_inodes / _dbfs_fds).
+    next_id          — next inode id to assign (module-level ops use this as seed).
+    next_fd          — next handle id to assign.
+    wal              — write-ahead log for group-commit.
+    flush_count      — number of group_commit() / WAL flush calls.
+    arena_base       — base_block of the backing RawNvmeArena, or -1 for in-memory.
+    arena_block_count — block_count of the backing RawNvmeArena (0 if not device-backed).
     """
-    name:        text
-    inst_id:     i64
-    next_id:     u64
-    next_fd:     u64
-    wal:         DbfsWal
-    flush_count: i64
+    name:             text
+    inst_id:          i64
+    next_id:          u64
+    next_fd:          u64
+    wal:              DbfsWal
+    flush_count:      i64
+    arena_base:       i64
+    arena_block_count: i64
 
 # --- Module-level store helpers ---
 
@@ -143,13 +150,63 @@ impl DbFsDriver:
             unlinked: false,
         ))
         DbFsDriver(
-            name:        "DbFsDriver",
-            inst_id:     iid,
-            next_id:     2,
-            next_fd:     1,
-            wal:         DbfsWal.new(),
-            flush_count: 0,
+            name:              "DbFsDriver",
+            inst_id:           iid,
+            next_id:           2,
+            next_fd:           1,
+            wal:               DbfsWal.new(),
+            flush_count:       0,
+            arena_base:        -1,
+            arena_block_count: 0,
         )
+
+    static fn open_on_device(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
+        """Create a DBFS driver backed by a real BlockDevice region.
+
+        Registers a RawNvmeArena over [base_block, base_block+block_count) on dev.
+        Returns Ok(DbFsDriver) with arena_base set; arena writes go through
+        BlockDevice.write_sector. In-memory inode store is still used for the
+        directory/file metadata layer (see write_passthrough for raw arena I/O).
+        """
+        val arena = RawNvmeArena.new(dev, base_block, block_count)
+        val iid = _alloc_inst_id()
+        # Install root inode in the in-memory layer (same as new_hosted).
+        _dbfs_inodes.push(DbFsInode(
+            inst_id:  iid,
+            id:       1,
+            kind:     DbFsKind.Dir,
+            name:     "/",
+            content:  "",
+            parent:   0,
+            size:     0,
+            unlinked: false,
+        ))
+        Ok(DbFsDriver(
+            name:              "DbFsDriver",
+            inst_id:           iid,
+            next_id:           2,
+            next_fd:           1,
+            wal:               DbfsWal.new(),
+            flush_count:       0,
+            arena_base:        base_block,
+            arena_block_count: block_count,
+        ))
+
+    fn write_passthrough(data: [u8]) -> Result<i64, FsError>:
+        """Write raw bytes directly to the backing BlockDevice via RawNvmeArena.
+
+        Only available when the driver was constructed via open_on_device.
+        Returns Ok(bytes_written) on success, Err(FsError.Unsupported) when
+        the driver is in-memory only (arena_base == -1).
+        """
+        if self.arena_base < 0:
+            return Err(FsError.Unsupported)
+        val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count)
+        val handle = arena.arena_handle()
+        val r = arena.arena_append(handle, data, DurabilityClass.BestEffort)
+        if r.generation < 0:
+            return Err(FsError.IoError(code: 0))
+        Ok(r.bytes_written)
 
     # --- stat ---
 
