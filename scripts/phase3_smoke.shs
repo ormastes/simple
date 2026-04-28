@@ -1,0 +1,34 @@
+#!/bin/sh
+# Phase 3 QEMU smoke — boots kernel + disk, validates serial markers.
+# Exit 0 if >=4 required marker lines found, 1 otherwise.
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+KERNEL="$REPO/build/os/simpleos_desktop_e2e_32.elf"
+DISK="${PHASE3_DISK:-$REPO/build/os/phase3_disk.img}"
+LOG="$REPO/build/os/phase3_serial.log"
+[ -f "$KERNEL" ] || { echo "MISS: $KERNEL"; exit 1; }
+[ -f "$DISK" ]   || { echo "MISS: $DISK";   exit 1; }
+rm -f "$LOG"
+timeout 60 qemu-system-x86_64 \
+  -machine q35 -cpu qemu64 -m 512M \
+  -kernel "$KERNEL" \
+  -drive "file=$DISK,if=none,id=nvm,format=raw,readonly=on" \
+  -device nvme,serial=deadbeef,drive=nvm \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+  -display none -serial file:"$LOG" -no-reboot >/dev/null 2>&1 || true
+
+# Required markers (Phase 0 + W-2):
+#   phase-3-mount       — FAT32 mount OK
+#   spawn:fs-bytes=     — bytes read from disk
+#   spawn:image-ok      — image verified
+#   phase-3-exit        — clean exit
+REQUIRED='phase-3-mount|spawn:fs-bytes=|spawn:image-ok|phase-3-exit'
+COUNT=$(grep -aE "$REQUIRED" "$LOG" 2>/dev/null | wc -l)
+if [ "$COUNT" -ge 4 ]; then
+    echo "PASS: $COUNT marker-bearing lines found"
+    grep -aE "$REQUIRED|phase-2-" "$LOG" | head -20
+    exit 0
+fi
+echo "FAIL: $COUNT/4 required marker lines found"
+tail -30 "$LOG"
+exit 1
