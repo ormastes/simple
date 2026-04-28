@@ -137,44 +137,84 @@ No SDL, no winit, no Wayland, no X11, no window/surface/sdl/wayland identifiers.
 
 ## Root Cause Class
 
-**Compile-time hang (option 3 of 5 in the diagnostic task).**
+**Compile-time super-linear scaling per `render_html_to_pixel_array` call site.**
+Not an infinite loop — termination is reached, but only after the 120s test
+runner timeout fires.
 
-Specifically: a single bootstrap-compiler thread is pinned at ~100% CPU with
-no syscalls, `fn main()` of the spec is never reached (stdout empty), and the
-spec performs no display I/O. The 869-line `browser_renderer.spl` plus its
-transitive `gc_async_mut/gpu/browser_engine` import graph is the most likely
-trigger because the working sibling `pixel_verify_minimal.spl` does reach
-main() with the same toolchain — the differentiator is the import set this
-larger spec pulls in (the multi-test fixtures plus the full BrowserRenderer
-path).
+### Empirical bisection (Agent M, 2026-04-28)
+
+Measured wall-clock for `bin/simple <repro>.spl` with N call sites of
+`render_html_to_pixel_array(h, 200, 200)` in `fn main()`, no other body code:
+
+| body shape                                 | elapsed | exit |
+|--------------------------------------------|--------:|-----:|
+| no import, `fn main(): 0`                  |   0.06s |    0 |
+| import only, no call                       |   0.99s |    0 |
+| 1 call site                                |  24.3s  |    0 |
+| 2 call sites                               |  44.5s  |    0 |
+| 3 call sites                               |  56.7s  |    0 |
+| 5 call sites                               |  96.0s  |    0 |
+| 5 call sites via `fn do_render(h)` wrapper | 125.2s  |    0 |
+| 1 call site inside `while i < 5` loop      | 109.5s  |    0 |
+| empty `while i < 5` loop, no call          |   1.05s |    0 |
+| 1 call + full Test-1 diagnostic body       |  46.1s  |    0 |
+
+The full failing spec has 5 call sites **plus** ~200 lines of
+interpolated-`print`/index/branch body code, which together push it past
+120s — hence the test-runner kill. The single 100%-CPU thread observed in
+procfs is super-linear compiler work, not a non-terminating loop.
+
+The helper-wrap experiment confirms cost is **per-call-site at the AST level**
+(every call expression of `render_html_to_pixel_array` independently inflates
+compile time); collapsing the literal arguments behind a one-line forwarder
+function does not help — it actually grows the work because the wrapper itself
+is now compiled per call site. A loop with one call site also bloats — likely
+because monomorphization / inlining of the entire 869-line BrowserRenderer
+pipeline closure is duplicated at each invocation expression in the AST.
 
 This is **not** a recurrence of the documented allocator-storm bug
 (`browser_engine_html_parser_hang.md`); the runtime allocator path is never
-entered. The prior fixes for that bug (StringBuilder conversions, rt_slice
-identity fast path, char_at substitutions) remain **unverified by this spec**
-since `render_html_to_pixel_array` is never invoked.
+entered before the 120s kill. The prior fixes for that bug (StringBuilder
+conversions, rt_slice identity fast path, char_at substitutions) remain
+**unverified by this spec** since `render_html_to_pixel_array` is never
+reached at runtime.
 
 ## Proposed Fix Shape
 
-Investigate the bootstrap compiler's loader / type-checker / borrow analysis
-when ingesting the `browser_renderer.spl` import closure — that is where the
-single-thread CPU loop lives. Suggested next steps, in order:
+Two independent paths, both useful:
 
-1. Build a **progressive import-elision repro** in `test/tmp_*` by stripping
-   imports and `render_html_to_pixel_array` call sites one at a time from a
-   copy of the failing spec until compilation completes; the last addition
-   that re-introduces the hang names the offending module/symbol.
-2. With `ptrace_scope` lowered (or in a dev container), capture a `perf
-   record -F 99` flamegraph on `target/bootstrap/simple` while compiling the
-   spec — the hot leaf will name the compiler pass and likely the algorithmic
-   defect (e.g. quadratic name resolution, exponential trait/generic
-   instantiation, monomorphization fixed point that fails to converge).
-3. Cross-check whether any recent change to `browser_renderer.spl` or its
-   imports added a generic explosion or a recursive type alias the bootstrap
-   compiler doesn't memoize.
+### A. .spl-layer mitigation (attempted but insufficient)
 
-A "skip-when-no-display" guard is **not** appropriate — there is no display
-involvement to guard against.
+Naive split into 2 files (tests 1-3 = 3 calls, tests 4-7 = 4 calls) was
+attempted on 2026-04-28 and **did not fit** the 120s test-runner budget:
+both halves still timed out at 120s. The full diagnostic body adds
+~10-22s per test on top of per-call-site cost (1 call + Test-1 body =
+46s vs. 24s for the bare call). To fit the budget the split would need
+either (a) >=4 files, each with <=2 call sites and stripped diagnostic
+prints, or (b) a single file with diagnostic prints removed entirely.
+Both options reduce test signal and are workarounds for the compiler
+defect described in section B; not landed.
+
+### B. Compiler perf bug (do NOT touch in this rescue)
+
+The real defect lives in the bootstrap compiler's per-call-site
+specialization / inlining of large imported function closures. Suggested
+next steps, in order, for a future compiler-track agent:
+
+1. With `ptrace_scope` lowered (or in a dev container), capture a `perf
+   record -F 99` flamegraph on `target/bootstrap/simple` while compiling
+   the 5-call-site repro at `/tmp/pv_5calls.spl` — the hot leaf will name
+   the compiler pass.
+2. Cross-check whether `browser_renderer.spl` (or any of its
+   `gc_async_mut/gpu/browser_engine/*` transitive imports) added a generic
+   explosion or a recursive type alias the bootstrap compiler doesn't
+   memoize per-call-site.
+3. Likely fix shape: memoize call-site specialization keyed on
+   (callee_symbol, monomorphization signature) instead of re-walking the
+   whole closure body per call expression.
+
+A "skip-when-no-display" guard is **not** appropriate — there is no
+display involvement to guard against.
 
 ## References
 
