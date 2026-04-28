@@ -176,7 +176,7 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
     match &use_stmt.target {
         ImportTarget::Group(_) | ImportTarget::Glob => {
-            if module_path.extension().map_or(false, |ext| ext == "spl")
+            if module_path.extension().is_some_and(|ext| ext == "spl")
                 && module_path.file_name().map_or(true, |name| name != "__init__.spl")
             {
                 let package_init = module_path.with_extension("").join("__init__.spl");
@@ -543,7 +543,7 @@ pub fn load_and_merge_module(
     // Without preloading these siblings, bare exports resolve to nothing.
     let preloaded_env: Option<HashMap<String, Value>> = if module_path
         .file_name()
-        .map_or(false, |f| f == "__init__.spl")
+        .is_some_and(|f| f == "__init__.spl")
     {
         let has_bare_exports = filtered_items
             .iter()
@@ -569,9 +569,9 @@ pub fn load_and_merge_module(
                         .filter_map(|e| e.ok())
                         .map(|e| e.path())
                         .filter(|p| {
-                            p.extension().map_or(false, |ext| ext == "spl")
-                                && p.file_name().map_or(false, |f| f != "__init__.spl")
-                                && p.file_name().map_or(false, |f| f != "mod_stub.spl")
+                            p.extension().is_some_and(|ext| ext == "spl")
+                                && p.file_name().is_some_and(|f| f != "__init__.spl")
+                                && p.file_name().is_some_and(|f| f != "mod_stub.spl")
                                 && p.is_file()
                         })
                         .filter_map(|p| {
@@ -589,8 +589,8 @@ pub fn load_and_merge_module(
                         .collect();
                     // Sort for deterministic load order; mod.spl first if present
                     sibling_files.sort_by(|(a, _), (b, _)| {
-                        let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
-                        let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
+                        let a_is_mod = a.file_name().is_some_and(|f| f == "mod.spl");
+                        let b_is_mod = b.file_name().is_some_and(|f| f == "mod.spl");
                         match (a_is_mod, b_is_mod) {
                             (true, false) => std::cmp::Ordering::Less,
                             (false, true) => std::cmp::Ordering::Greater,

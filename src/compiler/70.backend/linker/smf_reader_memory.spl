@@ -129,10 +129,10 @@ impl SmfReaderMemory:
 
     """Read code bytes for a symbol."""
     fn read_code(symbol: SmfSymbol) -> Result<[u8], text>:
-        # Each section table entry is 64 bytes:
+        # Each section table entry is 56 bytes (Rust #[repr(C)] SmfSection):
         #   section_type (1) + padding (3) + flags (4) + offset (8) +
-        #   size (8) + virtual_size (8) + alignment (4) + name (16) + pad (12)
-        val section_entry_size = 64
+        #   size (8) + virtual_size (8) + alignment (8) + name (16)
+        val section_entry_size = 56
         val sec_idx = symbol.section_index as i64
         val sec_entry_offset = self.sections_offset + sec_idx * section_entry_size
 
@@ -179,7 +179,7 @@ impl SmfReaderMemory:
 
     """Check if the Code section contains a full ELF object file."""
     fn has_elf_object() -> bool:
-        val section_entry_size = 64
+        val section_entry_size = 56
         val section_count = self.header.section_count as i64
         var i = 0
         while i < section_count:
@@ -206,7 +206,7 @@ impl SmfReaderMemory:
 
     """Read the full ELF object bytes from the Code section."""
     fn read_elf_object() -> Result<[u8], text>:
-        val section_entry_size = 64
+        val section_entry_size = 56
         val section_count = self.header.section_count as i64
         var i = 0
         while i < section_count:
@@ -246,7 +246,7 @@ impl SmfReaderMemory:
     Returns empty list for old SMF files without relocation sections.
     """
     fn read_relocations() -> Result<[SmfRelocEntry], text>:
-        val section_entry_size = 64
+        val section_entry_size = 56
         val section_count = self.header.section_count as i64
         val reloc_entry_size = 24
         var i = 0
@@ -466,7 +466,7 @@ fn smf_payload_file_offset(header: SmfHeader, offset: i64) -> i64:
 
 """Extract string table from SMF data."""
 fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
-    val section_entry_size = 64
+    val section_entry_size = 56
     val section_count = header.section_count as i64
     val sections_off = header.section_table_offset
 
@@ -501,9 +501,9 @@ fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
         i = i + 1
 
     # No StrTab section found in section table.
-    # Fall back: string table is after symbol table, before the 128-byte trailer header.
-    # Symbol entry size is 52 bytes (as written by backend/native and smf_writer).
-    val symbol_entry_size = 52
+    # Fall back: string table is after symbol table.
+    # Symbol entry size is 56 bytes (Rust #[repr(C)] SmfSymbol with natural alignment).
+    val symbol_entry_size = 56
     val sym_table_off = header.symbol_table_offset
     val sym_count = header.symbol_count as i64
     val str_start = sym_table_off + sym_count * symbol_entry_size
@@ -532,22 +532,24 @@ fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
 fn parse_symbol_table(data: [u8], header: SmfHeader, string_table: [u8]) -> Result<Dict<text, SmfSymbol>, text>:
     var symbols: Dict<text, SmfSymbol> = {}
 
-    # Symbol entry layout (52 bytes, matching build_symbol_entry in smf_writer.spl):
+    # Symbol entry layout (56 bytes, Rust #[repr(C)] SmfSymbol with natural alignment):
     #   name_offset:           u32 (4 bytes)  offset 0
-    #   name_hash:             u64 (8 bytes)  offset 4
-    #   sym_type:              u8  (1 byte)   offset 12
-    #   binding:               u8  (1 byte)   offset 13
-    #   visibility:            u8  (1 byte)   offset 14
-    #   flags:                 u8  (1 byte)   offset 15
+    #   name_hash:             u32 (4 bytes)  offset 4   <-- u32 NOT u64
+    #   sym_type:              u8  (1 byte)   offset 8
+    #   binding:               u8  (1 byte)   offset 9
+    #   visibility:            u8  (1 byte)   offset 10
+    #   flags:                 u8  (1 byte)   offset 11
+    #   <padding>              4 bytes        offset 12  (align value to 16)
     #   value:                 u64 (8 bytes)  offset 16
     #   size:                  u64 (8 bytes)  offset 24
     #   type_id:               u32 (4 bytes)  offset 32
     #   version:               u32 (4 bytes)  offset 36
     #   template_param_count:  u8  (1 byte)   offset 40
-    #   reserved:              3 bytes         offset 41
-    #   template_offset:       u64 (8 bytes)  offset 44
-    #   Total: 52 bytes
-    val symbol_entry_size = 52
+    #   reserved:              3 bytes        offset 41
+    #   <padding>              4 bytes        offset 44  (align template_offset to 48)
+    #   template_offset:       u64 (8 bytes)  offset 48
+    #   Total: 56 bytes
+    val symbol_entry_size = 56
     val sym_table_off = header.symbol_table_offset
     val sym_count = header.symbol_count as i64
 
@@ -561,14 +563,14 @@ fn parse_symbol_table(data: [u8], header: SmfHeader, string_table: [u8]) -> Resu
         # Read name_offset (u32 at offset 0)
         val name_offset = bytes_to_u32(data, entry_off)
 
-        # Read sym_type (u8 at offset 12)
-        val sym_type = data[entry_off + 12]
+        # Read sym_type (u8 at offset 8)
+        val sym_type = data[entry_off + 8]
 
-        # Read binding (u8 at offset 13)
-        val binding_raw = data[entry_off + 13]
+        # Read binding (u8 at offset 9)
+        val binding_raw = data[entry_off + 9]
 
-        # Read flags (u8 at offset 15)
-        val flags_raw = data[entry_off + 15]
+        # Read flags (u8 at offset 11)
+        val flags_raw = data[entry_off + 11]
 
         # Read value (u64 at offset 16) - offset within section
         val value = bytes_to_u64(data, entry_off + 16)
@@ -579,8 +581,8 @@ fn parse_symbol_table(data: [u8], header: SmfHeader, string_table: [u8]) -> Resu
         # Read template_param_count (u8 at offset 40)
         val tpl_param_count = data[entry_off + 40]
 
-        # Read template_offset (u64 at offset 44)
-        val tpl_offset = bytes_to_u64(data, entry_off + 44)
+        # Read template_offset (u64 at offset 48)
+        val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         # Resolve name from string table
         val name = read_string_from_table(string_table, name_offset as i64)

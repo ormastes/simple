@@ -492,13 +492,7 @@ pub fn compile_call<M: Module>(
                 // sign-extend to `-1` when consumed as `i64`.
                 let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
                 if let Some(ret_type) = get_runtime_return_type(ffi_name) {
-                    if ret_type == types::I32 {
-                        result = if dest_signed {
-                            builder.ins().sextend(types::I64, result)
-                        } else {
-                            builder.ins().uextend(types::I64, result)
-                        };
-                    } else if ret_type == types::I8 {
+                    if ret_type == types::I32 || ret_type == types::I8 {
                         result = if dest_signed {
                             builder.ins().sextend(types::I64, result)
                         } else {
@@ -657,7 +651,7 @@ pub fn compile_call<M: Module>(
         // e.g., TreeSitter__new → treesitter_new
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
                     type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
                     resolved_name = ctx
                         .use_map

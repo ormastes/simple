@@ -43,7 +43,7 @@ pub(crate) fn compile_closure_create<M: Module>(
         let mut dunder_storage;
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
                     dunder_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
                     resolved_name = ctx
                         .use_map
@@ -464,7 +464,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // e.g., TreeSitter__new → treesitter_new
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
                     type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
                     resolved_name = ctx
                         .use_map

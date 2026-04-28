@@ -27,11 +27,6 @@ impl<'a> MirLowerer<'a> {
                 dest
             })?;
 
-            // rt_enum_payload returns a tagged RuntimeValue.
-            // Mark it as tagged so downstream Store/Load tracking can
-            // insert UnboxInt when storing to a concrete int-typed local.
-            self.tagged_vregs.insert(raw_result);
-
             // If the expected type is known to be a native int/float, unbox now.
             let needs_int_unbox = matches!(
                 expr_ty,

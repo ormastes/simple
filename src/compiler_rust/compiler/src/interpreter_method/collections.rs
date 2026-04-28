@@ -359,7 +359,7 @@ pub fn handle_array_methods(
             {
                 for item in arr {
                     if dropping {
-                        let mut local_env = Env::clone(&captured);
+                        let mut local_env = Env::clone(captured);
                         if let Some(param) = params.first() {
                             local_env.insert(param.clone(), item.clone());
                         }
@@ -1045,7 +1045,7 @@ pub fn handle_dict_methods(
                         env: captured,
                     } => {
                         // Call the lambda
-                        let mut local_env = Env::clone(&captured);
+                        let mut local_env = Env::clone(captured);
                         for (i, param) in params.iter().enumerate() {
                             let arg_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
                             local_env.insert(param.clone(), arg_val);

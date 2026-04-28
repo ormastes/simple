@@ -453,7 +453,7 @@ int main(int argc, char** argv) {
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
         let has_native_all = selected_runtime
             .as_ref()
-            .map_or(false, |(_, is_native_all)| *is_native_all);
+            .is_some_and(|(_, is_native_all)| *is_native_all);
         let cc = if has_native_all {
             find_cxx_compiler()
         } else {
@@ -1008,7 +1008,7 @@ int main(int argc, char** argv) {
                     std::process::Command::new(p)
                         .arg("--version")
                         .output()
-                        .map_or(false, |o| o.status.success())
+                        .is_some_and(|o| o.status.success())
                 })
                 .map(|s| s.to_string())
         };
@@ -1218,7 +1218,7 @@ int main(int argc, char** argv) {
                         std::process::Command::new(bin)
                             .arg("--version")
                             .output()
-                            .map_or(false, |o| o.status.success())
+                            .is_some_and(|o| o.status.success())
                     })
                     .unwrap_or(&"objcopy");
                 let objcopy = std::process::Command::new(objcopy_bin)

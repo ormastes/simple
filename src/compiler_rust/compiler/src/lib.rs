@@ -3,6 +3,11 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
+// CompileError carries full diagnostic context by value; boxing would change the public
+// Result<_, CompileError> API for every caller. The workspace Cargo.toml already allows
+// this lint but -W clippy::all in `bin/simple build lint` re-enables it.
+#![allow(clippy::result_large_err)]
+
 pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;

@@ -136,7 +136,7 @@ fn count_spl_files(dir: &Path, count: &mut u32, max: u32) {
         let path = entry.path();
         if path.is_dir() {
             count_spl_files(&path, count, max);
-        } else if path.extension().map_or(false, |e| e == "spl") {
+        } else if path.extension().is_some_and(|e| e == "spl") {
             *count += 1;
         }
     }

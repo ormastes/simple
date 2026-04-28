@@ -531,7 +531,7 @@ fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
             };
             match effective_align {
                 '>' => {
-                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    let pad: String = std::iter::repeat_n(fill_char, padding).collect();
                     if fill_char == '0' && (raw.starts_with('+') || raw.starts_with('-')) {
                         let (sign, rest) = raw.split_at(1);
                         format!("{}{}{}", sign, pad, rest)
@@ -540,18 +540,18 @@ fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
                     }
                 }
                 '<' => {
-                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    let pad: String = std::iter::repeat_n(fill_char, padding).collect();
                     format!("{}{}", raw, pad)
                 }
                 '^' => {
                     let left_pad = padding / 2;
                     let right_pad = padding - left_pad;
-                    let left: String = std::iter::repeat(fill_char).take(left_pad).collect();
-                    let right: String = std::iter::repeat(fill_char).take(right_pad).collect();
+                    let left: String = std::iter::repeat_n(fill_char, left_pad).collect();
+                    let right: String = std::iter::repeat_n(fill_char, right_pad).collect();
                     format!("{}{}{}", left, raw, right)
                 }
                 '=' => {
-                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    let pad: String = std::iter::repeat_n(fill_char, padding).collect();
                     if raw.starts_with('+') || raw.starts_with('-') {
                         let (sign, rest) = raw.split_at(1);
                         format!("{}{}{}", sign, pad, rest)

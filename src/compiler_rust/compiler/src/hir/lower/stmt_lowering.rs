@@ -242,7 +242,7 @@ impl Lowerer {
                     let is_mut = if_stmt
                         .let_pattern
                         .as_ref()
-                        .map_or(false, |p| matches!(p, Pattern::MutIdentifier(_)));
+                        .is_some_and(|p| matches!(p, Pattern::MutIdentifier(_)));
                     let mutability = if is_mut {
                         Mutability::Mutable
                     } else {

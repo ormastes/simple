@@ -7,6 +7,39 @@ use crate::incremental::SourceInfo;
 use super::*;
 
 #[test]
+fn debug_os_entry_closure() {
+    // Navigate from CARGO_MANIFEST_DIR (compiler/) up to repo root
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // manifest_dir = .../src/compiler_rust/compiler
+    let project_root = manifest_dir
+        .parent().unwrap()  // src/compiler_rust
+        .parent().unwrap()  // src
+        .parent().unwrap()  // repo root
+        .to_path_buf();
+
+    let entry = project_root.join("examples/simple_os/arch/x86_64/os_entry.spl");
+    if !entry.exists() {
+        eprintln!("entry not found at {}", entry.display());
+        return;
+    }
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), PathBuf::from("/tmp/x"))
+        .source_dir(project_root.join("src/os"))
+        .entry_file(entry.clone());
+
+    let files = builder.discover_reachable_files_with_sources(&entry).unwrap();
+    eprintln!("=== {} files discovered ===", files.len());
+    for (p, _) in &files {
+        let ps = p.to_string_lossy();
+        if ps.contains("shell_app") || ps.contains("/vfs") || ps.contains("terminal")
+            || ps.contains("hello_world") || ps.contains("fs_types") {
+            eprintln!("  {}", p.display());
+        }
+    }
+    panic!("see stderr above");
+}
+
+#[test]
 fn test_module_prefix_from_path() {
     let source_root = PathBuf::from("/project/src");
 

@@ -21,25 +21,25 @@
 //! ALREADY PORTED (Rust copy is seed-only; MIRROR comments added):
 //!   * cli/** command dispatch           -> src/app/cli/main.spl (+ app.io.cli_ops)
 //!   * cli/test_runner/runner.rs         -> src/app/test_runner_new/** (full runner
-//!                                           already powers `bin/simple test`; the
-//!                                           static fast-path bypass is N/A on the
-//!                                           Simple side — there is no static fast
-//!                                           path there yet)
+//!     already powers `bin/simple test`; the
+//!     static fast-path bypass is N/A on the
+//!     Simple side — there is no static fast
+//!     path there yet)
 //!   * string_interner.rs                -> src/app/test_runner_new/string_interner.spl
 //!   * dependency_cache.rs               -> src/app/watch/deps.spl
-//!                                         + src/app/watch/watcher.spl
+//!     + src/app/watch/watcher.spl
 //!   * todo_parser.rs (consumer)         -> src/app/todo_scan/main.spl
 //!   * cli/code_quality (lint/fmt)       -> src/app/lint, src/app/formatter
 //!   * cli/check                         -> src/app/cli/check.spl
 //!   * cli/repl                          -> src/app/repl, app.io.cli_ops.cli_run_repl
 //!   * cli/llm_tools (mcp/diff/ctx)      -> src/app/mcp, src/app/diff, src/app/context
 //!   * cli/doc_gen (todo/feature/task)   -> src/app/todo_gen, src/app/feature_gen,
-//!                                           src/app/task_gen, src/app/spipe_docgen
+//!     src/app/task_gen, src/app/spipe_docgen
 //!   * cli/help + version                -> src/app/cli/main.spl (inline)
 //!
 //! NEW PEER ADDED THIS SLICE:
 //!   * is_system_spec predicate          -> src/app/test_runner_new/test_runner_helpers.spl
-//!                                         (mirrors runner.rs:733 system-spec gate)
+//!     (mirrors runner.rs:733 system-spec gate)
 //!
 //! REMAINING (Rust-only, not yet ported — pick next for future slices):
 //!   * auth_db.rs / oauth_flow.rs (OAuth/user auth DB)            313/404 LOC

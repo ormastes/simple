@@ -254,7 +254,7 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
         let out_section = out.add_section(segment.as_bytes().to_vec(), name.as_bytes().to_vec(), kind);
         let data = section.data().unwrap_or(&[]);
         out.section_mut(out_section)
-            .set_data(data.to_vec(), section.align() as u64);
+            .set_data(data.to_vec(), section.align());
         section_map.insert(section.index(), out_section);
     }
 

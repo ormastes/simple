@@ -55,7 +55,7 @@ pub(super) fn call_value_with_args(
             env: captured,
         } => {
             // Execute lambda with given args
-            let mut local_env = Env::clone(&captured);
+            let mut local_env = Env::clone(captured);
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.clone(), arg.clone());
@@ -65,7 +65,7 @@ pub(super) fn call_value_with_args(
         }
         Value::Function { def, captured_env, .. } => {
             // Execute function with given args, using the captured environment for closure
-            let mut local_env = Env::clone(&captured_env);
+            let mut local_env = Env::clone(captured_env);
             for (i, param) in def.params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.name.clone(), arg.clone());

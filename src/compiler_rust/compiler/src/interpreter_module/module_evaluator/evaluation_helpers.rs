@@ -643,7 +643,7 @@ pub(super) fn process_bare_exports(
     exports: &mut HashMap<String, Value>,
     module_path: Option<&Path>,
 ) {
-    let suppress_undefined_export_warning = module_path.map_or(false, |path| {
+    let suppress_undefined_export_warning = module_path.is_some_and(|path| {
         let normalized = path.to_string_lossy().replace('\\', "/");
         normalized.ends_with("/src/compiler_rust/lib/std/src/spec/__init__.spl")
     });

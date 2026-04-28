@@ -9,10 +9,26 @@
 #   builder.add_module("std/io/file", "path/to/file.smf")
 #   builder.write("libstd_io.lsm")
 
-use std.io_runtime.{file_read_bytes, file_exists}
+use std.io_runtime.{file_exists}
 use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_MAGIC, LSMF_HEADER_SIZE, LSMF_INDEX_ENTRY_SIZE, fnv1a_hash}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+fn fnv1a_hash_indexed(data: [u8]) -> u64:
+    val FNV_OFFSET_HI: u64 = 0x4BF29CE4
+    val fnv_hi_shifted = (FNV_OFFSET_HI + 0x80000000) << 32
+    val FNV_OFFSET: u64 = fnv_hi_shifted + 0x84222325
+    val FNV_PRIME: u64 = 4294967296 + 435
+
+    var hash = FNV_OFFSET
+    var i = 0
+    while i < data.len():
+        hash = hash ^ (data[i] as u64)
+        hash = hash * FNV_PRIME
+        i = i + 1
+
+    hash
 
 # ============================================================================
 # Lib SMF Builder
@@ -65,10 +81,10 @@ impl LibSmfBuilder:
         if not file_exists(smf_path):
             return Err("SMF file not found: {smf_path}")
 
-        val data = file_read_bytes(smf_path)
+        val data = rt_file_read_bytes(smf_path) ?? []
 
         # Calculate hash
-        val hash = fnv1a_hash(data)
+        val hash = fnv1a_hash_indexed(data)
 
         # Add to modules list
         val entry = ModuleEntry(
@@ -111,11 +127,11 @@ impl LibSmfBuilder:
             return Err("Object file not found: {obj_path}")
 
         # Read SMF data
-        val smf_data = file_read_bytes(smf_path)
-        val smf_hash = fnv1a_hash(smf_data)
+        val smf_data = rt_file_read_bytes(smf_path) ?? []
+        val smf_hash = fnv1a_hash_indexed(smf_data)
 
-        val obj_data = file_read_bytes(obj_path)
-        val obj_hash = fnv1a_hash(obj_data)
+        val obj_data = rt_file_read_bytes(obj_path) ?? []
+        val obj_hash = fnv1a_hash_indexed(obj_data)
 
         # Add to modules list
         val entry = ModuleEntry(

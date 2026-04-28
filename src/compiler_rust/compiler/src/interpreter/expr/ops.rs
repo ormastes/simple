@@ -534,21 +534,19 @@ pub(super) fn eval_op_expr(
                 BinOp::Sub => {
                     if use_float {
                         Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
+                    } else if let Some(result) = try_dunder_binop(
+                        "__sub__",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
                     } else {
-                        if let Some(result) = try_dunder_binop(
-                            "__sub__",
-                            &left_val,
-                            &right_val,
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        ) {
-                            result
-                        } else {
-                            Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
-                        }
+                        Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
                     }
                 }
                 BinOp::Mul => {
@@ -600,30 +598,28 @@ pub(super) fn eval_op_expr(
                         } else {
                             Ok(Value::Float(left_val.as_float()? / r))
                         }
+                    } else if let Some(result) = try_dunder_binop(
+                        "__div__",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
                     } else {
-                        if let Some(result) = try_dunder_binop(
-                            "__div__",
-                            &left_val,
-                            &right_val,
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        ) {
-                            result
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            // E3001 - Division By Zero
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot divide by zero")
+                                .with_note("check that the divisor is not zero before division");
+                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                         } else {
-                            let r = right_val.as_int()?;
-                            if r == 0 {
-                                // E3001 - Division By Zero
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::DIVISION_BY_ZERO)
-                                    .with_help("cannot divide by zero")
-                                    .with_note("check that the divisor is not zero before division");
-                                Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
-                            } else {
-                                Ok(Value::Int(left_val.as_int()? / r))
-                            }
+                            Ok(Value::Int(left_val.as_int()? / r))
                         }
                     }
                 }
@@ -640,30 +636,28 @@ pub(super) fn eval_op_expr(
                         } else {
                             Ok(Value::Float(left_val.as_float()? % r))
                         }
+                    } else if let Some(result) = try_dunder_binop(
+                        "__mod__",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
                     } else {
-                        if let Some(result) = try_dunder_binop(
-                            "__mod__",
-                            &left_val,
-                            &right_val,
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        ) {
-                            result
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            // E3001 - Division By Zero (includes modulo)
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot perform modulo by zero")
+                                .with_note("check that the divisor is not zero before modulo operation");
+                            Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                         } else {
-                            let r = right_val.as_int()?;
-                            if r == 0 {
-                                // E3001 - Division By Zero (includes modulo)
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::DIVISION_BY_ZERO)
-                                    .with_help("cannot perform modulo by zero")
-                                    .with_note("check that the divisor is not zero before modulo operation");
-                                Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
-                            } else {
-                                Ok(Value::Int(left_val.as_int()? % r))
-                            }
+                            Ok(Value::Int(left_val.as_int()? % r))
                         }
                     }
                 }

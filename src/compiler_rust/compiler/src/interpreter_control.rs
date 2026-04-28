@@ -249,7 +249,7 @@ pub(super) fn exec_while(
 
             // Evaluate only the "other" (variant) side of the comparison and
             // compare against the cached length integer directly.
-            let other_val = evaluate_expr(&hoisted.other_expr, env, functions, classes, enums, impl_methods)?;
+            let other_val = evaluate_expr(hoisted.other_expr, env, functions, classes, enums, impl_methods)?;
             let other_int = match other_val {
                 Value::Int(n) => n,
                 _ => {
@@ -670,13 +670,13 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
         } => {
             expr_may_mutate_var(condition, var)
                 || expr_may_mutate_var(then_branch, var)
-                || else_branch.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
+                || else_branch.as_ref().is_some_and(|e| expr_may_mutate_var(e, var))
         }
 
         Expr::Cast { expr, .. } => expr_may_mutate_var(expr, var),
         Expr::Range { start, end, .. } => {
-            start.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
-                || end.as_ref().map_or(false, |e| expr_may_mutate_var(e, var))
+            start.as_ref().is_some_and(|e| expr_may_mutate_var(e, var))
+                || end.as_ref().is_some_and(|e| expr_may_mutate_var(e, var))
         }
 
         // Anything exotic: bail.

@@ -44,9 +44,10 @@ fn unit_bits_to_type_id(bits: u8, signed: bool) -> Option<TypeId> {
     }
 }
 
-/// Result type of a `BinOp` given the operand types. Comparisons + membership
-/// + identity produce BOOL; logical ops produce BOOL; arithmetic / bitwise /
-/// shift ops keep the left-operand type (unknown operand → unknown result).
+/// Result type of a `BinOp` given the operand types.
+/// Comparisons, membership, and identity produce BOOL; logical ops produce BOOL;
+/// arithmetic, bitwise, and shift ops keep the left-operand type
+/// (unknown operand → unknown result).
 fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
     match op {
         BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => Some(TypeId::BOOL),
@@ -122,16 +123,14 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 MirInst::FieldGet { dest, field_type, .. } => {
                     types_map.insert(*dest, *field_type);
                 }
-                MirInst::IndirectCall { dest, return_type, .. } => {
-                    if let Some(d) = dest {
-                        types_map.insert(*d, *return_type);
-                    }
+                MirInst::IndirectCall { dest: Some(d), return_type, .. } => {
+                    types_map.insert(*d, *return_type);
                 }
-                MirInst::MethodCallVirtual { dest, return_type, .. } => {
-                    if let Some(d) = dest {
-                        types_map.insert(*d, *return_type);
-                    }
+                MirInst::IndirectCall { dest: None, .. } => {}
+                MirInst::MethodCallVirtual { dest: Some(d), return_type, .. } => {
+                    types_map.insert(*d, *return_type);
                 }
+                MirInst::MethodCallVirtual { dest: None, .. } => {}
                 MirInst::UnitWiden {
                     dest, to_bits, signed, ..
                 }
