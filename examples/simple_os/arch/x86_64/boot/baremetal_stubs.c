@@ -10247,6 +10247,71 @@ int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, Ru
     return ok;
 }
 
+/* Decrypts a TLS 1.3 record AND returns inner [content_type || data] as a single
+ * [u8]. Bypasses pure-Simple's enum-field-destructuring compile-mode bug
+ * (RecordResult.Ok's content_type field reads as 0 even when the source is
+ * correct). Empty result = error. On success: byte[0] = content_type,
+ * bytes[1..] = inner data (without padding). */
+RuntimeValue rt_tls13_record_decrypt_compact(RuntimeValue key_rv, RuntimeValue iv_rv,
+                                             int64_t seq_num_i64, RuntimeValue raw_record_rv)
+{
+    uint32_t key_len = 0, iv_len = 0, raw_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *iv = _tls_copy_runtime_bytes(iv_rv, &iv_len);
+    uint8_t *raw = _tls_copy_runtime_bytes(raw_record_rv, &raw_len);
+    uint8_t *plaintext = NULL;
+    uint8_t *result_buf = NULL;
+    RuntimeValue out = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+
+    if (!key || !iv || !raw || key_len != 16U || iv_len != 12U || raw_len < 5U + 16U) {
+        goto cleanup;
+    }
+    if (raw[0] != 0x17 || raw[1] != 0x03 || raw[2] != 0x03) goto cleanup;
+    uint32_t payload_len = ((uint32_t)raw[3] << 8) | (uint32_t)raw[4];
+    if (payload_len < 16U || (5U + payload_len) != raw_len) goto cleanup;
+    uint32_t ct_len = payload_len - 16U;
+
+    uint8_t nonce[12];
+    {
+        uint64_t s = (uint64_t)seq_num_i64;
+        nonce[0] = iv[0]; nonce[1] = iv[1]; nonce[2] = iv[2]; nonce[3] = iv[3];
+        nonce[4]  = iv[4]  ^ (uint8_t)((s >> 56) & 0xffU);
+        nonce[5]  = iv[5]  ^ (uint8_t)((s >> 48) & 0xffU);
+        nonce[6]  = iv[6]  ^ (uint8_t)((s >> 40) & 0xffU);
+        nonce[7]  = iv[7]  ^ (uint8_t)((s >> 32) & 0xffU);
+        nonce[8]  = iv[8]  ^ (uint8_t)((s >> 24) & 0xffU);
+        nonce[9]  = iv[9]  ^ (uint8_t)((s >> 16) & 0xffU);
+        nonce[10] = iv[10] ^ (uint8_t)((s >> 8)  & 0xffU);
+        nonce[11] = iv[11] ^ (uint8_t)(s & 0xffU);
+    }
+
+    plaintext = (uint8_t *)malloc(ct_len > 0 ? ct_len : 1U);
+    if (!plaintext) goto cleanup;
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, raw + 5U, ct_len, raw, 5U, raw + 5U + ct_len, plaintext) != 0) {
+        goto cleanup;
+    }
+    uint32_t cursor = ct_len;
+    while (cursor > 0U && plaintext[cursor - 1U] == 0x00) cursor--;
+    if (cursor == 0U) goto cleanup;
+    uint8_t content_type = plaintext[cursor - 1U];
+    uint32_t data_len = cursor - 1U;
+
+    /* Build [content_type || data...] */
+    result_buf = (uint8_t *)malloc(1U + data_len);
+    if (!result_buf) goto cleanup;
+    result_buf[0] = content_type;
+    if (data_len > 0) memcpy(result_buf + 1U, plaintext, data_len);
+    out = _tls_runtime_array_from_bytes(result_buf, 1U + data_len);
+
+cleanup:
+    if (key) free(key);
+    if (iv) free(iv);
+    if (raw) free(raw);
+    if (plaintext) free(plaintext);
+    if (result_buf) free(result_buf);
+    return out;
+}
+
 /* RFC 5869 §2.3: raw HKDF-Expand. Mirrors rt_tls13_hkdf_expand_label_into but
  * skips TLS 1.3 HkdfLabel encoding; info is fed verbatim. */
 int64_t rt_tls13_hkdf_expand_into(RuntimeValue prk_rv, RuntimeValue info_rv, RuntimeValue out_rv, int64_t length_i64)
