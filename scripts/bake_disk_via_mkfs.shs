@@ -1,0 +1,37 @@
+#!/bin/sh
+# bake_disk_via_mkfs.shs — fast FAT32 image bake via dosfstools + mtools.
+#
+# Usage:
+#   sh scripts/bake_disk_via_mkfs.shs <IMG> <SIZE_MB> <STAGING_DIR>
+#
+# Requires: mkfs.fat (dosfstools), mcopy (mtools).
+# If mcopy is absent the image is created but left empty (files not copied).
+#
+# Called by src/os/port/disk_image_bake.spl when the opt-in marker
+# build/os/.bake_use_mkfs_fat is present and both tools are on PATH.
+
+set -eu
+
+IMG="$1"
+SIZE_MB="$2"
+OUT_DIR="$3"
+
+if [ -z "$IMG" ] || [ -z "$SIZE_MB" ] || [ -z "$OUT_DIR" ]; then
+    echo "bake_disk_via_mkfs: usage: $0 <img> <size_mb> <staging_dir>" >&2
+    exit 1
+fi
+
+# Create a zero-filled image of the requested size.
+truncate -s "${SIZE_MB}M" "$IMG"
+
+# Format as FAT32.
+mkfs.fat -F 32 -n SIMPLEOS -i 12345678 "$IMG"
+
+# Copy every file in the staging dir into the root of the image.
+for f in "$OUT_DIR"/*; do
+    [ -f "$f" ] || continue
+    mcopy -i "$IMG" "$f" "::/$(basename "$f")"
+    echo "bake_disk_via_mkfs: copied $(basename "$f")"
+done
+
+echo "bake_disk_via_mkfs: done -> $IMG (${SIZE_MB}M)"
