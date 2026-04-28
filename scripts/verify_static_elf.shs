@@ -45,21 +45,10 @@ check_elf() {
       ;;
   esac
 
-  # 3. Statically linked (file output)
-  case "${file_out}" in
-    *"statically linked"*)
-      : ;;
-    *"dynamically linked"*)
-      status="FAIL"
-      notes="${notes} [BUG-PHASE1-MUST-BE-STATIC: dynamically linked]"
-      ;;
-    *)
-      status="FAIL"
-      notes="${notes} [link-type-unknown]"
-      ;;
-  esac
-
-  # 4. ldd check
+  # 3. ldd is the authoritative static check.
+  # `file` reports "dynamically linked" for static-PIE binaries (LLVM_BUILD_STATIC
+  # produces ELF-PIE without an interpreter; file misclassifies). ldd is truth:
+  # "statically linked" or "not a dynamic executable" => actually static.
   ldd_out="$(ldd "${path}" 2>&1 || true)"
   case "${ldd_out}" in
     *"not a dynamic executable"*) ldd_label="static" ;;
@@ -67,7 +56,16 @@ check_elf() {
     *)
       status="FAIL"
       ldd_label="dynamic"
-      notes="${notes} [ldd-shows-deps]"
+      notes="${notes} [ldd-shows-deps: dynamic dependencies]"
+      ;;
+  esac
+
+  # 4. file output advisory (note divergence from ldd, no status flip).
+  case "${file_out}" in
+    *"dynamically linked"*)
+      if [ "${ldd_label}" = "static" ]; then
+        notes="${notes} [advisory: file says dynamic-PIE but ldd says static; trusting ldd]"
+      fi
       ;;
   esac
 
