@@ -39,15 +39,62 @@ val ctx: [u8] = req.request_context
 expect(ctx.len()).to_equal(0)  # still fails
 ```
 
-This rules out the local-binding hypothesis; the interpreter's type-tracking discards the `[u8]` typing somewhere between class-field access and method-dispatch resolution.
+## Root Cause (CONFIRMED)
 
-## Root cause hypothesis (not confirmed)
+**The extern `rt_array_new_with_cap` is missing from the interpreter's extern handler table.**
 
-The interpreter's static type-checker probably uses the runtime tag of the field's stored RuntimeValue rather than the declared field type. Since heap pointers in this runtime are tagged in a way that looks like `i64` to the dispatcher, the check fails.
+### Call chain
 
-This is **separate from but related to** the enum-field-i64-zero-destructure compile-mode bug. Both stem from incomplete static-type-info propagation through field-access expressions, but they manifest differently:
-- Compile-mode enum: silently zeroes the value.
-- Interpreter class: rejects the method call at semantic check.
+1. `parse_certificate_request` in `src/os/tls13/handshake13.spl` calls `_byte_buf(0)` (line 18)
+2. `_byte_buf` calls `extern fn rt_array_new_with_cap(cap: i64) -> [u8]` (line 13)
+3. The interpreter extern handler table in `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` has `rt_array_new` mapped to `ffi_array::rt_array_new_fn`, but **has no entry for `rt_array_new_with_cap`**
+4. Falls through to `dynamic_ffi::try_call_dynamic` in `src/compiler_rust/compiler/src/interpreter_extern/dynamic_ffi.rs`
+5. `dynamic_ffi` calls the native runtime function via dlsym and returns `Value::Int(heap_ptr)` — the raw native pointer cast to `i64` — because it has no return-type information at dispatch time (see lines 616–621: `fn i64_to_value(v: i64) -> Value { Value::Int(v) }`)
+6. This `Value::Int(heap_ptr)` is stored as the `request_context` field of `CertificateRequest13`, and is also stored as the local byte-buffer variables inside `build_certificate_bytes` and `build_certificate_verify_bytes`
+7. When `.len()` or `.push()` is called on the receiver, `evaluate_method_call` in `src/compiler_rust/compiler/src/interpreter_method/mod.rs` calls `recv_val.type_name()` which returns `"i64"` for `Value::Int` — no array method match is found — error is emitted
+
+### Why all three tests fail (not just test 1)
+
+- **Test 1** (`req.request_context.len()`): fails via FieldAccess path in `interpreter/expr/calls.rs` — a `Value::Int` is loaded from `fields["request_context"]` and dispatched into `evaluate_method_call_with_self_update`
+- **Test 2** (`build_certificate_bytes`): fails inside the function body on a **local variable** `buf` (created by `_byte_buf(0)` inline) — no FieldAccess involved
+- **Test 3** (`build_certificate_verify_bytes`): same pattern as test 2
+
+Tests 2 and 3 cannot be fixed by patching the FieldAccess dispatch path in `interpreter/`. The local variable `buf: [u8]` is bound to a `Value::Int` from the start; the method dispatcher in `interpreter_method/mod.rs` fails before any FieldAccess resolution occurs.
+
+### Relevant file locations
+
+| File | Role |
+|------|------|
+| `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` | Extern handler table — missing `rt_array_new_with_cap` |
+| `src/compiler_rust/compiler/src/interpreter_extern/dynamic_ffi.rs:616-621` | Returns `Value::Int` unconditionally for unknown externs |
+| `src/compiler_rust/compiler/src/interpreter_extern/ffi_array.rs` | Has `rt_array_new_fn` — already handles same args as `rt_array_new_with_cap` |
+| `src/compiler_rust/compiler/src/interpreter_method/mod.rs` | Method dispatch — `Value::Int` hits no array branch → error |
+| `src/os/tls13/handshake13.spl:13,18` | Declares and calls `rt_array_new_with_cap` |
+
+## Proposed Fix (REJECTED — see "Actual root cause" below)
+
+~~**In `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`**, add `rt_array_new_with_cap` to the handler table alongside `rt_array_new`~~
+
+This was tried (`mod.rs:1287-1292` adds `"rt_array_new_with_cap" => ffi_array::rt_array_new_fn(&evaluated)`) but did NOT fix the tests. **`rt_array_new_fn` itself returns `Value::Int(rv.to_raw() as i64)` at line 31 of `ffi_array.rs`, not `Value::Array`.** So routing `rt_array_new_with_cap` to the same handler doesn't help — the handler already returns a raw-pointer-as-Int and the method dispatcher rejects it.
+
+## Actual root cause (deeper)
+
+The FFI extern handler convention in `interpreter_extern/ffi_array.rs` returns array RuntimeValues as `Value::Int(rv.to_raw() as i64)` (raw pointer cast to i64). This is "OK" within the FFI layer because subsequent FFI calls (`rt_array_push`, `rt_array_get`, etc.) accept the raw pointer as their first arg. **But when the value crosses back into Simple-land for native method dispatch (`.len()`, `.push()`), the dispatcher in `interpreter_method/mod.rs` sees `Value::Int` and rejects all array methods.**
+
+For Simple-language method dispatch on the result of an extern, the FFI return needs to be wrapped as `Value::Array(...)` (or whatever native shape the receiver type implies) using the declared return type from the `extern fn ... -> [u8]` signature.
+
+### Where the fix should go
+
+Either:
+1. **In `dynamic_ffi.rs:616-621`** — when calling an unknown extern with a declared `[u8]` (or generic `[T]`) return type, wrap the raw i64 pointer as `Value::Array` using the runtime's `RuntimeArray` shape. Requires plumbing the declared return type through to the FFI dispatcher.
+2. **In `ffi_array.rs:31`** — change `rt_array_new_fn` to return `Value::Array(rv_to_array(rv))` and audit all FFI consumers (`rt_array_push_fn`, `rt_array_get_fn`, etc.) to unwrap properly. More invasive but cleaner long-term.
+3. **In `interpreter_method/mod.rs`** — special-case `Value::Int` receivers when the static type info from the AST/HIR shows the expression should be `[u8]`. Adds heuristic at the dispatch site rather than the source.
+
+Option (1) is most surgical. Option (2) is most principled but touches more code. Option (3) is fragile but maybe simplest.
+
+## Scope constraint on original investigation
+
+This root cause is in `src/compiler_rust/compiler/src/interpreter_extern/` (outside the `interpreter/` sub-directory scope of the original task). A partial fix limited to `interpreter/expr/calls.rs` (FieldAccess coercion using class-def type info) would only resolve test 1 and would leave tests 2 and 3 broken. The correct fix is the missing extern handler entry above.
 
 ## Workaround
 
@@ -58,8 +105,8 @@ None known. The test failures are blocking but reproducibly localized to the int
 - Blocks interpreter-mode testing of any pure-Simple module that returns user-defined classes containing `[u8]` or array fields.
 - TLS AC-6 regression suite cannot be fully validated until either this is fixed or a working native-mode test path lands.
 
-## Investigation pointers
+## Investigation pointers (superseded)
 
-- Look at the interpreter's static type-checker — specifically the field-access path that resolves `obj.field_name` types.
-- Compare interpreter handling of class field access vs let-bound local bindings.
-- Memory `feedback_compile_mode_false_greens.md` (2026-04-25) and `feedback_interpreter_test_limits.md` describe related interpreter quirks; this is another instance of the same family.
+~~Look at the interpreter's static type-checker — specifically the field-access path that resolves `obj.field_name` types.~~
+
+Root cause is confirmed upstream: `rt_array_new_with_cap` has no interpreter extern handler, so dynamic FFI returns a raw `Value::Int` pointer instead of `Value::Array`. Fix the extern table first.

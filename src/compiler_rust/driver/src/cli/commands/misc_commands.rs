@@ -123,7 +123,7 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 
     match cmd {
         "bootstrap" => handle_bootstrap(&sub_args[1..]),
-        "lint" => handle_build_lint(),
+        "lint" => handle_build_lint_with_args(&sub_args[1..]),
         "fmt" => handle_build_fmt(&sub_args[1..]),
         "check" => handle_build_check(),
         "help" | "--help" | "-h" => {
@@ -141,6 +141,11 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!();
             println!("FMT OPTIONS:");
             println!("  --check            Check formatting without modifying files");
+            println!();
+            println!("LINT OPTIONS:");
+            println!(
+                "  --fix              Iteratively apply clippy machine-applicable fixes"
+            );
             println!();
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
@@ -165,8 +170,21 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     }
 }
 
-/// Handle 'build lint' - run cargo clippy on the Rust workspace
+/// Handle 'build lint' - run cargo clippy on the Rust workspace.
+///
+/// Supports `--fix` to auto-apply clippy machine-applicable suggestions.
+/// With `--fix`, runs `cargo clippy --fix` iteratively per crate until the
+/// owned-crate warning count stops decreasing. Any residual warnings are
+/// non-auto-fixable and require manual review.
 fn handle_build_lint() -> i32 {
+    handle_build_lint_with_args(&[])
+}
+
+fn handle_build_lint_with_args(args: &[&str]) -> i32 {
+    let do_fix = args.contains(&"--fix");
+    if do_fix {
+        return run_clippy_autofix_sweep();
+    }
     let status = std::process::Command::new("cargo")
         .args([
             "clippy",
@@ -185,6 +203,89 @@ fn handle_build_lint() -> i32 {
             1
         }
     }
+}
+
+/// Run `cargo clippy --fix` iteratively across owned crates until no further
+/// auto-fixes apply. Returns 0 on success, non-zero on cargo failure.
+///
+/// Per cargo design, clippy emits machine-applicable suggestions for many
+/// lints (`unnecessary_cast`, `useless_format`, `needless_borrow`,
+/// `collapsible_if`, etc.). This sweep applies them workspace-wide; any
+/// remaining warnings after the sweep need manual fixes.
+fn run_clippy_autofix_sweep() -> i32 {
+    println!("=== clippy auto-fix sweep ===");
+
+    // Apply machine-applicable suggestions across the workspace, iterating
+    // until the warning count stops going down (some fixes unblock others).
+    let mut prev_count: i64 = -1;
+    for round in 1..=5 {
+        let count = clippy_warning_count();
+        println!("round {round}: {count} warnings");
+        if count == prev_count || count == 0 {
+            println!("=== converged at {count} warnings ===");
+            return 0;
+        }
+        prev_count = count;
+        let status = std::process::Command::new("cargo")
+            .args([
+                "clippy",
+                "--manifest-path",
+                "src/compiler_rust/Cargo.toml",
+                "--workspace",
+                "--all-targets",
+                "--fix",
+                "--allow-dirty",
+                "--allow-staged",
+                "--",
+                "-W",
+                "clippy::all",
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("clippy --fix exited with {}", s.code().unwrap_or(1));
+                return s.code().unwrap_or(1);
+            }
+            Err(e) => {
+                eprintln!("error: failed to run cargo clippy --fix: {e}");
+                return 1;
+            }
+        }
+    }
+    let final_count = clippy_warning_count();
+    println!("=== max rounds reached; {final_count} warnings remain ===");
+    0
+}
+
+/// Count `^warning:` lines from `cargo clippy --workspace -W clippy::all`.
+/// Excludes per-crate summary lines like `simple-compiler (lib) generated N warnings`.
+fn clippy_warning_count() -> i64 {
+    let out = std::process::Command::new("cargo")
+        .args([
+            "clippy",
+            "--manifest-path",
+            "src/compiler_rust/Cargo.toml",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-W",
+            "clippy::all",
+        ])
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(_) => return -1,
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    combined
+        .lines()
+        .filter(|l| l.starts_with("warning:") && !l.starts_with("warning: `simple-"))
+        .count() as i64
 }
 
 /// Handle 'build fmt' - run cargo fmt on the Rust workspace

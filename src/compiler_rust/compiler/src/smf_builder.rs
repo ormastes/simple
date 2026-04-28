@@ -54,33 +54,21 @@ fn build_smf_with_code_for_target(
     }
     let symbol_table_offset = code_offset + code_bytes.len() as u64;
 
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::from_target_os(target.os) as u8,
-        arch: Arch::from_target_arch(target.arch) as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        compression: 0, // No compression
-        compression_level: 0,
-        reserved_compression: [0; 2],
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: entry_offset,
-        stub_size: 0, // Pure SMF (no stub)
-        smf_data_offset: 0,
-        module_hash: 0,
-        source_hash: 0,
-        app_type: 0,     // CLI application type
-        window_width: 0, // No window hints
-        window_height: 0,
-        prefetch_hint: 0, // No prefetch by default
-        prefetch_file_count: 0,
-        reserved: [0; 5], // Updated to 5 bytes
-    };
+    // Zero-initialize first so that repr(C) padding bytes (e.g. bytes 20-23 between
+    // section_count and section_table_offset) are deterministically 0x00 on disk.
+    let mut header: SmfHeader = unsafe { std::mem::zeroed() };
+    header.magic = *SMF_MAGIC;
+    header.version_major = 1;
+    header.version_minor = 1;
+    header.platform = Platform::from_target_os(target.os) as u8;
+    header.arch = Arch::from_target_arch(target.arch) as u8;
+    header.flags = SMF_FLAG_EXECUTABLE;
+    header.section_count = 1;
+    header.section_table_offset = section_table_offset;
+    header.symbol_table_offset = symbol_table_offset;
+    header.symbol_count = 1;
+    header.exported_count = 1;
+    header.entry_point = entry_offset;
 
     let mut sec_name = [0u8; 16];
     sec_name[..4].copy_from_slice(b"code");
@@ -238,6 +226,9 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
 }
 
 /// Helper to write a struct to a byte buffer.
+/// NOTE: Any uninitialized padding bytes in `value` are serialized as-is. Callers must
+/// ensure structs are zero-initialized (e.g. via `std::mem::zeroed()`) before field
+/// assignment so that padding bytes are deterministically 0x00.
 fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
     let bytes = unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
     buf.extend_from_slice(bytes);

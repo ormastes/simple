@@ -36,11 +36,68 @@ Verified empirically via `[BISECT-UNPACK]` probe in `_record_unpack_inner_with_l
 
 inner unpack has `real_ct=22` (= 0x16, the encoded TLS content type), but the test's `ct4` after destructuring is 0. The `data` field (a `[u8]`) destructures correctly — `dt4.len()=5` and the bytes are right.
 
-## Root cause hypothesis (not confirmed)
+## Root cause — confirmed (2026-04-28)
 
-Likely an i64-vs-tagged-int representation mismatch in the enum variant's field storage. The runtime probably tags integer values in slot positions, and the unbox/extract path during destructuring might be reading a NIL_VALUE-like tag (which is 3) and returning 0, OR shifting the raw int through a tag-sensitive path that maps the value to 0 for small-magnitude integers.
+### ct=0 trace (multi-field variant destructuring)
 
-The `text` field works because it's a heap pointer and the tag scheme treats heap-pointer slots correctly.
+1. **`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` ~line 888** — PRIMARY BUG (outside `mir/lower/`+`codegen/instr/` scope)
+
+   For `if val RecordResult.Ok(ct, dt) = res` with `payload_patterns.len() > 1`, the code constructs:
+   ```rust
+   let payload_expr = HirExpr {
+       kind: HirExprKind::BuiltinCall { name: "rt_enum_payload", args: [...] },
+       ty: binding_ty,   // BUG: binding_ty = I64 for the `ct` field
+   };
+   ```
+   `payload_expr.ty` must be `TypeId::ANY` for multi-field variants, because `rt_enum_payload` returns the wrapper array (a heap pointer), not the field value directly.
+
+2. **`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs`** — in scope
+
+   `lower_builtin_call_expr` special-cases `rt_enum_payload`. When `expr_ty = I64`, it sets `needs_int_unbox = true` and emits `UnboxInt` on the raw result:
+   ```rust
+   // expr_ty = I64 → UnboxInts the wrapper-array heap pointer → garbage integer
+   block.instructions.push(MirInst::UnboxInt { dest: unboxed, value: raw_result });
+   ```
+   For a multi-field variant, this produces a garbage integer instead of the array pointer.
+
+3. **`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`** — in scope
+
+   `lower_index_expr` then calls `rt_index_get(garbage_int, ENCODE_INT(0))`. Inside the runtime:
+   - `IS_HEAP(garbage_int)` fails → returns `NIL_VALUE = 3`
+   
+   `lower_index_expr` applies another `UnboxInt` based on `expr_ty = I64`:
+   - `DECODE_INT(3) = 3 >> 3 = 0` → **ct = 0**
+
+4. **`text` field works** because it is a heap pointer: the `IS_HEAP` check in `rt_index_get` succeeds and the stored pointer is returned directly, so no tag-path damage occurs.
+
+### Secondary bug — in scope
+
+**`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs` ~lines 115–130** — multi-field enum variant construction
+
+When constructing a multi-field variant, integer args are pushed to the wrapper array without `BoxInt`:
+```rust
+for arg in &arg_regs {
+    // BUG: no BoxInt inserted here for integer args
+    block.instructions.push(MirInst::Call {
+        dest: None,
+        target: CallTarget::from_name("rt_array_push"),
+        args: vec![array_reg, *arg],
+    });
+}
+```
+The `rt_array_push_handle` runtime comment explicitly states: "Values now arrive TAGGED from the compiler: .push(expr): MIR BoxInt inserted in lowering_expr.rs for integer args." The enum construction path skips this tagging, so integer fields are stored untagged — but this bug is masked by the primary bug above (ct=0 happens before array indexing even gets a chance to read a stored value).
+
+### Fix plan
+
+Fix order matters:
+
+1. **`stmt_lowering.rs` ~line 888**: For `payload_patterns.len() > 1`, set `payload_expr.ty = TypeId::ANY` so `lower_builtin_call_expr` does not insert `UnboxInt` on the wrapper-array pointer.
+
+2. **`lowering_expr_builtin.rs`**: Guard the `rt_enum_payload` unbox: only apply `needs_int_unbox` when the call-site type is actually a scalar (single-field variant). When the payload is a wrapper array, the type should be `ANY`/opaque.
+
+3. **`lowering_expr_call.rs` ~lines 115–130**: Insert `MirInst::BoxInt` before each `rt_array_push` call for integer-typed enum construction args (mirrors what `lower_assign_stmt` does for regular assignments).
+
+The live gate is green via the `rt_tls13_record_decrypt_compact` workaround. No fix was attempted in this investigation pass (primary bug is outside the assigned `mir/lower/`+`codegen/instr/` scope).
 
 ## Workaround in tree (2026-04-28)
 
@@ -58,9 +115,13 @@ Any compile-mode code path that returns integer payloads through enum variants s
 
 The workaround pattern (compact `[u8]` with sentinel byte) doesn't generalize cleanly to multi-field structures.
 
-## Investigation pointers
+## Investigation summary (2026-04-28)
 
-- Look at how enum variants with integer fields lower in `src/compiler_rust/compiler/src/mir/lower/lowering_*.rs`
-- Compare with `text` field handling (which works) to find where integer fields diverge
-- `MirInst::EnumNew` (or whatever the enum-construction MirInst is) and how it stores field values
-- The matching destructuring path in `lowering_expr_match.rs` or similar
+Investigation confirmed the root cause. Key files checked:
+
+- `src/compiler_rust/compiler/src/codegen/instr/pattern.rs` — `compile_pattern_bind`: dead code for `if val` patterns; `MirInst::EnumPayload` has zero emission sites in `mir/lower/`. Not the bug.
+- `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` ~line 888 — **primary bug** (`payload_expr.ty = binding_ty` for multi-field variants). Outside `mir/lower/`+`codegen/instr/` scope.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs` — `rt_enum_payload` unbox guard is missing the multi-field check. In scope.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs` ~lines 268–430 — `lower_index_expr` applies a second `UnboxInt` using `expr_ty`. In scope.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs` ~lines 115–130 — missing `BoxInt` before `rt_array_push` for integer enum construction args. In scope (secondary bug).
+- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` — runtime tag macros: `ENCODE_INT(v) = (v << 3) | 0`, `DECODE_INT(v) = v >> 3`, `NIL_VALUE = 3`. `rt_array_get` returns stored `RuntimeValue`; `rt_index_get` calls `DECODE_INT(idx)` first; `IS_HEAP` guard in array access.

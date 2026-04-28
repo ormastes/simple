@@ -1,0 +1,186 @@
+#!/bin/sh
+# Linux-host wrapper for checking the SimpleOS bootstrap path in QEMU.
+#
+# Usage:
+#   sh scripts/check-simpleos-bootstrap-qemu.shs [--smoke|--full] [--keep-going] [--skip-build]
+#
+# Defaults to --smoke:
+#   1. Verify QEMU + toolchain availability.
+#   2. Build the SimpleOS x86_64 kernel via `bin/simple native-build` (unless --skip-build).
+#   3. Boot the kernel in qemu-system-x86_64 and validate tier-1 serial output.
+#
+# --full also runs the upper boot tiers (multi-stage validation) inside the guest.
+#
+# Mirrors check-freebsd-bootstrap-qemu.shs in shape so both lanes have a uniform
+# release-prep entry point.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MODE="smoke"
+KEEP_GOING=0
+SKIP_BUILD=0
+KERNEL="${SIMPLEOS_KERNEL:-${REPO_ROOT}/build/os/simpleos_x86_64.elf}"
+ENTRY="${SIMPLEOS_ENTRY:-examples/simple_os/arch/x86_64/os_entry.spl}"
+LINKER_SCRIPT="${SIMPLEOS_LINKER_SCRIPT:-examples/simple_os/arch/x86_64/linker.ld}"
+SOURCE_DIR="${SIMPLEOS_SOURCE_DIR:-src/os}"
+
+usage() {
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --smoke)
+            MODE="smoke"
+            ;;
+        --full)
+            MODE="full"
+            ;;
+        --keep-going)
+            KEEP_GOING=1
+            ;;
+        --skip-build)
+            SKIP_BUILD=1
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "error: unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+cd "$REPO_ROOT"
+
+info() {
+    printf '[simpleos-qemu-bootstrap] %s\n' "$1"
+}
+
+run_step() {
+    label="$1"
+    shift
+    info "$label"
+    if "$@"; then
+        info "$label: PASS"
+        return 0
+    fi
+    info "$label: FAIL"
+    if [ "$KEEP_GOING" -eq 1 ]; then
+        return 1
+    fi
+    exit 1
+}
+
+check_qemu() {
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        echo "error: qemu-system-x86_64 not found in PATH" >&2
+        return 1
+    fi
+}
+
+check_compiler() {
+    if [ ! -x "${REPO_ROOT}/bin/simple" ]; then
+        echo "error: ${REPO_ROOT}/bin/simple is missing or not executable" >&2
+        return 1
+    fi
+}
+
+check_objcopy() {
+    if command -v llvm-objcopy >/dev/null 2>&1; then
+        return 0
+    fi
+    for p in /opt/homebrew/opt/llvm@18/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+        if [ -x "$p/llvm-objcopy" ]; then
+            PATH="$p:$PATH"
+            export PATH
+            return 0
+        fi
+    done
+    echo "error: llvm-objcopy is required (ELF64 -> ELF32 conversion for QEMU -kernel)" >&2
+    return 1
+}
+
+build_kernel() {
+    if [ "$SKIP_BUILD" -eq 1 ]; then
+        info "Skipping kernel build (--skip-build)"
+        if [ ! -f "$KERNEL" ]; then
+            echo "error: --skip-build set but kernel artifact missing: $KERNEL" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ ! -f "${REPO_ROOT}/${ENTRY}" ]; then
+        echo "error: SimpleOS entry source not found: ${REPO_ROOT}/${ENTRY}" >&2
+        return 1
+    fi
+    if [ ! -f "${REPO_ROOT}/${LINKER_SCRIPT}" ]; then
+        echo "error: SimpleOS linker script not found: ${REPO_ROOT}/${LINKER_SCRIPT}" >&2
+        return 1
+    fi
+    if [ ! -d "${REPO_ROOT}/${SOURCE_DIR}" ]; then
+        echo "error: SimpleOS source directory not found: ${REPO_ROOT}/${SOURCE_DIR}" >&2
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$KERNEL")"
+
+    info "Building kernel: entry=${ENTRY}"
+    "${REPO_ROOT}/bin/simple" native-build \
+        --entry-closure \
+        --entry "${ENTRY}" \
+        --target x86_64-unknown-none \
+        -o "${KERNEL}" \
+        --linker-script "${LINKER_SCRIPT}" \
+        --source "${SOURCE_DIR}"
+}
+
+run_qemu_tier() {
+    tier="$1"
+    "${REPO_ROOT}/scripts/os_qemu_test.shs" --skip-build --tier "$tier"
+}
+
+FAILED=0
+
+if ! run_step "Verify qemu-system-x86_64" check_qemu; then
+    FAILED=$((FAILED + 1))
+fi
+
+if ! run_step "Verify bin/simple compiler" check_compiler; then
+    FAILED=$((FAILED + 1))
+fi
+
+if ! run_step "Verify llvm-objcopy on PATH" check_objcopy; then
+    FAILED=$((FAILED + 1))
+fi
+
+if ! run_step "Build SimpleOS x86_64 kernel" build_kernel; then
+    FAILED=$((FAILED + 1))
+fi
+
+case "$MODE" in
+    smoke)
+        if ! run_step "Boot SimpleOS in QEMU (tier 1)" run_qemu_tier 1; then
+            FAILED=$((FAILED + 1))
+        fi
+        ;;
+    full)
+        if ! run_step "Boot SimpleOS in QEMU (all tiers)" run_qemu_tier all; then
+            FAILED=$((FAILED + 1))
+        fi
+        ;;
+esac
+
+if [ "$FAILED" -ne 0 ]; then
+    info "FAILED steps: $FAILED"
+    exit 1
+fi
+
+info "SimpleOS QEMU bootstrap check complete"

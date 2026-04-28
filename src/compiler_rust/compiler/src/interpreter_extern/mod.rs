@@ -1284,6 +1284,12 @@ pub(crate) fn call_extern_function(
         // FFI Array Operations (7 functions)
         // ====================================================================
         "rt_array_new" => ffi_array::rt_array_new_fn(&evaluated),
+        // `rt_array_new_with_cap(cap)` — same shape as rt_array_new(cap).
+        // Without this entry, the call falls through to dynamic FFI which
+        // returns Value::Int(raw_ptr), causing all method dispatch on the
+        // returned [u8] to fail with "method len/push not found on type i64".
+        // See doc/08_tracking/bug/interpreter_class_field_method_dispatch_2026-04-28.md
+        "rt_array_new_with_cap" => ffi_array::rt_array_new_fn(&evaluated),
         "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
         "rt_array_get" => ffi_array::rt_array_get_fn(&evaluated),
         "rt_array_set" => ffi_array::rt_array_set_fn(&evaluated),

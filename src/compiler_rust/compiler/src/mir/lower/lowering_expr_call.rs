@@ -117,14 +117,41 @@ impl<'a> MirLowerer<'a> {
                             });
                             dest
                         })?;
-                        // Push each arg into the array
-                        for arg in &arg_regs {
+                        // Push each arg into the array. `rt_array_push` (per its
+                        // runtime comment) expects values to arrive *tagged*; for
+                        // integer-typed args we must insert MirInst::BoxInt first,
+                        // mirroring what regular `arr.push(int)` lowering does.
+                        // Without this, integer enum fields are stored untagged,
+                        // and destructuring later applies DECODE_INT to a raw int,
+                        // silently zeroing the field. See
+                        // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
+                        for (i, arg) in arg_regs.iter().enumerate() {
+                            let arg_ty = args.get(i).map(|a| a.ty).unwrap_or(TypeId::ANY);
+                            let needs_box = matches!(
+                                arg_ty,
+                                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
+                                | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                                | TypeId::BOOL
+                            );
+                            let push_arg = if needs_box {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::BoxInt {
+                                        dest: boxed,
+                                        value: *arg,
+                                    });
+                                    boxed
+                                })?
+                            } else {
+                                *arg
+                            };
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
                                     target: CallTarget::from_name("rt_array_push"),
-                                    args: vec![array_reg, *arg],
+                                    args: vec![array_reg, push_arg],
                                 });
                             })?;
                         }

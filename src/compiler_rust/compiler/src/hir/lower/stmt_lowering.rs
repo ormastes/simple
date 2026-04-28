@@ -883,7 +883,18 @@ impl Lowerer {
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
 
-                        // Extract payload from enum subject, then bind to locals
+                        // Extract payload from enum subject, then bind to locals.
+                        // For multi-field variants, `rt_enum_payload` returns the
+                        // wrapper *array* (heap pointer) — its type is opaque (ANY),
+                        // not `binding_ty`. Otherwise `lower_builtin_call_expr` would
+                        // see the binding's scalar type, apply `UnboxInt` to the
+                        // heap pointer, and produce garbage. See
+                        // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
+                        let payload_expr_ty = if payload_patterns.len() == 1 {
+                            binding_ty
+                        } else {
+                            TypeId::ANY
+                        };
                         let payload_expr = HirExpr {
                             kind: HirExprKind::BuiltinCall {
                                 name: "rt_enum_payload".to_string(),
@@ -892,7 +903,7 @@ impl Lowerer {
                                     ty: subject_ty,
                                 }],
                             },
-                            ty: binding_ty,
+                            ty: payload_expr_ty,
                         };
 
                         // For single-payload enums, use payload directly

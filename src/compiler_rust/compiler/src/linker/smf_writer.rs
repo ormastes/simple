@@ -11,7 +11,7 @@ pub use simple_common::smf::{
 };
 
 /// SMF version constants
-pub const SMF_VERSION_MAJOR: u8 = 0;
+pub const SMF_VERSION_MAJOR: u8 = 1;
 pub const SMF_VERSION_MINOR: u8 = 1;
 
 /// Data section kind - for formal verification.
@@ -307,33 +307,21 @@ impl SmfWriter {
             .count() as u32;
 
         let target = simple_common::target::Target::host();
-        let header = LoaderHeader {
-            magic: *SMF_MAGIC,
-            version_major: SMF_VERSION_MAJOR,
-            version_minor: SMF_VERSION_MINOR,
-            platform: Platform::from_target_os(target.os) as u8,
-            arch: Arch::from_target_arch(target.arch) as u8,
-            flags: SMF_FLAG_EXECUTABLE,
-            compression: 0,
-            compression_level: 0,
-            reserved_compression: [0; 2],
-            section_count: loader_sections.len() as u32,
-            section_table_offset,
-            symbol_table_offset,
-            symbol_count: self.symbols.len() as u32,
-            exported_count,
-            entry_point,
-            stub_size: 0,
-            smf_data_offset: 0,
-            module_hash: 0,
-            source_hash: 0,
-            app_type: 0,
-            window_width: 0,
-            window_height: 0,
-            prefetch_hint: 0,
-            prefetch_file_count: 0,
-            reserved: [0; 5],
-        };
+        // Zero-initialize so repr(C) padding bytes (e.g. bytes 20-23 between section_count
+        // and section_table_offset) are deterministically 0x00 on disk.
+        let mut header: LoaderHeader = unsafe { std::mem::zeroed() };
+        header.magic = *SMF_MAGIC;
+        header.version_major = SMF_VERSION_MAJOR;
+        header.version_minor = SMF_VERSION_MINOR;
+        header.platform = Platform::from_target_os(target.os) as u8;
+        header.arch = Arch::from_target_arch(target.arch) as u8;
+        header.flags = SMF_FLAG_EXECUTABLE;
+        header.section_count = loader_sections.len() as u32;
+        header.section_table_offset = section_table_offset;
+        header.symbol_table_offset = symbol_table_offset;
+        header.symbol_count = self.symbols.len() as u32;
+        header.exported_count = exported_count;
+        header.entry_point = entry_point;
 
         let header_bytes = unsafe {
             std::slice::from_raw_parts(
