@@ -11,7 +11,7 @@
 #   7  = Signal (send signal to process)
 #   13 = SpawnBinary (from ELF binary path)
 #   57 = Fork
-#   59 = Execve (path pointer + length; argv/envp copy-in pending)
+#   59 = Execve (path pointer + length + argv/envp vectors)
 #   61 = Waitpid
 
 use os.posix.errno.{EINVAL, ECHILD, ENOENT, ENOMEM}
@@ -35,9 +35,9 @@ fn posix_fork() -> i64:
 fn posix_execve(path: text, args: [text], envp: [text]) -> i64:
     """Replace the current process image.
 
-    The kernel ABI currently accepts path bytes only. args/envp are retained
-    in the signature so callers can use the POSIX shape while argv/envp copy-in
-    is wired through the syscall layer.
+    The kernel ABI accepts path bytes plus optional argv/envp vectors.
+    Empty argv preserves the legacy path-only launch shape by letting the
+    kernel seed argv[0] from the executable path.
     """
     if path.len() == 0:
         return 0 - EINVAL as i64
@@ -63,9 +63,9 @@ fn posix_spawn(path: text, priority: u8) -> i64:
 fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
     """Spawn a new process with command-line arguments.
 
-    Current kernel SpawnBinary ABI accepts only a plain executable path.
-    Argument vectors are not yet passed through syscall 13, so this wrapper
-    launches by path and ignores `args` until argv/envp support lands.
+    SpawnBinary forwards argv through syscall 13 and leaves envp empty.
+    PATH/service callers that need a custom environment should use execve
+    after fork or a higher-level launcher that exposes envp explicitly.
 
     Returns:
       >= 0: PID of the new process

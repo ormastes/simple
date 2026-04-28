@@ -2,6 +2,7 @@
 # Provides tools to query all SDN databases (tests, features, bugs, TODOs, qualified ignores)
 
 use infra.file_io.read_file
+use std.cli.cli_util (parse_csv_fields)
 use sdn.*
 use mcp.core.*
 
@@ -118,28 +119,49 @@ fn create_query_bugs_tool() -> ToolHandler:
             case Err(e): "Error reading bug database: {e}"
             case Ok(content):
                 val doc = parse(content)
-                val table = doc.get_table("bugs")
-                if not table.?:
+                val active_table = doc.get_table("bugs_active")
+                val legacy_table = doc.get_table("bugs")
+                if not active_table.? and not legacy_table.?:
                     return "No bugs table found in bug_db.sdn"
 
-                val headers = ["bug_id", "description", "severity", "status"]
+                val headers = ["id", "title", "severity", "status", "file"]
                 var rows = []
+                val want_severity = if severity_filter.?: severity_filter.unwrap().lower() else: ""
+                val want_status = if status_filter.?: status_filter.unwrap().lower() else: ""
 
-                for record in table.rows():
-                    val severity = record.get("severity")
-                    val status = record.get("status")
+                if active_table.?:
+                    for record in active_table.unwrap().rows():
+                        val severity = record.get("severity")
+                        val status = record.get("status")
+                        if want_severity != "" and severity.lower() != want_severity:
+                            continue
+                        if want_status != "" and status.lower() != want_status:
+                            continue
+                        rows.append([
+                            record.get("id"),
+                            record.get("title"),
+                            severity,
+                            status,
+                            record.get("file")
+                        ])
 
-                    if severity_filter.? and severity != severity_filter:
-                        continue
-                    if status_filter.? and status != status_filter:
-                        continue
-
-                    rows.append([
-                        record.get("bug_id"),
-                        record.get("description"),
-                        severity,
-                        status
-                    ])
+                if legacy_table.?:
+                    for record in legacy_table.unwrap().rows():
+                        val severity = record.get("severity")
+                        val status = record.get("status")
+                        if want_severity != "" and severity.lower() != want_severity:
+                            continue
+                        if want_status != "" and status.lower() != want_status:
+                            continue
+                        val title = record.get("title")
+                        val description = record.get("description")
+                        rows.append([
+                            record.get("id"),
+                            if title != "": title else: description,
+                            severity,
+                            status,
+                            record.get("file")
+                        ])
 
                 rows = apply_limit(rows, limit)
                 format_markdown_table(headers, rows)

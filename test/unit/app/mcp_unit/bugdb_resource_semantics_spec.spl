@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect}
+use std.io.{file_write, file_delete}
+use std.nogc_async_mut.mcp.resources
+
+extern fn rt_getpid() -> i64
+extern fn rt_mkdir(path: text) -> bool
+
+fn mkdir(path: text):
+    _ = rt_mkdir(path)
+
+fn fixture_root() -> text:
+    "/tmp/bugdb_resource_semantics_{rt_getpid()}"
+
+fn fixture_bug_db(root: text) -> text:
+    "{root}/doc/08_tracking/bug/bug_db.sdn"
+
+fn write_bug_fixture(path: text):
+    val content = "# fixture\n\nbugs_active |id, severity, status, title, file, line, description, reproducible_by|\n    live_001, P1, open, Live bug, src/live.spl, 1, Live desc, live_spec\n\nbugs |id, severity, status, title, file, line, description, reproducible_by|\n    fixed_001, P2, fixed, Fixed bug, src/fixed.spl, 2, Fixed desc, fixed_spec\n    critical_legacy_001, P0, closed, Closed critical bug, src/legacy.spl, 3, Legacy desc, legacy_spec\n"
+    expect(file_write(path, content)).to_equal(true)
+
+describe "MCP bugdb resource semantics":
+    it "filters open, critical, and stats queries against split-table bug_db":
+        val root = fixture_root()
+        mkdir(root)
+        mkdir("{root}/doc")
+        mkdir("{root}/doc/08_tracking")
+        mkdir("{root}/doc/08_tracking/bug")
+        val db_path = fixture_bug_db(root)
+        write_bug_fixture(db_path)
+
+        val mgr = resources.ResourceManager.create(root)
+
+        match mgr.read_resource("bugdb:///open"):
+            case Ok(resource):
+                expect(resource.contents.contains("live_001")).to_equal(true)
+                expect(resource.contents.contains("fixed_001")).to_equal(false)
+            case Err(message):
+                expect(message).to_equal("")
+
+        match mgr.read_resource("bugdb:///critical"):
+            case Ok(resource):
+                expect(resource.contents.contains("live_001")).to_equal(true)
+                expect(resource.contents.contains("critical_legacy_001")).to_equal(true)
+                expect(resource.contents.contains("fixed_001")).to_equal(false)
+            case Err(message):
+                expect(message).to_equal("")
+
+        match mgr.read_resource("bugdb:///stats"):
+            case Ok(resource):
+                expect(resource.contents.contains("\"total\": 3")).to_equal(true)
+                expect(resource.contents.contains("\"open\": 1")).to_equal(true)
+                expect(resource.contents.contains("\"fixed\": 2")).to_equal(true)
+                expect(resource.contents.contains("\"p0\": 1")).to_equal(true)
+                expect(resource.contents.contains("\"p1\": 1")).to_equal(true)
+            case Err(message):
+                expect(message).to_equal("")
+
+        _ = file_delete(db_path)

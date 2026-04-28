@@ -10,12 +10,21 @@
 #
 # Supports both static resources and dynamic resource templates.
 
-use std.io.{file_read, file_exists, dir_list, is_dir, shell}
+use std.io.{dir_list, is_dir, shell}
 use std.nogc_async_mut.mcp.bugdb_resource (get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats)
 use std.nogc_async_mut.mcp.debug_log_tools.{handle_debuglog_resource}
 use std.nogc_async_mut.mcp.featuredb_resource (get_all_features, get_features_by_category, get_features_by_status, get_feature_stats)
 use std.nogc_async_mut.mcp.testdb_resource (get_all_runs, get_recent_runs, get_test_stats, get_flaky_tests)
 use common.text.{NL}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 fn replace_text_all(value: text, from: text, to: text) -> text:
     if from == "":
@@ -580,22 +589,29 @@ class ResourceManager:
     # Provide bug database query results
     fn provide_bugdb_query(query: text) -> Result<text, text>:
         val db_path = self.project_root + "/doc/08_tracking/bug/bug_db.sdn"
+        if not file_exists(db_path):
+            return Err("Bug database file not found: " + db_path)
 
-        # Database library has runtime compat issues with ? operator
-        # Read file directly and return raw content
-        val valid_queries = query == "/all" or query == "all" or query == "/open" or query == "open"
-        val valid_queries2 = query == "/critical" or query == "critical" or query == "/stats" or query == "stats"
+        val normalized = if query.starts_with("/"): query else: "/" + query
+        val valid_queries = normalized == "/all" or normalized == "/open"
+        val valid_queries2 = normalized == "/critical" or normalized == "/stats"
         if not valid_queries and not valid_queries2:
             return Err("Unknown bug database query: " + query + ". Valid queries: all, open, critical, stats")
 
-        match self.bug_cache.get(query):
+        match self.bug_cache.get(normalized):
             case Some(cached): return Ok(cached)
             case nil: ()
 
-        val content = file_read(db_path)
-        if content == "":
-            return Err("Bug database file not found: " + db_path)
-        self.bug_cache[query] = content
+        val content = if normalized == "/all":
+            get_all_bugs(db_path)
+        elif normalized == "/open":
+            get_open_bugs(db_path)
+        elif normalized == "/critical":
+            get_critical_bugs(db_path)
+        else:
+            get_bug_stats(db_path)
+
+        self.bug_cache[normalized] = content
         return Ok(content)
 
     # Provide feature database query results

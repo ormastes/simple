@@ -1,6 +1,7 @@
 # Database statistics aggregation
 
 use app.io (file_exists, file_read)
+use std.cli.cli_util (parse_csv_fields)
 use compiler.tools.stats.types (TestStats, FeatureStats, BugStats, CoverageStats)
 
 # Default empty test stats
@@ -100,26 +101,37 @@ fn collect_bug_stats() -> BugStats:
     var open = 0
     var critical = 0
     var fixed = 0
+    var in_bug_table = false
 
     for line in lines:
         val trimmed = line.trim()
-        if trimmed.starts_with("bugs "):
+        if trimmed.starts_with("bugs_active |") or trimmed.starts_with("bugs |"):
+            in_bug_table = true
             continue
         if trimmed.len() == 0 or trimmed.starts_with("#"):
+            if in_bug_table and trimmed == "":
+                in_bug_table = false
+            continue
+        if trimmed.contains("|"):
+            in_bug_table = false
+            continue
+        if not in_bug_table:
             continue
 
-        # Count non-header lines as bugs
-        if trimmed.contains(", open,"):
-            open = open + 1
-            total = total + 1
-        elif trimmed.contains(", fixed,"):
-            fixed = fixed + 1
-            total = total + 1
-        elif trimmed.len() > 10:
-            total = total + 1
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() < 8:
+            continue
 
-        # Check for critical severity
-        if trimmed.contains(", critical,"):
+        total = total + 1
+        val severity = fields[1].upper()
+        val status = fields[2].lower()
+
+        if status == "open" or status == "investigating" or status == "confirmed":
+            open = open + 1
+        elif status == "fixed" or status == "closed":
+            fixed = fixed + 1
+
+        if severity == "P0" or severity == "P1":
             critical = critical + 1
 
     BugStats(
@@ -136,4 +148,3 @@ fn collect_coverage_stats() -> CoverageStats:
 
     # Coverage file doesn't exist yet, return placeholder
     CoverageStats(percent: 0.0, lines_covered: 0, lines_total: 0)
-

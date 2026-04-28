@@ -47,34 +47,40 @@ fn fix_bug_db(dry_run: bool) -> DbFixResult:
 
     var db = db_opt.unwrap()
 
-    # Get bugs table and apply fixes
-    val table_opt = db.db.get_table("bugs")
-    if not table_opt.?:
-        result.skipped.push("No 'bugs' table found")
+    var found_table = false
+    var changed = false
+
+    for table_name in ["bugs_active", "bugs"]:
+        val table_opt = db.db.get_table(table_name)
+        if not table_opt.?:
+            continue
+
+        found_table = true
+        var table = table_opt.unwrap()
+        val before_count = result.fixed.len()
+
+        val dup_fixes = fix_remove_duplicates(table, "id")
+        for f in dup_fixes:
+            result.fixed.push("[{table_name}] {f}")
+
+        val valid_fixes = fix_invalid_valid_col(table)
+        for f in valid_fixes:
+            result.fixed.push("[{table_name}] {f}")
+
+        val trim_fixes = fix_trim_fields(table)
+        for f in trim_fixes:
+            result.fixed.push("[{table_name}] {f}")
+
+        if result.fixed.len() > before_count:
+            changed = true
+            db.db.set_table(table_name, table)
+
+    if not found_table:
+        result.skipped.push("No 'bugs_active' or 'bugs' table found")
         return result
 
-    var table = table_opt.unwrap()
-
-    # Fix: remove duplicate IDs
-    val dup_fixes = fix_remove_duplicates(table, "id")
-    for f in dup_fixes:
-        result.fixed.push(f)
-
-    # Fix: invalid valid column
-    val valid_fixes = fix_invalid_valid_col(table)
-    for f in valid_fixes:
-        result.fixed.push(f)
-
-    # Fix: trim whitespace
-    val trim_fixes = fix_trim_fields(table)
-    for f in trim_fixes:
-        result.fixed.push(f)
-
-    # Write back table and save
-    if result.fixed.len() > 0:
-        db.db.set_table("bugs", table)
-        if not dry_run:
-            db.save()
+    if changed and not dry_run:
+        db.save()
 
     result
 
@@ -274,4 +280,3 @@ fn run_fix_dbs(args: [text]) -> i64:
 # ============================================================================
 # Exports
 # ============================================================================
-

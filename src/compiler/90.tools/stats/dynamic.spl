@@ -2,7 +2,7 @@
 
 use app.io.mod (process_run, file_exists, file_read)
 use compiler.tools.stats.json_formatter (format_json)
-use std.cli.cli_util (get_cli_args, has_flag)
+use std.cli.cli_util (get_cli_args, has_flag, parse_csv_fields)
 
 # Helper to run shell command and get output
 fn run_cmd(cmd: text) -> text:
@@ -117,23 +117,57 @@ fn get_bug_total() -> i64:
     val cmd = "grep -v '^#\\|^bugs\\|^$' doc/08_tracking/bug/bug_db.sdn | grep -v ', invalid,' | wc -l"
     run_cmd(cmd).to_int()
 
-fn get_bug_open() -> i64:
+fn bug_row_count(mode: text) -> i64:
     if not file_exists("doc/08_tracking/bug/bug_db.sdn"):
         return 0
-    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/08_tracking/bug/bug_db.sdn | grep -c ', open,' 2>/dev/null || echo 0"
-    run_cmd(cmd).to_int()
+
+    val content = file_read("doc/08_tracking/bug/bug_db.sdn")
+    val lines = content.split("\n")
+    var count = 0
+    var in_bug_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("bugs_active |") or trimmed.starts_with("bugs |"):
+            in_bug_table = true
+            continue
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            if in_bug_table and trimmed == "":
+                in_bug_table = false
+            continue
+        if trimmed.contains("|"):
+            in_bug_table = false
+            continue
+        if not in_bug_table:
+            continue
+
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() < 8:
+            continue
+
+        val severity = fields[1].upper()
+        val status = fields[2].lower()
+
+        if mode == "open":
+            if status == "open" or status == "investigating" or status == "confirmed":
+                count = count + 1
+        elif mode == "closed":
+            if status == "closed":
+                count = count + 1
+        elif mode == "critical":
+            if severity == "P0" or severity == "P1":
+                count = count + 1
+
+    count
+
+fn get_bug_open() -> i64:
+    bug_row_count("open")
 
 fn get_bug_closed() -> i64:
-    if not file_exists("doc/08_tracking/bug/bug_db.sdn"):
-        return 0
-    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/08_tracking/bug/bug_db.sdn | grep -c ', closed,' 2>/dev/null || echo 0"
-    run_cmd(cmd).to_int()
+    bug_row_count("closed")
 
 fn get_bug_critical() -> i64:
-    if not file_exists("doc/08_tracking/bug/bug_db.sdn"):
-        return 0
-    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/08_tracking/bug/bug_db.sdn | grep -v ', invalid,' | grep -c ', P0,' 2>/dev/null || echo 0"
-    run_cmd(cmd).to_int()
+    bug_row_count("critical")
 
 # Count spec files in a directory
 fn count_spec_files(dir: text) -> i64:
