@@ -176,16 +176,24 @@ impl MountTable:
                 entry.driver.opendir_path(Path(raw: path))
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        """Read directory entries via the first mounted driver (handle is opaque)."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.readdir_handle(handle)
+        """Read directory entries via the driver that owns the handle (probe each mount)."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.readdir_handle(handle)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn read(handle: FileHandle, length: i64) -> Result<text, FsError>:
-        """Read up to length bytes from open file handle."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.read_handle(handle, length)
+        """Read up to length bytes; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.read_handle(handle, length)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
         """Create directory at path via the appropriate mounted driver."""
@@ -206,28 +214,44 @@ impl MountTable:
                 Ok(entry.driver.driver_name())
 
     fn write(handle: FileHandle, content: text) -> Result<(), FsError>:
-        """Write text content to an open file handle (DbFs only)."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.write_text_handle(handle, content)
+        """Write text content to an open file handle; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.write_text_handle(handle, content)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn pwrite(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
-        """Write text patch at offset (DbFs COW semantics)."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.pwrite_text_handle(handle, patch, offset)
+        """Write text patch at offset; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.pwrite_text_handle(handle, patch, offset)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn pread(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
-        """Read length chars starting at offset from an open file handle."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.pread_text_handle(handle, offset, length)
+        """Read length chars at offset; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.pread_text_handle(handle, offset, length)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
-        """Close an open file handle."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.close_handle(handle)
+        """Close an open file handle; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.close_handle(handle)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn unlink(path: text) -> Result<(), FsError>:
         """Remove a file from the filesystem."""
@@ -248,19 +272,30 @@ impl MountTable:
                 entry.driver.rename_path_text(old_path, new_path)
 
     fn ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
-        """Truncate or extend an open file to new_size."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.ftruncate_handle(handle, new_size)
+        """Truncate or extend an open file; probe each mount to find handle owner."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.ftruncate_handle(handle, new_size)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn mmap_shared_writable(handle: FileHandle, offset: i64, length: i64) -> Result<(), FsError>:
-        """Shared writable mmap — always returns ENOTSUP."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.mmap_shared_writable_handle(handle, offset, length)
+        """Shared writable mmap — always returns ENOTSUP (probes all mounts)."""
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val r = self.mounts[i].driver.mmap_shared_writable_handle(handle, offset, length)
+            if r.is_ok():
+                return r
+            i = i + 1
+        Err(FsError.NotFound)
 
     fn link(target: text, link_path: text) -> Result<(), FsError>:
-        """Hard link — always returns ENOTSUP."""
-        if self.mounts.len() == 0:
-            return Err(FsError.NotFound)
-        self.mounts[0].driver.link_path_text(target, link_path)
+        """Hard link — always returns ENOTSUP; uses path-based resolution."""
+        val entry_opt = self.lookup_text(target)
+        match entry_opt:
+            case nil:
+                Err(FsError.NotFound)
+            case Some(entry):
+                entry.driver.link_path_text(target, link_path)
