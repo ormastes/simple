@@ -1,0 +1,63 @@
+# Scilib NDArray — pluggable storage backend
+#
+# T-NDARRAY-04. StorageBackend enum drives runtime backend selection
+# for NDArray<T> per arch §4 + §6. v1 ships three variants:
+#
+#   Mock     — CPU-correct stub used in interpreter-mode tests
+#              (per OQ-D, mock satisfies AC-7 without dlopen).
+#   OpenBlas — host-side real BLAS/LAPACK via libspl_openblas.so
+#              (T-CUDA-04..06).
+#   Cublas   — CUDA-host real BLAS/LAPACK via libspl_cublas.so
+#              (T-CUDA-07..10).
+#
+# Selection is by env var SIMPLE_BLAS_BACKEND (cuda | openblas | mock);
+# default is `mock` so interp-mode `bin/simple test` works on any host.
+#
+# T-NDARRAY-23 will add a `Libtorch` variant that wraps the existing
+# tensor.spl libtorch storage as a fourth backend (transitional alias).
+
+use std.nogc_sync_mut.ndarray.types.{Index}
+
+
+enum StorageBackend:
+    """Compute / storage backend selector for NDArray<T>.
+
+    The variant is held by the `_backend_kind` field on NDArray; the
+    opaque `_backend` handle is interpreted differently per variant
+    (e.g. for Mock: pointer into a Simple-side typed buffer; for Cublas:
+    cuBLAS device-pointer cast to i64; for Libtorch (v1.1+): torch tensor
+    handle).
+    """
+    Mock
+    OpenBlas
+    Cublas
+
+    fn name(self) -> text:
+        match self:
+            case Mock:     "mock"
+            case OpenBlas: "openblas"
+            case Cublas:   "cublas"
+
+    fn is_real(self) -> bool:
+        """True if this backend executes against a real BLAS / cuBLAS
+        library; false for the in-process mock. Used by spec preludes
+        to gate GPU-only assertions."""
+        match self:
+            case Mock:     false
+            case OpenBlas: true
+            case Cublas:   true
+
+
+# ============================================================================
+# Default backend selection
+# ============================================================================
+#
+# T-CUDA-12 will expose `select_default_backend()` reading
+# SIMPLE_BLAS_BACKEND. For now (Wave 1B foundation), we provide a
+# pure helper that chooses Mock unconditionally — the FFI dispatch
+# layer wires environment-variable lookup later.
+
+fn default_backend() -> StorageBackend:
+    """v1 default: always Mock. T-CUDA-12 will switch to env-driven
+    selection once the cuda/openblas shims build."""
+    StorageBackend.Mock
