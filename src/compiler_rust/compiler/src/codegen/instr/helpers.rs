@@ -185,6 +185,178 @@ pub(crate) fn adapted_call(
     builder.ins().call(func_ref, &adapted)
 }
 
+// ============================================================================
+// C1: call_runtime_N helpers — promoted from methods.rs private helpers to pub
+// ============================================================================
+
+/// Call a runtime function with no arguments (arity-0, void return).
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_0<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+) {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    adapted_call(builder, func_ref, &[]);
+}
+
+/// Call a runtime function with one argument and return its result.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_1<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = adapted_call(builder, func_ref, &[arg]);
+    builder.inst_results(call)[0]
+}
+
+/// Call a runtime function with one argument, discarding the return value.
+/// Use this for void runtime fns like rt_print_value, rt_actor_reply, rt_condition_probe.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_1_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg: cranelift_codegen::ir::Value,
+) {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    adapted_call(builder, func_ref, &[arg]);
+}
+
+/// Call a runtime function with two arguments and return its result.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_2<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = adapted_call(builder, func_ref, &[arg1, arg2]);
+    builder.inst_results(call)[0]
+}
+
+/// Call a runtime function with two arguments, discarding the return value.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_2_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+) {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    adapted_call(builder, func_ref, &[arg1, arg2]);
+}
+
+/// Call a runtime function with three arguments and return its result.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_3<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+    arg3: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
+    builder.inst_results(call)[0]
+}
+
+/// Call a runtime function with three arguments, discarding the return value.
+/// Use this for void runtime fns like rt_condition_probe.
+/// The function must be pre-declared in `ctx.runtime_funcs`.
+#[inline]
+pub fn call_runtime_3_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+    arg3: cranelift_codegen::ir::Value,
+) {
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
+}
+
+// ============================================================================
+// C2: declare_uniform_i64_import — cache-check + sig-build + declare + cache
+// ============================================================================
+
+/// Look up or declare a uniform import (all I64 params → I64 return) and
+/// return the cached `FuncId`.
+///
+/// Returns `Ok(FuncId)` on success, `Err(ModuleError)` if `declare_function`
+/// fails and the name is not already cached. Each call site is responsible for
+/// its own error recovery (e.g., fall through to NIL, store null, or fallback
+/// to `rt_method_not_found`).
+///
+/// The `_builder` parameter is retained for API uniformity with other helpers;
+/// signature building does not emit IR instructions.
+#[inline]
+pub fn declare_uniform_i64_import<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    _builder: &mut FunctionBuilder,
+    name: &str,
+    n_params: usize,
+) -> Result<cranelift_module::FuncId, cranelift_module::ModuleError> {
+    use cranelift_codegen::ir::{AbiParam, Signature};
+    use cranelift_module::Linkage;
+
+    if let Some(&existing) = ctx.func_ids.get(name) {
+        return Ok(existing);
+    }
+    let mut sig = Signature::new(crate::codegen::shared::platform_call_conv());
+    for _ in 0..n_params {
+        sig.params.push(AbiParam::new(types::I64));
+    }
+    sig.returns.push(AbiParam::new(types::I64));
+    let result = ctx.module.declare_function(name, Linkage::Import, &sig);
+    if let Ok(id) = &result {
+        ctx.func_ids.insert(name.to_string(), *id);
+    }
+    result
+}
+
 /// Adapt a single value to match an expected Cranelift type.
 fn adapt_value_to_type(
     builder: &mut FunctionBuilder,

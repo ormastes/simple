@@ -1,13 +1,12 @@
 // Pointer operation instruction compilation.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::PointerKind;
 use crate::mir::VReg;
 
-use super::helpers::adapted_call;
+use super::helpers::call_runtime_1;
 use super::{InstrContext, InstrResult};
 
 /// Compile a PointerNew instruction - allocate a pointer wrapping a value.
@@ -28,15 +27,8 @@ pub(crate) fn compile_pointer_new<M: Module>(
         PointerKind::Weak => {
             // Weak pointers need a shared pointer to downgrade from
             // For now, create a shared pointer and downgrade it
-            let shared_id = ctx.runtime_funcs["rt_shared_new"];
-            let shared_ref = ctx.module.declare_func_in_func(shared_id, builder.func);
-            let shared_call = adapted_call(builder, shared_ref, &[value_val]);
-            let shared_ptr = builder.inst_results(shared_call)[0];
-
-            let weak_id = ctx.runtime_funcs["rt_shared_downgrade"];
-            let weak_ref = ctx.module.declare_func_in_func(weak_id, builder.func);
-            let weak_call = adapted_call(builder, weak_ref, &[shared_ptr]);
-            let result = builder.inst_results(weak_call)[0];
+            let shared_ptr = call_runtime_1(ctx, builder, "rt_shared_new", value_val);
+            let result = call_runtime_1(ctx, builder, "rt_shared_downgrade", shared_ptr);
             ctx.vreg_values.insert(dest, result);
             return Ok(());
         }
@@ -54,10 +46,7 @@ pub(crate) fn compile_pointer_new<M: Module>(
         }
     };
 
-    let func_id = ctx.runtime_funcs[rt_func];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[value_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_1(ctx, builder, rt_func, value_val);
     ctx.vreg_values.insert(dest, result);
     Ok(())
 }
@@ -94,16 +83,9 @@ pub(crate) fn compile_pointer_deref<M: Module>(
         PointerKind::Handle => "rt_handle_get",
         PointerKind::Weak => {
             // Weak pointers need to be upgraded first
-            let upgrade_id = ctx.runtime_funcs["rt_weak_upgrade"];
-            let upgrade_ref = ctx.module.declare_func_in_func(upgrade_id, builder.func);
-            let upgrade_call = adapted_call(builder, upgrade_ref, &[ptr_val]);
-            let shared_ptr = builder.inst_results(upgrade_call)[0];
-
+            let shared_ptr = call_runtime_1(ctx, builder, "rt_weak_upgrade", ptr_val);
             // Then get the value from the shared pointer
-            let get_id = ctx.runtime_funcs["rt_shared_get"];
-            let get_ref = ctx.module.declare_func_in_func(get_id, builder.func);
-            let get_call = adapted_call(builder, get_ref, &[shared_ptr]);
-            let result = builder.inst_results(get_call)[0];
+            let result = call_runtime_1(ctx, builder, "rt_shared_get", shared_ptr);
             ctx.vreg_values.insert(dest, result);
             return Ok(());
         }
@@ -119,10 +101,7 @@ pub(crate) fn compile_pointer_deref<M: Module>(
         }
     };
 
-    let func_id = ctx.runtime_funcs[rt_func];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[ptr_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_1(ctx, builder, rt_func, ptr_val);
     ctx.vreg_values.insert(dest, result);
     Ok(())
 }

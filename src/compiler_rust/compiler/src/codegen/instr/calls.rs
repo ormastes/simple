@@ -10,7 +10,7 @@ use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
-use super::helpers::{adapted_call, create_cstring_constant, get_vreg_or_default};
+use super::helpers::{adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
 /// Check if a function name is a profiler function (to avoid recursive instrumentation)
@@ -379,8 +379,6 @@ pub fn compile_call<M: Module>(
         .unwrap_or(func_name);
     if matches!(variant_name, "Ok" | "Err" | "Some" | "None") {
         if let Some(d) = dest {
-            let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
-            let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
             // Use hashed discriminants consistently with pattern matching
             let disc = {
                 use std::collections::hash_map::DefaultHasher;
@@ -397,8 +395,8 @@ pub fn compile_call<M: Module>(
                 // Empty payload uses tagged nil (3), not raw 0
                 builder.ins().iconst(types::I64, 3)
             };
-            let call = adapted_call(builder, enum_new_ref, &[enum_id_val, disc_val, payload_val]);
-            ctx.vreg_values.insert(*d, builder.inst_results(call)[0]);
+            let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
+            ctx.vreg_values.insert(*d, result);
         }
         return Ok(());
     }

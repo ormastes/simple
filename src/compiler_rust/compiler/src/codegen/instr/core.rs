@@ -10,7 +10,10 @@ use cranelift_module::Module;
 use crate::hir::{BinOp, TypeId};
 use crate::mir::VReg;
 
-use super::helpers::{adapted_call, create_string_constant, declare_named_bytes};
+use super::helpers::{
+    adapted_call, call_runtime_1, call_runtime_1_void, call_runtime_2, call_runtime_2_void,
+    call_runtime_3, create_string_constant, declare_named_bytes,
+};
 use super::{InstrContext, InstrResult};
 
 /// Look up whether a VReg holds a signed integer.
@@ -246,6 +249,10 @@ pub(crate) fn compile_binop<M: Module>(
             // original so `sextend` still sees the sign bit. After
             // `coerce_binop_operands`, `lhs` has already been `uextend`ed.
             let use_signed = lhs_signed.unwrap_or(true);
+            if std::env::var("FR_DRIVER_0002B_TRACE").is_ok() {
+                let lhs_ty = ctx.vreg_types.get(&left_vreg).copied();
+                eprintln!("[shr-dispatch] left_vreg={:?} vreg_ty={:?} lhs_signed={:?} use_signed={}", left_vreg, lhs_ty, lhs_signed, use_signed);
+            }
             let li = if pre_lhs_is_int {
                 ensure_i64_typed(builder, pre_lhs, Some(use_signed))
             } else {
@@ -298,10 +305,7 @@ pub(crate) fn compile_binop<M: Module>(
                 // Use rt_native_eq for safe equality of native codegen values.
                 // Handles both raw untagged integers (icmp fast path) and
                 // tagged heap strings (content comparison via rt_value_eq).
-                let eq_id = ctx.runtime_funcs["rt_native_eq"];
-                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
-                builder.inst_results(call)[0]
+                call_runtime_2(ctx, builder, "rt_native_eq", lhs, rhs)
             }
         }
         BinOp::NotEq => {
@@ -311,10 +315,7 @@ pub(crate) fn compile_binop<M: Module>(
                 ensure_i64(builder, cmp_i8)
             } else {
                 // Use rt_native_neq for safe inequality of native codegen values.
-                let neq_id = ctx.runtime_funcs["rt_native_neq"];
-                let neq_ref = ctx.module.declare_func_in_func(neq_id, builder.func);
-                let call = adapted_call(builder, neq_ref, &[lhs, rhs]);
-                builder.inst_results(call)[0]
+                call_runtime_2(ctx, builder, "rt_native_neq", lhs, rhs)
             }
         }
         BinOp::Is => {
@@ -328,10 +329,8 @@ pub(crate) fn compile_binop<M: Module>(
             // Ensure both operands are i64 for runtime function call
             let lhs_i64 = ensure_i64(builder, lhs);
             let rhs_i64 = ensure_i64(builder, rhs);
-            let contains_id = ctx.runtime_funcs["rt_contains"];
-            let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
-            let call = adapted_call(builder, contains_ref, &[rhs_i64, lhs_i64]);
-            let result = ensure_i64(builder, builder.inst_results(call)[0]);
+            let contains_raw = call_runtime_2(ctx, builder, "rt_contains", rhs_i64, lhs_i64);
+            let result = ensure_i64(builder, contains_raw);
             if matches!(op, BinOp::NotIn) {
                 let one = builder.ins().iconst(types::I64, 1);
                 builder.ins().bxor(result, one)
@@ -596,9 +595,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                         "eprintln" | "spl_eprintln" => "rt_eprint_str",
                         _ => print_str_fn,
                     };
-                    let print_str_id = ctx.runtime_funcs[base_str_fn];
-                    let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                    adapted_call(builder, print_str_ref, &[space_ptr, space_len]);
+                    call_runtime_2_void(ctx, builder, base_str_fn, space_ptr, space_len);
                 }
 
                 // Print the argument value using rt_print_value / rt_println_value
@@ -620,13 +617,11 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                     }
                 };
 
-                let print_id = ctx.runtime_funcs[fn_to_use];
-                let print_ref = ctx.module.declare_func_in_func(print_id, builder.func);
                 let arg_val = match ctx.vreg_values.get(arg) {
                     Some(&v) => v,
                     None => return Err(format!("print: arg vreg {:?} not found", arg)),
                 };
-                adapted_call(builder, print_ref, &[arg_val]);
+                call_runtime_1_void(ctx, builder, fn_to_use, arg_val);
             }
 
             // Handle empty print (just prints nothing or newline)
@@ -647,9 +642,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 } else {
                     "rt_eprint_str"
                 };
-                let print_str_id = ctx.runtime_funcs[base_str_fn];
-                let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                adapted_call(builder, print_str_ref, &[newline_ptr, newline_len]);
+                call_runtime_2_void(ctx, builder, base_str_fn, newline_ptr, newline_len);
             }
 
             // Return nil (0) for void functions
@@ -668,13 +661,14 @@ pub(crate) fn compile_interp_call<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
-    let array_new_id = ctx.runtime_funcs["rt_array_new"];
-    let array_new_ref = ctx.module.declare_func_in_func(array_new_id, builder.func);
     let capacity = builder.ins().iconst(types::I64, args.len() as i64);
-    let call = adapted_call(builder, array_new_ref, &[capacity]);
-    let args_array = builder.inst_results(call)[0];
+    let args_array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
 
-    let array_push_id = ctx.runtime_funcs["rt_array_push"];
+    // Reuse push FuncRef across the loop for efficiency
+    let array_push_id = *ctx
+        .runtime_funcs
+        .get("rt_array_push")
+        .unwrap_or_else(|| panic!("missing runtime fn 'rt_array_push' in {}", ctx.func.name));
     let array_push_ref = ctx.module.declare_func_in_func(array_push_id, builder.func);
 
     for arg in args {
@@ -687,10 +681,7 @@ pub(crate) fn compile_interp_call<M: Module>(
 
     let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
-    let interp_call_id = ctx.runtime_funcs["rt_interp_call"];
-    let interp_call_ref = ctx.module.declare_func_in_func(interp_call_id, builder.func);
-    let call = adapted_call(builder, interp_call_ref, &[name_ptr, name_len, args_array]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_3(ctx, builder, "rt_interp_call", name_ptr, name_len, args_array);
 
     if let Some(d) = dest {
         ctx.vreg_values.insert(*d, result);

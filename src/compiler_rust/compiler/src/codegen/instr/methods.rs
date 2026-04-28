@@ -5,65 +5,13 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
 use super::super::shared::platform_call_conv;
-use super::helpers::{adapted_call, declare_named_bytes, get_vreg_or_default};
+use super::helpers::{
+    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3,
+    declare_named_bytes, get_vreg_or_default,
+};
 use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
 use crate::mir::VReg;
-
-/// Helper to call a runtime function and get its result
-fn call_runtime_1<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-    arg: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
-    let func_id = ctx.runtime_funcs[func_name];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[arg]);
-    builder.inst_results(call)[0]
-}
-
-/// Helper to call a runtime function with 2 args and get its result
-fn call_runtime_2<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-    arg1: cranelift_codegen::ir::Value,
-    arg2: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
-    let func_id = ctx.runtime_funcs[func_name];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[arg1, arg2]);
-    builder.inst_results(call)[0]
-}
-
-/// Helper to call a runtime function with 2 args that returns void
-fn call_runtime_2_void<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-    arg1: cranelift_codegen::ir::Value,
-    arg2: cranelift_codegen::ir::Value,
-) {
-    let func_id = ctx.runtime_funcs[func_name];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    adapted_call(builder, func_ref, &[arg1, arg2]);
-}
-
-/// Helper to call a runtime function with 3 args and get its result
-fn call_runtime_3<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-    arg1: cranelift_codegen::ir::Value,
-    arg2: cranelift_codegen::ir::Value,
-    arg3: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
-    let func_id = ctx.runtime_funcs[func_name];
-    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
-    builder.inst_results(call)[0]
-}
 
 /// Pass value through for array/dict operations.
 /// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.

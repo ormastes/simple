@@ -142,6 +142,100 @@ impl<'a, M: Module> InstrContext<'a, M> {
             .copied()
             .ok_or_else(|| format!("vreg {:?} not found in vreg_values", vreg))
     }
+
+    /// Construct a minimal `InstrContext` for integration tests.
+    ///
+    /// Accepts a `HashMap<String, FuncId>` (which tests hold naturally) and
+    /// leaks the keys to produce the `&'static str` keys required by the field.
+    /// All auxiliary maps are heap-allocated and leaked for `'static` lifetime.
+    ///
+    /// # Safety / leaks
+    /// This function leaks memory intentionally — it is only for test use.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        module: &'a mut M,
+        runtime_funcs_by_string: &HashMap<String, cranelift_module::FuncId>,
+    ) -> InstrContext<'a, M> {
+        use crate::hir::TypeId;
+        use crate::mir::MirFunction;
+        use simple_parser::ast::Visibility;
+
+        // Convert String keys → &'static str via Box::leak
+        let mut static_map: HashMap<&'static str, cranelift_module::FuncId> =
+            HashMap::with_capacity(runtime_funcs_by_string.len());
+        for (k, v) in runtime_funcs_by_string {
+            let leaked: &'static str = Box::leak(k.clone().into_boxed_str());
+            static_map.insert(leaked, *v);
+        }
+        let runtime_funcs: &'static HashMap<&'static str, cranelift_module::FuncId> =
+            Box::leak(Box::new(static_map));
+
+        // Leak auxiliary maps so we can take &'a mut references
+        let func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId> =
+            Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let global_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
+            Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value> =
+            Box::leak(Box::new(HashMap::new()));
+        let local_addr_map: &'a mut HashMap<VReg, usize> =
+            Box::leak(Box::new(HashMap::new()));
+        let variables: &'static HashMap<usize, cranelift_frontend::Variable> =
+            Box::leak(Box::new(HashMap::new()));
+        let extra_variables: &'a mut HashMap<usize, cranelift_frontend::Variable> =
+            Box::leak(Box::new(HashMap::new()));
+        let vreg_from_local: &'a mut HashMap<VReg, usize> =
+            Box::leak(Box::new(HashMap::new()));
+        let blocks: &'static HashMap<BlockId, cranelift_codegen::ir::Block> =
+            Box::leak(Box::new(HashMap::new()));
+        let generator_state_map: &'static Option<
+            HashMap<BlockId, crate::mir::GeneratorState>,
+        > = Box::leak(Box::new(None));
+        let async_state_map: &'static Option<HashMap<BlockId, crate::mir::AsyncState>> =
+            Box::leak(Box::new(None));
+        let import_map: &'static std::sync::Arc<std::collections::HashMap<String, String>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
+        let use_map: &'static std::collections::HashMap<String, String> =
+            Box::leak(Box::new(std::collections::HashMap::new()));
+        let vtable_data_ids: &'static std::collections::BTreeMap<
+            String,
+            cranelift_module::DataId,
+        > = Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let vtable_type_ids: &'static std::collections::BTreeMap<
+            TypeId,
+            cranelift_module::DataId,
+        > = Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let vreg_types: &'a mut HashMap<VReg, TypeId> = Box::leak(Box::new(HashMap::new()));
+
+        // Minimal dummy MirFunction
+        let func: &'static MirFunction =
+            Box::leak(Box::new(MirFunction::new("__test__".to_string(), TypeId::I64, Visibility::Private)));
+
+        // Dummy entry block (block 0)
+        let entry_block = cranelift_codegen::ir::Block::with_number(0).unwrap();
+
+        InstrContext {
+            module,
+            func_ids,
+            runtime_funcs,
+            global_ids,
+            vreg_values,
+            local_addr_map,
+            variables,
+            extra_variables,
+            vreg_from_local,
+            func,
+            entry_block,
+            blocks,
+            mir_block_id: BlockId(0),
+            generator_state_map,
+            async_state_map,
+            import_map,
+            use_map,
+            vtable_data_ids,
+            vtable_type_ids,
+            vreg_types,
+        }
+    }
 }
 
 /// Result type for instruction compilation - uses String errors for genericity

@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{BindingStep, MirLiteral, MirPattern, PatternBinding, VReg};
 
-use super::helpers::adapted_call;
+use super::helpers::{call_runtime_1, call_runtime_2, call_runtime_3};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn compile_pattern_test<M: Module>(
@@ -46,15 +46,9 @@ pub(crate) fn compile_pattern_test<M: Module>(
                 match super::helpers::create_string_constant(ctx, builder, s) {
                     Ok((str_ptr, str_len)) => {
                         // Allocate runtime string: rt_string_new(ptr, len) -> i64
-                        let string_new_id = ctx.runtime_funcs["rt_string_new"];
-                        let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
-                        let new_call = adapted_call(builder, string_new_ref, &[str_ptr, str_len]);
-                        let lit_str = builder.inst_results(new_call)[0];
+                        let lit_str = call_runtime_2(ctx, builder, "rt_string_new", str_ptr, str_len);
                         // Compare: rt_string_eq(subject, lit) -> i64 (0 or 1)
-                        let eq_id = ctx.runtime_funcs["rt_string_eq"];
-                        let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-                        let eq_call = adapted_call(builder, eq_ref, &[subject_val, lit_str]);
-                        let result = builder.inst_results(eq_call)[0];
+                        let result = call_runtime_2(ctx, builder, "rt_string_eq", subject_val, lit_str);
                         builder.ins().ireduce(types::I8, result)
                     }
                     Err(_) => {
@@ -80,10 +74,7 @@ pub(crate) fn compile_pattern_test<M: Module>(
         } => {
             // All enums now use rt_enum_new format consistently.
             // rt_enum_discriminant extracts the discriminant.
-            let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
-            let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-            let call = adapted_call(builder, disc_ref, &[subject_val]);
-            let disc = builder.inst_results(call)[0];
+            let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", subject_val);
 
             // All enums use hashed variant name discriminants consistently
             let expected_disc = calculate_variant_discriminant(variant_name) as i64;
@@ -111,10 +102,7 @@ pub(crate) fn compile_pattern_bind<M: Module>(
 
     let result = if binding.path.iter().any(|s| matches!(s, BindingStep::EnumPayload)) {
         // All enums use rt_enum_new format, so use rt_enum_payload consistently
-        let payload_id = ctx.runtime_funcs["rt_enum_payload"];
-        let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-        let call = adapted_call(builder, payload_ref, &[current]);
-        builder.inst_results(call)[0]
+        call_runtime_1(ctx, builder, "rt_enum_payload", current)
     } else {
         current
     };
@@ -136,17 +124,12 @@ pub(crate) fn compile_enum_unit<M: Module>(
     dest: VReg,
     variant_name: &str,
 ) {
-    let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
-    let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
-
     let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(types::I32, 0);
     // Nil payload: tagged value 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
     let nil_val = builder.ins().iconst(types::I64, 3);
-
-    let call = adapted_call(builder, enum_new_ref, &[enum_id, disc_val, nil_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, nil_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -157,15 +140,10 @@ pub(crate) fn compile_enum_with<M: Module>(
     variant_name: &str,
     payload: VReg,
 ) {
-    let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
-    let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
-
     let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(types::I32, 0);
     let payload_val = ctx.vreg_values[&payload];
-
-    let call = adapted_call(builder, enum_new_ref, &[enum_id, disc_val, payload_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
 }

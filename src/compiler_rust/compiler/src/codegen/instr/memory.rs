@@ -17,7 +17,7 @@ use crate::hir::TypeId;
 use crate::mir::VReg;
 
 use super::super::types_util::type_id_size;
-use super::helpers::adapted_call;
+use super::helpers::call_runtime_1;
 use super::{InstrContext, InstrResult};
 
 /// Compile LocalAddr instruction
@@ -165,12 +165,9 @@ pub fn compile_gc_alloc<M: Module>(
     dest: VReg,
     ty: TypeId,
 ) -> InstrResult<()> {
-    let alloc_id = ctx.runtime_funcs["rt_alloc"];
-    let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
     let size = type_id_size(ty) as i64;
     let size_val = builder.ins().iconst(types::I64, size.max(8));
-    let call = adapted_call(builder, alloc_ref, &[size_val]);
-    let ptr = builder.inst_results(call)[0];
+    let ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
     ctx.vreg_values.insert(dest, ptr);
     Ok(())
 }
@@ -182,11 +179,8 @@ pub fn compile_wait<M: Module>(
     dest: Option<VReg>,
     target: VReg,
 ) -> InstrResult<()> {
-    let wait_id = ctx.runtime_funcs["rt_wait"];
-    let wait_ref = ctx.module.declare_func_in_func(wait_id, builder.func);
     let target_val = ctx.get_vreg(&target)?;
-    let call = adapted_call(builder, wait_ref, &[target_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_1(ctx, builder, "rt_wait", target_val);
     if let Some(d) = dest {
         ctx.vreg_values.insert(d, result);
     }

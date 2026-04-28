@@ -8,7 +8,7 @@ use cranelift_module::Module;
 
 use crate::mir::VReg;
 
-use super::helpers::adapted_call;
+use super::helpers::{call_runtime_2_void, call_runtime_3_void};
 use super::{InstrContext, InstrResult};
 
 /// Compile DecisionProbe instruction: records decision outcome for MC/DC coverage
@@ -32,9 +32,7 @@ pub fn compile_decision_probe<M: Module>(
     };
 
     let decision_id_val = builder.ins().iconst(types::I64, decision_id as i64);
-    let probe_func_id = ctx.runtime_funcs["rt_decision_probe"];
-    let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-    adapted_call(builder, probe_func_ref, &[decision_id_val, result_val]);
+    call_runtime_2_void(ctx, builder, "rt_decision_probe", decision_id_val, result_val);
 
     Ok(())
 }
@@ -63,13 +61,7 @@ pub fn compile_condition_probe<M: Module>(
 
     let decision_id_val = builder.ins().iconst(types::I64, decision_id as i64);
     let condition_id_val = builder.ins().iconst(types::I32, condition_id as i64);
-    let probe_func_id = ctx.runtime_funcs["rt_condition_probe"];
-    let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-    adapted_call(
-        builder,
-        probe_func_ref,
-        &[decision_id_val, condition_id_val, result_val],
-    );
+    call_runtime_3_void(ctx, builder, "rt_condition_probe", decision_id_val, condition_id_val, result_val);
 
     Ok(())
 }
@@ -85,9 +77,7 @@ pub fn compile_path_probe<M: Module>(
 ) -> InstrResult<()> {
     let path_id_val = builder.ins().iconst(types::I64, path_id as i64);
     let block_id_val = builder.ins().iconst(types::I32, block_id as i64);
-    let probe_func_id = ctx.runtime_funcs["rt_path_probe"];
-    let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-    adapted_call(builder, probe_func_ref, &[path_id_val, block_id_val]);
+    call_runtime_2_void(ctx, builder, "rt_path_probe", path_id_val, block_id_val);
 
     Ok(())
 }

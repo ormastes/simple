@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{BlockId, VReg};
 
-use super::helpers::{adapted_call, get_vreg_or_default};
+use super::helpers::{call_runtime_1, call_runtime_3, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
 /// Calculate discriminant for enum variant using DefaultHasher (matches pattern.rs).
@@ -30,18 +30,13 @@ fn create_enum_value<M: Module>(
     discriminant: i64,
     payload: Option<VReg>,
 ) {
-    let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
-    let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
-
     let enum_id_val = builder.ins().iconst(types::I32, enum_id);
     let disc_val = builder.ins().iconst(types::I32, discriminant);
     // Empty payload uses tagged nil (3), not raw 0
     let payload_val = payload
         .map(|v| get_vreg_or_default(ctx, builder, &v))
         .unwrap_or_else(|| builder.ins().iconst(types::I64, 3));
-
-    let call = adapted_call(builder, enum_new_ref, &[enum_id_val, disc_val, payload_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -56,10 +51,7 @@ pub(crate) fn compile_try_unwrap<M: Module>(
     let val = get_vreg_or_default(ctx, builder, &value);
 
     // Use rt_enum_discriminant to check if Ok (1) or Err (0)
-    let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
-    let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-    let disc_call = adapted_call(builder, disc_ref, &[val]);
-    let disc = builder.inst_results(disc_call)[0];
+    let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", val);
 
     let err_disc = builder.ins().iconst(types::I64, variant_disc("Err"));
     let is_error = builder
@@ -74,10 +66,7 @@ pub(crate) fn compile_try_unwrap<M: Module>(
 
     builder.switch_to_block(success_block);
     // Use rt_enum_payload to extract the payload
-    let payload_id = ctx.runtime_funcs["rt_enum_payload"];
-    let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-    let payload_call = adapted_call(builder, payload_ref, &[val]);
-    let payload = builder.inst_results(payload_call)[0];
+    let payload = call_runtime_1(ctx, builder, "rt_enum_payload", val);
     ctx.vreg_values.insert(dest, payload);
     ctx.vreg_values.insert(error_dest, val);
 }

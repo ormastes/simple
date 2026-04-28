@@ -35,6 +35,10 @@ use simple_compiler::codegen::instr::helpers::{
 use simple_compiler::codegen::instr::{InstrContext, InstrResult};
 use simple_compiler::CompilerPipeline;
 
+// InstBuilder must be in scope for builder.ins().iconst()/return_() calls in
+// the C2 idempotency tests below.
+use cranelift_codegen::ir::InstBuilder;
+
 // ============================================================================
 // Helper: compile a minimal Simple program exercising a specific call arity
 // ============================================================================
@@ -205,6 +209,7 @@ fn c2_declare_uniform_i64_import_is_pub_crate() {
 #[test]
 fn c2_declare_uniform_i64_import_idempotent() {
     use cranelift_codegen::ir::types;
+    use cranelift_codegen::ir::InstBuilder;
     use cranelift_codegen::settings;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_jit::{JITBuilder, JITModule};

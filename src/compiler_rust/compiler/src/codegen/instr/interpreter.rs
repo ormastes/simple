@@ -10,7 +10,7 @@ use cranelift_module::Module;
 
 use crate::mir::VReg;
 
-use super::helpers::adapted_call;
+use super::helpers::call_runtime_1;
 use super::{InstrContext, InstrResult};
 
 /// Compile InterpEval instruction: evaluates an expression in the interpreter
@@ -24,11 +24,8 @@ pub fn compile_interp_eval<M: Module>(
     dest: VReg,
     expr_index: usize,
 ) -> InstrResult<()> {
-    let interp_eval_id = ctx.runtime_funcs["rt_interp_eval"];
-    let interp_eval_ref = ctx.module.declare_func_in_func(interp_eval_id, builder.func);
     let idx = builder.ins().iconst(types::I64, expr_index as i64);
-    let call = adapted_call(builder, interp_eval_ref, &[idx]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_1(ctx, builder, "rt_interp_eval", idx);
     ctx.vreg_values.insert(dest, result);
     Ok(())
 }

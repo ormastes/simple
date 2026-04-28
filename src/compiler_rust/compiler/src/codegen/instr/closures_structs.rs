@@ -9,7 +9,10 @@ use crate::mir::VReg;
 
 use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
-use super::helpers::{adapted_call, create_string_constant, get_vreg_or_default, indirect_call_with_result};
+use super::helpers::{
+    adapted_call, call_runtime_1, call_runtime_2, create_string_constant, get_vreg_or_default,
+    indirect_call_with_result,
+};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn compile_closure_create<M: Module>(
@@ -21,12 +24,8 @@ pub(crate) fn compile_closure_create<M: Module>(
     capture_offsets: &[u32],
     captures: &[VReg],
 ) {
-    let alloc_id = ctx.runtime_funcs["rt_alloc"];
-    let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
-
     let size_val = builder.ins().iconst(types::I64, closure_size as i64);
-    let call = adapted_call(builder, alloc_ref, &[size_val]);
-    let closure_ptr = builder.inst_results(call)[0];
+    let closure_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
@@ -149,12 +148,8 @@ pub(crate) fn compile_struct_init<M: Module>(
     field_values: &[VReg],
     vtable_data_id: Option<cranelift_module::DataId>,
 ) {
-    let alloc_id = ctx.runtime_funcs["rt_alloc"];
-    let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
-
     let size_val = builder.ins().iconst(types::I64, struct_size as i64);
-    let call = adapted_call(builder, alloc_ref, &[size_val]);
-    let ptr = builder.inst_results(call)[0];
+    let ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
     // Write vtable pointer at offset 0 if this struct implements a trait
     if let Some(data_id) = vtable_data_id {
@@ -537,21 +532,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 }
             } else {
                 let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
-                let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
-                let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-                let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+                let result = call_runtime_2(ctx, builder, "rt_function_not_found", name_ptr, name_len);
                 if let Some(d) = dest {
-                    let result = builder.inst_results(call)[0];
                     ctx.vreg_values.insert(*d, result);
                 }
             }
         } else {
             let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
-            let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
-            let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-            let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
+            let result = call_runtime_2(ctx, builder, "rt_function_not_found", name_ptr, name_len);
             if let Some(d) = dest {
-                let result = builder.inst_results(call)[0];
                 ctx.vreg_values.insert(*d, result);
             }
         }

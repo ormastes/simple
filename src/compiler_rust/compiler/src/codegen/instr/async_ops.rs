@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::mir::{BlockId, VReg};
 
 use super::super::shared::get_func_block_addr;
-use super::helpers::adapted_call;
+use super::helpers::{adapted_call, call_runtime_1, call_runtime_2, call_runtime_3};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn build_ctx_array<M: Module>(
@@ -44,13 +44,9 @@ pub(crate) fn compile_future_create<M: Module>(
     dest: VReg,
     body_block: BlockId,
 ) {
-    let future_new_id = ctx.runtime_funcs["rt_future_new"];
-    let future_new_ref = ctx.module.declare_func_in_func(future_new_id, builder.func);
-
     let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
     let ctx_val = build_ctx_array(ctx, builder, body_block);
-    let call = adapted_call(builder, future_new_ref, &[body_ptr, ctx_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_2(ctx, builder, "rt_future_new", body_ptr, ctx_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -60,13 +56,9 @@ pub(crate) fn compile_actor_spawn<M: Module>(
     dest: VReg,
     body_block: BlockId,
 ) {
-    let spawn_id = ctx.runtime_funcs["rt_actor_spawn"];
-    let spawn_ref = ctx.module.declare_func_in_func(spawn_id, builder.func);
-
     let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
     let ctx_val = build_ctx_array(ctx, builder, body_block);
-    let call = adapted_call(builder, spawn_ref, &[body_ptr, ctx_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_2(ctx, builder, "rt_actor_spawn", body_ptr, ctx_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -76,9 +68,6 @@ pub(crate) fn compile_generator_create<M: Module>(
     dest: VReg,
     body_block: BlockId,
 ) {
-    let gen_new_id = ctx.runtime_funcs["rt_generator_new"];
-    let gen_new_ref = ctx.module.declare_func_in_func(gen_new_id, builder.func);
-
     let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
     let ctx_val = build_ctx_array(ctx, builder, body_block);
     let slot_count = ctx
@@ -88,8 +77,7 @@ pub(crate) fn compile_generator_create<M: Module>(
         .map(|meta| meta.frame_slots.unwrap_or(0) as i64)
         .unwrap_or(0);
     let slots_val = builder.ins().iconst(types::I64, slot_count);
-    let call = adapted_call(builder, gen_new_ref, &[body_ptr, slots_val, ctx_val]);
-    let result = builder.inst_results(call)[0];
+    let result = call_runtime_3(ctx, builder, "rt_generator_new", body_ptr, slots_val, ctx_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -109,18 +97,13 @@ pub(crate) fn compile_yield<M: Module>(
                 let _ = adapted_call(builder, store_ref, &[gen_param, idx_val, val]);
             }
 
-            let set_state_id = ctx.runtime_funcs["rt_generator_set_state"];
-            let set_state_ref = ctx.module.declare_func_in_func(set_state_id, builder.func);
             let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
-            let _ = adapted_call(builder, set_state_ref, &[gen_param, next_state]);
+            call_runtime_2(ctx, builder, "rt_generator_set_state", gen_param, next_state);
 
             let val = ctx.get_vreg(&value)?;
             // Wrap the yielded value as a RuntimeValue so the dispatcher ABI
             // matches the runtime's expectations.
-            let wrap_id = ctx.runtime_funcs["rt_value_int"];
-            let wrap_ref = ctx.module.declare_func_in_func(wrap_id, builder.func);
-            let wrap_call = adapted_call(builder, wrap_ref, &[val]);
-            let wrapped = builder.inst_results(wrap_call)[0];
+            let wrapped = call_runtime_1(ctx, builder, "rt_value_int", val);
             builder.ins().return_(&[wrapped]);
             return Ok(());
         }
