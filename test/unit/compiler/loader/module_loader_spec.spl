@@ -341,6 +341,198 @@ describe "Module Loader":
         expect(loader.jit.loaded_metadata.has(path)).to_equal(false)
         expect(loader.jit.jit_cache.has(jit_symbol_name)).to_equal(false)
 
+    # =========================================================================
+    # A1 — impl-method unload delegation parity
+    #
+    # Each test exercises loader.unload(path) (impl-method path) and compares
+    # observable state against what moduleloader_unload (free-function path)
+    # produces.  Before the A1 refactor the impl-method body was 38 lines of
+    # copy-paste; after it is a single delegator.  These tests form the gate.
+    # =========================================================================
+
+    it "impl-method unload clears modules entry for the path":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        _ = moduleloader_load(loader, path)
+        expect(loader.is_loaded(path)).to_equal(true)
+
+        loader.unload(path)
+
+        expect(loader.is_loaded(path)).to_equal(false)
+        expect(loader.modules.has(path)).to_equal(false)
+
+    it "impl-method unload drops global symbols owned by that module":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        _ = moduleloader_load(loader, path)
+        val sym = LoadedSymbol(
+            name: "owned_sym",
+            address: 8192,
+            size: 8,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 0
+        )
+        loader.global_symbols = {"owned_sym": (path, sym)}
+
+        loader.unload(path)
+
+        expect(loader.global_symbols.has("owned_sym")).to_equal(false)
+
+    it "impl-method unload clears loaded_metadata for the path":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        val entry = PossibleInstantiation(
+            template_name: "Vec",
+            type_args: "i64",
+            mangled_name: "vec_runtime_i64"
+        )
+        loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
+        _ = moduleloader_load(loader, path)
+
+        loader.unload(path)
+
+        expect(loader.jit.loaded_metadata.has(path)).to_equal(false)
+
+    it "impl-method unload clears jit_cache entries for symbols of the module":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        val sym_name = "Vec$i64"
+        _ = moduleloader_load(loader, path)
+        loader.jit.set_metadata_for_test(
+            path,
+            LoadedMetadata(
+                possible: [],
+                instantiations: [
+                    InstantiationRecord(
+                        id: 0,
+                        template_name: "Vec",
+                        type_args: "i64",
+                        mangled_name: sym_name,
+                        from_file: path,
+                        from_loc: path + ":0:0",
+                        to_obj: "jit_obj",
+                        status: "jit_compiled"
+                    )
+                ]
+            )
+        )
+        loader.jit.exec_mapper.set_record(sym_name, "__jit__", 4096)
+        loader.jit.set_cache_for_test(sym_name, [1, 2, 3], 4096)
+        _ = moduleloader_resolve_symbol(loader, sym_name)
+
+        loader.unload(path)
+
+        expect(loader.jit.jit_cache.has(sym_name)).to_equal(false)
+        expect(loader.global_symbols.has(sym_name)).to_equal(false)
+
+    it "impl-method unload preserves global symbols owned by a different module":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        val other_path = second_module_path()
+        _ = moduleloader_load(loader, path)
+        val other_sym = LoadedSymbol(
+            name: "other_fn",
+            address: 32768,
+            size: 8,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 0
+        )
+        loader.global_symbols = {"other_fn": (other_path, other_sym)}
+
+        loader.unload(path)
+
+        expect(loader.global_symbols.has("other_fn")).to_equal(true)
+
+    it "impl-method unload of a never-loaded path is a no-op and does not panic":
+        var loader = ModuleLoader.with_defaults()
+        val phantom = "test/unit/compiler/loader/does_not_exist_ghost.spl"
+
+        loader.unload(phantom)
+
+        expect(loader.modules.has(phantom)).to_equal(false)
+        expect(loader.global_symbols.len()).to_equal(0)
+
+    it "impl-method double-unload is idempotent: second call is a no-op":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        _ = moduleloader_load(loader, path)
+        val sym = LoadedSymbol(
+            name: "idempotent_sym",
+            address: 4096,
+            size: 8,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 0
+        )
+        loader.global_symbols = {"idempotent_sym": (path, sym)}
+
+        loader.unload(path)
+        loader.unload(path)
+
+        expect(loader.is_loaded(path)).to_equal(false)
+        expect(loader.global_symbols.has("idempotent_sym")).to_equal(false)
+
+    it "impl-method unload and free-function unload produce identical module-table state":
+        var loader_a = ModuleLoader.with_defaults()
+        var loader_b = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        val sym_name = "parity_sym"
+
+        _ = moduleloader_load(loader_a, path)
+        _ = moduleloader_load(loader_b, path)
+
+        val sym_a = LoadedSymbol(
+            name: sym_name,
+            address: 8192,
+            size: 8,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 0
+        )
+        val sym_b = LoadedSymbol(
+            name: sym_name,
+            address: 8192,
+            size: 8,
+            ty: SymbolType.Function,
+            is_jit: false,
+            file_offset: 0
+        )
+        loader_a.global_symbols = {sym_name: (path, sym_a)}
+        loader_b.global_symbols = {sym_name: (path, sym_b)}
+
+        # Apply unload via the two paths
+        loader_a.unload(path)        # impl-method path (the delegator under test)
+        moduleloader_unload(loader_b, path)  # free-function path (reference)
+
+        # Observable state must be identical
+        expect(loader_a.is_loaded(path)).to_equal(loader_b.is_loaded(path))
+        expect(loader_a.global_symbols.has(sym_name)).to_equal(loader_b.global_symbols.has(sym_name))
+        expect(loader_a.global_symbols.len()).to_equal(loader_b.global_symbols.len())
+
+    it "impl-method unload after JIT symbols are registered removes them correctly":
+        var loader = ModuleLoader.with_defaults()
+        val path = existing_module_path()
+        val jit_sym = "jit_owned_fn"
+        val entry = PossibleInstantiation(
+            template_name: "JitOwned",
+            type_args: "f64",
+            mangled_name: jit_sym
+        )
+        loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
+        _ = moduleloader_load(loader, path)
+        _ = moduleloader_resolve_symbol(loader, jit_sym)
+
+        loader.unload(path)
+
+        expect(loader.global_symbols.has(jit_sym)).to_equal(false)
+        match moduleloader_resolve_symbol(loader, jit_sym):
+            case SymbolResult.NotFound(name):
+                expect(name).to_equal(jit_sym)
+            case _:
+                expect("still_present").to_equal(jit_sym)
+
     it "reload rehydrates on-disk metadata so persisted jit symbols stay resolvable":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
