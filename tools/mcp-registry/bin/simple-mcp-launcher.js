@@ -3,7 +3,7 @@
 // Prefer the native MCP binary when it is available, and fall back to
 // the Simple runtime + source entry only for older bootstrap bundles.
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -51,7 +51,7 @@ function resolveNativeServer(rootDir) {
   );
 
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
+    if (isHealthyBinary(candidate)) {
       return candidate;
     }
   }
@@ -78,12 +78,29 @@ function resolveRuntimeBinary(rootDir) {
   );
 
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
+    if (isHealthyBinary(candidate)) {
       return candidate;
     }
   }
 
   return null;
+}
+
+function isHealthyBinary(candidate) {
+  if (!candidate) {
+    return false;
+  }
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+  } catch (_) {
+    return false;
+  }
+
+  const result = spawnSync(candidate, ['--version'], {
+    stdio: 'ignore',
+    timeout: 2000
+  });
+  return result.status === 0;
 }
 
 function resolveEnvRuntime(repoRoot) {

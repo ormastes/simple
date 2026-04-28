@@ -170,6 +170,49 @@ sys_schedctl      = 107  # service agent
 `src/os/kernel/abi/syscall_shim.spl` (5 new @export shims + 2 G13 shims),
 `src/os/kernel/types/vmspace_types.spl`, `src/os/kernel/memory/vmm.spl` (called, not modified).
 
+### Wave 2 — userland dynamic toolchain (2026-04-28)
+
+N = 108 (Wave 1 reserved through 107). Reserved for the userland-LLVM/rustc
+shipment program; see `doc/04_architecture/adr/ADR-003-userland-llvm-rustc-shipment.md`.
+
+Reserved (no dispatcher entry yet — implemented when the kernel runtime
+extension phase lands; see `~/.claude/plans/complete-porting-llvm-rust-reactive-cosmos.md`):
+
+```
+sys_arch_prctl    = 108  # ARCH_SET_FS / ARCH_GET_FS for x86_64 TLS
+                         # signature: arch_prctl(code: i32, addr: u64) -> i64
+sys_clone         = 109  # pthread create — restricted flag-set only:
+                         # CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|
+                         # CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|
+                         # CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID
+                         # any other flag bit returns -EINVAL.
+sys_futex         = 110  # FUTEX_WAIT / FUTEX_WAKE — emulated atop the
+                         # existing notification primitives
+                         # (NotificationSignal=25, NotificationWait=26).
+sys_exit_thread   = 111  # per-thread exit, releases stack and TLS slot
+                         # without affecting the rest of the process.
+```
+
+`@export` shim names follow the `spl_handle_<n>` convention used by Wave 1
+(see `src/os/kernel/abi/syscall_shim.spl` lines 108–172). Weak stubs in
+`examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` must return -ENOSYS
+until the strong override lands.
+
+`TaskContext` gains a `fs_base: u64` field (`src/os/kernel/types/task_types.spl`)
+restored on every context switch via `wrmsr(MSR_FS_BASE)` in
+`src/os/kernel/scheduler/context_switch.spl`. The `MSR_FS_BASE = 0xC0000100`
+constant already exists at `src/os/kernel/arch/x86_64/cpu.spl:104`.
+
+**Files to change (when wired):** `src/os/kernel/types/syscall_types.spl`
+(enum), `src/os/kernel/ipc/syscall.spl` (dispatcher cases),
+`src/os/kernel/abi/syscall_shim.spl` (4 new @export shims),
+`src/os/kernel/types/task_types.spl` (TaskContext.fs_base),
+`src/os/kernel/scheduler/context_switch.spl` (wrmsr on switch-in),
+`examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` (4 weak stubs).
+
+**Consumers:** musl PAL overlay at `src/os/external/musl/arch/simpleos-x86_64/`,
+Rust libstd PAL fork at `/home/ormastes/rust:simpleos`.
+
 ---
 
 ## IF-02 Fork/exec kernel contract

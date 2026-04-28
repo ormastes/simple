@@ -341,62 +341,6 @@ pub fn rt_u32_alloc_filled(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
-/// Allocate a zero-filled `[f64]` of the given length in O(len) C-side.
-///
-/// T-PERFSUGAR-01 (scilib): sibling of `rt_bytes_alloc`. NDArray<Float64>
-/// ctors (`zeros`, `from_seq`, `arange`, `linspace`) use this to sidestep
-/// the interpreter's quadratic `[f64].push` cost on N-element buffers.
-pub fn rt_f64_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
-    let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
-    };
-    if len <= 0 {
-        return Ok(Value::array(vec![]));
-    }
-    let arr: Vec<Value> = vec![Value::Float(0.0); len as usize];
-    Ok(Value::array(arr))
-}
-
-/// Allocate a zero-filled `[f32]` of the given length. T-PERFSUGAR-01.
-pub fn rt_f32_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
-    let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
-    };
-    if len <= 0 {
-        return Ok(Value::array(vec![]));
-    }
-    let arr: Vec<Value> = vec![Value::Float(0.0); len as usize];
-    Ok(Value::array(arr))
-}
-
-/// Allocate a zero-filled `[i64]` of the given length. T-PERFSUGAR-01.
-pub fn rt_i64_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
-    let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
-    };
-    if len <= 0 {
-        return Ok(Value::array(vec![]));
-    }
-    let arr: Vec<Value> = vec![Value::Int(0); len as usize];
-    Ok(Value::array(arr))
-}
-
-/// Allocate a zero-filled `[i32]` of the given length. T-PERFSUGAR-01.
-pub fn rt_i32_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
-    let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
-    };
-    if len <= 0 {
-        return Ok(Value::array(vec![]));
-    }
-    let arr: Vec<Value> = vec![Value::Int(0); len as usize];
-    Ok(Value::array(arr))
-}
-
 /// Create a byte array from a raw memory pointer
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = match args.first() {

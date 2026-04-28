@@ -4,7 +4,7 @@
 //! Includes ABI version checking and symbol caching.
 
 use libloading::{Library, Symbol};
-use simple_common::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+use simple_runtime_abi::{AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

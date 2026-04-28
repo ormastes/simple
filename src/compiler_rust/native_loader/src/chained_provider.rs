@@ -4,7 +4,7 @@
 //! This enables plugin support where custom libraries can override
 //! or extend the base runtime symbols.
 
-use simple_common::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+use simple_runtime_abi::{AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider};
 use std::sync::Arc;
 
 /// Chains multiple providers together for symbol resolution.

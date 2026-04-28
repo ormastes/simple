@@ -1,0 +1,101 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.units.{KeyCode, TileCoord, TileIndex, ZIndex}
+use std.common.engine.signal.signal.{Signal}
+use std.common.engine.signal.event_bus.{EventBus}
+use std.nogc_sync_mut.engine.scene.node.{NodeStore}
+use std.nogc_sync_mut.engine.component.registry.{Component2D, ComponentRegistry}
+use std.nogc_sync_mut.engine.component.camera.{CameraData}
+use std.nogc_sync_mut.engine.component.tilemap.{TileMapData}
+use std.nogc_sync_mut.engine.sprite.texture.{Texture, TextureStore}
+use std.nogc_sync_mut.engine.sprite.atlas.{TextureAtlas}
+use std.nogc_sync_mut.engine.sprite.sprite.{SpriteSheet}
+use std.nogc_sync_mut.engine.render.pipeline.{SoftwareRenderer}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.engine.render.vector.{VectorRenderer}
+use std.nogc_sync_mut.engine.input.input_manager.{InputManager}
+
+
+fn main():
+    # @cover src/lib/nogc_sync_mut/engine/physics/types.spl 80%
+    """
+    # Simple-Native 2D Game Engine — Current API Smoke Specification
+    """
+
+
+    describe "Engine2D current API smoke":
+        it "creates scene nodes with valid generational handles":
+            var store = NodeStore.new()
+            val root = store.create_node("root")
+            val child = store.create_node("child")
+            expect root.is_valid() == true
+            expect child.is_valid() == true
+            expect store.count == 2
+
+        it "constructs camera components through Component2D":
+            val node = NodeId(raw: RawHandle.new(0, 1))
+            var registry = ComponentRegistry.create()
+            val cam = CameraData.create(800.0, 600.0)
+            registry.attach(node, Component2D.Camera(data: cam))
+            expect cam.viewport_width == 800.0
+            expect cam.is_active == true
+
+        it "renders command buffers through the software renderer":
+            var renderer = SoftwareRenderer.create(4, 3)
+            var buf = RenderCommandBuffer.create()
+            buf.push(RenderCommand.Clear(color: EngineColor.black()))
+            buf.push(RenderCommand.DrawRect(
+                rect: Rect2(x: 0.0, y: 0.0, width: 2.0, height: 2.0),
+                color: EngineColor.red(),
+                z_order: ZIndex(value: 0)))
+            val stats = renderer.render_frame(buf)
+            expect buf.len() == 2
+            expect stats.draw_calls > 0
+            expect renderer.get_pixels().len() == 12
+
+        it "binds input actions with the current KeyCode field":
+            var mgr = InputManager.create(0)
+            mgr.bind_key_action("jump", KeyCode(code: 32))
+            expect mgr.is_action_pressed("jump") == false
+            expect mgr.get_action_strength("jump") == 0.0
+            mgr.destroy()
+
+        it "creates texture, atlas, sprite sheet, and tilemap resources":
+            var store = TextureStore.new()
+            val tex_id = store.add(Texture.create(128, 128))
+            expect tex_id.is_valid() == true
+
+            var atlas = TextureAtlas.create(256, 256)
+            val pixels: [i64] = [0xFFFFFFFF]
+            val region = atlas.pack(1, 1, pixels)
+            expect region == nil == false
+            expect atlas.region_count() == 1
+
+            val sheet = SpriteSheet.create(tex_id, 32, 32, 4, 4)
+            expect sheet.columns == 4
+            expect sheet.rows == 4
+
+            var tm = TileMapData.create(tex_id, 16, 16, 4, 4)
+            tm = tm.set_tile(TileCoord(col: 0, row: 0), TileIndex(value: 5))
+            expect tm.get_tile(TileCoord(col: 0, row: 0)).value == 5
+
+        it "tracks signal registrations and vector render commands":
+            var sig = Signal.create("test")
+            val conn = sig.connect(\data: data.len())
+            expect sig.connection_count() == 1
+            expect sig.is_connected(conn) == true
+
+            var bus = EventBus.create()
+            bus.register("on_hit")
+            expect bus.has_signal("on_hit") == true
+
+            val vector = VectorRenderer.create()
+            var cmds = RenderCommandBuffer.create()
+            vector.fill_rect(cmds, Rect2(x: 1.0, y: 1.0, width: 2.0, height: 2.0), EngineColor.white(), ZIndex(value: 1))
+            expect cmds.len() == 1

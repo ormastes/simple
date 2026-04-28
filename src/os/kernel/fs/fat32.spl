@@ -104,6 +104,67 @@ fn cluster_to_lba(bpb: Fat32Bpb, cluster: u32) -> u64:
     val data_offset = (cluster - 2u32).to_u64() * bpb.sectors_per_cluster.to_u64()
     fat_region + data_offset
 
+# -- LFN (long-filename) helpers ----------------------------------------------
+# LFN slots use attr=0x0F and store UCS-2 code units across three regions of the
+# 32-byte entry: bytes 1-10 (5 chars), 14-25 (6 chars), 28-31 (2 chars).
+# Slots are stored in reverse sequence: the slot with the LAST 13 chars of the
+# name is stored first physically (highest sequence + 0x40 last-bit). Walking
+# forward through the directory we encounter highest-seq → lowest-seq → 8.3.
+
+fn fat32_decode_lfn_code_unit(entry_data: [u8], offset: i32) -> text:
+    val lo = entry_data[offset]
+    val hi = entry_data[offset + 1]
+    if hi == 0x00u8 and lo == 0x00u8:
+        return ""               # NUL terminator
+    if hi == 0xFFu8 and lo == 0xFFu8:
+        return ""               # padding past terminator
+    if hi != 0x00u8:
+        return "?"              # non-ASCII (BMP code unit > 0xFF)
+    lo.chr()
+
+fn fat32_parse_lfn_slot(entry_data: [u8], offset: i32) -> text:
+    var name = ""
+    val c1 = fat32_decode_lfn_code_unit(entry_data, offset + 1)
+    if c1 != "":
+        name = name + c1
+    val c2 = fat32_decode_lfn_code_unit(entry_data, offset + 3)
+    if c2 != "":
+        name = name + c2
+    val c3 = fat32_decode_lfn_code_unit(entry_data, offset + 5)
+    if c3 != "":
+        name = name + c3
+    val c4 = fat32_decode_lfn_code_unit(entry_data, offset + 7)
+    if c4 != "":
+        name = name + c4
+    val c5 = fat32_decode_lfn_code_unit(entry_data, offset + 9)
+    if c5 != "":
+        name = name + c5
+    val c6 = fat32_decode_lfn_code_unit(entry_data, offset + 14)
+    if c6 != "":
+        name = name + c6
+    val c7 = fat32_decode_lfn_code_unit(entry_data, offset + 16)
+    if c7 != "":
+        name = name + c7
+    val c8 = fat32_decode_lfn_code_unit(entry_data, offset + 18)
+    if c8 != "":
+        name = name + c8
+    val c9 = fat32_decode_lfn_code_unit(entry_data, offset + 20)
+    if c9 != "":
+        name = name + c9
+    val c10 = fat32_decode_lfn_code_unit(entry_data, offset + 22)
+    if c10 != "":
+        name = name + c10
+    val c11 = fat32_decode_lfn_code_unit(entry_data, offset + 24)
+    if c11 != "":
+        name = name + c11
+    val c12 = fat32_decode_lfn_code_unit(entry_data, offset + 28)
+    if c12 != "":
+        name = name + c12
+    val c13 = fat32_decode_lfn_code_unit(entry_data, offset + 30)
+    if c13 != "":
+        name = name + c13
+    name
+
 # -- Driver state --------------------------------------------------------------
 
 class Fat32Filesystem:
@@ -270,18 +331,27 @@ impl Fat32Filesystem:
         val upper = name.upper()
         val total_entries = self.root_dir_data.len() / 32
         var idx = 0
+        var lfn_name = ""
         while idx < total_entries:
             val off = idx * 32
             val first_byte = self.root_dir_data[off]
             if first_byte == 0x00u8:
                 return Result.Ok(nil)   # end of directory
             if first_byte == 0xE5u8:
+                lfn_name = ""           # orphan any pending LFN
                 idx = idx + 1
                 continue                # deleted entry
             val attr = self.root_dir_data[off + 11]
             if attr == 0x0Fu8:
+                # Walk highest-seq → lowest-seq: prepend each fragment.
+                val fragment = fat32_parse_lfn_slot(self.root_dir_data, off)
+                lfn_name = fragment + lfn_name
                 idx = idx + 1
-                continue                # LFN entry
+                continue
+            # 8.3 entry. Match accumulated LFN first (the long name),
+            # then fall back to the 8.3 short name.
+            if lfn_name.len() > 0 and lfn_name.upper() == upper:
+                return Result.Ok(off)
             # Build 8.3 name string
             var entry_name = ""
             var ni = 0
@@ -301,6 +371,7 @@ impl Fat32Filesystem:
                 entry_name = entry_name + "." + ext
             if entry_name.upper() == upper:
                 return Result.Ok(off)
+            lfn_name = ""
             idx = idx + 1
         Result.Ok(nil)
 

@@ -7,7 +7,7 @@ use crate::chained_provider::ChainedProvider;
 use crate::dynamic_provider::{DynLoadError, DynamicSymbolProvider};
 use crate::process_provider::ProcessSymbolProvider;
 use crate::static_provider::StaticSymbolProvider;
-use simple_common::RuntimeSymbolProvider;
+use simple_runtime_abi::RuntimeSymbolProvider;
 use std::path::Path;
 use std::sync::Arc;
 

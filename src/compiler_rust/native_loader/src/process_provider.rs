@@ -4,7 +4,7 @@
 //! This avoids split-brain runtime state and gives SMF/JIT code access to the
 //! same exported symbols the host executable was linked with.
 
-use simple_common::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+use simple_runtime_abi::{AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider};
 use std::cell::RefCell;
 use std::collections::HashMap;
 

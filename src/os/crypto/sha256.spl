@@ -8,10 +8,14 @@
 # Reference: RFC 2104 (HMAC)
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn serial_println(msg: text)
 
-fn _bisect_shift_probe(x: u32) -> u32:
-    x >> 3
+# C-extern SHA-256 fast-path. Used by sha256_with_len to bypass pure-Simple
+# SHA in compile mode, which is broken by a Cranelift-level miscompilation
+# (selective `>> 3` on certain output bytes — see
+# doc/03_plan/agent_tasks/tls_live_bug_fix_restart.md §"2026-04-28 Update 2").
+# A1 already uses the same helper via rt_tls13_hkdf_extract_into; this just
+# extends the same approach to all SHA / HMAC / HKDF-Expand paths.
+extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -541,6 +545,19 @@ fn _list_hmac_sha256_bytes(key_bytes: list, message_bytes: list) -> list:
     _list_sha256_bytes(outer_input)
 
 fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
+    # Delegate to the C-extern helper SHA. Pure-Simple SHA is broken in compile
+    # mode by a Cranelift miscompilation (see
+    # doc/03_plan/agent_tasks/tls_live_bug_fix_restart.md §"2026-04-28 Update 2").
+    # The C extern `rt_tls13_sha256` reads the [u8]'s length from its runtime
+    # header, so we pass data directly. data_len is unused on this path; all
+    # callers in this module pass an array whose length already equals data_len.
+    val _unused = data_len
+    rt_tls13_sha256(data)
+
+# === Pure-Simple SHA-256 (kept for reference / hosted-mode fallback)
+# Compiled mode delegates to rt_tls13_sha256 above due to a Cranelift selective-
+# `>> 3` miscompilation. This block is preserved as the algorithm-of-record.
+fn _sha256_pure_simple_with_len(data: [u8], data_len: u64) -> [u8]:
     val padded = sha256_pad_with_len(data, data_len)
 
     var h: [u32] = []
@@ -554,104 +571,6 @@ fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
         val block = _copy_block64(padded, offset)
         h = sha256_process_block(block, 0, h)
         offset = offset + 64
-
-    if data_len == 0:
-        # Function-param-narrow probe: pass h[0] (already-narrowed by R1 at array read) through
-        # a u32-param helper. Print via the byte-write path that's proven reliable.
-        val w0_for_probe = h[0]
-        val sp_result = _bisect_shift_probe(w0_for_probe)
-        val inline_shr = w0_for_probe >> 3
-        var sp_bytes: [u8] = []
-        sp_bytes.push(((sp_result >> 24) & 0xFF).to_u8())
-        sp_bytes.push(((sp_result >> 16) & 0xFF).to_u8())
-        sp_bytes.push(((sp_result >> 8) & 0xFF).to_u8())
-        sp_bytes.push((sp_result & 0xFF).to_u8())
-        var inline_bytes: [u8] = []
-        inline_bytes.push(((inline_shr >> 24) & 0xFF).to_u8())
-        inline_bytes.push(((inline_shr >> 16) & 0xFF).to_u8())
-        inline_bytes.push(((inline_shr >> 8) & 0xFF).to_u8())
-        inline_bytes.push((inline_shr & 0xFF).to_u8())
-        val sp_b3 = rt_bytes_u8_at(sp_bytes, 0)
-        val sp_b2 = rt_bytes_u8_at(sp_bytes, 1)
-        val sp_b1 = rt_bytes_u8_at(sp_bytes, 2)
-        val sp_b0 = rt_bytes_u8_at(sp_bytes, 3)
-        serial_println("[BISECT] _bisect_shift_probe(h[0]) bytes: {sp_b3} {sp_b2} {sp_b1} {sp_b0}")
-        val in_b3 = rt_bytes_u8_at(inline_bytes, 0)
-        val in_b2 = rt_bytes_u8_at(inline_bytes, 1)
-        val in_b1 = rt_bytes_u8_at(inline_bytes, 2)
-        val in_b0 = rt_bytes_u8_at(inline_bytes, 3)
-        serial_println("[BISECT] inline (h[0] >> 3)        bytes: {in_b3} {in_b2} {in_b1} {in_b0}")
-        # h[0] in storage is 0xe316c442. >> 3 = 0x1c62d888 = bytes 28 98 216 136.
-        # If function-param narrow is correct, BOTH probe and inline produce 28 98 216 136.
-        # If param loses narrow, probe will give different bytes (likely larger via sign extension).
-        val literal_a = 0x80000000u32
-        # Via .to_u64()
-        serial_println("[BISECT] literal_a.to_u64() = {literal_a.to_u64()}  expected=2147483648 (0x80000000)")
-        # Via shift-extraction: top byte should be 0x80=128 if literal is correct
-        val top_byte = ((literal_a >> 24) & 0xFF).to_u64()
-        val byte_2   = ((literal_a >> 16) & 0xFF).to_u64()
-        val byte_1   = ((literal_a >> 8) & 0xFF).to_u64()
-        val byte_0   = (literal_a & 0xFF).to_u64()
-        serial_println("[BISECT] literal_a shift-bytes: {top_byte} {byte_2} {byte_1} {byte_0}  expected: 128 0 0 0")
-        # And via direct comparison
-        if literal_a == 0x80000000u32:
-            serial_println("[BISECT] literal_a == 0x80000000u32: true (good)")
-        else:
-            serial_println("[BISECT] literal_a == 0x80000000u32: FALSE (literal corrupted)")
-        val literal_b = 1u32
-        val one_left_31 = literal_b << 31
-        serial_println("[BISECT] (1u32 << 31).to_u64() = {one_left_31.to_u64()}  expected=2147483648")
-        val ol31_top = ((one_left_31 >> 24) & 0xFF).to_u64()
-        serial_println("[BISECT] (1u32 << 31) top-byte via shift: {ol31_top}  expected: 128")
-        val ss0_test = small_sigma0(0x80000000u32)
-        serial_println("[BISECT] small_sigma0(0x80000000) = {ss0_test.to_u64()}  expected=285220352 (0x11002000)")
-        val raw_shr_3 = 0x80000000u32 >> 3
-        serial_println("[BISECT] 0x80000000u32 >> 3 = {raw_shr_3.to_u64()}  expected=268435456 (0x10000000)")
-        val raw_shr_1 = 0x80000000u32 >> 1
-        serial_println("[BISECT] 0x80000000u32 >> 1 = {raw_shr_1.to_u64()}  expected=1073741824 (0x40000000)")
-        val raw_shr_0 = 0x80000000u32 >> 0
-        serial_println("[BISECT] 0x80000000u32 >> 0 = {raw_shr_0.to_u64()}  expected=2147483648 (0x80000000)")
-        # If "top 3 bits dropped" → 0x10000000 unchanged (268435456). If "everything >> 3" → 0x02000000 (33554432)
-        val safe_low = 0x10000000u32 >> 0
-        serial_println("[BISECT] 0x10000000u32 >> 0 = {safe_low.to_u64()}  expected=268435456 (0x10000000)")
-        # 0xF0000000 distinguishes: dropped → 0x10000000 (268435456). >> 3 → 0x1E000000 (503316480)
-        val high_nib = 0xF0000000u32 >> 0
-        serial_println("[BISECT] 0xF0000000u32 >> 0 = {high_nib.to_u64()}  expected=4026531840 (0xF0000000)")
-        # 0x07000000 has bits 24-26 set — distinguishes: dropped → 0x07000000. >> 3 → 0x00E00000
-        val mid = 0x07000000u32 >> 0
-        serial_println("[BISECT] 0x07000000u32 >> 0 = {mid.to_u64()}  expected=117440512 (0x07000000)")
-        # Non-shift operations on the same literal — does the bug affect storage too, or only shift?
-        val add0 = 0x80000000u32 + 0u32
-        serial_println("[BISECT] 0x80000000u32 + 0u32 = {add0.to_u64()}  expected=2147483648 (0x80000000)")
-        val xor0 = 0x80000000u32 ^ 0u32
-        serial_println("[BISECT] 0x80000000u32 ^ 0u32 = {xor0.to_u64()}  expected=2147483648 (0x80000000)")
-        val and_full = 0x80000000u32 & 0xFFFFFFFFu32
-        serial_println("[BISECT] 0x80000000u32 & 0xFFFFFFFFu32 = {and_full.to_u64()}  expected=2147483648 (0x80000000)")
-        val shl0 = 0x80000000u32 << 0
-        serial_println("[BISECT] 0x80000000u32 << 0 = {shl0.to_u64()}  expected=2147483648 (0x80000000)")
-        # Compare against i64-default literal (no u32 suffix)
-        val plain_i64: i64 = 0x80000000
-        serial_println("[BISECT] plain i64 0x80000000 = {plain_i64}  expected=2147483648")
-        # Direct i64 comparison
-        if plain_i64 == 2147483648:
-            serial_println("[BISECT] plain i64 == 2147483648: TRUE (good)")
-        else:
-            serial_println("[BISECT] plain i64 == 2147483648: FALSE")
-        val raw_rot7 = rotr32(0x80000000u32, 7)
-        serial_println("[BISECT] rotr32(0x80000000, 7) = {raw_rot7.to_u64()}  expected=16777216 (0x01000000)")
-        serial_println("[BISECT] sha256(empty) h[0]_to_u64={h[0].to_u64()}")
-        val w0 = h[0]
-        val b0_24 = ((w0 >> 24) & 0xFF).to_u64()
-        val b0_16 = ((w0 >> 16) & 0xFF).to_u64()
-        val b0_8  = ((w0 >> 8) & 0xFF).to_u64()
-        val b0_0  = (w0 & 0xFF).to_u64()
-        serial_println("[BISECT] h[0] via val+shift bytes: {b0_24} {b0_16} {b0_8} {b0_0}")
-        val w0_lit = (h[0] >> 24) & 0xFF
-        val w0_lit_16 = (h[0] >> 16) & 0xFF
-        val w0_lit_8  = (h[0] >> 8) & 0xFF
-        val w0_lit_0  = h[0] & 0xFF
-        serial_println("[BISECT] h[0] inline-literal-shift bytes: {w0_lit.to_u64()} {w0_lit_16.to_u64()} {w0_lit_8.to_u64()} {w0_lit_0.to_u64()}")
-        serial_println("[BISECT] expected h[0]=0xe3b0c442 → 227 176 196 66")
 
     var out: [u8] = []
     hi = 0

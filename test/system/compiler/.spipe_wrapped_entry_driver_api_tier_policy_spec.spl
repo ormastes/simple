@@ -1,0 +1,319 @@
+#![allow(spipe_empty_examples)]
+#![allow(spipe_boolean_wrapper_assertions)]
+@allow(spipe_empty_examples)
+@allow(spipe_boolean_wrapper_assertions)
+
+
+extern fn rt_file_read_text(path: text) -> Result<text, text>
+extern fn rt_file_exists(path: text) -> bool
+
+fn read_file(path: text) -> text:
+    val result = rt_file_read_text(path)
+    if result.is_ok():
+        result.unwrap()
+    else:
+        ""
+
+fn contains_import_line(content: text, pattern: text) -> bool:
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and not line.starts_with("#"):
+            if (line.starts_with("use ") or line.starts_with("use lazy ") or line.starts_with("export use ")) and line.contains(pattern):
+                return true
+        i = i + 1
+    false
+
+fn contains_line(content: text, pattern: text) -> bool:
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and not line.starts_with("#") and line.contains(pattern):
+            return true
+        i = i + 1
+    false
+
+fn count_exact_lines(content: text, expected_lines: [text]) -> i64:
+    val lines = content.split("\n")
+    var count = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        var j = 0
+        while j < expected_lines.len():
+            if line == expected_lines[j]:
+                count = count + 1
+                break
+            j = j + 1
+        i = i + 1
+    count
+
+fn main():
+    # @cover src/compiler/80.driver/driver_api.spl 80%
+    # Driver API Tier Policy Guardrails - Structural Tests
+    #
+    # Verifies that the tiered driver API module structure follows dependency rules:
+    #   - Tier 0 (driver_api_types) has no compiler graph imports
+    #   - Facade (driver_api) does not import from driver_api_core
+    #   - __init__.spl uses explicit export use, not bare exports
+    #   - No upward tier dependencies (lower tiers must not import higher tiers)
+    #
+    # These are regression tests to prevent future helpers from quietly
+    # reintroducing heavy-path hangs.
+
+
+    describe "Driver API Tier Policy Guardrails":
+
+        # ---------------------------------------------------------------
+        # Tier 0: driver_api_types must be compiler-graph-free
+        # ---------------------------------------------------------------
+
+        it "tier 0 driver_api_types has no compiler graph imports":
+            val content = read_file("src/compiler/80.driver/driver_api_types.spl")
+            val heavy_imports = [
+                "compiler.hir", "compiler.mir", "compiler.backend",
+                "compiler.frontend", "compiler.types", "compiler.mono",
+                "compiler.borrow", "compiler.semantics", "compiler.tools",
+                "compiler.mir_opt", "CompilerDriver"
+            ]
+            var i = 0
+            while i < heavy_imports.len():
+                expect contains_import_line(content, heavy_imports[i]) == false
+                i = i + 1
+
+        it "tier 0 driver_api_types exports find_runtime_lib_dir":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_types.spl") ?? ""
+            expect contains_line(content, "export find_runtime_lib_dir") == true
+
+        # ---------------------------------------------------------------
+        # Facade: driver_api must not import driver_api_core
+        # ---------------------------------------------------------------
+
+        it "facade driver_api does not import from driver_api_core":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api.spl") ?? ""
+            expect contains_import_line(content, "driver_api_core") == false
+
+        it "facade driver_api delegates to lightweight public modules":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api.spl") ?? ""
+            expect contains_line(content, "driver_public_compile") == true
+            expect contains_line(content, "driver_public_api") == true
+            expect contains_line(content, "driver_public_shared") == true
+
+        # ---------------------------------------------------------------
+        # __init__.spl uses explicit export use (no bare exports)
+        # ---------------------------------------------------------------
+
+        it "driver __init__.spl uses explicit export use statements":
+            val content = rt_file_read_text("src/compiler/80.driver/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            val allowed_shared_exports = [
+                "export compiler_shared.backend.*",
+                "export compiler_shared.blocks.*",
+                "export compiler_shared.type_system.*",
+                "export compiler_shared.hir.*",
+                "export compiler_shared.mir.*",
+                "export compiler_shared.error_explanations.*",
+                "export compiler_shared.pattern_analysis.*",
+                "export compiler_shared.semantics.*"
+            ]
+            var unexpected_bare_export_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line != "" and not line.starts_with("#") and line.starts_with("export "):
+                    var matched_allowed = false
+                    var j = 0
+                    while j < allowed_shared_exports.len():
+                        if line == allowed_shared_exports[j]:
+                            matched_allowed = true
+                            break
+                        j = j + 1
+                    if not matched_allowed and not line.starts_with("export use "):
+                        unexpected_bare_export_count = unexpected_bare_export_count + 1
+                i = i + 1
+            expect unexpected_bare_export_count == 0
+            expect count_exact_lines(content, allowed_shared_exports) == allowed_shared_exports.len()
+
+        # ---------------------------------------------------------------
+        # No upward tier dependencies
+        # ---------------------------------------------------------------
+
+        it "tier 1 driver_api_interpret does not import from tier 2+":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_interpret.spl") ?? ""
+            val forbidden = [
+                "driver_api_compile_single", "driver_api_codegen_backends",
+                "driver_api_native_single", "driver_api_project_build"
+            ]
+            var i = 0
+            while i < forbidden.len():
+                expect contains_import_line(content, forbidden[i]) == false
+                i = i + 1
+
+        it "tier 2 driver_api_compile_single does not import from tier 3+":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_compile_single.spl") ?? ""
+            val forbidden = [
+                "driver_api_codegen_backends", "driver_api_native_single",
+                "driver_api_project_build"
+            ]
+            var i = 0
+            while i < forbidden.len():
+                expect contains_import_line(content, forbidden[i]) == false
+                i = i + 1
+
+        it "tier 3 driver_api_codegen_backends does not import from tier 4+":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_codegen_backends.spl") ?? ""
+            val forbidden = ["driver_api_native_single", "driver_api_project_build"]
+            var i = 0
+            while i < forbidden.len():
+                expect contains_import_line(content, forbidden[i]) == false
+                i = i + 1
+
+        it "tier 4 driver_api_native_single does not import from tier 5":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_native_single.spl") ?? ""
+            expect contains_import_line(content, "driver_api_project_build") == false
+
+        # ---------------------------------------------------------------
+        # Backward compat: driver_api_core re-exports all tiers
+        # ---------------------------------------------------------------
+
+        it "driver_api_core re-exports from all 6 tiers":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_core.spl") ?? ""
+            expect contains_import_line(content, "driver_api_types") == true
+            expect contains_import_line(content, "driver_api_interpret") == true
+            expect contains_import_line(content, "driver_api_compile_single") == true
+            expect contains_import_line(content, "driver_api_codegen_backends") == true
+            expect contains_import_line(content, "driver_api_native_single") == true
+            expect contains_import_line(content, "driver_api_project_build") == true
+
+        it "driver_api_core is a thin re-export file under 25 lines":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_api_core.spl") ?? ""
+            val lines = content.split("\n")
+            expect lines.len() < 25 == true
+
+        # ---------------------------------------------------------------
+        # __init__.spl bare-export audit for heavy-path layers
+        # ---------------------------------------------------------------
+
+        it "50.mir __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/50.mir/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "20.hir __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/20.hir/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "25.traits __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/25.traits/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "35.semantics __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/35.semantics/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "40.mono __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/40.mono/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "60.mir_opt __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/60.mir_opt/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "85.mdsoc __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/85.mdsoc/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "90.tools __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/90.tools/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        it "99.loader __init__.spl has no bare exports":
+            val content = rt_file_read_text("src/compiler/99.loader/__init__.spl") ?? ""
+            val lines = content.split("\n")
+            var bare_count = 0
+            var i = 0
+            while i < lines.len():
+                val line = lines[i].trim()
+                if line.starts_with("export ") and not line.starts_with("export use ") and not line.starts_with("#"):
+                    bare_count = bare_count + 1
+                i = i + 1
+            expect bare_count == 0
+
+        # ---------------------------------------------------------------
+        # Type extraction verification
+        # ---------------------------------------------------------------
+
+        it "driver_core_types canonical source is in compiler.common":
+            val content = rt_file_read_text("src/compiler/00.common/driver_core_types.spl") ?? ""
+            expect contains_line(content, "enum CompileMode") == true
+            expect contains_line(content, "enum CompileResult") == true
+            expect contains_line(content, "struct CompileOptions") == true
+
+        it "driver_core_types shim in 80.driver re-exports from compiler.common":
+            val content = rt_file_read_text("src/compiler/80.driver/driver_core_types.spl") ?? ""
+            expect contains_import_line(content, "compiler.common.driver_core_types") == true

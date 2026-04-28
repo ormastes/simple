@@ -7,6 +7,8 @@
 #![allow(improper_ctypes_definitions)]
 #![allow(dead_code)]
 
+include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
+
 pub mod hir_core;
 pub mod loader;
 pub mod aop;
@@ -47,6 +49,11 @@ pub mod metal_graphics_runtime;
 #[ctor::ctor]
 fn init_monoio() {
     monoio_thread::init_runtime_thread();
+}
+
+#[ctor::ctor]
+fn register_static_runtime_symbols_with_abi() {
+    let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
 pub mod parallel;
 pub mod sandbox;
@@ -118,7 +125,7 @@ pub use memory::no_gc::NoGcAllocator;
 /// - minor: Additive changes (new symbols only)
 #[no_mangle]
 pub extern "C" fn simple_runtime_abi_version() -> u32 {
-    simple_common::AbiVersion::CURRENT.to_u32()
+    simple_runtime_abi::AbiVersion::CURRENT.to_u32()
 }
 
 #[no_mangle]
