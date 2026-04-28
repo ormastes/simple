@@ -40,7 +40,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         let normalized = name.strip_prefix('_').unwrap_or(name);
         use simple_runtime::value::{
-            rt_array_clear, rt_array_first, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_dispatch_rust,
+            rt_array_clear, rt_array_first, rt_bytes_u8_at, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_dispatch_rust,
             rt_cli_exit, rt_cli_file_exists, rt_cli_get_args, rt_cli_handle_compile, rt_cli_handle_diagram,
             rt_cli_handle_linkers, rt_cli_handle_run, rt_cli_handle_web, rt_cli_print_help, rt_cli_print_version,
             rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_ffi_gen, rt_cli_run_file, rt_cli_run_fix,
@@ -193,6 +193,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_array_push,
             rt_array_get,
             rt_array_set,
+            rt_bytes_u8_at,
             rt_array_pop,
             rt_array_first,
             rt_array_clear,

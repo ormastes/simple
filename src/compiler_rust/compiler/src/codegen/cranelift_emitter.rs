@@ -683,7 +683,12 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let val_type = self.builder.func.dfg.value_type(val);
         if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
-            val = self.builder.ins().sextend(types::I64, val);
+            let signed = super::instr::core::vreg_is_signed(self.ctx, value).unwrap_or(true);
+            val = if signed {
+                self.builder.ins().sextend(types::I64, val)
+            } else {
+                self.builder.ins().uextend(types::I64, val)
+            };
         }
         let three = self.builder.ins().iconst(types::I64, 3);
         let boxed = self.builder.ins().ishl(val, three);

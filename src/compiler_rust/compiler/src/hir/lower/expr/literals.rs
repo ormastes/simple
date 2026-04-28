@@ -3,7 +3,7 @@
 //! This module contains expression lowering logic for literal values
 //! (integers, floats, strings, booleans, nil) and formatted strings.
 
-use simple_parser::{self as ast, Expr};
+use simple_parser::{self as ast, Expr, NumericSuffix};
 
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
@@ -37,6 +37,61 @@ impl Lowerer {
                 ty: TypeId::NIL,
             }),
             _ => unreachable!("lower_literal called with non-literal"),
+        }
+    }
+
+    pub(super) fn lower_typed_literal(&self, expr: &Expr) -> LowerResult<HirExpr> {
+        match expr {
+            Expr::TypedInteger(n, suffix) => {
+                let ty = match suffix {
+                    NumericSuffix::I8 => TypeId::I8,
+                    NumericSuffix::I16 => TypeId::I16,
+                    NumericSuffix::I32 => TypeId::I32,
+                    NumericSuffix::I64 => TypeId::I64,
+                    NumericSuffix::U8 => TypeId::U8,
+                    NumericSuffix::U16 => TypeId::U16,
+                    NumericSuffix::U32 => TypeId::U32,
+                    NumericSuffix::U64 => TypeId::U64,
+                    NumericSuffix::Unit(_) => TypeId::I64,
+                    NumericSuffix::F32 | NumericSuffix::F64 => {
+                        return Err(LowerError::Unsupported(
+                            "typed integer literal has float suffix".to_string(),
+                        ))
+                    }
+                };
+                Ok(HirExpr {
+                    kind: HirExprKind::Integer(*n),
+                    ty,
+                })
+            }
+            Expr::TypedFloat(f, suffix) => {
+                let ty = match suffix {
+                    NumericSuffix::F32 => TypeId::F32,
+                    NumericSuffix::F64 => TypeId::F64,
+                    NumericSuffix::Unit(_) => TypeId::F64,
+                    NumericSuffix::I8
+                    | NumericSuffix::I16
+                    | NumericSuffix::I32
+                    | NumericSuffix::I64
+                    | NumericSuffix::U8
+                    | NumericSuffix::U16
+                    | NumericSuffix::U32
+                    | NumericSuffix::U64 => {
+                        return Err(LowerError::Unsupported(
+                            "typed float literal has integer suffix".to_string(),
+                        ))
+                    }
+                };
+                Ok(HirExpr {
+                    kind: HirExprKind::Float(*f),
+                    ty,
+                })
+            }
+            Expr::TypedString(s, _suffix) => Ok(HirExpr {
+                kind: HirExprKind::String(s.clone()),
+                ty: TypeId::STRING,
+            }),
+            _ => unreachable!("lower_typed_literal called with non-typed literal"),
         }
     }
 

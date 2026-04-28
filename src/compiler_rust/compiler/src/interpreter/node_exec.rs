@@ -637,7 +637,6 @@ fn exec_assignment(
             if obj_name == "self" {
                 let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
                 if in_immutable_fn {
-                    eprintln!("DEBUG FieldAccess: self.{} assignment with IN_IMMUTABLE=true", field);
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_ASSIGNMENT)
                         .with_help("use `me` instead of `fn` to allow self mutation in methods");

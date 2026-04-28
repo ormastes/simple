@@ -251,6 +251,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_push",
     "rt_array_get",
     "rt_array_set",
+    "rt_bytes_u8_at",
     "rt_array_pop",
     "rt_array_first",
     "rt_array_clear",

@@ -122,7 +122,7 @@ extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 extern RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
-extern RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 extern RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
 extern RuntimeValue rt_array_len(RuntimeValue arr);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
@@ -269,7 +269,7 @@ RuntimeValue rt_value_clone(RuntimeValue v) {
         RuntimeArray *a = (RuntimeArray *)h;
         RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
         for (uint32_t i = 0; i < a->len; i++) {
-            new_arr = rt_array_push(new_arr, a->items[i]);
+            rt_array_push(new_arr, a->items[i]);
         }
         return new_arr;
     }
@@ -1241,7 +1241,7 @@ RuntimeValue rt_range(RuntimeValue start, RuntimeValue end) {
     int64_t e = DECODE_INT(end);
     RuntimeValue arr = rt_array_new(ENCODE_INT(e > s ? e - s : 0));
     for (int64_t i = s; i < e; i++) {
-        arr = rt_array_push(arr, ENCODE_INT(i));
+        rt_array_push(arr, ENCODE_INT(i));
     }
     return arr;
 }
@@ -1270,7 +1270,7 @@ RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue 
         }
         RuntimeValue result = rt_array_new(ENCODE_INT(e > s ? e - s : 0));
         for (int64_t i = s; (stride > 0) ? (i < e) : (i > e); i += stride) {
-            result = rt_array_push(result, a->items[i]);
+            rt_array_push(result, a->items[i]);
         }
         return result;
     }
@@ -1324,7 +1324,7 @@ RuntimeValue rt_text_to_bytes(RuntimeValue str) {
     if (!s) return rt_array_new(ENCODE_INT(0));
     RuntimeValue arr = rt_array_new(ENCODE_INT(s->len));
     for (uint32_t i = 0; i < s->len; i++) {
-        arr = rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+        rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
     }
     return arr;
 }
@@ -1335,7 +1335,7 @@ RuntimeValue rt_bytes_from_raw(RuntimeValue ptr, RuntimeValue len) {
     if (!p || n <= 0) return rt_array_new(ENCODE_INT(0));
     RuntimeValue arr = rt_array_new(ENCODE_INT(n));
     for (int64_t i = 0; i < n; i++) {
-        arr = rt_array_push(arr, ENCODE_INT((int64_t)p[i]));
+        rt_array_push(arr, ENCODE_INT((int64_t)p[i]));
     }
     return arr;
 }

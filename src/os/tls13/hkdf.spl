@@ -7,6 +7,19 @@
 #   hkdf_expand_label — RFC 8446 §7.1 HkdfLabel encoding
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_tls13_hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_extract_into(salt: [u8], ikm: [u8], out: [u8]) -> i64
+extern fn rt_tls13_hkdf_expand_label(secret: [u8], label: [u8], context: [u8], length: i64) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_into(secret: [u8], label: [u8], context: [u8], out: [u8], length: i64) -> i64
+extern fn rt_tls13_hkdf_expand_label_derived(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_key(secret: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_iv(secret: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_finished(secret: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_client_hs(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_server_hs(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_client_app(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_expand_label_server_app(secret: [u8], context: [u8]) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 use os.crypto.sha256.{sha256_hmac, sha256_hmac_with_len, sha256_hmac_from_list}
 
@@ -45,9 +58,10 @@ fn _label_len(label: text) -> u64:
 
 fn _copy_prefix(src: [u8], n: u64) -> [u8]:
     var out: [u8] = []
+    val limit = if n < src.len().to_u64() { n } else { src.len().to_u64() }
     var copied: u64 = 0
-    while copied < n and copied < src.len().to_u64():
-        out.push(src[copied].to_u8())
+    while copied < limit:
+        out.push(rt_bytes_u8_at(src, copied.to_i64()).to_u8())
         copied = copied + 1
     out
 
@@ -71,9 +85,27 @@ fn hkdf_extract_with_len(salt: [u8], salt_len: u64, ikm: [u8], ikm_len: u64) -> 
         while i < 32:
             effective_salt.push(0x00)
             i = i + 1
-        return _copy_prefix(sha256_hmac_with_len(effective_salt, 32, ikm, ikm_len), 32)
+        if ikm_len == ikm.len().to_u64():
+            var out: [u8] = []
+            i = 0
+            while i < 32:
+                out.push(0x00)
+                i = i + 1
+            if rt_tls13_hkdf_extract_into(effective_salt, ikm, out) != 0:
+                return out
+        val out = sha256_hmac_with_len(effective_salt, 32, ikm, ikm_len)
+        return _copy_prefix(out, 32)
     else:
-        return _copy_prefix(sha256_hmac_with_len(salt, salt_len, ikm, ikm_len), 32)
+        if salt_len == salt.len().to_u64() and ikm_len == ikm.len().to_u64():
+            var out: [u8] = []
+            var i: u64 = 0
+            while i < 32:
+                out.push(0x00)
+                i = i + 1
+            if rt_tls13_hkdf_extract_into(salt, ikm, out) != 0:
+                return out
+        val out = sha256_hmac_with_len(salt, salt_len, ikm, ikm_len)
+        return _copy_prefix(out, 32)
 
 fn hkdf_extract_from_list(salt: list, ikm: list) -> [u8]:
     if salt.len() == 0:
@@ -117,14 +149,13 @@ fn hkdf_expand_with_info_len(prk: [u8], info: [u8], info_len: u64, length: u64) 
         # Append T(i-1)
         var j: u64 = 0
         while j < t_prev_len:
-            input.push(t_prev[j].to_u8())
+            input.push(rt_bytes_u8_at(t_prev, j.to_i64()).to_u8())
             input_len = input_len + 1
             j = j + 1
-
         # Append info
         j = 0
         while j < info_len:
-            input.push(info[j].to_u8())
+            input.push(rt_bytes_u8_at(info, j.to_i64()).to_u8())
             input_len = input_len + 1
             j = j + 1
 
@@ -137,7 +168,7 @@ fn hkdf_expand_with_info_len(prk: [u8], info: [u8], info_len: u64, length: u64) 
         # Append T(i) to OKM
         j = 0
         while j < digest_len:
-            okm.push(t_i[j])
+            okm.push(rt_bytes_u8_at(t_i, j.to_i64()).to_u8())
             okm_len = okm_len + 1
             j = j + 1
 
@@ -149,7 +180,7 @@ fn hkdf_expand_with_info_len(prk: [u8], info: [u8], info_len: u64, length: u64) 
     var result: [u8] = []
     var k: u64 = 0
     while k < length:
-        result.push(okm[k])
+        result.push(rt_bytes_u8_at(okm, k.to_i64()).to_u8())
         k = k + 1
     _copy_prefix(result, length)
 
@@ -167,7 +198,36 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
 
     Then calls hkdf_expand(secret, encoded_label, length).
     """
+    if label == "key" and length == 16:
+        return rt_tls13_hkdf_expand_label_key(secret)
+    if label == "key" and length == 32:
+        var out: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            out.push(0x00)
+            i = i + 1
+        if rt_tls13_hkdf_expand_label_into(secret, [0x6bu8, 0x65u8, 0x79u8], context, out, 32) != 0:
+            return out
+    if label == "iv" and length == 12:
+        return rt_tls13_hkdf_expand_label_iv(secret)
+    if label == "finished" and length == 32:
+        return rt_tls13_hkdf_expand_label_finished(secret)
+    if label == "derived" and length == 32:
+        return rt_tls13_hkdf_expand_label_derived(secret, context)
+    if label == "c hs traffic" and length == 32:
+        return rt_tls13_hkdf_expand_label_client_hs(secret, context)
+    if label == "s hs traffic" and length == 32:
+        return rt_tls13_hkdf_expand_label_server_hs(secret, context)
+    if label == "c ap traffic" and length == 32:
+        return rt_tls13_hkdf_expand_label_client_app(secret, context)
+    if label == "s ap traffic" and length == 32:
+        return rt_tls13_hkdf_expand_label_server_app(secret, context)
+
     val label_tail = _label_bytes(label)
+    if context.len().to_u64() == context.len() and length <= 255:
+        val out = rt_tls13_hkdf_expand_label(secret, label_tail, context, length.to_i64())
+        if out.len().to_u64() == length:
+            return out
     val label_tail_len = _label_len(label)
     var label_bytes: [u8] = []
     label_bytes.push(0x74u8)
@@ -179,7 +239,7 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
     var label_bytes_len = 6u64
     var li: u64 = 0
     while li < label_tail_len:
-        label_bytes.push(label_tail[li])
+        label_bytes.push(rt_bytes_u8_at(label_tail, li.to_i64()).to_u8())
         label_bytes_len = label_bytes_len + 1
         li = li + 1
 
@@ -208,7 +268,7 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
     # label bytes
     var i: u64 = 0
     while i < label_bytes_len:
-        encoded.push(label_bytes[i].to_u8())
+        encoded.push(rt_bytes_u8_at(label_bytes, i.to_i64()).to_u8())
         encoded_len = encoded_len + 1
         i = i + 1
 
@@ -219,8 +279,8 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
     # context bytes
     i = 0
     while i < context_len:
-        encoded.push(context[i].to_u8())
+        encoded.push(rt_bytes_u8_at(context, i.to_i64()).to_u8())
         encoded_len = encoded_len + 1
         i = i + 1
 
-    hkdf_expand_with_info_len(secret, encoded, encoded_len, length)
+    hkdf_expand_with_info_len(secret, encoded, encoded.len().to_u64(), length)

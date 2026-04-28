@@ -7,6 +7,7 @@ use cranelift_module::{Linkage, Module};
 use super::super::shared::platform_call_conv;
 use super::helpers::{adapted_call, declare_named_bytes, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
+use crate::hir::TypeId;
 use crate::mir::VReg;
 
 /// Helper to call a runtime function and get its result
@@ -70,11 +71,58 @@ fn call_runtime_3<M: Module>(
 /// MethodCallStatic (see lowering_expr.rs), so integer args arrive already tagged.
 /// This function remains a no-op pass-through.
 fn wrap_value<M: Module>(
-    _ctx: &mut InstrContext<'_, M>,
-    _builder: &mut FunctionBuilder,
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    vreg: VReg,
     val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    val
+    match ctx.vreg_types.get(&vreg).copied() {
+        Some(TypeId::BOOL) => {
+            let func_id = ctx.runtime_funcs["rt_value_bool"];
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[val]);
+            builder.inst_results(call)[0]
+        }
+        Some(
+            TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64,
+        ) => {
+            let mut sig = Signature::new(platform_call_conv());
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = ctx
+                .module
+                .declare_function("rt_box_int", Linkage::Import, &sig)
+                .expect("declare rt_box_int");
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[val]);
+            builder.inst_results(call)[0]
+        }
+        Some(TypeId::F32 | TypeId::F64) => {
+            let mut sig = Signature::new(platform_call_conv());
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = ctx
+                .module
+                .declare_function("rt_box_float", Linkage::Import, &sig)
+                .expect("declare rt_box_float");
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let arg = if builder.func.dfg.value_type(val) == types::F32 {
+                builder.ins().fpromote(types::F64, val)
+            } else {
+                val
+            };
+            let call = adapted_call(builder, func_ref, &[arg]);
+            builder.inst_results(call)[0]
+        }
+        _ => val,
+    }
 }
 
 /// Call a len method with fallback to 0 if not present
@@ -106,25 +154,28 @@ pub(crate) fn compile_builtin_method<M: Module>(
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.get_vreg(&args[0])?;
-            let wrapped = wrap_value(ctx, builder, arg_val);
             // rt_array_push returns bool (success), NOT a new array pointer.
             // The array is mutated in-place. Do NOT update the receiver vreg —
             // overwriting it with the bool return value (1 = true) would corrupt
             // subsequent uses of the array variable.
-            let push_result = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, wrapped);
+            //
+            // MIR lowering already inserts BoxInt for integer push args.
+            // Re-wrapping here double-boxes those values and corrupts pushed
+            // bytes on the freestanding x86_64 lane.
+            let push_result = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, arg_val);
             Some(push_result)
         }
         ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.get_vreg(&args[0])?;
-            let wrapped_idx = wrap_value(ctx, builder, idx_val);
+            let wrapped_idx = wrap_value(ctx, builder, args[0], idx_val);
             Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
         }
         ("Array", "set") | ("array", "set") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let arg_val = ctx.get_vreg(&args[1])?;
-            let wrapped_idx = wrap_value(ctx, builder, idx_val);
-            let wrapped_val = wrap_value(ctx, builder, arg_val);
+            let wrapped_idx = wrap_value(ctx, builder, args[0], idx_val);
+            let wrapped_val = wrap_value(ctx, builder, args[1], arg_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_index_set", receiver_val, wrapped_idx, wrapped_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
@@ -160,14 +211,14 @@ pub(crate) fn compile_builtin_method<M: Module>(
         }
         ("Dict", "get") | ("dict", "get") => {
             let key_val = ctx.get_vreg(&args[0])?;
-            let wrapped_key = wrap_value(ctx, builder, key_val);
+            let wrapped_key = wrap_value(ctx, builder, args[0], key_val);
             Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_key))
         }
         ("Dict", "set") | ("dict", "set") => {
             let key_val = ctx.get_vreg(&args[0])?;
             let val_val = ctx.get_vreg(&args[1])?;
-            let wrapped_key = wrap_value(ctx, builder, key_val);
-            let wrapped_val = wrap_value(ctx, builder, val_val);
+            let wrapped_key = wrap_value(ctx, builder, args[0], key_val);
+            let wrapped_val = wrap_value(ctx, builder, args[1], val_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
@@ -186,7 +237,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ("Tuple", "set") | ("tuple", "set") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let arg_val = ctx.get_vreg(&args[1])?;
-            let wrapped = wrap_value(ctx, builder, arg_val);
+            let wrapped = wrap_value(ctx, builder, args[1], arg_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }

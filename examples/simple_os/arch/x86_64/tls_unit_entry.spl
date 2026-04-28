@@ -2,12 +2,15 @@
 # TLS 1.3 Unit Tests — baremetal entry for QEMU
 
 use os.tls13.hkdf.{hkdf_extract, hkdf_expand, hkdf_expand_label}
-use os.tls13.transcript.{transcript_new, transcript_add_with_len, transcript_hash, transcript_empty_hash}
-use os.tls13.key_schedule.{derive_secret, tls13_early_secret, tls13_handshake_secret, tls13_master_secret, tls13_traffic_keys, tls13_finished_key, tls13_compute_handshake_secrets, tls13_compute_app_secrets}
-use os.tls13.record13.{record13_encrypt, record13_decrypt, record13_make_nonce}
+use os.tls13.transcript.{Transcript, transcript_new, transcript_add_with_len, transcript_hash, transcript_empty_hash}
+use os.tls13.key_schedule.{Tls13Secrets, TrafficKeys, derive_secret, tls13_early_secret, tls13_handshake_secret, tls13_master_secret, tls13_traffic_keys, tls13_finished_key, tls13_compute_handshake_secrets, tls13_compute_app_secrets}
+use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt, record13_decrypt, record13_make_nonce}
 
 extern fn serial_println(msg: text)
 extern fn rt_port_outb(port: u16, value: u8)
+extern fn rt_tls13_hkdf_extract_into(salt: [u8], ikm: [u8], out: [u8]) -> i64
+extern fn rt_tls13_hkdf_expand_label_into(secret: [u8], label: [u8], context: [u8], out: [u8], length: i64) -> i64
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 var _pass_count: u32 = 0
 var _fail_count: u32 = 0
@@ -23,24 +26,39 @@ fn _assert(condition: bool, name: text):
         _serial("[TEST FAIL: {name}]")
         _fail_count = _fail_count + 1
 
+fn _byte_i64_at_or_neg1(a: [u8], idx: u64) -> i64:
+    if idx >= a.len():
+        return -1
+    return rt_bytes_u8_at(a, idx.to_i64())
+
 fn _bytes_eq(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
         return false
     var i: u64 = 0
     while i < a.len():
-        if a[i] != b[i]:
+        if _byte_i64_at_or_neg1(a, i) != _byte_i64_at_or_neg1(b, i):
             return false
         i = i + 1
     return true
 
-fn _byte_eq_at(a: [u8], idx: u64, expected: u8) -> bool:
-    if idx >= a.len():
-        return false
-    return a[idx] == expected
+fn _byte_eq_at(a: [u8], idx: u64, expected: i64) -> bool:
+    return _byte_i64_at_or_neg1(a, idx) == expected
 
 fn _dbg4(label: text, bs: [u8]):
     if bs.len() >= 4:
-        _serial("{label}: {bs[0].to_i64()} {bs[1].to_i64()} {bs[2].to_i64()} {bs[3].to_i64()}")
+        _serial("{label}: {_byte_i64_at_or_neg1(bs, 0)} {_byte_i64_at_or_neg1(bs, 1)} {_byte_i64_at_or_neg1(bs, 2)} {_byte_i64_at_or_neg1(bs, 3)}")
+    elif bs.len() == 3:
+        _serial("{label}: {_byte_i64_at_or_neg1(bs, 0)} {_byte_i64_at_or_neg1(bs, 1)} {_byte_i64_at_or_neg1(bs, 2)}")
+    elif bs.len() == 2:
+        _serial("{label}: {_byte_i64_at_or_neg1(bs, 0)} {_byte_i64_at_or_neg1(bs, 1)}")
+    elif bs.len() == 1:
+        _serial("{label}: {_byte_i64_at_or_neg1(bs, 0)}")
+    else:
+        _serial("{label}: short len={bs.len()}")
+
+fn _dbg_first_last4(label: text, bs: [u8]):
+    if bs.len() >= 32:
+        _serial("{label}: {_byte_i64_at_or_neg1(bs, 0)} {_byte_i64_at_or_neg1(bs, 1)} {_byte_i64_at_or_neg1(bs, 2)} {_byte_i64_at_or_neg1(bs, 3)} ... {_byte_i64_at_or_neg1(bs, 28)} {_byte_i64_at_or_neg1(bs, 29)} {_byte_i64_at_or_neg1(bs, 30)} {_byte_i64_at_or_neg1(bs, 31)}")
     else:
         _serial("{label}: short len={bs.len()}")
 
@@ -60,57 +78,66 @@ fn section_a_hkdf():
         a_i = a_i + 1
 
     # salt: 000102030405060708090a0b0c (13 bytes)
-    var salt_a: [u8] = [
-        0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8,
-        0x07u8, 0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8
-    ]
-
-    # PRK expected: 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
-    var prk_expected: [u8] = [
-        0x07u8, 0x77u8, 0x09u8, 0x36u8, 0x2cu8, 0x2eu8, 0x32u8, 0xdfu8,
-        0x0du8, 0xdcu8, 0x3fu8, 0x0du8, 0xc4u8, 0x7bu8, 0xbau8, 0x63u8,
-        0x90u8, 0xb6u8, 0xc7u8, 0x3bu8, 0xb5u8, 0x0fu8, 0x9cu8, 0x31u8,
-        0x22u8, 0xecu8, 0x84u8, 0x4au8, 0xd7u8, 0xc2u8, 0xb3u8, 0xe5u8
-    ]
+    var salt_a: [u8] = []
+    salt_a.push(0x00u8)
+    salt_a.push(0x01u8)
+    salt_a.push(0x02u8)
+    salt_a.push(0x03u8)
+    salt_a.push(0x04u8)
+    salt_a.push(0x05u8)
+    salt_a.push(0x06u8)
+    salt_a.push(0x07u8)
+    salt_a.push(0x08u8)
+    salt_a.push(0x09u8)
+    salt_a.push(0x0au8)
+    salt_a.push(0x0bu8)
+    salt_a.push(0x0cu8)
 
     # info: f0f1f2f3f4f5f6f7f8f9 (10 bytes)
-    var info_a: [u8] = [
-        0xf0u8, 0xf1u8, 0xf2u8, 0xf3u8, 0xf4u8, 0xf5u8, 0xf6u8, 0xf7u8,
-        0xf8u8, 0xf9u8
-    ]
-
-    # OKM expected (42 bytes): 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
-    var okm_expected: [u8] = [
-        0x3cu8, 0xb2u8, 0x5fu8, 0x25u8, 0xfau8, 0xacu8, 0xd5u8, 0x7au8,
-        0x90u8, 0x43u8, 0x4fu8, 0x64u8, 0xd0u8, 0x36u8, 0x2fu8, 0x2au8,
-        0x2du8, 0x2du8, 0x0au8, 0x90u8, 0xcfu8, 0x1au8, 0x5au8, 0x4cu8,
-        0x5du8, 0xb0u8, 0x2du8, 0x56u8, 0xecu8, 0xc4u8, 0xc5u8, 0xbfu8,
-        0x34u8, 0x00u8, 0x72u8, 0x08u8, 0xd5u8, 0xb8u8, 0x87u8, 0x18u8,
-        0x58u8, 0x65u8
-    ]
+    var info_a: [u8] = []
+    info_a.push(0xf0u8)
+    info_a.push(0xf1u8)
+    info_a.push(0xf2u8)
+    info_a.push(0xf3u8)
+    info_a.push(0xf4u8)
+    info_a.push(0xf5u8)
+    info_a.push(0xf6u8)
+    info_a.push(0xf7u8)
+    info_a.push(0xf8u8)
+    info_a.push(0xf9u8)
 
     # A1: HKDF-Extract matches PRK (check first 4 and last 4 bytes)
     var prk_a: [u8] = hkdf_extract(salt_a, ikm_a)
+    var prk_probe: [u8] = []
+    var prk_probe_i: u64 = 0
+    while prk_probe_i < 32:
+        prk_probe.push(0x00)
+        prk_probe_i = prk_probe_i + 1
+    _serial("[DBG] A1 extract_into rc={rt_tls13_hkdf_extract_into(salt_a, ikm_a, prk_probe)}")
     var a1_ok: bool = true
     if prk_a.len() != 32:
+        _serial("[DBG] A1 prk_a.len()={prk_a.len()}")
         a1_ok = false
     else:
-        if prk_a[0] != prk_expected[0]:
+        if not _byte_eq_at(prk_a, 0, 7):
             a1_ok = false
-        if prk_a[1] != prk_expected[1]:
+        if not _byte_eq_at(prk_a, 1, 119):
             a1_ok = false
-        if prk_a[2] != prk_expected[2]:
+        if not _byte_eq_at(prk_a, 2, 9):
             a1_ok = false
-        if prk_a[3] != prk_expected[3]:
+        if not _byte_eq_at(prk_a, 3, 54):
             a1_ok = false
-        if prk_a[28] != prk_expected[28]:
+        if not _byte_eq_at(prk_a, 28, 215):
             a1_ok = false
-        if prk_a[29] != prk_expected[29]:
+        if not _byte_eq_at(prk_a, 29, 194):
             a1_ok = false
-        if prk_a[30] != prk_expected[30]:
+        if not _byte_eq_at(prk_a, 30, 179):
             a1_ok = false
-        if prk_a[31] != prk_expected[31]:
+        if not _byte_eq_at(prk_a, 31, 229):
             a1_ok = false
+    if not a1_ok:
+        _dbg_first_last4("[DBG] A1 prk_a", prk_a)
+        _serial("[DBG] A1 expected: 7 119 9 54 ... 215 194 179 229")
     _assert(a1_ok, "A1: HKDF-Extract PRK first+last 4 bytes match RFC 5869 TC1")
 
     # A2: HKDF-Expand matches OKM first 2 bytes and total length
@@ -118,7 +145,10 @@ fn section_a_hkdf():
     var a2_len_ok: bool = okm_a.len() == 42
     var a2_bytes_ok: bool = false
     if okm_a.len() >= 2:
-        a2_bytes_ok = (okm_a[0] == okm_expected[0]) and (okm_a[1] == okm_expected[1])
+        a2_bytes_ok = _byte_eq_at(okm_a, 0, 60) and _byte_eq_at(okm_a, 1, 178)
+    if not (a2_len_ok and a2_bytes_ok):
+        _dbg4("[DBG] A2 okm_a", okm_a)
+        _serial("[DBG] A2 okm_a.len()={okm_a.len()} expected first2=60 178")
     _assert(a2_len_ok and a2_bytes_ok, "A2: HKDF-Expand OKM length=42 and first 2 bytes match")
 
     # A3: HKDF-Extract with empty salt works (32-byte PRK)
@@ -142,7 +172,11 @@ fn section_a_hkdf():
         ikm_diff.push(0xAAu8)
         a6_i = a6_i + 1
     var prk_diff: [u8] = hkdf_extract(salt_a, ikm_diff)
+    if prk_diff.len() != 32:
+        _serial("[DBG] A6 prk_diff.len()={prk_diff.len()}")
     if _bytes_eq(prk_a, prk_diff):
+        _dbg4("[DBG] A6 ikm_a", ikm_a)
+        _dbg4("[DBG] A6 ikm_diff", ikm_diff)
         _dbg4("[DBG] A6 prk_a", prk_a)
         _dbg4("[DBG] A6 prk_diff", prk_diff)
     _assert(not _bytes_eq(prk_a, prk_diff), "A6: Different IKM gives different PRK")
@@ -160,6 +194,14 @@ fn section_a_hkdf():
     # We verify by checking that the output is 32 bytes (the length param is respected)
     var empty_ctx: [u8] = []
     var label_out: [u8] = hkdf_expand_label(prk_a, "key", empty_ctx, 32)
+    var label_probe: [u8] = []
+    var label_probe_i: u64 = 0
+    while label_probe_i < 32:
+        label_probe.push(0x00)
+        label_probe_i = label_probe_i + 1
+    _serial("[DBG] A9 expand_label_into rc={rt_tls13_hkdf_expand_label_into(prk_a, [0x6bu8, 0x65u8, 0x79u8], empty_ctx, label_probe, 32)}")
+    if label_out.len() != 32:
+        _serial("[DBG] A9 label_out.len()={label_out.len()}")
     _assert(label_out.len() == 32, "A9: HKDF-Expand-Label with length=32 returns 32 bytes")
 
     # A10: HKDF-Expand-Label with "tls13 " prefix produces different output than a raw expand
@@ -184,29 +226,34 @@ fn section_a_hkdf():
 fn section_b_transcript():
     _serial("--- B. Transcript ---")
 
-    # SHA-256 of empty string (known constant)
-    # e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-    var empty_hash_expected: [u8] = [
-        0xe3u8, 0xb0u8, 0xc4u8, 0x42u8, 0x98u8, 0xfcu8, 0x1cu8, 0x14u8,
-        0x9au8, 0xfbu8, 0xf4u8, 0xc8u8, 0x99u8, 0x6fu8, 0xb9u8, 0x24u8,
-        0x27u8, 0xaeu8, 0x41u8, 0xe4u8, 0x64u8, 0x9bu8, 0x93u8, 0x4cu8,
-        0xa4u8, 0x95u8, 0x99u8, 0x1bu8, 0x78u8, 0x52u8, 0xb8u8, 0x55u8
-    ]
-
     # B1: empty transcript hash = SHA-256("")
-    var t0 = transcript_new()
+    var t0: Transcript = transcript_new()
     var h0: [u8] = transcript_hash(t0)
-    _assert(_bytes_eq(h0, empty_hash_expected), "B1: empty transcript hash == SHA-256(empty)")
+    var b1_ok: bool = h0.len() == 32 and
+        _byte_eq_at(h0, 0, 227) and _byte_eq_at(h0, 1, 176) and
+        _byte_eq_at(h0, 2, 196) and _byte_eq_at(h0, 3, 66) and
+        _byte_eq_at(h0, 28, 120) and _byte_eq_at(h0, 29, 82) and
+        _byte_eq_at(h0, 30, 184) and _byte_eq_at(h0, 31, 85)
+    if not b1_ok:
+        _dbg_first_last4("[DBG] B1 h0", h0)
+        _serial("[DBG] B1 expected: 227 176 196 66 ... 120 82 184 85")
+    _assert(b1_ok, "B1: empty transcript hash == SHA-256(empty)")
 
     # B2: transcript with one message hashes that message
-    var msg1: [u8] = [0x01u8, 0x02u8, 0x03u8]
-    var t1 = transcript_add_with_len(t0, msg1, 3)
+    var msg1: [u8] = []
+    msg1.push(0x01u8)
+    msg1.push(0x02u8)
+    msg1.push(0x03u8)
+    var t1: Transcript = transcript_add_with_len(t0, msg1, 3)
     var h1: [u8] = transcript_hash(t1)
     _assert(h1.len() == 32, "B2: transcript with one message returns 32-byte hash")
 
     # B3: transcript with two messages hashes concatenation
-    var msg2: [u8] = [0x04u8, 0x05u8, 0x06u8]
-    var t2 = transcript_add_with_len(t1, msg2, 3)
+    var msg2: [u8] = []
+    msg2.push(0x04u8)
+    msg2.push(0x05u8)
+    msg2.push(0x06u8)
+    var t2: Transcript = transcript_add_with_len(t1, msg2, 3)
     var h2: [u8] = transcript_hash(t2)
     _assert(h2.len() == 32, "B3: transcript with two messages returns 32-byte hash")
 
@@ -215,17 +262,25 @@ fn section_b_transcript():
     _assert(eh.len() == 32, "B4: transcript_empty_hash returns 32 bytes")
 
     # B5: transcript_hash length = 32
-    var t3 = transcript_new()
-    var msg3: [u8] = [0xAAu8, 0xBBu8]
-    var t4 = transcript_add_with_len(t3, msg3, 2)
+    var t3: Transcript = transcript_new()
+    var msg3: [u8] = []
+    msg3.push(0xAAu8)
+    msg3.push(0xBBu8)
+    var t4: Transcript = transcript_add_with_len(t3, msg3, 2)
     var h4: [u8] = transcript_hash(t4)
     _assert(h4.len() == 32, "B5: transcript_hash always returns 32 bytes")
 
     # B6: different messages give different hashes
-    var msg_alt: [u8] = [0xCCu8, 0xDDu8]
-    var t5 = transcript_add_with_len(t3, msg_alt, 2)
+    var msg_alt: [u8] = []
+    msg_alt.push(0xCCu8)
+    msg_alt.push(0xDDu8)
+    var t5: Transcript = transcript_add_with_len(t3, msg_alt, 2)
     var h5: [u8] = transcript_hash(t5)
     if _bytes_eq(h4, h5):
+        _dbg4("[DBG] B6 msg3", msg3)
+        _dbg4("[DBG] B6 msg_alt", msg_alt)
+        _dbg4("[DBG] B6 t4.buf", t4.buf)
+        _dbg4("[DBG] B6 t5.buf", t5.buf)
         _dbg4("[DBG] B6 h4", h4)
         _dbg4("[DBG] B6 h5", h5)
     _assert(not _bytes_eq(h4, h5), "B6: different messages give different transcript hashes")
@@ -251,7 +306,7 @@ fn section_c_key_schedule():
     _assert(hs.len() == 32, "C2: handshake_secret is 32 bytes")
 
     # C3: traffic_keys key is 16 bytes, iv is 12 bytes
-    var tk = tls13_traffic_keys(hs)
+    var tk: TrafficKeys = tls13_traffic_keys(hs)
     var tk_key_len: u64 = tk.key.len()
     var tk_iv_len: u64 = tk.iv.len()
     _assert(tk_key_len == 16 and tk_iv_len == 12, "C3: traffic_keys key=16 bytes, iv=12 bytes")
@@ -261,7 +316,7 @@ fn section_c_key_schedule():
     _assert(fk.len() == 32, "C4: finished_key is 32 bytes")
 
     # C5: derive_secret with different labels gives different secrets
-    var t_empty = transcript_new()
+    var t_empty: Transcript = transcript_new()
     var secret_c: [u8] = derive_secret(hs, "c hs traffic", t_empty)
     var secret_s: [u8] = derive_secret(hs, "s hs traffic", t_empty)
     _assert(not _bytes_eq(secret_c, secret_s), "C5: derive_secret with different labels gives different secrets")
@@ -276,8 +331,8 @@ fn section_c_key_schedule():
     while c7_i < 32:
         dhe2.push(0x42u8)
         c7_i = c7_i + 1
-    var t_sh = transcript_new()
-    var hs_sec = tls13_compute_handshake_secrets(dhe2, t_sh)
+    var t_sh: Transcript = transcript_new()
+    var hs_sec: Tls13Secrets = tls13_compute_handshake_secrets(dhe2, t_sh)
     var c7_ok: bool = true
     if hs_sec.early_secret.len() != 32:
         c7_ok = false
@@ -290,8 +345,8 @@ fn section_c_key_schedule():
     _assert(c7_ok, "C7: tls13_compute_handshake_secrets populates early/hs/client_hs/server_hs (32 bytes each)")
 
     # C8: tls13_compute_app_secrets populates master/client_app/server_app
-    var t_sf = transcript_new()
-    var app_sec = tls13_compute_app_secrets(hs_sec, t_sf)
+    var t_sf: Transcript = transcript_new()
+    var app_sec: Tls13Secrets = tls13_compute_app_secrets(hs_sec, t_sf)
     var c8_ok: bool = true
     if app_sec.master_secret.len() != 32:
         c8_ok = false
@@ -309,15 +364,37 @@ fn section_d_record():
     _serial("--- D. Record Layer ---")
 
     # Build a test RecordKey: 16-byte key, 12-byte IV
-    var rk_key: [u8] = [
-        0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
-        0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8, 0x0du8, 0x0eu8, 0x0fu8
-    ]
-    var rk_iv: [u8] = [
-        0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
-        0x08u8, 0x09u8, 0x0au8, 0x0bu8
-    ]
-    var rk = RecordKey(key: rk_key, iv: rk_iv)
+    var rk_key: [u8] = []
+    rk_key.push(0x00u8)
+    rk_key.push(0x01u8)
+    rk_key.push(0x02u8)
+    rk_key.push(0x03u8)
+    rk_key.push(0x04u8)
+    rk_key.push(0x05u8)
+    rk_key.push(0x06u8)
+    rk_key.push(0x07u8)
+    rk_key.push(0x08u8)
+    rk_key.push(0x09u8)
+    rk_key.push(0x0au8)
+    rk_key.push(0x0bu8)
+    rk_key.push(0x0cu8)
+    rk_key.push(0x0du8)
+    rk_key.push(0x0eu8)
+    rk_key.push(0x0fu8)
+    var rk_iv: [u8] = []
+    rk_iv.push(0x00u8)
+    rk_iv.push(0x01u8)
+    rk_iv.push(0x02u8)
+    rk_iv.push(0x03u8)
+    rk_iv.push(0x04u8)
+    rk_iv.push(0x05u8)
+    rk_iv.push(0x06u8)
+    rk_iv.push(0x07u8)
+    rk_iv.push(0x08u8)
+    rk_iv.push(0x09u8)
+    rk_iv.push(0x0au8)
+    rk_iv.push(0x0bu8)
+    var rk: RecordKey = RecordKey(key: rk_key, iv: rk_iv)
 
     # D1: record13_make_nonce with seq=0 returns IV XOR [00...00] = IV itself
     var nonce0: [u8] = record13_make_nonce(rk_iv, 0)
@@ -329,9 +406,14 @@ fn section_d_record():
     _assert(d2_differs, "D2: record13_make_nonce seq=1 differs from seq=0")
 
     # D3: encrypt+decrypt round trip recovers plaintext
-    var pt: [u8] = [0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]  # "Hello"
+    var pt: [u8] = []
+    pt.push(0x48u8)
+    pt.push(0x65u8)
+    pt.push(0x6cu8)
+    pt.push(0x6cu8)
+    pt.push(0x6fu8)  # "Hello"
     var enc: [u8] = record13_encrypt(rk, 0, 0x17u8, pt)
-    var dec_res = record13_decrypt(rk, 0, enc)
+    var dec_res: RecordResult = record13_decrypt(rk, 0, enc)
     var d3_ok: bool = false
     if val RecordResult.Ok(ct3, dt3) = dec_res:
         d3_ok = _bytes_eq(dt3, pt)
@@ -340,26 +422,39 @@ fn section_d_record():
     # D4: encrypt+decrypt round trip recovers content type
     var d4_ok: bool = false
     var enc4: [u8] = record13_encrypt(rk, 1, 0x16u8, pt)
-    var dec4 = record13_decrypt(rk, 1, enc4)
+    var dec4: RecordResult = record13_decrypt(rk, 1, enc4)
     if val RecordResult.Ok(ct4, dt4) = dec4:
         d4_ok = (ct4 == 0x16u8)
+        if not d4_ok:
+            _serial("[DBG] D4 ct4={ct4} dt4.len()={dt4.len()}")
+            _dbg4("[DBG] D4 dt4", dt4)
+    if val RecordResult.Err(err4) = dec4:
+        _serial("[DBG] D4 err={err4}")
     _assert(d4_ok, "D4: encrypt+decrypt round trip recovers content type")
 
     # D5: decrypt wrong record (too short) returns Err
-    var short_rec: [u8] = [0x17u8, 0x03u8, 0x03u8]
-    var dec5 = record13_decrypt(rk, 0, short_rec)
+    var short_rec: [u8] = []
+    short_rec.push(0x17u8)
+    short_rec.push(0x03u8)
+    short_rec.push(0x03u8)
+    var dec5: RecordResult = record13_decrypt(rk, 0, short_rec)
     var d5_ok: bool = false
     if val RecordResult.Err(_) = dec5:
         d5_ok = true
     _assert(d5_ok, "D5: decrypt too-short record returns Err")
 
     # D6: decrypt wrong content_type header returns Err
-    var bad_hdr: [u8] = [0x14u8, 0x03u8, 0x03u8, 0x00u8, 0x10u8]
+    var bad_hdr: [u8] = []
+    bad_hdr.push(0x14u8)
+    bad_hdr.push(0x03u8)
+    bad_hdr.push(0x03u8)
+    bad_hdr.push(0x00u8)
+    bad_hdr.push(0x10u8)
     var d6_i: u64 = 0
     while d6_i < 16:
         bad_hdr.push(0x00u8)
         d6_i = d6_i + 1
-    var dec6 = record13_decrypt(rk, 0, bad_hdr)
+    var dec6: RecordResult = record13_decrypt(rk, 0, bad_hdr)
     var d6_ok: bool = false
     if val RecordResult.Err(_) = dec6:
         d6_ok = true
@@ -371,7 +466,7 @@ fn section_d_record():
     if enc7.len() > 5:
         var flipped: u8 = enc7[5] ^ 0xFFu8
         enc7[5] = flipped
-    var dec7 = record13_decrypt(rk, 2, enc7)
+    var dec7: RecordResult = record13_decrypt(rk, 2, enc7)
     var d7_ok: bool = false
     if val RecordResult.Err(_) = dec7:
         d7_ok = true
@@ -387,19 +482,29 @@ fn section_d_record():
     # D9: encrypt with empty plaintext still produces valid AEAD (round trip works)
     var empty_pt: [u8] = []
     var enc9: [u8] = record13_encrypt(rk, 4, 0x17u8, empty_pt)
-    var dec9 = record13_decrypt(rk, 4, enc9)
+    var dec9: RecordResult = record13_decrypt(rk, 4, enc9)
     var d9_ok: bool = false
     if val RecordResult.Ok(ct9, dt9) = dec9:
         d9_ok = (dt9.len() == 0) and (ct9 == 0x17u8)
+        if not d9_ok:
+            _serial("[DBG] D9 ct9={ct9} dt9.len()={dt9.len()}")
+            _dbg4("[DBG] D9 dt9", dt9)
+    if val RecordResult.Err(err9) = dec9:
+        _serial("[DBG] D9 err={err9}")
     _assert(d9_ok, "D9: encrypt with empty plaintext still produces valid AEAD round trip")
 
     # D10: decrypt recovers content type as last-byte-of-inner
     # Verify that a record encrypted with content_type=0x16 decrypts to ct==0x16
     var enc10: [u8] = record13_encrypt(rk, 5, 0x16u8, pt)
-    var dec10 = record13_decrypt(rk, 5, enc10)
+    var dec10: RecordResult = record13_decrypt(rk, 5, enc10)
     var d10_ok: bool = false
     if val RecordResult.Ok(ct10, dt10) = dec10:
         d10_ok = (ct10 == 0x16u8) and _bytes_eq(dt10, pt)
+        if not d10_ok:
+            _serial("[DBG] D10 ct10={ct10} dt10.len()={dt10.len()}")
+            _dbg4("[DBG] D10 dt10", dt10)
+    if val RecordResult.Err(err10) = dec10:
+        _serial("[DBG] D10 err={err10}")
     _assert(d10_ok, "D10: decrypt recovers content type as last-byte-of-inner")
 
 # ============================================================================

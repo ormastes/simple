@@ -84,7 +84,7 @@ extern void *malloc(size_t sz);
 extern void  free(void *p);
 /* rt_array_new / rt_array_push from baremetal_stubs.c */
 extern RuntimeValue rt_array_new(RuntimeValue cap_val);
-extern RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 
 /* ===================================================================
  * Internal helpers
@@ -230,7 +230,7 @@ static RuntimeValue sm_make_array(const RuntimeValue *items, uint32_t count)
     RuntimeValue arr = rt_array_new((RuntimeValue)raw_cap);
     if (IS_NIL(arr)) return NIL_VALUE;
     for (uint32_t i = 0; i < count; i++) {
-        arr = rt_array_push(arr, items[i]);
+        rt_array_push(arr, items[i]);
     }
     return arr;
 }
@@ -354,9 +354,9 @@ RuntimeValue __rt_btreemap_entries(RV map)
         /* Each entry is a 2-element array [key, value] */
         RuntimeValue pair = rt_array_new((RuntimeValue)2);
         if (IS_NIL(pair)) continue;
-        pair = rt_array_push(pair, m->keys[i]);
-        pair = rt_array_push(pair, m->values[i]);
-        outer = rt_array_push(outer, pair);
+        rt_array_push(pair, m->keys[i]);
+        rt_array_push(pair, m->values[i]);
+        rt_array_push(outer, pair);
     }
     return outer;
 }

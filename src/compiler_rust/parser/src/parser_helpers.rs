@@ -186,24 +186,36 @@ impl<'a> Parser<'a> {
 
         let saved_current = self.current.clone();
         let saved_previous = self.previous.clone();
-        let saved_pending = self.pending_tokens.clone();
+
+        // Track every token that becomes `current` during peek so we can
+        // push them back to pending — the lexer can't be rewound, so any
+        // token it emitted during peek must be re-queued.
+        let mut peeked_tokens: Vec<Token> = Vec::new();
 
         self.advance();
+        peeked_tokens.push(self.current.clone());
         if self.check(&TokenKind::LParen) {
             self.advance();
+            peeked_tokens.push(self.current.clone());
             while !self.check(&TokenKind::RParen) && !self.is_at_end() {
                 self.advance();
+                peeked_tokens.push(self.current.clone());
             }
             if self.check(&TokenKind::RParen) {
                 self.advance();
+                peeked_tokens.push(self.current.clone());
             }
         }
 
         let result = kinds.iter().any(|kind| self.check(kind));
 
+        // Restore by re-queuing every token consumed during peek so the
+        // next advance() yields them in the same order.
+        for tok in peeked_tokens.into_iter().rev() {
+            self.pending_tokens.push_front(tok);
+        }
         self.current = saved_current;
         self.previous = saved_previous;
-        self.pending_tokens = saved_pending;
         result
     }
 

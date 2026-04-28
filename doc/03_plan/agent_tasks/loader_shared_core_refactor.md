@@ -101,3 +101,44 @@ Stop and escalate instead of forcing the refactor if:
   extraction
 - the two JIT layers cannot share on the common metadata shape without a
   nominal-type bridge that is larger than the helper itself
+
+## Current Remaining Work
+
+Status after the 2026-04-27 shared-helper and lifecycle-coverage passes:
+
+- Done:
+  - feature request filed as `FR-COMPILER-011`
+  - design seed written in `doc/05_design/loader_shared_core_refactor.md`
+  - first shared seam landed:
+    `src/compiler/99.loader/metadata_symbols.spl`
+  - shared unload-bookkeeping helpers landed:
+    `src/compiler/99.loader/unload_ownership.spl`
+  - both loaders now consume the shared helper layer for:
+    metadata-instantiation symbol names, loaded-metadata path removal,
+    owned-global-symbol name collection, and global-symbol filtering by name
+  - compatibility loader baseline restored on this branch
+  - focused compatibility specs green
+  - lifecycle-aware loader regression coverage added in
+    `test/unit/compiler/loader/module_loader_spec.spl` proving unload removes
+    path-owned globals, clears metadata-owned JIT symbols, preserves unrelated
+    globals, and clears loaded metadata
+
+- Still open for spawned-agent execution:
+  1. Treat the current helper boundary as the default stop point unless a new
+     candidate seam comes with explicit evidence that it does not cross either
+     reload-policy or unload-ownership-policy differences.
+  2. If broader sharing is attempted later, evaluate candidates in this order:
+     reload orchestration, unload orchestration, tiny finalization helpers.
+     Current recommendation is to reject the first two and skip the third as
+     too small to justify the indirection.
+  3. Separate but relevant repo health item: the SSH transport spec path still
+     has pre-existing helper drift (`str.to_bytes()`), while
+     `test/system/os_ssh_host_key_loader_spec.spl` remains green.
+
+- Current stop boundary:
+  - Do not extract any cross-loader helper that decides which JIT symbols to
+    unload once that decision depends on compatibility heuristics
+    (`_symbol_matches_path(...)`, exec-mapper owner probing) or full-loader
+    lifecycle ownership state (`lifecycle_unload_module(...)`).
+  - Shared refactor is currently safe only at the helper-level
+    bookkeeping/data-selection seams already landed.

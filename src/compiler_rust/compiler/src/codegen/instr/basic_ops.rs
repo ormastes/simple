@@ -43,14 +43,36 @@ pub fn compile_cast<M: Module>(
     // Determine source and target types
     let is_from_float = from_ty == TypeId::F64 || from_ty == TypeId::F32;
     let is_to_float = to_ty == TypeId::F64 || to_ty == TypeId::F32;
-    let is_to_i64 = to_ty == TypeId::I64;
+    let to_int_width = match to_ty {
+        TypeId::I8 | TypeId::U8 => Some(types::I8),
+        TypeId::I16 | TypeId::U16 => Some(types::I16),
+        TypeId::I32 | TypeId::U32 => Some(types::I32),
+        TypeId::I64 | TypeId::U64 => Some(types::I64),
+        _ => None,
+    };
+    let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+    let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
 
     let val = if is_from_float && !is_to_float {
         // Float to int conversion
-        builder.ins().fcvt_to_sint(types::I64, src_val)
+        let widened = if to_signed {
+            builder.ins().fcvt_to_sint(types::I64, src_val)
+        } else {
+            builder.ins().fcvt_to_uint(types::I64, src_val)
+        };
+        match to_int_width {
+            Some(types::I8) => builder.ins().ireduce(types::I8, widened),
+            Some(types::I16) => builder.ins().ireduce(types::I16, widened),
+            Some(types::I32) => builder.ins().ireduce(types::I32, widened),
+            _ => widened,
+        }
     } else if !is_from_float && is_to_float {
         // Int to float conversion
-        builder.ins().fcvt_from_sint(types::F64, src_val)
+        if from_signed {
+            builder.ins().fcvt_from_sint(types::F64, src_val)
+        } else {
+            builder.ins().fcvt_from_uint(types::F64, src_val)
+        }
     } else if is_from_float && is_to_float {
         // Float to float (F32 <-> F64)
         if from_ty == TypeId::F32 {
@@ -58,9 +80,26 @@ pub fn compile_cast<M: Module>(
         } else {
             builder.ins().fdemote(types::F32, src_val)
         }
-    } else if is_to_i64 {
-        // Int to i64 (no-op or sign extension)
-        src_val
+    } else if let Some(target_ty) = to_int_width {
+        let src_ty = builder.func.dfg.value_type(src_val);
+        if src_ty == target_ty {
+            src_val
+        } else {
+            match target_ty {
+                types::I8 | types::I16 | types::I32 => builder.ins().ireduce(target_ty, src_val),
+                types::I64 => match src_ty {
+                    types::I8 | types::I16 | types::I32 => {
+                        if from_signed {
+                            builder.ins().sextend(types::I64, src_val)
+                        } else {
+                            builder.ins().uextend(types::I64, src_val)
+                        }
+                    }
+                    _ => src_val,
+                },
+                _ => src_val,
+            }
+        }
     } else {
         // Default: just copy the value
         src_val

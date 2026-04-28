@@ -525,3 +525,66 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/05_design/all_regions.md`
 - **Notes:** CAD requires explicit geometry/topology/kernel design; raw SDN is not sufficient.
+
+---
+
+### FR-COMPILER-011 — Share loader core logic only across proven safe seams
+
+- **Filed-on:** 2026-04-27
+- **Filed-by:** Codex / loader stabilization and refactor session
+- **Target:** compiler loader surfaces in `src/compiler/99.loader/`
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  The compatibility loader in `src/compiler/99.loader/module_loader.spl` and the
+  lifecycle-aware runtime loader in
+  `src/compiler/99.loader/loader/module_loader.spl` should share core unload and
+  reload bookkeeping only where the behavior is provably equivalent. The helper
+  layer already shared in this session is the baseline: metadata-instantiation
+  symbol extraction, loaded-metadata path removal, owned-global-symbol name
+  collection, and global-symbol filtering by name. Remaining work should not
+  force a broader merge unless a new seam is demonstrated to preserve both
+  loader policies.
+- **Acceptance-criteria:**
+  - [x] Shared helper surfaces exist for:
+        `metadata_instantiation_symbol_names(...)`,
+        `loaded_metadata_instantiation_symbol_names(...)`,
+        `loaded_metadata_remove_path(...)`,
+        `owned_global_symbol_names(...)`, and
+        `global_symbols_without_names(...)`.
+  - [x] Both loader implementations consume that shared helper layer without
+        regressing current unload/reload behavior.
+  - [x] Loader-path regression coverage proves the lifecycle-aware unload path
+        removes path-owned globals, clears metadata-owned JIT symbols, preserves
+        unrelated globals, and clears `jit.loaded_metadata[path]`.
+  - [ ] Any further cross-loader extraction above the current helper layer is
+        accepted only if backed by direct evidence that it does not cross
+        reload-policy differences (`unload` + `load` vs live replacement) or
+        unload-ownership-policy differences (heuristic JIT-cache reconstruction
+        vs lifecycle-owned teardown).
+  - [ ] If no such evidence exists, the refactor is considered complete at the
+        current helper boundary and the stop condition is documented rather than
+        worked around.
+- **Related-upfront:** none
+- **Related-design-doc:** `doc/05_design/loader_shared_core_refactor.md`
+- **Notes:**
+  Current verified baseline:
+  - helper unit coverage:
+    `test/unit/compiler/loader/metadata_symbols_spec.spl`,
+    `test/unit/compiler/loader/unload_ownership_spec.spl`
+  - loader acceptance coverage:
+    `test/unit/compiler/loader/module_loader_spec.spl`,
+    `test/unit/compiler/loader/module_loader_crash_fix_spec.spl`
+  - smoke gates:
+    `sh scripts/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
+    and
+    `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check-mcp-native-smoke.shs`
+
+  Remaining decision after the 2026-04-27 review pass:
+  - do not share reload orchestration next, because the compatibility loader is
+    plain `unload` then `load`, while the runtime loader uses live replacement
+  - do not share unload-body orchestration next, because the compatibility
+    loader rebuilds globals from surviving JIT cache plus heuristics, while the
+    runtime loader does lifecycle teardown plus destructive removal
+  - the only common tail left is tiny finalization bookkeeping, which may not be
+    worth another abstraction

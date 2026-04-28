@@ -19,7 +19,8 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
 use .smf_mmap_native.{native_alloc_rw_memory, native_make_executable, native_make_rw, native_flush_icache, native_write_exec_memory}
 use .jit_instantiator.*
-use ..metadata_symbols.{metadata_instantiation_symbol_names}
+use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
+use ..unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
 use .resource_lifecycle.{
     ResourceLifecycleManager, LifecycleConfig,
     lifecycle_new, lifecycle_with_defaults,
@@ -585,36 +586,27 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     lifecycle_unload_module(self.lifecycle, self.jit.exec_mapper, path)
 
     # 2. Collect symbols owned by this module in the global table.
-    var owned_symbols: [text] = []
-    for _item in self.global_symbols:
-        val sym_name = _item[0]
-        val _destruct_3 = _item[1]
-        val owner = _destruct_3[0]
-        if owner == path:
-            owned_symbols = owned_symbols.push(sym_name)
+    val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
 
     # 3. Collect JIT symbols triggered by this module but mapped under "__jit__".
     var jit_symbols_to_free: [text] = []
-    if self.jit.loaded_metadata.has(path):
-        val metadata = self.jit.loaded_metadata[path]
-        for mangled in metadata_instantiation_symbol_names(metadata):
-            if self.jit.jit_cache.has(mangled):
-                jit_symbols_to_free = jit_symbols_to_free.push(mangled)
+    for mangled in loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path):
+        if self.jit.jit_cache.has(mangled):
+            jit_symbols_to_free = jit_symbols_to_free.push(mangled)
 
     # 4. Remove global table entries and JIT bookkeeping for owned symbols.
     #    Exec pages already freed by lifecycle — drop_cached_symbol's unmap is idempotent.
+    self.global_symbols = global_symbols_without_names(self.global_symbols, owned_symbols)
     for sym_name in owned_symbols:
-        self.global_symbols = self.global_symbols.remove(sym_name)
         self.jit.drop_cached_symbol(sym_name)
 
     # 5. Free JIT symbols triggered by this module but owned by "__jit__".
+    self.global_symbols = global_symbols_without_names(self.global_symbols, jit_symbols_to_free)
     for jit_sym in jit_symbols_to_free:
-        self.global_symbols = self.global_symbols.remove(jit_sym)
         self.jit.drop_cached_symbol(jit_sym)
 
     # 6. Clear template metadata for this module.
-    if self.jit.loaded_metadata.has(path):
-        self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
+    self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
 
     # 7. Remove module from cache.
     self.modules = self.modules.remove(path)

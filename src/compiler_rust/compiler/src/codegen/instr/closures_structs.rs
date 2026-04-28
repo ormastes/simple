@@ -626,12 +626,59 @@ fn try_compile_builtin_method_call<M: Module>(
         }
     }
 
-    // Numeric type conversion methods — in the tagged RuntimeValue ABI,
-    // all integers are i64 so conversions are identity (masking for narrowing).
-    // This handles to_u8, to_u16, to_u32, to_u64, to_i8, to_i16, to_i32, to_i64, to_f32, to_f64.
+    // Numeric type conversion methods must produce a real native cast so later
+    // boxing preserves the intended width and signedness.
     if method.starts_with("to_u") || method.starts_with("to_i") || method.starts_with("to_f") {
-        // All numeric conversions are identity ops in the tagged value ABI
-        return Ok(Some(receiver_val));
+        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        let to_ty = match method {
+            "to_u8" => TypeId::U8,
+            "to_u16" => TypeId::U16,
+            "to_u32" => TypeId::U32,
+            "to_u64" => TypeId::U64,
+            "to_i8" => TypeId::I8,
+            "to_i16" => TypeId::I16,
+            "to_i32" => TypeId::I32,
+            "to_i64" | "to_int" => TypeId::I64,
+            "to_f32" => TypeId::F32,
+            "to_f64" => TypeId::F64,
+            _ => return Ok(Some(receiver_val)),
+        };
+
+        let converted = if from_ty == to_ty {
+            receiver_val
+        } else {
+            let src_ty = builder.func.dfg.value_type(receiver_val);
+            let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+            match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
+                TypeId::U64 | TypeId::I64 => match src_ty {
+                    types::I8 | types::I16 | types::I32 => {
+                        if from_signed {
+                            builder.ins().sextend(types::I64, receiver_val)
+                        } else {
+                            builder.ins().uextend(types::I64, receiver_val)
+                        }
+                    }
+                    _ => receiver_val,
+                },
+                TypeId::F32 | TypeId::F64 => {
+                    let float_val = if from_signed {
+                        builder.ins().fcvt_from_sint(types::F64, receiver_val)
+                    } else {
+                        builder.ins().fcvt_from_uint(types::F64, receiver_val)
+                    };
+                    if to_ty == TypeId::F32 {
+                        builder.ins().fdemote(types::F32, float_val)
+                    } else {
+                        float_val
+                    }
+                }
+                _ => receiver_val,
+            }
+        };
+        return Ok(Some(converted));
     }
 
     // Map method names to runtime functions
@@ -758,6 +805,23 @@ fn try_compile_builtin_method_call<M: Module>(
     let mut call_args = vec![receiver_val];
     for arg in args.iter() {
         let val = get_vreg_or_default(ctx, builder, arg);
+        if runtime_func == "rt_array_push" && std::env::var("SIMPLE_DEBUG_PUSH").is_ok() {
+            let val_ty = builder.func.dfg.value_type(val);
+            let val_def = builder.func.dfg.value_def(val);
+            let inst_text = match val_def {
+                cranelift_codegen::ir::ValueDef::Result(inst, _) => Some(format!("{}", builder.func.dfg.display_inst(inst))),
+                _ => None,
+            };
+            eprintln!(
+                "[DEBUG-PUSH] fn={} arg_vreg={:?} type_hint={:?} clif_ty={:?} value_def={:?} inst={:?}",
+                ctx.func.name,
+                arg,
+                ctx.vreg_types.get(arg).copied(),
+                val_ty,
+                val_def,
+                inst_text
+            );
+        }
         call_args.push(val);
     }
 

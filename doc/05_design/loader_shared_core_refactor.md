@@ -113,6 +113,81 @@ Minimum gates for any implementation pass:
 - `sh scripts/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
 - `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check-mcp-native-smoke.shs`
 
+Current proof status on 2026-04-27:
+
+- helper-level unit coverage exists in:
+  - `test/unit/compiler/loader/metadata_symbols_spec.spl`
+  - `test/unit/compiler/loader/unload_ownership_spec.spl`
+- loader-path acceptance coverage exists in:
+  - `test/unit/compiler/loader/module_loader_spec.spl`
+- the lifecycle-aware loader path is now explicitly covered by an unload
+  regression that proves:
+  - path-owned globals are removed
+  - metadata-owned JIT symbols are removed
+  - unrelated globals are preserved
+  - `jit.loaded_metadata[path]` is cleared
+
+## Current Boundary
+
+The shared-core refactor should currently stop at helper-level ownership and
+bookkeeping.
+
+Safe shared seams now include:
+
+- metadata instantiation symbol extraction
+- loaded-metadata path lookup/removal
+- owned global-symbol name collection
+- pure global-symbol filtering by name
+
+Do not currently share helpers that decide which JIT symbols to unload once the
+decision depends on either:
+
+- compatibility-only owner/path heuristics such as `_symbol_matches_path(...)`
+- lifecycle-aware ownership state such as `lifecycle_unload_module(...)`
+
+At that point the refactor has crossed from shared bookkeeping into distinct
+loader policy, and the two loaders are not aligned enough yet.
+
+## Remaining Decision
+
+The next refactor decision is architectural rather than mechanical:
+
+- either stop here and treat the two loaders as intentionally sharing only
+  bookkeeping/data-selection helpers
+- or gather explicit evidence for one broader shared seam at a time before
+  extracting it
+
+What should not happen next is a blind deduplication pass over full unload or
+reload bodies. The earlier compatibility-harness delegation failure remains the
+evidence against that approach.
+
+### Evidence for the current stop boundary
+
+The 2026-04-27 follow-up review did not find a safe shared seam above the
+current helper layer.
+
+Rejected candidates:
+
+1. Shared reload orchestration
+   - compatibility loader reload is plain `unload` then `load`
+   - lifecycle-aware loader reload routes through live replacement
+   - sharing this would either reintroduce an unload/load visibility gap into
+     the runtime loader or force staged replacement policy into the
+     compatibility loader
+
+2. Shared unload-body orchestration
+   - compatibility unload computes removal scope with metadata plus
+     owner/path heuristics, then rebuilds `global_symbols` from surviving JIT
+     cache entries
+   - lifecycle-aware unload delegates teardown to lifecycle first, then
+     destructively removes owned globals and metadata-derived JIT symbols
+   - those are different ownership and reconstruction policies, not just
+     different spellings of the same logic
+
+That leaves only tiny finalization helpers such as clearing
+`loaded_metadata[path]` and removing `modules[path]`, which are below the
+intended value threshold for further cross-loader extraction.
+
 ## First Concrete Implementation Slice
 
 Recommended first slice for an implementation task:

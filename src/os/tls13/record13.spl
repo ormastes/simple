@@ -10,6 +10,7 @@ use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResul
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_tls13_aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
+extern fn rt_tls13_record_encrypt(key: [u8], iv: [u8], seq_num: u64, content_type: u8, plaintext: [u8]) -> [u8]
 extern fn rt_tls13_record_payload_len(record: [u8]) -> i64
 
 # ============================================================================
@@ -60,6 +61,30 @@ fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
         out.push(_u8_at(b, i))
         i = i + 1
     out
+
+fn _record_tag_start(header_len: u64, payload_length: u64) -> u64:
+    """Return the first byte index of the AEAD tag within a TLSCiphertext record."""
+    header_len + payload_length - AEAD_TAG_SIZE
+
+fn _record_unpack_inner(inner: [u8]) -> RecordResult:
+    if inner.len() == 0:
+        return RecordResult.Err("decrypted inner plaintext is empty")
+    var cursor = inner.len()
+    while cursor > 0:
+        val idx = cursor - 1
+        if _u8_at(inner, idx) != 0x00:
+            cursor = idx
+            break
+        cursor = idx
+    if cursor >= inner.len():
+        return RecordResult.Err("decrypted inner plaintext missing content type")
+    val real_content_type = _u8_at(inner, cursor)
+    var data: [u8] = []
+    var j: u64 = 0
+    while j < cursor:
+        data.push(_u8_at(inner, j))
+        j = j + 1
+    RecordResult.Ok(content_type: real_content_type, data: data)
 
 # ============================================================================
 # record13_make_nonce
@@ -123,13 +148,18 @@ fn record13_encrypt(rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u
 
     Returns: 5-byte header || ciphertext || 16-byte tag.
     """
+    if seq_num == 0 and content_type == 0x17u8 and plaintext.len() > 0:
+        val fast_record = rt_tls13_record_encrypt(rk.key, rk.iv, seq_num, content_type, plaintext)
+        if fast_record.len() >= 5:
+            return fast_record
+
     # TLSInnerPlaintext = plaintext || content_type byte
-    var inner: [u8] = []
+    var inner: [u8] = rt_array_new_with_cap((plaintext.len() + 1).to_i64())
     var i: u64 = 0
     while i < plaintext.len():
-        inner.push(plaintext[i])
+        inner.push(_u8_at(plaintext, i))
         i = i + 1
-    inner.push(content_type)
+    inner.push((content_type.to_i64() & 0xFF).to_u8())
 
     # payload_length = len(inner) + AEAD tag size
     val payload_length = inner.len() + AEAD_TAG_SIZE
@@ -195,8 +225,8 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
 
     val header_len: u64 = 5
     val available_payload = raw_record.len() - header_len
-    if available_payload < payload_length:
-        _rec_debug("truncated raw_len={raw_record.len()} available_payload={available_payload} payload_length={payload_length}")
+    if available_payload != payload_length:
+        _rec_debug("payload mismatch raw_len={raw_record.len()} available_payload={available_payload} payload_length={payload_length}")
         return RecordResult.Err("record too short: payload truncated")
 
     # Payload must be at least the tag size (16 bytes)
@@ -209,7 +239,7 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
     val ciphertext = _copy_range(raw_record, header_len, ct_len)
 
     # Extract tag: raw_record[5+ct_len .. 5+payload_length]
-    val tag_start = raw_record.len() - AEAD_TAG_SIZE
+    val tag_start = _record_tag_start(header_len, payload_length)
     val tag = _copy_range(raw_record, tag_start, AEAD_TAG_SIZE)
 
     # AAD = header (5 bytes)
@@ -218,30 +248,16 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
     # Derive per-record nonce
     val nonce = record13_make_nonce(rk.iv, seq_num)
 
+    # Baremetal live lane is currently more reliable through the runtime AES-GCM helper.
+    val fast_inner = rt_tls13_aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
+    if fast_inner.len() != 0:
+        return _record_unpack_inner(fast_inner)
+
     # AEAD decrypt
     val dec_result = aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
 
     if val Aes128GcmResult.Ok(inner) = dec_result:
-        # TLSInnerPlaintext = content || zeros* || content_type.
-        # Strip the final content_type and any zero padding that precedes it.
-        if inner.len() == 0:
-            return RecordResult.Err("decrypted inner plaintext is empty")
-        var cursor = inner.len()
-        while cursor > 0:
-            val idx = cursor - 1
-            if _u8_at(inner, idx) != 0x00:
-                cursor = idx
-                break
-            cursor = idx
-        if cursor >= inner.len():
-            return RecordResult.Err("decrypted inner plaintext missing content type")
-        val real_content_type = _u8_at(inner, cursor)
-        var data: [u8] = []
-        var j: u64 = 0
-        while j < cursor:
-            data.push(_u8_at(inner, j))
-            j = j + 1
-        return RecordResult.Ok(content_type: real_content_type, data: data)
+        return _record_unpack_inner(inner)
 
     if val Aes128GcmResult.Err(err_msg) = dec_result:
         return RecordResult.Err(err_msg)
@@ -266,14 +282,14 @@ fn record13_decrypt_fd(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordR
     val payload_length = payload_length_i.to_u64()
     val header_len: u64 = 5
     val available_payload = raw_record.len() - header_len
-    if available_payload < payload_length:
+    if available_payload != payload_length:
         return RecordResult.Err("record too short: payload truncated")
     if payload_length < AEAD_TAG_SIZE:
         return RecordResult.Err("record payload too short: less than tag size")
 
     val ct_len = payload_length - AEAD_TAG_SIZE
     val ciphertext = _copy_range(raw_record, header_len, ct_len)
-    val tag_start = raw_record.len() - AEAD_TAG_SIZE
+    val tag_start = _record_tag_start(header_len, payload_length)
     val tag = _copy_range(raw_record, tag_start, AEAD_TAG_SIZE)
     val aad = _copy_range(raw_record, 0, 5)
     val nonce = record13_make_nonce(rk.iv, seq_num)
@@ -318,14 +334,14 @@ fn record13_decrypt_fd_inner(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> [
     val payload_length = payload_length_i.to_u64()
     val header_len: u64 = 5
     val available_payload = raw_record.len() - header_len
-    if available_payload < payload_length:
+    if available_payload != payload_length:
         return []
     if payload_length < AEAD_TAG_SIZE:
         return []
 
     val ct_len = payload_length - AEAD_TAG_SIZE
     val ciphertext = _copy_range(raw_record, header_len, ct_len)
-    val tag_start = raw_record.len() - AEAD_TAG_SIZE
+    val tag_start = _record_tag_start(header_len, payload_length)
     val tag = _copy_range(raw_record, tag_start, AEAD_TAG_SIZE)
     val aad = _copy_range(raw_record, 0, 5)
     val nonce = record13_make_nonce(rk.iv, seq_num)

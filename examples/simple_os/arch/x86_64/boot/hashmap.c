@@ -97,7 +97,7 @@ typedef struct {
 extern void *malloc(size_t sz);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_array_new(RuntimeValue cap_val);
-extern RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 
 /* ===================================================================
  * Hash function — splitmix64 finalizer
@@ -331,7 +331,7 @@ RuntimeValue __rt_hashmap_keys(RuntimeValue map)
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->cap; i++) {
         if (!slot_is_vacant(m->keys[i]))
-            arr = rt_array_push(arr, m->keys[i]);
+            rt_array_push(arr, m->keys[i]);
     }
     return arr;
 }
@@ -344,7 +344,7 @@ RuntimeValue __rt_hashmap_values(RuntimeValue map)
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->cap; i++) {
         if (!slot_is_vacant(m->keys[i]))
-            arr = rt_array_push(arr, m->values[i]);
+            rt_array_push(arr, m->values[i]);
     }
     return arr;
 }
@@ -358,9 +358,9 @@ RuntimeValue __rt_hashmap_entries(RuntimeValue map)
     for (uint32_t i = 0; i < m->cap; i++) {
         if (!slot_is_vacant(m->keys[i])) {
             RuntimeValue pair = rt_array_new(ENCODE_INT(2));
-            pair = rt_array_push(pair, m->keys[i]);
-            pair = rt_array_push(pair, m->values[i]);
-            arr  = rt_array_push(arr, pair);
+            rt_array_push(pair, m->keys[i]);
+            rt_array_push(pair, m->values[i]);
+            rt_array_push(arr, pair);
         }
     }
     return arr;
@@ -451,7 +451,7 @@ RuntimeValue __rt_hashset_to_array(RuntimeValue set)
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->cap; i++) {
         if (!slot_is_vacant(m->keys[i]))
-            arr = rt_array_push(arr, m->keys[i]);
+            rt_array_push(arr, m->keys[i]);
     }
     return arr;
 }

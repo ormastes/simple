@@ -442,6 +442,7 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_array_push" => simple_runtime::rt_array_push as *const () as usize,
         "rt_array_get" => simple_runtime::rt_array_get as *const () as usize,
         "rt_array_set" => simple_runtime::rt_array_set as *const () as usize,
+        "rt_bytes_u8_at" => value::rt_bytes_u8_at as *const () as usize,
         "rt_array_pop" => simple_runtime::rt_array_pop as *const () as usize,
         "rt_array_clear" => value::rt_array_clear as *const () as usize,
 

@@ -102,7 +102,7 @@ RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
 RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
 RuntimeValue rt_array_new(RuntimeValue cap_val);
-RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);

@@ -43,7 +43,7 @@ unsafe fn runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
 
     let array = rt_array_new(bytes.len() as u64);
     for &byte in bytes {
-        assert!(rt_array_push(array, RuntimeValue::from_i64(byte as i64)));
+        assert!(rt_array_push(array, RuntimeValue::from_int(byte as i64)));
     }
     array
 }

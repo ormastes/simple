@@ -80,7 +80,7 @@ extern void *malloc(unsigned long sz);
 extern unsigned long strlen(const char *s);
 extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_array_new(RuntimeValue cap_val);
-extern RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 
 /* ===================================================================
  * 1. Arc/Rc box — reference-counted heap objects
@@ -279,7 +279,7 @@ static RuntimeValue make_byte_array(const uint8_t *bytes, int count)
 {
     RuntimeValue arr = rt_array_new(ENCODE_INT(count));
     for (int i = 0; i < count; i++) {
-        arr = rt_array_push(arr, ENCODE_INT(bytes[i]));
+        rt_array_push(arr, ENCODE_INT(bytes[i]));
     }
     return arr;
 }
@@ -661,7 +661,8 @@ RuntimeValue array_set(RuntimeValue arr, RuntimeValue i, RuntimeValue v)
 
 RuntimeValue array_append(RuntimeValue arr, RuntimeValue v)
 {
-    return rt_array_push(arr, v);
+    rt_array_push(arr, v);
+    return arr;
 }
 
 RuntimeValue array_len(RuntimeValue arr)
@@ -759,7 +760,7 @@ RuntimeValue spl_read_bytes(RuntimeValue ptr, RuntimeValue off, RuntimeValue len
     RuntimeValue arr = rt_array_new(ENCODE_INT(count));
     uint8_t *src = base + offset;
     for (int64_t i = 0; i < count; i++) {
-        arr = rt_array_push(arr, ENCODE_INT(src[i]));
+        rt_array_push(arr, ENCODE_INT(src[i]));
     }
     return arr;
 }

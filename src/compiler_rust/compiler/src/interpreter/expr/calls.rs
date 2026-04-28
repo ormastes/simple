@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, MODULE_GLOBALS,
+    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
 
 pub(super) fn eval_call_expr(
@@ -452,7 +452,7 @@ pub(super) fn eval_call_expr(
                                 })
                             }
                         } else {
-                            // Check for enum methods
+                            // Check for enum methods (defined inline in the enum body)
                             if let Some(method) = enum_def.methods.iter().find(|m| m.name == *field) {
                                 Ok(Value::Function {
                                     name: method.name.clone(),
@@ -460,13 +460,31 @@ pub(super) fn eval_call_expr(
                                     captured_env: Arc::new(Env::new()),
                                 })
                             } else {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::METHOD_NOT_FOUND)
-                                    .with_help("check that this variant or method is defined on this enum");
-                                Err(CompileError::semantic_with_context(
-                                    format!("unknown variant or method '{}' on enum {}", field, enum_name),
-                                    ctx,
-                                ))
+                                // Check impl_methods for static/associated functions on this enum
+                                // (e.g., `impl SdnValue` factory methods like `SdnValue.int(42)`)
+                                let impl_func = impl_methods
+                                    .get(enum_name.as_str())
+                                    .and_then(|methods| methods.iter().find(|m| m.name == *field).cloned())
+                                    .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| {
+                                        cell.borrow()
+                                            .get(enum_name.as_str())
+                                            .and_then(|methods| methods.iter().find(|m| m.name == *field).cloned())
+                                    }));
+                                if let Some(func) = impl_func {
+                                    Ok(Value::Function {
+                                        name: func.name.clone(),
+                                        def: func,
+                                        captured_env: Arc::new(Env::new()),
+                                    })
+                                } else {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::METHOD_NOT_FOUND)
+                                        .with_help("check that this variant or method is defined on this enum");
+                                    Err(CompileError::semantic_with_context(
+                                        format!("unknown variant or method '{}' on enum {}", field, enum_name),
+                                        ctx,
+                                    ))
+                                }
                             }
                         }
                     } else {

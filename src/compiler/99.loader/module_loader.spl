@@ -4,7 +4,8 @@
 extern fn rt_file_exists(path: text) -> bool
 use compiler.loader.jit_instantiator.{JitInstantiator}
 use compiler.loader.compiler_ffi.{TypeInfo, type_to_string}
-use compiler.loader.metadata_symbols.{metadata_instantiation_symbol_names}
+use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
+use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
 
 fn _path_tag(path: text) -> text:
     val base = path.split("/").last() ?? path
@@ -26,9 +27,29 @@ fn _name_in(list: [text], name: text) -> bool:
     false
 
 fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
-    if not self.jit.loaded_metadata.has(path):
-        return []
-    metadata_instantiation_symbol_names(self.jit.loaded_metadata[path])
+    loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
+
+fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
+    var remove_jit: [text] = []
+    for sym_name in _metadata_instantiation_symbols(self, path):
+        if not _name_in(remove_jit, sym_name):
+            remove_jit.push(sym_name)
+
+    for item in self.jit.jit_cache:
+        val sym_name = item[0]
+        val rec_cache = item[1]
+        var owner = "__jit__"
+        if rec_cache.has("owner"):
+            owner = rec_cache["owner"]
+        else:
+            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+            if rec_opt.?:
+                owner = rec_opt.unwrap().owner_id
+
+        if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
+            if not _name_in(remove_jit, sym_name):
+                remove_jit.push(sym_name)
+    remove_jit
 
 enum SymbolType:
     Function
@@ -132,34 +153,13 @@ impl ModuleLoader:
     me unload(path: text):
         if not self.modules.has(path):
             return
-        var remove_jit: [text] = []
-        for sym_name in _metadata_instantiation_symbols(self, path):
-            if not _name_in(remove_jit, sym_name):
-                remove_jit.push(sym_name)
-        for item in self.jit.jit_cache:
-            val sym_name = item[0]
-            val rec_cache = item[1]
-            var owner = "__jit__"
-            if rec_cache.has("owner"):
-                owner = rec_cache["owner"]
-            else:
-                val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-                if rec_opt.?:
-                    owner = rec_opt.unwrap().owner_id
-
-            if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
-                remove_jit.push(sym_name)
-
+        val remove_jit = _collect_unload_jit_symbols(self, path)
         for sym_name in remove_jit:
             self.jit.drop_cached_symbol(sym_name)
 
-        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = {}
-        for item in self.global_symbols:
-            val sym_name = item[0]
-            val owner_pair = item[1]
-            val kept_owner = owner_pair[0]
-            if kept_owner != path and not _name_in(remove_jit, sym_name):
-                rebuilt_globals[sym_name] = owner_pair
+        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
+        val removed_symbols = owned_symbols + remove_jit
+        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
 
         for item in self.jit.jit_cache:
             val sym_name = item[0]
@@ -184,8 +184,7 @@ impl ModuleLoader:
             rebuilt_globals[sym_name] = (mapped_owner, sym)
 
         self.global_symbols = rebuilt_globals
-        if self.jit.loaded_metadata.has(path):
-            self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
+        self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
 
         if self.modules.has(path):
             self.modules = self.modules.remove(path)
@@ -305,34 +304,13 @@ me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 me moduleloader_unload(self: ModuleLoader, path: text):
     if not self.modules.has(path):
         return
-    var remove_jit: [text] = []
-    for sym_name in _metadata_instantiation_symbols(self, path):
-        if not _name_in(remove_jit, sym_name):
-            remove_jit.push(sym_name)
-    for item in self.jit.jit_cache:
-        val sym_name = item[0]
-        val rec_cache = item[1]
-        var owner = "__jit__"
-        if rec_cache.has("owner"):
-            owner = rec_cache["owner"]
-        else:
-            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-            if rec_opt.?:
-                owner = rec_opt.unwrap().owner_id
-
-        if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
-            remove_jit.push(sym_name)
-
+    val remove_jit = _collect_unload_jit_symbols(self, path)
     for sym_name in remove_jit:
         self.jit.drop_cached_symbol(sym_name)
 
-    var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = {}
-    for item in self.global_symbols:
-        val sym_name = item[0]
-        val owner_pair = item[1]
-        val kept_owner = owner_pair[0]
-        if kept_owner != path and not _name_in(remove_jit, sym_name):
-            rebuilt_globals[sym_name] = owner_pair
+    val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
+    val removed_symbols = owned_symbols + remove_jit
+    var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
 
     for item in self.jit.jit_cache:
         val sym_name = item[0]
@@ -357,8 +335,7 @@ me moduleloader_unload(self: ModuleLoader, path: text):
         rebuilt_globals[sym_name] = (mapped_owner, sym)
 
     self.global_symbols = rebuilt_globals
-    if self.jit.loaded_metadata.has(path):
-        self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
+    self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
 
     if self.modules.has(path):
         self.modules = self.modules.remove(path)

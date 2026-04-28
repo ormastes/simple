@@ -106,6 +106,7 @@ pub use channels::RuntimeChannel;
 // Re-export collection FFI functions
 pub use collections::{
     rt_array_clear, rt_array_first, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
+    rt_bytes_u8_at,
     rt_array_set, rt_contains, rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_char_at,
     rt_string_concat, rt_range, rt_range_inclusive, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find,
     rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind,
