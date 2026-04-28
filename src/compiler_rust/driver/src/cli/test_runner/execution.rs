@@ -1296,7 +1296,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
     let wrapped = format!(
-        "#![allow(spipe_empty_examples)]\n#![allow(spipe_boolean_wrapper_assertions)]\n@allow(spipe_empty_examples)\n@allow(spipe_boolean_wrapper_assertions)\n{}\n{}\n{}\nfn main():\n{}",
+        "// reason: auto-generated spipe entry wrapper; examples and assertions live in the wrapped spec body\n{}\n{}\n{}\nfn main():\n{}",
         import_parts.join("\n"),
         helpers_section,
         top_joined,
