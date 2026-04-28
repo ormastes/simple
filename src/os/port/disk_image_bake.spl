@@ -23,6 +23,7 @@
 
 use std.io_runtime as io
 use std.process
+use std.common.{str_last_index_of}
 use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
     cmd_build, validate_image}
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
@@ -31,13 +32,17 @@ extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
-    """Read a file and wrap as a FAT32 8.3 directory entry."""
+    """Read a file and wrap as a FAT32 8.3 directory entry (flat root placement)."""
+    _load_payload_at(path, name83, "")
+
+fn _load_payload_at(path: text, name83: text, guest_path: text) -> Result<PayloadEntry, text>:
+    """Read a file and wrap as a FAT32 PayloadEntry with an optional guest VFS path."""
     if not io.file_exists(path):
         return Err("bake: payload missing: " + path)
     val data: [u8] = rt_file_read_bytes(path) ?? []
     if data.length == 0:
         return Err("bake: payload empty or unreadable: " + path)
-    Ok(PayloadEntry(path: name83, data: data))
+    Ok(PayloadEntry(path: name83, data: data, guest_path: guest_path))
 
 fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text) -> Result<(), text>:
     """Build a real initramfs image and inject the bake payloads into it."""
@@ -101,9 +106,22 @@ fn _bake_via_mkfs_fat(out_disk: text, payloads: [PayloadEntry], size_mb: u64) ->
     io.dir_create_all(staging)
 
     # Write each in-memory payload to the staging directory.
+    # If the entry carries a guest_path (e.g. /sys/apps/simple), mirror the full
+    # directory tree under staging/ so mcopy -s picks it up at the right location.
+    # Entries without a guest_path land at flat root as before.
     for entry in payloads:
-        val filename = _fat83_to_filename(entry.path)
-        val dest = staging + "/" + filename
+        var dest: text
+        if entry.guest_path.length > 0:
+            # guest_path must start with / (e.g. /sys/apps/simple).
+            # Stage at staging/sys/apps/simple so mcopy -s picks it up.
+            dest = staging + entry.guest_path
+            val last_slash: i64 = str_last_index_of(dest, "/")
+            if last_slash > 0:
+                val parent = dest.substring(0, last_slash as u64)
+                io.dir_create_all(parent)
+        else:
+            val filename = _fat83_to_filename(entry.path)
+            dest = staging + "/" + filename
         if not rt_file_write_bytes(dest, entry.data):
             return Err("bake: failed to stage payload: " + dest)
 
@@ -152,10 +170,10 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     # Wave-4a flat-bake puts files at root; Team S's mount-probe fallback (commit
     # bbdd694a05) reads /BROWSMF.SMF after /SYS/APPS/BROWSMF.SMF fails.
     val version_bytes: [u8] = [83u8, 105u8, 109u8, 112u8, 108u8, 101u8, 79u8, 83u8, 32u8, 80u8, 49u8, 10u8]
-    payloads.push(PayloadEntry(path: "VERSION TXT", data: version_bytes))
+    payloads.push(PayloadEntry(path: "VERSION TXT", data: version_bytes, guest_path: ""))
     print "bake: added VERSION.TXT stub (12 bytes)"
     # BROWSMF stand-in: reuse the hello_rs ELF — kernel only checks ELF magic.
-    val brow_entry = PayloadEntry(path: "BROWSMFSMF ", data: rs_entry.data)
+    val brow_entry = PayloadEntry(path: "BROWSMFSMF ", data: rs_entry.data, guest_path: "")
     payloads.push(brow_entry)
     print "bake: added BROWSMF.SMF stand-in (mirrors hello_rs ELF)"
 
@@ -179,7 +197,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
                 case Err(_):
                     print "bake: rustc_static load failed (skipped)"
         if io.file_exists(simple_path):
-            match _load_payload(simple_path, "SIMPLSTCSMF"):
+            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple"):
                 case Ok(e):
                     print "bake: loaded simple (" + io.file_size(simple_path).to_text() + " bytes)"
                     payloads.push(e)
