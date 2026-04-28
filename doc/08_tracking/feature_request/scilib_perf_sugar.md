@@ -371,3 +371,41 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   ndarray analogue is per-element-index dispatch. Without this, all user-written
   element-wise loops are scalar and single-threaded; for large arrays this is
   the dominant runtime cost after buffer allocation is fixed (PERF-SUGAR-001).
+
+---
+
+### PERF-SUGAR-014 — Extern registration sites: prefix-dispatch precedent vs explicit-table assumption
+
+- **Title:** runtime extern dispatch path uses prefix-pattern matching, not an explicit symbol table
+- **Filed-on:** 2026-04-27
+- **Filed-by:** observed during T-PERFSUGAR-01 implementation
+- **Priority:** P2 (documentation / contributor onboarding)
+- **Status:** observed (not a wedge — clarifies prior assumption)
+- **Expected-repro:**
+  ```
+  # Adding a new rt_* extern. Plan said: 3 sites — runtime fn,
+  # registration in runtime_symbols.rs, interpreter-dispatch arm.
+  grep -rn 'rt_bytes_alloc' src/compiler_rust/common/src/runtime_symbols.rs
+  # → empty: rt_bytes_alloc is NOT registered in runtime_symbols.rs.
+  ```
+  The "registration table" model (assumed in `scilib_port_perf_sugar.md`
+  T-PERFSUGAR-01..05) does not match reality for the `rt_*` extern family.
+  `runtime_symbols.rs` uses prefix-based dispatch (e.g. anything starting
+  with `rt_` is recognised); only the interpreter-extern dispatch in
+  `interpreter_extern/mod.rs` needs an explicit arm.
+- **Current-cost:** zero runtime cost; only contributor-confusion cost.
+  An agent following the plan literally will look for a registration site
+  that does not exist, then either invent one (buggy), grep for siblings
+  and discover the absence (10 min of confusion), or escalate.
+- **Proposed-sugar:** (a) Update `scilib_port_perf_sugar.md` T-PERFSUGAR-01..05
+  to describe 2 sites (decl + dispatch), not 3. (b) Optional: add a one-line
+  comment near the prefix-dispatch in `runtime_symbols.rs` saying "rt_* is
+  prefix-matched here; per-symbol registration NOT required". (c) Same
+  observation likely applies to `xtra_*`, `__rt_*`, and any other prefix-
+  matched extern family.
+- **Notes:** Surfaced by T-PERFSUGAR-01 implementation (committed in
+  `4dba2d4f4b`). The agent's "if the precedent is structurally different,
+  STOP and report" rule worked: instead of inventing a registration site,
+  the agent surfaced the discrepancy. Lesson for future task plans:
+  cross-check assumed file lists against actual `grep` output for the
+  precedent symbol before blessing the plan.
