@@ -296,6 +296,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_eq",
     "rt_string_starts_with",
     "rt_string_ends_with",
+    "rt_hash_text",
     // Regex operations
     "ffi_regex_is_match",
     "ffi_regex_find",

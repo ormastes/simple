@@ -53,6 +53,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_is_macro_trace_enabled, rt_is_some, rt_method_not_found, rt_len, rt_path_probe, rt_platform_name,
             rt_print_str, rt_print_value, rt_println_str, rt_println_value, rt_range, rt_range_inclusive,
             rt_stderr_flush, rt_stderr_write,
+            rt_hash_text,
             rt_string_char_at, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
             rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_int,
             rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_term_enable_ansi, rt_term_get_size,
@@ -239,6 +240,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_string_eq,
             rt_string_starts_with,
             rt_string_ends_with,
+            rt_hash_text,
             // Regex operations
             ffi_regex_is_match,
             ffi_regex_find,

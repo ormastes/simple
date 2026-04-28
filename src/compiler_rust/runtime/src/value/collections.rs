@@ -1114,6 +1114,28 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
     }
 }
 
+/// Hash a text string and return as i64
+///
+/// Uses DefaultHasher (same algorithm as the interpreter) for cross-mode consistency.
+#[no_mangle]
+pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
+    let len = rt_string_len(string);
+    if len < 0 {
+        return 0;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize)).hash(&mut h);
+    }
+    h.finish() as i64
+}
+
 /// Convert any value to a string representation
 #[no_mangle]
 pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {
