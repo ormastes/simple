@@ -20,6 +20,7 @@ use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_env_get(key: text) -> text
 
 fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
     """Read a file and wrap as a FAT32 8.3 directory entry."""
@@ -85,29 +86,32 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     io.dir_create_all("build/os")
     var payloads: [PayloadEntry] = [rs_entry]
 
-    # --- Step 3a: optionally bake clang_static -> /SYS/APPS/CLANGSTCSMF ---
-    if io.file_exists(clang_static_path):
-        val cs_entry = match _load_payload(clang_static_path, "CLANGSTCSMF"):
-            case Ok(e):
-                print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
-                e
-            case Err(_):
-                nil
-        if cs_entry != nil: payloads.push(cs_entry.unwrap())
+    # --- Step 3a/3b: optionally bake clang_static + rustc_static ---
+    # Gated behind BAKE_INCLUDE_TOOLCHAIN=1 because 100+ MB binaries through
+    # the interpreter-driven FAT32 writer take 5+ minutes (BUG-INTERPRETER-PERF).
+    # Default-off keeps the bake fast for normal hello_rs smoke iteration.
+    val include_toolchain = rt_env_get("BAKE_INCLUDE_TOOLCHAIN")
+    if include_toolchain == "1":
+        if io.file_exists(clang_static_path):
+            match _load_payload(clang_static_path, "CLANGSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: clang_static load failed (skipped)"
+        else:
+            print "bake: clang_static not found — skipped"
+        if io.file_exists(rustc_static_path):
+            match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: rustc_static load failed (skipped)"
+        else:
+            print "bake: rustc_static not found — skipped"
     else:
-        print "bake: clang_static not found — skipped (heavy build may not be done yet)"
-
-    # --- Step 3b: optionally bake rustc_static -> /SYS/APPS/RUSTCSTCSMF ---
-    if io.file_exists(rustc_static_path):
-        val rc_entry = match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
-            case Ok(e):
-                print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
-                e
-            case Err(_):
-                nil
-        if rc_entry != nil: payloads.push(rc_entry.unwrap())
-    else:
-        print "bake: rustc_static not found — skipped (heavy build may not be done yet)"
+        print "bake: toolchain inclusion off (set BAKE_INCLUDE_TOOLCHAIN=1 to embed clang_static + rustc_static)"
 
     val cfg = DiskImageConfig(size_mb: 32u64, payloads: payloads)
     match build(cfg, out_disk):
